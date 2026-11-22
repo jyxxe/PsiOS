@@ -22,3 +22,7 @@ This verifies all five archive parts, reconstructs the exact original ZIP, check
 **Authority:** read `docs/v1/docs/00-reading-and-authority.md` first. Historical source files under `sources/archive/` are for provenance and do not override v1 normative constraints or approve any technology/implementation.
 
 **Status:** all actual PsiOS product acceptance tests remain `NotRun` / `NotVerified`. This repository import certifies the document bytes only, not runtime behavior.
+
+## In-place documentation amendment — 2026-11-22
+
+The GitHub main working tree now has an autonomous-Agent orchestration clarification in the normative chapters. The VERSION file remains 1.0.0. Original split ZIP parts and their documented checksum continue to represent the **original immutable upload**, not the modified current working-tree text. The historical validation report predates this amendment and should not be used as post-amendment verification. No product runtime or hardware status changed.

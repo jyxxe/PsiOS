@@ -147,3 +147,13 @@ Run 生命周期为 `Created / Running / WaitingInput / WaitingApproval / Waitin
 | 定时与预算 | DST 双时刻、长停机补跑、并行子任务争用最后预算；触发唯一、补跑有界 |
 
 上述用例扩展原 `ACC-EVT-01～03`、`AGT-T01～05`、`XAT-39`、`WF-AT-04～06/08`；文档中存在用例不表示测试通过。跨节点仍须满足集群章节的资源端 fencing；灾难恢复遵循恢复章节的外部效果对账屏障。
+
+## 8.10 Agent 自主事件触发与任务派发
+
+本节将 SuperAgent 类系统的事件触发、Router 和 Worker 机制映射到原 Task/Event，不增加第二个 Ticket、Queue、Run 或 Operation 权威；文档仍为 v1.0.0，工程 `NotVerified / NotRun`。
+
+- **发现与关联：** 事件/定时器验证来源、权限、事件 ID、资源修订和规则版本。Router 优先关联已有 Task、WorkItem、WorkflowRun、Conversation/Thread；同一 Issue/CI/Review 的重复、乱序事件不能无限产生新任务。Webhook/评论只作为线索，回源查询外部权威。
+- **受控创建：** 只有在有效规则、Grant/Delegation、目的、预算及范围下，才通过 `Task.Submit` 的 `origin_ref`、稳定 `trigger_id`、`idempotency_key` 和不可变输入摘要提交新 Task。否则保持候选/等待审批，不能报 Accepted。队列和预算满时有界拒绝。
+- **执行选择：** Router 只推荐能力与步骤；Broker/Scheduler 决定 Run、领取租约/代次、隔离 Profile、数据驻留及 Worker。Agent 不得自行声称领取成功或改写权威终态。
+- **恢复：** 非 LLM Watchdog 独立检测任务、租约、取消和预算。Router 或模型离线不妨碍读取已持久记录。失去租约时先 fencing，跨节点/模型/工具不兼容时创建新 Run，并核对已执行 Operation；`OutcomeUnknown` 不盲重试。
+- **验收（未执行）：** 重复 CI 事件只产生一个 Task；后续 Review 进入原 Task；Router 崩溃后无重派发；模型失败不拖垮本机管理；旧 Worker 被 fencing 后无法双写；外部成功但 ACK 遗失先对账。正式新增测试编号须同步测试注册表。

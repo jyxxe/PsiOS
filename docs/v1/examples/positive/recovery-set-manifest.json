@@ -1,0 +1,93 @@
+{
+  "schema_version": "1.0.0",
+  "recovery_set_id": "recovery-set-demo",
+  "source_authority_id": "node-demo",
+  "source_incarnation": "core-incarnation-1",
+  "created_at": "2026-11-22T08:00:00Z",
+  "creator_tool_version": "prototype-unverified",
+  "digest_profile": {
+    "digest_algorithm": "SHA-256",
+    "canonicalization_version": "RFC8785",
+    "domain": "psios/recovery-set-manifest/1"
+  },
+  "scope": "service_group",
+  "capture_interval": {
+    "started_at": "2026-11-22T08:00:00Z",
+    "completed_at": "2026-11-22T08:00:00Z"
+  },
+  "consistency": "crash_consistent",
+  "coordination": "IndependentCheckpointsWithReconciliation",
+  "consistency_evidence_refs": [],
+  "members": [
+    {
+      "resource_id": "volume-demo",
+      "data_incarnation": "volume-incarnation-1",
+      "schema_version": "1.0.0",
+      "checkpoint": "commit-42",
+      "backup_ref": {
+        "resource_id": "volume-backup",
+        "version": "rev-1",
+        "digest": "sha256:b9ef65ab70e609163976538b28511f33478b17a851fc6bd48bc8544046ef145d"
+      },
+      "size_bytes": "1048576"
+    }
+  ],
+  "cross_service_relation_refs": [
+    {
+      "resource_id": "relations-checkpoint",
+      "version": "rev-1",
+      "digest": "sha256:b0161c4c17149a0224da315fa58fa9853257fd8008db1524b5e27a8b31bbe3fc"
+    }
+  ],
+  "incremental_dependencies": [],
+  "required_log_refs": [
+    {
+      "resource_id": "wal-42",
+      "version": "rev-1",
+      "digest": "sha256:8cdafea51db28be84039876d4b4ec1b7cdf9a0220c834e4d920847217b0a1d4b"
+    }
+  ],
+  "security_evidence_refs": [],
+  "secret_refs": [
+    {
+      "resource_id": "backup-key-reference",
+      "version": "rev-1",
+      "digest": "sha256:66fcf5514cabf6964096077d05e6db0296a1018280fe02060b420bc837279c53"
+    }
+  ],
+  "identity_mapping_ref": {
+    "resource_id": "restore-identity-map",
+    "version": "rev-1",
+    "digest": "sha256:0bcc13d8095ca578cdd6c1343c340a8b90c2fb86ce3f71533c78c607ad09da62"
+  },
+  "effect_reconciliation_plan_ref": {
+    "resource_id": "effect-reconcile-plan",
+    "version": "rev-1",
+    "digest": "sha256:01c8cafb1818ee4e6df2b2e4e964cee7616a344ffa69a254b1b289d39925a90c"
+  },
+  "replay_prohibited_refs": [
+    {
+      "resource_id": "operation-demo",
+      "version": "rev-1",
+      "digest": "sha256:ac67bcc2eed8ba3000fd01c13cb133c88459a21085b4fef0c73bd8d1e0fb4c79"
+    }
+  ],
+  "retention_policy_ref": {
+    "resource_id": "retention-policy",
+    "version": "rev-1",
+    "digest": "sha256:3281b75427119630c5794d69f868102e701b62353938cc76bc35673121b19fd9"
+  },
+  "failure_domain": "independent-backup-medium",
+  "restore_procedure_ref": {
+    "resource_id": "restore-procedure",
+    "version": "rev-1",
+    "digest": "sha256:c81b6eabbf939f78d18b30dd09ffb3a54be33fba4b8b348c84548f622b215c76"
+  },
+  "independent_tool_ref": {
+    "resource_id": "restore-tool",
+    "version": "rev-1",
+    "digest": "sha256:b321e6540ceb52b03600b77b3f366f3c0b9f6c74593becb0db8d64e265095444"
+  },
+  "required_restore_bytes": "2097152",
+  "manifest_digest": "sha256:73e744da3fdc594ab81e4776016e6e9230c5ba1dceeb602f218d3ab353b505f4"
+}

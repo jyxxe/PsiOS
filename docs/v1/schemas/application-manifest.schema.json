@@ -1,0 +1,225 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.psios.example/v1/application-manifest.schema.json",
+  "title": "Application release requirements; an installed Deployment is separate",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "application_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "release_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "release_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "artifact_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "publisher_identity_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "runtime_profile_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "release_spec_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "package_format": {
+      "enum": [
+        "OCI",
+        "Flatpak",
+        "DEB",
+        "RPM",
+        "AlpineAPK",
+        "NativeWeb",
+        "HostExtension"
+      ]
+    },
+    "required_capability_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+      },
+      "minItems": 0,
+      "maxItems": 4096
+    },
+    "volume_requirements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+          },
+          "minimum_bytes": {
+            "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+          },
+          "access_mode": {
+            "enum": [
+              "multi_reader",
+              "single_node_rw",
+              "single_writer_rw",
+              "multi_writer_rw"
+            ]
+          },
+          "schema_ref": {
+            "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+          }
+        },
+        "required": [
+          "name",
+          "minimum_bytes",
+          "access_mode",
+          "schema_ref"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 0,
+      "maxItems": 64
+    },
+    "network_policy_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "health_check_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "migration_plan_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "rollback_policy_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "compatibility_claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "capability": {
+            "enum": [
+              "Recognized",
+              "Imported",
+              "RuntimeVerified",
+              "GUIVerified"
+            ]
+          },
+          "result": {
+            "enum": [
+              "NotRun",
+              "Passed",
+              "Failed",
+              "Blocked",
+              "NotApplicable"
+            ]
+          },
+          "profile_ref": {
+            "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {
+              "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+            },
+            "minItems": 0,
+            "maxItems": 4096
+          },
+          "limitations": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 0,
+            "maxItems": 256
+          },
+          "not_applicable_reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "capability",
+          "result",
+          "profile_ref",
+          "evidence_refs",
+          "limitations"
+        ],
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "result": {
+                  "const": "Passed"
+                }
+              },
+              "required": [
+                "result"
+              ]
+            },
+            "then": {
+              "properties": {
+                "evidence_refs": {
+                  "minItems": 1
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "result": {
+                  "const": "NotApplicable"
+                }
+              },
+              "required": [
+                "result"
+              ]
+            },
+            "then": {
+              "required": [
+                "not_applicable_reason"
+              ]
+            }
+          }
+        ]
+      },
+      "minItems": 1,
+      "maxItems": 4
+    }
+  },
+  "required": [
+    "schema_version",
+    "application_id",
+    "release_id",
+    "release_version",
+    "artifact_ref",
+    "publisher_identity_ref",
+    "runtime_profile_ref",
+    "release_spec_ref",
+    "package_format",
+    "required_capability_refs",
+    "volume_requirements",
+    "network_policy_ref",
+    "health_check_ref",
+    "migration_plan_ref",
+    "rollback_policy_ref",
+    "compatibility_claims"
+  ],
+  "additionalProperties": false
+}

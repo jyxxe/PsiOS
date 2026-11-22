@@ -1,0 +1,26 @@
+{
+  "schema_version": "1.0.0",
+  "message_id": "message-demo",
+  "conversation_id": "room-demo",
+  "client_send_id": "send-window-1/message-001",
+  "conversation_seq": 9007199254740993,
+  "writer_epoch": "12",
+  "membership_revision": "7",
+  "recovery_incarnation": "conversation-incarnation-2",
+  "accepted_at": "2026-11-22T08:00:00Z",
+  "content_digest": "sha256:5e02683e80a00afd742ac5db7ac7c36f54ac9a3c8827f3719bf58feee7c5e504",
+  "deduplicated": false,
+  "durability_profile": {
+    "profile_ref": {
+      "resource_id": "profile-local-durable",
+      "version": "rev-1",
+      "digest": "sha256:c96dffa1f435c03577441c9f0fc6c16c1c4adca32d23f0c2fda8fb8564307866"
+    },
+    "ack_level": "Durable",
+    "fault_scope": [
+      "ProcessCrash",
+      "PowerLoss"
+    ],
+    "rpo_seconds": "0"
+  }
+}

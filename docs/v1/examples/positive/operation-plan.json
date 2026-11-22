@@ -1,0 +1,81 @@
+{
+  "schema_version": "1.0.0",
+  "plan_id": "plan-demo",
+  "purpose_ref": {
+    "resource_id": "user-purpose",
+    "version": "rev-1",
+    "digest": "sha256:b4b19602f174faa6688483ab57b526b8108c7cbafd0c734d5016aa160a85b096"
+  },
+  "requester_principal_id": "principal-user",
+  "delegation_ref": {
+    "resource_id": "delegation-review",
+    "version": "rev-1",
+    "digest": "sha256:1a224ec34161b91a7b0ffa3b1858897e93d3628c372f725ca5b48674e0f7a31b"
+  },
+  "allowed_effects": [
+    {
+      "resource_ref": {
+        "resource_id": "target-document",
+        "version": "rev-1",
+        "digest": "sha256:daee958c2c3ba7e6b9589b02f1e86b41dab48c4270ccefd1e24c878489581490"
+      },
+      "action": "document.replace",
+      "scope_ref": {
+        "resource_id": "scope-one-document",
+        "version": "rev-1",
+        "digest": "sha256:67489305de1e0f89c7f0ec3271ca2a98367b91abd2af83c56c49872a243bdaec"
+      }
+    }
+  ],
+  "input_refs": [
+    {
+      "resource_id": "replacement-content",
+      "version": "rev-1",
+      "digest": "sha256:1b5a0fd98f2a707b417e88664a24799cbba4e837ceb6a3208aa9c80894e42cf3"
+    }
+  ],
+  "runtime_refs": [
+    {
+      "resource_id": "tool-document-editor",
+      "version": "rev-1",
+      "digest": "sha256:3763d3ab546bfc8d2686d73912419058a0626bd50a6f66469263e349cee882ae"
+    }
+  ],
+  "preconditions": [
+    {
+      "resource_ref": {
+        "resource_id": "target-document",
+        "version": "rev-1",
+        "digest": "sha256:daee958c2c3ba7e6b9589b02f1e86b41dab48c4270ccefd1e24c878489581490"
+      },
+      "kind": "ContentDigest",
+      "expected": "sha256:daee958c2c3ba7e6b9589b02f1e86b41dab48c4270ccefd1e24c878489581490",
+      "enforcement": "ConditionalApply"
+    }
+  ],
+  "budget_ref": {
+    "resource_id": "budget-one-edit",
+    "version": "rev-1",
+    "digest": "sha256:5fa934394917dc351e68bab101f0d393dd1d399c5b99a61084b3300e102a4603"
+  },
+  "deadline_at": "2026-11-22T09:00:00Z",
+  "data_policy_ref": {
+    "resource_id": "policy-local-only",
+    "version": "rev-1",
+    "digest": "sha256:00df23a94c150ecd0d677e6e7d93ef9f6c6787d0f5e1a5d7d21e143f7b77050d"
+  },
+  "permission_delta_refs": [],
+  "recovery_plan_ref": {
+    "resource_id": "recover-document-version",
+    "version": "rev-1",
+    "digest": "sha256:354105227434cf2d689eb6989a1878bf598d964c8c03a72227fc959852fa2c94"
+  },
+  "irreversible_effects": [],
+  "use_scope": "SingleOperation",
+  "digest_profile": {
+    "digest_algorithm": "SHA-256",
+    "canonicalization_version": "RFC8785",
+    "domain": "psios/operation-plan/1"
+  },
+  "plan_digest": "sha256:76f3a62bfb9c6f378a7477e734b6e1b802ed5d18f84a323f20e6f215ce55a87d"
+}

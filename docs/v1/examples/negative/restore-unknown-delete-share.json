@@ -1,0 +1,34 @@
+{
+  "schema_version": "1.0.0",
+  "recovery_operation_id": "restore-demo",
+  "trust_domain_id": "trust-new",
+  "security_domain_id": "tenant-demo",
+  "security_recovery_epoch": "3",
+  "recovery_incarnation": "core-incarnation-2",
+  "security_mode": "ReEnrolled",
+  "covered_resource_ids": [
+    "node-demo"
+  ],
+  "uncovered_resource_ids": [
+    "external-forge"
+  ],
+  "security_evidence_refs": [
+    {
+      "resource_id": "reenrollment-evidence",
+      "version": "rev-1",
+      "digest": "sha256:2107b03f6b61217bede91e15f26f203fc2a1b1843d048aab442d83890de989cc"
+    }
+  ],
+  "effect_reconciliation": "Blocked",
+  "unknown_effect_refs": [
+    {
+      "resource_id": "effect-demo",
+      "version": "rev-1",
+      "digest": "sha256:0c8933f76447434912c5aabaafc520302d92031f5dbcaa487f5e5aa6e0a7dfba"
+    }
+  ],
+  "deletion_history": "Unknown",
+  "automatic_writes_enabled": false,
+  "public_sharing_enabled": true,
+  "verified_at": "2026-11-22T08:00:00Z"
+}

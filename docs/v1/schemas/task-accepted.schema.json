@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.psios.example/v1/task-accepted.schema.json",
+  "title": "Task persistent acceptance receipt",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "task_revision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "accepted_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "request_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "origin_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/OriginRef"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "deduplicated": {
+      "type": "boolean"
+    },
+    "durability_profile": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/DurabilityProfile"
+    }
+  },
+  "required": [
+    "schema_version",
+    "task_id",
+    "task_revision",
+    "accepted_at",
+    "request_digest",
+    "origin_ref",
+    "idempotency_key",
+    "deduplicated",
+    "durability_profile"
+  ],
+  "additionalProperties": false
+}

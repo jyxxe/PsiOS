@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0.0",
+  "revocation_id": "revocation-demo",
+  "accepted_at": "2026-11-22T08:00:00Z",
+  "authorization_epoch": "20",
+  "status": "Complete",
+  "targets": [
+    {
+      "resource_id": "volume-demo",
+      "required": true,
+      "capabilities": [
+        "ResourceFence"
+      ],
+      "enforcement_status": "Enforced",
+      "evidence_refs": [
+        {
+          "resource_id": "fence-evidence",
+          "version": "rev-1",
+          "digest": "sha256:8f5df19983629d1843229ef787d2d3b4b8a91ee20291cb689f6058340cdc1f4c"
+        }
+      ],
+      "residual_effects": []
+    },
+    {
+      "resource_id": "worker-offline",
+      "required": true,
+      "capabilities": [
+        "SandboxTerminate"
+      ],
+      "enforcement_status": "Unreachable",
+      "evidence_refs": [],
+      "residual_effects": [
+        "A previously issued external request may still complete."
+      ]
+    }
+  ]
+}

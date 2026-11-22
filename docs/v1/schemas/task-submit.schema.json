@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.psios.example/v1/task-submit.schema.json",
+  "title": "Task.Submit request: no server-generated Task or Run ID",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "origin_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/OriginRef"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "request_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "input_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "task_type": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "delegation_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "budget_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "deadline_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "cancel_scope_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    }
+  },
+  "required": [
+    "schema_version",
+    "origin_ref",
+    "idempotency_key",
+    "request_digest",
+    "input_ref",
+    "task_type",
+    "delegation_ref",
+    "budget_ref",
+    "cancel_scope_id"
+  ],
+  "additionalProperties": false
+}

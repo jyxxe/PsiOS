@@ -1,0 +1,172 @@
+{
+  "schema_version": "1.0.0",
+  "namespace": "https://schemas.psios.example/v1/",
+  "binding": "Logical JSON contracts; HTTP/RPC transport and backend implementation are not supplied.",
+  "contracts": [
+    {
+      "name": "common",
+      "path": "common.schema.json",
+      "title": "PsiOS v1 shared types (not a writable generic API)"
+    },
+    {
+      "name": "resource-envelope",
+      "path": "resource-envelope.schema.json",
+      "title": "Read envelope; kind-specific spec validation is mandatory"
+    },
+    {
+      "name": "error",
+      "path": "error.schema.json",
+      "title": "Stable machine-readable error"
+    },
+    {
+      "name": "operation-plan",
+      "path": "operation-plan.schema.json",
+      "title": "Immutable OperationPlan"
+    },
+    {
+      "name": "operation",
+      "path": "operation.schema.json",
+      "title": "Operation lifecycle and effect knowledge"
+    },
+    {
+      "name": "effect-record",
+      "path": "effect-record.schema.json",
+      "title": "One logical resource or external effect"
+    },
+    {
+      "name": "approval-request",
+      "path": "approval-request.schema.json",
+      "title": "Request for an authority decision"
+    },
+    {
+      "name": "approval-decision",
+      "path": "approval-decision.schema.json",
+      "title": "Immutable approval/rejection fact"
+    },
+    {
+      "name": "approval-use",
+      "path": "approval-use.schema.json",
+      "title": "CAS-bound approval usage ledger view"
+    },
+    {
+      "name": "execution-permit",
+      "path": "execution-permit.schema.json",
+      "title": "Authenticated execution admission; JSON alone is not proof"
+    },
+    {
+      "name": "task-submit",
+      "path": "task-submit.schema.json",
+      "title": "Task.Submit request: no server-generated Task or Run ID"
+    },
+    {
+      "name": "task-accepted",
+      "path": "task-accepted.schema.json",
+      "title": "Task persistent acceptance receipt"
+    },
+    {
+      "name": "task-lookup",
+      "path": "task-lookup.schema.json",
+      "title": "Authoritative submission lookup; absence has bounded meaning"
+    },
+    {
+      "name": "task",
+      "path": "task.schema.json",
+      "title": "Task read view; terminal result availability is independent"
+    },
+    {
+      "name": "run",
+      "path": "run.schema.json",
+      "title": "One Task execution attempt"
+    },
+    {
+      "name": "cancel-origin",
+      "path": "cancel-origin.schema.json",
+      "title": "CancelOrigin is serialized with submission acceptance"
+    },
+    {
+      "name": "chat-send",
+      "path": "chat-send.schema.json",
+      "title": "Client SendMessage; sender is derived from authentication"
+    },
+    {
+      "name": "chat-accepted",
+      "path": "chat-accepted.schema.json",
+      "title": "Persistent Conversation acceptance receipt"
+    },
+    {
+      "name": "message",
+      "path": "message.schema.json",
+      "title": "Persistent Message read view; revision and initial send digest are separate"
+    },
+    {
+      "name": "workflow-definition",
+      "path": "workflow-definition.schema.json",
+      "title": "Restricted Workflow AST (graph/authorization checks are separate)"
+    },
+    {
+      "name": "workflow-run",
+      "path": "workflow-run.schema.json",
+      "title": "WorkflowRun state with immutable definition/input refs"
+    },
+    {
+      "name": "dispatch-intent",
+      "path": "dispatch-intent.schema.json",
+      "title": "Workflow-to-Task durable dispatch intent"
+    },
+    {
+      "name": "event",
+      "path": "event.schema.json",
+      "title": "Committed fact notification envelope, not an authorization token"
+    },
+    {
+      "name": "dataset-record",
+      "path": "dataset-record.schema.json",
+      "title": "Dataset record: seven business fields and independent system metadata"
+    },
+    {
+      "name": "volume",
+      "path": "volume.schema.json",
+      "title": "Logical Volume; access_mode does not itself prove fencing"
+    },
+    {
+      "name": "volume-attachment",
+      "path": "volume-attachment.schema.json",
+      "title": "Attachment is separate from Volume lifecycle"
+    },
+    {
+      "name": "capability-descriptor",
+      "path": "capability-descriptor.schema.json",
+      "title": "Advertised backend capability, never a Grant"
+    },
+    {
+      "name": "revocation-result",
+      "path": "revocation-result.schema.json",
+      "title": "Per-resource enforcement and residual effects"
+    },
+    {
+      "name": "recovery-status",
+      "path": "recovery-status.schema.json",
+      "title": "Recovery trust, effect reconciliation and publication barriers"
+    },
+    {
+      "name": "recovery-set-manifest",
+      "path": "recovery-set-manifest.schema.json",
+      "title": "Recovery set with explicit consistency and external-effect scope"
+    },
+    {
+      "name": "application-manifest",
+      "path": "application-manifest.schema.json",
+      "title": "Application release requirements; an installed Deployment is separate"
+    },
+    {
+      "name": "application-release-spec",
+      "path": "application-release-spec.schema.json",
+      "title": "Executable application requirements resolved by ApplicationManifest"
+    },
+    {
+      "name": "snapshot-page",
+      "path": "snapshot-page.schema.json",
+      "title": "One page of a fixed authority snapshot"
+    }
+  ]
+}

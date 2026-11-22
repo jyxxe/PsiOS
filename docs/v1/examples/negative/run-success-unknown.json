@@ -1,0 +1,38 @@
+{
+  "schema_version": "1.0.0",
+  "run_id": "run-demo",
+  "task_id": "task-demo",
+  "claim_id": "claim-demo",
+  "claim_epoch": "2",
+  "recovery_incarnation": "core-incarnation-2",
+  "lifecycle": "Succeeded",
+  "outcome_knowledge": "Unknown",
+  "input_ref": {
+    "resource_id": "review-input",
+    "version": "rev-1",
+    "digest": "sha256:e5d06a3998e8ed7373c1cd1799383f287f9bb37105f90de6ca5a517d7697db51"
+  },
+  "execution_snapshot_ref": {
+    "resource_id": "execution-snapshot-demo",
+    "version": "rev-1",
+    "digest": "sha256:05867e27e64e0f5b366d35a90fdcd5bc3eacdf0d4bb7b4d6e19e9e60b28345e6"
+  },
+  "output_refs": [],
+  "operation_refs": [
+    {
+      "resource_id": "operation-demo",
+      "version": "rev-1",
+      "digest": "sha256:ac67bcc2eed8ba3000fd01c13cb133c88459a21085b4fef0c73bd8d1e0fb4c79"
+    }
+  ],
+  "conditions": [
+    {
+      "type": "OutcomeUnknown",
+      "status": "True",
+      "reason": "ExternalReceiptUnavailable",
+      "message": "Reconcile the previously issued effect before allowing new effects.",
+      "observed_generation": "1",
+      "last_transition_at": "2026-11-22T08:00:00Z"
+    }
+  ]
+}

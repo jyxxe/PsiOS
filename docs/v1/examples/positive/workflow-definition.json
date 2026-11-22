@@ -1,0 +1,74 @@
+{
+  "schema_version": "1.0.0",
+  "dsl_version": "1.0.0",
+  "definition_id": "workflow-review",
+  "definition_version": "definition-rev-1",
+  "input_schema_ref": {
+    "resource_id": "schema-review-input",
+    "version": "rev-1",
+    "digest": "sha256:b9a37494f3a39b50a3c5251a28ae12a59f2ce7b1506f8de39a97a55b135933b3"
+  },
+  "output_schema_ref": {
+    "resource_id": "schema-review-output",
+    "version": "rev-1",
+    "digest": "sha256:3603263f31b1695361e5c6dda51294c7db02073fc86ab9c769347dd1647c68b2"
+  },
+  "nodes": [
+    {
+      "step_id": "review",
+      "kind": "TaskStep",
+      "depends_on": [],
+      "deadline_seconds": "600",
+      "retry_policy": {
+        "max_attempts": "1",
+        "backoff_seconds": "0",
+        "retry_unknown_effects": false
+      },
+      "failure_policy": "Stop",
+      "task_type": "review.read_only.v1",
+      "input_bindings": {
+        "document": {
+          "kind": "input",
+          "path": [
+            "document"
+          ]
+        }
+      },
+      "allowed_capability_refs": [
+        {
+          "resource_id": "capability-document-read",
+          "version": "rev-1",
+          "digest": "sha256:9d11221696136d7cd38f2c3c1affe7ea49f655d8708bd8311016452cefad7a16"
+        }
+      ],
+      "delegation_ref": {
+        "resource_id": "delegation-review",
+        "version": "rev-1",
+        "digest": "sha256:1a224ec34161b91a7b0ffa3b1858897e93d3628c372f725ca5b48674e0f7a31b"
+      },
+      "budget_ref": {
+        "resource_id": "budget-review",
+        "version": "rev-1",
+        "digest": "sha256:408616897a72dc871f8c1593211e2efb21959733fbb9c2b7358f01ff1c0729de"
+      }
+    }
+  ],
+  "root_budget_ref": {
+    "resource_id": "budget-root",
+    "version": "rev-1",
+    "digest": "sha256:7d4cd7f604255d463bb2d18d0866737ed9c5fe99a508666af236a3d24f92a266"
+  },
+  "max_concurrency": "1",
+  "deadline_seconds": "900",
+  "output_bindings": {
+    "report": {
+      "kind": "input",
+      "path": [
+        "steps",
+        "review",
+        "report"
+      ]
+    }
+  },
+  "definition_digest": "sha256:07bcbb45b5937c67718960df20b04983b0578cee284b598299a68b85a6c167fd"
+}

@@ -1,0 +1,1807 @@
+{
+  "schema_version": "1.0.0",
+  "document_version": "1.0.0",
+  "source_document": "docs/14-roadmap-and-decisions.md",
+  "scope": "从 v1 第 14 章工作项表转换的 26 项实施计划；未创建外部工单，未实施代码或执行产品验收。",
+  "dependency_semantics": {
+    "dependencies": "仅含 WI ID，表示集成/验收前置；允许文中明确的隔离原型并行。",
+    "conditional_dependencies": "逐项按冻结的支持范围判定，适用时为必需验收前置；不适用必须保留范围与理由，不得借此省略已宣传能力。",
+    "stage": "原阶段范围按包含端点展开；阶段是证据门槛，不是预计日期。",
+    "legacy_identity": "来源 source_id 与 legacy_id 共同确定旧编号身份；无编号条目使用 null，不从行号创造 P1/P2 ID。",
+    "source_sections": "Space 的跨模块依赖在 35.12，带 P0/P1/P2 编号的实施任务在 35.16；Project 路线使用独立 P0-01～08。"
+  },
+  "work_items": [
+    {
+      "id": "WI-001",
+      "title": "固定真实Forgejo仓库与完整HEAD，逐模块reuse/adapt/rewrite/exclude、许可证与秘密扫描证据",
+      "priority": "P0",
+      "stage": [
+        "M0"
+      ],
+      "dependencies": [],
+      "acceptance_criteria": [
+        "记录实际访问的 Forgejo 仓库、分支、完整 commit SHA 与审计日期；历史压缩包明确标为历史来源，不能代替当前 HEAD。",
+        "逐模块给出 reuse/adapt/rewrite/exclude 及许可证、依赖、秘密扫描、耦合和证据位置；无法访问的部分列为 Blocked，不声明已验收。"
+      ],
+      "owner_role": "代码来源与复用审计负责人；许可证及供应链复核角色",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.16 下一步实施任务",
+          "legacy_id": "P0-01",
+          "legacy_text": "固定 PsiOS 源仓库当前 Forgejo HEAD；导出 XeLab 模块复用矩阵（TaskEngine、EventStore、Broker、OCI、Identity、Storage、SDK、WebUI）",
+          "mapping_scope": "原仓库 HEAD、XeLab 逐模块来源/许可与复用审计。"
+        },
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "首批 P0 工作项",
+          "legacy_id": "P0-01",
+          "legacy_text": "固定本地 Forgejo 最新 HEAD，并逐模块审计 XeLab 复用来源及许可证。",
+          "mapping_scope": "本地 Forgejo 最新 HEAD、XeLab 复用来源及许可证。"
+        }
+      ],
+      "source_stage_text": "M0",
+      "source_dependency_text": "无；访问不足则明确Blocked",
+      "adr_gates": [],
+      "conditional_dependencies": []
+    },
+    {
+      "id": "WI-002",
+      "title": "规范/Schema/ADR/故障测试目录、隔离CI与证据记录格式",
+      "priority": "P0",
+      "stage": [
+        "M0"
+      ],
+      "dependencies": [
+        "WI-001"
+      ],
+      "acceptance_criteria": [
+        "规范、Schema、ADR 与故障测试骨架可版本化；隔离 CI 保留源码 SHA、制品摘要和测试结果。",
+        "验证器能发现引用缺失、Schema/示例不一致和未证实的接受状态；CI 执行不取得生产签名密钥或用户数据。"
+      ],
+      "owner_role": "开发基础设施与隔离 CI 维护者",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.16 下一步实施任务",
+          "legacy_id": "P0-02",
+          "legacy_text": "建立 docs/architecture、docs/adr、api/schema、tests/contracts 的可版本化骨架",
+          "mapping_scope": "原规范/Schema/ADR/测试骨架与带摘要证据的 CI。"
+        },
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "首批 P0 工作项",
+          "legacy_id": "P0-02",
+          "legacy_text": "建立 docs/architecture、docs/adr、api/schema、tests/contracts，CI 保留带 SHA 的证据。",
+          "mapping_scope": "规范与测试骨架、CI 带 SHA 证据。"
+        }
+      ],
+      "source_stage_text": "M0",
+      "source_dependency_text": "WI-001可并行做骨架",
+      "adr_gates": [],
+      "conditional_dependencies": [],
+      "dependency_notes": "WI-001 是集成/完成门槛；隔离目录骨架和 CI 格式可与仓库来源审计并行，不要求等待其结束才开始。"
+    },
+    {
+      "id": "WI-003",
+      "title": "共同对象、错误、编码、JCS测试向量、版本与状态合同",
+      "priority": "P0",
+      "stage": [
+        "M0",
+        "M1",
+        "M2"
+      ],
+      "dependencies": [
+        "WI-002"
+      ],
+      "acceptance_criteria": [
+        "共同对象、稳定错误、字符串 ID/数值编码、JCS 摘要输入、版本协商及状态维度有一致 Schema 和正反例。",
+        "运行摘要测试向量与条件写/幂等契约测试；客户端不能伪造服务端权威字段，Unknown 不与 lifecycle 混为一谈。"
+      ],
+      "owner_role": "Core API、Schema 与兼容契约维护者",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.16 下一步实施任务",
+          "legacy_id": "P0-03",
+          "legacy_text": "固化 Principal/Grant/Delegation/Approval/Operation/Resource/Event 样例 Schema 与统一错误码",
+          "mapping_scope": "共同 Resource/Operation/Event Schema、编码与错误合同。"
+        },
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.16 下一步实施任务",
+          "legacy_id": "P0-04",
+          "legacy_text": "写出数据权威与状态机 ADR：Task/Run、Event outbox、WorkflowRun、Message、WorkItem",
+          "mapping_scope": "各对象的共享状态与权威合同。"
+        },
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "首批 P0 工作项",
+          "legacy_id": "P0-03",
+          "legacy_text": "统一 Principal/Grant/Delegation/Approval/Operation、Task/Run、WorkflowRun、Conversation/Message Schema。",
+          "mapping_scope": "共同 Schema、编码和对象版本合同。"
+        }
+      ],
+      "source_stage_text": "M0–M2",
+      "source_dependency_text": "WI-002",
+      "adr_gates": [],
+      "conditional_dependencies": []
+    },
+    {
+      "id": "WI-004",
+      "title": "Principal/Grant/Delegation、目的与效果计划、审批CAS/许可、数据面撤权原型",
+      "priority": "P0",
+      "stage": [
+        "M0",
+        "M1",
+        "M2"
+      ],
+      "dependencies": [
+        "WI-003"
+      ],
+      "acceptance_criteria": [
+        "Principal、Grant、Delegation、ApprovalRequest/Decision/Use、OperationPlan 和 ExecutionPermit 有唯一权威及目的/允许效果绑定。",
+        "审批并发 CAS 只绑定同一逻辑 Operation；撤销与准入竞态、跨受众令牌、资源版本 TOCTOU 均有实际失败证据。",
+        "数据面撤权按真实 GateOnly/StreamCut/SandboxTerminate/ResourceFence 能力和逐资源回执报告，不能把控制面受理当成全部强制完成。"
+      ],
+      "owner_role": "Identity/Policy、Approval Authority 与资源安全执行维护者",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.16 下一步实施任务",
+          "legacy_id": "P0-03",
+          "legacy_text": "固化 Principal/Grant/Delegation/Approval/Operation/Resource/Event 样例 Schema 与统一错误码",
+          "mapping_scope": "Principal/Grant/Delegation/Approval 的安全语义与跨入口权限测试。"
+        },
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "首批 P0 工作项",
+          "legacy_id": "P0-03",
+          "legacy_text": "统一 Principal/Grant/Delegation/Approval/Operation、Task/Run、WorkflowRun、Conversation/Message Schema。",
+          "mapping_scope": "Principal/Grant/Delegation/Approval/Operation 的安全合同。"
+        },
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "首批 P0 工作项",
+          "legacy_id": "P0-07",
+          "legacy_text": "测试真实用户目的/允许副作用约束，以及 RevocationMode 数据面撤权。",
+          "mapping_scope": "真实用户目的、允许副作用约束及实际数据面撤权；v1 用能力集合和执行结果区分旧 RevocationMode。"
+        }
+      ],
+      "source_stage_text": "M0–M2",
+      "source_dependency_text": "WI-003",
+      "adr_gates": [],
+      "conditional_dependencies": []
+    },
+    {
+      "id": "WI-005",
+      "title": "SecurityState权威、隔离恢复、独立恢复身份、效果对账屏障",
+      "priority": "P0",
+      "stage": [
+        "M0",
+        "M1",
+        "M2"
+      ],
+      "dependencies": [
+        "WI-003",
+        "WI-004"
+      ],
+      "acceptance_criteria": [
+        "仅有撤权前旧备份且无独立可信见证时默认 Quarantined；合法本地恢复身份不依赖旧管理员名单。",
+        "VerifiedCurrent/ReEnrolled 明确覆盖域、资源和残留外部凭据；新信任不冒充历史撤权已找回。",
+        "旧 Task/Workflow/outbox 与外部效果对账后按范围激活，Unknown 保留屏障，不能换键盲重放。"
+      ],
+      "owner_role": "SecurityState 与灾难恢复联合负责人",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "首批 P0 工作项",
+          "legacy_id": "P0-04",
+          "legacy_text": "实现并验证 SecurityState 受限灾难恢复，确认无独立可信撤权记录时默认隔离旧权限。",
+          "mapping_scope": "SecurityState 受限灾难恢复；无当前撤权证据时隔离旧权限。"
+        },
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.12 跨模块依赖与建设顺序 / Storage Service",
+          "legacy_id": null,
+          "legacy_text": "Storage Service | Host Storage、设备稳定 ID、Policy、备份与恢复口径 | TableFS、列式索引、分布式共享写",
+          "mapping_scope": "保留该模块必须先稳定的契约及可延后的非阻塞能力；具体 WI 前置以 v1 第 14 章为准。"
+        }
+      ],
+      "source_stage_text": "M0–M2",
+      "source_dependency_text": "WI-003、004",
+      "adr_gates": [],
+      "conditional_dependencies": []
+    },
+    {
+      "id": "WI-006",
+      "title": "可重建宿主、镜像、安装、离线CLI、独立救援",
+      "priority": "P0",
+      "stage": [
+        "M1"
+      ],
+      "dependencies": [
+        "WI-001",
+        "WI-002"
+      ],
+      "acceptance_criteria": [
+        "固定宿主构建输入和平台组合，生成可重建镜像及稳定设备身份安装计划，验证错盘/热换保护。",
+        "断模型、断网、无 Controller 或容器引擎故障时本机登录、离线 CLI、诊断及独立救援仍可用。",
+        "首次启动不复用镜像中的 machine-id、节点私钥或旧会话；引导与恢复证据关联 ADR-01～04 的适用决策。"
+      ],
+      "owner_role": "宿主构建、安装引导与独立救援维护者",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.16 下一步实施任务",
+          "legacy_id": "P0-05",
+          "legacy_text": "M1 最小镜像、离线恢复、M2 OCI + Volume + 独立 Backup 小闭环",
+          "mapping_scope": "M1 最小镜像、离线管理及独立救援。"
+        },
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "首批 P0 工作项",
+          "legacy_id": "P0-08",
+          "legacy_text": "M1 引导/恢复与 M2 OCI + Volume + Backup 基础链路。",
+          "mapping_scope": "M1 引导与独立恢复。"
+        }
+      ],
+      "source_stage_text": "M1",
+      "source_dependency_text": "WI-001、002；ADR-01～04相关门槛",
+      "adr_gates": [
+        "ADR-01",
+        "ADR-02",
+        "ADR-03",
+        "ADR-04"
+      ],
+      "conditional_dependencies": []
+    },
+    {
+      "id": "WI-007",
+      "title": "Storage/Volume/Backup、数据Schema与OCI有状态应用恢复闭环",
+      "priority": "P0",
+      "stage": [
+        "M2"
+      ],
+      "dependencies": [
+        "WI-004",
+        "WI-005",
+        "WI-006"
+      ],
+      "acceptance_criteria": [
+        "一个真实有状态 OCI 应用写授权独立卷，并完成备份、从独立介质恢复至新目标、业务一致性验证与受控激活。",
+        "验证重启、断电、满盘、缺失卷、错误密钥、Schema 不兼容和元数据/对象引用缺失；不得以空卷初始化伪装恢复成功。",
+        "保留数据和密钥/权限边界；应用更新或卸载不默认删除独立数据卷。"
+      ],
+      "owner_role": "Storage/Backup 与 OCI Application 联合维护者",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.16 下一步实施任务",
+          "legacy_id": "P0-05",
+          "legacy_text": "M1 最小镜像、离线恢复、M2 OCI + Volume + 独立 Backup 小闭环",
+          "mapping_scope": "M2 OCI+Volume+独立 Backup 有状态闭环及故障恢复。"
+        },
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "首批 P0 工作项",
+          "legacy_id": "P0-08",
+          "legacy_text": "M1 引导/恢复与 M2 OCI + Volume + Backup 基础链路。",
+          "mapping_scope": "M2 OCI+Volume+Backup 的有状态基础链路。"
+        },
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.12 跨模块依赖与建设顺序 / Application Runtime",
+          "legacy_id": null,
+          "legacy_text": "Application Runtime | Host/Identity/Operation/Volume/Network/审计 | 高级包导入、多主机迁移",
+          "mapping_scope": "保留该模块必须先稳定的契约及可延后的非阻塞能力；具体 WI 前置以 v1 第 14 章为准。"
+        },
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.12 跨模块依赖与建设顺序 / Storage Service",
+          "legacy_id": null,
+          "legacy_text": "Storage Service | Host Storage、设备稳定 ID、Policy、备份与恢复口径 | TableFS、列式索引、分布式共享写",
+          "mapping_scope": "保留该模块必须先稳定的契约及可延后的非阻塞能力；具体 WI 前置以 v1 第 14 章为准。"
+        }
+      ],
+      "source_stage_text": "M2",
+      "source_dependency_text": "WI-004、005、006",
+      "adr_gates": [],
+      "conditional_dependencies": []
+    },
+    {
+      "id": "WI-008",
+      "title": "Task/Run/Operation、可靠Event、去重窗口、预算/结果保留",
+      "priority": "P0",
+      "stage": [
+        "M2"
+      ],
+      "dependencies": [
+        "WI-003",
+        "WI-004",
+        "WI-007"
+      ],
+      "acceptance_criteria": [
+        "Task/Run/Operation 与可靠 Event/outbox 的权威、持久接受、条件写、迟到结果和终态语义经故障测试。",
+        "去重窗口与备份/离线恢复窗口协调；未知效果不自动重试，取消不抹除实际效果。",
+        "预算、队列满、结果制品/元数据保留和 ResultEvicted/ResultUnavailable 可核实，满盘仍保留必要提交及审计空间。"
+      ],
+      "owner_role": "Task/Event Engine 与 Operation 持久化维护者",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.16 下一步实施任务",
+          "legacy_id": "P0-03",
+          "legacy_text": "固化 Principal/Grant/Delegation/Approval/Operation/Resource/Event 样例 Schema 与统一错误码",
+          "mapping_scope": "Event/Operation 的持久权威及条件写实现验证。"
+        },
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.16 下一步实施任务",
+          "legacy_id": "P0-04",
+          "legacy_text": "写出数据权威与状态机 ADR：Task/Run、Event outbox、WorkflowRun、Message、WorkItem",
+          "mapping_scope": "Task/Run 与 Event outbox 的状态权威。"
+        },
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "首批 P0 工作项",
+          "legacy_id": "P0-03",
+          "legacy_text": "统一 Principal/Grant/Delegation/Approval/Operation、Task/Run、WorkflowRun、Conversation/Message Schema。",
+          "mapping_scope": "Task/Run 与 Operation 的执行事实合同。"
+        },
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.12 跨模块依赖与建设顺序 / Task Engine",
+          "legacy_id": null,
+          "legacy_text": "Task Engine | Resource API、CoreState、outbox、SecretRef、配额 | 多 Controller、复杂 DSL",
+          "mapping_scope": "保留该模块必须先稳定的契约及可延后的非阻塞能力；具体 WI 前置以 v1 第 14 章为准。"
+        }
+      ],
+      "source_stage_text": "M2",
+      "source_dependency_text": "WI-003、004、007",
+      "adr_gates": [],
+      "conditional_dependencies": []
+    },
+    {
+      "id": "WI-009",
+      "title": "DispatchIntent、outbox、接受去重、CancelOrigin及跨库恢复PoC",
+      "priority": "P0",
+      "stage": [
+        "M2",
+        "M3"
+      ],
+      "dependencies": [
+        "WI-005",
+        "WI-008"
+      ],
+      "acceptance_criteria": [
+        "DispatchIntent 与 outbox 持久创建，Task Broker 按稳定来源去重并回传同一 task_id；在派发、接受、绑定各裂缝重启不会重复逻辑 Task。",
+        "CancelOrigin 先于或晚于接受时结果明确，迟到成功及未知效果仍被保留。",
+        "恢复不同时间的 Workflow/Task/审批检查点可对账，不能根据旧检查点缺少 task_id 就重新派发。"
+      ],
+      "owner_role": "Workflow Dispatcher 与 Task Broker 一致性维护者",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.16 下一步实施任务",
+          "legacy_id": "P0-04",
+          "legacy_text": "写出数据权威与状态机 ADR：Task/Run、Event outbox、WorkflowRun、Message、WorkItem",
+          "mapping_scope": "Workflow 与 Task 的 outbox/派发状态裂缝及恢复。"
+        },
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.16 下一步实施任务",
+          "legacy_id": "P1-01",
+          "legacy_text": "ADR-22：Workflow DSL + DAG + ApprovalGate；单节点 PoC",
+          "mapping_scope": "单节点可靠 Workflow 所需派发接受/回执对账 PoC。"
+        },
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "首批 P0 工作项",
+          "legacy_id": "P0-05",
+          "legacy_text": "制作 Workflow→Task DispatchIntent + outbox + Task 接受去重/回执丢失对账 PoC。",
+          "mapping_scope": "Workflow→Task DispatchIntent+outbox、接受去重和回执丢失对账 PoC。"
+        },
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.12 跨模块依赖与建设顺序 / Workflow",
+          "legacy_id": null,
+          "legacy_text": "Workflow | Task/Event 的版本和失败语义、ApprovalGate、Artifact | 可视化工作流编辑器",
+          "mapping_scope": "保留该模块必须先稳定的契约及可延后的非阻塞能力；具体 WI 前置以 v1 第 14 章为准。"
+        }
+      ],
+      "source_stage_text": "M2–M3",
+      "source_dependency_text": "WI-005、008",
+      "adr_gates": [],
+      "conditional_dependencies": []
+    },
+    {
+      "id": "WI-010",
+      "title": "Conversation单写、client_send_id、成员顺序、epoch/fencing与历史缺口",
+      "priority": "P0",
+      "stage": [
+        "M3"
+      ],
+      "dependencies": [
+        "WI-004",
+        "WI-005",
+        "WI-008"
+      ],
+      "acceptance_criteria": [
+        "Conversation 单写权威、client_send_id、message_id、确认序号和投递标识分工经 ACK 丢失/同键异文测试。",
+        "成员变更与消息接受有序，writer_epoch/fencing 在实际写入端拒旧，分区侧不自行确认正式历史。",
+        "旧快照丢失已确认尾部公开 HistoryGap 与游标重同步，不复用同一身份空间确认序号。"
+      ],
+      "owner_role": "Conversation Authority 与消息存储维护者",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.16 下一步实施任务",
+          "legacy_id": "P0-04",
+          "legacy_text": "写出数据权威与状态机 ADR：Task/Run、Event outbox、WorkflowRun、Message、WorkItem",
+          "mapping_scope": "Message/Conversation 的单写和确认权威。"
+        },
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.16 下一步实施任务",
+          "legacy_id": "P1-02",
+          "legacy_text": "ADR-21：Conversation/Message/Membership/DM + Durable Inbox/Outbox",
+          "mapping_scope": "Conversation/Message/Membership/DM 的持久权威和去重基础。"
+        },
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "首批 P0 工作项",
+          "legacy_id": "P0-03",
+          "legacy_text": "统一 Principal/Grant/Delegation/Approval/Operation、Task/Run、WorkflowRun、Conversation/Message Schema。",
+          "mapping_scope": "Conversation/Message 的消息合同。"
+        },
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "首批 P0 工作项",
+          "legacy_id": "P0-06",
+          "legacy_text": "设计 Conversation WriterEpoch、存储端 fencing 和分区不重复确认。",
+          "mapping_scope": "Conversation WriterEpoch、存储端 fencing 及分区不重复确认。"
+        },
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.12 跨模块依赖与建设顺序 / Conversation / DM",
+          "legacy_id": null,
+          "legacy_text": "Conversation / DM | Principal、Registry、消息持久化、Task Dispatcher 授权边界 | 跨集群联邦聊天、复杂语义搜索",
+          "mapping_scope": "保留该模块必须先稳定的契约及可延后的非阻塞能力；具体 WI 前置以 v1 第 14 章为准。"
+        }
+      ],
+      "source_stage_text": "M3",
+      "source_dependency_text": "WI-004、005、008",
+      "adr_gates": [],
+      "conditional_dependencies": []
+    },
+    {
+      "id": "WI-011",
+      "title": "网络代次回退、IPv6/代理出口、Secret代理及管理入口",
+      "priority": "P1",
+      "stage": [
+        "M2"
+      ],
+      "dependencies": [
+        "WI-004",
+        "WI-006"
+      ],
+      "acceptance_criteria": [
+        "管理网络保存旧配置、绑定 operation/generation 并通过新认证连接确认；超时/重启回退不会覆盖后来已提交配置。",
+        "IPv6、DNS 重解析、重定向、代理及链路本地/元数据目标按实际出口受控，策略失败不退到开放宿主网络。",
+        "Secret 代理与管理会话执行当前身份、受众和权限校验，凭据不泄漏到日志或跨 origin 重定向。"
+      ],
+      "owner_role": "Network Service 与管理入口安全维护者",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "M0–M6 / M2",
+          "legacy_id": null,
+          "legacy_text": "Identity/Policy/Broker、OCI Application、Storage Volume/Backup、持久 Task/Event | 从独立备份恢复有状态应用；撤权数据面/网络错误配置回滚、outbox 与可重复结果验证",
+          "mapping_scope": "网络错误配置回滚的基础验收。"
+        },
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.12 跨模块依赖与建设顺序 / Application Runtime",
+          "legacy_id": null,
+          "legacy_text": "Application Runtime | Host/Identity/Operation/Volume/Network/审计 | 高级包导入、多主机迁移",
+          "mapping_scope": "保留该模块必须先稳定的契约及可延后的非阻塞能力；具体 WI 前置以 v1 第 14 章为准。"
+        }
+      ],
+      "source_stage_text": "M2",
+      "source_dependency_text": "WI-004、006",
+      "adr_gates": [],
+      "conditional_dependencies": []
+    },
+    {
+      "id": "WI-012",
+      "title": "原子部署试启动、数据迁移兼容、驱动/HostExtension ABI、更新失败救援",
+      "priority": "P1",
+      "stage": [
+        "M2",
+        "M3",
+        "M4",
+        "M5",
+        "M6"
+      ],
+      "dependencies": [
+        "WI-005",
+        "WI-006",
+        "WI-007"
+      ],
+      "acceptance_criteria": [
+        "更新各持久阶段中断后有可恢复状态，有限试启动失败回退或进入经过验证的人工救援，同一失败摘要不循环安装。",
+        "OS 部署、应用制品、数据 Schema 与安全状态回退边界分别验证；旧程序不能写不兼容的新数据或复活旧授权。",
+        "驱动/HostExtension 的内核 ABI、来源、签名及固件限制有矩阵，TPM/密钥恢复在适用硬件完成演练。"
+      ],
+      "owner_role": "宿主更新、数据迁移与 HostExtension 维护者",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "P1/P2 工作项（无单项编号）",
+          "legacy_id": null,
+          "legacy_text": "GPU/设备、HostExtension、Kernel ABI、宿主更新与救援。",
+          "mapping_scope": "宿主更新、HostExtension 与 Kernel ABI/救援分工。"
+        }
+      ],
+      "source_stage_text": "M2–M6",
+      "source_dependency_text": "WI-005、006、007",
+      "adr_gates": [],
+      "conditional_dependencies": []
+    },
+    {
+      "id": "WI-013",
+      "title": "原生Agent执行快照、Skills、模型路由、预算/外发/提示注入防护",
+      "priority": "P1",
+      "stage": [
+        "M3"
+      ],
+      "dependencies": [
+        "WI-004",
+        "WI-008"
+      ],
+      "acceptance_criteria": [
+        "原生 Agent 执行固定输入/工具/Skill/模型版本快照，真实工具授权经同一 Tool Gateway 和 Task/Operation 权威。",
+        "Skills 与不可信外部内容不能扩大权限；提示注入测试以授权、参数和效果边界为判据，不宣称自然语言可完全防注入。",
+        "模型路由、费用/轮数/外发预算和取消有实际边界；模型或可选 Knowledge 离线不阻断本机基础管理。"
+      ],
+      "owner_role": "原生 Agent Runtime、Model Gateway 与 Skill 安全维护者",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.16 下一步实施任务",
+          "legacy_id": "P1-03",
+          "legacy_text": "第三方 Agent C1 适配 + 原生 Agent 完成同一工作流",
+          "mapping_scope": "原生 Agent 作为相同受限任务的执行与授权对照端。"
+        },
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "M0–M6 / M3",
+          "legacy_id": null,
+          "legacy_text": "原生 Agent、第三方 C1/C2、MCP、Skills、单机 PsiFlow/Agent Chat/DM | 同类工具任务、预算、权限、取消、ACK丢失/崩溃恢复、双 Agent 会话/DM 验收",
+          "mapping_scope": "原生 Agent、Skills、预算/取消及故障恢复。"
+        },
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.12 跨模块依赖与建设顺序 / Agent Runtime/Adapters",
+          "legacy_id": null,
+          "legacy_text": "Agent Runtime/Adapters | Task/Run/ToolCall、Tool Gateway、权限委托、Model Gateway 接口 | 可选知识库、完整协议矩阵",
+          "mapping_scope": "保留该模块必须先稳定的契约及可延后的非阻塞能力；具体 WI 前置以 v1 第 14 章为准。"
+        }
+      ],
+      "source_stage_text": "M3",
+      "source_dependency_text": "WI-004、008",
+      "adr_gates": [],
+      "conditional_dependencies": []
+    },
+    {
+      "id": "WI-014",
+      "title": "明确MCP代际、C1/C2适配与认证桥接；A2A/ACP按能力声明",
+      "priority": "P1",
+      "stage": [
+        "M3"
+      ],
+      "dependencies": [
+        "WI-003",
+        "WI-008",
+        "WI-013"
+      ],
+      "acceptance_criteria": [
+        "逐适配器记录协议全名、版本/代际、传输、认证、C1/C2 和实际支持方法；缺失取消或幂等能力准确降级。",
+        "至少一个独立第三方 Agent 与原生 Agent 执行同一获准任务，验证权限、取消、预算、恢复和审计。",
+        "MCP 新旧代际与 A2A/ACP 仅按经验证的能力声明，跨服务认证不透传万能长期 Token。"
+      ],
+      "owner_role": "第三方 Agent 协议适配与互操作测试维护者",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.16 下一步实施任务",
+          "legacy_id": "P1-03",
+          "legacy_text": "第三方 Agent C1 适配 + 原生 Agent 完成同一工作流",
+          "mapping_scope": "独立第三方 C1 适配及协议、权限、取消、审计互操作。"
+        },
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "P1/P2 工作项（无单项编号）",
+          "legacy_id": null,
+          "legacy_text": "第三方 Agent 与 MCP 2026/旧版适配；定版 Workflow DSL 和审批/预算语义。",
+          "mapping_scope": "第三方 Agent 与 MCP 代际适配；不擅自给本无编号列表分配 P1 编号。"
+        },
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.12 跨模块依赖与建设顺序 / Agent Runtime/Adapters",
+          "legacy_id": null,
+          "legacy_text": "Agent Runtime/Adapters | Task/Run/ToolCall、Tool Gateway、权限委托、Model Gateway 接口 | 可选知识库、完整协议矩阵",
+          "mapping_scope": "保留该模块必须先稳定的契约及可延后的非阻塞能力；具体 WI 前置以 v1 第 14 章为准。"
+        }
+      ],
+      "source_stage_text": "M3",
+      "source_dependency_text": "WI-003、008、013",
+      "adr_gates": [],
+      "conditional_dependencies": []
+    },
+    {
+      "id": "WI-015",
+      "title": "最小Workflow DSL、步骤实例、Join/Loop/取消/补偿",
+      "priority": "P1",
+      "stage": [
+        "M3"
+      ],
+      "dependencies": [
+        "WI-004",
+        "WI-009"
+      ],
+      "acceptance_criteria": [
+        "WorkflowDefinition 固定版本，WorkflowRun/步骤实例与 Task Run 分工明确；DAG、Join、显式有界 Loop 与纯表达式经契约验证。",
+        "暂停、审批、取消、重复派发、恢复和补偿保持权威关联；Workflow 不伪造 Task 终态。",
+        "补偿是独立受授权 Operation；未知外部效果不盲重试，动态步骤和预算有硬边界，并满足 ADR-22/24 的决策门槛。"
+      ],
+      "owner_role": "PsiFlow DSL 与 Workflow Engine 维护者",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.16 下一步实施任务",
+          "legacy_id": "P0-04",
+          "legacy_text": "写出数据权威与状态机 ADR：Task/Run、Event outbox、WorkflowRun、Message、WorkItem",
+          "mapping_scope": "WorkflowRun 编排状态与 Task 事实映射。"
+        },
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.16 下一步实施任务",
+          "legacy_id": "P1-01",
+          "legacy_text": "ADR-22：Workflow DSL + DAG + ApprovalGate；单节点 PoC",
+          "mapping_scope": "ADR-22 的 DSL/DAG/ApprovalGate 与取消、重试、恢复语义。"
+        },
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "首批 P0 工作项",
+          "legacy_id": "P0-03",
+          "legacy_text": "统一 Principal/Grant/Delegation/Approval/Operation、Task/Run、WorkflowRun、Conversation/Message Schema。",
+          "mapping_scope": "WorkflowRun 的编排合同。"
+        },
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "P1/P2 工作项（无单项编号）",
+          "legacy_id": null,
+          "legacy_text": "第三方 Agent 与 MCP 2026/旧版适配；定版 Workflow DSL 和审批/预算语义。",
+          "mapping_scope": "Workflow DSL、审批与预算语义。"
+        },
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.12 跨模块依赖与建设顺序 / Workflow",
+          "legacy_id": null,
+          "legacy_text": "Workflow | Task/Event 的版本和失败语义、ApprovalGate、Artifact | 可视化工作流编辑器",
+          "mapping_scope": "保留该模块必须先稳定的契约及可延后的非阻塞能力；具体 WI 前置以 v1 第 14 章为准。"
+        }
+      ],
+      "source_stage_text": "M3",
+      "source_dependency_text": "WI-004、009；ADR-22/24",
+      "adr_gates": [
+        "ADR-22",
+        "ADR-24"
+      ],
+      "conditional_dependencies": []
+    },
+    {
+      "id": "WI-016",
+      "title": "Chat/DM、在线/离线投递、唤醒根预算、摘要/附件隐私",
+      "priority": "P1",
+      "stage": [
+        "M3"
+      ],
+      "dependencies": [
+        "WI-010",
+        "WI-013"
+      ],
+      "acceptance_criteria": [
+        "双 Agent 与用户的群聊/DM、Thread、在线/离线投递、重复消息及重连有可复核测试。",
+        "唤醒根预算、循环深度和消息去重阻止互相 @ 无限增殖；普通消息不默认唤醒所有 Agent。",
+        "当前成员/授权控制正文、摘要、搜索及附件访问；聊天记录清理不破坏仍有效的任务、制品和审计引用。"
+      ],
+      "owner_role": "Chat/DM 路由、唤醒预算与会话隐私维护者",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.16 下一步实施任务",
+          "legacy_id": "P1-02",
+          "legacy_text": "ADR-21：Conversation/Message/Membership/DM + Durable Inbox/Outbox",
+          "mapping_scope": "Inbox/Outbox 投递、群聊/私聊、离线恢复、循环预算及 ACL。"
+        },
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "P1/P2 工作项（无单项编号）",
+          "legacy_id": null,
+          "legacy_text": "Room/DM/Thread/Delivery/Subscription 和 Project/Forgejo/CI 外部事件对账。",
+          "mapping_scope": "Room/DM/Thread/Delivery/Subscription 会话与投递部分。"
+        },
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.12 跨模块依赖与建设顺序 / Conversation / DM",
+          "legacy_id": null,
+          "legacy_text": "Conversation / DM | Principal、Registry、消息持久化、Task Dispatcher 授权边界 | 跨集群联邦聊天、复杂语义搜索",
+          "mapping_scope": "保留该模块必须先稳定的契约及可延后的非阻塞能力；具体 WI 前置以 v1 第 14 章为准。"
+        }
+      ],
+      "source_stage_text": "M3",
+      "source_dependency_text": "WI-010、013",
+      "adr_gates": [],
+      "conditional_dependencies": []
+    },
+    {
+      "id": "WI-017",
+      "title": "Project、WorkItem、外部字段权威、Forgejo/CI的head绑定门禁",
+      "priority": "P1",
+      "stage": [
+        "M4"
+      ],
+      "dependencies": [
+        "WI-014",
+        "WI-015",
+        "WI-016"
+      ],
+      "acceptance_criteria": [
+        "Project/WorkItem 与 Task/Workflow 权威分工，ExternalLink 按 provider/tenant/repository/object 区分，并逐字段记录事实来源。",
+        "Forgejo/CI 重复、乱序、漏投 Webhook 和人工变更可通过权威 revision 对账，桥接回流不重复创建。",
+        "写回、合并与验收绑定确切 head SHA 和真实 CI 证据；审批后 head 改变必须重新校验，先满足 ADR-23 门槛。"
+      ],
+      "owner_role": "Project、Forgejo/CI Connector 与外部事实同步维护者",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.16 下一步实施任务",
+          "legacy_id": "P0-04",
+          "legacy_text": "写出数据权威与状态机 ADR：Task/Run、Event outbox、WorkflowRun、Message、WorkItem",
+          "mapping_scope": "WorkItem 与外部项目事实的权威边界。"
+        },
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.16 下一步实施任务",
+          "legacy_id": "P1-04",
+          "legacy_text": "Project/WorkItem + Forgejo 只读同步，之后受控写回与 CI webhook 对账",
+          "mapping_scope": "Project/WorkItem、Forgejo 只读同步、受控写回与 CI 对账。"
+        },
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "P1/P2 工作项（无单项编号）",
+          "legacy_id": null,
+          "legacy_text": "Room/DM/Thread/Delivery/Subscription 和 Project/Forgejo/CI 外部事件对账。",
+          "mapping_scope": "Project/Forgejo/CI 外部事件对账部分。"
+        },
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.12 跨模块依赖与建设顺序 / Project / 外部集成",
+          "legacy_id": null,
+          "legacy_text": "Project / 外部集成 | Workflow/Task 引用、外部事实版本、Webhook 验证和对账 | 全功能看板、多外部厂商",
+          "mapping_scope": "保留该模块必须先稳定的契约及可延后的非阻塞能力；具体 WI 前置以 v1 第 14 章为准。"
+        }
+      ],
+      "source_stage_text": "M4",
+      "source_dependency_text": "WI-014、015、016；ADR-23",
+      "adr_gates": [
+        "ADR-23"
+      ],
+      "conditional_dependencies": []
+    },
+    {
+      "id": "WI-018",
+      "title": "节点入群、单Controller恢复、RunClaim/ResourceLease、资源端fence",
+      "priority": "P1",
+      "stage": [
+        "M4"
+      ],
+      "dependencies": [
+        "WI-005",
+        "WI-008",
+        "WI-011"
+      ],
+      "acceptance_criteria": [
+        "短期引导与正式节点身份分离，单 Controller 恢复、RunClaim/ResourceLease 和目标节点二次准入有持久证据。",
+        "旧 Worker 仍运行、资源端不可达及 fence 安装中断时不产生双写；没有真实拒旧回执不得迁移共享写资源。",
+        "旧快照不能仅将 epoch 加一后派发，旧节点重连/迟到结果需对账；不把单 Controller 宣称为 HA。"
+      ],
+      "owner_role": "Cluster Authority、Task Broker 与资源 fencing 联合维护者",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.16 下一步实施任务",
+          "legacy_id": "P1-07",
+          "legacy_text": "单 Controller/Worker 跨节点 Task + fencing 恢复",
+          "mapping_scope": "单 Controller/Worker 的跨节点 Task、真实资源 fence 与旧快照恢复。"
+        },
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "M0–M6 / M4",
+          "legacy_id": null,
+          "legacy_text": "三版、单控制器与 Worker、跨节点协作、KDE/GUI Bridge、包适配、Forgejo/CI | 分区无双写、共享租约被 fencing、人类接管、GUI/多发行版包受限 Profile 实测",
+          "mapping_scope": "单控制器与 Worker、共享资源 fencing。"
+        },
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.12 跨模块依赖与建设顺序 / Cluster",
+          "legacy_id": null,
+          "legacy_text": "Cluster | Local Agent/Task、节点身份、资源端 fencing、数据位置 | HA、分布式卷、多写",
+          "mapping_scope": "保留该模块必须先稳定的契约及可延后的非阻塞能力；具体 WI 前置以 v1 第 14 章为准。"
+        }
+      ],
+      "source_stage_text": "M4",
+      "source_dependency_text": "WI-005、008、011",
+      "adr_gates": [],
+      "conditional_dependencies": []
+    },
+    {
+      "id": "WI-019",
+      "title": "三版Profile、GPU/设备预算、用户会话、睡眠/唤醒一致性",
+      "priority": "P1",
+      "stage": [
+        "M4"
+      ],
+      "dependencies": [
+        "WI-006",
+        "WI-012",
+        "WI-013",
+        "WI-018"
+      ],
+      "acceptance_criteria": [
+        "为纳入支持范围的 Edition/硬件固定服务、容量及体验 Profile，三版共享契约的适用性逐项验证。",
+        "GPU/设备的计量、预留、可强制隔离和热插拔身份分别验证；本机交互、诊断与恢复保留资源。",
+        "用户切换、锁屏、睡眠/唤醒及长时离线重新校验授权、输入、设备代次和租约，不复活旧会话许可。"
+      ],
+      "owner_role": "Edition 集成、设备/GPU、电源与用户会话维护者",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "P1/P2 工作项（无单项编号）",
+          "legacy_id": null,
+          "legacy_text": "GPU/设备、HostExtension、Kernel ABI、宿主更新与救援。",
+          "mapping_scope": "GPU/设备部分。"
+        },
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "P1/P2 工作项（无单项编号）",
+          "legacy_id": null,
+          "legacy_text": "三版资源预算、CI Profile；TableFS 与传统 FS + Index 基准；Dataset/Knowledge 与 JSON 精确查询。",
+          "mapping_scope": "三版资源和 CI Profile 预算部分。"
+        }
+      ],
+      "source_stage_text": "M4",
+      "source_dependency_text": "WI-006、012、013、018",
+      "adr_gates": [],
+      "conditional_dependencies": []
+    },
+    {
+      "id": "WI-020",
+      "title": "Argon Portal与Neon无头GUI、Viewer权限、输入租约、token恢复",
+      "priority": "P1",
+      "stage": [
+        "M4"
+      ],
+      "dependencies": [
+        "WI-004",
+        "WI-018",
+        "WI-019"
+      ],
+      "acceptance_criteria": [
+        "在选定 Argon Portal 与 Neon 无头后端分别验证捕获范围、Viewer 权限、会话关闭与实际撤权能力。",
+        "Browser 与 Agent 并发操作遵守单输入租约；人类接管/锁屏清除旧输入，重连不自动恢复旧控制。",
+        "恢复 token、会话/窗口/设备代次和当前授权绑定；SingleApplication 不以屏幕裁剪冒充隔离，未支持能力明确拒绝。"
+      ],
+      "owner_role": "DesktopSession、GUI Bridge 与 Computer Use 安全维护者",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.16 下一步实施任务",
+          "legacy_id": "P1-05",
+          "legacy_text": "KDE/Wayland + Neon 无头 GUI Bridge 授权 PoC",
+          "mapping_scope": "KDE/Wayland 与 Neon 无头 GUI Bridge、Portal 撤权和单输入租约。"
+        },
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "P1/P2 工作项（无单项编号）",
+          "legacy_id": null,
+          "legacy_text": "KDE Portal 与无头 GUI Bridge、输入租约、会话恢复与浏览器 Viewer 生命周期。",
+          "mapping_scope": "KDE Portal/无头 GUI、输入租约、恢复与 Viewer 生命周期。"
+        },
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.12 跨模块依赖与建设顺序 / GUI Bridge / Computer Use",
+          "legacy_id": null,
+          "legacy_text": "GUI Bridge / Computer Use | App、DesktopSession、ControlLease、KDE/Portal 实测 | 任意窗口透传、Android Runtime",
+          "mapping_scope": "保留该模块必须先稳定的契约及可延后的非阻塞能力；具体 WI 前置以 v1 第 14 章为准。"
+        }
+      ],
+      "source_stage_text": "M4",
+      "source_dependency_text": "WI-004、018、019",
+      "adr_gates": [],
+      "conditional_dependencies": []
+    },
+    {
+      "id": "WI-021",
+      "title": "PackageAdapter隔离解析与受限DEB/RPM/Alpine导入、ABI/来源验证",
+      "priority": "P1",
+      "stage": [
+        "M3",
+        "M4"
+      ],
+      "dependencies": [
+        "WI-004",
+        "WI-007",
+        "WI-012"
+      ],
+      "acceptance_criteria": [
+        "DEB/RPM/Alpine APK 在隔离解析/构建环境中分别验证声明支持的来源与 rootfs/ABI/架构组合；Android APK 不被误识别成 Alpine 包。",
+        "安装脚本、包数据库、依赖和 Secrets 不污染宿主；OCI 制品可追溯，不能以格式识别推导运行兼容。",
+        "安装、升级、回退、卸载/保留数据和重建验证通过才发布对应 Profile，不声称支持任意包。"
+      ],
+      "owner_role": "Package Adapter、隔离构建与 ABI 兼容维护者",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.16 下一步实施任务",
+          "legacy_id": "P1-06",
+          "legacy_text": "DEB/RPM/Alpine APK 分别在受限用户空间导入一项可信样例",
+          "mapping_scope": "DEB/RPM/Alpine APK 受限环境导入与来源/兼容验证。"
+        },
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "P1/P2 工作项（无单项编号）",
+          "legacy_id": null,
+          "legacy_text": "Linux DEB/RPM/Alpine APK 隔离导入、ABI/安装脚本限制、依赖安全重建。",
+          "mapping_scope": "隔离包导入、ABI/脚本限制和依赖重建。"
+        }
+      ],
+      "source_stage_text": "M3–M4",
+      "source_dependency_text": "WI-004、007、012",
+      "adr_gates": [],
+      "conditional_dependencies": []
+    },
+    {
+      "id": "WI-022",
+      "title": "Dataset类型/版本、JSON查询、Knowledge视图/ACL、Embedding兼容",
+      "priority": "P2",
+      "stage": [
+        "M5"
+      ],
+      "dependencies": [
+        "WI-004",
+        "WI-007",
+        "WI-008"
+      ],
+      "acceptance_criteria": [
+        "Dataset 核心字段、精确 JSON、数据/Schema 版本和独立 uid 身份可验证，主记录与派生索引单一权威。",
+        "Knowledge 仅按主数据引用/视图与当前 ACL 使用；旧索引、缓存、固定 View 受撤权和删除屏障约束。",
+        "Embedding 兼容性、可选安装/卸载、导出和恢复通过；未安装服务不成为 Core 启动依赖。"
+      ],
+      "owner_role": "Dataset/Knowledge、查询与 Embedding 维护者",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.16 下一步实施任务",
+          "legacy_id": "P2-02",
+          "legacy_text": "Dataset/View/Index/Knowledge 可选安装、卸载与恢复",
+          "mapping_scope": "可选 Dataset/View/Index/Knowledge 安装、卸载、JSON 查询与撤权恢复。"
+        },
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "P1/P2 工作项（无单项编号）",
+          "legacy_id": null,
+          "legacy_text": "三版资源预算、CI Profile；TableFS 与传统 FS + Index 基准；Dataset/Knowledge 与 JSON 精确查询。",
+          "mapping_scope": "Dataset/Knowledge 与 JSON 精确查询部分。"
+        },
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.12 跨模块依赖与建设顺序 / Dataset / Knowledge / TableFS",
+          "legacy_id": null,
+          "legacy_text": "Dataset / Knowledge / TableFS | Volume、Task/Event、Policy、数据 Schema、恢复/权限 | 作为 Core 的启动依赖（**始终不引入**）",
+          "mapping_scope": "保留该模块必须先稳定的契约及可延后的非阻塞能力；具体 WI 前置以 v1 第 14 章为准。"
+        }
+      ],
+      "source_stage_text": "M5",
+      "source_dependency_text": "WI-004、007、008",
+      "adr_gates": [],
+      "conditional_dependencies": []
+    },
+    {
+      "id": "WI-023",
+      "title": "TableFS对照实验、POSIX矩阵、双入口提交/缓存/GC、独立退出",
+      "priority": "P2",
+      "stage": [
+        "M5"
+      ],
+      "dependencies": [
+        "WI-005",
+        "WI-007",
+        "WI-022"
+      ],
+      "acceptance_criteria": [
+        "在相同硬件、持久性设置和工作负载下对照 TableFS 与普通文件系统加索引，记录性能、资源和故障结果及 Go/No-Go。",
+        "验证 POSIX 支持子集、双入口提交、缓存、内容发布顺序与 GC 竞态；未支持行为不能假成功。",
+        "独立工具导出和恢复可验证；若可靠性或收益不满足门槛则保留普通文件系统方案，不强制默认启用 TableFS。"
+      ],
+      "owner_role": "TableFS、文件系统验证与导出恢复维护者",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.16 下一步实施任务",
+          "legacy_id": "P2-01",
+          "legacy_text": "TableFS 与普通 FS + Index 的同负载单机对照实验",
+          "mapping_scope": "TableFS 与普通 FS+Index 同负载对照、POSIX 和独立导出。"
+        },
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "P1/P2 工作项（无单项编号）",
+          "legacy_id": null,
+          "legacy_text": "三版资源预算、CI Profile；TableFS 与传统 FS + Index 基准；Dataset/Knowledge 与 JSON 精确查询。",
+          "mapping_scope": "TableFS 与传统 FS+Index 基准部分。"
+        },
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.12 跨模块依赖与建设顺序 / Dataset / Knowledge / TableFS",
+          "legacy_id": null,
+          "legacy_text": "Dataset / Knowledge / TableFS | Volume、Task/Event、Policy、数据 Schema、恢复/权限 | 作为 Core 的启动依赖（**始终不引入**）",
+          "mapping_scope": "保留该模块必须先稳定的契约及可延后的非阻塞能力；具体 WI 前置以 v1 第 14 章为准。"
+        }
+      ],
+      "source_stage_text": "M5",
+      "source_dependency_text": "WI-005、007、022",
+      "adr_gates": [],
+      "conditional_dependencies": []
+    },
+    {
+      "id": "WI-024",
+      "title": "容量预算、指标/审计、诊断包、压测与恢复保留",
+      "priority": "P1",
+      "stage": [
+        "M0",
+        "M1",
+        "M2",
+        "M3",
+        "M4",
+        "M5",
+        "M6"
+      ],
+      "dependencies": [
+        "WI-002"
+      ],
+      "acceptance_criteria": [
+        "为准入、队列、WAL、结果、对象、审计、模型及 GUI 流设有限预算，并为诊断/恢复/终态提交保留容量。",
+        "指标、关联审计与诊断包验证脱敏、访问范围、出口关闭和压力行为；必要审计不可静默丢失。",
+        "正文、幂等墓碑、审批使用、效果账本、附件、备份链和恢复 pin 的保留/GC 关系经满盘和旧快照演练，满足 ADR-25 门槛。"
+      ],
+      "owner_role": "容量规划、可观测性、审计与保留策略维护者",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "P1/P2 工作项（无单项编号）",
+          "legacy_id": null,
+          "legacy_text": "三版资源预算、CI Profile；TableFS 与传统 FS + Index 基准；Dataset/Knowledge 与 JSON 精确查询。",
+          "mapping_scope": "三版资源预算及 CI Profile 的通用容量与证据部分。"
+        },
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.13 ADR 决策登记 / ADR-25",
+          "legacy_id": null,
+          "legacy_text": "单机持久数据库/事件方式、保留与 GC、消息/附件上限、扩展到集群、备份迁移",
+          "mapping_scope": "容量、持久化、保留与回收证据统一纳入 WI-024；这是一条原 ADR 范围引用，不伪造旧工作项编号。"
+        }
+      ],
+      "source_stage_text": "M0–M6",
+      "source_dependency_text": "WI-002并贯穿各服务；ADR-25",
+      "adr_gates": [
+        "ADR-25"
+      ],
+      "conditional_dependencies": [],
+      "dependency_notes": "WI-002 为基础前置；容量、审计、压力和保留验收随各服务支持范围持续开展，不等待 M6 才建立基础预算。"
+    },
+    {
+      "id": "WI-025",
+      "title": "精确Profile端到端验收、兼容矩阵、签名发布、SBOM与密钥恢复",
+      "priority": "P1",
+      "stage": [
+        "M6"
+      ],
+      "dependencies": [
+        "WI-012",
+        "WI-024"
+      ],
+      "acceptance_criteria": [
+        "冻结本次发布的精确 Edition、硬件/VM、后端、协议和可选 Profile，列出适用与未纳入范围；只有实际 Passed 证据支持对外能力声明。",
+        "完成 WI-012 与 WI-024 的适用发布门槛，并逐项评估展开的 WI-017～WI-023 条件依赖；未纳入的可选能力注明范围与理由，不强制实现全部模块。",
+        "在确切制品上完成适用端到端、升级回退、兼容、签名/SBOM、密钥恢复、救援和退役演练；历史或文档结构验证不冒充工程验收。"
+      ],
+      "owner_role": "发布工程、兼容验收与签名供应链负责人",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [
+        {
+          "source_id": "SRC-IMPORT-ROADMAP",
+          "source_file": "sources/archive/project-v06-roadmap.md",
+          "section": "M0–M6 / M6",
+          "legacy_id": null,
+          "legacy_text": "发布质量、正式兼容矩阵、SBOM、签名、升级回退及故障演练 | 通过确切镜像/硬件/Profile 的测试，发布声明只包含 Passed 能力",
+          "mapping_scope": "仅对确切镜像/硬件/Profile 的 Passed 能力发布。"
+        }
+      ],
+      "source_stage_text": "M6",
+      "source_dependency_text": "WI-012、017–024；仅选定范围",
+      "adr_gates": [],
+      "conditional_dependencies": [
+        {
+          "work_item_id": "WI-017",
+          "applies_when": "发布范围声明 Project、Forgejo/CI 或受控外部项目集成时；未纳入时不得宣传该能力。",
+          "required_when_applicable": true
+        },
+        {
+          "work_item_id": "WI-018",
+          "applies_when": "发布范围声明集群加入、跨节点执行或资源转交时；单机范围不据此强制发布集群。",
+          "required_when_applicable": true
+        },
+        {
+          "work_item_id": "WI-019",
+          "applies_when": "对发布范围中的 Edition、硬件、GPU/设备及电源/用户会话 Profile 验证适用子集；不要求所有三版和所有硬件组合同时发布。",
+          "required_when_applicable": true
+        },
+        {
+          "work_item_id": "WI-020",
+          "applies_when": "发布范围声明 GUI Bridge、Portal/无头图形或 Computer Use 时；纯无图形范围不强制该可选入口。",
+          "required_when_applicable": true
+        },
+        {
+          "work_item_id": "WI-021",
+          "applies_when": "发布范围声明 Package Adapter 或指定 DEB/RPM/Alpine 兼容组合时；不要求所有包格式和发行版组合同时发布。",
+          "required_when_applicable": true
+        },
+        {
+          "work_item_id": "WI-022",
+          "applies_when": "发布范围纳入可选 Dataset/Knowledge/Embedding 服务时；未安装不构成 Core 启动或发布阻断。",
+          "required_when_applicable": true
+        },
+        {
+          "work_item_id": "WI-023",
+          "applies_when": "发布范围纳入可选 TableFS Profile 时；选择普通文件系统方案时记录未纳入理由及普通卷证据。",
+          "required_when_applicable": true
+        }
+      ],
+      "dependency_notes": "原表 WI-012、WI-017～WI-024 已完全展开：WI-012/WI-024 为强前置，WI-017～WI-023 按本次支持范围逐项判定。范围冻结不可用来遗漏已对外声明能力的验收；不把未纳入的可选服务变成 M6 全局前置。"
+    },
+    {
+      "id": "WI-026",
+      "title": "维护规范/迁移映射/ADR/风险台账，检查实现与宣传一致",
+      "priority": "P1",
+      "stage": [
+        "M0",
+        "M1",
+        "M2",
+        "M3",
+        "M4",
+        "M5",
+        "M6"
+      ],
+      "dependencies": [],
+      "acceptance_criteria": [
+        "每次范围、共同契约或技术选择改变时同步规范、迁移映射、ADR、风险与测试引用，保留旧结论及变更原因。",
+        "决策接受、实现验证、测试结果和发布宣传分别有证据；没有真实实验不得把 Proposed/NotVerified/NotRun 改为已接受或通过。",
+        "持续核对跨文档单一权威、编号、来源与支持范围，明确残余风险责任角色及后续处置，不凭同号合并不同来源旧工作项。"
+      ],
+      "owner_role": "架构规范、ADR、迁移与风险台账维护者",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.16 下一步实施任务",
+          "legacy_id": "P0-04",
+          "legacy_text": "写出数据权威与状态机 ADR：Task/Run、Event outbox、WorkflowRun、Message、WorkItem",
+          "mapping_scope": "原状态机 ADR 的持续维护与跨文档一致性；不替代各实现项。"
+        },
+        {
+          "source_id": "SRC-SPACE-V06",
+          "source_file": "sources/archive/space-unified-v0.6.md",
+          "section": "35.17 对后续讨论和开发 Agent 的维护规则",
+          "legacy_id": null,
+          "legacy_text": "- **本 Page 是统一规划与详细规范的工作入口，但仍不代替源码、ADR、Issue 和 CI 验证。** 任何设计建议进入“待决”→ 明确验收与风险 → ADR 批准 → Schema/代码实现 → 测试证据 → 发布支持声明；阶段之间不得跳级。",
+          "mapping_scope": "规范、证据状态与实现宣传的一致性持续维护。"
+        }
+      ],
+      "source_stage_text": "M0–M6",
+      "source_dependency_text": "持续；每次范围或合同变更触发",
+      "adr_gates": [],
+      "conditional_dependencies": [],
+      "dependency_notes": "持续治理项无一次性前置 WI；范围、合同、实现证据或宣传改变时触发，不通过回指所有工作项形成依赖环。"
+    }
+  ],
+  "legacy_work_item_mappings": [
+    {
+      "source_id": "SRC-SPACE-V06",
+      "source_file": "sources/archive/space-unified-v0.6.md",
+      "section": "35.16 下一步实施任务",
+      "legacy_id": "P0-01",
+      "legacy_text": "固定 PsiOS 源仓库当前 Forgejo HEAD；导出 XeLab 模块复用矩阵（TaskEngine、EventStore、Broker、OCI、Identity、Storage、SDK、WebUI）",
+      "legacy_acceptance": "每项附 SHA、许可、耦合、测试、迁移或重写决定；不能假定旧代码可运行",
+      "targets": [
+        {
+          "work_item_id": "WI-001",
+          "mapping_scope": "原仓库 HEAD、XeLab 逐模块来源/许可与复用审计。"
+        }
+      ]
+    },
+    {
+      "source_id": "SRC-SPACE-V06",
+      "source_file": "sources/archive/space-unified-v0.6.md",
+      "section": "35.16 下一步实施任务",
+      "legacy_id": "P0-02",
+      "legacy_text": "建立 docs/architecture、docs/adr、api/schema、tests/contracts 的可版本化骨架",
+      "legacy_acceptance": "CI 能检查 Schema、ADRs、契约测试并保留产物摘要",
+      "targets": [
+        {
+          "work_item_id": "WI-002",
+          "mapping_scope": "原规范/Schema/ADR/测试骨架与带摘要证据的 CI。"
+        }
+      ]
+    },
+    {
+      "source_id": "SRC-SPACE-V06",
+      "source_file": "sources/archive/space-unified-v0.6.md",
+      "section": "35.16 下一步实施任务",
+      "legacy_id": "P0-03",
+      "legacy_text": "固化 Principal/Grant/Delegation/Approval/Operation/Resource/Event 样例 Schema 与统一错误码",
+      "legacy_acceptance": "有跨 CLI/Shell/Agent 的权限和条件写测试",
+      "targets": [
+        {
+          "work_item_id": "WI-003",
+          "mapping_scope": "共同 Resource/Operation/Event Schema、编码与错误合同。"
+        },
+        {
+          "work_item_id": "WI-004",
+          "mapping_scope": "Principal/Grant/Delegation/Approval 的安全语义与跨入口权限测试。"
+        },
+        {
+          "work_item_id": "WI-008",
+          "mapping_scope": "Event/Operation 的持久权威及条件写实现验证。"
+        }
+      ]
+    },
+    {
+      "source_id": "SRC-SPACE-V06",
+      "source_file": "sources/archive/space-unified-v0.6.md",
+      "section": "35.16 下一步实施任务",
+      "legacy_id": "P0-04",
+      "legacy_text": "写出数据权威与状态机 ADR：Task/Run、Event outbox、WorkflowRun、Message、WorkItem",
+      "legacy_acceptance": "没有循环依赖/双数据库权威，关键转换有故障注入表",
+      "targets": [
+        {
+          "work_item_id": "WI-003",
+          "mapping_scope": "各对象的共享状态与权威合同。"
+        },
+        {
+          "work_item_id": "WI-008",
+          "mapping_scope": "Task/Run 与 Event outbox 的状态权威。"
+        },
+        {
+          "work_item_id": "WI-009",
+          "mapping_scope": "Workflow 与 Task 的 outbox/派发状态裂缝及恢复。"
+        },
+        {
+          "work_item_id": "WI-010",
+          "mapping_scope": "Message/Conversation 的单写和确认权威。"
+        },
+        {
+          "work_item_id": "WI-015",
+          "mapping_scope": "WorkflowRun 编排状态与 Task 事实映射。"
+        },
+        {
+          "work_item_id": "WI-017",
+          "mapping_scope": "WorkItem 与外部项目事实的权威边界。"
+        },
+        {
+          "work_item_id": "WI-026",
+          "mapping_scope": "原状态机 ADR 的持续维护与跨文档一致性；不替代各实现项。"
+        }
+      ]
+    },
+    {
+      "source_id": "SRC-SPACE-V06",
+      "source_file": "sources/archive/space-unified-v0.6.md",
+      "section": "35.16 下一步实施任务",
+      "legacy_id": "P0-05",
+      "legacy_text": "M1 最小镜像、离线恢复、M2 OCI + Volume + 独立 Backup 小闭环",
+      "legacy_acceptance": "重启/断电/满盘、卷失联与恢复全部实测",
+      "targets": [
+        {
+          "work_item_id": "WI-006",
+          "mapping_scope": "M1 最小镜像、离线管理及独立救援。"
+        },
+        {
+          "work_item_id": "WI-007",
+          "mapping_scope": "M2 OCI+Volume+独立 Backup 有状态闭环及故障恢复。"
+        }
+      ]
+    },
+    {
+      "source_id": "SRC-SPACE-V06",
+      "source_file": "sources/archive/space-unified-v0.6.md",
+      "section": "35.16 下一步实施任务",
+      "legacy_id": "P1-01",
+      "legacy_text": "ADR-22：Workflow DSL + DAG + ApprovalGate；单节点 PoC",
+      "legacy_acceptance": "取消/重试/OutcomeUnknown/重启保持正确",
+      "targets": [
+        {
+          "work_item_id": "WI-009",
+          "mapping_scope": "单节点可靠 Workflow 所需派发接受/回执对账 PoC。"
+        },
+        {
+          "work_item_id": "WI-015",
+          "mapping_scope": "ADR-22 的 DSL/DAG/ApprovalGate 与取消、重试、恢复语义。"
+        }
+      ]
+    },
+    {
+      "source_id": "SRC-SPACE-V06",
+      "source_file": "sources/archive/space-unified-v0.6.md",
+      "section": "35.16 下一步实施任务",
+      "legacy_id": "P1-02",
+      "legacy_text": "ADR-21：Conversation/Message/Membership/DM + Durable Inbox/Outbox",
+      "legacy_acceptance": "Agent 群聊、私聊、离线重投、循环预算和 ACL 的 WF-AT-01～03/08",
+      "targets": [
+        {
+          "work_item_id": "WI-010",
+          "mapping_scope": "Conversation/Message/Membership/DM 的持久权威和去重基础。"
+        },
+        {
+          "work_item_id": "WI-016",
+          "mapping_scope": "Inbox/Outbox 投递、群聊/私聊、离线恢复、循环预算及 ACL。"
+        }
+      ]
+    },
+    {
+      "source_id": "SRC-SPACE-V06",
+      "source_file": "sources/archive/space-unified-v0.6.md",
+      "section": "35.16 下一步实施任务",
+      "legacy_id": "P1-03",
+      "legacy_text": "第三方 Agent C1 适配 + 原生 Agent 完成同一工作流",
+      "legacy_acceptance": "实测协议版本、权限、取消和 Audit",
+      "targets": [
+        {
+          "work_item_id": "WI-013",
+          "mapping_scope": "原生 Agent 作为相同受限任务的执行与授权对照端。"
+        },
+        {
+          "work_item_id": "WI-014",
+          "mapping_scope": "独立第三方 C1 适配及协议、权限、取消、审计互操作。"
+        }
+      ]
+    },
+    {
+      "source_id": "SRC-SPACE-V06",
+      "source_file": "sources/archive/space-unified-v0.6.md",
+      "section": "35.16 下一步实施任务",
+      "legacy_id": "P1-04",
+      "legacy_text": "Project/WorkItem + Forgejo 只读同步，之后受控写回与 CI webhook 对账",
+      "legacy_acceptance": "WF-AT-07，外部状态能以 revision 复核",
+      "targets": [
+        {
+          "work_item_id": "WI-017",
+          "mapping_scope": "Project/WorkItem、Forgejo 只读同步、受控写回与 CI 对账。"
+        }
+      ]
+    },
+    {
+      "source_id": "SRC-SPACE-V06",
+      "source_file": "sources/archive/space-unified-v0.6.md",
+      "section": "35.16 下一步实施任务",
+      "legacy_id": "P1-05",
+      "legacy_text": "KDE/Wayland + Neon 无头 GUI Bridge 授权 PoC",
+      "legacy_acceptance": "单输入租约、浏览器重连、Portal 撤权、窗口隔离",
+      "targets": [
+        {
+          "work_item_id": "WI-020",
+          "mapping_scope": "KDE/Wayland 与 Neon 无头 GUI Bridge、Portal 撤权和单输入租约。"
+        }
+      ]
+    },
+    {
+      "source_id": "SRC-SPACE-V06",
+      "source_file": "sources/archive/space-unified-v0.6.md",
+      "section": "35.16 下一步实施任务",
+      "legacy_id": "P1-06",
+      "legacy_text": "DEB/RPM/Alpine APK 分别在受限用户空间导入一项可信样例",
+      "legacy_acceptance": "包隔离、制品来源、运行兼容等级可核验",
+      "targets": [
+        {
+          "work_item_id": "WI-021",
+          "mapping_scope": "DEB/RPM/Alpine APK 受限环境导入与来源/兼容验证。"
+        }
+      ]
+    },
+    {
+      "source_id": "SRC-SPACE-V06",
+      "source_file": "sources/archive/space-unified-v0.6.md",
+      "section": "35.16 下一步实施任务",
+      "legacy_id": "P1-07",
+      "legacy_text": "单 Controller/Worker 跨节点 Task + fencing 恢复",
+      "legacy_acceptance": "断网/重启/旧快照无重复写入",
+      "targets": [
+        {
+          "work_item_id": "WI-018",
+          "mapping_scope": "单 Controller/Worker 的跨节点 Task、真实资源 fence 与旧快照恢复。"
+        }
+      ]
+    },
+    {
+      "source_id": "SRC-SPACE-V06",
+      "source_file": "sources/archive/space-unified-v0.6.md",
+      "section": "35.16 下一步实施任务",
+      "legacy_id": "P2-01",
+      "legacy_text": "TableFS 与普通 FS + Index 的同负载单机对照实验",
+      "legacy_acceptance": "POSIX 子集、元数据/内容一致恢复、导出与性能证据",
+      "targets": [
+        {
+          "work_item_id": "WI-023",
+          "mapping_scope": "TableFS 与普通 FS+Index 同负载对照、POSIX 和独立导出。"
+        }
+      ]
+    },
+    {
+      "source_id": "SRC-SPACE-V06",
+      "source_file": "sources/archive/space-unified-v0.6.md",
+      "section": "35.16 下一步实施任务",
+      "legacy_id": "P2-02",
+      "legacy_text": "Dataset/View/Index/Knowledge 可选安装、卸载与恢复",
+      "legacy_acceptance": "extra_data 精确 JSON 查询、知识库引用主数据、撤权屏障",
+      "targets": [
+        {
+          "work_item_id": "WI-022",
+          "mapping_scope": "可选 Dataset/View/Index/Knowledge 安装、卸载、JSON 查询与撤权恢复。"
+        }
+      ]
+    },
+    {
+      "source_id": "SRC-IMPORT-ROADMAP",
+      "source_file": "sources/archive/project-v06-roadmap.md",
+      "section": "首批 P0 工作项",
+      "legacy_id": "P0-01",
+      "legacy_text": "固定本地 Forgejo 最新 HEAD，并逐模块审计 XeLab 复用来源及许可证。",
+      "legacy_acceptance": null,
+      "targets": [
+        {
+          "work_item_id": "WI-001",
+          "mapping_scope": "本地 Forgejo 最新 HEAD、XeLab 复用来源及许可证。"
+        }
+      ]
+    },
+    {
+      "source_id": "SRC-IMPORT-ROADMAP",
+      "source_file": "sources/archive/project-v06-roadmap.md",
+      "section": "首批 P0 工作项",
+      "legacy_id": "P0-02",
+      "legacy_text": "建立 docs/architecture、docs/adr、api/schema、tests/contracts，CI 保留带 SHA 的证据。",
+      "legacy_acceptance": null,
+      "targets": [
+        {
+          "work_item_id": "WI-002",
+          "mapping_scope": "规范与测试骨架、CI 带 SHA 证据。"
+        }
+      ]
+    },
+    {
+      "source_id": "SRC-IMPORT-ROADMAP",
+      "source_file": "sources/archive/project-v06-roadmap.md",
+      "section": "首批 P0 工作项",
+      "legacy_id": "P0-03",
+      "legacy_text": "统一 Principal/Grant/Delegation/Approval/Operation、Task/Run、WorkflowRun、Conversation/Message Schema。",
+      "legacy_acceptance": null,
+      "targets": [
+        {
+          "work_item_id": "WI-003",
+          "mapping_scope": "共同 Schema、编码和对象版本合同。"
+        },
+        {
+          "work_item_id": "WI-004",
+          "mapping_scope": "Principal/Grant/Delegation/Approval/Operation 的安全合同。"
+        },
+        {
+          "work_item_id": "WI-008",
+          "mapping_scope": "Task/Run 与 Operation 的执行事实合同。"
+        },
+        {
+          "work_item_id": "WI-010",
+          "mapping_scope": "Conversation/Message 的消息合同。"
+        },
+        {
+          "work_item_id": "WI-015",
+          "mapping_scope": "WorkflowRun 的编排合同。"
+        }
+      ]
+    },
+    {
+      "source_id": "SRC-IMPORT-ROADMAP",
+      "source_file": "sources/archive/project-v06-roadmap.md",
+      "section": "首批 P0 工作项",
+      "legacy_id": "P0-04",
+      "legacy_text": "实现并验证 SecurityState 受限灾难恢复，确认无独立可信撤权记录时默认隔离旧权限。",
+      "legacy_acceptance": null,
+      "targets": [
+        {
+          "work_item_id": "WI-005",
+          "mapping_scope": "SecurityState 受限灾难恢复；无当前撤权证据时隔离旧权限。"
+        }
+      ]
+    },
+    {
+      "source_id": "SRC-IMPORT-ROADMAP",
+      "source_file": "sources/archive/project-v06-roadmap.md",
+      "section": "首批 P0 工作项",
+      "legacy_id": "P0-05",
+      "legacy_text": "制作 Workflow→Task DispatchIntent + outbox + Task 接受去重/回执丢失对账 PoC。",
+      "legacy_acceptance": null,
+      "targets": [
+        {
+          "work_item_id": "WI-009",
+          "mapping_scope": "Workflow→Task DispatchIntent+outbox、接受去重和回执丢失对账 PoC。"
+        }
+      ]
+    },
+    {
+      "source_id": "SRC-IMPORT-ROADMAP",
+      "source_file": "sources/archive/project-v06-roadmap.md",
+      "section": "首批 P0 工作项",
+      "legacy_id": "P0-06",
+      "legacy_text": "设计 Conversation WriterEpoch、存储端 fencing 和分区不重复确认。",
+      "legacy_acceptance": null,
+      "targets": [
+        {
+          "work_item_id": "WI-010",
+          "mapping_scope": "Conversation WriterEpoch、存储端 fencing 及分区不重复确认。"
+        }
+      ]
+    },
+    {
+      "source_id": "SRC-IMPORT-ROADMAP",
+      "source_file": "sources/archive/project-v06-roadmap.md",
+      "section": "首批 P0 工作项",
+      "legacy_id": "P0-07",
+      "legacy_text": "测试真实用户目的/允许副作用约束，以及 RevocationMode 数据面撤权。",
+      "legacy_acceptance": null,
+      "targets": [
+        {
+          "work_item_id": "WI-004",
+          "mapping_scope": "真实用户目的、允许副作用约束及实际数据面撤权；v1 用能力集合和执行结果区分旧 RevocationMode。"
+        }
+      ]
+    },
+    {
+      "source_id": "SRC-IMPORT-ROADMAP",
+      "source_file": "sources/archive/project-v06-roadmap.md",
+      "section": "首批 P0 工作项",
+      "legacy_id": "P0-08",
+      "legacy_text": "M1 引导/恢复与 M2 OCI + Volume + Backup 基础链路。",
+      "legacy_acceptance": null,
+      "targets": [
+        {
+          "work_item_id": "WI-006",
+          "mapping_scope": "M1 引导与独立恢复。"
+        },
+        {
+          "work_item_id": "WI-007",
+          "mapping_scope": "M2 OCI+Volume+Backup 的有状态基础链路。"
+        }
+      ]
+    }
+  ]
+}

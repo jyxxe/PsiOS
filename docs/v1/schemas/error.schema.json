@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.psios.example/v1/error.schema.json",
+  "title": "Stable machine-readable error",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "code": {
+      "enum": [
+        "InvalidArgument",
+        "SchemaVersionUnsupported",
+        "AuthenticationRequired",
+        "PermissionDenied",
+        "ApprovalRequired",
+        "ApprovalInvalidated",
+        "ApprovalAlreadyBound",
+        "NotFound",
+        "Conflict",
+        "PreconditionFailed",
+        "IdempotencyConflict",
+        "IdempotencyKeyExpired",
+        "QueueFull",
+        "QuotaExceeded",
+        "ServiceNotInstalled",
+        "UnsupportedCapability",
+        "DependencyUnavailable",
+        "StorageUnavailable",
+        "PartialFailure",
+        "CursorExpired",
+        "ResyncRequired",
+        "LeaseLost",
+        "Fenced",
+        "RecoveryRequired",
+        "OutcomeUnknown",
+        "ResultEvicted",
+        "ResultUnavailable",
+        "Cancelled",
+        "DeadlineExceeded",
+        "InternalError"
+      ]
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "retryable": {
+      "type": "boolean"
+    },
+    "retry_condition": {
+      "enum": [
+        "Never",
+        "SameRequestAfterBackoff",
+        "Reauthenticate",
+        "Replan",
+        "ReconcileOutcome",
+        "Resynchronize",
+        "DependencyReady"
+      ]
+    },
+    "operation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "details": {
+      "type": "object",
+      "description": "Bounded, redacted diagnostics; never authorization inputs."
+    }
+  },
+  "required": [
+    "schema_version",
+    "code",
+    "message",
+    "request_id",
+    "retryable",
+    "retry_condition"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "retryable": {
+            "const": false
+          }
+        },
+        "required": [
+          "retryable"
+        ]
+      },
+      "then": {
+        "properties": {
+          "retry_condition": {
+            "enum": [
+              "Never",
+              "Reauthenticate",
+              "Replan",
+              "ReconcileOutcome",
+              "Resynchronize",
+              "DependencyReady"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "retryable": {
+            "const": true
+          }
+        },
+        "required": [
+          "retryable"
+        ]
+      },
+      "then": {
+        "properties": {
+          "retry_condition": {
+            "enum": [
+              "SameRequestAfterBackoff",
+              "DependencyReady"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

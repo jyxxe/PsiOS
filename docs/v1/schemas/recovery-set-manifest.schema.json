@@ -1,0 +1,266 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.psios.example/v1/recovery-set-manifest.schema.json",
+  "title": "Recovery set with explicit consistency and external-effect scope",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "recovery_set_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "source_authority_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "source_incarnation": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "creator_tool_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "manifest_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "digest_profile": {
+      "type": "object",
+      "properties": {
+        "digest_algorithm": {
+          "const": "SHA-256"
+        },
+        "canonicalization_version": {
+          "const": "RFC8785"
+        },
+        "domain": {
+          "const": "psios/recovery-set-manifest/1"
+        }
+      },
+      "required": [
+        "digest_algorithm",
+        "canonicalization_version",
+        "domain"
+      ],
+      "additionalProperties": false
+    },
+    "scope": {
+      "enum": [
+        "single_volume",
+        "volume_group",
+        "service_group",
+        "node"
+      ]
+    },
+    "capture_interval": {
+      "type": "object",
+      "properties": {
+        "started_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+        },
+        "completed_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+        }
+      },
+      "required": [
+        "started_at",
+        "completed_at"
+      ],
+      "additionalProperties": false
+    },
+    "consistency": {
+      "enum": [
+        "crash_consistent",
+        "application_consistent"
+      ]
+    },
+    "coordination": {
+      "enum": [
+        "CoordinatedCut",
+        "IndependentCheckpointsWithReconciliation"
+      ]
+    },
+    "consistency_evidence_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+      },
+      "minItems": 0,
+      "maxItems": 4096
+    },
+    "members": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "resource_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+          },
+          "data_incarnation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+          },
+          "schema_version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+          },
+          "checkpoint": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+          },
+          "backup_ref": {
+            "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+          },
+          "size_bytes": {
+            "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+          }
+        },
+        "required": [
+          "resource_id",
+          "data_incarnation",
+          "schema_version",
+          "checkpoint",
+          "backup_ref",
+          "size_bytes"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1,
+      "maxItems": 4096
+    },
+    "cross_service_relation_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+      },
+      "minItems": 0,
+      "maxItems": 4096
+    },
+    "incremental_dependencies": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+      },
+      "minItems": 0,
+      "maxItems": 4096
+    },
+    "required_log_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+      },
+      "minItems": 0,
+      "maxItems": 4096
+    },
+    "security_evidence_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+      },
+      "minItems": 0,
+      "maxItems": 4096
+    },
+    "secret_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+      },
+      "minItems": 0,
+      "maxItems": 4096
+    },
+    "identity_mapping_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "effect_reconciliation_plan_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "replay_prohibited_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+      },
+      "minItems": 0,
+      "maxItems": 4096
+    },
+    "retention_policy_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "failure_domain": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "restore_procedure_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "independent_tool_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "required_restore_bytes": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+    },
+    "last_drill_evidence_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    }
+  },
+  "required": [
+    "schema_version",
+    "recovery_set_id",
+    "source_authority_id",
+    "source_incarnation",
+    "created_at",
+    "creator_tool_version",
+    "manifest_digest",
+    "digest_profile",
+    "scope",
+    "capture_interval",
+    "consistency",
+    "coordination",
+    "consistency_evidence_refs",
+    "members",
+    "cross_service_relation_refs",
+    "incremental_dependencies",
+    "required_log_refs",
+    "security_evidence_refs",
+    "secret_refs",
+    "identity_mapping_ref",
+    "effect_reconciliation_plan_ref",
+    "replay_prohibited_refs",
+    "retention_policy_ref",
+    "failure_domain",
+    "restore_procedure_ref",
+    "independent_tool_ref",
+    "required_restore_bytes"
+  ],
+  "additionalProperties": false
+}

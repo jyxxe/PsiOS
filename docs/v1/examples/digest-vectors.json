@@ -1,0 +1,343 @@
+{
+  "schema_version": "1.0.0",
+  "vectors": [
+    {
+      "contract": "task-submit",
+      "digest_field": "request_digest",
+      "domain_prefix": "psios/task-submit/1\n",
+      "payload": {
+        "schema_version": "1.0.0",
+        "origin_ref": {
+          "authority_id": "workflow-local",
+          "origin_type": "WorkflowRun",
+          "origin_id": "wf-run-demo",
+          "step_key": "review/iteration-0",
+          "attempt_generation": "0"
+        },
+        "idempotency_key": "submit-window-1/review-0",
+        "input_ref": {
+          "resource_id": "review-input",
+          "version": "rev-1",
+          "digest": "sha256:e5d06a3998e8ed7373c1cd1799383f287f9bb37105f90de6ca5a517d7697db51"
+        },
+        "task_type": "review.read_only.v1",
+        "delegation_ref": {
+          "resource_id": "delegation-review",
+          "version": "rev-1",
+          "digest": "sha256:1a224ec34161b91a7b0ffa3b1858897e93d3628c372f725ca5b48674e0f7a31b"
+        },
+        "budget_ref": {
+          "resource_id": "budget-review",
+          "version": "rev-1",
+          "digest": "sha256:408616897a72dc871f8c1593211e2efb21959733fbb9c2b7358f01ff1c0729de"
+        },
+        "deadline_at": "2026-11-22T09:00:00Z",
+        "cancel_scope_id": "cancel-scope-demo"
+      },
+      "canonical_utf8": "{\"budget_ref\":{\"digest\":\"sha256:408616897a72dc871f8c1593211e2efb21959733fbb9c2b7358f01ff1c0729de\",\"resource_id\":\"budget-review\",\"version\":\"rev-1\"},\"cancel_scope_id\":\"cancel-scope-demo\",\"deadline_at\":\"2026-11-22T09:00:00Z\",\"delegation_ref\":{\"digest\":\"sha256:1a224ec34161b91a7b0ffa3b1858897e93d3628c372f725ca5b48674e0f7a31b\",\"resource_id\":\"delegation-review\",\"version\":\"rev-1\"},\"idempotency_key\":\"submit-window-1/review-0\",\"input_ref\":{\"digest\":\"sha256:e5d06a3998e8ed7373c1cd1799383f287f9bb37105f90de6ca5a517d7697db51\",\"resource_id\":\"review-input\",\"version\":\"rev-1\"},\"origin_ref\":{\"attempt_generation\":\"0\",\"authority_id\":\"workflow-local\",\"origin_id\":\"wf-run-demo\",\"origin_type\":\"WorkflowRun\",\"step_key\":\"review/iteration-0\"},\"schema_version\":\"1.0.0\",\"task_type\":\"review.read_only.v1\"}",
+      "expected_digest": "sha256:176e64af9c97dcbff66293c0ab23223a4d9f9222d739eed42f664a3be7bb9691",
+      "scope": "ASCII object keys and safe integer number subset; not complete RFC8785 conformance."
+    },
+    {
+      "contract": "chat-send",
+      "digest_field": "content_digest",
+      "domain_prefix": "psios/chat-send/1\n",
+      "payload": {
+        "schema_version": "1.0.0",
+        "conversation_id": "room-demo",
+        "client_send_id": "send-window-1/message-001",
+        "content": {
+          "parts": [
+            {
+              "kind": "text",
+              "text": "请检查这份方案。此消息不构成系统授权。"
+            }
+          ]
+        },
+        "mentions": [
+          "agent-reviewer"
+        ],
+        "message_type": "request",
+        "attachment_refs": [
+          {
+            "resource_id": "design-attachment",
+            "version": "rev-1",
+            "digest": "sha256:d031cc3f00bf944a468a78a12dbafc5b9ec8daa5f496a0984921eee409d2b389"
+          }
+        ]
+      },
+      "canonical_utf8": "{\"attachment_refs\":[{\"digest\":\"sha256:d031cc3f00bf944a468a78a12dbafc5b9ec8daa5f496a0984921eee409d2b389\",\"resource_id\":\"design-attachment\",\"version\":\"rev-1\"}],\"client_send_id\":\"send-window-1/message-001\",\"content\":{\"parts\":[{\"kind\":\"text\",\"text\":\"请检查这份方案。此消息不构成系统授权。\"}]},\"conversation_id\":\"room-demo\",\"mentions\":[\"agent-reviewer\"],\"message_type\":\"request\",\"schema_version\":\"1.0.0\"}",
+      "expected_digest": "sha256:5e02683e80a00afd742ac5db7ac7c36f54ac9a3c8827f3719bf58feee7c5e504",
+      "scope": "ASCII object keys and safe integer number subset; not complete RFC8785 conformance."
+    },
+    {
+      "contract": "operation-plan",
+      "digest_field": "plan_digest",
+      "domain_prefix": "psios/operation-plan/1\n",
+      "payload": {
+        "schema_version": "1.0.0",
+        "plan_id": "plan-demo",
+        "purpose_ref": {
+          "resource_id": "user-purpose",
+          "version": "rev-1",
+          "digest": "sha256:b4b19602f174faa6688483ab57b526b8108c7cbafd0c734d5016aa160a85b096"
+        },
+        "requester_principal_id": "principal-user",
+        "delegation_ref": {
+          "resource_id": "delegation-review",
+          "version": "rev-1",
+          "digest": "sha256:1a224ec34161b91a7b0ffa3b1858897e93d3628c372f725ca5b48674e0f7a31b"
+        },
+        "allowed_effects": [
+          {
+            "resource_ref": {
+              "resource_id": "target-document",
+              "version": "rev-1",
+              "digest": "sha256:daee958c2c3ba7e6b9589b02f1e86b41dab48c4270ccefd1e24c878489581490"
+            },
+            "action": "document.replace",
+            "scope_ref": {
+              "resource_id": "scope-one-document",
+              "version": "rev-1",
+              "digest": "sha256:67489305de1e0f89c7f0ec3271ca2a98367b91abd2af83c56c49872a243bdaec"
+            }
+          }
+        ],
+        "input_refs": [
+          {
+            "resource_id": "replacement-content",
+            "version": "rev-1",
+            "digest": "sha256:1b5a0fd98f2a707b417e88664a24799cbba4e837ceb6a3208aa9c80894e42cf3"
+          }
+        ],
+        "runtime_refs": [
+          {
+            "resource_id": "tool-document-editor",
+            "version": "rev-1",
+            "digest": "sha256:3763d3ab546bfc8d2686d73912419058a0626bd50a6f66469263e349cee882ae"
+          }
+        ],
+        "preconditions": [
+          {
+            "resource_ref": {
+              "resource_id": "target-document",
+              "version": "rev-1",
+              "digest": "sha256:daee958c2c3ba7e6b9589b02f1e86b41dab48c4270ccefd1e24c878489581490"
+            },
+            "kind": "ContentDigest",
+            "expected": "sha256:daee958c2c3ba7e6b9589b02f1e86b41dab48c4270ccefd1e24c878489581490",
+            "enforcement": "ConditionalApply"
+          }
+        ],
+        "budget_ref": {
+          "resource_id": "budget-one-edit",
+          "version": "rev-1",
+          "digest": "sha256:5fa934394917dc351e68bab101f0d393dd1d399c5b99a61084b3300e102a4603"
+        },
+        "deadline_at": "2026-11-22T09:00:00Z",
+        "data_policy_ref": {
+          "resource_id": "policy-local-only",
+          "version": "rev-1",
+          "digest": "sha256:00df23a94c150ecd0d677e6e7d93ef9f6c6787d0f5e1a5d7d21e143f7b77050d"
+        },
+        "permission_delta_refs": [],
+        "recovery_plan_ref": {
+          "resource_id": "recover-document-version",
+          "version": "rev-1",
+          "digest": "sha256:354105227434cf2d689eb6989a1878bf598d964c8c03a72227fc959852fa2c94"
+        },
+        "irreversible_effects": [],
+        "use_scope": "SingleOperation",
+        "digest_profile": {
+          "digest_algorithm": "SHA-256",
+          "canonicalization_version": "RFC8785",
+          "domain": "psios/operation-plan/1"
+        }
+      },
+      "canonical_utf8": "{\"allowed_effects\":[{\"action\":\"document.replace\",\"resource_ref\":{\"digest\":\"sha256:daee958c2c3ba7e6b9589b02f1e86b41dab48c4270ccefd1e24c878489581490\",\"resource_id\":\"target-document\",\"version\":\"rev-1\"},\"scope_ref\":{\"digest\":\"sha256:67489305de1e0f89c7f0ec3271ca2a98367b91abd2af83c56c49872a243bdaec\",\"resource_id\":\"scope-one-document\",\"version\":\"rev-1\"}}],\"budget_ref\":{\"digest\":\"sha256:5fa934394917dc351e68bab101f0d393dd1d399c5b99a61084b3300e102a4603\",\"resource_id\":\"budget-one-edit\",\"version\":\"rev-1\"},\"data_policy_ref\":{\"digest\":\"sha256:00df23a94c150ecd0d677e6e7d93ef9f6c6787d0f5e1a5d7d21e143f7b77050d\",\"resource_id\":\"policy-local-only\",\"version\":\"rev-1\"},\"deadline_at\":\"2026-11-22T09:00:00Z\",\"delegation_ref\":{\"digest\":\"sha256:1a224ec34161b91a7b0ffa3b1858897e93d3628c372f725ca5b48674e0f7a31b\",\"resource_id\":\"delegation-review\",\"version\":\"rev-1\"},\"digest_profile\":{\"canonicalization_version\":\"RFC8785\",\"digest_algorithm\":\"SHA-256\",\"domain\":\"psios/operation-plan/1\"},\"input_refs\":[{\"digest\":\"sha256:1b5a0fd98f2a707b417e88664a24799cbba4e837ceb6a3208aa9c80894e42cf3\",\"resource_id\":\"replacement-content\",\"version\":\"rev-1\"}],\"irreversible_effects\":[],\"permission_delta_refs\":[],\"plan_id\":\"plan-demo\",\"preconditions\":[{\"enforcement\":\"ConditionalApply\",\"expected\":\"sha256:daee958c2c3ba7e6b9589b02f1e86b41dab48c4270ccefd1e24c878489581490\",\"kind\":\"ContentDigest\",\"resource_ref\":{\"digest\":\"sha256:daee958c2c3ba7e6b9589b02f1e86b41dab48c4270ccefd1e24c878489581490\",\"resource_id\":\"target-document\",\"version\":\"rev-1\"}}],\"purpose_ref\":{\"digest\":\"sha256:b4b19602f174faa6688483ab57b526b8108c7cbafd0c734d5016aa160a85b096\",\"resource_id\":\"user-purpose\",\"version\":\"rev-1\"},\"recovery_plan_ref\":{\"digest\":\"sha256:354105227434cf2d689eb6989a1878bf598d964c8c03a72227fc959852fa2c94\",\"resource_id\":\"recover-document-version\",\"version\":\"rev-1\"},\"requester_principal_id\":\"principal-user\",\"runtime_refs\":[{\"digest\":\"sha256:3763d3ab546bfc8d2686d73912419058a0626bd50a6f66469263e349cee882ae\",\"resource_id\":\"tool-document-editor\",\"version\":\"rev-1\"}],\"schema_version\":\"1.0.0\",\"use_scope\":\"SingleOperation\"}",
+      "expected_digest": "sha256:76f3a62bfb9c6f378a7477e734b6e1b802ed5d18f84a323f20e6f215ce55a87d",
+      "scope": "ASCII object keys and safe integer number subset; not complete RFC8785 conformance."
+    },
+    {
+      "contract": "workflow-definition",
+      "digest_field": "definition_digest",
+      "domain_prefix": "psios/workflow-definition/1\n",
+      "payload": {
+        "schema_version": "1.0.0",
+        "dsl_version": "1.0.0",
+        "definition_id": "workflow-review",
+        "definition_version": "definition-rev-1",
+        "input_schema_ref": {
+          "resource_id": "schema-review-input",
+          "version": "rev-1",
+          "digest": "sha256:b9a37494f3a39b50a3c5251a28ae12a59f2ce7b1506f8de39a97a55b135933b3"
+        },
+        "output_schema_ref": {
+          "resource_id": "schema-review-output",
+          "version": "rev-1",
+          "digest": "sha256:3603263f31b1695361e5c6dda51294c7db02073fc86ab9c769347dd1647c68b2"
+        },
+        "nodes": [
+          {
+            "step_id": "review",
+            "kind": "TaskStep",
+            "depends_on": [],
+            "deadline_seconds": "600",
+            "retry_policy": {
+              "max_attempts": "1",
+              "backoff_seconds": "0",
+              "retry_unknown_effects": false
+            },
+            "failure_policy": "Stop",
+            "task_type": "review.read_only.v1",
+            "input_bindings": {
+              "document": {
+                "kind": "input",
+                "path": [
+                  "document"
+                ]
+              }
+            },
+            "allowed_capability_refs": [
+              {
+                "resource_id": "capability-document-read",
+                "version": "rev-1",
+                "digest": "sha256:9d11221696136d7cd38f2c3c1affe7ea49f655d8708bd8311016452cefad7a16"
+              }
+            ],
+            "delegation_ref": {
+              "resource_id": "delegation-review",
+              "version": "rev-1",
+              "digest": "sha256:1a224ec34161b91a7b0ffa3b1858897e93d3628c372f725ca5b48674e0f7a31b"
+            },
+            "budget_ref": {
+              "resource_id": "budget-review",
+              "version": "rev-1",
+              "digest": "sha256:408616897a72dc871f8c1593211e2efb21959733fbb9c2b7358f01ff1c0729de"
+            }
+          }
+        ],
+        "root_budget_ref": {
+          "resource_id": "budget-root",
+          "version": "rev-1",
+          "digest": "sha256:7d4cd7f604255d463bb2d18d0866737ed9c5fe99a508666af236a3d24f92a266"
+        },
+        "max_concurrency": "1",
+        "deadline_seconds": "900",
+        "output_bindings": {
+          "report": {
+            "kind": "input",
+            "path": [
+              "steps",
+              "review",
+              "report"
+            ]
+          }
+        }
+      },
+      "canonical_utf8": "{\"deadline_seconds\":\"900\",\"definition_id\":\"workflow-review\",\"definition_version\":\"definition-rev-1\",\"dsl_version\":\"1.0.0\",\"input_schema_ref\":{\"digest\":\"sha256:b9a37494f3a39b50a3c5251a28ae12a59f2ce7b1506f8de39a97a55b135933b3\",\"resource_id\":\"schema-review-input\",\"version\":\"rev-1\"},\"max_concurrency\":\"1\",\"nodes\":[{\"allowed_capability_refs\":[{\"digest\":\"sha256:9d11221696136d7cd38f2c3c1affe7ea49f655d8708bd8311016452cefad7a16\",\"resource_id\":\"capability-document-read\",\"version\":\"rev-1\"}],\"budget_ref\":{\"digest\":\"sha256:408616897a72dc871f8c1593211e2efb21959733fbb9c2b7358f01ff1c0729de\",\"resource_id\":\"budget-review\",\"version\":\"rev-1\"},\"deadline_seconds\":\"600\",\"delegation_ref\":{\"digest\":\"sha256:1a224ec34161b91a7b0ffa3b1858897e93d3628c372f725ca5b48674e0f7a31b\",\"resource_id\":\"delegation-review\",\"version\":\"rev-1\"},\"depends_on\":[],\"failure_policy\":\"Stop\",\"input_bindings\":{\"document\":{\"kind\":\"input\",\"path\":[\"document\"]}},\"kind\":\"TaskStep\",\"retry_policy\":{\"backoff_seconds\":\"0\",\"max_attempts\":\"1\",\"retry_unknown_effects\":false},\"step_id\":\"review\",\"task_type\":\"review.read_only.v1\"}],\"output_bindings\":{\"report\":{\"kind\":\"input\",\"path\":[\"steps\",\"review\",\"report\"]}},\"output_schema_ref\":{\"digest\":\"sha256:3603263f31b1695361e5c6dda51294c7db02073fc86ab9c769347dd1647c68b2\",\"resource_id\":\"schema-review-output\",\"version\":\"rev-1\"},\"root_budget_ref\":{\"digest\":\"sha256:7d4cd7f604255d463bb2d18d0866737ed9c5fe99a508666af236a3d24f92a266\",\"resource_id\":\"budget-root\",\"version\":\"rev-1\"},\"schema_version\":\"1.0.0\"}",
+      "expected_digest": "sha256:07bcbb45b5937c67718960df20b04983b0578cee284b598299a68b85a6c167fd",
+      "scope": "ASCII object keys and safe integer number subset; not complete RFC8785 conformance."
+    },
+    {
+      "contract": "recovery-set-manifest",
+      "digest_field": "manifest_digest",
+      "domain_prefix": "psios/recovery-set-manifest/1\n",
+      "payload": {
+        "schema_version": "1.0.0",
+        "recovery_set_id": "recovery-set-demo",
+        "source_authority_id": "node-demo",
+        "source_incarnation": "core-incarnation-1",
+        "created_at": "2026-11-22T08:00:00Z",
+        "creator_tool_version": "prototype-unverified",
+        "digest_profile": {
+          "digest_algorithm": "SHA-256",
+          "canonicalization_version": "RFC8785",
+          "domain": "psios/recovery-set-manifest/1"
+        },
+        "scope": "service_group",
+        "capture_interval": {
+          "started_at": "2026-11-22T08:00:00Z",
+          "completed_at": "2026-11-22T08:00:00Z"
+        },
+        "consistency": "crash_consistent",
+        "coordination": "IndependentCheckpointsWithReconciliation",
+        "consistency_evidence_refs": [],
+        "members": [
+          {
+            "resource_id": "volume-demo",
+            "data_incarnation": "volume-incarnation-1",
+            "schema_version": "1.0.0",
+            "checkpoint": "commit-42",
+            "backup_ref": {
+              "resource_id": "volume-backup",
+              "version": "rev-1",
+              "digest": "sha256:b9ef65ab70e609163976538b28511f33478b17a851fc6bd48bc8544046ef145d"
+            },
+            "size_bytes": "1048576"
+          }
+        ],
+        "cross_service_relation_refs": [
+          {
+            "resource_id": "relations-checkpoint",
+            "version": "rev-1",
+            "digest": "sha256:b0161c4c17149a0224da315fa58fa9853257fd8008db1524b5e27a8b31bbe3fc"
+          }
+        ],
+        "incremental_dependencies": [],
+        "required_log_refs": [
+          {
+            "resource_id": "wal-42",
+            "version": "rev-1",
+            "digest": "sha256:8cdafea51db28be84039876d4b4ec1b7cdf9a0220c834e4d920847217b0a1d4b"
+          }
+        ],
+        "security_evidence_refs": [],
+        "secret_refs": [
+          {
+            "resource_id": "backup-key-reference",
+            "version": "rev-1",
+            "digest": "sha256:66fcf5514cabf6964096077d05e6db0296a1018280fe02060b420bc837279c53"
+          }
+        ],
+        "identity_mapping_ref": {
+          "resource_id": "restore-identity-map",
+          "version": "rev-1",
+          "digest": "sha256:0bcc13d8095ca578cdd6c1343c340a8b90c2fb86ce3f71533c78c607ad09da62"
+        },
+        "effect_reconciliation_plan_ref": {
+          "resource_id": "effect-reconcile-plan",
+          "version": "rev-1",
+          "digest": "sha256:01c8cafb1818ee4e6df2b2e4e964cee7616a344ffa69a254b1b289d39925a90c"
+        },
+        "replay_prohibited_refs": [
+          {
+            "resource_id": "operation-demo",
+            "version": "rev-1",
+            "digest": "sha256:ac67bcc2eed8ba3000fd01c13cb133c88459a21085b4fef0c73bd8d1e0fb4c79"
+          }
+        ],
+        "retention_policy_ref": {
+          "resource_id": "retention-policy",
+          "version": "rev-1",
+          "digest": "sha256:3281b75427119630c5794d69f868102e701b62353938cc76bc35673121b19fd9"
+        },
+        "failure_domain": "independent-backup-medium",
+        "restore_procedure_ref": {
+          "resource_id": "restore-procedure",
+          "version": "rev-1",
+          "digest": "sha256:c81b6eabbf939f78d18b30dd09ffb3a54be33fba4b8b348c84548f622b215c76"
+        },
+        "independent_tool_ref": {
+          "resource_id": "restore-tool",
+          "version": "rev-1",
+          "digest": "sha256:b321e6540ceb52b03600b77b3f366f3c0b9f6c74593becb0db8d64e265095444"
+        },
+        "required_restore_bytes": "2097152"
+      },
+      "canonical_utf8": "{\"capture_interval\":{\"completed_at\":\"2026-11-22T08:00:00Z\",\"started_at\":\"2026-11-22T08:00:00Z\"},\"consistency\":\"crash_consistent\",\"consistency_evidence_refs\":[],\"coordination\":\"IndependentCheckpointsWithReconciliation\",\"created_at\":\"2026-11-22T08:00:00Z\",\"creator_tool_version\":\"prototype-unverified\",\"cross_service_relation_refs\":[{\"digest\":\"sha256:b0161c4c17149a0224da315fa58fa9853257fd8008db1524b5e27a8b31bbe3fc\",\"resource_id\":\"relations-checkpoint\",\"version\":\"rev-1\"}],\"digest_profile\":{\"canonicalization_version\":\"RFC8785\",\"digest_algorithm\":\"SHA-256\",\"domain\":\"psios/recovery-set-manifest/1\"},\"effect_reconciliation_plan_ref\":{\"digest\":\"sha256:01c8cafb1818ee4e6df2b2e4e964cee7616a344ffa69a254b1b289d39925a90c\",\"resource_id\":\"effect-reconcile-plan\",\"version\":\"rev-1\"},\"failure_domain\":\"independent-backup-medium\",\"identity_mapping_ref\":{\"digest\":\"sha256:0bcc13d8095ca578cdd6c1343c340a8b90c2fb86ce3f71533c78c607ad09da62\",\"resource_id\":\"restore-identity-map\",\"version\":\"rev-1\"},\"incremental_dependencies\":[],\"independent_tool_ref\":{\"digest\":\"sha256:b321e6540ceb52b03600b77b3f366f3c0b9f6c74593becb0db8d64e265095444\",\"resource_id\":\"restore-tool\",\"version\":\"rev-1\"},\"members\":[{\"backup_ref\":{\"digest\":\"sha256:b9ef65ab70e609163976538b28511f33478b17a851fc6bd48bc8544046ef145d\",\"resource_id\":\"volume-backup\",\"version\":\"rev-1\"},\"checkpoint\":\"commit-42\",\"data_incarnation\":\"volume-incarnation-1\",\"resource_id\":\"volume-demo\",\"schema_version\":\"1.0.0\",\"size_bytes\":\"1048576\"}],\"recovery_set_id\":\"recovery-set-demo\",\"replay_prohibited_refs\":[{\"digest\":\"sha256:ac67bcc2eed8ba3000fd01c13cb133c88459a21085b4fef0c73bd8d1e0fb4c79\",\"resource_id\":\"operation-demo\",\"version\":\"rev-1\"}],\"required_log_refs\":[{\"digest\":\"sha256:8cdafea51db28be84039876d4b4ec1b7cdf9a0220c834e4d920847217b0a1d4b\",\"resource_id\":\"wal-42\",\"version\":\"rev-1\"}],\"required_restore_bytes\":\"2097152\",\"restore_procedure_ref\":{\"digest\":\"sha256:c81b6eabbf939f78d18b30dd09ffb3a54be33fba4b8b348c84548f622b215c76\",\"resource_id\":\"restore-procedure\",\"version\":\"rev-1\"},\"retention_policy_ref\":{\"digest\":\"sha256:3281b75427119630c5794d69f868102e701b62353938cc76bc35673121b19fd9\",\"resource_id\":\"retention-policy\",\"version\":\"rev-1\"},\"schema_version\":\"1.0.0\",\"scope\":\"service_group\",\"secret_refs\":[{\"digest\":\"sha256:66fcf5514cabf6964096077d05e6db0296a1018280fe02060b420bc837279c53\",\"resource_id\":\"backup-key-reference\",\"version\":\"rev-1\"}],\"security_evidence_refs\":[],\"source_authority_id\":\"node-demo\",\"source_incarnation\":\"core-incarnation-1\"}",
+      "expected_digest": "sha256:73e744da3fdc594ab81e4776016e6e9230c5ba1dceeb602f218d3ab353b505f4",
+      "scope": "ASCII object keys and safe integer number subset; not complete RFC8785 conformance."
+    }
+  ]
+}

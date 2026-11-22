@@ -1,0 +1,46 @@
+{
+  "schema_version": "1.0.0",
+  "permit_id": "permit-demo",
+  "operation_id": "operation-demo",
+  "effect_id": "effect-demo",
+  "plan_digest": "sha256:76f3a62bfb9c6f378a7477e734b6e1b802ed5d18f84a323f20e6f215ce55a87d",
+  "audience_resource_refs": [
+    {
+      "resource_id": "target-document",
+      "version": "rev-1",
+      "digest": "sha256:daee958c2c3ba7e6b9589b02f1e86b41dab48c4270ccefd1e24c878489581490"
+    }
+  ],
+  "principal_chain_digest": "sha256:4cbea176ba014f048af7b78f648792577b0f1f0a38501049682d58d53f73d153",
+  "authorization_epoch": "19",
+  "security_recovery_epoch": "3",
+  "recovery_incarnation": "core-incarnation-2",
+  "authorization_ref": {
+    "resource_id": "delegation-review",
+    "version": "rev-1",
+    "digest": "sha256:1a224ec34161b91a7b0ffa3b1858897e93d3628c372f725ca5b48674e0f7a31b"
+  },
+  "decision_ref": {
+    "resource_id": "decision-demo",
+    "version": "rev-1",
+    "digest": "sha256:86f3f5c0c8d1205176715a00475703b788a8c92c17176869cea312180407dae2"
+  },
+  "preconditions": [
+    {
+      "resource_ref": {
+        "resource_id": "target-document",
+        "version": "rev-1",
+        "digest": "sha256:daee958c2c3ba7e6b9589b02f1e86b41dab48c4270ccefd1e24c878489581490"
+      },
+      "kind": "ContentDigest",
+      "expected": "sha256:daee958c2c3ba7e6b9589b02f1e86b41dab48c4270ccefd1e24c878489581490",
+      "enforcement": "ConditionalApply"
+    }
+  ],
+  "issued_at": "2026-11-22T08:00:00Z",
+  "not_after": "2026-11-22T09:00:00Z",
+  "usage": "SingleLogicalEffect",
+  "auth_proof": {
+    "mode": "TrustMe"
+  }
+}

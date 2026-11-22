@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0.0",
+  "capability_id": "storage.write",
+  "capability_version": "1.0.0",
+  "authority_id": "storage-local",
+  "actions": [
+    "volume.write"
+  ],
+  "profile_ref": {
+    "resource_id": "storage-profile",
+    "version": "rev-1",
+    "digest": "sha256:a4a9af90fdc4f2fc52030ca85dddabc53b5c1a06afe2d2af37a9cf3906c48a39"
+  },
+  "revocation_capabilities": [
+    "GateOnly",
+    "ResourceFence"
+  ],
+  "effect_limitations": [
+    "Already exported bytes cannot be recalled."
+  ],
+  "availability": "Ready",
+  "implementation_status": "NotVerified"
+}

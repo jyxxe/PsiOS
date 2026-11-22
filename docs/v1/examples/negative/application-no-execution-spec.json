@@ -1,0 +1,76 @@
+{
+  "schema_version": "1.0.0",
+  "application_id": "app-notes",
+  "release_id": "app-notes-release-1",
+  "release_version": "0.1.0-prototype",
+  "artifact_ref": {
+    "resource_id": "oci-image-demo",
+    "version": "rev-1",
+    "digest": "sha256:3d537c3892b011f4b477c153d2572835be42e181fde80c9d01cbd348717e9bfc"
+  },
+  "publisher_identity_ref": {
+    "resource_id": "publisher-demo",
+    "version": "rev-1",
+    "digest": "sha256:b5ea9bef1116b467cef447a97076f64bf7e98601aa2cf675d3c59b3dacaf89f7"
+  },
+  "runtime_profile_ref": {
+    "resource_id": "oci-profile",
+    "version": "rev-1",
+    "digest": "sha256:5d0f6f434637de5188b71c1945e19b9fbc6755b136c2f683f0b1dcd6ded1c267"
+  },
+  "package_format": "OCI",
+  "required_capability_refs": [
+    {
+      "resource_id": "capability-volume-write",
+      "version": "rev-1",
+      "digest": "sha256:3fb6c4761b09a82da5045fdd46b9e600d823f0fef5ecec459d872bc6626e1cc3"
+    }
+  ],
+  "volume_requirements": [
+    {
+      "name": "data",
+      "minimum_bytes": "1073741824",
+      "access_mode": "single_writer_rw",
+      "schema_ref": {
+        "resource_id": "notes-data-schema",
+        "version": "rev-1",
+        "digest": "sha256:6c831027636883264935a08b1d5d093eacbfd87d1bbfb329e87f490b5f894262"
+      }
+    }
+  ],
+  "network_policy_ref": {
+    "resource_id": "network-local-only",
+    "version": "rev-1",
+    "digest": "sha256:cc591fcc96ccf1fed8a41a09988250e43ec09e1a103d42a7137ece59d773fbf3"
+  },
+  "health_check_ref": {
+    "resource_id": "notes-health",
+    "version": "rev-1",
+    "digest": "sha256:8cc5be80a5db5c4f5c75cefa0e7e8d37706e7d9173808a6bca252eb77f312ad8"
+  },
+  "migration_plan_ref": {
+    "resource_id": "notes-migrate",
+    "version": "rev-1",
+    "digest": "sha256:3906ee1749c3d3d5ef778f71c4fbad59d1fd2c6cc0822533055e2f9101863fdb"
+  },
+  "rollback_policy_ref": {
+    "resource_id": "notes-rollback",
+    "version": "rev-1",
+    "digest": "sha256:266f490f0efe926b1d23380df8d06db7619c076c8eb4390bef16913d3516d1bc"
+  },
+  "compatibility_claims": [
+    {
+      "capability": "Recognized",
+      "result": "NotRun",
+      "profile_ref": {
+        "resource_id": "oci-profile",
+        "version": "rev-1",
+        "digest": "sha256:5d0f6f434637de5188b71c1945e19b9fbc6755b136c2f683f0b1dcd6ded1c267"
+      },
+      "evidence_refs": [],
+      "limitations": [
+        "Illustrative fixture only."
+      ]
+    }
+  ]
+}

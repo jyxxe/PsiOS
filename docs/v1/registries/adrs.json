@@ -1,0 +1,1193 @@
+[
+  {
+    "adr_id": "ADR-01",
+    "path": "adr/ADR-001.md",
+    "title": "OS 基底、构建工具与平台组合",
+    "legacy_title": "OS 基底、构建工具与平台组合",
+    "scope_change": "保持原编号与范围",
+    "status": "Proposed",
+    "owner_role": "发行/Host 维护者",
+    "owner": null,
+    "implementation_status": "NotVerified",
+    "test_status": "NotRun",
+    "selected_option": null,
+    "gate": "M0 完成候选 PoC；进入 M1 前批准首批平台组合。",
+    "dependencies": [],
+    "constraint_documents": [
+      "docs/01-product-and-architecture.md",
+      "docs/03-host-updates-network-devices.md"
+    ],
+    "options": [
+      {
+        "name": "成熟发行版的最小宿主加受控镜像构建",
+        "considerations": "可使用现有包和安全维护输入；必须验证定制配置、许可证及部署不可变边界。"
+      },
+      {
+        "name": "以 bootable OCI/bootc 类流程交付宿主",
+        "considerations": "统一内容寻址制品流；须验证启动链、持久状态布局、离线安装和目标平台支持。"
+      },
+      {
+        "name": "独立生成最小系统镜像",
+        "considerations": "可严格控制组件和体积；维护工具链、驱动和安全更新的成本必须实测。"
+      }
+    ],
+    "required_experiments": [
+      "用同一 Core 样例和已锁定依赖构建各候选最小镜像，保存源码/工具链/镜像摘要与许可证清单。",
+      "在首批 VM/真实硬件上断网安装并启动，停掉 Agent/容器后验证本地管理。",
+      "复建并比较制品差异来源，测量安装容量、启动时间、内存及更新恢复成本。"
+    ],
+    "rejection_conditions": "缺乏合法分发依据、不能锁定输入、基础恢复依赖在线服务、或首批平台无法可靠启动的候选不得入选。",
+    "fallback": "缩小首批平台/Profile范围，保留已验证基底；不通过关掉校验或恢复机制凑齐平台数量。",
+    "review_triggers": "上游维护终止、关键驱动缺失、平台新增、构建不可再现或安全维护成本超出批准预算。",
+    "legacy_validation_scope": "统一 Core 构建；发行许可；首批 CPU/固件/虚拟化目标；驱动可用性；依赖锁定和维护方案。",
+    "legacy_gate": "M0 PoC；进入 M1 前固定首批组合。"
+  },
+  {
+    "adr_id": "ADR-02",
+    "path": "adr/ADR-002.md",
+    "title": "启动器、更新后端与持久状态布局",
+    "legacy_title": "启动器、更新后端与持久状态布局",
+    "scope_change": "保持原编号与范围",
+    "status": "Proposed",
+    "owner_role": "启动/更新/恢复维护者",
+    "owner": null,
+    "implementation_status": "NotVerified",
+    "test_status": "NotRun",
+    "selected_option": null,
+    "gate": "M1 写盘实现前确定基础组合；M2 通过完整恢复闭环。",
+    "dependencies": [
+      "ADR-01",
+      "ADR-04"
+    ],
+    "constraint_documents": [
+      "docs/03-host-updates-network-devices.md",
+      "docs/05-recovery-consistency.md"
+    ],
+    "options": [
+      {
+        "name": "bootc 类宿主部署与配套启动链",
+        "considerations": "对候选实际 /etc、/var、试启动和回退行为逐项映射，不能只据文档名推断。"
+      },
+      {
+        "name": "OSTree 类部署与配套启动器",
+        "considerations": "验证部署切换、配置合并、签名和离线恢复；需定义应用数据迁移责任。"
+      },
+      {
+        "name": "A/B 系统分区或等效镜像槽位",
+        "considerations": "提交边界直观；验证掉电窗口、状态卷、启动计数及容量代价。"
+      }
+    ],
+    "required_experiments": [
+      "在下载、校验、写盘、启动项切换、试启动和提交各阶段断电，验证只有完整目标能被提交。",
+      "执行新驱动无法启动、旧服务不能读新Schema、加密解锁材料缺失三种恢复。",
+      "尝试用旧备份回滚安全代次，确认进入隔离恢复而不是复活授权。"
+    ],
+    "rejection_conditions": "掉电后两个槽位都不可启动、旧Schema仍可写新数据、回退删除唯一恢复入口、或不可逆数据迁移被隐瞒。",
+    "fallback": "对不具备自动回退的平台只公布经过验证的人工救援Profile；保留兼容旧部署，停止对同一失败制品无限重试。",
+    "review_triggers": "更换启动器/固件策略、宿主状态目录语义变化、引入不可逆迁移或Secure Boot根更新。",
+    "legacy_validation_scope": "完整/中断安装、断电、试启动失败、配置与安全状态回退边界、解锁与外部救援。bootc/OSTree 等保留为候选。",
+    "legacy_gate": "M1 写盘实现前；M2 通过恢复闭环。"
+  },
+  {
+    "adr_id": "ADR-03",
+    "path": "adr/ADR-003.md",
+    "title": "默认文件系统、卷与备份后端",
+    "legacy_title": "默认文件系统、卷与备份后端",
+    "scope_change": "保持原编号与范围",
+    "status": "Proposed",
+    "owner_role": "存储/备份维护者",
+    "owner": null,
+    "implementation_status": "NotVerified",
+    "test_status": "NotRun",
+    "selected_option": null,
+    "gate": "M2 持久应用准入前；高级后端在 M5 或能力启用前。",
+    "dependencies": [
+      "ADR-01",
+      "ADR-02",
+      "ADR-04"
+    ],
+    "constraint_documents": [
+      "docs/06-storage-data-tablefs.md",
+      "docs/05-recovery-consistency.md"
+    ],
+    "options": [
+      {
+        "name": "传统文件系统加应用专用备份",
+        "considerations": "可采用经验证的 ext4/XFS 等候选；快照不可用时准确报告，依赖应用导出保证一致性。"
+      },
+      {
+        "name": "具备快照能力的本地卷/文件系统组合",
+        "considerations": "如经验证的 Btrfs 或 LVM 组合；核对每种快照范围、写屏障、配额和故障恢复。"
+      },
+      {
+        "name": "可插拔存储驱动按Profile选择",
+        "considerations": "统一生命周期与能力发现，允许不同后端共存；增加兼容矩阵和驱动测试责任。"
+      }
+    ],
+    "required_experiments": [
+      "同一有状态OCI应用写入、重启、升级、失卷、满盘和只读后保留数据身份。",
+      "从独立故障域备份到新目标恢复，检查数据库业务一致性和权限映射。",
+      "测试缺失基础备份、损坏增量、错误密钥、日志不齐和跨卷不协调，测量RPO/RTO。"
+    ],
+    "rejection_conditions": "只能在原系统盘上恢复、把非原子复制标原子快照、无法导出、默认GC破坏引用或恢复不可诊断。",
+    "fallback": "使用已验证普通卷及应用专用备份，禁用未验证快照/共享写能力；基础数据持久性不能推迟到M5。",
+    "review_triggers": "新增多卷数据库、加密后端、故障域、共享访问模式，或恢复目标不能继续达成。",
+    "legacy_validation_scope": "数据身份、配额、满盘、只读降级、支持的快照保证、独立恢复、密钥丢失边界。",
+    "legacy_gate": "M2 持久应用准入前；高级后端 M5。"
+  },
+  {
+    "adr_id": "ADR-04",
+    "path": "adr/ADR-004.md",
+    "title": "身份、授权、Secret 与安全启动 Profile",
+    "legacy_title": "身份、授权、Secret 与安全启动 Profile",
+    "scope_change": "保持原编号与范围",
+    "status": "Proposed",
+    "owner_role": "Identity/Policy/安全维护者",
+    "owner": null,
+    "implementation_status": "NotVerified",
+    "test_status": "NotRun",
+    "selected_option": null,
+    "gate": "M0 契约，M2 本机实现，M4 节点与桌面；安全启动能力启用前独立验证。",
+    "dependencies": [
+      "ADR-05"
+    ],
+    "constraint_documents": [
+      "docs/04-security-identity.md",
+      "docs/05-recovery-consistency.md",
+      "docs/03-host-updates-network-devices.md"
+    ],
+    "options": [
+      {
+        "name": "本地身份/策略权威加可选OIDC映射",
+        "considerations": "满足离线本地管理；必须验证外部subject绑定、密钥托管和策略维护。"
+      },
+      {
+        "name": "成熟策略引擎与窄宿主授权适配",
+        "considerations": "复用策略计算实现，仍需PsiOS权威账本、资源端强制、审计及故障语义。"
+      },
+      {
+        "name": "按信任等级组合软件密钥与可选TPM/安全启动",
+        "considerations": "普通设备保留软件恢复路径；硬件保护Profile必须实测升级、换板和密钥恢复。"
+      }
+    ],
+    "required_experiments": [
+      "执行SEC-V1-01～15，重点审批并发消费、被盗会话、跨受众令牌和数据面撤权。",
+      "全盘恢复旧备份，无见证/网络时测试隔离和合法本地恢复。",
+      "在选定硬件验证安全启动与模块签名；分别记录实际可强制能力、延迟和不可逆效果。"
+    ],
+    "rejection_conditions": "把请求体身份当认证、只撤Token却报全部撤权、恢复旧管理员名单即获得最高权、或没有合法密钥仍声称可解密。",
+    "fallback": "保持最小本地认证和受控救援；禁用未验证的远端自动化、硬件解锁或直接资源授予Profile。",
+    "review_triggers": "身份源更换、签名根/密钥泄露、策略或委托语义变化、引入更强离线授权及新数据面后端。",
+    "legacy_validation_scope": "用户映射、委托、离线有效范围、撤销时限与安全代次；Secure Boot/TPM 如启用，验证驱动签名及救援解锁。",
+    "legacy_gate": "M0 契约，M2 本机实现，M4 节点和桌面。"
+  },
+  {
+    "adr_id": "ADR-05",
+    "path": "adr/ADR-005.md",
+    "title": "系统 API、资源 Schema 与元数据实现",
+    "legacy_title": "系统 API、资源 Schema 与元数据实现",
+    "scope_change": "保持原编号与范围",
+    "status": "Proposed",
+    "owner_role": "Core API/Schema维护者",
+    "owner": null,
+    "implementation_status": "NotVerified",
+    "test_status": "NotRun",
+    "selected_option": null,
+    "gate": "M0 最小Schema；M2 持久接口发布前。",
+    "dependencies": [],
+    "constraint_documents": [
+      "docs/02-common-contracts.md",
+      "docs/04-security-identity.md",
+      "docs/08-tasks-events.md"
+    ],
+    "options": [
+      {
+        "name": "单机事务数据库承载资源与本地outbox",
+        "considerations": "减少提交裂缝，验证并发、WAL/恢复和容量；不强迫全部角色共用物理库。"
+      },
+      {
+        "name": "服务型事务数据库承载多个逻辑权威",
+        "considerations": "适合所声明部署范围；需隔离写入责任、部署依赖和本机离线边界。"
+      },
+      {
+        "name": "持久追加日志加受控投影",
+        "considerations": "可审计与重建，但须证明唯一提交权威、条件写及快照/压实正确。"
+      }
+    ],
+    "required_experiments": [
+      "对所有核心Schema运行正反示例、未知字段、最大序号及跨语言摘要向量。",
+      "并发相同/不同幂等请求、版本冲突、游标过期和状态提交后崩溃，检查明确结果。",
+      "将状态变更、outbox和查询快照在选定事务边界下做故障注入；验证引用与删除条件。"
+    ],
+    "rejection_conditions": "SDK暗中提升权限、元数据全局版本替代效果前提、客户端浮点数损坏序号、或不能区分结果未知。",
+    "fallback": "缩小发布API范围并显式UnsupportedCapability；保留可读旧版本及迁移工具，不猜测新Schema写入。",
+    "review_triggers": "序列化/摘要实现变化、资源封套或错误码变更、跨语言SDK加入和元数据后端迁移。",
+    "legacy_validation_scope": "原子条件写、Operation、幂等、持久化崩溃恢复、订阅游标、配置迁移和兼容策略。",
+    "legacy_gate": "M0 最小 Schema；M2 持久接口发布前。"
+  },
+  {
+    "adr_id": "ADR-06",
+    "path": "adr/ADR-006.md",
+    "title": "OCI 执行后端与隔离等级",
+    "legacy_title": "OCI 执行后端与隔离等级",
+    "scope_change": "保持原编号与范围",
+    "status": "Proposed",
+    "owner_role": "Runtime/宿主隔离维护者",
+    "owner": null,
+    "implementation_status": "NotVerified",
+    "test_status": "NotRun",
+    "selected_option": null,
+    "gate": "M2 执行真实用户工作负载前。",
+    "dependencies": [
+      "ADR-03",
+      "ADR-04",
+      "ADR-05",
+      "ADR-08"
+    ],
+    "constraint_documents": [
+      "docs/07-applications-packages-gui.md",
+      "docs/04-security-identity.md",
+      "docs/03-host-updates-network-devices.md"
+    ],
+    "options": [
+      {
+        "name": "成熟OCI管理引擎加窄适配器",
+        "considerations": "复用生命周期实现；限制管理Socket/特权范围，验证身份与恢复映射。"
+      },
+      {
+        "name": "窄执行器直接编排经验证OCI runtime",
+        "considerations": "控制面较小；必须自行承担进程回收、挂载、网络、重启对账及日志责任。"
+      },
+      {
+        "name": "高风险Profile采用独立内核沙箱/虚拟机",
+        "considerations": "减少共享内核风险；验证资源开销、设备、文件传输和运行能力，不能默认为所有发行版依赖。"
+      }
+    ],
+    "required_experiments": [
+      "复测只读rootfs、/run状态目录、bind mount、UID/GID映射和重复启动/删除。",
+      "注入运行器崩溃、宿主重启、OOM、设备丢失、卷不可达，核验实际进程与持久对象一致。",
+      "撤销运行中fd/设备/网络权限，测量残留进程与后代，确认报告不虚假。"
+    ],
+    "rejection_conditions": "默认privileged、共享宿主root/引擎Socket、清理失败毁坏独立数据、或无资源强制却宣称严格配额。",
+    "fallback": "只发布已验证的隔离Profile；不满足高风险任务要求时拒绝准入，不放宽到宿主root执行。",
+    "review_triggers": "runtime升级、内核隔离变更、设备直通、新工作负载类别或旧复用代码边界变化。",
+    "legacy_validation_scope": "XeLab 复用与现成方案的对照；只读根、身份映射、资源和设备限制、重启恢复、撤权。",
+    "legacy_gate": "M2 执行真实用户工作负载前。"
+  },
+  {
+    "adr_id": "ADR-07",
+    "path": "adr/ADR-007.md",
+    "title": "网络配置与策略执行后端",
+    "legacy_title": "网络配置与策略执行后端",
+    "scope_change": "保持原编号与范围",
+    "status": "Proposed",
+    "owner_role": "网络与远程管理维护者",
+    "owner": null,
+    "implementation_status": "NotVerified",
+    "test_status": "NotRun",
+    "selected_option": null,
+    "gate": "M2 远程管理开放前。",
+    "dependencies": [
+      "ADR-04",
+      "ADR-05"
+    ],
+    "constraint_documents": [
+      "docs/03-host-updates-network-devices.md",
+      "docs/04-security-identity.md"
+    ],
+    "options": [
+      {
+        "name": "NetworkManager类后端统一受控管理",
+        "considerations": "对KDE/无头接口做相同权威适配，核验检查点和目标环境行为。"
+      },
+      {
+        "name": "systemd-networkd等声明式后端加事务代理",
+        "considerations": "适合受限配置面；自行实现试配置、确认、回退和桌面协同。"
+      },
+      {
+        "name": "按Profile选择宿主后端、统一策略执行接口",
+        "considerations": "保持API一致；每个组合单独测试IPv6、网络命名空间和防火墙强制。"
+      }
+    ],
+    "required_experiments": [
+      "故意错误修改管理IP/路由/DNS/防火墙，断开旧连接，用新连接确认或有界自动回退。",
+      "两个配置操作交错、旧回退定时器晚到时，不能覆盖新已提交代数。",
+      "测试DNS重绑定、IPv6、代理、NAT、集群主动连接Worker及离线本机恢复。"
+    ],
+    "rejection_conditions": "只有旧连接存活就提交、回退覆盖更晚配置、IPv4规则冒充全协议隔离或策略失败后开放宿主网络。",
+    "fallback": "未验证自动回退的后端限制为本地确认变更；远程高风险网络变更拒绝自动执行。",
+    "review_triggers": "后端/防火墙版本变更、IPv6/VPN/代理新模式、桌面接管或远程连接拓扑变化。",
+    "legacy_validation_scope": "Headless/KDE 共用权威；DNS/IPv6/代理；端口与外连；管理链路确认回退。",
+    "legacy_gate": "M2 远程管理开放前。"
+  },
+  {
+    "adr_id": "ADR-08",
+    "path": "adr/ADR-008.md",
+    "title": "设备/GPU 和电源能力矩阵",
+    "legacy_title": "设备/GPU 和电源能力矩阵",
+    "scope_change": "保持原编号与范围",
+    "status": "Proposed",
+    "owner_role": "设备/GPU/电源维护者",
+    "owner": null,
+    "implementation_status": "NotVerified",
+    "test_status": "NotRun",
+    "selected_option": null,
+    "gate": "M2 基础限制；M4 对应桌面/GPU角色；每类硬件能力启用前。",
+    "dependencies": [
+      "ADR-01",
+      "ADR-04"
+    ],
+    "constraint_documents": [
+      "docs/03-host-updates-network-devices.md",
+      "docs/04-security-identity.md",
+      "docs/12-cluster-coordination.md"
+    ],
+    "options": [
+      {
+        "name": "首期整设备租约加宿主资源控制",
+        "considerations": "容易表达所有权，仍须测试设备重置、DMA/队列与进程终止后的残留。"
+      },
+      {
+        "name": "已验证厂商硬件分区Profile",
+        "considerations": "提高并发隔离能力；受特定设备/驱动支持约束，不外推到其他GPU。"
+      },
+      {
+        "name": "共享运行但只公布计量/准入保证",
+        "considerations": "适合可信负载；不承诺不可实现的显存硬配额或安全多租户。"
+      }
+    ],
+    "required_experiments": [
+      "在确切GPU/驱动/内核上测量OOM、超额请求、热拔插/重置及撤权后可写路径。",
+      "合盖、睡眠、休眠、断电及唤醒测试设备重探测与旧输入/租约失效。",
+      "压力下验证本机登录、诊断、桌面和恢复资源仍有保留，后台任务不会永久饿死交互。"
+    ],
+    "rejection_conditions": "将估计显存作为严格隔离、设备路径复用旧授权、未确认旧队列清空即迁移资源、或无限重试OOM。",
+    "fallback": "退到整卡独占或禁用相应设备Profile；允许明确的只读计量，不冒充共享隔离。",
+    "review_triggers": "新增硬件、驱动/固件更新、共享模式变更、电源策略或调度抢占规则变化。",
+    "legacy_validation_scope": "可强制限制与仅计量区分；热插拔、OOM/显存不足、驱动更新、睡眠恢复。",
+    "legacy_gate": "M2 基础限制；M4 对应桌面/GPU角色。"
+  },
+  {
+    "adr_id": "ADR-09",
+    "path": "adr/ADR-009.md",
+    "title": "Agent 协议与第三方兼容配置",
+    "legacy_title": "Agent 协议与第三方兼容配置",
+    "scope_change": "保持原编号与范围",
+    "status": "Proposed",
+    "owner_role": "Agent Adapter/协议维护者",
+    "owner": null,
+    "implementation_status": "NotVerified",
+    "test_status": "NotRun",
+    "selected_option": null,
+    "gate": "M3 对外声明支持前。",
+    "dependencies": [
+      "ADR-04",
+      "ADR-05",
+      "ADR-11"
+    ],
+    "constraint_documents": [
+      "docs/09-agents-models-protocols.md",
+      "docs/08-tasks-events.md",
+      "docs/10-conversations.md",
+      "docs/04-security-identity.md"
+    ],
+    "options": [
+      {
+        "name": "进程隔离的每协议适配器",
+        "considerations": "限制解析器故障和依赖；增加IPC与部署成本，权限仍统一检查。"
+      },
+      {
+        "name": "统一Gateway内的严格模块化协议适配",
+        "considerations": "共享认证/限流基础；需证明模块故障与版本语义不会互相污染。"
+      },
+      {
+        "name": "CLI/SDK受控桥接先支持少量实现",
+        "considerations": "兼容覆盖较小但可明确验证；不把缺少取消/恢复的桥接标成C2。"
+      }
+    ],
+    "required_experiments": [
+      "原生Agent和一个独立第三方执行同类任务，测试授权拒绝、取消、预算、重启和审计。",
+      "对所声明MCP协议代际分别验证发现/握手、逐请求鉴权、受众、长任务映射及不支持响应。",
+      "模糊与恶意消息、超大载荷、未知字段、断流、重复结果不能扩大权限或失控唤醒。"
+    ],
+    "rejection_conditions": "仅启动进程即标C2、同一缩写混指不同协议、旧会话隐式授权新请求或令牌跨服务透传。",
+    "fallback": "降至实际通过的C0/C1或禁用特定方法；用户可用本机任务/原生Agent继续工作。",
+    "review_triggers": "协议版本、SDK、认证规范或第三方行为变化；新增C2声明或跨节点能力。",
+    "legacy_validation_scope": "协议全名、版本、传输、认证、C0/C1/C2 能力，至少一个独立第三方端到端测试。",
+    "legacy_gate": "M3 对外声明支持前。"
+  },
+  {
+    "adr_id": "ADR-10",
+    "path": "adr/ADR-010.md",
+    "title": "KDE、Portal 与无头图形后端",
+    "legacy_title": "KDE、Portal 与无头图形后端",
+    "scope_change": "保持原编号与范围",
+    "status": "Proposed",
+    "owner_role": "Desktop/Portal维护者",
+    "owner": null,
+    "implementation_status": "NotVerified",
+    "test_status": "NotRun",
+    "selected_option": null,
+    "gate": "M4 Computer Use 验收前。",
+    "dependencies": [
+      "ADR-04",
+      "ADR-08"
+    ],
+    "constraint_documents": [
+      "docs/07-applications-packages-gui.md",
+      "docs/04-security-identity.md"
+    ],
+    "options": [
+      {
+        "name": "Argon原生KDE/Wayland经Portal授权",
+        "considerations": "保留本机桌面体验；核实指定版本的捕获、输入、锁屏、撤销和恢复行为。"
+      },
+      {
+        "name": "专用无头/嵌套Wayland会话",
+        "considerations": "隔离应用和自动化；需要独立渲染、字体、输入法、音频与会话管理。"
+      },
+      {
+        "name": "隔离虚拟机或经审查X11会话Profile",
+        "considerations": "用于明确兼容需求；不能将窗口裁剪称作可靠安全隔离。"
+      }
+    ],
+    "required_experiments": [
+      "验证整屏/单窗口实际可授权范围、拒绝授权、锁屏、用户切换、热插拔和分辨率变化。",
+      "复测restore token生命周期、流serial/会话代次和旧输入队列失效。",
+      "两Agent与人类同时控制，停止入口在模型/Agent失效时仍切断旧输入。"
+    ],
+    "rejection_conditions": "绕过Portal授权、凭旧Node ID/URL恢复控制、只能全屏却宣称单窗口安全或无本地停止路径。",
+    "fallback": "提供专用隔离会话或只读观察；不支持范围明确拒绝，无图形后端不影响Core。",
+    "review_triggers": "KDE/Portal/PipeWire版本变更、输入后端变化、持久授权、无人值守和新硬件显示路径。",
+    "legacy_validation_scope": "目标桌面版本的屏幕范围、输入、会话关闭、撤权、接管、持久授权和锁屏行为。",
+    "legacy_gate": "M4 Computer Use 验收前。"
+  },
+  {
+    "adr_id": "ADR-11",
+    "path": "adr/ADR-011.md",
+    "title": "任务/事件持久化与执行语义",
+    "legacy_title": "任务/事件持久化与执行语义",
+    "scope_change": "保持原编号与范围",
+    "status": "Proposed",
+    "owner_role": "Task/Event维护者",
+    "owner": null,
+    "implementation_status": "NotVerified",
+    "test_status": "NotRun",
+    "selected_option": null,
+    "gate": "M2 基础任务；M3 Agent 执行前。",
+    "dependencies": [
+      "ADR-04",
+      "ADR-05"
+    ],
+    "constraint_documents": [
+      "docs/08-tasks-events.md",
+      "docs/02-common-contracts.md",
+      "docs/05-recovery-consistency.md"
+    ],
+    "options": [
+      {
+        "name": "单机事务库+outbox/inbox",
+        "considerations": "可合并本地提交边界；验证元数据容量、日志、恢复和消费者隔离。"
+      },
+      {
+        "name": "事务库+外部消息投递服务",
+        "considerations": "扩展投递能力；数据库仍拥有任务事实，Broker投递确认不能替代业务接受。"
+      },
+      {
+        "name": "持久追加事件日志+状态投影",
+        "considerations": "适合重建与审计；必须证明条件转移、压实、结果保留和副作用账本正确。"
+      }
+    ],
+    "required_experiments": [
+      "提交前后崩溃、Accepted回执丢失、重复领取、结果上传完成但引用未提交、取消与结果并发。",
+      "队列满时原子预留失败，消费者落后和毒消息有界；游标过期明确重建。",
+      "跨旧备份恢复时幂等窗口结束、外部效果未知不重复执行；定时补跑/DST规则可复验。"
+    ],
+    "rejection_conditions": "先标已处理再执行效果、内存队列接受即报告持久成功、普通重试队列盲重放未知外部效果。",
+    "fallback": "拒绝新准入、暂停消费者或保持未知待核实；本地查询和独立救援继续可用。",
+    "review_triggers": "持久后端、投递引擎、保留策略、触发器或副作用分类变化。",
+    "legacy_validation_scope": "入队确认、元数据容量预留、outbox、至少一次投递、结果未知、取消和恢复。",
+    "legacy_gate": "M2 基础任务；M3 Agent 执行前。"
+  },
+  {
+    "adr_id": "ADR-12",
+    "path": "adr/ADR-012.md",
+    "title": "集群控制面、准入、租约与恢复代次",
+    "legacy_title": "集群控制面、准入、租约与恢复代次",
+    "scope_change": "保持原编号与范围",
+    "status": "Proposed",
+    "owner_role": "Cluster/调度维护者",
+    "owner": null,
+    "implementation_status": "NotVerified",
+    "test_status": "NotRun",
+    "selected_option": null,
+    "gate": "M4 基础集群；多Controller/HA启用前单独增补批准。",
+    "dependencies": [
+      "ADR-04",
+      "ADR-07",
+      "ADR-08",
+      "ADR-11"
+    ],
+    "constraint_documents": [
+      "docs/12-cluster-coordination.md",
+      "docs/05-recovery-consistency.md",
+      "docs/04-security-identity.md"
+    ],
+    "options": [
+      {
+        "name": "单Controller本地事务存储+显式恢复",
+        "considerations": "首期部署简单，故障窗口明确；失效时停止新集群调度，节点按本地策略自治。"
+      },
+      {
+        "name": "单Controller+独立持久权威/见证",
+        "considerations": "可降低部分恢复不确定性；增加在线依赖，仍不自动构成控制器HA。"
+      },
+      {
+        "name": "后续多数派多Controller",
+        "considerations": "只有成员变更、仲裁、故障域和灾难恢复均验证后开启；不能用两节点复制冒称任一故障可用。"
+      }
+    ],
+    "required_experiments": [
+      "Worker领取后分区，旧Worker仍写；新Controller必须在fencing确认前阻塞重放。",
+      "恢复旧快照、克隆节点、证书轮换、重复结果和不兼容Schema的重连。",
+      "混合本地/集群任务压力和失联下验证节点所有权、预算、数据位置与本地接管。"
+    ],
+    "rejection_conditions": "心跳超时即视为旧实例死亡、任务局部run计数当资源栅栏、未知远端效果自动重试。",
+    "fallback": "保持本地自治并暂停共享写重调度；人工可靠隔离后逐资源恢复，不降低认证。",
+    "review_triggers": "HA拓扑、跨区域/多故障域、共享卷、自动迁移或恢复世代实现变化。",
+    "legacy_validation_scope": "单 Controller 持久恢复、双向认证、网络分区、旧结果重放、旧快照恢复；多 Controller 另做仲裁和故障域验证。",
+    "legacy_gate": "M4 基础集群；HA 在启用前单独冻结。"
+  },
+  {
+    "adr_id": "ADR-13",
+    "path": "adr/ADR-013.md",
+    "title": "Dataset/Knowledge 引擎和查询实现",
+    "legacy_title": "Dataset/Knowledge 引擎和查询 Schema",
+    "scope_change": "原范围含字段类型未定；v1逻辑字段与JSON精确查询语义已在数据章节明确，ADR继续裁决实际物理编码、引擎、索引与性能实现，不推翻既定字段。",
+    "status": "Proposed",
+    "owner_role": "Data/Knowledge维护者",
+    "owner": null,
+    "implementation_status": "NotVerified",
+    "test_status": "NotRun",
+    "selected_option": null,
+    "gate": "M5 对应服务启用前。",
+    "dependencies": [
+      "ADR-03",
+      "ADR-04",
+      "ADR-05",
+      "ADR-11"
+    ],
+    "constraint_documents": [
+      "docs/06-storage-data-tablefs.md",
+      "docs/04-security-identity.md",
+      "docs/05-recovery-consistency.md"
+    ],
+    "options": [
+      {
+        "name": "事务主数据+对象内容+独立索引",
+        "considerations": "分离权威与派生负载；需可靠引用发布、增量水位和恢复清单。"
+      },
+      {
+        "name": "具备所需JSON与检索能力的统一数据引擎",
+        "considerations": "减少集成点；必须验证大记录、字段语义、权限过滤和导出，不能由引擎默认值改契约。"
+      },
+      {
+        "name": "轻量主数据服务+可选多种索引后端",
+        "considerations": "方便按需安装；需明确查询能力协商和跨索引一致性窗口。"
+      }
+    ],
+    "required_experiments": [
+      "验证NULL/缺省/score/tag/vector类型、JSON路径精确比较、数值和空数组边界。",
+      "超大记录流式导入/导出、固定版本视图、Embedding版本切换与索引重建。",
+      "撤权/删除后的旧缓存和索引不能泄露；卸载服务不破坏主卷，独立导出可重导入。"
+    ],
+    "rejection_conditions": "把近似向量匹配当精确过滤、把extra_data缩成评分器私字段、索引成为第二原文权威或卸载删除主数据。",
+    "fallback": "保留可用主数据/导出能力，关闭未验证索引；未安装Data Services时Core照常运行。",
+    "review_triggers": "主Schema演进、查询语义/Embedding模型变化、存储后端迁移和新增数据驻留范围。",
+    "legacy_validation_scope": "既有字段、通用 JSON、超大记录、版本视图、索引代次、撤权过滤、导入导出和一致恢复。",
+    "legacy_gate": "M5 对应服务启用前。"
+  },
+  {
+    "adr_id": "ADR-14",
+    "path": "adr/ADR-014.md",
+    "title": "观测与审计后端",
+    "legacy_title": "观测与审计后端",
+    "scope_change": "保持原编号与范围",
+    "status": "Proposed",
+    "owner_role": "Observability/审计维护者",
+    "owner": null,
+    "implementation_status": "NotVerified",
+    "test_status": "NotRun",
+    "selected_option": null,
+    "gate": "M1 最小诊断；M2 强制审计；M6 完整压力与隐私矩阵。",
+    "dependencies": [
+      "ADR-04",
+      "ADR-05"
+    ],
+    "constraint_documents": [
+      "docs/13-operations-release-governance.md",
+      "docs/04-security-identity.md",
+      "docs/03-host-updates-network-devices.md"
+    ],
+    "options": [
+      {
+        "name": "宿主本地日志+结构化审计账本",
+        "considerations": "基础依赖少；本地root篡改风险明确，需控制容量与导出。"
+      },
+      {
+        "name": "本地持久审计加可选远端见证",
+        "considerations": "提高独立验证能力；定义离线窗口、容量和远端失效处理。"
+      },
+      {
+        "name": "标准遥测适配加轻量本机入口",
+        "considerations": "可评估OpenTelemetry类互操作；不要求每节点部署完整Collector，不能代替授权审计。"
+      }
+    ],
+    "required_experiments": [
+      "停用网络/Agent/容器时从本机取得启动、存储和恢复信息。",
+      "审计满盘、日志风暴、高基数标签、导出断流时检查背压、资源预算和特权拒绝。",
+      "验证脱敏、访问控制、导出清单、遥测关闭，以及关键关联ID的完整性。"
+    ],
+    "rejection_conditions": "本地日志声称抵抗宿主root篡改、完整秘密默认进入追踪、远端Collector失败阻断普通工作负载或审计失败静默丢失。",
+    "fallback": "降低可采样诊断量并保留必要本机信息；必要审计不能满足则拒绝相关新增特权操作。",
+    "review_triggers": "采集范围、保留期、远端出口、审计后端或安全见证机制变化。",
+    "legacy_validation_scope": "最小宿主诊断、压力预算、关联追踪、脱敏、审计满盘、出口关闭及可选远端见证。",
+    "legacy_gate": "M1 最小诊断；M2 强制审计；M6 完整矩阵。"
+  },
+  {
+    "adr_id": "ADR-15",
+    "path": "adr/ADR-015.md",
+    "title": "发布信任、兼容窗口与维护政策",
+    "legacy_title": "发布信任、兼容窗口与维护政策",
+    "scope_change": "保持原编号与范围",
+    "status": "Proposed",
+    "owner_role": "Release/Supply-chain维护者",
+    "owner": null,
+    "implementation_status": "NotVerified",
+    "test_status": "NotRun",
+    "selected_option": null,
+    "gate": "M0 流水线框架，M1 开发信任，M6 正式支持政策。",
+    "dependencies": [
+      "ADR-01",
+      "ADR-02",
+      "ADR-04",
+      "ADR-17"
+    ],
+    "constraint_documents": [
+      "docs/13-operations-release-governance.md",
+      "docs/03-host-updates-network-devices.md",
+      "docs/04-security-identity.md"
+    ],
+    "options": [
+      {
+        "name": "受控签名清单加固定发布通道",
+        "considerations": "实现较小；须自行验证回滚、过期、密钥轮换和离线更新攻击面。"
+      },
+      {
+        "name": "TUF类更新元数据与委托体系",
+        "considerations": "可复用机制；需验证选定实现、根轮换、离线时间和恢复操作。"
+      },
+      {
+        "name": "组织发布服务加节点独立验证",
+        "considerations": "可集中管理签名流程，但节点需验证受众/制品/策略并保留离线恢复入口。"
+      }
+    ],
+    "required_experiments": [
+      "重放过期/旧元数据、替换制品、签名密钥泄露/轮换、离线更新与时钟不可信。",
+      "复现构建输入并生成可检查来源证明、许可证和依赖清单，确认秘密不进入制品。",
+      "在实际版本组合测试升级、降级、滚动混版本和不兼容拒绝，建立维护/弃用窗口。"
+    ],
+    "rejection_conditions": "无许可证证据分发、只有标签没有digest、断网跳过校验、签名密钥普遍给开发Agent或用旧镜像恢复已封禁信任。",
+    "fallback": "暂停新发布/更新，保留已验证本地部署和受控救援；发布范围仅含通过验收的组合。",
+    "review_triggers": "签名根事件、发布渠道变更、供应商停止维护、兼容策略或安全响应机制变化。",
+    "legacy_validation_scope": "签名/撤销、离线更新、来源证明、SBOM、许可证、支持周期、弃用与漏洞响应。",
+    "legacy_gate": "M0 流水线框架，M1 开发信任，M6 正式政策。"
+  },
+  {
+    "adr_id": "ADR-16",
+    "path": "adr/ADR-016.md",
+    "title": "发行版资源和体验基线",
+    "legacy_title": "发行版资源和体验基线",
+    "scope_change": "保持原编号与范围",
+    "status": "Proposed",
+    "owner_role": "Edition/Profile与体验维护者",
+    "owner": null,
+    "implementation_status": "NotVerified",
+    "test_status": "NotRun",
+    "selected_option": null,
+    "gate": "M1 最小镜像记录，M4 三版对照，M6 发布门槛。",
+    "dependencies": [
+      "ADR-01",
+      "ADR-06",
+      "ADR-08",
+      "ADR-14",
+      "ADR-25"
+    ],
+    "constraint_documents": [
+      "docs/01-product-and-architecture.md",
+      "docs/03-host-updates-network-devices.md",
+      "docs/13-operations-release-governance.md"
+    ],
+    "options": [
+      {
+        "name": "最小Core加按需角色组合",
+        "considerations": "保持轻量与一致API；需验证安装/卸载和缺失服务反馈。"
+      },
+      {
+        "name": "三版固定默认服务集加可选组件",
+        "considerations": "用户体验明确；防止默认配置逐渐分叉成不同Core。"
+      },
+      {
+        "name": "基于声明Profile生成交付变体",
+        "considerations": "可复用构建与测试矩阵；需要严格限制组合数量和可支持范围。"
+      }
+    ],
+    "required_experiments": [
+      "相同硬件/VM配置下测量镜像体积、安装空间、空闲RAM、启动耗时及压力退化，记录工具和并发。",
+      "完成安装→账户→应用→Agent→备份→恢复的用户路径；Argon额外验证显示、输入法、音频及无障碍。",
+      "满盘/低内存/无网/模型故障时保留诊断、停止与恢复入口。"
+    ],
+    "rejection_conditions": "凭旧项目固定40GB等预算宣称适用、发行版名决定权限、Helium缺少基础Agent契约或可选服务变启动硬依赖。",
+    "fallback": "减少默认角色和并发，准确禁用不支持组合；不因图形/模型组件缺失阻断基础管理。",
+    "review_triggers": "默认服务变化、支持硬件扩大、最低资源目标变化或严重体验退化。",
+    "legacy_validation_scope": "基于实测固定安装容量、空闲资源、首批硬件、Shell/桌面流程与可访问性；记录测量环境。",
+    "legacy_gate": "M1 最小镜像记录，M4 三版对照，M6 发布门槛。"
+  },
+  {
+    "adr_id": "ADR-17",
+    "path": "adr/ADR-017.md",
+    "title": "XeLab 按模块复用",
+    "legacy_title": "XeLab 按模块复用",
+    "scope_change": "保持原编号与范围",
+    "status": "Proposed",
+    "owner_role": "迁移审查/模块维护者",
+    "owner": null,
+    "implementation_status": "NotVerified",
+    "test_status": "NotRun",
+    "selected_option": null,
+    "gate": "任何模块进入 PsiOS 主线之前。",
+    "dependencies": [],
+    "constraint_documents": [
+      "docs/01-product-and-architecture.md",
+      "docs/02-common-contracts.md",
+      "docs/13-operations-release-governance.md"
+    ],
+    "options": [
+      {
+        "name": "保留内部模块并替换边界适配",
+        "considerations": "适合职责清晰且许可可用的代码；必须验证旧隐式信任和资源假设。"
+      },
+      {
+        "name": "只复用算法/测试/工具，重新实现服务边界",
+        "considerations": "减少旧平台耦合；需证明功能与故障语义重新覆盖。"
+      },
+      {
+        "name": "使用维护中的上游组件或新实现替换",
+        "considerations": "降低遗留负担；比较集成、许可、运维和安全成本，不默认重写一定更好。"
+      }
+    ],
+    "required_experiments": [
+      "固定真实HEAD生成模块/文件/许可证矩阵，逐项标reuse/adapt/rewrite/disable及理由。",
+      "在干净环境运行必要测试，复测OCI挂载、任务持久化、撤权和外部副作用危险路径。",
+      "检查旧固定端点、账号、凭据、容量、模型默认与站点部署配置，保留来源追踪。"
+    ],
+    "rejection_conditions": "来源SHA不明、许可无依据、边界依赖隐式宿主特权、测试仅来自无法复验叙述。",
+    "fallback": "该模块不进入主线；保留接口与替代实现计划，历史代码归档不当作已验收产物。",
+    "review_triggers": "上游HEAD变化、发现新许可/安全问题、依赖弃用或PsiOS接口改变。",
+    "legacy_validation_scope": "当前 Forgejo 完整 SHA、依赖/许可、旧约定清除、宿主边界、故障测试与导出清单。",
+    "legacy_gate": "模块进入 PsiOS 主线前。"
+  },
+  {
+    "adr_id": "ADR-18",
+    "path": "adr/ADR-018.md",
+    "title": "TableFS 文件/表双视图存储后端",
+    "legacy_title": "TableFS 文件/表双视图存储后端",
+    "scope_change": "保持原编号与范围",
+    "status": "Proposed",
+    "owner_role": "TableFS/Storage维护者",
+    "owner": null,
+    "implementation_status": "NotVerified",
+    "test_status": "NotRun",
+    "selected_option": null,
+    "gate": "M0 定义接口与实验；M5 首个可选交付/声明前冻结。",
+    "dependencies": [
+      "ADR-03",
+      "ADR-04",
+      "ADR-05",
+      "ADR-13"
+    ],
+    "constraint_documents": [
+      "docs/06-storage-data-tablefs.md",
+      "docs/05-recovery-consistency.md",
+      "docs/04-security-identity.md"
+    ],
+    "options": [
+      {
+        "name": "事务元数据+不可变内容对象+用户态挂载",
+        "considerations": "可直接表达双视图；需验证FUSE/缓存、写放大、fsync及对象引用发布。"
+      },
+      {
+        "name": "现成文件系统保持权威，加受控Catalog/索引",
+        "considerations": "降低持久写风险；目录表并非独立可写权威，需准确声明查询滞后。"
+      },
+      {
+        "name": "不在首轮交付TableFS，仅保留接口和实验",
+        "considerations": "当收益或可靠性未达门槛时的有效No-Go选择，普通卷继续承载数据。"
+      }
+    ],
+    "required_experiments": [
+      "同负载比较原生FS+Index与TableFS：百万目录项、大文件随机写、rename、锁、mmap、尾延迟与写放大。",
+      "在内容写、元数据提交、fsync、GC/压实、快照和导出各点注入崩溃/掉电/满盘。",
+      "交替File API与Catalog写读，验证缓存、权限、删除、独立导出和新目标恢复。"
+    ],
+    "rejection_conditions": "已确认引用的内容永久丢失、未支持POSIX操作假成功、查询绕过ACL、GC删除活跃引用或无实质收益仍强制默认启用。",
+    "fallback": "选择No-Go或限定实验Profile，继续普通卷+索引；保留可验证导出和迁移退出路径。",
+    "review_triggers": "目标负载变化、内核/FUSE行为变更、加入多写或索引成为权威的提案。",
+    "legacy_validation_scope": "稳定 inode/dentry 与 Dataset UID 映射、元数据提交/WAL、分块对象持久化顺序、POSIX 能力矩阵、FUSE 与缓存一致性、隔离权限、虚拟目录语义、百万级对象基准、故障注入、备份导出与回退路径；对比普通文件系统+索引服务的收益与成本。",
+    "legacy_gate": "M0 定义接口和验证计划；M5 首个可选 TableFS 交付/声明前冻结。"
+  },
+  {
+    "adr_id": "ADR-19",
+    "path": "adr/ADR-019.md",
+    "title": "Universal Package Adapter 与发行版兼容 Profile",
+    "legacy_title": "Universal Package Adapter 与发行版兼容 Profile",
+    "scope_change": "保持原编号与范围",
+    "status": "Proposed",
+    "owner_role": "Package Adapter维护者",
+    "owner": null,
+    "implementation_status": "NotVerified",
+    "test_status": "NotRun",
+    "selected_option": null,
+    "gate": "M2 受限原型；M3/M4 首批声明组合发布前。",
+    "dependencies": [
+      "ADR-06",
+      "ADR-15",
+      "ADR-17"
+    ],
+    "constraint_documents": [
+      "docs/07-applications-packages-gui.md",
+      "docs/04-security-identity.md",
+      "docs/13-operations-release-governance.md"
+    ],
+    "options": [
+      {
+        "name": "发行版原生解析器在隔离构建环境运行",
+        "considerations": "保留依赖语义；限制安装脚本、网络源、挂载和产物出口。"
+      },
+      {
+        "name": "预验证发行版基础镜像加限定应用导入",
+        "considerations": "缩小支持矩阵；每个包版本/架构仍需功能与升级测试。"
+      },
+      {
+        "name": "对已打包OCI/Flatpak应用优先使用原制品",
+        "considerations": "降低导入复杂度；不把这种路径误标为对应DEB/RPM/APK已实现全面支持。"
+      }
+    ],
+    "required_experiments": [
+      "每种Linux格式安装、启动、升级、卸载一个可信样例，记录仓库、依赖锁和镜像digest。",
+      "恶意脚本、路径穿越、依赖冲突、超时、满盘、无内核能力和跨架构请求准确拒绝。",
+      "上游安全更新触发重建/回归/受控替换；旧用户卷不被脚本或GC破坏。"
+    ],
+    "rejection_conditions": "宿主包管理器混装、安装脚本任意root、格式识别即标RuntimeVerified、Android/Alpine混淆。",
+    "fallback": "只发布已验证包/Profile，未通过者保持Recognized或Unsupported，不扩大宿主权限以提高兼容率。",
+    "review_triggers": "发行版/ABI/仓库切换、新脚本能力、基础镜像更新和安全修复策略变化。",
+    "legacy_validation_scope": "DEB/RPM/Alpine APK 各一个来源可信的安装/升级/卸载样例，发行版 rootfs/ABI/架构矩阵、脚本权限与依赖锁定、OCI 制品追溯、故障恢复、Android APK 格式误识别拦截。",
+    "legacy_gate": "M2 导入器原型；M3/M4 首批声明支持的组合发布前冻结。"
+  },
+  {
+    "adr_id": "ADR-20",
+    "path": "adr/ADR-020.md",
+    "title": "GUI Bridge：窗口、Viewer 与传输后端",
+    "legacy_title": "GUI Bridge：Wayland/X11、窗口与传输后端",
+    "scope_change": "原题包含Wayland/X11桌面后端；v1将本机compositor/Portal能力具体选择交ADR-10，本ADR保留窗口呈现、浏览器Viewer、媒体/输入传输、代理与重连语义，编号不变。",
+    "status": "Proposed",
+    "owner_role": "GUI Bridge/Web交互维护者",
+    "owner": null,
+    "implementation_status": "NotVerified",
+    "test_status": "NotRun",
+    "selected_option": null,
+    "gate": "M3 Schema；M4 声明图形入口发布前。",
+    "dependencies": [
+      "ADR-04",
+      "ADR-06",
+      "ADR-10",
+      "ADR-16"
+    ],
+    "constraint_documents": [
+      "docs/07-applications-packages-gui.md",
+      "docs/04-security-identity.md"
+    ],
+    "options": [
+      {
+        "name": "WebRTC媒体与受控输入信令",
+        "considerations": "评估低延迟路径、NAT/TURN、加密和资源预算，实际能力逐项协商。"
+      },
+      {
+        "name": "现成图形桥组件如Xpra/Selkies/网关的窄适配",
+        "considerations": "复用传输实现；验证身份、剪贴板、窗口隔离与生命周期映射。"
+      },
+      {
+        "name": "NativeWeb反向代理或独立受控入口",
+        "considerations": "适用已有Web前端应用；遵守CSP/会话策略，不强行iframe所有站点。"
+      }
+    ],
+    "required_experiments": [
+      "Argon授权桌面、Neon无头单应用、浏览器与Agent互斥输入各跑闭环。",
+      "断线重连、旧URL重放、窗口销毁、锁屏、缩放变化和暂停输入队列，验证不会控制错误目标。",
+      "测试权限分项、跨站/脚本内容、音视频/IME/剪贴板、软件回退资源预算及TURN凭据有效期。"
+    ],
+    "rejection_conditions": "窗口裁剪冒充隔离、观察者可输入、旧Viewer自动恢复控制、任意iframe绕安全策略或无限帧队列影响宿主。",
+    "fallback": "降至已授权且支持的只读/独立入口；需要更大屏幕范围时新授权，无法限制就拒绝。",
+    "review_triggers": "媒体协议、编码器、桥接组件、会话授权、硬件加速或浏览器安全模型变化。",
+    "legacy_validation_scope": "KDE 授权会话与无头 compositor 的 FullDesktop/SingleApplication 演示；Xpra/Selkies 等候选对照；Portal 实际授权撤销、输入租约、音视频/剪贴板、WebRTC/回退与连线恢复；安全与资源预算。",
+    "legacy_gate": "M3 Schema，M4 声明支持的图形入口发布前冻结。"
+  },
+  {
+    "adr_id": "ADR-21",
+    "path": "adr/ADR-021.md",
+    "title": "Agent Chat 的 Room/DM、投递和唤醒后端",
+    "legacy_title": "Agent Chat 的 Room/DM、投递和唤醒后端",
+    "scope_change": "沿用ADR-21身份。v0.6两张表的Agent Chat/Conversation/DM为同一决策；通用容量和持久化基础选择与ADR-25联合，不能让消息投递器拥有第二消息权威。",
+    "status": "Proposed",
+    "owner_role": "Conversation/消息路由维护者",
+    "owner": null,
+    "implementation_status": "NotVerified",
+    "test_status": "NotRun",
+    "selected_option": null,
+    "gate": "M0 Schema；M3 单机Chat；M4 跨节点协作声明前。",
+    "dependencies": [
+      "ADR-04",
+      "ADR-05",
+      "ADR-11",
+      "ADR-25"
+    ],
+    "constraint_documents": [
+      "docs/10-conversations.md",
+      "docs/04-security-identity.md",
+      "docs/05-recovery-consistency.md"
+    ],
+    "options": [
+      {
+        "name": "内置事务消息存储+outbox投递",
+        "considerations": "适合轻量本机；测试消息/ACL/附件引用提交、离线队列和容量。"
+      },
+      {
+        "name": "权威消息存储+外部投递服务",
+        "considerations": "扩展连接与推送；外部服务只负责投递，不能重复确认权威历史。"
+      },
+      {
+        "name": "首期单机会话服务，跨节点经显式代理",
+        "considerations": "降低分区复杂度；跨节点不可达时Pending而非双主确认。"
+      }
+    ],
+    "required_experiments": [
+      "双Agent与用户群聊/DM/@/邀请，普通消息不广播唤醒无关Agent。",
+      "同键同文/异文、ACK丢失、writer切换、双节点分区、旧凭据和membership改变。",
+      "权限撤销后旧搜索/附件/摘要不泄露；预算、循环@、桥接回流和离线堆积有界。"
+    ],
+    "rejection_conditions": "Pending被当可信历史触发执行、失联侧自行分配正式seq、消息类型改变Task/审批状态或旧成员继续读无权历史。",
+    "fallback": "单写不可证时暂停确认写入；可保存有界Pending但不伪装成功；本机独立管理保持可用。",
+    "review_triggers": "增加多写/联邦、历史导入、消息保留、外部桥接和自动唤醒策略变化。",
+    "legacy_validation_scope": "单机/跨节点消息存储、成员授权、群内顺序、离线领取、去重、撤权后的历史与附件访问、自动回复循环上限及 CLI/A2A 适配器测试；比较内置存储与外部消息服务的资源占用。",
+    "legacy_gate": "M0 Schema；M3 基础 Chat 声明支持前；跨节点协作 M4 前。"
+  },
+  {
+    "adr_id": "ADR-22",
+    "path": "adr/ADR-022.md",
+    "title": "PsiFlow 编排、WorkflowRun 与版本化 DSL",
+    "legacy_title": "PsiFlow 编排、项目对象和外部仓库集成",
+    "scope_change": "v0.5/第29章宽范围包括项目对象和外部仓库；v0.6第35章已增加ADR-23/24/25。v1将Project/外部字段权威交ADR-23、审批/Saga交ADR-24、物理存储/容量交ADR-25；ADR-22保留编排、DSL、调度与Task映射。旧编号不复用于其他主题。",
+    "status": "Proposed",
+    "owner_role": "Workflow/PsiFlow维护者",
+    "owner": null,
+    "implementation_status": "NotVerified",
+    "test_status": "NotRun",
+    "selected_option": null,
+    "gate": "M0 对象/状态契约；M3 基础编排；M4 跨节点联动前。",
+    "dependencies": [
+      "ADR-04",
+      "ADR-05",
+      "ADR-11",
+      "ADR-24",
+      "ADR-25"
+    ],
+    "constraint_documents": [
+      "docs/11-workflows-projects.md",
+      "docs/08-tasks-events.md",
+      "docs/04-security-identity.md"
+    ],
+    "options": [
+      {
+        "name": "最小内置DSL解释器+持久步骤状态",
+        "considerations": "容易限定能力与轻量部署；需实现版本、暂停、合流和恢复正确性。"
+      },
+      {
+        "name": "适配现成持久工作流引擎",
+        "considerations": "可复用调度能力；必须映射PsiOS权限/Task权威，禁止引擎自动重试未知效果。"
+      },
+      {
+        "name": "声明式DAG优先，动态能力分阶段启用",
+        "considerations": "缩小首轮语义，未支持控制结构明确拒绝；后续扩展遵守版本协商。"
+      }
+    ],
+    "required_experiments": [
+      "在每个派发/接受/绑定裂缝崩溃，重复outbox只得到同一Task。",
+      "并行合流、条件分支、循环上限、审批等待、取消及部分补偿后的恢复。",
+      "运行中更新Definition、工具Schema或输入版本，旧Run保持固定定义或明确停在不兼容状态。"
+    ],
+    "rejection_conditions": "重启从头重放副作用、DSL允许任意I/O表达式、动态任务无限扩张、Workflow伪造Task成功。",
+    "fallback": "保留已确认步骤并暂停待核实；不支持动态结构时使用受限DAG；完整Studio不是正确性前置。",
+    "review_triggers": "DSL版本、状态迁移、控制结构、调度引擎、检查点和跨节点执行策略变化。",
+    "legacy_validation_scope": "单机可靠 Workflow、复杂依赖/审批、Run/Task 权威映射、Agent/Worker Lease、失败恢复、Forgejo Webhook 去重及单一权威字段映射、CI/PR 验收；按预算实测 SQLite/PostgreSQL/队列候选。",
+    "legacy_gate": "M0 对象与状态契约；M3 基础编排启用前；项目/集群联动 M4 前。"
+  },
+  {
+    "adr_id": "ADR-23",
+    "path": "adr/ADR-023.md",
+    "title": "项目管理及外部系统同步",
+    "legacy_title": "项目管理及外部系统同步",
+    "scope_change": "承接原ADR-22中Project对象、外部仓库和CI同步实现决策；延续v0.6新增ADR-23编号。",
+    "status": "Proposed",
+    "owner_role": "Project/Integration维护者",
+    "owner": null,
+    "implementation_status": "NotVerified",
+    "test_status": "NotRun",
+    "selected_option": null,
+    "gate": "M0 字段权威契约；M3 只读集成PoC；M4 受控写回前。",
+    "dependencies": [
+      "ADR-04",
+      "ADR-05",
+      "ADR-11",
+      "ADR-22"
+    ],
+    "constraint_documents": [
+      "docs/11-workflows-projects.md",
+      "docs/04-security-identity.md",
+      "docs/08-tasks-events.md"
+    ],
+    "options": [
+      {
+        "name": "只读外部同步加显式受控操作",
+        "considerations": "先建立可靠事实视图，写回作为独立Operation进行权限/前提检查。"
+      },
+      {
+        "name": "按字段单向权威的双向集成",
+        "considerations": "允许不同字段分别由PsiOS或外部拥有；冲突不能盲合并同一字段。"
+      },
+      {
+        "name": "外部系统为主的轻量Project投影",
+        "considerations": "减少重复项目状态；本机任务与Workflow仍可独立运行。"
+      }
+    ],
+    "required_experiments": [
+      "重复、乱序、漏投Webhook，外部人工修改和权限回收，投影必须能重建。",
+      "PR head SHA改变、CI仅测旧SHA、合并回执丢失，不能宣布已通过/合并或重复写。",
+      "同一事件往返桥接、对象删除重建、不同租户相同repo/name不能串映射。"
+    ],
+    "rejection_conditions": "使用时间戳猜权威、自然语言汇报替代真实CI、字段两端独立覆盖、丢权限后缓存仍作当前事实。",
+    "fallback": "转只读/标Stale或Blocked并等待权威对账；不删除外部对象来解决映射冲突。",
+    "review_triggers": "外部厂商API/认证/版本机制变化、增加受控写动作、新字段权威或多项目共享权限。",
+    "legacy_validation_scope": "Project/WorkItem 事实来源；Forgejo/GitHub/CI 的 authority、revision、Webhook、冲突对账；重复、乱序、丢失 Webhook 和人工修改下无误覆盖。",
+    "legacy_gate": "原追加表未给出单独阶段门槛；v1门槛列于本记录登记表。"
+  },
+  {
+    "adr_id": "ADR-24",
+    "path": "adr/ADR-024.md",
+    "title": "跨模块操作/审批与 Saga",
+    "legacy_title": "跨模块操作/审批与 Saga",
+    "scope_change": "承接原ADR-22中跨步骤审批/补偿和v0.6新增ADR-24。只决定跨权威可靠协议，不能取代各资源权威或声明全局ACID。",
+    "status": "Proposed",
+    "owner_role": "Core一致性/Policy/Workflow联合维护者",
+    "owner": null,
+    "implementation_status": "NotVerified",
+    "test_status": "NotRun",
+    "selected_option": null,
+    "gate": "M0 共同契约；M2/M3 自动副作用和审批执行前。",
+    "dependencies": [
+      "ADR-04",
+      "ADR-05",
+      "ADR-11"
+    ],
+    "constraint_documents": [
+      "docs/02-common-contracts.md",
+      "docs/04-security-identity.md",
+      "docs/05-recovery-consistency.md",
+      "docs/11-workflows-projects.md"
+    ],
+    "options": [
+      {
+        "name": "各权威本地事务+outbox/inbox+显式Saga",
+        "considerations": "保持职责清楚；需要每一步幂等键、回执查询、超时和人工接管。"
+      },
+      {
+        "name": "小范围同库事务+跨边界Saga",
+        "considerations": "可减少部分裂缝；不能将物理同库升级为永久架构假设或跨外部系统事务。"
+      },
+      {
+        "name": "对不可安全补偿的流程采用人工检查点",
+        "considerations": "保留可靠自动部分；高风险未核实效果由明确接管流程处理。"
+      }
+    ],
+    "required_experiments": [
+      "审批成功但绑定丢失、绑定后执行器崩溃、撤销与准入竞态、外部成功但回执丢失。",
+      "取消与晚到成功、补偿失败、预算耗尽、旧快照恢复及去重过期。",
+      "记录每一故障点的权威事实和允许转移，证明无重复有害效果、无审计缺口或虚假全部回滚。"
+    ],
+    "rejection_conditions": "分布式check-then-write冒充原子授权、同意一次允许任意后续操作、自动更换幂等键绕未知效果。",
+    "fallback": "保持不确定性和实际效果记录，停止后续依赖步骤并转核实/接管；合法独立任务可按范围继续。",
+    "review_triggers": "新增外部不可逆动作、审批策略/摘要规则、事务边界、恢复窗口或补偿能力变化。",
+    "legacy_validation_scope": "Plan/Approval/Operation/Workflow 的版本绑定、审批缓存、补偿边界、OutcomeUnknown、人类接管；注入超时、取消、审批失效、补偿失败、跨节点恢复。",
+    "legacy_gate": "原追加表未给出单独阶段门槛；v1门槛列于本记录登记表。"
+  },
+  {
+    "adr_id": "ADR-25",
+    "path": "adr/ADR-025.md",
+    "title": "Workflow/Chat 持久存储、容量、保留与回收",
+    "legacy_title": "Workflow/Chat 的状态存储与容量",
+    "scope_change": "延续v0.6 ADR-25。v1补全跨服务RecoverySetManifest、去重/审批/效果账本与附件GC的共同容量约束；不转移ADR-05资源API、ADR-11 Task/Event、ADR-21/22领域权威。",
+    "status": "Proposed",
+    "owner_role": "Persistence/容量与恢复联合维护者",
+    "owner": null,
+    "implementation_status": "NotVerified",
+    "test_status": "NotRun",
+    "selected_option": null,
+    "gate": "M0 容量模型；M2/M3 相关服务启用前；M4集群/M5数据扩展前复核。",
+    "dependencies": [
+      "ADR-03",
+      "ADR-04",
+      "ADR-05",
+      "ADR-11"
+    ],
+    "constraint_documents": [
+      "docs/08-tasks-events.md",
+      "docs/10-conversations.md",
+      "docs/11-workflows-projects.md",
+      "docs/05-recovery-consistency.md",
+      "docs/06-storage-data-tablefs.md"
+    ],
+    "options": [
+      {
+        "name": "轻量节点事务库+内容对象文件",
+        "considerations": "可降低常驻依赖；需要验证对象发布、压实、WAL和磁盘故障。"
+      },
+      {
+        "name": "服务型事务库+受控对象池",
+        "considerations": "适合中心角色；本机最小能力与恢复不能硬依赖远端服务。"
+      },
+      {
+        "name": "按Profile组合物理后端，共用恢复和保留契约",
+        "considerations": "支持不同规模；每种组合必须有明确版本/容量/恢复测试，避免无限组合。"
+      }
+    ],
+    "required_experiments": [
+      "满盘、inode耗尽、对象池不可达、WAL膨胀和消费者积压时验证准入、背压与安全GC。",
+      "恢复非同步数据库与对象快照，核对Task/Workflow/消息/附件/审批使用关系。",
+      "在去重记录过期、备份仍保留、节点长期离线时验证旧请求不能再次产生危险效果；测量RPO/RTO与尾延迟。"
+    ],
+    "rejection_conditions": "默认清除未决效果/审批消费、引用对象被GC、容器删除带走独立卷、或用无界队列掩盖容量不足。",
+    "fallback": "拒绝新增、暂停非必要投递/索引、保留查询和恢复；不牺牲最后验证备份或关键安全账本换空间。",
+    "review_triggers": "保留与回收政策、备份窗口、对象池、持久数据库、集群布局或默认Profile预算变化。",
+    "legacy_validation_scope": "单机持久数据库/事件方式、保留与 GC、消息/附件上限、扩展到集群、备份迁移；磁盘满、回放、Schema 升级与旧快照恢复压力测试。",
+    "legacy_gate": "原追加表未给出单独阶段门槛；v1门槛列于本记录登记表。"
+  }
+]

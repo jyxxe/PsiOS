@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.psios.example/v1/operation-plan.schema.json",
+  "title": "Immutable OperationPlan",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "plan_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "purpose_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "requester_principal_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "delegation_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "allowed_effects": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "resource_ref": {
+            "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+          },
+          "action": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+          },
+          "scope_ref": {
+            "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+          }
+        },
+        "required": [
+          "resource_ref",
+          "action",
+          "scope_ref"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1,
+      "maxItems": 256
+    },
+    "input_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+      },
+      "minItems": 0,
+      "maxItems": 4096
+    },
+    "runtime_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+      },
+      "minItems": 1,
+      "maxItems": 64
+    },
+    "preconditions": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/Precondition"
+      },
+      "minItems": 0,
+      "maxItems": 256
+    },
+    "budget_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "deadline_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "data_policy_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "permission_delta_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+      },
+      "minItems": 0,
+      "maxItems": 256
+    },
+    "recovery_plan_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "irreversible_effects": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 0,
+      "maxItems": 256
+    },
+    "use_scope": {
+      "enum": [
+        "SingleOperation",
+        "BoundedSteps"
+      ]
+    },
+    "step_keys": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+      },
+      "minItems": 1,
+      "maxItems": 256,
+      "uniqueItems": true
+    },
+    "digest_profile": {
+      "type": "object",
+      "properties": {
+        "digest_algorithm": {
+          "const": "SHA-256"
+        },
+        "canonicalization_version": {
+          "const": "RFC8785"
+        },
+        "domain": {
+          "const": "psios/operation-plan/1"
+        }
+      },
+      "required": [
+        "digest_algorithm",
+        "canonicalization_version",
+        "domain"
+      ],
+      "additionalProperties": false
+    },
+    "plan_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  },
+  "required": [
+    "schema_version",
+    "plan_id",
+    "purpose_ref",
+    "requester_principal_id",
+    "delegation_ref",
+    "allowed_effects",
+    "input_refs",
+    "runtime_refs",
+    "preconditions",
+    "budget_ref",
+    "deadline_at",
+    "data_policy_ref",
+    "permission_delta_refs",
+    "recovery_plan_ref",
+    "irreversible_effects",
+    "use_scope",
+    "digest_profile",
+    "plan_digest"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "use_scope": {
+            "const": "BoundedSteps"
+          }
+        },
+        "required": [
+          "use_scope"
+        ]
+      },
+      "then": {
+        "required": [
+          "step_keys"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "use_scope": {
+            "const": "SingleOperation"
+          }
+        },
+        "required": [
+          "use_scope"
+        ]
+      },
+      "then": {
+        "not": {
+          "required": [
+            "step_keys"
+          ]
+        }
+      }
+    }
+  ]
+}

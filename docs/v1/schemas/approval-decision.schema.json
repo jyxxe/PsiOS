@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.psios.example/v1/approval-decision.schema.json",
+  "title": "Immutable approval/rejection fact",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "decision_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "request_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "plan_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "decision": {
+      "enum": [
+        "Approved",
+        "Rejected"
+      ]
+    },
+    "approver_principal_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "decided_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "valid_until": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "approval_policy_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "preconditions": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/Precondition"
+      },
+      "minItems": 0,
+      "maxItems": 256
+    },
+    "use_limit": {
+      "enum": [
+        "SingleOperation",
+        "BoundedSteps"
+      ]
+    },
+    "step_keys": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+      },
+      "minItems": 1,
+      "maxItems": 256,
+      "uniqueItems": true
+    },
+    "verification_evidence_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    }
+  },
+  "required": [
+    "schema_version",
+    "decision_id",
+    "request_ref",
+    "plan_digest",
+    "decision",
+    "approver_principal_id",
+    "decided_at",
+    "valid_until",
+    "approval_policy_ref",
+    "preconditions",
+    "use_limit",
+    "verification_evidence_ref"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "use_limit": {
+            "const": "BoundedSteps"
+          }
+        },
+        "required": [
+          "use_limit"
+        ]
+      },
+      "then": {
+        "required": [
+          "step_keys"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "use_limit": {
+            "const": "SingleOperation"
+          }
+        },
+        "required": [
+          "use_limit"
+        ]
+      },
+      "then": {
+        "not": {
+          "required": [
+            "step_keys"
+          ]
+        }
+      }
+    }
+  ]
+}

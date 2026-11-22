@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0.0",
+  "status": "Indeterminate",
+  "authority_id": "task-broker",
+  "recovery_incarnation": "core-incarnation-2",
+  "checked_at": "2026-11-22T08:00:00Z",
+  "origin_ref": {
+    "authority_id": "workflow-local",
+    "origin_type": "WorkflowRun",
+    "origin_id": "wf-run-demo",
+    "step_key": "review/iteration-0",
+    "attempt_generation": "0"
+  },
+  "idempotency_key": "submit-window-1/review-0",
+  "request_digest": "sha256:176e64af9c97dcbff66293c0ab23223a4d9f9222d739eed42f664a3be7bb9691",
+  "namespace_ref": {
+    "resource_id": "submit-window-1",
+    "version": "rev-1",
+    "digest": "sha256:8364004c4eb89bace1974a877298d19cd331b55393d90fcd18213bf9ca422084"
+  },
+  "reason": "The authority cannot prove non-acceptance."
+}

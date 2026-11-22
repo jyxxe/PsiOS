@@ -1,0 +1,377 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.psios.example/v1/common.schema.json",
+  "title": "PsiOS v1 shared types (not a writable generic API)",
+  "$defs": {
+    "Id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "UInt64": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})$",
+      "description": "Canonical unsigned decimal string. Semantic bound: <= 18446744073709551615."
+    },
+    "PositiveUInt64": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,19}$",
+      "description": "Canonical positive decimal string. Semantic u64 bound applies."
+    },
+    "Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "Timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "OpaqueVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "OutcomeKnowledge": {
+      "enum": [
+        "NotStarted",
+        "InFlight",
+        "Known",
+        "Unknown"
+      ]
+    },
+    "CompensationStatus": {
+      "enum": [
+        "NotRequired",
+        "Planned",
+        "Running",
+        "Complete",
+        "Partial",
+        "Failed"
+      ]
+    },
+    "ResourceRef": {
+      "type": "object",
+      "properties": {
+        "resource_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "resource_id",
+        "version",
+        "digest"
+      ],
+      "additionalProperties": false
+    },
+    "ContentRef": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "ref"
+        },
+        "resource_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "size_bytes": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+        },
+        "media_type": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "kind",
+        "resource_id",
+        "version",
+        "digest",
+        "size_bytes",
+        "media_type"
+      ],
+      "additionalProperties": false
+    },
+    "DurabilityProfile": {
+      "type": "object",
+      "properties": {
+        "profile_ref": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+        },
+        "ack_level": {
+          "const": "Durable"
+        },
+        "fault_scope": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "ProcessCrash",
+              "PowerLoss",
+              "DeviceLoss",
+              "NodeLoss"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true
+        },
+        "rpo_seconds": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+        }
+      },
+      "required": [
+        "profile_ref",
+        "ack_level",
+        "fault_scope",
+        "rpo_seconds"
+      ],
+      "additionalProperties": false
+    },
+    "OriginRef": {
+      "type": "object",
+      "properties": {
+        "authority_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "origin_type": {
+          "enum": [
+            "WorkflowRun",
+            "Schedule",
+            "ChatDispatch",
+            "HumanRequest",
+            "Service"
+          ]
+        },
+        "origin_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "step_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "attempt_generation": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+        }
+      },
+      "required": [
+        "authority_id",
+        "origin_type",
+        "origin_id"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "origin_type": {
+                "const": "WorkflowRun"
+              }
+            },
+            "required": [
+              "origin_type"
+            ]
+          },
+          "then": {
+            "required": [
+              "step_key",
+              "attempt_generation"
+            ]
+          }
+        }
+      ]
+    },
+    "Precondition": {
+      "type": "object",
+      "properties": {
+        "resource_ref": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+        },
+        "kind": {
+          "enum": [
+            "ResourceVersion",
+            "ContentDigest",
+            "CommitSHA",
+            "DeviceIdentity",
+            "ProfilePredicate"
+          ]
+        },
+        "expected": {
+          "type": "string",
+          "minLength": 1
+        },
+        "enforcement": {
+          "enum": [
+            "ConditionalApply",
+            "ExclusiveAuthority"
+          ]
+        },
+        "predicate_profile_ref": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+        }
+      },
+      "required": [
+        "resource_ref",
+        "kind",
+        "expected",
+        "enforcement"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "ProfilePredicate"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "predicate_profile_ref"
+            ]
+          }
+        }
+      ]
+    },
+    "Condition": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "status": {
+          "enum": [
+            "True",
+            "False",
+            "Unknown"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "message": {
+          "type": "string"
+        },
+        "observed_generation": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+        },
+        "last_transition_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+        }
+      },
+      "required": [
+        "type",
+        "status",
+        "reason",
+        "message",
+        "observed_generation",
+        "last_transition_at"
+      ],
+      "additionalProperties": false
+    },
+    "Fence": {
+      "type": "object",
+      "properties": {
+        "resource_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "recovery_incarnation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "epoch": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+        }
+      },
+      "required": [
+        "resource_id",
+        "recovery_incarnation",
+        "epoch"
+      ],
+      "additionalProperties": false
+    },
+    "RetentionRef": {
+      "type": "object",
+      "properties": {
+        "retention_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "resource_ref": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+        },
+        "authority_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "valid_until": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+        }
+      },
+      "required": [
+        "retention_id",
+        "resource_ref",
+        "authority_id",
+        "valid_until"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

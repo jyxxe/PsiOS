@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0.0",
+  "decision_id": "decision-demo",
+  "request_ref": {
+    "resource_id": "approval-request-demo",
+    "version": "rev-1",
+    "digest": "sha256:1eb3327e15cf3ff3589b8dbb45460372f3129f25916cc4d307dfc48bf7d18bbe"
+  },
+  "plan_digest": "sha256:76f3a62bfb9c6f378a7477e734b6e1b802ed5d18f84a323f20e6f215ce55a87d",
+  "decision": "Approved",
+  "approver_principal_id": "principal-reviewer",
+  "decided_at": "2026-11-22T08:00:00Z",
+  "valid_until": "2026-11-22T09:00:00Z",
+  "approval_policy_ref": {
+    "resource_id": "approval-policy",
+    "version": "rev-1",
+    "digest": "sha256:fc50a51ba8ead210d9af0445b2d688b2eab9b75ed28e45225c882cdbf7826297"
+  },
+  "preconditions": [
+    {
+      "resource_ref": {
+        "resource_id": "target-document",
+        "version": "rev-1",
+        "digest": "sha256:daee958c2c3ba7e6b9589b02f1e86b41dab48c4270ccefd1e24c878489581490"
+      },
+      "kind": "ContentDigest",
+      "expected": "sha256:daee958c2c3ba7e6b9589b02f1e86b41dab48c4270ccefd1e24c878489581490",
+      "enforcement": "ConditionalApply"
+    }
+  ],
+  "use_limit": "SingleOperation",
+  "verification_evidence_ref": {
+    "resource_id": "approval-audit",
+    "version": "rev-1",
+    "digest": "sha256:c4eef423ec6474582d7aed74f5d6f8233558ff1d42e5e322a64ed95498597906"
+  }
+}

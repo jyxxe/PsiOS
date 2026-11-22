@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0.0",
+  "authority_id": "storage-local",
+  "recovery_incarnation": "storage-incarnation-2",
+  "snapshot_id": "snapshot-list-demo",
+  "items": [
+    {
+      "resource_id": "volume-demo",
+      "version": "rev-1",
+      "digest": "sha256:6fd638360057f1c9d12af4d9664f9b06b0f3be8fc71d54ddc754b13740ff9525"
+    }
+  ],
+  "next_cursor": null,
+  "watch_start_cursor": "opaque-watch-demo",
+  "expires_at": "2026-11-22T09:00:00Z",
+  "authorization_epoch": "20",
+  "complete": true
+}

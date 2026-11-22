@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0.0",
+  "approval_request_id": "approval-request-demo",
+  "plan_ref": {
+    "resource_id": "plan-demo",
+    "version": "rev-1",
+    "digest": "sha256:eb7d50144814fd99afc0433feada11fd6b94edd87e40c48679e3f030cacb22fd"
+  },
+  "plan_digest": "sha256:76f3a62bfb9c6f378a7477e734b6e1b802ed5d18f84a323f20e6f215ce55a87d",
+  "requester_principal_id": "principal-user",
+  "approver_policy_ref": {
+    "resource_id": "approval-policy",
+    "version": "rev-1",
+    "digest": "sha256:fc50a51ba8ead210d9af0445b2d688b2eab9b75ed28e45225c882cdbf7826297"
+  },
+  "status": "Pending",
+  "expires_at": "2026-11-22T09:00:00Z"
+}

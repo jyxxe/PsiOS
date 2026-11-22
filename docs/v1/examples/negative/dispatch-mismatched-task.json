@@ -1,0 +1,67 @@
+{
+  "schema_version": "1.0.0",
+  "intent_id": "intent-review-0",
+  "workflow_run_id": "wf-run-demo",
+  "step_key": "review/iteration-0",
+  "attempt_generation": "0",
+  "submit_request": {
+    "schema_version": "1.0.0",
+    "origin_ref": {
+      "authority_id": "workflow-local",
+      "origin_type": "WorkflowRun",
+      "origin_id": "wf-run-demo",
+      "step_key": "review/iteration-0",
+      "attempt_generation": "0"
+    },
+    "idempotency_key": "submit-window-1/review-0",
+    "input_ref": {
+      "resource_id": "review-input",
+      "version": "rev-1",
+      "digest": "sha256:e5d06a3998e8ed7373c1cd1799383f287f9bb37105f90de6ca5a517d7697db51"
+    },
+    "task_type": "review.read_only.v1",
+    "delegation_ref": {
+      "resource_id": "delegation-review",
+      "version": "rev-1",
+      "digest": "sha256:1a224ec34161b91a7b0ffa3b1858897e93d3628c372f725ca5b48674e0f7a31b"
+    },
+    "budget_ref": {
+      "resource_id": "budget-review",
+      "version": "rev-1",
+      "digest": "sha256:408616897a72dc871f8c1593211e2efb21959733fbb9c2b7358f01ff1c0729de"
+    },
+    "deadline_at": "2026-11-22T09:00:00Z",
+    "cancel_scope_id": "cancel-scope-demo",
+    "request_digest": "sha256:176e64af9c97dcbff66293c0ab23223a4d9f9222d739eed42f664a3be7bb9691"
+  },
+  "status": "Linked",
+  "accepted": {
+    "schema_version": "1.0.0",
+    "task_id": "task-demo",
+    "task_revision": "revision-accepted",
+    "accepted_at": "2026-11-22T08:00:00Z",
+    "request_digest": "sha256:9d6f965ac832e40a5df6c06afe983e3b449c07b843ff51ce76204de05c690d11",
+    "origin_ref": {
+      "authority_id": "workflow-local",
+      "origin_type": "WorkflowRun",
+      "origin_id": "wf-run-demo",
+      "step_key": "review/iteration-0",
+      "attempt_generation": "0"
+    },
+    "idempotency_key": "submit-window-1/review-0",
+    "deduplicated": false,
+    "durability_profile": {
+      "profile_ref": {
+        "resource_id": "profile-local-durable",
+        "version": "rev-1",
+        "digest": "sha256:c96dffa1f435c03577441c9f0fc6c16c1c4adca32d23f0c2fda8fb8564307866"
+      },
+      "ack_level": "Durable",
+      "fault_scope": [
+        "ProcessCrash",
+        "PowerLoss"
+      ],
+      "rpo_seconds": "0"
+    }
+  }
+}

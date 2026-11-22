@@ -1,0 +1,442 @@
+{
+  "document_version": "1.0.0",
+  "checked_on": "2026-11-22",
+  "references": [
+    {
+      "id": "SEC-S01",
+      "title": "RFC 9700 — Best Current Practice for OAuth 2.0 Security",
+      "url": "https://www.rfc-editor.org/rfc/rfc9700.html",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SEC-S01"
+      ],
+      "claims": [
+        "OAuth授权中的受众限制、code/PKCE及refresh token保护机制；不证明PsiOS已采用或实现"
+      ]
+    },
+    {
+      "id": "SEC-S02",
+      "title": "RFC 8785 — JSON Canonicalization Scheme",
+      "url": "https://www.rfc-editor.org/rfc/rfc8785.html",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SEC-S02",
+        "SRC-CORE-001"
+      ],
+      "claims": [
+        "确定性JSON规范化、拒绝重复键、数值/Unicode/数组顺序约束；v1选定JCS摘要语义，具体实现库仍待ADR验证",
+        "JCS数值/Unicode/排序及确定摘要语义；不等于完整PsiOS安全验证"
+      ]
+    },
+    {
+      "id": "SEC-S03",
+      "title": "OWASP Session Management Cheat Sheet",
+      "url": "https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SEC-S03"
+      ],
+      "claims": [
+        "Web会话Cookie、登录/权限变化时ID轮换、服务端过期和注销机制"
+      ]
+    },
+    {
+      "id": "SEC-S04",
+      "title": "OWASP Cross-Site Request Forgery Prevention Cheat Sheet",
+      "url": "https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SEC-S04"
+      ],
+      "claims": [
+        "CSRF防护、Origin/SameSite边界及安全GET；具体PsiOS策略由本包提出"
+      ]
+    },
+    {
+      "id": "SEC-S05",
+      "title": "OWASP Cross Site Scripting Prevention Cheat Sheet",
+      "url": "https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SEC-S05"
+      ],
+      "claims": [
+        "上下文输出编码、HTML消毒以及CSP仅作为纵深防御"
+      ]
+    },
+    {
+      "id": "SRC-STA-01",
+      "title": "Linux kernel 6.1 FUSE documentation",
+      "url": "https://docs.kernel.org/6.1/filesystems/fuse.html",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SRC-STA-01"
+      ],
+      "claims": [
+        "default_permissions、allow_other与FUSE连接/挂载边界；不证明PsiOS已实现授权。"
+      ]
+    },
+    {
+      "id": "SRC-STA-02",
+      "title": "Linux kernel 5.15 Fuse I/O modes",
+      "url": "https://docs.kernel.org/5.15/filesystems/fuse-io.html",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SRC-STA-02"
+      ],
+      "claims": [
+        "writeback缓存及所有修改经FUSE内核路径的假设；当前内核特性需绑定实际版本复测。"
+      ]
+    },
+    {
+      "id": "SRC-STA-03",
+      "title": "PostgreSQL file system level backup",
+      "url": "https://www.postgresql.org/docs/current/backup-file.html",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SRC-STA-03"
+      ],
+      "claims": [
+        "数据库备份需要按实际停止/快照与WAL范围协议协调；不代表选用该数据库。"
+      ]
+    },
+    {
+      "id": "SRC-STA-04",
+      "title": "RFC 8259 JSON",
+      "url": "https://www.rfc-editor.org/rfc/rfc8259",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SRC-STA-04"
+      ],
+      "claims": [
+        "JSON值类型、数字与互操作基础；PsiOS额外拒重复键和精确比较策略为本设计定义。"
+      ]
+    },
+    {
+      "id": "SRC-STA-05",
+      "title": "OCI Runtime Specification configuration",
+      "url": "https://github.com/opencontainers/runtime-spec/blob/main/config.md",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SRC-STA-05"
+      ],
+      "claims": [
+        "OCI配置、root、mounts及process等机制；具体权限效果需实际Runtime验证。"
+      ]
+    },
+    {
+      "id": "SRC-STA-06",
+      "title": "OCI Runtime Specification Linux configuration",
+      "url": "https://github.com/opencontainers/runtime-spec/blob/main/config-linux.md",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SRC-STA-06"
+      ],
+      "claims": [
+        "namespace/cgroup等Linux隔离配置机制；不保证任意威胁模型沙箱。"
+      ]
+    },
+    {
+      "id": "SRC-STA-07",
+      "title": "Flatpak Sandbox Permissions",
+      "url": "https://docs.flatpak.org/en/latest/sandbox-permissions.html",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SRC-STA-07"
+      ],
+      "claims": [
+        "静态权限与Portal授权路径不同；音频Socket可能开放多类音频能力。"
+      ]
+    },
+    {
+      "id": "SRC-STA-08",
+      "title": "XDG Desktop Portal ScreenCast interface",
+      "url": "https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.ScreenCast.html",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SRC-STA-08"
+      ],
+      "claims": [
+        "恢复令牌单次使用；pipewire-serial为接口v6新增；组合RemoteDesktop持久化不得由ScreenCast单独管理。"
+      ]
+    },
+    {
+      "id": "SRC-STA-09",
+      "title": "XDG Desktop Portal RemoteDesktop interface",
+      "url": "https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.RemoteDesktop.html",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SRC-STA-09"
+      ],
+      "claims": [
+        "组合会话生命周期与持久化由RemoteDesktop管理；EIS建立后不再使用Notify输入。"
+      ]
+    },
+    {
+      "id": "SRC-ORC-001",
+      "title": "MCP 2026-07-28 Versioning and Negotiation",
+      "url": "https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SRC-ORC-001"
+      ],
+      "claims": [
+        "现代 MCP 采用逐请求版本上下文；服务器必须实现 server/discover，客户端可以先发现或直接请求；与 legacy 初始化时代区分。"
+      ]
+    },
+    {
+      "id": "SRC-ORC-002",
+      "title": "MCP 2025-11-25 Lifecycle",
+      "url": "https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SRC-ORC-002"
+      ],
+      "claims": [
+        "历史 MCP 通过 initialize/initialized 生命周期协商版本与能力；不能把旧会话假设直接套用现代请求。"
+      ]
+    },
+    {
+      "id": "SRC-ORC-003",
+      "title": "MCP 2026-07-28 Transports",
+      "url": "https://modelcontextprotocol.io/specification/2026-07-28/basic/transports",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SRC-ORC-003"
+      ],
+      "claims": [
+        "现代 HTTP 元信息与正文映射须一致，传输流/请求中止语义不构成远端业务效果已回滚的证明。"
+      ]
+    },
+    {
+      "id": "SRC-ORC-004",
+      "title": "MCP 2026-07-28 Authorization",
+      "url": "https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SRC-ORC-004"
+      ],
+      "claims": [
+        "HTTP OAuth 与 STDIO 凭据路径区分；资源/令牌受众、发行方与授权响应 issuer 验证按规范和元数据执行；不得把可选条件写成所有响应强制 iss。"
+      ]
+    },
+    {
+      "id": "SRC-ORC-005",
+      "title": "MCP Tasks Extension 2026-07-28",
+      "url": "https://tasks.extensions.modelcontextprotocol.io/specification/2026-07-28/tasks",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SRC-ORC-005"
+      ],
+      "claims": [
+        "现代任务方法包含 tasks/get、tasks/update、tasks/cancel；completed 可以包含 isError:true 的工具结果；访问任务继续授权，TTL 到期可能清理记录。"
+      ]
+    },
+    {
+      "id": "SRC-ORC-006",
+      "title": "Agent2Agent Protocol Specification",
+      "url": "https://a2a-protocol.org/latest/specification/",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SRC-ORC-006"
+      ],
+      "claims": [
+        "A2A 覆盖 Agent 发现、消息与任务互操作；Send Message 的 messageId 幂等属于 MAY，不能由协议名推断发送端到端 exactly-once。"
+      ]
+    },
+    {
+      "id": "SRC-ORC-007",
+      "title": "Agent Client Protocol v1 Overview",
+      "url": "https://agentclientprotocol.com/protocol/v1/overview",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SRC-ORC-007"
+      ],
+      "claims": [
+        "ACP-Client 是客户端与 Agent 的会话交互协议；核验时官方文档区分 v1 Latest 与 v2 Preview，实际采用仍需锁定版本。"
+      ]
+    },
+    {
+      "id": "SRC-ORC-008",
+      "title": "Agent Communication Protocol Welcome and A2A Migration Notice",
+      "url": "https://agentcommunicationprotocol.dev/introduction/welcome",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SRC-ORC-008"
+      ],
+      "claims": [
+        "Agent Communication Protocol 与 Agent Client Protocol 是不同协议；前者官方说明已并入 Linux Foundation 的 A2A。"
+      ]
+    },
+    {
+      "id": "SRC-ORC-009",
+      "title": "AG-UI Introduction",
+      "url": "https://docs.ag-ui.com/introduction",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SRC-ORC-009"
+      ],
+      "claims": [
+        "AG-UI 负责 Agent 与用户前端之间的交互事件；PsiOS 将其定位为 UI 事件适配，审批和效果权威仍由自己的安全/Operation 契约定义。"
+      ]
+    },
+    {
+      "id": "SRC-ORC-010",
+      "title": "OpenAPI Specification v3.2.1",
+      "url": "https://spec.openapis.org/oas/v3.2.1.html",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SRC-ORC-010"
+      ],
+      "claims": [
+        "OpenAPI 是 HTTP API 的接口描述规范，可用于工具封装；描述文件本身不等于实现已验证、安全授权或幂等保证。"
+      ]
+    },
+    {
+      "id": "SRC-CORE-002",
+      "title": "etcd v3.6 Disaster recovery",
+      "url": "https://etcd.io/docs/v3.6/op-guide/recovery/",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SRC-CORE-002"
+      ],
+      "claims": [
+        "旧快照revision回退和watch缓存恢复；不能代替资源端fencing"
+      ]
+    },
+    {
+      "id": "SRC-CORE-003",
+      "title": "bootc filesystem",
+      "url": "https://github.com/bootc-dev/bootc/blob/main/docs/src/bootc-filesystem.7.md",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SRC-CORE-003"
+      ],
+      "claims": [
+        "/etc与/var持久与更新语义不同；具体后端尚待选择"
+      ]
+    },
+    {
+      "id": "SRC-CORE-004",
+      "title": "bootc rollback",
+      "url": "https://bootc.dev/bootc/man/bootc-rollback.8.html",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SRC-CORE-004"
+      ],
+      "claims": [
+        "rollback启动部署与/etc处理、自动更新可能再次推进；需绑定目标版本核验"
+      ]
+    },
+    {
+      "id": "SRC-CORE-005",
+      "title": "Linux man-pages 6.11",
+      "url": "https://www.kernel.org/pub/linux/docs/man-pages/book/man-pages-6.11.pdf",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SRC-CORE-005"
+      ],
+      "claims": [
+        "CLOCK_MONOTONIC与CLOCK_BOOTTIME对挂起计时的差别"
+      ]
+    },
+    {
+      "id": "SRC-CORE-006",
+      "title": "Linux cgroup v2",
+      "url": "https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SRC-CORE-006"
+      ],
+      "claims": [
+        "memory.high压力节流不等同memory.max硬限制"
+      ]
+    },
+    {
+      "id": "SRC-CORE-007",
+      "title": "The Update Framework specification",
+      "url": "https://theupdateframework.github.io/specification/latest/index.html",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SRC-CORE-007"
+      ],
+      "claims": [
+        "更新信任和委托机制参考；不表示已经采用"
+      ]
+    },
+    {
+      "id": "SRC-CORE-008",
+      "title": "SLSA v1.2 Provenance",
+      "url": "https://slsa.dev/spec/v1.2/provenance",
+      "access_date": "2026-11-22",
+      "source_type": "Primary",
+      "implementation_implication": "None; source explains mechanism, not PsiOS implementation.",
+      "aliases": [
+        "SRC-CORE-008"
+      ],
+      "claims": [
+        "构建来源与制品证据模型；不声称达到认证等级"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.psios.example/v1/effect-record.schema.json",
+  "title": "One logical resource or external effect",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "effect_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "operation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "resource_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "action": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "phase": {
+      "enum": [
+        "IntentRecorded",
+        "PermitBound",
+        "EffectStarted",
+        "EffectConfirmed",
+        "EffectReconciled"
+      ]
+    },
+    "outcome_knowledge": {
+      "enum": [
+        "NotStarted",
+        "InFlight",
+        "Known",
+        "Unknown"
+      ]
+    },
+    "external_idempotency_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "external_object_ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+      },
+      "minItems": 0,
+      "maxItems": 4096
+    },
+    "compensation_operation_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    }
+  },
+  "required": [
+    "schema_version",
+    "effect_id",
+    "operation_id",
+    "resource_ref",
+    "action",
+    "phase",
+    "outcome_knowledge",
+    "evidence_refs"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "phase": {
+            "const": "EffectConfirmed"
+          }
+        },
+        "required": [
+          "phase"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome_knowledge": {
+            "const": "Known"
+          }
+        },
+        "required": [
+          "evidence_refs"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "phase": {
+            "const": "EffectReconciled"
+          }
+        },
+        "required": [
+          "phase"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome_knowledge": {
+            "const": "Known"
+          }
+        }
+      }
+    }
+  ]
+}

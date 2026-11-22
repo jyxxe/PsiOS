@@ -1,0 +1,289 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.psios.example/v1/application-release-spec.schema.json",
+  "title": "Executable application requirements resolved by ApplicationManifest",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "release_spec_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "execution": {
+      "type": "object",
+      "properties": {
+        "argv": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "maxItems": 1024
+        },
+        "working_directory": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "environment": {
+          "type": "object",
+          "maxProperties": 512,
+          "propertyNames": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": "string",
+                "maxLength": 65536
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "secret_ref": {
+                    "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+                  }
+                },
+                "required": [
+                  "secret_ref"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        }
+      },
+      "required": [
+        "argv",
+        "working_directory",
+        "environment"
+      ],
+      "additionalProperties": false
+    },
+    "lifecycle": {
+      "type": "object",
+      "properties": {
+        "stop_signal": {
+          "enum": [
+            "SIGTERM",
+            "SIGINT",
+            "SIGHUP"
+          ]
+        },
+        "stop_grace_seconds": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+        },
+        "start_deadline_seconds": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+        },
+        "restart_policy": {
+          "enum": [
+            "Never",
+            "OnFailure",
+            "Always"
+          ]
+        },
+        "max_restarts": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+        }
+      },
+      "required": [
+        "stop_signal",
+        "stop_grace_seconds",
+        "start_deadline_seconds",
+        "restart_policy",
+        "max_restarts"
+      ],
+      "additionalProperties": false
+    },
+    "identity": {
+      "type": "object",
+      "properties": {
+        "execution_identity_profile_ref": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+        },
+        "namespace_mapping_profile_ref": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+        }
+      },
+      "required": [
+        "execution_identity_profile_ref",
+        "namespace_mapping_profile_ref"
+      ],
+      "additionalProperties": false
+    },
+    "permission_requests": {
+      "type": "object",
+      "properties": {
+        "capability_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+          },
+          "minItems": 0,
+          "maxItems": 256
+        },
+        "secret_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+          },
+          "minItems": 0,
+          "maxItems": 256
+        },
+        "device_profile_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+          },
+          "minItems": 0,
+          "maxItems": 256
+        },
+        "volume_bindings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "manifest_volume_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+              },
+              "mount_path": {
+                "type": "string",
+                "pattern": "^/"
+              },
+              "requested_access": {
+                "enum": [
+                  "ReadOnly",
+                  "ReadWrite"
+                ]
+              }
+            },
+            "required": [
+              "manifest_volume_name",
+              "mount_path",
+              "requested_access"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0,
+          "maxItems": 64
+        }
+      },
+      "required": [
+        "capability_refs",
+        "secret_refs",
+        "device_profile_refs",
+        "volume_bindings"
+      ],
+      "additionalProperties": false
+    },
+    "resources": {
+      "type": "object",
+      "properties": {
+        "cpu_millicores": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+        },
+        "memory_max_bytes": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+        },
+        "pids_max": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+        },
+        "ephemeral_max_bytes": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+        },
+        "io_profile_ref": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+        },
+        "gpu_profile_ref": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+        }
+      },
+      "required": [
+        "cpu_millicores",
+        "memory_max_bytes",
+        "pids_max",
+        "ephemeral_max_bytes",
+        "io_profile_ref"
+      ],
+      "additionalProperties": false
+    },
+    "provenance": {
+      "type": "object",
+      "properties": {
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+          },
+          "minItems": 1,
+          "maxItems": 256
+        },
+        "license_expression": {
+          "type": "string",
+          "minLength": 1
+        },
+        "license_material_ref": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+        },
+        "source_trust": {
+          "enum": [
+            "PublisherVerified",
+            "RepositoryVerified",
+            "UserSuppliedUnverified"
+          ]
+        },
+        "trust_evidence_or_admission_policy_ref": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+        },
+        "build_record_ref": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+        },
+        "sbom_ref": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+        }
+      },
+      "required": [
+        "source_refs",
+        "license_expression",
+        "license_material_ref",
+        "source_trust",
+        "trust_evidence_or_admission_policy_ref",
+        "build_record_ref",
+        "sbom_ref"
+      ],
+      "additionalProperties": false
+    },
+    "dependency_release_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+      },
+      "minItems": 0,
+      "maxItems": 1024
+    },
+    "backup_scope_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    }
+  },
+  "required": [
+    "schema_version",
+    "release_spec_id",
+    "execution",
+    "lifecycle",
+    "identity",
+    "permission_requests",
+    "resources",
+    "provenance",
+    "dependency_release_refs",
+    "backup_scope_ref"
+  ],
+  "additionalProperties": false
+}

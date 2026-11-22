@@ -1,0 +1,139 @@
+{
+  "metadata": {
+    "page_id": "page_c1cd937805a0819191a370c09f64f5ae",
+    "layout": "document",
+    "symbol": null,
+    "title": "PsiOS｜ADR 与风险关闭台账",
+    "preview": "# PsiOS｜ADR 与风险关闭台账\n\n**修订基线：** 已保存 v0.5（2026-11-22）+ Space 统一规划 Page。**状态含义：** `SpecResolved` = 已提出足以实施/检验的规范约束；`ADRPending` = 关键实现选型待批准；`PoCRequired` = 尚未实测；`Verified` = 绑定明确代码提交、测试产物、硬件/环境及复核人方可填写。本页所有工程验证均为 **NotRun / NotVerified**，不将文档更",
+    "creator_account_user_id": "user-9BpD0gQ6dHogXVyk3sDMfKFC",
+    "owner_workspace_id": null,
+    "parent": {
+      "page_id": "page_baa84054d37c81918d9cca228a512d13",
+      "title": "PsiOS｜项目主页"
+    },
+    "drive_scope": "space",
+    "drive_space_id": "page_space_a4ae1d534b008191a5daf988db0c21af",
+    "library_container_id": "fde3_cGFnZV9jMWNkOTM3ODA1YTA4MTkxOTFhMzcwYzA5ZjY0ZjVhZQ_96d5a4d7afb08191bef7585cb648d91c",
+    "file_upload_page_id": "page_c1cd937805a0819191a370c09f64f5ae",
+    "position": 1393081367900160,
+    "created_at": "2026-11-22T06:29:37.513788Z",
+    "updated_at": "2026-11-22T06:29:38.792191Z",
+    "deleted_at": null,
+    "current_sequence": 0,
+    "projection_through_sequence": 0,
+    "access": {
+      "can_read": true,
+      "can_comment": true,
+      "can_write": true,
+      "can_share": true,
+      "can_delete": true,
+      "sources": [
+        "library"
+      ]
+    },
+    "url": "https://chatgpt.com/space/page_c1cd937805a0819191a370c09f64f5ae"
+  },
+  "blocks": [
+    {
+      "id": "1bf84227-fed4-4d72-8b0f-7f260da4f8c1",
+      "hash": "da82b081433c1a0dc69b2af0de3a4ca11e676240b9953d2f782e1ae2c19a2fbd"
+    },
+    {
+      "id": "0c44395f-26ff-4753-8c43-6a550dcc6096",
+      "hash": "ff33732c4f34ceebc693cbe2c24bbf3ba1d9e4e8a6ab01827f47d0d00fc4a9a6"
+    },
+    {
+      "id": "38be8e52-a45e-4a67-85d2-28c51300535b",
+      "hash": "48ad11727bc26ba654fabbcbef2078313b4791d29a487587a14938b5f2e91fa3"
+    },
+    {
+      "id": "a1282fd7-9822-4254-b72c-b0ad676ea45b",
+      "hash": "f17bf8d68ebe019cd677978c46fbdb68bcf32123fd28d12efeabf46c9138368e"
+    },
+    {
+      "id": "c9e8ace5-350c-4dbd-ab15-973520701089",
+      "hash": "0a70c4f52eec0d3d4b42b0fc5e4846667a6146dceaab25900c0c0e4e823ea421"
+    },
+    {
+      "id": "0442c345-f193-44e6-9847-c9b8d1d27b3f",
+      "hash": "49c0845bc5dda63b9a947a8b03f09819373c87f45e5f5b493ba15222dca99942"
+    },
+    {
+      "id": "2ad9967e-d6cb-451d-9a14-83f923b5da09",
+      "hash": "b619f4fd598e19ec4fa86eb66f80165bad4faa398284afc65f2bbff0c5a98026"
+    },
+    {
+      "id": "2b12cdf4-1090-4b2d-97f0-a916917ee1d1",
+      "hash": "8c0674266a74642873afb91ea3499a3334582b33f2a139cba5c08da75b106477"
+    },
+    {
+      "id": "1702b868-f577-4b6b-baed-f34771bea46d",
+      "hash": "5488e9f597a133e430543b80b515c93e7294ddfc035997f4253a7d0c0cede5c2"
+    },
+    {
+      "id": "574238a8-6a7e-45ae-a04e-582ca23762e9",
+      "hash": "04e599684aca14a0c78895da4b42938225a15c9ccee771a259fab17fffeb5f61"
+    },
+    {
+      "id": "35b054a3-ab66-491c-820a-ca10fc01e0f4",
+      "hash": "ee6815e8e02288c14a2788a173d3c7a8013c1bf25029304b0ca384924a83dc58"
+    },
+    {
+      "id": "9b8b815f-a5c9-4bbe-8ef6-129f04f1bf06",
+      "hash": "3ac50601fa0397b19bbff09de08f837ca030268e6dead5602fcc5c5bb1cfd331"
+    },
+    {
+      "id": "f6fde0a1-be64-42b6-80f7-de6e62630794",
+      "hash": "9afdac5cc529de80697c78c57f51ef4943cf405327516d55b0f89af4b26afcd3"
+    },
+    {
+      "id": "b3b46077-aba2-4d56-b1ea-281d6b73ad29",
+      "hash": "81b840ce29f763ffe6e2faf5be0735ca6b809c6511ef03a5ddef460685c2d292"
+    },
+    {
+      "id": "d8d64796-fe98-4402-b194-e66256fb0329",
+      "hash": "ef0cd5e47637af92c0f0742d9789d27b8a1ddade8182f321df205e14dfc4472e"
+    },
+    {
+      "id": "16f990e5-ae7c-406f-a93f-1807fba0a65b",
+      "hash": "203efee6053d8a64c580691de0415e9029ad54ce1e040a7353d0753f36568790"
+    },
+    {
+      "id": "daab644d-fae4-4e24-b9dc-afc3d37d9e71",
+      "hash": "56f51d0404d7cb280c0fe8f0ade4f010072a106fe51b2db959496e768b5b7c42"
+    },
+    {
+      "id": "562aac62-d12d-4783-9fbc-7304694e29c8",
+      "hash": "c93ed5fc02ed1b0aeac53b3a1cfd8f3f153e01dac1c32b7d232ced99d4f8266d"
+    },
+    {
+      "id": "98c894d1-e15e-41d9-b5fc-2ac3aab79630",
+      "hash": "d5dc04d5ef680a7ecbdebcce8ea6bf6f6e010d695a9c06867ec4f7c3798b4fe8"
+    },
+    {
+      "id": "ff407c1e-583a-4aa1-a967-669cb87853e0",
+      "hash": "dfb5b11da933c229fca8d6c22cf6a9dd09541cc5525b12a95273266e2bde4a27"
+    },
+    {
+      "id": "4f2bcc70-79ae-4cce-b751-43f98c8f71db",
+      "hash": "5a9c742ea963ee6ba42f18fbd5c390588e1615aa92a4be31eb1a56740033bb0c"
+    },
+    {
+      "id": "d4b3024f-f364-479a-814b-9b570a566f2d",
+      "hash": "8b7041532031e84eb62f970993268092475e3c5ed64af64d8923016e86bc17c7"
+    },
+    {
+      "id": "8bcc90e3-5af0-49f4-b897-653dd1a7f41e",
+      "hash": "951f41d21344c28120dc892cb816a7daa84d71d55899c94ab49d39335a89edee"
+    },
+    {
+      "id": "f2823e9a-f8ef-466e-93fb-ca6935863e62",
+      "hash": "56c52182536f57b7fd6a5c912241fe33bba886f8de0f400d5f602ef6aa0b1587"
+    },
+    {
+      "id": "8fe574f9-fbd6-43d6-88fb-a6609891d61c",
+      "hash": "8ccb72ed3942a0f67d93b8ca076830205d141c4d6df828e20fc30ad311365cf1"
+    }
+  ],
+  "accessed_at": "2026-11-22"
+}

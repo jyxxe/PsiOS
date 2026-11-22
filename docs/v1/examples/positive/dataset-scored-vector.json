@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0.0",
+  "dataset_id": "dataset-demo",
+  "record": {
+    "uid": "record-book",
+    "name": "示例书籍",
+    "content": "这是一个完整逻辑记录。",
+    "tag": [
+      "book"
+    ],
+    "score": 0,
+    "extra_data": null,
+    "vector": [
+      1,
+      0,
+      0
+    ]
+  },
+  "metadata": {
+    "record_version": "record-rev-1",
+    "content_version": "content-rev-1",
+    "content_digest": "sha256:63f4aa706c4a1958bfafd3f1360e816beccb4b121e38f5d31c22765d5ec5cab9",
+    "created_at": "2026-11-22T08:00:00Z",
+    "updated_at": "2026-11-22T08:00:00Z",
+    "score_profile_ref": {
+      "resource_id": "score-profile",
+      "version": "rev-1",
+      "digest": "sha256:8f8bd2c6a3ae7d6699444e3417cc458e1d1920556ff7b723768e00629f559c84"
+    },
+    "score_source_content_version": "content-rev-1",
+    "embedding_profile": {
+      "profile_ref": {
+        "resource_id": "embedding-profile",
+        "version": "rev-1",
+        "digest": "sha256:1939babce2597c8a988bd3e04962f6a0bc40e14ac242fab6d3c78f76275a81ef"
+      },
+      "model_id": "demo-model",
+      "model_version": "model-rev-1",
+      "dimensions": "3",
+      "distance": "Cosine",
+      "normalization": "UnitL2",
+      "source_content_version": "content-rev-1"
+    }
+  }
+}

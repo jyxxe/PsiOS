@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.psios.example/v1/volume-attachment.schema.json",
+  "title": "Attachment is separate from Volume lifecycle",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "attachment_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "volume_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "data_incarnation": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "node_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "workload_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "requested_access": {
+      "enum": [
+        "ReadOnly",
+        "ReadWrite"
+      ]
+    },
+    "effective_access": {
+      "enum": [
+        "Blocked",
+        "ReadOnly",
+        "ReadWrite"
+      ]
+    },
+    "lifecycle": {
+      "enum": [
+        "Attaching",
+        "Attached",
+        "Detaching",
+        "Detached"
+      ]
+    },
+    "fence": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/Fence"
+    },
+    "lease_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    }
+  },
+  "required": [
+    "schema_version",
+    "attachment_id",
+    "volume_id",
+    "data_incarnation",
+    "node_id",
+    "workload_id",
+    "requested_access",
+    "effective_access",
+    "lifecycle"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "requested_access": {
+            "const": "ReadOnly"
+          }
+        },
+        "required": [
+          "requested_access"
+        ]
+      },
+      "then": {
+        "properties": {
+          "effective_access": {
+            "enum": [
+              "Blocked",
+              "ReadOnly"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "lifecycle": {
+            "const": "Detached"
+          }
+        },
+        "required": [
+          "lifecycle"
+        ]
+      },
+      "then": {
+        "properties": {
+          "effective_access": {
+            "const": "Blocked"
+          }
+        }
+      }
+    }
+  ]
+}

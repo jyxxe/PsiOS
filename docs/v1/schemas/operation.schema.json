@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.psios.example/v1/operation.schema.json",
+  "title": "Operation lifecycle and effect knowledge",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "operation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "operation_revision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "plan_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "task_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "lifecycle": {
+      "enum": [
+        "Pending",
+        "WaitingApproval",
+        "WaitingDependency",
+        "Running",
+        "CancelRequested",
+        "Succeeded",
+        "Failed",
+        "Cancelled"
+      ]
+    },
+    "outcome_knowledge": {
+      "enum": [
+        "NotStarted",
+        "InFlight",
+        "Known",
+        "Unknown"
+      ]
+    },
+    "compensation_status": {
+      "enum": [
+        "NotRequired",
+        "Planned",
+        "Running",
+        "Complete",
+        "Partial",
+        "Failed"
+      ]
+    },
+    "effect_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+      },
+      "minItems": 0,
+      "maxItems": 4096
+    },
+    "conditions": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/Condition"
+      },
+      "minItems": 0,
+      "maxItems": 64
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    }
+  },
+  "required": [
+    "schema_version",
+    "operation_id",
+    "operation_revision",
+    "plan_ref",
+    "lifecycle",
+    "outcome_knowledge",
+    "compensation_status",
+    "effect_refs",
+    "conditions",
+    "created_at",
+    "updated_at"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "lifecycle": {
+            "const": "Succeeded"
+          }
+        },
+        "required": [
+          "lifecycle"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome_knowledge": {
+            "const": "Known"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome_knowledge": {
+            "const": "Unknown"
+          }
+        },
+        "required": [
+          "outcome_knowledge"
+        ]
+      },
+      "then": {
+        "properties": {
+          "conditions": {
+            "contains": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "OutcomeUnknown"
+                },
+                "status": {
+                  "const": "True"
+                }
+              },
+              "required": [
+                "type",
+                "status"
+              ]
+            },
+            "minContains": 1
+          }
+        }
+      }
+    }
+  ]
+}

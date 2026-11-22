@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.psios.example/v1/run.schema.json",
+  "title": "One Task execution attempt",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "claim_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "claim_epoch": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+    },
+    "recovery_incarnation": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "lifecycle": {
+      "enum": [
+        "Created",
+        "Running",
+        "WaitingInput",
+        "WaitingApproval",
+        "WaitingResource",
+        "Paused",
+        "Cancelling",
+        "Succeeded",
+        "Failed",
+        "Cancelled",
+        "Lost"
+      ]
+    },
+    "outcome_knowledge": {
+      "enum": [
+        "NotStarted",
+        "InFlight",
+        "Known",
+        "Unknown"
+      ]
+    },
+    "input_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "execution_snapshot_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "output_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+      },
+      "minItems": 0,
+      "maxItems": 4096
+    },
+    "operation_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+      },
+      "minItems": 0,
+      "maxItems": 4096
+    },
+    "conditions": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/Condition"
+      },
+      "minItems": 0,
+      "maxItems": 64
+    }
+  },
+  "required": [
+    "schema_version",
+    "run_id",
+    "task_id",
+    "claim_id",
+    "claim_epoch",
+    "recovery_incarnation",
+    "lifecycle",
+    "outcome_knowledge",
+    "input_ref",
+    "execution_snapshot_ref",
+    "output_refs",
+    "operation_refs",
+    "conditions"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "lifecycle": {
+            "const": "Succeeded"
+          }
+        },
+        "required": [
+          "lifecycle"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome_knowledge": {
+            "const": "Known"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome_knowledge": {
+            "const": "Unknown"
+          }
+        },
+        "required": [
+          "outcome_knowledge"
+        ]
+      },
+      "then": {
+        "properties": {
+          "conditions": {
+            "contains": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "OutcomeUnknown"
+                },
+                "status": {
+                  "const": "True"
+                }
+              },
+              "required": [
+                "type",
+                "status"
+              ]
+            },
+            "minContains": 1
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.psios.example/v1/chat-accepted.schema.json",
+  "title": "Persistent Conversation acceptance receipt",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "message_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "conversation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "client_send_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "conversation_seq": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+    },
+    "writer_epoch": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+    },
+    "membership_revision": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+    },
+    "recovery_incarnation": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "accepted_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "content_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "deduplicated": {
+      "type": "boolean"
+    },
+    "durability_profile": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/DurabilityProfile"
+    }
+  },
+  "required": [
+    "schema_version",
+    "message_id",
+    "conversation_id",
+    "client_send_id",
+    "conversation_seq",
+    "writer_epoch",
+    "membership_revision",
+    "recovery_incarnation",
+    "accepted_at",
+    "content_digest",
+    "deduplicated",
+    "durability_profile"
+  ],
+  "additionalProperties": false
+}

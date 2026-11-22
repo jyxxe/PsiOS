@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.psios.example/v1/revocation-result.schema.json",
+  "title": "Per-resource enforcement and residual effects",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "revocation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "accepted_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "authorization_epoch": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+    },
+    "status": {
+      "enum": [
+        "Accepted",
+        "InProgress",
+        "Complete",
+        "Partial",
+        "RecoveryRequired"
+      ]
+    },
+    "targets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "resource_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "GateOnly",
+                "StreamCut",
+                "SandboxTerminate",
+                "ResourceFence"
+              ]
+            },
+            "minItems": 0,
+            "maxItems": 4,
+            "uniqueItems": true
+          },
+          "enforcement_status": {
+            "enum": [
+              "Pending",
+              "Enforced",
+              "Unsupported",
+              "Unreachable",
+              "Failed"
+            ]
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {
+              "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+            },
+            "minItems": 0,
+            "maxItems": 4096
+          },
+          "residual_effects": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 0,
+            "maxItems": 256
+          }
+        },
+        "required": [
+          "resource_id",
+          "required",
+          "capabilities",
+          "enforcement_status",
+          "evidence_refs",
+          "residual_effects"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1,
+      "maxItems": 4096
+    }
+  },
+  "required": [
+    "schema_version",
+    "revocation_id",
+    "accepted_at",
+    "authorization_epoch",
+    "status",
+    "targets"
+  ],
+  "additionalProperties": false
+}

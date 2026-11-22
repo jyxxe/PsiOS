@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0.0",
+  "message_id": "message-demo",
+  "conversation_id": "room-demo",
+  "client_send_id": "send-window-1/message-001",
+  "conversation_seq": "9007199254740993",
+  "writer_epoch": "12",
+  "membership_revision": "7",
+  "recovery_incarnation": "conversation-incarnation-2",
+  "accepted_at": "2026-11-22T08:00:00Z",
+  "durability_profile": {
+    "profile_ref": {
+      "resource_id": "profile-local-durable",
+      "version": "rev-1",
+      "digest": "sha256:c96dffa1f435c03577441c9f0fc6c16c1c4adca32d23f0c2fda8fb8564307866"
+    },
+    "ack_level": "Durable",
+    "fault_scope": [
+      "ProcessCrash",
+      "PowerLoss"
+    ],
+    "rpo_seconds": "0"
+  },
+  "sender_principal_id": "principal-user",
+  "message_revision": "message-rev-2",
+  "initial_send_digest": "sha256:5e02683e80a00afd742ac5db7ac7c36f54ac9a3c8827f3719bf58feee7c5e504",
+  "current_content_ref": {
+    "resource_id": "message-content-rev-2",
+    "version": "rev-1",
+    "digest": "sha256:ad1bc0901a0d53506bb0cba2fc96299c87cfa7c71e8be4dc7dc31ae554c26fa1"
+  },
+  "content_state": "Visible",
+  "mentions": [
+    "agent-reviewer"
+  ],
+  "message_type": "request",
+  "attachment_refs": [
+    {
+      "resource_id": "design-attachment",
+      "version": "rev-1",
+      "digest": "sha256:d031cc3f00bf944a468a78a12dbafc5b9ec8daa5f496a0984921eee409d2b389"
+    }
+  ],
+  "retention_refs": []
+}

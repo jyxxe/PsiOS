@@ -1,0 +1,566 @@
+{
+  "schema_version": "1.0.0",
+  "scope": "DocumentationFixtureValidationOnly",
+  "examples": [
+    {
+      "id": "EX-P-operation-plan",
+      "path": "positive/operation-plan.json",
+      "schema": "operation-plan.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "Immutable OperationPlan"
+    },
+    {
+      "id": "EX-P-operation",
+      "path": "positive/operation.json",
+      "schema": "operation.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "Operation lifecycle and effect knowledge"
+    },
+    {
+      "id": "EX-P-effect-record",
+      "path": "positive/effect-record.json",
+      "schema": "effect-record.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "One logical resource or external effect"
+    },
+    {
+      "id": "EX-P-approval-request",
+      "path": "positive/approval-request.json",
+      "schema": "approval-request.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "Request for an authority decision"
+    },
+    {
+      "id": "EX-P-approval-decision",
+      "path": "positive/approval-decision.json",
+      "schema": "approval-decision.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "Immutable approval/rejection fact"
+    },
+    {
+      "id": "EX-P-approval-use",
+      "path": "positive/approval-use.json",
+      "schema": "approval-use.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "CAS-bound approval usage ledger view"
+    },
+    {
+      "id": "EX-P-execution-permit",
+      "path": "positive/execution-permit.json",
+      "schema": "execution-permit.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "Authenticated execution admission; JSON alone is not proof"
+    },
+    {
+      "id": "EX-P-task-submit",
+      "path": "positive/task-submit.json",
+      "schema": "task-submit.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "Task.Submit request: no server-generated Task or Run ID"
+    },
+    {
+      "id": "EX-P-task-accepted",
+      "path": "positive/task-accepted.json",
+      "schema": "task-accepted.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "Task persistent acceptance receipt"
+    },
+    {
+      "id": "EX-P-task-lookup",
+      "path": "positive/task-lookup.json",
+      "schema": "task-lookup.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "Authoritative submission lookup; absence has bounded meaning"
+    },
+    {
+      "id": "EX-P-task",
+      "path": "positive/task.json",
+      "schema": "task.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "Task read view; terminal result availability is independent"
+    },
+    {
+      "id": "EX-P-run",
+      "path": "positive/run.json",
+      "schema": "run.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "One Task execution attempt"
+    },
+    {
+      "id": "EX-P-cancel-origin",
+      "path": "positive/cancel-origin.json",
+      "schema": "cancel-origin.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "CancelOrigin is serialized with submission acceptance"
+    },
+    {
+      "id": "EX-P-chat-send",
+      "path": "positive/chat-send.json",
+      "schema": "chat-send.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "Client SendMessage; sender is derived from authentication"
+    },
+    {
+      "id": "EX-P-chat-accepted",
+      "path": "positive/chat-accepted.json",
+      "schema": "chat-accepted.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "Persistent Conversation acceptance receipt"
+    },
+    {
+      "id": "EX-P-message",
+      "path": "positive/message.json",
+      "schema": "message.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "Persistent Message read view; revision and initial send digest are separate"
+    },
+    {
+      "id": "EX-P-workflow-definition",
+      "path": "positive/workflow-definition.json",
+      "schema": "workflow-definition.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "Restricted Workflow AST (graph/authorization checks are separate)"
+    },
+    {
+      "id": "EX-P-workflow-run",
+      "path": "positive/workflow-run.json",
+      "schema": "workflow-run.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "WorkflowRun state with immutable definition/input refs"
+    },
+    {
+      "id": "EX-P-dispatch-intent",
+      "path": "positive/dispatch-intent.json",
+      "schema": "dispatch-intent.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "Workflow-to-Task durable dispatch intent"
+    },
+    {
+      "id": "EX-P-event",
+      "path": "positive/event.json",
+      "schema": "event.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "Committed fact notification envelope, not an authorization token"
+    },
+    {
+      "id": "EX-P-dataset-record",
+      "path": "positive/dataset-record.json",
+      "schema": "dataset-record.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "Dataset record: seven business fields and independent system metadata"
+    },
+    {
+      "id": "EX-P-volume",
+      "path": "positive/volume.json",
+      "schema": "volume.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "Logical Volume; access_mode does not itself prove fencing"
+    },
+    {
+      "id": "EX-P-volume-attachment",
+      "path": "positive/volume-attachment.json",
+      "schema": "volume-attachment.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "Attachment is separate from Volume lifecycle"
+    },
+    {
+      "id": "EX-P-capability-descriptor",
+      "path": "positive/capability-descriptor.json",
+      "schema": "capability-descriptor.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "Advertised backend capability, never a Grant"
+    },
+    {
+      "id": "EX-P-revocation-result",
+      "path": "positive/revocation-result.json",
+      "schema": "revocation-result.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "Per-resource enforcement and residual effects"
+    },
+    {
+      "id": "EX-P-recovery-status",
+      "path": "positive/recovery-status.json",
+      "schema": "recovery-status.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "Recovery trust, effect reconciliation and publication barriers"
+    },
+    {
+      "id": "EX-P-recovery-set-manifest",
+      "path": "positive/recovery-set-manifest.json",
+      "schema": "recovery-set-manifest.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "Recovery set with explicit consistency and external-effect scope"
+    },
+    {
+      "id": "EX-P-application-manifest",
+      "path": "positive/application-manifest.json",
+      "schema": "application-manifest.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "Application release requirements; an installed Deployment is separate"
+    },
+    {
+      "id": "EX-P-application-release-spec",
+      "path": "positive/application-release-spec.json",
+      "schema": "application-release-spec.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "Executable application requirements resolved by ApplicationManifest"
+    },
+    {
+      "id": "EX-P-snapshot-page",
+      "path": "positive/snapshot-page.json",
+      "schema": "snapshot-page.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "One page of a fixed authority snapshot"
+    },
+    {
+      "id": "EX-P-resource-envelope",
+      "path": "positive/resource-envelope.json",
+      "schema": "resource-envelope.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "Read envelope; kind-specific spec validation is mandatory"
+    },
+    {
+      "id": "EX-P-error",
+      "path": "positive/error.json",
+      "schema": "error.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "Stable machine-readable error"
+    },
+    {
+      "id": "EX-N-task-client-task-id",
+      "path": "negative/task-client-task-id.json",
+      "schema": "task-submit.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "Create request must not include server Task ID."
+    },
+    {
+      "id": "EX-N-task-missing-origin-step",
+      "path": "negative/task-missing-origin-step.json",
+      "schema": "task-submit.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "Workflow origins need stable step identity."
+    },
+    {
+      "id": "EX-N-task-wrong-digest",
+      "path": "negative/task-wrong-digest.json",
+      "schema": "task-submit.schema.json",
+      "expected": "Invalid",
+      "validation": "Digest",
+      "purpose": "Digest covers all business fields."
+    },
+    {
+      "id": "EX-N-chat-forged-sender",
+      "path": "negative/chat-forged-sender.json",
+      "schema": "chat-send.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "Sender comes from authenticated identity."
+    },
+    {
+      "id": "EX-N-chat-missing-client-id",
+      "path": "negative/chat-missing-client-id.json",
+      "schema": "chat-send.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "Client send ID is required."
+    },
+    {
+      "id": "EX-N-chat-number-sequence",
+      "path": "negative/chat-number-sequence.json",
+      "schema": "chat-accepted.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "Persistent sequence must not use JSON number."
+    },
+    {
+      "id": "EX-N-chat-leading-zero-epoch",
+      "path": "negative/chat-leading-zero-epoch.json",
+      "schema": "chat-accepted.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "Canonical decimal encoding has no leading zero."
+    },
+    {
+      "id": "EX-N-chat-counter-overflow",
+      "path": "negative/chat-counter-overflow.json",
+      "schema": "chat-accepted.schema.json",
+      "expected": "Invalid",
+      "validation": "Semantic",
+      "purpose": "u64 semantic upper bound."
+    },
+    {
+      "id": "EX-N-operation-success-unknown",
+      "path": "negative/operation-success-unknown.json",
+      "schema": "operation.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "Unknown effects cannot be successful."
+    },
+    {
+      "id": "EX-N-task-success-unknown",
+      "path": "negative/task-success-unknown.json",
+      "schema": "task.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "Task success requires known effects."
+    },
+    {
+      "id": "EX-N-run-success-unknown",
+      "path": "negative/run-success-unknown.json",
+      "schema": "run.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "Run success requires known effects."
+    },
+    {
+      "id": "EX-N-workflow-completed-alias",
+      "path": "negative/workflow-completed-alias.json",
+      "schema": "workflow-run.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "Legacy Completed is not a v1 lifecycle."
+    },
+    {
+      "id": "EX-N-approval-bound-no-operation",
+      "path": "negative/approval-bound-no-operation.json",
+      "schema": "approval-use.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "Bound usage must name its unique Operation."
+    },
+    {
+      "id": "EX-N-approval-unbound-with-operation",
+      "path": "negative/approval-unbound-with-operation.json",
+      "schema": "approval-use.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "Unbound usage must not retain a bound Operation."
+    },
+    {
+      "id": "EX-N-permit-self-declared-proof",
+      "path": "negative/permit-self-declared-proof.json",
+      "schema": "execution-permit.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "Only explicit authenticated lookup or signature structures."
+    },
+    {
+      "id": "EX-N-dataset-null-name",
+      "path": "negative/dataset-null-name.json",
+      "schema": "dataset-record.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "Missing name differs from null."
+    },
+    {
+      "id": "EX-N-dataset-duplicate-tags",
+      "path": "negative/dataset-duplicate-tags.json",
+      "schema": "dataset-record.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "Tags have set semantics."
+    },
+    {
+      "id": "EX-N-dataset-empty-vector",
+      "path": "negative/dataset-empty-vector.json",
+      "schema": "dataset-record.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "Absent vector is not an empty vector."
+    },
+    {
+      "id": "EX-N-dataset-scored-without-profile",
+      "path": "negative/dataset-scored-without-profile.json",
+      "schema": "dataset-record.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "Score zero is valid but must have a scoring profile."
+    },
+    {
+      "id": "EX-N-readonly-attachment-writes",
+      "path": "negative/readonly-attachment-writes.json",
+      "schema": "volume-attachment.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "A read-only request cannot gain effective writes."
+    },
+    {
+      "id": "EX-N-revocation-false-complete",
+      "path": "negative/revocation-false-complete.json",
+      "schema": "revocation-result.schema.json",
+      "expected": "Invalid",
+      "validation": "Semantic",
+      "purpose": "Complete requires all required targets Enforced."
+    },
+    {
+      "id": "EX-N-quarantine-auto-writes",
+      "path": "negative/quarantine-auto-writes.json",
+      "schema": "recovery-status.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "Quarantine cannot enable automatic writes."
+    },
+    {
+      "id": "EX-N-restore-unknown-delete-share",
+      "path": "negative/restore-unknown-delete-share.json",
+      "schema": "recovery-status.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "Unknown deletion history blocks automatic public sharing."
+    },
+    {
+      "id": "EX-N-snapshot-false-final",
+      "path": "negative/snapshot-false-final.json",
+      "schema": "snapshot-page.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "Final page must have no next cursor."
+    },
+    {
+      "id": "EX-N-workflow-duplicate-step",
+      "path": "negative/workflow-duplicate-step.json",
+      "schema": "workflow-definition.schema.json",
+      "expected": "Invalid",
+      "validation": "Semantic",
+      "purpose": "Steps need unique stable IDs."
+    },
+    {
+      "id": "EX-N-workflow-cycle",
+      "path": "negative/workflow-cycle.json",
+      "schema": "workflow-definition.schema.json",
+      "expected": "Invalid",
+      "validation": "Semantic",
+      "purpose": "Base graph must be acyclic."
+    },
+    {
+      "id": "EX-N-workflow-zero-step-deadline",
+      "path": "negative/workflow-zero-step-deadline.json",
+      "schema": "workflow-definition.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "All step deadlines must be finite positive bounds."
+    },
+    {
+      "id": "EX-N-workflow-loop-missing-bound",
+      "path": "negative/workflow-loop-missing-bound.json",
+      "schema": "workflow-definition.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "A real BoundedLoop node must declare max_iterations."
+    },
+    {
+      "id": "EX-N-task-success-pending-result",
+      "path": "negative/task-success-pending-result.json",
+      "schema": "task.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "Succeeded cannot retain an unpublished initial result."
+    },
+    {
+      "id": "EX-N-dispatch-mismatched-task",
+      "path": "negative/dispatch-mismatched-task.json",
+      "schema": "dispatch-intent.schema.json",
+      "expected": "Invalid",
+      "validation": "Semantic",
+      "purpose": "Linked receipt must match the exact dispatch intent."
+    },
+    {
+      "id": "EX-N-runtime-verified-no-evidence",
+      "path": "negative/runtime-verified-no-evidence.json",
+      "schema": "application-manifest.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "A Passed compatibility claim needs actual evidence references."
+    },
+    {
+      "id": "EX-N-application-no-execution-spec",
+      "path": "negative/application-no-execution-spec.json",
+      "schema": "application-manifest.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "A release cannot omit its complete executable requirements."
+    },
+    {
+      "id": "EX-N-application-unbounded-memory",
+      "path": "negative/application-unbounded-memory.json",
+      "schema": "application-release-spec.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "Memory hard limit must be a positive finite quantity."
+    },
+    {
+      "id": "EX-N-lookup-found-no-record",
+      "path": "negative/lookup-found-no-record.json",
+      "schema": "task-lookup.schema.json",
+      "expected": "Invalid",
+      "validation": "Schema",
+      "purpose": "Found needs the original acceptance receipt."
+    },
+    {
+      "id": "EX-N-resource-observed-future",
+      "path": "negative/resource-observed-future.json",
+      "schema": "resource-envelope.schema.json",
+      "expected": "Invalid",
+      "validation": "Semantic",
+      "purpose": "Observed generation cannot exceed desired generation."
+    },
+    {
+      "id": "EX-P-dataset-scored-vector",
+      "path": "positive/dataset-scored-vector.json",
+      "schema": "dataset-record.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "score=0, optional vector with version-bound profile, and extra_data=null are valid."
+    },
+    {
+      "id": "EX-P-task-lookup-expired",
+      "path": "positive/task-lookup-expired.json",
+      "schema": "task-lookup.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "No automatic retry is inferred from this lookup status."
+    },
+    {
+      "id": "EX-P-task-lookup-indeterminate",
+      "path": "positive/task-lookup-indeterminate.json",
+      "schema": "task-lookup.schema.json",
+      "expected": "Valid",
+      "validation": "SchemaAndLocalSemantics",
+      "purpose": "No automatic retry is inferred from this lookup status."
+    }
+  ]
+}

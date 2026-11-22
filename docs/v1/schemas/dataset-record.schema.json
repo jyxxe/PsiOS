@@ -1,0 +1,227 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.psios.example/v1/dataset-record.schema.json",
+  "title": "Dataset record: seven business fields and independent system metadata",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "dataset_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "record": {
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "name": {
+          "type": "string"
+        },
+        "content": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ContentRef"
+            }
+          ]
+        },
+        "tag": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 0,
+          "maxItems": 4096,
+          "uniqueItems": true
+        },
+        "score": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "vector": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 1,
+          "maxItems": 65536
+        },
+        "extra_data": {}
+      },
+      "required": [
+        "uid",
+        "content",
+        "tag",
+        "score"
+      ],
+      "additionalProperties": false
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "record_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "content_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "content_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "score_profile_ref": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+        },
+        "score_source_content_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "embedding_profile": {
+          "type": "object",
+          "properties": {
+            "profile_ref": {
+              "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+            },
+            "model_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+            },
+            "dimensions": {
+              "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+            },
+            "distance": {
+              "enum": [
+                "Cosine",
+                "Dot",
+                "Euclidean"
+              ]
+            },
+            "normalization": {
+              "enum": [
+                "None",
+                "UnitL2"
+              ]
+            },
+            "source_content_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+            }
+          },
+          "required": [
+            "profile_ref",
+            "model_id",
+            "model_version",
+            "dimensions",
+            "distance",
+            "normalization",
+            "source_content_version"
+          ],
+          "additionalProperties": false
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+        }
+      },
+      "required": [
+        "record_version",
+        "content_version",
+        "content_digest",
+        "created_at",
+        "updated_at"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema_version",
+    "dataset_id",
+    "record",
+    "metadata"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "record": {
+            "required": [
+              "vector"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "metadata": {
+            "required": [
+              "embedding_profile"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "record": {
+            "properties": {
+              "score": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "score"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "metadata": {
+            "required": [
+              "score_profile_ref",
+              "score_source_content_version"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0.0",
+  "approval_use_id": "approval-use-demo",
+  "decision_ref": {
+    "resource_id": "decision-demo",
+    "version": "rev-1",
+    "digest": "sha256:86f3f5c0c8d1205176715a00475703b788a8c92c17176869cea312180407dae2"
+  },
+  "resource_version": "rv-bound",
+  "plan_digest": "sha256:76f3a62bfb9c6f378a7477e734b6e1b802ed5d18f84a323f20e6f215ce55a87d",
+  "binding_status": "Bound",
+  "validity_status": "Valid",
+  "operation_id": "operation-demo",
+  "bound_at": "2026-11-22T08:00:00Z"
+}

@@ -1,0 +1,1067 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.psios.example/v1/workflow-definition.schema.json",
+  "title": "Restricted Workflow AST (graph/authorization checks are separate)",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "dsl_version": {
+      "const": "1.0.0"
+    },
+    "definition_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "definition_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "definition_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "input_schema_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "output_schema_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "step_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+              },
+              "depends_on": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+                },
+                "minItems": 0,
+                "maxItems": 4096,
+                "uniqueItems": true
+              },
+              "deadline_seconds": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+              },
+              "retry_policy": {
+                "type": "object",
+                "properties": {
+                  "max_attempts": {
+                    "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+                  },
+                  "backoff_seconds": {
+                    "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+                  },
+                  "retry_unknown_effects": {
+                    "const": false
+                  }
+                },
+                "required": [
+                  "max_attempts",
+                  "backoff_seconds",
+                  "retry_unknown_effects"
+                ],
+                "additionalProperties": false
+              },
+              "failure_policy": {
+                "enum": [
+                  "Stop",
+                  "ContinueTyped"
+                ]
+              },
+              "compensation_definition_ref": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+              },
+              "kind": {
+                "const": "TaskStep"
+              },
+              "task_type": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+              },
+              "input_bindings": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Expression"
+                },
+                "maxProperties": 256
+              },
+              "allowed_capability_refs": {
+                "type": "array",
+                "items": {
+                  "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+                },
+                "minItems": 1,
+                "maxItems": 256
+              },
+              "delegation_ref": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+              },
+              "budget_ref": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+              }
+            },
+            "required": [
+              "step_id",
+              "depends_on",
+              "deadline_seconds",
+              "retry_policy",
+              "failure_policy",
+              "kind",
+              "task_type",
+              "input_bindings",
+              "allowed_capability_refs",
+              "delegation_ref",
+              "budget_ref"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "step_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+              },
+              "depends_on": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+                },
+                "minItems": 0,
+                "maxItems": 4096,
+                "uniqueItems": true
+              },
+              "deadline_seconds": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+              },
+              "retry_policy": {
+                "type": "object",
+                "properties": {
+                  "max_attempts": {
+                    "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+                  },
+                  "backoff_seconds": {
+                    "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+                  },
+                  "retry_unknown_effects": {
+                    "const": false
+                  }
+                },
+                "required": [
+                  "max_attempts",
+                  "backoff_seconds",
+                  "retry_unknown_effects"
+                ],
+                "additionalProperties": false
+              },
+              "failure_policy": {
+                "enum": [
+                  "Stop",
+                  "ContinueTyped"
+                ]
+              },
+              "compensation_definition_ref": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+              },
+              "kind": {
+                "const": "Condition"
+              },
+              "expression": {
+                "$ref": "#/$defs/Expression"
+              },
+              "branches": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "value": {},
+                    "activate": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256,
+                        "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+                      },
+                      "minItems": 1,
+                      "maxItems": 256,
+                      "uniqueItems": true
+                    }
+                  },
+                  "required": [
+                    "value",
+                    "activate"
+                  ],
+                  "additionalProperties": false
+                },
+                "minItems": 1,
+                "maxItems": 64
+              },
+              "default_activate": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+                },
+                "minItems": 0,
+                "maxItems": 256,
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "step_id",
+              "depends_on",
+              "deadline_seconds",
+              "retry_policy",
+              "failure_policy",
+              "kind",
+              "expression",
+              "branches",
+              "default_activate"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "step_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+              },
+              "depends_on": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+                },
+                "minItems": 0,
+                "maxItems": 4096,
+                "uniqueItems": true
+              },
+              "deadline_seconds": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+              },
+              "retry_policy": {
+                "type": "object",
+                "properties": {
+                  "max_attempts": {
+                    "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+                  },
+                  "backoff_seconds": {
+                    "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+                  },
+                  "retry_unknown_effects": {
+                    "const": false
+                  }
+                },
+                "required": [
+                  "max_attempts",
+                  "backoff_seconds",
+                  "retry_unknown_effects"
+                ],
+                "additionalProperties": false
+              },
+              "failure_policy": {
+                "enum": [
+                  "Stop",
+                  "ContinueTyped"
+                ]
+              },
+              "compensation_definition_ref": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+              },
+              "kind": {
+                "const": "Parallel"
+              },
+              "children": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+                },
+                "minItems": 1,
+                "maxItems": 256,
+                "uniqueItems": true
+              },
+              "max_concurrency": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+              }
+            },
+            "required": [
+              "step_id",
+              "depends_on",
+              "deadline_seconds",
+              "retry_policy",
+              "failure_policy",
+              "kind",
+              "children",
+              "max_concurrency"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "step_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+              },
+              "depends_on": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+                },
+                "minItems": 0,
+                "maxItems": 4096,
+                "uniqueItems": true
+              },
+              "deadline_seconds": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+              },
+              "retry_policy": {
+                "type": "object",
+                "properties": {
+                  "max_attempts": {
+                    "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+                  },
+                  "backoff_seconds": {
+                    "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+                  },
+                  "retry_unknown_effects": {
+                    "const": false
+                  }
+                },
+                "required": [
+                  "max_attempts",
+                  "backoff_seconds",
+                  "retry_unknown_effects"
+                ],
+                "additionalProperties": false
+              },
+              "failure_policy": {
+                "enum": [
+                  "Stop",
+                  "ContinueTyped"
+                ]
+              },
+              "compensation_definition_ref": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+              },
+              "kind": {
+                "const": "Join"
+              },
+              "strategy": {
+                "enum": [
+                  "AllSuccess",
+                  "AllSettled",
+                  "AnySuccess"
+                ]
+              },
+              "predecessors": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+                },
+                "minItems": 1,
+                "maxItems": 256,
+                "uniqueItems": true
+              },
+              "nonselected_policy": {
+                "const": "Exclude"
+              },
+              "loser_policy": {
+                "enum": [
+                  "ReconcileBeforeRelease",
+                  "NotApplicable"
+                ]
+              },
+              "aggregate_schema_ref": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+              }
+            },
+            "required": [
+              "step_id",
+              "depends_on",
+              "deadline_seconds",
+              "retry_policy",
+              "failure_policy",
+              "kind",
+              "strategy",
+              "predecessors",
+              "nonselected_policy",
+              "loser_policy",
+              "aggregate_schema_ref"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "step_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+              },
+              "depends_on": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+                },
+                "minItems": 0,
+                "maxItems": 4096,
+                "uniqueItems": true
+              },
+              "deadline_seconds": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+              },
+              "retry_policy": {
+                "type": "object",
+                "properties": {
+                  "max_attempts": {
+                    "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+                  },
+                  "backoff_seconds": {
+                    "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+                  },
+                  "retry_unknown_effects": {
+                    "const": false
+                  }
+                },
+                "required": [
+                  "max_attempts",
+                  "backoff_seconds",
+                  "retry_unknown_effects"
+                ],
+                "additionalProperties": false
+              },
+              "failure_policy": {
+                "enum": [
+                  "Stop",
+                  "ContinueTyped"
+                ]
+              },
+              "compensation_definition_ref": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+              },
+              "kind": {
+                "const": "ApprovalGate"
+              },
+              "operation_plan_ref": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+              },
+              "approval_policy_ref": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+              },
+              "on_rejected": {
+                "enum": [
+                  "Fail",
+                  "Cancel"
+                ]
+              }
+            },
+            "required": [
+              "step_id",
+              "depends_on",
+              "deadline_seconds",
+              "retry_policy",
+              "failure_policy",
+              "kind",
+              "operation_plan_ref",
+              "approval_policy_ref",
+              "on_rejected"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "step_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+              },
+              "depends_on": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+                },
+                "minItems": 0,
+                "maxItems": 4096,
+                "uniqueItems": true
+              },
+              "deadline_seconds": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+              },
+              "retry_policy": {
+                "type": "object",
+                "properties": {
+                  "max_attempts": {
+                    "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+                  },
+                  "backoff_seconds": {
+                    "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+                  },
+                  "retry_unknown_effects": {
+                    "const": false
+                  }
+                },
+                "required": [
+                  "max_attempts",
+                  "backoff_seconds",
+                  "retry_unknown_effects"
+                ],
+                "additionalProperties": false
+              },
+              "failure_policy": {
+                "enum": [
+                  "Stop",
+                  "ContinueTyped"
+                ]
+              },
+              "compensation_definition_ref": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+              },
+              "kind": {
+                "const": "WaitInput"
+              },
+              "allowed_principal_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+                },
+                "minItems": 1,
+                "maxItems": 256,
+                "uniqueItems": true
+              },
+              "input_schema_ref": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+              }
+            },
+            "required": [
+              "step_id",
+              "depends_on",
+              "deadline_seconds",
+              "retry_policy",
+              "failure_policy",
+              "kind",
+              "allowed_principal_ids",
+              "input_schema_ref"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "step_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+              },
+              "depends_on": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+                },
+                "minItems": 0,
+                "maxItems": 4096,
+                "uniqueItems": true
+              },
+              "deadline_seconds": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+              },
+              "retry_policy": {
+                "type": "object",
+                "properties": {
+                  "max_attempts": {
+                    "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+                  },
+                  "backoff_seconds": {
+                    "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+                  },
+                  "retry_unknown_effects": {
+                    "const": false
+                  }
+                },
+                "required": [
+                  "max_attempts",
+                  "backoff_seconds",
+                  "retry_unknown_effects"
+                ],
+                "additionalProperties": false
+              },
+              "failure_policy": {
+                "enum": [
+                  "Stop",
+                  "ContinueTyped"
+                ]
+              },
+              "compensation_definition_ref": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+              },
+              "kind": {
+                "const": "WaitEvent"
+              },
+              "subscription_ref": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+              },
+              "event_type": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+              },
+              "predicate": {
+                "$ref": "#/$defs/Expression"
+              }
+            },
+            "required": [
+              "step_id",
+              "depends_on",
+              "deadline_seconds",
+              "retry_policy",
+              "failure_policy",
+              "kind",
+              "subscription_ref",
+              "event_type",
+              "predicate"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "step_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+              },
+              "depends_on": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+                },
+                "minItems": 0,
+                "maxItems": 4096,
+                "uniqueItems": true
+              },
+              "deadline_seconds": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+              },
+              "retry_policy": {
+                "type": "object",
+                "properties": {
+                  "max_attempts": {
+                    "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+                  },
+                  "backoff_seconds": {
+                    "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+                  },
+                  "retry_unknown_effects": {
+                    "const": false
+                  }
+                },
+                "required": [
+                  "max_attempts",
+                  "backoff_seconds",
+                  "retry_unknown_effects"
+                ],
+                "additionalProperties": false
+              },
+              "failure_policy": {
+                "enum": [
+                  "Stop",
+                  "ContinueTyped"
+                ]
+              },
+              "compensation_definition_ref": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+              },
+              "kind": {
+                "const": "BoundedLoop"
+              },
+              "body_definition_ref": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+              },
+              "max_iterations": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+              },
+              "while_expression": {
+                "$ref": "#/$defs/Expression"
+              },
+              "budget_ref": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+              }
+            },
+            "required": [
+              "step_id",
+              "depends_on",
+              "deadline_seconds",
+              "retry_policy",
+              "failure_policy",
+              "kind",
+              "body_definition_ref",
+              "max_iterations",
+              "while_expression",
+              "budget_ref"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "step_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+              },
+              "depends_on": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+                },
+                "minItems": 0,
+                "maxItems": 4096,
+                "uniqueItems": true
+              },
+              "deadline_seconds": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+              },
+              "retry_policy": {
+                "type": "object",
+                "properties": {
+                  "max_attempts": {
+                    "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+                  },
+                  "backoff_seconds": {
+                    "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+                  },
+                  "retry_unknown_effects": {
+                    "const": false
+                  }
+                },
+                "required": [
+                  "max_attempts",
+                  "backoff_seconds",
+                  "retry_unknown_effects"
+                ],
+                "additionalProperties": false
+              },
+              "failure_policy": {
+                "enum": [
+                  "Stop",
+                  "ContinueTyped"
+                ]
+              },
+              "compensation_definition_ref": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+              },
+              "kind": {
+                "const": "SubWorkflow"
+              },
+              "child_definition_ref": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+              },
+              "input_bindings": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/Expression"
+                },
+                "maxProperties": 256
+              },
+              "budget_ref": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+              }
+            },
+            "required": [
+              "step_id",
+              "depends_on",
+              "deadline_seconds",
+              "retry_policy",
+              "failure_policy",
+              "kind",
+              "child_definition_ref",
+              "input_bindings",
+              "budget_ref"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "step_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+              },
+              "depends_on": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+                },
+                "minItems": 0,
+                "maxItems": 4096,
+                "uniqueItems": true
+              },
+              "deadline_seconds": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+              },
+              "retry_policy": {
+                "type": "object",
+                "properties": {
+                  "max_attempts": {
+                    "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+                  },
+                  "backoff_seconds": {
+                    "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+                  },
+                  "retry_unknown_effects": {
+                    "const": false
+                  }
+                },
+                "required": [
+                  "max_attempts",
+                  "backoff_seconds",
+                  "retry_unknown_effects"
+                ],
+                "additionalProperties": false
+              },
+              "failure_policy": {
+                "enum": [
+                  "Stop",
+                  "ContinueTyped"
+                ]
+              },
+              "compensation_definition_ref": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+              },
+              "kind": {
+                "const": "Map"
+              },
+              "child_definition_ref": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+              },
+              "items_expression": {
+                "$ref": "#/$defs/Expression"
+              },
+              "max_items": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+              },
+              "max_concurrency": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+              },
+              "expansion_policy": {
+                "const": "FreezeAtExpansion"
+              },
+              "budget_ref": {
+                "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+              }
+            },
+            "required": [
+              "step_id",
+              "depends_on",
+              "deadline_seconds",
+              "retry_policy",
+              "failure_policy",
+              "kind",
+              "child_definition_ref",
+              "items_expression",
+              "max_items",
+              "max_concurrency",
+              "expansion_policy",
+              "budget_ref"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "minItems": 1,
+      "maxItems": 4096
+    },
+    "root_budget_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "max_concurrency": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+    },
+    "deadline_seconds": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+    },
+    "output_bindings": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/Expression"
+      },
+      "maxProperties": 256
+    }
+  },
+  "required": [
+    "schema_version",
+    "dsl_version",
+    "definition_id",
+    "definition_version",
+    "definition_digest",
+    "input_schema_ref",
+    "output_schema_ref",
+    "nodes",
+    "root_budget_ref",
+    "max_concurrency",
+    "deadline_seconds",
+    "output_bindings"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "Expression": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "literal"
+            },
+            "value": {}
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "input"
+            },
+            "path": {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000
+                  }
+                ]
+              },
+              "minItems": 0,
+              "maxItems": 32
+            }
+          },
+          "required": [
+            "kind",
+            "path"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "call"
+            },
+            "function": {
+              "enum": [
+                "eq",
+                "lt",
+                "lte",
+                "gt",
+                "gte",
+                "and",
+                "or",
+                "not",
+                "exists",
+                "type",
+                "array_contains"
+              ]
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Expression"
+              },
+              "minItems": 1,
+              "maxItems": 32
+            }
+          },
+          "required": [
+            "kind",
+            "function",
+            "args"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

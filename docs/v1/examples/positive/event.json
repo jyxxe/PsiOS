@@ -1,0 +1,27 @@
+{
+  "schema_version": "1.0.0",
+  "event_id": "event-demo",
+  "event_type": "psios.task.updated.v1",
+  "source_authority_id": "task-broker",
+  "recovery_incarnation": "core-incarnation-2",
+  "source_seq": "42",
+  "resource_ref": {
+    "resource_id": "task-demo",
+    "version": "rev-1",
+    "digest": "sha256:5fdf86ae1f79fe4aa46b58d9c36ef69e32e33bb974f704d39d7a8dec615412f6"
+  },
+  "occurred_at": "2026-11-22T08:00:00Z",
+  "received_at": "2026-11-22T08:00:00Z",
+  "correlation_id": "correlation-demo",
+  "task_id": "task-demo",
+  "payload_ref": {
+    "resource_id": "task-event-payload",
+    "version": "rev-1",
+    "digest": "sha256:893cdf725885400c45934d0c492ead329841c9bb95de166d8e45154729349f5d"
+  },
+  "authorization_context_ref": {
+    "resource_id": "event-policy-context",
+    "version": "rev-1",
+    "digest": "sha256:a9202d757bae68cfee1c1e17bf820d0e2ee4560b4fd5d297bcc592f5f33448a2"
+  }
+}

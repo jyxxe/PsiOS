@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.0.0",
+  "volume_id": "volume-demo",
+  "data_incarnation": "volume-incarnation-2",
+  "resource_version": "volume-rv-2",
+  "pool_id": "pool-demo",
+  "driver_profile_ref": {
+    "resource_id": "driver-local",
+    "version": "rev-1",
+    "digest": "sha256:446724c763c01d5dcd98a51010f47e6c6493b4447817fcc8440d78d7d4bd8e61"
+  },
+  "access_mode": "single_writer_rw",
+  "capacity_bytes": "10737418240",
+  "lifecycle": "Available",
+  "health": "Healthy",
+  "attachment_refs": [
+    {
+      "resource_id": "attachment-demo",
+      "version": "rev-1",
+      "digest": "sha256:ebd16969d606011780f2894b796cfe936724bfbaea7927e9bd6159e2808177d6"
+    }
+  ],
+  "backup_policy_ref": {
+    "resource_id": "backup-policy",
+    "version": "rev-1",
+    "digest": "sha256:5797788d905b4ac49ac278303f10c392cab7163d48022c398f5b56fa6524a964"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0.0",
+  "attachment_id": "attachment-demo",
+  "volume_id": "volume-demo",
+  "data_incarnation": "volume-incarnation-2",
+  "node_id": "node-demo",
+  "workload_id": "workload-demo",
+  "requested_access": "ReadWrite",
+  "effective_access": "ReadWrite",
+  "lifecycle": "Attached",
+  "fence": {
+    "resource_id": "volume-demo",
+    "recovery_incarnation": "storage-incarnation-2",
+    "epoch": "13"
+  },
+  "lease_ref": {
+    "resource_id": "lease-demo",
+    "version": "rev-1",
+    "digest": "sha256:552e0c89154e986443108f7d5824cc016c0cc129c4645bdb505fdb2bd154e928"
+  }
+}

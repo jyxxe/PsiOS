@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.psios.example/v1/volume.schema.json",
+  "title": "Logical Volume; access_mode does not itself prove fencing",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "volume_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "data_incarnation": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "resource_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "pool_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "driver_profile_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "access_mode": {
+      "enum": [
+        "multi_reader",
+        "single_node_rw",
+        "single_writer_rw",
+        "multi_writer_rw"
+      ]
+    },
+    "capacity_bytes": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+    },
+    "lifecycle": {
+      "enum": [
+        "Provisioning",
+        "Available",
+        "Deleting",
+        "Deleted"
+      ]
+    },
+    "health": {
+      "enum": [
+        "Unknown",
+        "Healthy",
+        "Degraded",
+        "Unavailable"
+      ]
+    },
+    "attachment_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+      },
+      "minItems": 0,
+      "maxItems": 4096
+    },
+    "backup_policy_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    }
+  },
+  "required": [
+    "schema_version",
+    "volume_id",
+    "data_incarnation",
+    "resource_version",
+    "pool_id",
+    "driver_profile_ref",
+    "access_mode",
+    "capacity_bytes",
+    "lifecycle",
+    "health",
+    "attachment_refs",
+    "backup_policy_ref"
+  ],
+  "additionalProperties": false
+}

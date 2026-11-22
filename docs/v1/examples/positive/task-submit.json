@@ -1,0 +1,30 @@
+{
+  "schema_version": "1.0.0",
+  "origin_ref": {
+    "authority_id": "workflow-local",
+    "origin_type": "WorkflowRun",
+    "origin_id": "wf-run-demo",
+    "step_key": "review/iteration-0",
+    "attempt_generation": "0"
+  },
+  "idempotency_key": "submit-window-1/review-0",
+  "input_ref": {
+    "resource_id": "review-input",
+    "version": "rev-1",
+    "digest": "sha256:e5d06a3998e8ed7373c1cd1799383f287f9bb37105f90de6ca5a517d7697db51"
+  },
+  "task_type": "review.read_only.v1",
+  "delegation_ref": {
+    "resource_id": "delegation-review",
+    "version": "rev-1",
+    "digest": "sha256:1a224ec34161b91a7b0ffa3b1858897e93d3628c372f725ca5b48674e0f7a31b"
+  },
+  "budget_ref": {
+    "resource_id": "budget-review",
+    "version": "rev-1",
+    "digest": "sha256:408616897a72dc871f8c1593211e2efb21959733fbb9c2b7358f01ff1c0729de"
+  },
+  "deadline_at": "2026-11-22T09:00:00Z",
+  "cancel_scope_id": "cancel-scope-demo",
+  "request_digest": "sha256:176e64af9c97dcbff66293c0ab23223a4d9f9222d739eed42f664a3be7bb9691"
+}

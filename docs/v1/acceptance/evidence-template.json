@@ -1,0 +1,111 @@
+{
+  "schema_version": "1.0.0",
+  "template_notice": "这是未执行证据模板。null 表示尚未采集；不得删除缺失字段后宣称 Passed。每次实际运行复制为独立记录。",
+  "test_id": null,
+  "requirement_ids": [],
+  "execution_id": null,
+  "test_plan_revision": "PsiOS-v1",
+  "result": "NotRun",
+  "implementation_status": "NotVerified",
+  "stage": [],
+  "product": {
+    "repository_url": null,
+    "commit_sha": null,
+    "artifact_digest": null,
+    "schema_versions": [],
+    "protocol_versions": [],
+    "dependency_lock_digest": null
+  },
+  "environment": {
+    "edition": null,
+    "profile_ref": null,
+    "hardware": [],
+    "architecture": null,
+    "kernel_version": null,
+    "runtime_version": null,
+    "storage_backend": null,
+    "database_version": null,
+    "portal_versions": [],
+    "configuration_digest": null,
+    "clock_and_time_trust": null,
+    "declared_fault_scope": [],
+    "resource_limits": {}
+  },
+  "participants": {
+    "executor_principal_id": null,
+    "reviewer_principal_id": null,
+    "independence_policy_ref": null
+  },
+  "timing": {
+    "started_at": null,
+    "finished_at": null,
+    "monotonic_clock_source": null,
+    "boot_ids": []
+  },
+  "setup": {
+    "fixture_manifest_ref": null,
+    "fixture_digest": null,
+    "initial_authority_revisions": [],
+    "recovery_incarnations": [],
+    "policy_epoch": null,
+    "precondition_results": []
+  },
+  "execution": {
+    "fault_injection_points": [],
+    "concurrency_schedule_ref": null,
+    "random_seed": null,
+    "steps": [],
+    "restarts_and_reconnections": [],
+    "unexpected_effects": []
+  },
+  "assertions": [
+    {
+      "assertion_id": null,
+      "requirement_ids": [],
+      "expected": null,
+      "observed": null,
+      "result": "NotRun",
+      "evidence_refs": []
+    }
+  ],
+  "actual_summary": null,
+  "required_evidence": [
+    {
+      "kind": "authority_records",
+      "description": "权威状态、提交/去重/审批/预算及恢复记录，按场景选择",
+      "uri": null,
+      "digest": null,
+      "redacted": true
+    },
+    {
+      "kind": "resource_or_external_observation",
+      "description": "实际资源端写入、远端效果或独立数据校验证据",
+      "uri": null,
+      "digest": null,
+      "redacted": true
+    },
+    {
+      "kind": "fault_and_recovery_trace",
+      "description": "故障点、交错顺序和恢复后的检查",
+      "uri": null,
+      "digest": null,
+      "redacted": true
+    }
+  ],
+  "limitations": [],
+  "blocked_reason": null,
+  "not_applicable_reason": null,
+  "review": {
+    "decision": null,
+    "reviewed_at": null,
+    "reviewer_principal_id": null,
+    "notes": null
+  },
+  "rerun_of_execution_id": null,
+  "retention": {
+    "security_domain_id": null,
+    "policy_ref": null,
+    "expires_at": null
+  },
+  "pass_gate": "仅当实际运行完成、全部适用断言通过、证据可访问且摘要匹配、环境/制品准确绑定并完成必要独立复核时，才可在真实运行记录中填写 Passed。"
+}

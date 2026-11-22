@@ -1,0 +1,3 @@
+# Documentation validation only; not PsiOS runtime dependencies.
+jsonschema==4.26.0
+referencing==0.37.0

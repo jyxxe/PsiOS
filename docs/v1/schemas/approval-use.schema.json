@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.psios.example/v1/approval-use.schema.json",
+  "title": "CAS-bound approval usage ledger view",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "approval_use_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "decision_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "resource_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "plan_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "binding_status": {
+      "enum": [
+        "Unbound",
+        "Bound"
+      ]
+    },
+    "validity_status": {
+      "enum": [
+        "Valid",
+        "Revoked",
+        "Expired",
+        "Superseded"
+      ]
+    },
+    "operation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "bound_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "approved_step_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    }
+  },
+  "required": [
+    "schema_version",
+    "approval_use_id",
+    "decision_ref",
+    "resource_version",
+    "plan_digest",
+    "binding_status",
+    "validity_status"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "binding_status": {
+            "const": "Bound"
+          }
+        },
+        "required": [
+          "binding_status"
+        ]
+      },
+      "then": {
+        "required": [
+          "operation_id",
+          "bound_at"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "binding_status": {
+            "const": "Unbound"
+          }
+        },
+        "required": [
+          "binding_status"
+        ]
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "operation_id"
+              ]
+            },
+            {
+              "required": [
+                "bound_at"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

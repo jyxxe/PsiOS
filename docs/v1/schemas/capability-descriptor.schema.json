@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.psios.example/v1/capability-descriptor.schema.json",
+  "title": "Advertised backend capability, never a Grant",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "capability_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "capability_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "authority_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+      },
+      "minItems": 1,
+      "maxItems": 256,
+      "uniqueItems": true
+    },
+    "profile_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "revocation_capabilities": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "GateOnly",
+          "StreamCut",
+          "SandboxTerminate",
+          "ResourceFence"
+        ]
+      },
+      "minItems": 0,
+      "maxItems": 4,
+      "uniqueItems": true
+    },
+    "effect_limitations": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 0,
+      "maxItems": 256
+    },
+    "availability": {
+      "enum": [
+        "Ready",
+        "Degraded",
+        "Unavailable",
+        "NotInstalled"
+      ]
+    },
+    "implementation_status": {
+      "enum": [
+        "NotVerified",
+        "ImplementedUnverified",
+        "Verified"
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "capability_id",
+    "capability_version",
+    "authority_id",
+    "actions",
+    "profile_ref",
+    "revocation_capabilities",
+    "effect_limitations",
+    "availability",
+    "implementation_status"
+  ],
+  "additionalProperties": false
+}

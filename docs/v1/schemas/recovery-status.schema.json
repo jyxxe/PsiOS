@@ -1,0 +1,198 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.psios.example/v1/recovery-status.schema.json",
+  "title": "Recovery trust, effect reconciliation and publication barriers",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "recovery_operation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "trust_domain_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "security_domain_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "security_recovery_epoch": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+    },
+    "recovery_incarnation": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "security_mode": {
+      "enum": [
+        "Quarantined",
+        "VerifiedCurrent",
+        "ReEnrolled"
+      ]
+    },
+    "covered_resource_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+      },
+      "minItems": 0,
+      "maxItems": 4096,
+      "uniqueItems": true
+    },
+    "uncovered_resource_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+      },
+      "minItems": 0,
+      "maxItems": 4096,
+      "uniqueItems": true
+    },
+    "security_evidence_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+      },
+      "minItems": 0,
+      "maxItems": 4096
+    },
+    "effect_reconciliation": {
+      "enum": [
+        "Blocked",
+        "InProgress",
+        "Complete"
+      ]
+    },
+    "unknown_effect_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+      },
+      "minItems": 0,
+      "maxItems": 4096
+    },
+    "deletion_history": {
+      "enum": [
+        "Unknown",
+        "VerifiedWithinScope"
+      ]
+    },
+    "automatic_writes_enabled": {
+      "type": "boolean"
+    },
+    "public_sharing_enabled": {
+      "type": "boolean"
+    },
+    "verified_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    }
+  },
+  "required": [
+    "schema_version",
+    "recovery_operation_id",
+    "trust_domain_id",
+    "security_domain_id",
+    "security_recovery_epoch",
+    "recovery_incarnation",
+    "security_mode",
+    "covered_resource_ids",
+    "uncovered_resource_ids",
+    "security_evidence_refs",
+    "effect_reconciliation",
+    "unknown_effect_refs",
+    "deletion_history",
+    "automatic_writes_enabled",
+    "public_sharing_enabled"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "security_mode": {
+            "const": "Quarantined"
+          }
+        },
+        "required": [
+          "security_mode"
+        ]
+      },
+      "then": {
+        "properties": {
+          "automatic_writes_enabled": {
+            "const": false
+          },
+          "public_sharing_enabled": {
+            "const": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "deletion_history": {
+            "const": "Unknown"
+          }
+        },
+        "required": [
+          "deletion_history"
+        ]
+      },
+      "then": {
+        "properties": {
+          "public_sharing_enabled": {
+            "const": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "automatic_writes_enabled": {
+            "const": true
+          }
+        },
+        "required": [
+          "automatic_writes_enabled"
+        ]
+      },
+      "then": {
+        "properties": {
+          "effect_reconciliation": {
+            "const": "Complete"
+          },
+          "unknown_effect_refs": {
+            "maxItems": 0
+          },
+          "security_mode": {
+            "enum": [
+              "VerifiedCurrent",
+              "ReEnrolled"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

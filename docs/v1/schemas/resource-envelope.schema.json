@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.psios.example/v1/resource-envelope.schema.json",
+  "title": "Read envelope; kind-specific spec validation is mandatory",
+  "type": "object",
+  "properties": {
+    "api_version": {
+      "const": "psios.v1"
+    },
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "kind": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "resource_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "identity_domain_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "authority_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "security_domain_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "owner_principal_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "resource_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "spec_generation": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+        }
+      },
+      "required": [
+        "resource_id",
+        "identity_domain_id",
+        "authority_id",
+        "security_domain_id",
+        "owner_principal_id",
+        "resource_version",
+        "spec_generation",
+        "created_at",
+        "updated_at"
+      ],
+      "additionalProperties": false
+    },
+    "spec": {
+      "type": "object",
+      "description": "Uninterpreted in this base envelope; must also pass registered kind schema before a write."
+    },
+    "status": {
+      "type": "object",
+      "properties": {
+        "observed_generation": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
+        },
+        "lifecycle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "conditions": {
+          "type": "array",
+          "items": {
+            "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/Condition"
+          },
+          "minItems": 0,
+          "maxItems": 64
+        }
+      },
+      "required": [
+        "observed_generation",
+        "lifecycle",
+        "conditions"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "api_version",
+    "schema_version",
+    "kind",
+    "metadata",
+    "spec",
+    "status"
+  ],
+  "additionalProperties": false
+}

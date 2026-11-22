@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0.0",
+  "effect_id": "effect-demo",
+  "operation_id": "operation-demo",
+  "resource_ref": {
+    "resource_id": "target-document",
+    "version": "rev-1",
+    "digest": "sha256:daee958c2c3ba7e6b9589b02f1e86b41dab48c4270ccefd1e24c878489581490"
+  },
+  "action": "document.replace",
+  "phase": "EffectStarted",
+  "outcome_knowledge": "Unknown",
+  "evidence_refs": []
+}

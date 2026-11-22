@@ -1,0 +1,100 @@
+{
+  "schema_version": "1.0.0",
+  "release_spec_id": "notes-release-spec",
+  "execution": {
+    "argv": [
+      "/app/bin/notes",
+      "--data",
+      "/data"
+    ],
+    "working_directory": "/app",
+    "environment": {
+      "LANG": "C.UTF-8"
+    }
+  },
+  "lifecycle": {
+    "stop_signal": "SIGTERM",
+    "stop_grace_seconds": "20",
+    "start_deadline_seconds": "60",
+    "restart_policy": "OnFailure",
+    "max_restarts": "3"
+  },
+  "identity": {
+    "execution_identity_profile_ref": {
+      "resource_id": "identity-unprivileged",
+      "version": "rev-1",
+      "digest": "sha256:1ae688fa89118df0a54b6ab7aa1c1bc4484a63baa76e14bdce4d88ebfc9ce70d"
+    },
+    "namespace_mapping_profile_ref": {
+      "resource_id": "private-user-namespace",
+      "version": "rev-1",
+      "digest": "sha256:7248a78f449611fbaa1c971d012bf805701701c9b3e7bbabe478f79772fdf5c6"
+    }
+  },
+  "permission_requests": {
+    "capability_refs": [
+      {
+        "resource_id": "capability-volume-write",
+        "version": "rev-1",
+        "digest": "sha256:3fb6c4761b09a82da5045fdd46b9e600d823f0fef5ecec459d872bc6626e1cc3"
+      }
+    ],
+    "secret_refs": [],
+    "device_profile_refs": [],
+    "volume_bindings": [
+      {
+        "manifest_volume_name": "data",
+        "mount_path": "/data",
+        "requested_access": "ReadWrite"
+      }
+    ]
+  },
+  "resources": {
+    "cpu_millicores": "500",
+    "memory_max_bytes": "0",
+    "pids_max": "64",
+    "ephemeral_max_bytes": "67108864",
+    "io_profile_ref": {
+      "resource_id": "io-limited",
+      "version": "rev-1",
+      "digest": "sha256:9738d51835008a69a9b93127872fdadb2e99b5113e3a32e815cab77e9819422f"
+    }
+  },
+  "provenance": {
+    "source_refs": [
+      {
+        "resource_id": "source-archive-demo",
+        "version": "rev-1",
+        "digest": "sha256:76a312864da92e0f4613c026c4d4f5af7e67335f8b44a6a00a115fee54c470ca"
+      }
+    ],
+    "license_expression": "MIT",
+    "license_material_ref": {
+      "resource_id": "license-demo",
+      "version": "rev-1",
+      "digest": "sha256:a58f393de37e6be0746159b138b73b19de1aa75df7a63c472fc9a1581ba559b4"
+    },
+    "source_trust": "UserSuppliedUnverified",
+    "trust_evidence_or_admission_policy_ref": {
+      "resource_id": "user-package-admission-policy",
+      "version": "rev-1",
+      "digest": "sha256:b143924211b730f5f1ccbd34f7467ee5fd3fa04e5dc1d35c9e4e32b10c634933"
+    },
+    "build_record_ref": {
+      "resource_id": "build-demo",
+      "version": "rev-1",
+      "digest": "sha256:56cf97be95c714082b48d1c9d5af3fd0ae68d5c47ac9682e0852218b82040828"
+    },
+    "sbom_ref": {
+      "resource_id": "sbom-demo",
+      "version": "rev-1",
+      "digest": "sha256:5ce0d9d1e0410a9ea2edcd96c9fbf223f346c2e57ab044e60e706ba9d3d46eb0"
+    }
+  },
+  "dependency_release_refs": [],
+  "backup_scope_ref": {
+    "resource_id": "backup-notes-data",
+    "version": "rev-1",
+    "digest": "sha256:60d2f2b3aa3a62cb50a2e052fa80d056c3857543d1d98c399df06bc65f5647bd"
+  }
+}

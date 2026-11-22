@@ -1,0 +1,252 @@
+# 07 应用、软件包兼容、Computer Use 与 GUI Bridge
+
+文档基线：PsiOS v1；接口语义版本：`1.0.0`；日期：2026-11-22。本文规定目标行为与兼容声明方法，不表示已有运行后端、软件包或桌面环境通过验收。实际实现均为 `NotVerified / NotRun`。相关 ADR：06（运行时）、10（KDE/Portal）、19（包适配）、20（GUI）；权限和恢复规则分别见 [安全与身份](04-security-identity.md)、[恢复一致性](05-recovery-consistency.md)。
+
+## 1. Application 的权威模型
+
+### V1-APP-001：统一身份、制品与部署
+
+普通应用、Agent 执行环境和可选服务由统一 Application/Runtime 管理；Linux 内核、驱动、KWin 与必要特权代理属于可信宿主职责，不能为了“全容器化”强迫它们依赖容器服务才能救援。第三方应用可由 Adapter 生成清单，不要求上游全部改成 PsiOS 专有打包格式。
+
+| 对象 | 权威内容 | 与其他对象的区别 |
+|---|---|---|
+| `Application` | 应用稳定身份、所有者、安装策略及当前选中版本引用 | 不随进程重启更换；不是一次容器实例 |
+| `ApplicationRelease` | 不可变清单、制品摘要、来源和兼容声明 | 标签只用于发现；实际运行绑定摘要 |
+| `Deployment` | 某 Release 的受控部署、配置版本、数据绑定和目标状态 | 升级创建/选择部署代次，不改写旧制品 |
+| `RuntimeInstance` | 真实进程/容器/沙箱实例、节点和启动代次 | 实例 ID 与宿主 PID 不同；PID 可复用 |
+| `RuntimeDriver` | OCI、Flatpak、开发容器或强化沙箱的能力与控制接口 | Driver 只对其实际支持范围负责 |
+| `PackageImport` | 第三方包识别、解析、验证、构建和集成操作 | 产物进入 Application，不成为第二套应用权威 |
+| `PackageEnvironment` | 目标发行版用户空间、ABI、包数据库、基础层及重建记录 | 不等同于宿主发行版，不拥有宿主包管理权 |
+
+### V1-APP-002：清单与生效权限
+
+清单必须用版本化 Schema 校验，并保存以下内容：
+
+| 部分 | 必填语义 |
+|---|---|
+| 元数据 | 应用/Release ID、版本、发布者、来源、许可证声明、制品摘要、签名验证记录 |
+| 兼容性 | CPU 架构、运行时/版本、系统 API 范围、ABI、必需/可选能力与设备驱动条件 |
+| 执行 | 服务或一次性 Job、入口、非秘密配置、工作目录、启动依赖、停止宽限和期限 |
+| 权限 | 系统能力、卷/路径及读写、设备、网络/数据外发、桌面/Portal、SecretRef 请求 |
+| 资源 | CPU、内存、进程、临时空间、块 I/O、日志、GPU/显存请求及可强制限制 |
+| 数据 | 卷及所有权、配置和数据 Schema、兼容窗口、备份/恢复/迁移钩子及失败处理 |
+| 运维 | 存活/就绪/业务健康、重启策略、升级/回退方式、默认保留数据、维护渠道 |
+
+`requested_permissions`、`approved_permissions`、`effective_permissions` 分别是申请、策略授权与后端实际配置/观测。生效权限必须不超出批准范围，必需限制必须确实生效；任一条件无法证明时阻止启动并说明原因。制品签名证明来源/完整性，不证明内容安全。更新新增权限、改外发目标或扩大设备范围必须重新通过授权裁决，不能继承旧授权的含糊“允许此应用”。
+
+### V1-APP-003：隔离与运行后端
+
+Runtime Profile 明确 namespace、cgroup、UID/GID 映射、capabilities、LSM/seccomp、挂载传播、设备、网络、Secret 注入、日志和撤权能力。OCI 运行规范提供相关配置结构，隔离效果取决于配置、内核和后端；符合 OCI 不等于获得任意威胁模型下的安全沙箱。[OCI Runtime 配置](https://github.com/opencontainers/runtime-spec/blob/main/config.md)及 [Linux 配置](https://github.com/opencontainers/runtime-spec/blob/main/config-linux.md)是适配机制依据；实现需锁定确切版本或提交。
+
+普通应用默认无宿主 PID/网络命名空间、全宿主文件系统、管理 Socket、任意设备或跨用户会话总线。rootless 是一种执行身份配置，不代替设备/内核安全边界；涉及不可信原生代码或多租户时，由 Profile 明确选择已验证强化隔离。缺少某项必需限制时拒绝或在已有授权内换后端；不能把 runtime 日志中的警告自动解释为该限制已落实。
+
+`read_only_rootfs` 不意味着没有任何写入。清单为 `/run`、`/tmp`、应用缓存、身份注入点等列独立受限挂载，创建顺序及目录权限必须在目标 Runtime 验证；不能为修复只读根启动错误而把整个宿主根改为读写。挂载路径使用受控资源解析，检查符号链接、挂载传播、uid/gid 与源卷 incarnation；不因路径相同复用另一应用的数据。
+
+Flatpak 静态权限与 Portal 动态授权分别记录和展示；Portal 的最终决定仍由真实桌面后端执行。[Flatpak 权限文档](https://docs.flatpak.org/en/latest/sandbox-permissions.html)说明这些不同机制；例如某些音频 Socket 会开放多种音频能力，不能仅靠 PsiOS 界面宣称已把麦克风与播放隔离。如果实际授权范围更宽，需如实显示并取得该范围授权，或更换能实施目标范围的后端。
+
+### V1-APP-004：生命周期分解与可观察状态
+
+避免把安装、进程和健康混在一个互斥枚举中：
+
+| 维度 | 状态 | 更新依据 |
+|---|---|---|
+| 安装操作 | `Resolving → Verifying → Preparing → Committing → Succeeded`；可 `Failed/Cancelled` | Operation 的持久进度和实际制品/数据绑定 |
+| Deployment 配置 | `Prepared → Active → Superseded → Removed` | 版本化控制面选择及原子指针切换 |
+| `desired_state` | `Running / Stopped / Removed` | 有权用户/服务的条件写 |
+| Runtime 观测 | `Absent / Starting / Running / Stopping / Exited / Unknown` | 具有启动代次的实际后端观测 |
+| `health` | `Unknown / Healthy / Degraded / Unhealthy` | 声明的探针及业务验证 |
+| `readiness` | `Ready / NotReady / Unknown` | 是否允许新请求 |
+
+界面可以组合显示“已安装·停止”或“运行·未就绪”；不能把进程存在写成安装/健康全部成功。旧 APP-005 的状态映射到这些维度，迁移时保留来源与不确定性，不能凭旧 `Running` 补造健康证据。
+
+### V1-APP-005：安装、启动、停止和数据绑定
+
+安装先验证 Schema、来源、依赖、真实可用空间、配额和权限，再在新目标准备制品与数据附件。依赖必须是明确的资源状态、能力及版本条件，不是固定 sleep；规划阶段检测硬依赖环并拒绝，运行中等待有截止/取消路径。可选依赖要声明缺失时关闭的功能，不能让可选数据服务意外成为普通应用或Core启动硬依赖。关键接受和选择新版本提交后才确认，崩溃恢复对照 Operation 与真实资源清单完成、清理孤儿或等待人工；清理只能删除该操作确切拥有且无其他引用的对象。
+
+启动须再次确认有效授权、实际后端能力、所需卷及 incarnation、设备和网络。缺卷不创建空目录替代，依赖不足显示具体 Blocked 原因。探针失败使用有界重试/退避，停止重启风暴。停止先撤出接流、发协作式终止、等待宽限，再按能力终止；强制停止记录数据一致性风险。释放会触发重调度的写租约之前，必须确认旧执行者已无写能力或资源 fence 已生效。
+
+### V1-APP-006：升级、恢复与互斥操作
+
+同一应用的数据域上的升级、迁移、恢复、卸载相互排斥。操作锁有 `operation_id`、所有者、资源范围、epoch 和恢复规则；锁过期不证明旧迁移进程已停止。新执行者必须在真实写入端 fence 旧执行者，或证实其已停且不再写，才能接管。无法证明时保持 `RecoveryRequired`，不能同时启动两个迁移。
+
+升级流程为准备新制品 → 验证 API/配置/数据兼容 → 按计划建立恢复点 → 排空/隔离写者 → 受控迁移 → 健康和业务验证 → 切换 Active 引用。无状态回退与有状态 Schema 回退独立：数据不可逆迁移后不盲目退旧二进制，而是采用已验证恢复集或前向修复。迁移钩子作为受控 Task 使用最小权限、时间和资源预算，不能以“安装需要”为由获得任意 root shell。
+
+### V1-APP-007：卸载、共享依赖与维护
+
+卸载停止运行实例并移除应用制品引用，默认保留持久数据、来源及恢复方式；毁数据是独立 Operation。共享镜像层、模型缓存、卷和依赖按引用及保留 pin 回收；正在升级、备份或回退的制品不能被 GC 删除。卸载无数据权限时可以移除应用但必须准确列出残留数据，不能撒谎报已销毁。
+
+仓库区分官方、社区、用户导入渠道，提供版本锁、离线依赖、撤回公告、维护责任和替代版本。制品被撤回后阻止未经授权的新安装，现有部署按风险策略处理；重建的安全修复生成新摘要，不能覆盖同一版本标签并假定现有授权自然适用。插件在独立进程/沙箱运行；签名不赋予装入高权限 Core 进程的资格。
+
+## 2. Universal Package Adapter
+
+### 机器合同中的完整清单引用
+
+本包`application-manifest.schema.json`表示发布元数据和固定引用：必需`release_spec_ref`解析到`application-release-spec.schema.json`，不能单凭Manifest摘要启动应用。完整ReleaseSpec规定execution（argv、隔离根内工作目录、非敏感环境值或SecretRef）、lifecycle（停止信号、宽限、启动截止、有界重启）、identity（运行身份与user namespace映射）、permission_requests（能力、Secret、设备和按Manifest名称绑定的卷）、resources（CPU、内存/PID硬限、临时空间及IO/GPU Profile）、provenance（源、许可、信任证据或允许未验证来源的政策、构建记录、SBOM）、依赖Release和备份范围。
+
+控制器必须同时核验Manifest、ReleaseSpec、制品、Profile与部署绑定的一致性，所请求权限还须由当前Policy批准。清单路径解释在隔离根内，不允许宿主路径逃逸；明文环境变量不得承载Secret。`compatibility_claims[]`逐能力保存Profile、result、证据和限制，GUI不适用须有原因。结构通过不等于完整配置已经获准或真实后端能执行。
+
+### V1-APP-008：格式、目标环境和兼容等级
+
+| 维度 | 必须记录的值 |
+|---|---|
+| 来源格式 | 实际检测的 DEB、RPM、Alpine APK、Android APK 或拒绝结果；扩展名只作线索 |
+| 目标用户空间 | 发行版、确切版本/快照、CPU 架构、glibc/musl等ABI、基础制品摘要 |
+| 执行方式 | OCI/Flatpak/受控服务或专用 Runtime；是否需要额外内核/设备能力 |
+| 依赖与入口 | 包数据库、依赖版本及来源、安装脚本/触发器、服务、CLI/desktop入口 |
+| 兼容证据 | 包版本、架构、环境、用例、日志、测试状态、已知限制 |
+
+DEB、RPM、Alpine APK 以相符的隔离用户空间并存，不能同时写宿主的三套包数据库。容器共享宿主内核，无法通过换 rootfs 满足任意内核模块/系统调用/GPU 驱动需求。多候选发行版由清单/策略明确选择；无法找到可验证目标时拒绝，不靠“解压后能看到二进制”宣布支持。
+
+`Recognized` 仅表示格式/元数据可读；`Imported` 表示隔离依赖安装完成；`RuntimeVerified` 表示指定功能用例通过；`GUIVerified` 表示指定图形入口/交互通过。它们是独立证据能力集合，不能当成对所有功能的通用成熟度。CLI/服务的 GUI 为 `NotApplicable`；Android APK 必须由独立 Android Runtime 和兼容矩阵处理，不能送进 Alpine `apk`。
+
+### V1-APP-009：导入安全与完整状态
+
+PackageImport 使用 `Detected → Resolving → Verifying → PreparingEnvironment → Building → Validating → Integrating → Succeeded`；错误进入 `Rejected/Failed`，取消使用 `Cancelling/Cancelled` 并保留已产生资源。`Succeeded` 仍不自动意味着 RuntimeVerified。每一步有可持久恢复的输入/输出摘要及所有权清单，避免重启后重跑已发生副作用的脚本。
+
+格式探测、元数据解析、解压本身属于不可信处理，必须先放入受限进程并限制压缩比、总字节、文件数、目录深度、CPU/内存和超时，不能等到安装脚本才启动沙箱。规范化并验证所有条目，阻止 `../`、绝对路径、符号/硬链接逃逸、设备节点、FIFO、危险 xattr、setuid/capability 位及覆盖宿主路径。拒绝未知格式特征，保留原始制品便于审查；失败清理不能追随恶意 symlink 删除外部文件。
+
+各包生态的信任入口不同，Adapter 必须分别验证其支持的签名/仓库元数据链、摘要、发行版和过期/撤回策略，不能声称每个 `.deb` 都自带同一种独立签名。无可验证来源的用户包可按独立允许策略导入，但必须展示信任差异及禁用范围；不能把“算出本地 SHA”当作已认证发布者。
+
+### V1-APP-010：隔离构建、来源锁与安全重建
+
+PackageEnvironment 可共享只读基础层；可写包数据库、运行身份、权限及用户数据相互隔离。`apt/dpkg`、`dnf/rpm`、Alpine `apk` 仅在目标环境执行。`preinst/postinst`、scriptlets、触发器、systemd 服务和自动钩子均为不可信代码；构建默认无宿主设备/服务总线、无生产凭据，网络按受控依赖源白名单和预算放行。需要特权的动作通过单独结构化 Host Broker 请求或报兼容限制。
+
+一次构建记录原包摘要、仓库快照/索引验证、全依赖版本及摘要、基础层、构建工具/脚本/配置、网络来源、日志和最终制品摘要。依赖解析后不能默默追随仓库最新包；可重复构建的输入可固定，但是否字节可复现必须以实测声明。离线安装需携带完整已认证依赖集合，缺失时明确失败，不能后台联网突破离线政策。
+
+安全修复分别跟踪包、本地补丁、基础层和运行时；重建生成新不可变 Release，运行配置与用户卷独立。更新失败保留可运行旧 Deployment及数据；数据迁移仍遵守 APP-006。共享层 GC 使用 [存储规则](06-storage-data-tablefs.md)的在途 pin，不能删除正在构建/验证的版本。
+
+### V1-APP-011：图形与特权兼容 Profile
+
+图形用例逐项测试 `.desktop` 启动、Qt/GTK/Electron 库、D-Bus/Portal、字体、输入法、通知、GPU、音频、焦点及生命周期。应用需要 systemd、宿主服务、内核模块、特定设备或显卡接口时，列为明确的增强 Profile，不修改普通隔离 Profile 以默认放开。架构模拟可选且必须实测，不从格式识别推导跨架构运行。
+
+导入产物最终统一转换为 ApplicationRelease/Deployment，复用启动停止、卷、资源、审计和备份；PackageEnvironment 不独立决定应用“运行成功”。M2先完成 OCI 基本闭环；包兼容在 M3/M4 按实际组合逐个加入，Android不纳入初始Linux三格式完成条件。
+
+## 3. DesktopSession、Computer Use 与 GUI Bridge
+
+### V1-GUI-001：入口和对象边界
+
+| 入口 | 输出与控制范围 | 无法兑现时 |
+|---|---|---|
+| `FullDesktop` | 经过授权的整个 DesktopSession | 不因单窗口失败自动升级到此范围 |
+| `SingleApplication` | 应用专属会话，或后端实测可限制的指定窗口及输入 | 报不支持，或提出需另行授权的更宽范围 |
+| `NativeWeb` | 应用自己的Web前端，通过独立授权URL/代理 | CSP/Cookie不允许嵌入时打开独立入口 |
+
+KDE Plasma 是 Argon 本地桌面；PsiOS Shell 是共同 WebUI，不能替代 Plasma。Helium/Neon 的无头图形组件按 Profile 选装；未安装只影响相应能力。
+
+| 对象 | 绑定字段及权威 |
+|---|---|
+| `DesktopSession` | 用户、安全域、后端/版本、物理或虚拟类型、`session_generation`、可见表面和生命周期；桌面服务权威 |
+| `ApplicationWindow` | 应用/实例、会话代次、后端表面标识、窗口版本；窗口关闭后旧标识失效 |
+| `ControlLease` | 单个远程输入者、任务、操作范围、期限、`lease_generation`、授权代次；输入Broker权威 |
+| `DisplayStream` | 会话、表面、音频范围、流代次、布局版本、传输能力；捕获/传输子资源 |
+| `ViewerSession` | 浏览器/Agent主体、观察授权、允许输入范围、来源/目标、连接代次与期限 | 
+
+观察授权与输入租约分开：允许多个经授权只读观察者，但最多一个远程输入权威。媒体连接成功不产生输入权限；Viewer 不能拥有比其主体/会话授权更高的权力。应用进程、DesktopSession、Viewer 生命周期独立，关闭浏览器默认不停止应用；无人连接时冻结/持续/超时回收由明确策略决定。
+
+### V1-GUI-002：权限分项和实际范围
+
+分别授权屏幕观察、键盘、鼠标/触控、剪贴板读/写、上传/下载、播放音频、麦克风、摄像头和设备穿透；所有 API、无障碍、浏览器自动化、视觉模型走同一作用域裁决。换成截图坐标不能突破语义API已拒绝的权限。
+
+界面展示的是后端实际能强制的权限，不能人为拆出无法隔离的假选项。窗口画面捕获与窗口输入限制分别探测：只能裁剪画面、键盘仍能作用其他窗口的实现不得声明完整 SingleApplication。优先应用专属虚拟会话/嵌套 compositor；X11 后端须额外测试窗口树、剪贴板和输入侧通道，不能仅靠裁剪排除泄露。
+
+新虚拟会话默认不导入用户 home、D-Bus、Cookie、浏览器配置、密钥或剪贴板。需要复用登录状态时通过明确授权的状态导入，并说明目标、范围、有效期和隔离边界；不把宿主 Wayland/X11 Socket或GPU管理接口直接分享给不可信容器。截图脱敏只是辅助，不能保证识别全部秘密；敏感界面可暂停并人类接管。
+
+### V1-GUI-003：输入协议、去重与人类接管
+
+输入信封绑定 `desktop_session_id`、`session_generation`、`lease_id/lease_generation`、`viewer_session_id`、`input_seq`、`layout_revision`、输入类别和结构化参数。序号只在该有效租约/连接代次内单调递增；服务端拒绝重复、过期或不连续且无法确认安全的输入，不自动重放点击/粘贴等副作用。ACK区分已接收与已送入实际后端，丢失后不能假定用户动作未发生。
+
+本地停止入口不依赖 Agent/模型/网络。触发时 Broker 先使旧输入代次失效并阻止新输入，清空队列，撤销控制，关闭不再获准的捕获/音频流，再报告逐资源数据面结果。物理用户输入优先策略必须可见；不要求本地人类先取得远程租约。
+
+后端维护按键/鼠标按钮按下集合和IME组合状态。接管、断线、锁屏或异常时，以受控清理动作释放原会话按键、取消未提交组合并复位拖拽；如果焦点/目标已不能验证，停止或销毁隔离输入会话，不能向新用户窗口发送“补偿键”。粘贴和文本提交具有明确的文字与按键语义，避免重连后重复提交整段文本。清理动作不能变成绕过撤销的新控制通道。
+
+### V1-GUI-004：定位、布局和连接恢复
+
+必须协商捕获分辨率、compositor坐标、缩放/DPI、方向、布局版本、窗口焦点、键盘布局、光标模式、编码和音画时间基准；像素坐标与桌面逻辑坐标不假定相等。窗口移动、显示变更、休眠恢复、后端重启、锁屏、注销或切用户后，旧截图/定位和相关租约失效或重新验证。
+
+任务检查点保存语义目标、版本和已经确认的动作，不能把坐标序列作为无条件重放脚本。优先AT-SPI/应用语义接口，但共享相同权限。Viewer重连重新认证主体、授权、会话和输入代次，旧URL、旧流ID、旧Cookie缓存都不能复活已撤销控制。
+
+### V1-GUI-005：Portal协议和能力版本
+
+能力发现须记录实际 KDE/Portal/PipeWire/输入后端版本及接口 `version`，同时测试后端实现，而不是仅检查接口名称存在。独立 ScreenCast 先创建会话、选择来源、发起Start并等待真实Response，再打开只含授权流的PipeWire连接；取消、失败和Session关闭都更新本地状态。用户授权前不声明Active。
+
+组合 RemoteDesktop + ScreenCast 会话使用 RemoteDesktop 创建及Start/结束路径，ScreenCast为它选择采集源。组合会话的持久化参数与恢复令牌由 RemoteDesktop 管理，不能同时向ScreenCast设置另一套恢复令牌。RemoteDesktop 使用EIS或Notify方法时必须协商并固定一种输入通路；建立EIS连接后不再混用Notify输入。[RemoteDesktop官方接口](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.RemoteDesktop.html)规定这些边界。
+
+ScreenCast的`pipewire-serial`在接口v6加入；存在时优先使用它及`PW_KEY_TARGET_OBJECT`定位。较老接口仅有Node ID时，绑定当前授权连接、会话和流存活状态，重建流立即废止旧ID。PsiOS还保存PipeWire连接/daemon代次，避免将serial解释为跨后端重启的永久身份。Node ID可复用，serial也不替代授权。[ScreenCast官方接口](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.ScreenCast.html)是版本和标识机制的依据；后两项代次校验是PsiOS自己的额外安全约束。
+
+### V1-GUI-006：一次性恢复令牌和崩溃窗口
+
+Portal `restore_token` 作为SecretRef保存，绑定应用、用户、会话类型、后端和授权范围；不能写URL、日志、模型上下文或共享不受保护的配置。实际Portal支持且策略已授权时才使用持久化，无人值守不能自动操作Portal许可弹窗批准自己。
+
+令牌本地状态为 `Available → Reserved → Consumed`，成功收到新令牌后原子保存为新的Available。发起恢复前持久记录预留及调用关联；同一令牌不并发消费。Portal已消费、但响应或新令牌落盘前崩溃属于无法跨进程原子提交的窗口：旧令牌记 `UnknownConsumed` 并停止自动重放，关闭/核实残留会话，进入等待重新授权或后端明确支持的核实流程。不得为提升可用性回滚令牌状态再盲试。令牌失效、权限撤销或来源消失按真实Portal结果重新请求授权；没有用户时保持等待。
+
+### V1-GUI-007：传输与资源预算
+
+WebRTC是候选实时传输；WebSocket、VNC/RDP网关、Xpra、Selkies、Guacamole可按经验证能力评估，不冻结唯一组件。协商明确视频、音频、输入、剪贴板、文件、硬件编码支持与限制；无WebRTC或硬件编码不能声称体验等价。
+
+信令、媒体及输入均需认证、加密、来源和用途绑定。短期凭证绑定Viewer、会话代次、目标和权限；HTTP/WebSocket核对Origin、防跨站和重放，不能只依赖TLS。TURN/STUN使用的凭证按实际机制限定用途/期限；ICE网络路径和外部中继必须符合数据出站政策。
+
+CPU/内存/显存、编码器会话、码率、Viewer数、帧队列、输入队列和总流量有独立预算。过载有界降帧/拒新流；输入超时/积压则停止并重新同步，不能在网络恢复后突然重放旧鼠标操作。软件回退仅在资源与体验Profile允许时开启，不侵占宿主登录和恢复资源。
+
+### V1-GUI-008：NativeWeb的浏览器安全边界
+
+不可信应用前端与管理Shell使用不同origin；仅用同域不同路径不能隔离脚本、Cookie、存储和Service Worker。多应用代理为每应用/安全域配置明确origin和会话策略，不转发管理凭据、任意Cookie或未经校验的认证头；Host/Forwarded等只接受可信代理重建值。Cookie尽可能host-only，管理端不得用跨不可信子域的宽泛Domain；进一步站点隔离按实际威胁模型决定。
+
+iframe仅在应用CSP/frame-ancestors、Cookie及权限模型允许时使用，sandbox和Permissions Policy按实际需要最小化。不移除目标安全头来强行保证可嵌入，不通过通用代理绕过应用认证。`postMessage`同时验证确切origin、source窗口和Schema；导航后废止旧能力。不能使用`*`作为带敏感内容的消息目标。
+
+代理目的地必须是注册Application端点，不提供带当前用户凭据的任意URL转发。验证DNS解析后地址、IPv6、重定向和连接时目标，禁止访问未授权管理/元数据端点。对于上传文件、下载路径、WebSocket升级、响应头和跨应用URL重写单独测试。NativeWeb的应用会话与PsiOS管理会话独立，SSO只传有明确audience和用途的短期断言。
+
+### V1-GUI-009：秘密、隐私和数据去向
+
+截图、录屏、剪贴板、原始音频、摄像头和文件传输各自规定采集开关、访问范围、容量、保留和删除。默认保存操作事件与最小必要证据，不记录全部键盘、完整用户桌面或后台永久录屏。凭据注入由受控入口完成，不把明文返回模型；应用只能人工登录时给用户接管点。
+
+停止捕获只能阻止后续数据流，不能删除此前合法送到外部模型/远端的画面；授权时显示数据出口和处理主体。跨用户查看、共享屏幕、Agent观察和摘要外发需独立授权；日志/诊断包须脱敏并受原始数据权限限制。
+
+### V1-GUI-010：第三方与节点边界
+
+原生Agent、第三方Agent、浏览器和本地管理工具复用同一DesktopSession/ControlLease/Policy/Audit；协议接入不带宿主特权。跨节点访问通过已授权节点和资源路由，目标节点再次检查会话归属、权限代次和预算；Controller失联不允许旧Viewer绕过本机撤权。
+
+M3完成对象、授权和接口；M4在Argon实际KDE、Neon至少一个无头会话和一个隔离包应用上做端到端PoC，Helium按选装Profile测试。所有显示/输入/Portal能力的支持声明同时绑定发行版、桌面/后端版本、运行Profile和验证记录，不能从其中一个成功推广为全部组合。
+
+## 4. 验收、故障处理与旧要求映射
+
+以下新增场景均为 `NotRun`，是实施门槛，不是测试结果。通用错误除权限/审批外至少区分依赖未就绪、ABI不支持、来源不可信、容量不足、资源失联、状态冲突、OutcomeUnknown语义、Portal等待和后端能力不足。
+
+| 测试 ID | 场景 | 通过条件 |
+|---|---|---|
+| AT-STA-013 | OCI只读根、run/tmp挂载、UID映射、缺必需限制 | 只给声明的写点，不扩大宿主权限，能力不足拒启 |
+| AT-STA-014 | 安装/升级各步骤中断，旧迁移仍运行时锁到期 | 无双迁移和误删卷；fence或显式等待恢复 |
+| AT-STA-015 | 新权限更新、不可逆Schema迁移失败、卸载重装 | 不沿用扩权；回退不损数据；默认保留卷 |
+| AT-STA-016 | DEB/RPM/Alpine/Android混淆、ABI错、离线缺依赖 | 准确拒绝/声明兼容等级；不污染宿主包库 |
+| AT-STA-017 | 解压路径穿越、恶意symlink、tar bomb、脚本外连 | 解析阶段即隔离；有界失败；无宿主写/秘密外泄 |
+| AT-STA-018 | 依赖源变化、基础层更新、安全修复重建与GC竞争 | 来源锁可复核，新摘要不覆盖旧发布，引用层不误删 |
+| AT-STA-019 | 单窗口可捕获但键盘可跨窗；只读Viewer发输入 | 不能声明虚假SingleApplication或观察者写入 |
+| AT-STA-020 | 两远程输入者、键按下后断网/接管、IME未提交 | 单一租约；旧输入丢弃；安全清理无新用户误输入 |
+| AT-STA-021 | 锁屏/切用户/缩放/热插拔/PipeWire重启及重连 | 旧布局/ID/serial/租约不误用，应用与Viewer寿命分离 |
+| AT-STA-022 | Portal v4/v5/v6、RemoteDesktop组合、EIS/Notify | 能力准确降级，组合持久化正确，输入通路不混用 |
+| AT-STA-023 | restore_token消费后响应或新令牌写入丢失 | 不盲复用旧token；进入可解释等待，残留会话可核实 |
+| AT-STA-024 | NativeWeb恶意脚本、Cookie、postMessage和代理SSRF | 管理origin隔离，凭据不串应用，代理不出范围 |
+| AT-STA-025 | 仅授权播放但后端同时开放麦克风；未授权剪贴板 | 如实拒绝/重新授权真实范围，不能用UI虚构隔离 |
+| AT-STA-026 | 编码器/显存/带宽耗尽、排队输入与流撤权 | 有界退化，停止后不重放，宿主救援保持可用 |
+
+| 旧要求 | v1 对应条款 |
+|---|---|
+| APP-001、APP-002 | V1-APP-001、002 |
+| APP-003、APP-004 | V1-APP-003 |
+| APP-005、APP-006 | V1-APP-004、005 |
+| APP-007、APP-008、APP-009 | V1-APP-006、007 |
+| PKG-001、PKG-002 | V1-APP-008、009 |
+| PKG-003、PKG-004、PKG-005 | V1-APP-009、010 |
+| PKG-006、PKG-007、PKG-008 | V1-APP-001、008、011 |
+| PKG-009、PKG-010 | V1-APP-007、008、010 |
+| CU-001、CU-002、CU-003 | V1-GUI-001、002 |
+| CU-004、CU-005 | V1-GUI-003、004 |
+| CU-006、CU-007、CU-008 | V1-GUI-005、006、009 |
+| GUI-001、GUI-002、GUI-003 | V1-GUI-001、002 |
+| GUI-004、GUI-005、GUI-006 | V1-GUI-002、007 |
+| GUI-007、GUI-008、GUI-009 | V1-GUI-001、002、003、004 |
+| GUI-010、GUI-011 | V1-GUI-004、005、010 |
+| GUI-012、GUI-013 | V1-GUI-007、009 |
+| GUI-014、GUI-015 | V1-GUI-008、010 |
+| R-09、R-15 | V1-APP-010；V1-GUI-004、005、006 |
+
+原 `APP-T01～05`、`PKG-T01～05`、`CU-T01～07`、`GUI-T01～06`、`XAT-09/24～29/42/45` 持续有效，上述场景细化其失败条件。若后端无法兑现控制范围或及时撤权，必须收缩发布Profile并公开限制；不以“以后完善”宣称当前已经安全支持。

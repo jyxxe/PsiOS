@@ -1,0 +1,223 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.psios.example/v1/workflow-run.schema.json",
+  "title": "WorkflowRun state with immutable definition/input refs",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "workflow_run_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "resource_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "definition_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "input_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "lifecycle": {
+      "enum": [
+        "Draft",
+        "Ready",
+        "Running",
+        "WaitingApproval",
+        "WaitingInput",
+        "Blocked",
+        "Cancelling",
+        "Compensating",
+        "Succeeded",
+        "Failed",
+        "Cancelled"
+      ]
+    },
+    "outcome_knowledge": {
+      "enum": [
+        "NotStarted",
+        "InFlight",
+        "Known",
+        "Unknown"
+      ]
+    },
+    "compensation_status": {
+      "enum": [
+        "NotRequired",
+        "Planned",
+        "Running",
+        "Complete",
+        "Partial",
+        "Failed"
+      ]
+    },
+    "cancel_scope_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "root_budget_ref": {
+      "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+    },
+    "step_instance_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+      },
+      "minItems": 0,
+      "maxItems": 4096
+    },
+    "output_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
+      },
+      "minItems": 0,
+      "maxItems": 4096
+    },
+    "conditions": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/Condition"
+      },
+      "minItems": 0,
+      "maxItems": 64
+    }
+  },
+  "required": [
+    "schema_version",
+    "workflow_run_id",
+    "resource_version",
+    "definition_ref",
+    "input_ref",
+    "lifecycle",
+    "outcome_knowledge",
+    "compensation_status",
+    "cancel_scope_id",
+    "root_budget_ref",
+    "step_instance_refs",
+    "output_refs",
+    "conditions"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "lifecycle": {
+            "const": "Succeeded"
+          }
+        },
+        "required": [
+          "lifecycle"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome_knowledge": {
+            "const": "Known"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome_knowledge": {
+            "const": "Unknown"
+          }
+        },
+        "required": [
+          "outcome_knowledge"
+        ]
+      },
+      "then": {
+        "properties": {
+          "conditions": {
+            "contains": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "OutcomeUnknown"
+                },
+                "status": {
+                  "const": "True"
+                }
+              },
+              "required": [
+                "type",
+                "status"
+              ]
+            },
+            "minContains": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "lifecycle": {
+            "const": "WaitingInput"
+          }
+        },
+        "required": [
+          "lifecycle"
+        ]
+      },
+      "then": {
+        "properties": {
+          "conditions": {
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "lifecycle": {
+            "const": "WaitingApproval"
+          }
+        },
+        "required": [
+          "lifecycle"
+        ]
+      },
+      "then": {
+        "properties": {
+          "conditions": {
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "lifecycle": {
+            "const": "Blocked"
+          }
+        },
+        "required": [
+          "lifecycle"
+        ]
+      },
+      "then": {
+        "properties": {
+          "conditions": {
+            "minItems": 1
+          }
+        }
+      }
+    }
+  ]
+}

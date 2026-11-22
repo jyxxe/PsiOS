@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0.0",
+  "conversation_id": "room-demo",
+  "client_send_id": "send-window-1/message-001",
+  "content": {
+    "parts": [
+      {
+        "kind": "text",
+        "text": "请检查这份方案。此消息不构成系统授权。"
+      }
+    ]
+  },
+  "mentions": [
+    "agent-reviewer"
+  ],
+  "message_type": "request",
+  "attachment_refs": [
+    {
+      "resource_id": "design-attachment",
+      "version": "rev-1",
+      "digest": "sha256:d031cc3f00bf944a468a78a12dbafc5b9ec8daa5f496a0984921eee409d2b389"
+    }
+  ],
+  "content_digest": "sha256:5e02683e80a00afd742ac5db7ac7c36f54ac9a3c8827f3719bf58feee7c5e504"
+}

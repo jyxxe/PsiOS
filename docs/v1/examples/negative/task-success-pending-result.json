@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.0.0",
+  "task_id": "task-demo",
+  "task_revision": "rev-5",
+  "origin_ref": {
+    "authority_id": "workflow-local",
+    "origin_type": "WorkflowRun",
+    "origin_id": "wf-run-demo",
+    "step_key": "review/iteration-0",
+    "attempt_generation": "0"
+  },
+  "request_digest": "sha256:176e64af9c97dcbff66293c0ab23223a4d9f9222d739eed42f664a3be7bb9691",
+  "lifecycle": "Succeeded",
+  "outcome_knowledge": "Known",
+  "cancel_scope_id": "cancel-scope-demo",
+  "result": {
+    "availability": "Pending",
+    "artifact_refs": [
+      {
+        "resource_id": "expired-report",
+        "version": "rev-1",
+        "digest": "sha256:866d221df8926d069f563bd7268d874c104abd5fcf13fa88f33f14092bf9e84f"
+      }
+    ]
+  },
+  "operation_refs": [],
+  "conditions": []
+}

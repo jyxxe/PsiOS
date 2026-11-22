@@ -1,0 +1,532 @@
+{
+  "document_version": "1.0.0",
+  "checked_at": "2026-11-22T09:03:58.147549+00:00",
+  "scope": "DocumentationPackageStaticValidationOnly",
+  "result": "Passed",
+  "counts": {
+    "schema_definitions": 33,
+    "schema_references": 236,
+    "positive_examples": 35,
+    "negative_examples": 35,
+    "digest_vectors": 5,
+    "strict_json_files": 116,
+    "normative_requirements": 245,
+    "local_markdown_links": 4478,
+    "product_test_plans_not_run": 135,
+    "requirements_with_validation_plan": 245,
+    "proposed_adrs": 25,
+    "work_items": 26,
+    "document_findings": 89,
+    "legacy_mapping_targets": 994,
+    "legacy_definition_slices": 1953,
+    "legacy_requirements": 245,
+    "legacy_tests": 141,
+    "html_internal_anchors": 1890,
+    "html_document_sections": 69,
+    "archived_sources": 15
+  },
+  "failures": [],
+  "example_results": [
+    {
+      "id": "EX-P-operation-plan",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-operation",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-effect-record",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-approval-request",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-approval-decision",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-approval-use",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-execution-permit",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-task-submit",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-task-accepted",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-task-lookup",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-task",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-run",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-cancel-origin",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-chat-send",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-chat-accepted",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-message",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-workflow-definition",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-workflow-run",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-dispatch-intent",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-event",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-dataset-record",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-volume",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-volume-attachment",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-capability-descriptor",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-revocation-result",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-recovery-status",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-recovery-set-manifest",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-application-manifest",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-application-release-spec",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-snapshot-page",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-resource-envelope",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-error",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-task-client-task-id",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-task-missing-origin-step",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-task-wrong-digest",
+      "expected": "Invalid",
+      "rejection_layer": "Digest",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-chat-forged-sender",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-chat-missing-client-id",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-chat-number-sequence",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-chat-leading-zero-epoch",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-chat-counter-overflow",
+      "expected": "Invalid",
+      "rejection_layer": "Semantic",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-operation-success-unknown",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-task-success-unknown",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-run-success-unknown",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-workflow-completed-alias",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-approval-bound-no-operation",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-approval-unbound-with-operation",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-permit-self-declared-proof",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-dataset-null-name",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-dataset-duplicate-tags",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-dataset-empty-vector",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-dataset-scored-without-profile",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-readonly-attachment-writes",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-revocation-false-complete",
+      "expected": "Invalid",
+      "rejection_layer": "Semantic",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-quarantine-auto-writes",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-restore-unknown-delete-share",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-snapshot-false-final",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-workflow-duplicate-step",
+      "expected": "Invalid",
+      "rejection_layer": "Semantic",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-workflow-cycle",
+      "expected": "Invalid",
+      "rejection_layer": "Semantic",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-workflow-zero-step-deadline",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-workflow-loop-missing-bound",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-task-success-pending-result",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-dispatch-mismatched-task",
+      "expected": "Invalid",
+      "rejection_layer": "Semantic",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-runtime-verified-no-evidence",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-application-no-execution-spec",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-application-unbounded-memory",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-lookup-found-no-record",
+      "expected": "Invalid",
+      "rejection_layer": "Schema",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-N-resource-observed-future",
+      "expected": "Invalid",
+      "rejection_layer": "Semantic",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-dataset-scored-vector",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-task-lookup-expired",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    },
+    {
+      "id": "EX-P-task-lookup-indeterminate",
+      "expected": "Valid",
+      "rejection_layer": "SchemaAndLocalSemantics",
+      "result": "Passed",
+      "scope": "DocumentationFixtureOnly"
+    }
+  ],
+  "product_implementation_status": "NotVerified",
+  "product_test_status": "NotRun",
+  "not_proven": [
+    "Authorization and signature authenticity",
+    "Database transactions and distributed races",
+    "Hardware/process isolation and actual resource fencing",
+    "Power-loss durability and recovery",
+    "External side effects or protocol interoperability",
+    "Performance and supported release profiles",
+    "Full RFC8785 cross-language conformance (fixture subset only)"
+  ]
+}

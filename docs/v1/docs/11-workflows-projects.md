@@ -158,3 +158,15 @@ M3 提供单机持久 DAG、审批等待、受控重试/取消、基础群聊/DM
 | 未安装 Project/Studio | 本地 Task、Agent、最小工作流与 Chat 仍正常可用 |
 
 以上覆盖 `ACC-WFL-01～05`、`WF-AT-04～08` 及原 XAT-33/35～37/39/44。ADR-22 负责 DSL/编排语义，ADR-23 负责外部同步，ADR-24 负责跨服务提交与审批/Saga，ADR-25 负责存储容量与跨服务恢复；任何实现方案获得批准都仍需独立提交和实测证据。
+
+## 11.12 自主 Agent 开发与项目事件闭环
+
+Router 是 PsiFlow 的计划与调度使用者，不能成为第二个 WorkflowRun、Approval 或 WorkItem 写入权威。Project/Studio 仍可选；未安装时本地 Task、Schedule、Agent 和最小 Workflow 可独立运行。
+
+- **事件关联：** Forgejo/GitHub/CI 的 Webhook 先验签、过滤并回源查询权威状态，依据 ExternalLink 和修订关联已有 WorkItem、Task、WorkflowRun；重复/乱序/漏投事件经去重和周期对账处理。
+- **Agent 分工：** Router 推荐 Plan/Implement/Review 等步骤，由已版本化 WorkflowDefinition 和 Task Broker 持久派发；子 Agent 共享预算及收窄委托，不通过聊天“同意”颁发审批。
+- **交付门禁：** CI 与 IndependentReview 都绑定同一仓库、确切 head SHA、检查集合和审查身份；ProtectedMerge/Deploy 复查目标 head/base、实际授权、ApprovalDecision 和外部版本。无条件写能力时阻塞或人工接管，不绕过保护。
+- **恢复：** Agent Session 变更不改变 WorkItem/Task 身份；替换 Worker 新建 Run，首先核实旧外部效果。PR 合并、评论发布或部署成功但回执丢失维持 Unknown，回源对账后才写结果。
+- **成本：** Router 推理、各 Worker、群聊主动消息和重试均计入同一根预算；超限、权限不足和模型/Controller 离线时准确报告阻塞并允许用户暂停。
+
+**增量验收（NotRun）：** 一次 CI 失败触发一个修复 Task；后续 Review 返回原 Worker；head 改变使旧证据失效；重复 Webhook 不双重合并；跨节点分区不双写；禁用 Project UI 后基本任务仍可用。

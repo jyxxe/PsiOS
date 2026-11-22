@@ -133,3 +133,36 @@ M3 至少完成一个真实独立第三方实现与原生 Agent 的同类工具�
 | 云模型与上下文恢复 | 公开修订不完整时如实声明可复现性限制，不虚构完全相同运行 |
 
 原 `AGT-T01～07`、`XAT-43/44` 和第三方兼容矩阵继续适用。扩展协议、完整群聊联邦和任意第三方框架的支持必须逐项增加证据；本章没有把 SDK、框架或服务版本锁定为已批准实现。
+
+## 9.10 原生 Agent 自主编排（SuperAgent 类机制）
+
+本节把 Router–Worker、主动任务发现、Ticket 跟踪和 Thread Subscription 作为 PsiOS 原生 Agent 的逻辑能力，不是直接部署 SuperAgent 原型，也不另建高权限控制平面。它是现行 v1.0.0 设计增补，不代表某个 ADR 已批准或任何运行实现已验证。
+
+### 9.10.1 角色和权威
+
+- **Router / Planner：** 按可见事件、用户目标、Agent 能力和任务关联提供计划、优先级、执行器建议；需要推理时才唤醒模型，不要求永久运行 LLM 会话。
+- **Policy Evaluator：** 现有 Identity/Policy/Approval、预算和数据出口服务执行确定性授权；模型不能替系统签发权限。
+- **Worker / Executor：** 可以是原生 Agent、经 C1/C2 能力验证的 DSH/Codex 等第三方 Agent 或远程 Agent；一律复用 Task/Run、Tool Gateway、沙箱和审计。
+- **Watchdog：** 与模型独立的健康、超时、退避、租约和取消管理，不能以 Router 不在线为由扩大权限。
+
+以上是职责角色，不是自带 root、跨用户文件访问、桌面控制或仓库合并权的独立 Principal 等级。
+
+### 9.10.2 概念到 PsiOS 的映射
+
+- `Ticket` → Core `Task`；如有 Project Service，长期工作由 `WorkItem` 关联 Task。禁止另建 Ticket 终态数据库。
+- `Assignment` → Broker/Scheduler 领取与受限执行租约，关联 Agent、Task、Run、节点、隔离等级、代次和能力；调度决定不可由自然语言替代。
+- `Mandate` → `Grant + Delegation + OperationPlan + ApprovalDecision/ExecutionPermit`，逐层约束操作范围、目的、预算、有效期与可继续委托的权限。
+- `Trigger` → Event、Schedule、外部 Connector 的已验证来源事件；`Subscription` → Conversation 中任务/线程订阅，复用 Task/Event 去重与持久游标。
+- `Session` → Agent 的模型交互上下文；不得充当 Task、Operation、审批或外部效果的唯一恢复日志。
+
+### 9.10.3 主动任务闭环
+
+事件来源先认证、过滤及去重；优先关联已有工作和原 Worker。新任务由预授权策略及正式 Task.Submit 接受。Router 可规划多 Agent 分工，但执行计划经确定性权限、预算、数据驻留与效果检查后，才由 Broker 分配独立 Run。Worker 可在群聊 @ 或 DM 协作，正式委托必须经 Task/Workflow API。Review/CI/Issue 后续变化回到已有订阅任务而不是反复新建 Agent；完成时根据可验证 Artifact、Operation 及外部权威记录结案。
+
+### 9.10.4 安全、成本与回退
+
+自主程度可以由未来 Profile 配置成只观察、提出候选、已授权范围内执行或逐阶段审批；这些为设计选项，具体 Schema/默认值仍由 ADR 决定。各层维持独立 Principal、最小沙箱、数据出口与目的约束、可撤销租约、统一根预算、并发/递归深度/唤醒跳数/冷却上限。群聊或恶意 README/PR/Skill 均不能更新授权、绕过人类接管或启动无界循环。节点断线、Router 重启、模型额度耗尽时从已提交任务与检查点恢复；旧写入者须经资源端 fencing，未知外部副作用不得盲重发。三版共享接口，Helium 可采用轻量事件驱动 Router，Neon 可部署长期控制服务，Argon 可接入 KDE 授权会话；均不把模型作为本机诊断和救援依赖。
+
+### 9.10.5 增量验收计划（均 NotRun）
+
+重复/乱序事件不增殖 Task；同一 PR Review 被原 Task/Worker 接续且重新检查成员权限；Agent A→B→A 的循环因根预算和跳数停止；恶意评论诱导越权被 Tool Gateway 拦截；两个 Worker 抢占时旧租约无法写入；Router 死亡和模型离线不重放已确认副作用；已发生外部写入但回执丢失保持 `OutcomeUnknown` 并对账；撤权按实际 RevocationMode 截断后续能力。M3 测单机，M4 才验证跨节点与 Forgejo/CI 闭环。沿用现有 AT-TSK、AT-AGT、AT-CHAT、AT-WFL、AT-CORE 分类，待正式注册新用例后才分配独立测试 ID。

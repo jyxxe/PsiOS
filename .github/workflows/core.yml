@@ -54,8 +54,8 @@ jobs:
         run: |
           mkdir "$RUNNER_TEMP/psios-format4"
           git archive 0287ebb3208b00f091ef51977d58d215ad32f47a Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format4"
-          cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format4/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-previous/target"
-          python3 tests/model_leases.py --previous-bin "$RUNNER_TEMP/psios-previous/target/debug"
+          cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format4/Cargo.toml"
+          python3 tests/model_leases.py --previous-bin "$RUNNER_TEMP/psios-format4/target/debug"
       - name: Verify real systemd service control and crash reconciliation
         run: |
           sudo loginctl enable-linger "$(id -un)"

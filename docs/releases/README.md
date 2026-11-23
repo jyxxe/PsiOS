@@ -13,9 +13,9 @@ The exact original `PsiOS-v1.0.0-docs-2026-11-22.zip` (5,566,788 bytes; SHA-256 
 Rebuild and restore the two large files into `docs/v1/` by running from the repository root:
 
 ```bash
-python3 docs/releases/restore_v1.py --verify-all --write-zip
+python3 docs/releases/restore_v1.py --verify-current --write-zip
 ```
 
-The operation is **offline** and uses only Python's standard library. It checks each part and the complete ZIP. It refuses to overwrite existing files whose bytes differ. It never runs the archived XeLab code.
+The operation is **offline** and uses only Python's standard library. It checks each part and the complete ZIP. With `--verify-current` it validates the original files inside the ZIP against the sealed archive manifest and the checked-out documents against the manifest in the selected Git revision. Use `--verify-all` when a checkout must match every original delivery entry byte for byte. It refuses to overwrite existing files whose bytes differ. It never runs the archived XeLab code.
 
 For a manual reconstruction without Python, concatenate the files **as binary bytes in numerical order**, then compare the reconstructed ZIP SHA-256 against the value above. Do not append text newlines.

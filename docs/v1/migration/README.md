@@ -1,6 +1,6 @@
 # 历史规范迁移与原文归档
 
-本目录回答三个问题：旧版本提出了什么、v1 在哪里保留或修正、哪些结论仍需实际工程证据。**v1 是完整设计文档基线，不是 PsiOS 软件 1.0 发布，亦不代表当前源码和外部组件已经完成验证。**
+本目录回答三个问题：旧版本提出了什么、v1 在哪里保留或修正、哪些结论仍需实际工程证据。**v1 是完整设计文档基线，不是 PsiOS 软件 1.0 发布，也不是对 XeLab 当前源码的审计完成证明。**
 
 ## 1. 阅读入口
 
@@ -10,6 +10,8 @@
 | [legacy-requirements.md](legacy-requirements.md) | 245 个旧规范编号逐项定位到 v1；包含选定原句、章节和来源 |
 | [legacy-tests.md](legacy-tests.md) | 141 个旧验收编号逐项保留；原场景继续作为 NotRun 的工程义务 |
 | [id-conflicts.md](id-conflicts.md) | P0 工作项同号不同义、ADR 编号/范围变化、计数和章节错误 |
+| [xelab-reuse-boundary.md](xelab-reuse-boundary.md) | 历史 ZIP 的可复核结构、模块、来源陈述、许可证线索及复用限制 |
+| [xelab-archive-inspection.json](xelab-archive-inspection.json) | ZIP 的静态清点记录；没有运行归档代码或依赖安装 |
 | [rebuild_legacy_registry.py](rebuild_legacy_registry.py) | 仅从本包归档和当前文档重建旧编号登记、定义引用和两份逐项表 |
 | [legacy-requirements.json](../registries/legacy-requirements.json) | 所有定义块、引用、范围展开、来源行号及明确映射的机器登记 |
 | [source-inventory.json](../sources/source-inventory.json) | 15 个原始输入的身份、原上传名称、原文件/页面 ID、字节数和 SHA-256 |
@@ -17,7 +19,7 @@
 
 ## 2. 盘点范围和计数口径
 
-本次读取全部 10 份 Project Markdown/TXT 输入、两份已取得的 Space 正文导出、两份对应元数据；相关历史来源不代表 PsiOS 当前实现。Space 元数据保留页面 ID、序列和块摘要，用于解释正文来自哪次导出。元数据及 ZIP 不参与规范编号的正文计数。
+本次读取全部 10 份 Project Markdown/TXT 输入、两份已取得的 Space 正文导出、两份对应元数据，并归档一份历史 XeLab ZIP。Space 元数据保留页面 ID、序列和块摘要，用于解释正文来自哪次导出。元数据及 ZIP 不参与规范编号的正文计数。
 
 旧规范以规范化编号去重：**245 项 = BASE 固定约束 20 项 + 专业规范 225 项**。同一条在 v0.2、v0.3、v0.4、v0.5、导入 v0.6 和 Space v0.6 中重复出现，只计算一次逻辑编号；各来源文本没有被覆盖或抹去。JSON 保留 1,297 处规范定义，并记录来源章节、原句和引用位置。
 

@@ -204,6 +204,26 @@ class PlatformTests(unittest.TestCase):
         ack = n.call("Event.Ack", dict(consumer="node-observer", previous=prev, cursor=fresh))
         self.assertEqual(ack["cursor"], fresh)
 
+    def test_rejection_and_superseded_single_use_commit_consistently(self):
+        n = self.n
+        v = n.perform("volume.create", {"name": "approval"})
+        opts = dict(**target(v), name="never", content="denied")
+        tid = n.submit("volume.write", opts)
+        decision = n.approve(tid, approve=False)
+        self.assertEqual(decision["decision"], "Rejected")
+        terminal = n.wait(tid)
+        self.assertEqual((terminal["lifecycle"], terminal["outcome_knowledge"]), ("Cancelled", "NotStarted"))
+        self.assertEqual(n.call("Resource.List", {"kind": "ApprovalUse"})["items"], [])
+        cordon = n.call("Node.Get", {})
+        n.call("Node.Configure", dict(expected_resource_version=cordon["reference"]["version"], scheduling="Cordoned"))
+        another = n.submit("volume.write", opts)
+        approved = n.approve(another)
+        queued = n.call("Task.Get", {"id": another})
+        n.call("Task.Cancel", dict(id=another, expected_resource_version=queued["task_revision"]))
+        unit = n.get("use-" + approved["decision_id"])["value"]
+        self.assertEqual((unit["binding_status"], unit["validity_status"]), ("Unbound", "Superseded"))
+        self.assertFalse((n.state / "volumes" / v["resource_id"] / "data" / "never").exists())
+
     def test_bad_worker_and_service_config(self):
         n = self.n
         n.stop()

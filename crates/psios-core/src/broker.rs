@@ -94,7 +94,8 @@ fn close(
         }
     }
     if matches!(phase.as_str(), "WaitingApproval" | "Queued" | "Claimed") {
-        let decision:Option<String>=db.c.query_row("SELECT decision FROM approval_bindings WHERE task=?1 AND decision IS NOT NULL AND operation IS NULL",[&t.id],|r|r.get(0)).optional()?;
+        let decision:Option<String>=db.c.query_row("SELECT a.decision FROM approval_bindings a JOIN current d ON d.id=a.decision
+            WHERE a.task=?1 AND a.operation IS NULL AND d.kind='ApprovalDecision' AND d.body->>'decision'='Approved' ",[&t.id],|r|r.get(0)).optional()?;
         if let Some(decision) = decision {
             let use_ = db.of(&format!("use-{decision}"), "ApprovalUse")?;
             let mut b = use_.body.clone();
@@ -126,7 +127,9 @@ fn close(
             })
         }
         if let Some(a) = artifact {
-            b["evidence_refs"] = json!([a.reference()])
+            let mut refs = vec![a.reference()];
+            refs.extend(a.spec.get("reconciliation_evidence_ref").cloned());
+            b["evidence_refs"] = json!(refs);
         }
         *r = db.status(&e, b)?.reference();
     }

@@ -53,25 +53,22 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - name: Install package build tools
         run: |
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends debhelper
           rustup show active-toolchain
-      - name: Build and test the native Core package
-        # rustup supplies the workspace toolchain outside dpkg's database.
-        run: dpkg-buildpackage -b -us -uc -d
-      - name: Exercise the installed system service across upgrade and removal
-        run: sudo tests/debian-install.sh --disposable-systemd-host ../psios-core_*.deb
-      - name: Record the tested host package and build inputs
+      - name: Build the original packaged Core and the current package
         run: |
-          mkdir -p "$RUNNER_TEMP/psios-package"
-          cp ../psios-core_*.deb ../psios-core_*.buildinfo "$RUNNER_TEMP/psios-package/"
-          git rev-parse HEAD > "$RUNNER_TEMP/psios-package/source-commit"
-          rustc -Vv > "$RUNNER_TEMP/psios-package/rustc-version"
-          cp Cargo.lock "$RUNNER_TEMP/psios-package/"
-          cd "$RUNNER_TEMP/psios-package"
-          sha256sum *.deb *.buildinfo source-commit rustc-version Cargo.lock > SHA256SUMS
+          tools/build-host-package "$RUNNER_TEMP/psios-previous-package" 73421114b0a2751bb89b6ab95873fcda5d3ef85f
+          tools/build-host-package "$RUNNER_TEMP/psios-package"
+      - name: Exercise the installed system service across a real package upgrade
+        run: |
+          (cd "$RUNNER_TEMP/psios-package" && sha256sum -c SHA256SUMS)
+          sudo tests/debian-install.sh --disposable-systemd-host \
+            "$RUNNER_TEMP"/psios-previous-package/psios-core_*.deb "$RUNNER_TEMP"/psios-package/psios-core_*.deb
       - name: Retain the tested amd64 package
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

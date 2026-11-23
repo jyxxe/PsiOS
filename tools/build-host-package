@@ -1,0 +1,46 @@
+#!/bin/bash
+# Build a versioned binary package from committed source, outside the checkout.
+set -euo pipefail
+if [[ $# -lt 1 || $# -gt 2 ]]; then
+    echo "usage: $0 NEW_OUTPUT_DIRECTORY [GIT_REVISION]" >&2
+    exit 2
+fi
+out=$(realpath -m -- "$1")
+if [[ -e $out || -L $out ]]; then echo "output directory already exists" >&2; exit 2; fi
+root=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
+if [[ $(git -C "$root" rev-parse --is-shallow-repository) != false ]]; then
+    echo "package ordering requires a full commit history (git fetch --unshallow)" >&2
+    exit 2
+fi
+sha=$(git -C "$root" rev-parse --verify --end-of-options "${2:-HEAD}^{commit}")
+count=$(git -C "$root" rev-list --count "$sha")
+epoch=$(git -C "$root" show -s --format=%ct "$sha")
+export SOURCE_DATE_EPOCH="$epoch" LC_ALL=C.UTF-8 TZ=UTC
+work=$(mktemp -d)
+trap 'rm -rf -- "$work"' EXIT
+mkdir "$work/source" "$work/artifacts"
+git -C "$root" archive "$sha" | tar -x -C "$work/source"
+cd "$work/source"
+base=$(dpkg-parsechangelog -SVersion)
+maintainer=$(dpkg-parsechangelog -SMaintainer)
+version="$base+git$count.g$sha"
+printf 'Building psios-core %s\n' "$version"
+{
+    printf 'psios-core (%s) unstable; urgency=medium\n\n' "$version"
+    printf '  * Development build from commit %s.\n\n' "$sha"
+    printf ' -- %s  %s\n\n' "$maintainer" "$(date -u -R -d "@$epoch")"
+    cat debian/changelog
+} > debian/changelog.new
+mv debian/changelog.new debian/changelog
+# rustup supplies the locked toolchain outside dpkg's package database.
+dpkg-buildpackage -b -us -uc -d
+artifacts="$work/artifacts"
+cp ../psios-core_*.deb ../psios-core_*.buildinfo Cargo.lock "$artifacts/"
+printf '%s\n' "$sha" > "$artifacts/source-commit"
+rustc -Vv > "$artifacts/rustc-version"
+cd "$artifacts"
+sha256sum *.deb *.buildinfo source-commit rustc-version Cargo.lock > SHA256SUMS
+# Reserve the output name only once the build and hashes are complete.
+mkdir -- "$out"
+cp -- *.deb *.buildinfo source-commit rustc-version Cargo.lock "$out/"
+cp -- SHA256SUMS "$out/"

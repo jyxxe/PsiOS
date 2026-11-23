@@ -4,6 +4,7 @@ import selectors
 import signal
 import socket
 import socketserver
+import subprocess
 import threading
 
 from support import Failure, target
@@ -89,6 +90,24 @@ def lose_receipt(n, app, volume, tool, match_request):
     n.stop()
     n.config.write_text(json.dumps(original))
     n.start()
+    if tool == "application.start":
+        docker = ["docker", "--host", "unix://" + real_socket]
+        cid = subprocess.check_output(docker + ["ps", "-q", "--no-trunc", "--filter",
+            "label=io.psios.operation=" + op["resource_id"]], text=True).strip()
+        subprocess.run(docker + ["pause", cid], check=True, stdout=subprocess.DEVNULL)
+        try:
+            paused = n.wait(n.submit("application.health", target(app)))
+            assert paused["lifecycle"] == "Succeeded", paused
+            sample = paused["result"]["artifact_refs"][0]
+            assert not n.call("Artifact.Read", {"reference": sample})["process_running"]
+            try:
+                n.call("Operation.Reconcile", dict(**target(op), evidence_ref=sample))
+            except Failure as error:
+                assert error.code == "OutcomeUnknown", error
+            else:
+                raise AssertionError("paused instance accepted as a running postcondition")
+        finally:
+            subprocess.run(docker + ["unpause", cid], check=True, stdout=subprocess.DEVNULL)
     proof = n.wait(n.submit("application.health", target(app)))
     assert proof["lifecycle"] == "Succeeded", proof
     evidence = proof["result"]["artifact_refs"][0]

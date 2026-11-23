@@ -324,7 +324,7 @@ def compile_readers():
         body.append(f'<section class="document" id="{key(p)}" data-title="{html.escape(title,quote=True)}">'
                     f'<p class="source-path">{html.escape(p.relative_to(ROOT).as_posix())}</p>{rendered}</section>')
         nav.append(f'<a href="#{key(p)}">{html.escape(title)}</a>')
-    write('PsiOS-v1-complete.md','\n'.join(combined)+'\n')
+    write('PsiOS-v1-complete.md','\n'.join(combined).rstrip('\n')+'\n')
     style='''
     :root{color-scheme:light;--ink:#172b3a;--muted:#526777;--line:#d9e3e8;--accent:#087f8c;--paper:#fff;--nav:#102e3d}
     *{box-sizing:border-box}body{margin:0;font-family:Inter,"Noto Sans CJK SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;color:var(--ink);background:#edf3f5;line-height:1.75}

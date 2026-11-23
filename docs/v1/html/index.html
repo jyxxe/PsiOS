@@ -67,7 +67,6 @@
 <a href="#doc-migration-v0-to-v1">v0.1–v0.6 → v1 设计迁移说明</a>
 <a href="#doc-migration-id-conflicts">旧编号冲突、范围变化与历史勘误</a>
 <a href="#doc-migration-findings">v0.x → v1 问题与修正台账</a>
-<a href="#doc-migration-component-readiness">PsiOS 组件准入检查</a>
 <a href="#doc-migration-legacy-requirements">旧规范逐项迁移表</a>
 <a href="#doc-migration-legacy-tests">旧验收逐项保留与迁移</a>
 <a href="#doc-schemas-README">JSON Schema 合同</a>
@@ -120,8 +119,8 @@
 <td>245个旧要求、141个旧测试均有文档去向</td>
 </tr>
 <tr class="odd">
-<td>来源</td>
-<td>PsiOS 设计草案、Space 规划与验收记录；技术规范见参考资料清单</td>
+<td>规划资料</td>
+<td>PsiOS 设计草案、Space 规划及验收记录；公开技术规范另见参考资料清单</td>
 </tr>
 </tbody>
 </table></div>
@@ -243,10 +242,9 @@
 <li>保留245个旧要求和141个旧验收编号的去向，原源逐字节存档。</li>
 </ul>
 <h2 id="doc-CHANGELOG-有意保留的工程不确定性">有意保留的工程不确定性</h2>
-<p>没有选择未经实验的数据库/文件系统/系统镜像技术；没有声称零丢失、任意软件包兼容、全平台支持、集群HA或绝对即时撤权。全部技术ADR仍Proposed，所有产品实现NotVerified，产品测试NotRun。软件源码及运行证据仍须按 WI-001 核验。</p>
+<p>没有选择未经实验的数据库/文件系统/系统镜像技术；没有声称零丢失、任意软件包兼容、全平台支持、集群HA或绝对即时撤权。全部技术ADR仍Proposed，所有产品实现NotVerified，产品测试NotRun。软件源码及实际运行证据仍须按 WI-001 核验。</p>
 <p>完整逐项变更见<a href="#doc-migration-findings">migration/findings.md</a>，编号冲突与字段迁移见<a href="#doc-migration-v0-to-v1">migration/v0-to-v1.md</a>。</p>
-
-<h2 id="doc-CHANGELOG-addendum-1">同版本文档增补（2026-11-22）</h2>
+<h2 id="doc-CHANGELOG-同版本文档增补2026-11-22">同版本文档增补（2026-11-22）</h2>
 <p>在保持 <code>VERSION = 1.0.0</code> 的前提下，当前 GitHub 分章补充 Agent 自主编排：Router/Worker、主动事件触发、任务/线程接续、委托权限、非 LLM Watchdog、根预算、恢复和 Forgejo/CI/Review 门禁，关联第 08/09/10/11/14 章。</p>
 <p>本次未增加新的正式 V1 规范 ID、Schema 或已批准 ADR，工程 <code>NotVerified</code>、增量测试 <code>NotRun</code>。原始分段 ZIP 仍是增补前不可变封存快照；此前的静态 validation-report.json 只对增补前文档有效，不能冒充此次修改后的重验证记录。</p>
 </section>
@@ -290,7 +288,7 @@
 </tr>
 <tr class="even">
 <td>migration/</td>
-<td>规范差异、编号冲突、要求/测试去向和组件准入规则</td>
+<td>原文错误、编号冲突、旧要求/测试去向</td>
 </tr>
 <tr class="odd">
 <td>sources/</td>
@@ -451,8 +449,6 @@
     legacy-tests.md
     rebuild_legacy_registry.py
     v0-to-v1.md
-
-
   operations/
     README.md
     data-export-exit.md
@@ -524,7 +520,6 @@
       space-risk-v0.6.metadata.json
       space-unified-v0.6.md
       space-unified-v0.6.metadata.json
-
     references.json
     source-inventory.json
   tools/
@@ -585,7 +580,7 @@
 </tr>
 </tbody>
 </table></div>
-<p><strong>V1-GOV-002｜证据不得跨层推断。</strong> 文档链接检查、Schema 自检和示例验证通过，只证明本包的特定结构条件；不能推出持久性、安全隔离、并发正确性或硬件兼容通过。历史文字或报告无法替代当前 PsiOS 实际运行验证。</p>
+<p><strong>V1-GOV-002｜证据不得跨层推断。</strong> 文档链接检查、Schema 自检和示例验证通过，只证明本包的特定结构条件；不能推出持久性、安全隔离、并发正确性或硬件兼容通过。历史报告不能作为本次执行证据，也不能替代 PsiOS 当前提交的实际验证。</p>
 <p><code>SpecResolved</code> 旧称统一解释为“已有明确设计约束”，不再用“风险已关闭”概括工程状态。仍需要 PoC 的问题写明候选、测量方法、通过条件、失败后策略、决策责任角色和最迟启用门槛。责任角色可以已明确而具体人员未指派；正式实施前必须指派具体负责人。</p>
 <h2 id="doc-docs-00-reading-and-authority-3-规范用词和优先级">3. 规范用词和优先级</h2>
 <p><strong>必须 / 不得</strong>是对应能力声明支持前的硬要求；<strong>应当</strong>是默认要求，偏离需有记录的替代保证；<strong>可以</strong>是按 Profile 启用的能力。P0/P1/P2 是问题影响与设计优先级，M0～M6 是实施阶段，两者不等同。高优先级的跨节点规则不意味着 M1 就要实现集群。</p>
@@ -647,7 +642,7 @@
 </section>
 <section class="document" id="doc-docs-01-product-and-architecture" data-title="01｜产品边界与统一架构"><p class="source-path">docs/01-product-and-architecture.md</p><h1 id="doc-docs-01-product-and-architecture-01产品边界与统一架构">01｜产品边界与统一架构</h1>
 <h2 id="doc-docs-01-product-and-architecture-1-产品目标与固定约束">1. 产品目标与固定约束</h2>
-<p>PsiOS 是基于 Linux 的 Agent-Native 操作系统。用户通过 CLI、KDE、WebUI、SDK 和 Agent 访问同一组系统资源；模型离线或 Agent 停止后，传统登录、应用运行、数据访问、诊断和救援仍有独立路径。PsiOS 的实现依据自身源码、原生 API、持久化契约和部署规范。</p>
+<p>PsiOS 是基于 Linux 的 Agent-Native 操作系统。用户通过 CLI、KDE、WebUI、SDK 和 Agent 访问同一组系统资源；模型离线或 Agent 停止后，传统登录、应用运行、数据访问、诊断和救援仍有独立路径。PsiOS 以独立源码和自身架构为实现基线，由 PsiOS 原生接口、持久化契约和部署规范定义系统行为。</p>
 <p><strong>V1-BASE-001｜三版同源。</strong> Helium 是精简版，Neon 是服务器版，Argon 是 KDE Plasma 桌面版。三者共享资源模型、授权、任务和集群接入契约，差异来自默认安装配置和交互场景，不以硬件档次锁住功能。模型可位于本机、局域网、集群或获准的云端；不要求每个节点装大模型或 Controller。</p>
 <div class="table-scroll"><table>
 <thead>
@@ -1358,7 +1353,7 @@
 <p><strong>V1-NET-002｜管理连接变更有确认与回退。</strong> 保存旧配置和generation → 用Operation排他取得配置写权 → 应用新配置 → 在新generation下建立新的认证管理连接，并验证所需路由/DNS → 提交。旧长连接能用不代表新登录可用。确认token绑定operation_id、配置摘要、generation和deadline，不能被另一次变更或旧浏览器复用。</p>
 <p>超时由本机组件回退，回退前仍校验该操作持有的配置generation，避免旧定时器覆盖后来已提交的新配置。断电后根据持久事务决定回退/重新验证。本机控制台是网络错误时的恢复入口；明确主动断网的目标使用单独授权确认，不要求“断网后远程连通”这个不可能条件。</p>
 <p><strong>V1-NET-003｜实际出站路径受控。</strong> Egress规则涵盖DNS结果、重解析、IPv6、重定向、代理出口和本机/链路本地/云元数据地址；凭据不得跟随重定向发往新origin。网络驱动失败不能回退到host network。端口发布明确地址、协议、来源域和授权，配置丢失默认不扩大公网暴露。</p>
-<p><strong>V1-NET-004｜断联不扩权。</strong> 远程服务不可达时本机网络配置、日志和已有获准本地服务可用；涉及在线批准/租约的共享写暂停。跨NAT/代理可选Worker主动连接模式，但API Key只用于引导或规定的受限目的，正式节点访问仍需可轮换身份和明确资源授权；网络方案由 PsiOS 的安全模型和实际验收决定。</p>
+<p><strong>V1-NET-004｜断联不扩权。</strong> 远程服务不可达时本机网络配置、日志和已有获准本地服务可用；涉及在线批准/租约的共享写暂停。跨NAT/代理可选Worker主动连接模式，但API Key只用于引导或规定的受限目的，正式节点访问仍需可轮换身份和明确资源授权；网络拓扑应按 PsiOS 本身的安全模型、场景和验收结果确定。</p>
 <h2 id="doc-docs-03-host-updates-network-devices-7-设备资源与电源">7. 设备、资源与电源</h2>
 <p><strong>V1-DEV-001｜设备身份不靠路径。</strong> Device含稳定ID、节点、类型、驱动/固件、拓扑、健康、能力、授权、租用及generation。热插拔/重置/驱动更新递增相关generation并使旧租用重新验证；路径被新设备复用不能继承旧Grant。GPU/NPU、USB、音频、摄像头、蓝牙、打印与外部存储按后端适配，不重造上游驱动。</p>
 <p><strong>V1-DEV-002｜承诺与强制能力分开。</strong> CPU/内存/PID/IO/临时盘限额必须落实到实际运行环境，先准入再执行；核心管理/审计/救援保留资源。cgroup v2的memory.high用于压力/节流而非硬上限；memory.max、swap、PID等控制器需单独配置验证；不能只采样指标就宣称隔离。<a href="https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html">Linux cgroup v2</a></p>
@@ -2377,7 +2372,7 @@
 <p>重启、设备热插拔和恢复后，应用启动必须等待同一卷身份及所需内容版本确认。发现卷缺失时保持绑定、停止相关写入并报告错误；严禁自动创建空目录让应用初始化另一套数据。删除需先列引用，拒绝仍被有效附件、快照、备份、任务、恢复或导出保留的对象；强制删除必须说明确切损失范围和独立授权，不作为失败恢复默认路径。</p>
 <h3 id="doc-docs-06-storage-data-tablefs-v1-sto-005容量与可操作性">V1-STO-005：容量与可操作性</h3>
 <p>按数据、元数据/WAL、镜像与模型缓存、临时文件、索引、日志、审计和备份分别记账。准入预留必要提交空间；空间或 inode 耗尽时拒绝新分配，保留只读诊断和救援预算。新数据写入和后台 GC 不得因日志盘满自动删除用户卷。I/O 错误、短写、只读降级、校验失败和健康告警须关联资源与 Operation；“设备在线”不能替代数据可靠性。</p>
-<p>配额包括硬上限、当前用量、预留量、计费范围及超限行为；稀疏文件同时显示逻辑大小和实际占用，不把逻辑预留当真实可用空间。压缩、去重和复制带来的容量节省/增加分别计量；具体数值在发行 Profile 中经测量确定，具体容量在 PsiOS 目标 Profile 中测量确定。</p>
+<p>配额包括硬上限、当前用量、预留量、计费范围及超限行为；稀疏文件同时显示逻辑大小和实际占用，不把逻辑预留当真实可用空间。压缩、去重和复制带来的容量节省/增加分别计量；具体数值在发行 Profile 中经测量确定，不采用未经验证的固定磁盘分配方案。</p>
 <h2 id="doc-docs-06-storage-data-tablefs-2-持久化快照备份与恢复">2. 持久化、快照、备份与恢复</h2>
 <h3 id="doc-docs-06-storage-data-tablefs-v1-sto-006成功响应与故障模型">V1-STO-006：成功响应与故障模型</h3>
 <p>每个写 API 必须区分 <code>Visible</code> 与 <code>Durable</code>，响应注明保证范围。<code>Durable</code> 表示在已声明故障模型内，所需内容、元数据和日志已进入可恢复提交边界；不承诺毁坏唯一物理介质后仍无损。Profile 至少分别声明进程崩溃、宿主断电、单盘损坏、整机损毁的保护范围，并列 <code>ack_durability</code>、故障域、复制/备份要求和 RPO。用户请求高于当前能力的保证时拒绝或经显式授权降低，不能静默给出同样的成功响应。</p>
@@ -3557,8 +3552,7 @@
 </tbody>
 </table></div>
 <p>上述用例扩展原 <code>ACC-EVT-01～03</code>、<code>AGT-T01～05</code>、<code>XAT-39</code>、<code>WF-AT-04～06/08</code>；文档中存在用例不表示测试通过。跨节点仍须满足集群章节的资源端 fencing；灾难恢复遵循恢复章节的外部效果对账屏障。</p>
-
-<h2 id="doc-docs-08-tasks-events-addendum-1">8.10 Agent 自主事件触发与任务派发</h2>
+<h2 id="doc-docs-08-tasks-events-810-agent-自主事件触发与任务派发">8.10 Agent 自主事件触发与任务派发</h2>
 <p>本节将 SuperAgent 类系统的事件触发、Router 和 Worker 机制映射到原 Task/Event，不增加第二个 Ticket、Queue、Run 或 Operation 权威；文档仍为 v1.0.0，工程 <code>NotVerified / NotRun</code>。</p>
 <ul>
 <li><strong>发现与关联：</strong> 事件/定时器验证来源、权限、事件 ID、资源修订和规则版本。Router 优先关联已有 Task、WorkItem、WorkflowRun、Conversation/Thread；同一 Issue/CI/Review 的重复、乱序事件不能无限产生新任务。Webhook/评论只作为线索，回源查询外部权威。</li>
@@ -3872,10 +3866,9 @@
 </tbody>
 </table></div>
 <p>原 <code>AGT-T01～07</code>、<code>XAT-43/44</code> 和第三方兼容矩阵继续适用。扩展协议、完整群聊联邦和任意第三方框架的支持必须逐项增加证据；本章没有把 SDK、框架或服务版本锁定为已批准实现。</p>
-
-<h2 id="doc-docs-09-agents-models-protocols-addendum-1">9.10 原生 Agent 自主编排（SuperAgent 类机制）</h2>
+<h2 id="doc-docs-09-agents-models-protocols-910-原生-agent-自主编排superagent-类机制">9.10 原生 Agent 自主编排（SuperAgent 类机制）</h2>
 <p>本节把 Router–Worker、主动任务发现、Ticket 跟踪和 Thread Subscription 作为 PsiOS 原生 Agent 的逻辑能力，不是直接部署 SuperAgent 原型，也不另建高权限控制平面。它是现行 v1.0.0 设计增补，不代表某个 ADR 已批准或任何运行实现已验证。</p>
-<h3 id="doc-docs-09-agents-models-protocols-addendum-2">9.10.1 角色和权威</h3>
+<h3 id="doc-docs-09-agents-models-protocols-9101-角色和权威">9.10.1 角色和权威</h3>
 <ul>
 <li><strong>Router / Planner：</strong> 按可见事件、用户目标、Agent 能力和任务关联提供计划、优先级、执行器建议；需要推理时才唤醒模型，不要求永久运行 LLM 会话。</li>
 <li><strong>Policy Evaluator：</strong> 现有 Identity/Policy/Approval、预算和数据出口服务执行确定性授权；模型不能替系统签发权限。</li>
@@ -3883,7 +3876,7 @@
 <li><strong>Watchdog：</strong> 与模型独立的健康、超时、退避、租约和取消管理，不能以 Router 不在线为由扩大权限。</li>
 </ul>
 <p>以上是职责角色，不是自带 root、跨用户文件访问、桌面控制或仓库合并权的独立 Principal 等级。</p>
-<h3 id="doc-docs-09-agents-models-protocols-addendum-3">9.10.2 概念到 PsiOS 的映射</h3>
+<h3 id="doc-docs-09-agents-models-protocols-9102-概念到-psios-的映射">9.10.2 概念到 PsiOS 的映射</h3>
 <ul>
 <li><code>Ticket</code> → Core <code>Task</code>；如有 Project Service，长期工作由 <code>WorkItem</code> 关联 Task。禁止另建 Ticket 终态数据库。</li>
 <li><code>Assignment</code> → Broker/Scheduler 领取与受限执行租约，关联 Agent、Task、Run、节点、隔离等级、代次和能力；调度决定不可由自然语言替代。</li>
@@ -3891,11 +3884,11 @@
 <li><code>Trigger</code> → Event、Schedule、外部 Connector 的已验证来源事件；<code>Subscription</code> → Conversation 中任务/线程订阅，复用 Task/Event 去重与持久游标。</li>
 <li><code>Session</code> → Agent 的模型交互上下文；不得充当 Task、Operation、审批或外部效果的唯一恢复日志。</li>
 </ul>
-<h3 id="doc-docs-09-agents-models-protocols-addendum-4">9.10.3 主动任务闭环</h3>
+<h3 id="doc-docs-09-agents-models-protocols-9103-主动任务闭环">9.10.3 主动任务闭环</h3>
 <p>事件来源先认证、过滤及去重；优先关联已有工作和原 Worker。新任务由预授权策略及正式 Task.Submit 接受。Router 可规划多 Agent 分工，但执行计划经确定性权限、预算、数据驻留与效果检查后，才由 Broker 分配独立 Run。Worker 可在群聊 @ 或 DM 协作，正式委托必须经 Task/Workflow API。Review/CI/Issue 后续变化回到已有订阅任务而不是反复新建 Agent；完成时根据可验证 Artifact、Operation 及外部权威记录结案。</p>
-<h3 id="doc-docs-09-agents-models-protocols-addendum-5">9.10.4 安全、成本与回退</h3>
+<h3 id="doc-docs-09-agents-models-protocols-9104-安全成本与回退">9.10.4 安全、成本与回退</h3>
 <p>自主程度可以由未来 Profile 配置成只观察、提出候选、已授权范围内执行或逐阶段审批；这些为设计选项，具体 Schema/默认值仍由 ADR 决定。各层维持独立 Principal、最小沙箱、数据出口与目的约束、可撤销租约、统一根预算、并发/递归深度/唤醒跳数/冷却上限。群聊或恶意 README/PR/Skill 均不能更新授权、绕过人类接管或启动无界循环。节点断线、Router 重启、模型额度耗尽时从已提交任务与检查点恢复；旧写入者须经资源端 fencing，未知外部副作用不得盲重发。三版共享接口，Helium 可采用轻量事件驱动 Router，Neon 可部署长期控制服务，Argon 可接入 KDE 授权会话；均不把模型作为本机诊断和救援依赖。</p>
-<h3 id="doc-docs-09-agents-models-protocols-addendum-6">9.10.5 增量验收计划（均 NotRun）</h3>
+<h3 id="doc-docs-09-agents-models-protocols-9105-增量验收计划均-notrun">9.10.5 增量验收计划（均 NotRun）</h3>
 <p>重复/乱序事件不增殖 Task；同一 PR Review 被原 Task/Worker 接续且重新检查成员权限；Agent A→B→A 的循环因根预算和跳数停止；恶意评论诱导越权被 Tool Gateway 拦截；两个 Worker 抢占时旧租约无法写入；Router 死亡和模型离线不重放已确认副作用；已发生外部写入但回执丢失保持 <code>OutcomeUnknown</code> 并对账；撤权按实际 RevocationMode 截断后续能力。M3 测单机，M4 才验证跨节点与 Forgejo/CI 闭环。沿用现有 AT-TSK、AT-AGT、AT-CHAT、AT-WFL、AT-CORE 分类，待正式注册新用例后才分配独立测试 ID。</p>
 </section>
 <section class="document" id="doc-docs-10-conversations" data-title="10｜Conversation、群聊、私聊与 Agent 路由"><p class="source-path">docs/10-conversations.md</p><h1 id="doc-docs-10-conversations-10conversation群聊私聊与-agent-路由">10｜Conversation、群聊、私聊与 Agent 路由</h1>
@@ -4139,8 +4132,7 @@
 </tbody>
 </table></div>
 <p>本矩阵具体化 <code>ACC-CHAT-01～06</code>、<code>WF-AT-01～03/08</code> 和 <code>XAT-40/41</code>。结果仍为 NotRun；只有绑定提交、制品、权限配置与故障注入日志后才能提升工程状态。</p>
-
-<h2 id="doc-docs-10-conversations-addendum-1">10.11 任务线程订阅与持续协作</h2>
+<h2 id="doc-docs-10-conversations-1011-任务线程订阅与持续协作">10.11 任务线程订阅与持续协作</h2>
 <p>SuperAgent 类 Thread Subscription 在 PsiOS 中复用 <code>Subscription</code>、<code>Thread</code>、<code>Task</code> 和 <code>WorkItem</code>，不创建可绕过成员授权的第二消息总线。</p>
 <ul>
 <li>订阅绑定任务/工作项/Conversation/Thread、订阅主体及其 Membership 实例、通知游标、授权范围、唤醒条件与根预算；具体字段须经 ADR-21/25 和 Schema 审核。</li>
@@ -4478,8 +4470,7 @@
 </tbody>
 </table></div>
 <p>以上覆盖 <code>ACC-WFL-01～05</code>、<code>WF-AT-04～08</code> 及原 XAT-33/35～37/39/44。ADR-22 负责 DSL/编排语义，ADR-23 负责外部同步，ADR-24 负责跨服务提交与审批/Saga，ADR-25 负责存储容量与跨服务恢复；任何实现方案获得批准都仍需独立提交和实测证据。</p>
-
-<h2 id="doc-docs-11-workflows-projects-addendum-1">11.12 自主 Agent 开发与项目事件闭环</h2>
+<h2 id="doc-docs-11-workflows-projects-1112-自主-agent-开发与项目事件闭环">11.12 自主 Agent 开发与项目事件闭环</h2>
 <p>Router 是 PsiFlow 的计划与调度使用者，不能成为第二个 WorkflowRun、Approval 或 WorkItem 写入权威。Project/Studio 仍可选；未安装时本地 Task、Schedule、Agent 和最小 Workflow 可独立运行。</p>
 <ul>
 <li><strong>事件关联：</strong> Forgejo/GitHub/CI 的 Webhook 先验签、过滤并回源查询权威状态，依据 ExternalLink 和修订关联已有 WorkItem、Task、WorkflowRun；重复/乱序/漏投事件经去重和周期对账处理。</li>
@@ -5032,7 +5023,7 @@
 <tr class="odd">
 <td>数据、运维与发行复用</td>
 <td>ADR-13～17</td>
-<td>Dataset、观测、发布信任、三版基线及组件准入治理</td>
+<td>Dataset、观测、发布信任、三版基线及独立组件依赖治理</td>
 </tr>
 <tr class="even">
 <td>可选文件系统、包与GUI</td>
@@ -5052,8 +5043,7 @@
 <p>降级不得放宽权限、扩大捕获范围、丢弃未知状态或自动删除用户数据。改变用户已批准的效果、外发目标、不可逆范围或数据损失边界需要重新形成计划。实施中发现新事实可以修改技术选择，但须保留原结论、原因与迁移路径。</p>
 <h2 id="doc-docs-14-roadmap-and-decisions-6-本次交付与未完成工程">6. 本次交付与未完成工程</h2>
 <p>本包完成的是旧文档审查、设计合同修订、接口结构样例、追踪索引和验收计划。尚未在真实PsiOS代码上实现这些合同，也未执行宿主启动、断电、资源fence、桌面输入、灾备、协议互操作或发布签名实验。<code>CorrectedInV1</code>表示文本已修正；<code>NotVerified/NotRun</code>仍是产品实现和产品验收的准确状态。</p>
-
-<h2 id="doc-docs-14-roadmap-and-decisions-addendum-1">7. 自主 Agent 编排增量路线（文档版本不变）</h2>
+<h2 id="doc-docs-14-roadmap-and-decisions-7-自主-agent-编排增量路线文档版本不变">7. 自主 Agent 编排增量路线（文档版本不变）</h2>
 <ul>
 <li><strong>M0：</strong> 在 ADR-04/05/09/11/21/22/23/24/25 下明确 Router/Worker、事件来源、权限/预算、关联订阅、任务权威及故障边界，不额外建立 Ticket 状态机。</li>
 <li><strong>M2：</strong> 实施稳定 Trigger、Task 提交去重、取消墓碑、预算预留、受限执行租约与非 LLM 健康监测基础。</li>
@@ -5858,7 +5848,7 @@
 <p>原 v0.6 主题：<strong>OS 基底、构建工具与平台组合</strong>。v1保持原编号和责任范围，补充实现选择证据与失败门槛，不将行为规范的明确写成技术方案已获批准。文件名使用三位补零便于排序，规范ID仍为 ADR-01。</p>
 <p>原验收范围（继续保留）：统一 Core 构建；发行许可；首批 CPU/固件/虚拟化目标；驱动可用性；依赖锁定和维护方案。</p>
 <h2 id="doc-adr-ADR-001-2-要解决的问题">2. 要解决的问题</h2>
-<p>首个镜像需要可重复构建、合法分发和独立救援，OS 基底必须依据受支持的硬件与验证结果决定。平台过宽会扩大驱动、启动和升级验证矩阵。</p>
+<p>首个镜像需要可重复构建、合法分发和独立救援，但不能仅凭某台开发设备的现状直接冻结 OS 基底。平台过宽会扩大驱动、启动和升级验证矩阵。</p>
 <h2 id="doc-adr-ADR-001-3-已确认的约束">3. 已确认的约束</h2>
 <p>约束入口：<a href="#doc-docs-01-product-and-architecture">01-product-and-architecture</a>、<a href="#doc-docs-03-host-updates-network-devices">03-host-updates-network-devices</a>。以下行为边界属于本v1文档规范；违反它们的技术方案不能通过仅修改本ADR获得批准。</p>
 <ol type="1">
@@ -6311,9 +6301,9 @@
 </table></div>
 <h2 id="doc-adr-ADR-006-1-范围与旧编号沿革">1. 范围与旧编号沿革</h2>
 <p>原 v0.6 主题：<strong>OCI 执行后端与隔离等级</strong>。v1保持原编号和责任范围，补充实现选择证据与失败门槛，不将行为规范的明确写成技术方案已获批准。文件名使用三位补零便于排序，规范ID仍为 ADR-06。</p>
-<p>原验收范围（继续保留）：标准 OCI 后端与 PsiOS 适配层的对照；只读根、身份映射、资源和设备限制、重启恢复、撤权。</p>
+<p>原验收范围（继续保留）：主流 OCI 后端与 PsiOS 适配层的对照；只读根、身份映射、资源和设备限制、重启恢复、撤权。</p>
 <h2 id="doc-adr-ADR-006-2-要解决的问题">2. 要解决的问题</h2>
-<p>管理OCI生命周期与保证隔离是不同责任；标准 OCI Runtime、成熟隔离引擎和增强沙箱需要同一工作负载对照。</p>
+<p>管理OCI生命周期与保证隔离是不同责任；OCI Runtime、成熟隔离引擎和增强沙箱需要使用同一工作负载对照。</p>
 <h2 id="doc-adr-ADR-006-3-已确认的约束">3. 已确认的约束</h2>
 <p>约束入口：<a href="#doc-docs-07-applications-packages-gui">07-applications-packages-gui</a>、<a href="#doc-docs-04-security-identity">04-security-identity</a>、<a href="#doc-docs-03-host-updates-network-devices">03-host-updates-network-devices</a>。以下行为边界属于本v1文档规范；违反它们的技术方案不能通过仅修改本ADR获得批准。</p>
 <ol type="1">
@@ -7271,7 +7261,7 @@
 <p>复审触发条件：默认服务变化、支持硬件扩大、最低资源目标变化或严重体验退化。</p>
 <p>跨领域约束需要改变时先提交共同契约修订，保留旧决议和迁移关系；不得静默复用原编号表达另一主题。</p>
 </section>
-<section class="document" id="doc-adr-ADR-017" data-title="ADR-17　第三方组件准入与依赖治理"><p class="source-path">adr/ADR-017.md</p><h1 id="doc-adr-ADR-017-adr-17-component-admission">ADR-17　第三方组件准入与依赖治理</h1>
+<section class="document" id="doc-adr-ADR-017" data-title="ADR-17　第三方组件准入与依赖治理"><p class="source-path">adr/ADR-017.md</p><h1 id="doc-adr-ADR-017-adr-17-第三方组件准入与依赖治理">ADR-17　第三方组件准入与依赖治理</h1>
 <div class="table-scroll"><table>
 <thead>
 <tr class="header">
@@ -7286,7 +7276,7 @@
 </tr>
 <tr class="even">
 <td>负责人</td>
-<td>迁移审查/模块维护者；具体人员待指派</td>
+<td>PsiOS 组件维护/依赖审查者；具体人员待指派</td>
 </tr>
 <tr class="odd">
 <td>实现状态</td>
@@ -7311,16 +7301,16 @@
 </tbody>
 </table></div>
 <h2 id="doc-adr-ADR-017-1-范围与旧编号沿革">1. 范围与旧编号沿革</h2>
-<p>本 ADR 以 PsiOS 组件准入与依赖治理为范围，方案须依据实际实验与证据批准。文件名使用三位补零便于排序，规范ID仍为 ADR-17。</p>
-<p>原验收范围（继续保留）：当前 Forgejo 完整 SHA、依赖/许可、旧约定清除、宿主边界、故障测试与导出清单。</p>
+<p>本 ADR 定义 PsiOS 第三方依赖治理、核心接口边界与组件准入要求。技术方案仍需实际评估和验证，不因规范完整而视为已批准。文件名使用三位补零便于排序，规范ID仍为 ADR-17。</p>
+<p>验收范围：PsiOS 当前源码提交、可选第三方组件的来源和许可证、接口隔离、宿主边界、故障测试及导出/替换方案。</p>
 <h2 id="doc-adr-ADR-017-2-要解决的问题">2. 要解决的问题</h2>
-<p>旧仓库与打包代码是候选素材，不能以历史测试或旧GitHub快照推断当前Forgejo实现，也不能保留不合适的旧授权与数据约定。</p>
+<p>PsiOS 的启动、构建、运行和发布均遵循自身的技术决策与验证流程。系统权限、API 及持久化契约由 PsiOS 独立定义，并通过其自身测试验收。</p>
 <h2 id="doc-adr-ADR-017-3-已确认的约束">3. 已确认的约束</h2>
 <p>约束入口：<a href="#doc-docs-01-product-and-architecture">01-product-and-architecture</a>、<a href="#doc-docs-02-common-contracts">02-common-contracts</a>、<a href="#doc-docs-13-operations-release-governance">13-operations-release-governance</a>。以下行为边界属于本v1文档规范；违反它们的技术方案不能通过仅修改本ADR获得批准。</p>
 <ol type="1">
-<li>记录实际当前Forgejo完整SHA、模块来源、许可、依赖、测试和迁移决定。</li>
-<li>组件必须满足 PsiOS API、身份授权及数据契约。</li>
-<li>已有压缩包的审查报告是历史证据，不等于本轮已复验或完整上游当前状态。</li>
+<li>固定 PsiOS 当前源码提交；对确需引入的第三方组件分别登记来源 SHA、许可证、依赖、测试和采纳/替换决定。</li>
+<li>所有外部组件必须符合 PsiOS 原生 API、身份授权与持久化契约。</li>
+<li>历史压缩包及审查报告仅供追溯，不代表 PsiOS 已验证或当前外部组件仍满足准入要求。</li>
 </ol>
 <h2 id="doc-adr-ADR-017-4-可行候选与代价">4. 可行候选与代价</h2>
 <div class="table-scroll"><table>
@@ -7348,7 +7338,7 @@
 <p>候选可在不同Profile中组合，但必须逐组合记录部署边界、依赖、版本与支持范围；表中出现的软件/后端名称只表示评估对象，不是依赖锁定或能力验收。</p>
 <h2 id="doc-adr-ADR-017-5-选择证据与实验">5. 选择证据与实验</h2>
 <ol type="1">
-<li>固定真实HEAD生成模块/文件/许可证矩阵，逐项标reuse/adapt/rewrite/disable及理由。</li>
+<li>固定 PsiOS 自身完整提交 SHA，建立模块/文件/许可证矩阵；对外部依赖按需标记 adopt/adapt/replace/disable 并说明理由。</li>
 <li>在干净环境运行必要测试，复测OCI挂载、任务持久化、撤权和外部副作用危险路径。</li>
 <li>检查旧固定端点、账号、凭据、容量、模型默认与站点部署配置，保留来源追踪。</li>
 </ol>
@@ -14369,7 +14359,7 @@
 </table></div>
 </section>
 <section class="document" id="doc-migration-README" data-title="历史规范迁移与原文归档"><p class="source-path">migration/README.md</p><h1 id="doc-migration-README-历史规范迁移与原文归档">历史规范迁移与原文归档</h1>
-<p>本目录回答三个问题：旧版本提出了什么、v1 在哪里保留或修正、哪些结论仍需实际工程证据。<strong>v1 是完整设计文档基线，不是 PsiOS 软件 1.0 发布，也不代表软件功能已完成工程验证。</strong></p>
+<p>本目录回答三个问题：旧版本提出了什么、v1 在哪里保留或修正、哪些结论仍需实际工程证据。<strong>v1 是完整设计文档基线，不是 PsiOS 软件 1.0 发布，也不代表任何软件功能已经通过工程验证。</strong></p>
 <h2 id="doc-migration-README-1-阅读入口">1. 阅读入口</h2>
 <div class="table-scroll"><table>
 <thead>
@@ -14396,14 +14386,6 @@
 <td>P0 工作项同号不同义、ADR 编号/范围变化、计数和章节错误</td>
 </tr>
 <tr class="odd">
-<td><a href="#doc-migration-component-readiness">组件准入检查</a></td>
-<td>历史 ZIP 的可复核结构、模块、来源陈述、许可证线索及复用限制</td>
-</tr>
-<tr class="even">
-<td>组件准入说明</td>
-<td>ZIP 的静态清点记录；没有运行归档代码或依赖安装</td>
-</tr>
-<tr class="odd">
 <td><a href="../migration/rebuild_legacy_registry.py">rebuild_legacy_registry.py</a></td>
 <td>仅从本包归档和当前文档重建旧编号登记、定义引用和两份逐项表</td>
 </tr>
@@ -14422,7 +14404,7 @@
 </tbody>
 </table></div>
 <h2 id="doc-migration-README-2-盘点范围和计数口径">2. 盘点范围和计数口径</h2>
-<p>本次整理 PsiOS 的设计草案、Space 正文导出和相关元数据。Space 元数据保留页面 ID、序列和块摘要，用于解释正文来自哪次导出。元数据及 ZIP 不参与规范编号的正文计数。</p>
+<p>本次读取全部 10 份 Project Markdown/TXT 输入、两份已取得的 Space 正文导出、两份对应元数据。Space 元数据保留页面 ID、序列和块摘要，用于解释正文来自哪次导出。元数据及 ZIP 不参与规范编号的正文计数。</p>
 <p>旧规范以规范化编号去重：<strong>245 项 = BASE 固定约束 20 项 + 专业规范 225 项</strong>。同一条在 v0.2、v0.3、v0.4、v0.5、导入 v0.6 和 Space v0.6 中重复出现，只计算一次逻辑编号；各来源文本没有被覆盖或抹去。JSON 保留 1,297 处规范定义，并记录来源章节、原句和引用位置。</p>
 <p>旧验收以原测试编号去重：<strong>141 项 = XAT 45 + WF-AT 12 + ACC 36 + 专章 T 系列 37 + 基础 AT 系列 11</strong>。JSON 保留 656 处测试定义。旧稿的“v0.5 现有 29 个跨模块场景”是过期计数；实际 v0.5 为 XAT-01～37，v0.6 新增 XAT-38～45。不能用这一错误计数删去 8 个旧场景。</p>
 <p>本包还记录 15 个风险编号、25 个 ADR 编号、17 种历史工作项编号拼写。它们没有混进 245 项规范或 141 项测试的分母。工作项身份是 <strong><code>(source_id, legacy_id)</code></strong>；同一个 P0-04 出现在不同来源，不能假定是同一工作。</p>
@@ -14470,7 +14452,7 @@
 <h2 id="doc-migration-README-4-可复核方法">4. 可复核方法</h2>
 <p>在解压后的 PsiOS-v1 根目录运行：</p>
 <div class="sourceCode" id="doc-migration-README-cb1"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="doc-migration-README-cb1-1"><a href="#doc-migration-README-cb1-1" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> migration/rebuild_legacy_registry.py</span></code></pre></div>
-<p>脚本只使用 Python 标准库，读取 <code>sources/archive/</code>、来源清单和 <code>docs/</code>，不访问网络、不安装运行时依赖。它校验归档文本 SHA-256，展开编号、重建原句位置，检查显式映射的新条款/测试存在，再输出 JSON 和两份逐项 Markdown 表。手工维护的映射仍需语义复核；脚本不会以关键词相似度自动批准迁移。</p>
+<p>脚本只使用 Python 标准库，读取 <code>sources/archive/</code>和 <code>docs/</code>，不访问网络、不安装运行时依赖。它校验归档文本 SHA-256，展开编号、重建原句位置，检查显式映射的新条款/测试存在，再输出 JSON 和两份逐项 Markdown 表。手工维护的映射仍需语义复核；脚本不会以关键词相似度自动批准迁移。</p>
 <p>脚本失败、缺条款或出现未知旧编号时应修正输入/映射后重建。不要删除未匹配旧要求来让覆盖率变成 100%。最终文件摘要和打包结果由本包的发布清单记录；来源摘要与输出摘要用途不同。</p>
 </section>
 <section class="document" id="doc-migration-v0-to-v1" data-title="v0.1–v0.6 → v1 设计迁移说明"><p class="source-path">migration/v0-to-v1.md</p><h1 id="doc-migration-v0-to-v1-v01v06--v1-设计迁移说明">v0.1–v0.6 → v1 设计迁移说明</h1>
@@ -14713,9 +14695,9 @@
 <tbody>
 <tr class="odd">
 <td>P0-01</td>
-<td>固定当前 Forgejo HEAD；TaskEngine/EventStore/Broker/OCI/Identity/Storage/SDK/WebUI 复用矩阵</td>
-<td>核验 PsiOS 当前源码、依赖与许可证</td>
-<td>意图相近，保留两个来源；真正执行项仍需实际仓库和 HEAD</td>
+<td>核验 PsiOS 当前提交；建立 Task/Event/Broker/OCI/Identity/Storage/SDK/WebUI 模块接口矩阵</td>
+<td>以 PsiOS 源码、组件版本、依赖许可证和验收证据为准</td>
+<td>方案的生效取决于 PsiOS 当前实现证据与审查记录</td>
 </tr>
 <tr class="even">
 <td>P0-02</td>
@@ -14838,9 +14820,9 @@
 <td>只表示设计层有处理约束；实现NotVerified、验收NotRun</td>
 </tr>
 <tr class="even">
-<td>模块命名与实际功能状态</td>
-<td>容易被理解成已实现PsiOS v1</td>
-<td>只是历史导出crate名称；当前仓库HEAD、集成、安全默认值及测试仍需验证</td>
+<td>模块命名与实现状态</td>
+<td>模块名称不证明软件功能已经实现</td>
+<td>以 PsiOS 自身源码、集成测试及功能验收结果为准</td>
 </tr>
 </tbody>
 </table></div>
@@ -14950,15 +14932,15 @@
 <td>FIX-CORE-013</td>
 <td>P1</td>
 <td>缺口</td>
-<td>验收日志和结果产物必须可追溯；缺少可核验测试证据时保持 NotVerified。</td>
-<td><a href="#doc-migration-component-readiness">组件准入检查</a></td>
+<td>当测试日志、运行环境或结果产物缺失时，仅凭文档描述无法复核关键功能与恢复保证。</td>
+<td><a href="#doc-docs-15-acceptance-and-evidence">docs/15-acceptance-and-evidence.md</a></td>
 </tr>
 <tr class="even">
 <td>FIX-CORE-014</td>
 <td>P1</td>
 <td>歧义</td>
-<td>该ZIP是多来源历史模块集合，缺少Git对象/历史和当前远端验证，不能把任一元数据SHA当作整包唯一HEAD。内包摘要与自带metadata相同，只能证明归档内部清单一致，不能证明当前仓库来源或PsiOS v1…</td>
-<td><a href="#doc-migration-component-readiness">组件准入检查</a></td>
+<td>仅有文件清单、制品摘要或某个版本标识，不足以证明当前 PsiOS 模块已正确集成及满足安全边界。</td>
+<td><a href="#doc-adr-ADR-017">adr/ADR-017.md</a></td>
 </tr>
 <tr class="odd">
 <td>FIX-CORE-015</td>
@@ -15572,7 +15554,21 @@
 <p><strong>位置：</strong> <a href="#doc-docs-13-operations-release-governance">docs/13-operations-release-governance.md</a></p>
 <p><strong>验证方向：</strong> 提交含探测环境变量、runner文件系统、容器管理Socket和网络外发代码的测试PR；应无法取得生产密钥或宿主权限，也不能替换已绑定摘要的待签制品。验证正常审查/构建证据通过后独立签名路径仍可运行。</p>
 <p><strong>状态：</strong> CorrectedInV1（规范层）；NotVerified（实现层）。</p>
-<h3 id="doc-migration-findings-fix-core-013p1缺口">FIX-CORE-013｜P1｜缺口</h3><p><strong>问题：</strong>缺少运行环境、测试日志或结果产物时无法复核关键功能。</p><p><strong>修订：</strong>验收证据必须绑定 PsiOS 提交、环境、操作步骤及产物摘要；未满足时保持 NotVerified/NotRun。</p><h3 id="doc-migration-findings-fix-core-014p1歧义">FIX-CORE-014｜P1｜歧义</h3><p><strong>问题：</strong>文件清单、制品摘要或版本标签不能证明 PsiOS 模块已经正确集成。</p><p><strong>修订：</strong>按模块登记接口、依赖许可证、构建和故障恢复测试。</p><h3 id="doc-migration-findings-fix-core-015p1缺口">FIX-CORE-015｜P1｜缺口</h3>
+<h3 id="doc-migration-findings-fix-core-013p1缺口">FIX-CORE-013｜P1｜缺口</h3>
+<p>**原文依据：**PsiOS 设计条款与实际功能验证必须使用可追溯的证据链，不能将缺失测试产物的叙述视为已验证。</p>
+<p>**问题：**当测试日志、运行环境或结果产物缺失时，仅凭文档描述无法复核关键功能与恢复保证。</p>
+<p>**v1修正：**验收记录绑定确切版本、环境、操作步骤、日志与产物摘要；证据缺失时明确保留 NotVerified/NotRun。</p>
+<p><strong>位置：</strong><a href="#doc-docs-15-acceptance-and-evidence">docs/15-acceptance-and-evidence.md</a></p>
+<p>**验证方向：**抽查恢复、权限撤销、OCI 隔离等场景的证据字段；缺少测试产物时不能升级验收状态。</p>
+<p><strong>状态：</strong> CorrectedInV1（规范层）；NotVerified（实现层）。</p>
+<h3 id="doc-migration-findings-fix-core-014p1歧义">FIX-CORE-014｜P1｜歧义</h3>
+<p>**原文依据：**PsiOS 模块准入需要当前源代码提交、依赖清单、许可证、构建和运行验证证据。</p>
+<p>**问题：**仅有文件清单、制品摘要或某个版本标识，不足以证明当前 PsiOS 模块已正确集成及满足安全边界。</p>
+<p>**v1修正：**按模块建立接口、源码提交、依赖/许可、测试和可替换性记录；未经实测的能力保持 NotVerified。</p>
+<p><strong>位置：</strong><a href="#doc-adr-ADR-017">adr/ADR-017.md</a></p>
+<p>**验证方向：**对 Task、OCI、Storage 等模块核验实际提交、构建、接口契约、权限边界与故障恢复测试。</p>
+<p><strong>状态：</strong> CorrectedInV1（规范层）；NotVerified（实现层）。</p>
+<h3 id="doc-migration-findings-fix-core-015p1缺口">FIX-CORE-015｜P1｜缺口</h3>
 <p><strong>原文依据：</strong> Space v0.6 CLU-012已规定恢复旧控制面不能只把epoch加一，须资源端认可新incarnation；API-012要求过期游标重列举，但没有显式说明恢复旧快照后已建立watch、分页游标及控制器投影必须失效。</p>
 <p><strong>问题：</strong> 写入fencing正确也不保证观察缓存正确。恢复数据库可能把revision退到客户端已见版本之前，旧watch/成员/调度缓存若继续等待更高revision，可能长期遗漏删除或维持不再存在的资源投影。此项关注恢复后控制订阅，不重复旧Writer写权限的隔离缺陷。</p>
 <p><strong>v1修正：</strong> 控制订阅、游标和数据修订带恢复世代；旧快照恢复后让旧订阅失效并完整重新列表，处理已删除对象。etcd的revision bump/compaction仅用于相应缓存失效，不能替代PsiOS资源fencing或身份恢复。</p>
@@ -16098,7 +16094,6 @@
 <p><strong>验证方向：</strong> 在 CI/Review 成功之后、合并调用之前改变 head；旧证据不能授权新提交；远端无条件写能力时不得错误宣称无竞争保障。</p>
 <p><strong>状态：</strong> CorrectedInV1（规范层）；NotVerified（实现层）。</p>
 </section>
-<section class="document" id="doc-migration-component-readiness" data-title="PsiOS 组件准入与实现边界"><p class="source-path">PsiOS 组件准入检查</p><h1>PsiOS 组件准入与实现边界</h1><p>模块按照 PsiOS 自有 API、授权与生命周期规范实施，必须通过构建、接口、隔离和故障恢复验收。</p><h2>核验要求</h2><p>提交 SHA、许可证、依赖锁、模块边界、状态所有权、权限审计、故障注入与可恢复性均须可追溯。</p></section>
 <section class="document" id="doc-migration-legacy-requirements" data-title="旧规范逐项迁移表"><p class="source-path">migration/legacy-requirements.md</p><h1 id="doc-migration-legacy-requirements-旧规范逐项迁移表">旧规范逐项迁移表</h1>
 <p>旧规范共 <strong>245</strong> 个唯一编号；已有明确 v1 文档去向 <strong>245</strong> 项，定位覆盖率 <strong>100.0%</strong>。该分母包括 BASE 的20项固定约束；旧附录单列的专业规范为225项。</p>
 <p>所有结果为文档迁移定位；工程状态仍为 <strong>NotVerified / NotRun</strong>。每项保留原编号，重复出现在多个版本只算一个逻辑编号；不同文本版本和所有引用仍在JSON中分别保留。</p>
@@ -16505,7 +16500,7 @@
 <p><strong>去向：</strong> <a href="#doc-docs-01-product-and-architecture">V1-ARCH-005</a>；<a href="#doc-docs-13-operations-release-governance">V1-GOV-007</a>。</p>
 <p><strong>选定原文：</strong> <a href="../sources/archive/space-unified-v0.6.md">SRC-SPACE-V06</a>，PsiOS｜统一架构与持续开发规划 · 合并 v0.6 › 零、修订基线与阅读约定（0.1 保留 v0.2 历史说明） › 0.2 继续有效的设计约束，第 48–48 行。</p>
 <blockquote>
-<p>| BASE-10 | PsiOS 独立定义核心架构及 API | 实现以 PsiOS 当前提交和验收为准。 |</p>
+<p>| BASE-10 | PsiOS 按独立架构和原生接口开发 | 以 PsiOS 当前提交、接口契约及验收结果确认实现状态。 |</p>
 </blockquote>
 <p><strong>溯源范围：</strong> 6 处定义、0 处引用；1 个逐字不同的历史定义块。原文保留旧拼写/旧错误，不直接作为当前行为规范。</p>
 <h3 id="doc-migration-legacy-requirements-base-11">BASE-11</h3>
@@ -17220,7 +17215,7 @@
 <p><strong>去向：</strong> <a href="#doc-docs-13-operations-release-governance">V1-GOV-007</a>；<a href="#doc-docs-01-product-and-architecture">V1-ARCH-005</a>。</p>
 <p><strong>选定原文：</strong> <a href="../sources/archive/space-unified-v0.6.md">SRC-SPACE-V06</a>，PsiOS｜统一架构与持续开发规划 · 合并 v0.6 › 二十八、用户体验、运维配置与后续能力边界 › 28.4 模块质量与责任边界，第 1699–1699 行。</p>
 <blockquote>
-<p>GOV-002：必须登记 PsiOS 模块提交、版本、依赖许可证、接口、安全边界与测试证据；文档不代替运行验证。</p>
+<p>GOV-002：必须对进入 PsiOS 主线的模块登记准确的源代码提交、版本、依赖与许可证、接口契约、安全评估和测试证据。设计文档补全不能替代真实实现验证。</p>
 </blockquote>
 <p><strong>溯源范围：</strong> 6 处定义、6 处引用；1 个逐字不同的历史定义块。原文保留旧拼写/旧错误，不直接作为当前行为规范。</p>
 <h3 id="doc-migration-legacy-requirements-gov-003">GOV-003</h3>
@@ -17484,7 +17479,7 @@
 <p><strong>去向：</strong> <a href="#doc-docs-13-operations-release-governance">V1-OPS-004</a>。</p>
 <p><strong>选定原文：</strong> <a href="../sources/archive/space-unified-v0.6.md">SRC-SPACE-V06</a>，PsiOS｜统一架构与持续开发规划 · 合并 v0.6 › 二十八、用户体验、运维配置与后续能力边界 › 28.2 配置与运维，第 1674–1674 行。</p>
 <blockquote>
-<p>OPS-004：必须预留运行预算与压力策略，包括 CPU、内存、IO、临时磁盘、事件与审计空间、网络带宽和模型费用。每项预算有范围、硬限/软限、超限行为和可查询用量；数值由目标平台测量后冻结，资源配置基于 PsiOS 实际测量。</p>
+<p>OPS-004：必须预留运行预算与压力策略，包括 CPU、内存、IO、临时磁盘、事件与审计空间、网络带宽和模型费用。每项预算有范围、硬限/软限、超限行为和可查询用量；数值由目标平台测量后冻结，以 PsiOS 的实测资源预算为准。</p>
 </blockquote>
 <p><strong>溯源范围：</strong> 6 处定义、12 处引用；1 个逐字不同的历史定义块。原文保留旧拼写/旧错误，不直接作为当前行为规范。</p>
 <h3 id="doc-migration-legacy-requirements-ops-005">OPS-005</h3>
@@ -19641,8 +19636,8 @@
 </tbody>
 </table></div>
 <h2 id="doc-sources-README-原始输入与代码边界">原始输入与代码边界</h2>
-<p><a href="../sources/source-inventory.json">原始输入清单</a> · <a href="../sources/archive/README.md">历史源说明</a> · <a href="#doc-adr-ADR-017">组件准入规则</a>。</p>
-<p>此包未获取当前Forgejo HEAD，未安装或执行归档代码。保存源文件是为了可追溯，不把历史文件的计划、测试数字或脚本自动提升为当前权威。</p>
+<p><a href="../sources/source-inventory.json">原始输入清单</a> · <a href="../sources/archive/README.md">历史源说明</a>。</p>
+<p>规划材料用于记录设计变更；实现状态以 PsiOS 源码、构建制品和实际测试为准。</p>
 </section>
 <section class="document" id="doc-tools-README" data-title="文档构建与校验工具"><p class="source-path">tools/README.md</p><h1 id="doc-tools-README-文档构建与校验工具">文档构建与校验工具</h1>
 <p>这些脚本只维护本包文档及数据，不是PsiOS产品实现，不执行sources/archive中的代码。Python 3.10或更新版本；校验依赖见requirements.txt。重建HTML另需系统Pandoc；交付的html/index.html可直接离线阅读。</p>
@@ -19691,10 +19686,11 @@
 <p>修改Schema生成器后应检查是否有退役样例，不能留未列入manifest的旧反例。不要手改生成的合订本、HTML或需求索引形成第二权威。原始archive保持字节不变。</p>
 <h2 id="doc-tools-README-实际检查范围">实际检查范围</h2>
 <p>严格JSON读取、Schema语法/本地ref、正反例与拒绝层次、无损计数范围、夹具摘要向量、局部关系/依赖图、规范ID、链接、注册表定位、产品计划仍NotRun、原文定义切片与归档SHA、最终交付清单。未覆盖的签名真实性、分布式并发、真实fencing、断电、硬件、协议互通和性能在报告中明确列为NotProven。</p>
+<p>历史映射中的原文切片对应 2026-11-22 封存交付。仓库检出会离线读取并校验同级 releases 目录的五个分段。单独分发修订版时，使用 <code>python tools/validate_package.py --original-delivery /path/to/PsiOS-v1.0.0-docs-2026-11-22.zip</code> 复核历史切片。当前分章和来源副本分别按当前清单核验。</p>
 </section>
 <section class="document" id="doc-NOTICE" data-title="来源与使用说明"><p class="source-path">NOTICE.md</p><h1 id="doc-NOTICE-来源与使用说明">来源与使用说明</h1>
-<p>本包是 PsiOS 设计文档，不是安装介质或软件发行版。工程实现、许可证和发布资格以 PsiOS 自身代码和验证记录为准。</p>
-<p>设计资料、技术候选和任务记录不等同于软件功能验证。实际复用需按ADR-17检查确切源码、许可证、依赖及安全边界。</p>
+<p>本包是PsiOS项目的设计文档交付，不是安装介质或已验证软件发行版。项目规划文件与技术规范保留可追溯修订信息；所有依赖遵循各自许可证及其适用范围。本包不授予超出许可证的任何权利。</p>
+<p>设计资料、技术候选和任务记录不等同于软件功能验证。组件准入需按 ADR-17 核验许可证、依赖、安全边界和可维护性。</p>
 <p>新文档中的架构与接口是设计要求；具体代码许可、发布签名、支持范围、性能和维护期限须由项目治理另行确定。示例中的ID、摘要引用、时间、许可和预算均为虚构夹具。</p>
 </section></main><script>
     const input=document.getElementById('query'),count=document.getElementById('count');

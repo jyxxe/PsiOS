@@ -1,10 +1,10 @@
 # PsiOS
 
-PsiOS is a Linux-based **Agent-Native Operating System** project with three planned editions: **Helium** (minimal), **Neon** (server), and **Argon** (KDE Plasma desktop).
+PsiOS is an independent **Agent-Native Linux operating system** project with three planned editions: **Helium** (minimal), **Neon** (server), and **Argon** (KDE Plasma desktop). PsiOS defines its own system contracts and release criteria. The native image baseline is tracked in [ADR-01](docs/v1/adr/ADR-001.md).
 
 The repository contains the **PsiOS v1.0.0 documentation baseline (2026-11-22)** and an initial Rust implementation of the single-node Core. `psiosd` serves the local System API. `psiosctl` and the Rust SDK use that API for identity and policy, durable tasks, OCI applications, local volumes, backups and agent tools.
 
-Build with `cargo build --locked --workspace`. For installation on an existing systemd host, see the [Core package guide](docs/host-package.md). The [QEMU installation guide](docs/host-vm.md) builds a bootable amd64 guest with a per-instance administrator key and local authority. The [local Core guide](docs/core-local.md) covers initialization, running a task, enrolling an agent, approvals, recovery and verification. The [host and Agent Runtime guide](docs/core-runtime.md) covers systemd control, concurrent scheduling, release switching, binary files, versioned Skills and restartable multi-step sessions. The sealed v1 documentation retains its original release and acceptance status.
+Build with `cargo build --locked --workspace`, or use the [portable amd64 Core build](docs/core-local.md#portable-amd64-core) for standalone Linux binaries. The [Core package guide](docs/host-package.md) covers the optional .deb integration tested on Ubuntu 24.04. The [QEMU guide](docs/host-vm.md) runs a development node on an Ubuntu Minimal guest. The [local Core guide](docs/core-local.md) covers initialization, running a task, enrolling an agent, approvals, recovery and verification. The [host and Agent Runtime guide](docs/core-runtime.md) covers systemd control, concurrent scheduling, release switching, binary files, versioned Skills and restartable multi-step sessions. The sealed v1 documentation retains its original release and acceptance status.
 
 ## Documentation
 

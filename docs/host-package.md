@@ -1,6 +1,6 @@
-# 在现有 Linux 主机安装 PsiOS Core
+# 在 Ubuntu 测试宿主上安装 PsiOS Core 的 .deb 包
 
-`psios-core` 包含本机权威服务、CLI、默认配置和两个 systemd 单元。构建针对当前主机架构。CI 在 Ubuntu 24.04 的 amd64 虚机上执行打包与服务生命周期验收。当前交付范围是已有 Linux 上的单节点 Core。三个发行版的启动介质、磁盘安装器、签名更新通道和系统部署回退仍待实现。
+`psios-core` 包含本机权威服务、CLI、默认配置和两个 systemd 单元。此包为可选的宿主集成，CI 在 Ubuntu 24.04 amd64 上执行打包与服务生命周期验收。PsiOS 是独立的 Linux 操作系统项目。Core 同时提供可直接运行的静态 Linux 二进制。三个发行版的启动介质、磁盘安装器、签名更新通道和系统部署回退仍待实现。[独立二进制](core-local.md#portable-amd64-core) · [宿主基底决策](v1/adr/ADR-001.md)
 
 通过验收的 Actions 运行保存 `psios-core-ubuntu-24.04-amd64` 开发制品 14 天。归档含实际测试的 deb、dpkg buildinfo、源码提交、Rust 版本、Cargo.lock 和 SHA-256 清单。从对应的成功运行下载并解压后，在包目录执行 `sha256sum -c SHA256SUMS`。主线开发包的来源核验见下文。正式发行通道及其独立信任策略仍待建立。
 

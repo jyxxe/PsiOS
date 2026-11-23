@@ -22,7 +22,7 @@ fn state(s: &Shared) -> Result<MutexGuard<'_, Store>> {
     s.lock()
         .map_err(|_| err("RecoveryRequired", "authority mutex poisoned"))
 }
-fn connection(s: &Shared, stream: &mut UnixStream) -> Result<()> {
+fn connection(s: &Shared, stream: &mut UnixStream, stop: &AtomicBool) -> Result<()> {
     let time = Some(Duration::from_secs(3));
     stream.set_read_timeout(time)?;
     stream.set_write_timeout(time)?;
@@ -36,6 +36,12 @@ fn connection(s: &Shared, stream: &mut UnixStream) -> Result<()> {
         let r: Request = serde_json::from_value(parse(&bytes)?)?;
         crate::label(&r.request_id)?;
         rid = r.request_id.clone();
+        if r.method == "Event.Wait" {
+            let changes = state(s)?.changes.clone();
+            return crate::watch::poll(&changes, stop, r, |request| {
+                state(s)?.request(peer, request)
+            });
+        }
         state(s)?.request(peer, r)
     })();
     let mut answer = match result {
@@ -144,14 +150,17 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     let (listener, _endpoint) = bind(&cfg.socket)?;
     db.transaction("restart-recovery", broker::recover)?;
     let db = Arc::new(Mutex::new(db));
-    let running = db.clone();
-    let shutdown = stop.clone();
-    let worker =
-        thread::spawn(move || worker(running, shutdown, Duration::from_millis(cfg.tick_ms)));
+    let mut workers = Vec::new();
+    for _ in 0..cfg.workers {
+        let running = db.clone();
+        let shutdown = stop.clone();
+        let tick = Duration::from_millis(cfg.tick_ms);
+        workers.push(thread::spawn(move || worker(running, shutdown, tick)));
+    }
     let mut clients: Vec<(UnixStream, thread::JoinHandle<()>)> = Vec::new();
     eprintln!("psiosd ready on {}", cfg.socket.display());
     let mut accept_error = None;
-    while !stop.load(Ordering::Acquire) && !worker.is_finished() {
+    while !stop.load(Ordering::Acquire) && !workers.iter().any(thread::JoinHandle::is_finished) {
         let mut i = 0;
         while i < clients.len() {
             if clients[i].1.is_finished() {
@@ -171,10 +180,11 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
                     }
                 };
                 let s = db.clone();
+                let stop = stop.clone();
                 clients.push((
                     cancel,
                     thread::spawn(move || {
-                        let _ = connection(&s, &mut stream);
+                        let _ = connection(&s, &mut stream, &stop);
                     }),
                 ));
             }
@@ -191,14 +201,22 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
         }
     }
     stop.store(true, Ordering::Release);
+    state(&db)?.changes.notify();
     drop(listener);
     for (s, h) in clients {
         let _ = s.shutdown(Shutdown::Both);
         let _ = h.join();
     }
-    worker
-        .join()
-        .map_err(|_| err("RecoveryRequired", "worker terminated unexpectedly"))??;
+    let mut result = Ok(());
+    for worker in workers {
+        if let Err(error) = worker
+            .join()
+            .unwrap_or_else(|_| Err(err("RecoveryRequired", "worker terminated unexpectedly")))
+        {
+            result = Err(error);
+        }
+    }
+    result?;
     if let Some(e) = accept_error {
         return Err(e.into());
     }

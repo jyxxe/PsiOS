@@ -47,6 +47,8 @@ enum Cmd {
     },
     Watch {
         cursor: String,
+        #[arg(long)]
+        wait_ms: Option<u64>,
     },
     Submit {
         tool: String,
@@ -68,6 +70,13 @@ enum Cmd {
         #[arg(long)]
         delegation: String,
     },
+    /// Process one durable model turn with the local node inventory provider.
+    ModelStep {
+        session: String,
+        #[arg(long)]
+        key: String,
+    },
+    Node,
     Validate {
         contract: String,
         #[arg(default_value = "-")]
@@ -111,6 +120,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_else(|| rustix::process::geteuid().as_raw()),
     );
     let v = match o.cmd {
+        Cmd::ModelStep { session, key } => c.model_turn(&session, &key, &psios_api::NodeSurvey)?,
+        Cmd::Node => c.call("Node.Get", json!({}))?,
         Cmd::Whoami => c.call("Principal.WhoAmI", json!({}))?,
         Cmd::Capabilities => c.call("Capability.Discover", json!({}))?,
         Cmd::Status { delegation } => c.call(
@@ -120,7 +131,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::Call { method, file } => c.call(&method, input(&file)?)?,
         Cmd::Get { id } => c.call("Resource.Get", json!({"id": id}))?,
         Cmd::List { kind } => c.call("Resource.List", json!({"kind": kind.unwrap_or_default()}))?,
-        Cmd::Watch { cursor } => c.call("Event.Poll", json!({"cursor": cursor}))?,
+        Cmd::Watch { cursor, wait_ms } => match wait_ms {
+            Some(timeout_ms) => c.call(
+                "Event.Wait",
+                json!({"cursor":cursor,"timeout_ms":timeout_ms}),
+            )?,
+            None => c.call("Event.Poll", json!({"cursor":cursor}))?,
+        },
         Cmd::Submit {
             tool,
             key,

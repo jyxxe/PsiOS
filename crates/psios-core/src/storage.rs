@@ -1,4 +1,5 @@
 //! Single-node directory volumes. A writer or an uncertain operation retains the volume hold.
+pub mod files;
 use crate::{
     config::{Config, new_file, private_dir, replace},
     db::{Db, Doc},
@@ -92,7 +93,11 @@ pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
             require(
                 matches!(
                     w.action,
-                    Action::Read(_) | Action::Activate(_) | Action::Delete(_)
+                    Action::Read(_)
+                        | Action::Chunk(_)
+                        | Action::Files(_)
+                        | Action::Activate(_)
+                        | Action::Delete(_)
                 ),
                 "PreconditionFailed",
                 "restored volume requires activation",
@@ -463,6 +468,11 @@ pub fn confirm_write(cfg: &Config, volume: &Doc, name: &str, expected: &str) -> 
 }
 pub fn perform(w: &Work) -> Result<Value> {
     match &w.action {
+        Action::Files(_)
+        | Action::Chunk(_)
+        | Action::Append(_)
+        | Action::MakeDir(_)
+        | Action::RemoveEntry(_) => files::perform(w),
         Action::Activate(_) => Ok(json!({"validated": true})),
         Action::Create { .. } => create_volume(w, None),
         Action::Restore(_) => create_volume(w, Some(&w.target)),
@@ -585,7 +595,11 @@ pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
             b["deleted_at"] = json!(now());
             Ok(db.status(&w.target, b)?.reference())
         }
-        Action::Delete(_) | Action::Write(_) => {
+        Action::Delete(_)
+        | Action::Write(_)
+        | Action::Append(_)
+        | Action::MakeDir(_)
+        | Action::RemoveEntry(_) => {
             let mut b = w.target.body.clone();
             if matches!(w.action, Action::Delete(_)) {
                 b["lifecycle"] = json!("Deleted")

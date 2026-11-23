@@ -1,5 +1,7 @@
 //! Local system API contracts, bounded framing and synchronous Rust client.
 mod client;
+mod model;
+pub use model::*;
 mod json;
 pub use client::*;
 pub use json::{canonical, contract, digest, parse, sha256};

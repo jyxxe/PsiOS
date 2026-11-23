@@ -30,6 +30,25 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
             let _: Empty = decode(p)?;
             policy::who(db, actor)
         }
+        "Node.Get" => node::get(db, actor, p),
+        "Node.Configure" => node::configure(db, actor, p),
+        "Skill.Publish" => agent::skill(db, actor, p),
+        "Skill.Retire" => agent::retire(db, actor, p, "Skill"),
+        "Model.Register" => agent::model(db, actor, p),
+        "Model.Retire" => agent::retire(db, actor, p, "Model"),
+        "Model.Claim" => agent::claim(db, actor, p),
+        "Model.Respond" => agent::respond(db, actor, p),
+        "Mailbox.Bind" => agent::mail::bind(db, actor, p),
+        "Mailbox.Close" => agent::mail::close(db, actor, p),
+        "Mailbox.Read" => agent::mail::read(db, actor, p),
+        "Mailbox.Ack" => agent::mail::ack(db, actor, p),
+        "Signal.Send" => agent::mail::send(db, actor, p),
+        "Session.Open" => agent::open(db, actor, p),
+        "Session.RetryTask" => agent::retry_task(db, actor, p),
+        "Session.Extend" => agent::extend(db, actor, p),
+        "Session.Get" => agent::get(db, actor, p),
+        "Session.History" => agent::history(db, actor, p),
+        "Session.Cancel" => agent::cancel(db, actor, p),
         "Agent.Register" => policy::register(db, actor, p),
         "Principal.Revoke" => policy::disable(db, actor, p),
         "Delegation.Create" => policy::delegate(db, actor, p),
@@ -43,7 +62,8 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         }
         "Tool.Call" => {
             let p: ToolCall = decode(p)?;
-            policy::delegation(db, actor, &p.delegation_id, &p.tool)?;
+            let d = policy::delegation(db, actor, &p.delegation_id, &p.tool)?;
+            policy::tool_scope(db, &d.reference(), policy::PROFILE)?;
             match host::Action::parse(&p.tool, &p.input)? {
                 host::Action::Status {} => {
                     db.audit(actor, "system.status", Some(policy::PROFILE), "Allowed")?;
@@ -98,6 +118,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
             policy::owned(actor, &d)?;
             Ok(d.body)
         }
+        "Secret.Rotate" => policy::secret_rotate(db, actor, p),
         "Secret.Put" => policy::secret_put(db, actor, p),
         "Secret.Revoke" => policy::secret_revoke(db, actor, p),
         "StoragePool.Get" => storage::pool_status(db, actor, p),
@@ -109,6 +130,8 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Task.Cancel" => broker::cancel(db, actor, p),
         "Task.CancelOrigin" => broker::cancel_origin(db, actor, p),
         "Task.Retry" => broker::retry(db, actor, p),
+        "Task.History" => broker::history(db, actor, p),
+        "Task.Archive" => broker::archive(db, actor, p),
         "Task.Get" => broker::get(db, actor, p, "Task"),
         "Run.Get" => broker::get(db, actor, p, "Run"),
         "Operation.Reconcile" => broker::reconcile(db, actor, p),
@@ -163,11 +186,27 @@ impl Store {
             if matches!(
                 method,
                 "Agent.Register"
+                    | "Skill.Publish"
+                    | "Skill.Retire"
+                    | "Model.Register"
+                    | "Model.Retire"
+                    | "Model.Claim"
+                    | "Model.Respond"
+                    | "Mailbox.Bind"
+                    | "Mailbox.Close"
+                    | "Mailbox.Ack"
+                    | "Signal.Send"
+                    | "Session.RetryTask"
+                    | "Session.Extend"
+                    | "Session.Open"
+                    | "Session.Cancel"
+                    | "Node.Configure"
                     | "Principal.Revoke"
                     | "Delegation.Create"
                     | "Delegation.Revoke"
                     | "Grant.Issue"
                     | "Grant.Revoke"
+                    | "Secret.Rotate"
                     | "Secret.Put"
                     | "Secret.Revoke"
                     | "Approval.Decide"
@@ -175,6 +214,7 @@ impl Store {
                     | "Application.Configure"
                     | "Task.Cancel"
                     | "Task.CancelOrigin"
+                    | "Task.Archive"
                     | "Task.Retry"
                     | "Event.Ack"
             ) {

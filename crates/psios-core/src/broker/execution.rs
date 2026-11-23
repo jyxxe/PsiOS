@@ -1,27 +1,49 @@
 use super::*;
 
+fn plan_audience(plan: &Doc) -> Vec<Value> {
+    plan.body["preconditions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["resource_ref"].clone())
+        .collect()
+}
 fn preflight(db: &Db<'_>, t: &Doc) -> Result<(Doc, Doc)> {
+    agent::check_dispatch(db, t)?;
     let (_, input) = authority(db, &t.owner, &t.spec)?;
     deadline(&t.spec)?;
     let a = Action::parse(field(&t.spec, "task_type"), &input.body)?;
     let target = a.target(db, &t.owner)?;
+    let audience = a.audience(db, &t.owner, &t.spec["delegation_ref"], &target)?;
     let op = operation(db, t)?;
     let p = db.resolve(&op.body["plan_ref"])?;
     require(
         !expired(field(&p.body, "deadline_at"))?
-            && target.reference() == p.body["allowed_effects"][0]["resource_ref"],
+            && target.reference() == p.body["allowed_effects"][0]["resource_ref"]
+            && audience == plan_audience(&p),
         "ApprovalInvalidated",
         "execution precondition or deadline changed",
     )?;
     Ok((op, p))
 }
 pub fn claim(db: &Db<'_>) -> Result<Option<String>> {
-    let invalid:Option<(String,bool)>=db.c.query_row("SELECT q.task,julianday(q.valid_until)<=julianday('now') FROM queue q
-      JOIN current g ON g.id=q.grant_id JOIN current t ON t.id=q.task
-      JOIN current d ON d.id=json_extract(t.spec,'$.delegation_ref.resource_id')
-      JOIN current p ON p.id=t.owner WHERE q.phase='WaitingApproval' AND
-      (julianday(q.valid_until)<=julianday('now') OR g.body->>'lifecycle'!='Active' OR d.body->>'lifecycle'!='Active' OR p.body->>'lifecycle'!='Active') LIMIT 1",[],
-      |r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+    let pending: bool = db.c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM queue WHERE phase IN ('Queued','WaitingApproval'))",
+        [],
+        |r| r.get(0),
+    )?;
+    if !pending {
+        return Ok(None);
+    }
+    let invalid:Option<(String,bool)>=db.c.query_row("WITH RECURSIVE lineage(task,did,depth) AS (
+        SELECT q.task,t.spec->'delegation_ref'->>'resource_id',0 FROM queue q JOIN current t ON t.id=q.task
+        WHERE q.phase IN ('Queued','WaitingApproval') UNION ALL
+        SELECT l.task,d.body->'parent_ref'->>'resource_id',l.depth+1 FROM lineage l JOIN current d ON d.id=l.did
+        WHERE l.depth<4 AND d.body->'parent_ref' IS NOT NULL)
+        SELECT q.task,julianday(q.valid_until)<=julianday('now') FROM lineage l
+        JOIN queue q ON q.task=l.task JOIN current d ON d.id=l.did JOIN current p ON p.id=d.owner JOIN current g ON g.id=q.grant_id
+        WHERE julianday(q.valid_until)<=julianday('now') OR g.body->>'lifecycle'!='Active' OR d.body->>'lifecycle'!='Active'
+        OR p.body->>'lifecycle'!='Active' LIMIT 1",[],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
     if let Some((id, expired)) = invalid {
         close(
             db,
@@ -34,14 +56,19 @@ pub fn claim(db: &Db<'_>) -> Result<Option<String>> {
                 } else {
                     "PermissionDenied"
                 },
-                "approval wait no longer authorized",
+                "queued admission no longer authorized",
             )),
             None,
         )?;
     }
+    if !node::enabled(db)? {
+        return Ok(None);
+    }
     let next: Option<String> =
         db.c.query_row(
-            "SELECT task FROM queue WHERE phase='Queued' ORDER BY stamp,task LIMIT 1",
+            "SELECT q.task FROM queue q JOIN current t ON t.id=q.task
+             LEFT JOIN dispatch_fairness f ON f.principal=t.owner
+             WHERE q.phase='Queued' ORDER BY coalesce(f.turn,0),q.stamp,q.task LIMIT 1",
             [],
             |r| r.get(0),
         )
@@ -55,6 +82,8 @@ pub fn claim(db: &Db<'_>) -> Result<Option<String>> {
             return Ok(None);
         }
     };
+    db.c.execute("INSERT INTO dispatch_fairness(principal,turn) VALUES(?1,(SELECT coalesce(max(turn),0)+1 FROM dispatch_fairness))
+        ON CONFLICT(principal) DO UPDATE SET turn=excluded.turn", [&t.owner])?;
     let epoch: u32 = db.c.query_row(
         "UPDATE queue SET attempt=attempt+1,phase='Claimed' WHERE task=?1 RETURNING attempt",
         [&t.id],
@@ -76,7 +105,7 @@ pub fn claim(db: &Db<'_>) -> Result<Option<String>> {
             "lifecycle": "Running",
             "outcome_knowledge": "NotStarted",
             "input_ref": t.spec["input_ref"],
-            "execution_snapshot_ref": plan.reference(),
+            "execution_snapshot_ref": agent::snapshot(db,&t,&plan)?,
             "output_refs": [],
             "operation_refs": [op.reference()],
             "conditions": []
@@ -153,7 +182,7 @@ pub fn dispatch(db: &Db<'_>, task: &str) -> Result<Option<Work>> {
             "operation_id": op.id,
             "effect_id": eid,
             "permit_id": pid,
-            "audience": target,
+            "audience_resource_refs":plan_audience(&p),
             "claim_id": run.body["claim_id"],
             "claim_epoch": run.body["claim_epoch"],
             "plan_digest": p.body["plan_digest"]
@@ -185,7 +214,7 @@ pub fn dispatch(db: &Db<'_>, task: &str) -> Result<Option<Work>> {
         "operation_id": op.id,
         "effect_id": eid,
         "plan_digest": p.body["plan_digest"],
-        "audience_resource_refs": [target],
+        "audience_resource_refs": plan_audience(&p),
         "principal_chain_digest": sha256(&canonical(&t.spec["delegation_ref"])),
         "authorization_epoch": db.meta("epoch")?,
         "security_recovery_epoch": "1",

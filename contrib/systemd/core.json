@@ -1,0 +1,8 @@
+{
+  "state_dir": "/var/lib/psios",
+  "witness_dir": "/var/lib/psios.witness",
+  "socket": "/run/psios/api.sock",
+  "docker_socket": "/var/run/docker.sock",
+  "queue_limit": 256,
+  "tick_ms": 60
+}

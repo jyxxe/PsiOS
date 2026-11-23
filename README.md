@@ -2,7 +2,9 @@
 
 PsiOS is a Linux-based **Agent-Native Operating System** project with three planned editions: **Helium** (minimal), **Neon** (server), and **Argon** (KDE Plasma desktop).
 
-The current repository is initialized with the **PsiOS v1.0.0 documentation baseline (2026-11-22)**. This is a **design/specification baseline, not a verified OS release**. Implementation details, CI results, and hardware tests are tracked separately and remain NotVerified/NotRun until evidenced.
+The repository contains the **PsiOS v1.0.0 documentation baseline (2026-11-22)** and an initial Rust implementation of the single-node Core. `psiosd` serves the local System API. `psiosctl` and the Rust SDK use that API for identity and policy, durable tasks, OCI applications, local volumes, backups and agent tools.
+
+Build with `cargo build --locked --workspace`. The [local Core guide](docs/core-local.md) covers initialization, running a task, enrolling an agent, approvals, recovery and verification. The sealed v1 documentation retains its original release and acceptance status.
 
 ## Documentation
 

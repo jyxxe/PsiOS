@@ -1,0 +1,142 @@
+use clap::{Parser, Subcommand};
+use psios_api::{Client, StatusProvider, parse};
+use serde_json::{Value, json};
+use std::{
+    fs,
+    io::Read,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    path::PathBuf,
+    time::Duration,
+};
+
+#[derive(Parser)]
+#[command(version, about = "PsiOS local system client")]
+struct Opts {
+    #[arg(long, global = true, default_value = "/var/lib/psios/api.sock")]
+    socket: PathBuf,
+    #[arg(
+        long,
+        global = true,
+        default_value = "/var/lib/psios.witness/owner.token"
+    )]
+    token_file: PathBuf,
+    #[arg(long, global = true)]
+    service_uid: Option<u32>,
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+#[derive(Subcommand)]
+enum Cmd {
+    Whoami,
+    Capabilities,
+    Status {
+        #[arg(long, default_value = "owner-delegation")]
+        delegation: String,
+    },
+    /// JSON from a file or stdin (-). Credentials and secrets need not enter shell history.
+    Call {
+        method: String,
+        #[arg(default_value = "-")]
+        file: String,
+    },
+    Get {
+        id: String,
+    },
+    List {
+        kind: Option<String>,
+    },
+    Watch {
+        cursor: String,
+    },
+    Submit {
+        tool: String,
+        #[arg(long)]
+        key: String,
+        #[arg(long, default_value = "owner-delegation")]
+        delegation: String,
+        #[arg(default_value = "-")]
+        file: String,
+    },
+    Wait {
+        id: String,
+        #[arg(long, default_value_t = 30)]
+        seconds: u64,
+    },
+    Agent {
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        delegation: String,
+    },
+    Validate {
+        contract: String,
+        #[arg(default_value = "-")]
+        file: String,
+    },
+}
+fn input(path: &str) -> Result<Value, Box<dyn std::error::Error>> {
+    let reader: Box<dyn Read> = if path == "-" {
+        Box::new(std::io::stdin())
+    } else {
+        Box::new(fs::File::open(path)?)
+    };
+    let mut bytes = vec![];
+    reader
+        .take(psios_api::MAX_FRAME as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > psios_api::MAX_FRAME {
+        return Err("input exceeds frame limit".into());
+    }
+    Ok(parse(&bytes)?)
+}
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let o = Opts::parse();
+    if let Cmd::Validate { contract, file } = &o.cmd {
+        psios_api::contract(contract, &input(file)?)?;
+        println!("valid");
+        return Ok(());
+    }
+    let f = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(o.token_file)?;
+    let m = f.metadata()?;
+    if !m.is_file() || m.mode() & 0o077 != 0 || m.len() > 128 {
+        return Err("expected a private credential file".into());
+    }
+    let mut token = String::new();
+    f.take(129).read_to_string(&mut token)?;
+    let c = Client::new(o.socket, token.trim()).with_service_uid(
+        o.service_uid
+            .unwrap_or_else(|| rustix::process::geteuid().as_raw()),
+    );
+    let v = match o.cmd {
+        Cmd::Whoami => c.call("Principal.WhoAmI", json!({}))?,
+        Cmd::Capabilities => c.call("Capability.Discover", json!({}))?,
+        Cmd::Status { delegation } => c.call(
+            "Tool.Call",
+            json!({"tool": "system.status", "input": {}, "delegation_id": delegation}),
+        )?,
+        Cmd::Call { method, file } => c.call(&method, input(&file)?)?,
+        Cmd::Get { id } => c.call("Resource.Get", json!({"id": id}))?,
+        Cmd::List { kind } => c.call("Resource.List", json!({"kind": kind.unwrap_or_default()}))?,
+        Cmd::Watch { cursor } => c.call("Event.Poll", json!({"cursor": cursor}))?,
+        Cmd::Submit {
+            tool,
+            key,
+            delegation,
+            file,
+        } => c.submit(&tool, input(&file)?, &key, &delegation)?,
+        Cmd::Wait { id, seconds } => c.wait(&id, Duration::from_secs(seconds))?,
+        Cmd::Agent { key, delegation } => c.execute_agent(&StatusProvider, &key, &delegation)?,
+        Cmd::Validate { .. } => unreachable!(),
+    };
+    println!("{}", serde_json::to_string_pretty(&v)?);
+    Ok(())
+}
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("{e}");
+        std::process::exit(1)
+    }
+}

@@ -1,0 +1,33 @@
+name: PsiOS Core
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the tested Rust toolchain
+        run: rustup toolchain install 1.100.0 --profile minimal --component rustfmt,clippy
+      - name: Format and lint
+        run: |
+          cargo +1.100.0 fmt --all --check
+          cargo +1.100.0 clippy --locked --workspace --all-targets -- -D warnings
+      - name: Build and run Rust contract and recovery tests
+        run: |
+          cargo +1.100.0 build --locked --workspace
+          cargo +1.100.0 test --locked --workspace
+      - name: Verify documentation contracts
+        run: |
+          python3 -m venv "$RUNNER_TEMP/psios-docs"
+          "$RUNNER_TEMP/psios-docs/bin/pip" install -r docs/v1/tools/requirements.txt
+          python3 docs/releases/restore_v1.py
+          "$RUNNER_TEMP/psios-docs/bin/python" docs/v1/tools/validate_package.py
+      - name: Test local system API and process recovery
+        run: python3 tests/system.py
+      - name: Exercise a real OCI engine and persistent volume
+        run: python3 tests/oci.py

@@ -4,6 +4,21 @@
 
 节点调度、受管 systemd 服务、分块卷数据、应用版本切换和持久 Agent 会话见[宿主与 Agent Runtime 指南](core-runtime.md)。
 
+## Portable amd64 Core
+
+独立二进制开发包包含 `psiosd` 和 `psiosctl`。二者在 Alpine 上以 musl 静态链接，可直接用普通 Linux 用户运行。构建器检查 ELF 的解释器与动态库依赖。开发包不安装系统服务，操作员负责保存状态目录、见证目录与所有者凭据。宿主服务管理、OCI 和网络查询分别需要系统提供对应工具与权限。
+
+可从 CI 的 `psios-core-linux-amd64` 制品取得 tar.gz，或在安装了 Git、GNU tar、gzip 及 Docker Buildx 的 Linux 构建机上，从指定提交生成。归档保留可执行权限、完整源码提交、Cargo.lock 和文件校验和。若构建网络使用专用 CA，设置 `CARGO_HTTP_CAINFO` 指向受信任的 CA 文件。使用下载的开发包前应确认制品来自所选仓库和提交的 CI 运行。
+
+```bash
+tools/build-portable-core ./psios-core-linux-amd64.tar.gz HEAD
+mkdir ./portable-core
+tar -xzf ./psios-core-linux-amd64.tar.gz -C ./portable-core
+(cd ./portable-core && sha256sum -c SHA256SUMS && cat source-commit)
+```
+
+下方本机启动示例中的 `target/debug/` 可替换为 `./portable-core/`，并跳过 Cargo 编译。CI 在只读、断网的 Alpine 用户空间以非特权用户运行同一份二进制，覆盖身份授权、任务幂等和进程崩溃后的恢复。该验收覆盖单节点 Core，系统引导和各发行版安装另行验收。
+
 ## 本机启动
 
 在仓库根目录执行。第一次初始化要求状态目录及其同级见证目录为空。示例使用新建临时目录，数据随该目录保留。

@@ -1,0 +1,34 @@
+#!/bin/bash
+# Export the standalone amd64 Linux binaries from the selected source commit.
+set -euo pipefail
+if [[ $# -lt 1 || $# -gt 2 ]]; then
+    echo "usage: $0 NEW_TAR_GZ [GIT_REVISION]" >&2
+    exit 2
+fi
+if [[ -e $1 || -L $1 ]]; then
+    echo "output already exists" >&2
+    exit 2
+fi
+output="$(realpath -e -- "$(dirname "$1")")/$(basename -- "$1")"
+repo=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
+sha=$(git -C "$repo" rev-parse --verify --end-of-options "${2:-HEAD}^{commit}")
+epoch=$(git -C "$repo" show -s --format=%ct "$sha")
+work=$(mktemp -d -- "$(dirname "$output")/.psios-portable.XXXXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+build_options=()
+if [[ -n ${CARGO_HTTP_CAINFO:-} ]]; then
+    build_options+=(--secret "id=cargo_ca,src=$CARGO_HTTP_CAINFO")
+fi
+git -C "$repo" archive "$sha" Cargo.toml Cargo.lock crates docs/v1/schemas contrib/portable |
+    docker buildx build "${build_options[@]}" --platform linux/amd64 --file contrib/portable/Dockerfile \
+        --output "type=tar,dest=$work/binaries.tar" -
+mkdir "$work/bundle"
+cd "$work/bundle"
+tar -xf "$work/binaries.tar" psiosd psiosctl
+git -C "$repo" show "$sha:Cargo.lock" > Cargo.lock
+printf '%s\n' "$sha" > source-commit
+sha256sum psiosd psiosctl Cargo.lock source-commit > SHA256SUMS
+tar --mtime="@$epoch" --owner=0 --group=0 --numeric-owner --mode='u+rw,go+r-w' \
+    -cf - Cargo.lock SHA256SUMS psiosctl psiosd source-commit | gzip -n > "$work/core.tar.gz"
+# Hard-link from the same filesystem to publish only a complete, new archive.
+ln -T -- "$work/core.tar.gz" "$output"

@@ -1,4 +1,4 @@
-# 在 QEMU 中安装并启动单节点 PsiOS
+# 在 Ubuntu Minimal 测试虚拟机中启动 PsiOS Core
 
 此配置使用固定的 Ubuntu Minimal 24.04 amd64，支持 SeaBIOS 和标准 OVMF UEFI 两种固件，从独立的 QCOW2 系统盘引导。每次安装生成自己的 NoCloud 种子，里面包含本机提供的管理员 SSH **公钥**和已构建的 Core 包。首次开机在客户机内生成 Linux machine-id、SSH 主机密钥、PsiOS 节点和所有者凭据。安装 Core 的过程可在客户机无法出网时完成。适用范围是 QEMU 单节点开发与验收。Helium、Neon、Argon 的发行就绪验收，Secure Boot、物理磁盘安装与引导回退另行跟踪。
 

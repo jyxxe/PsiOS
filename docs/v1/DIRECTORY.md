@@ -11,7 +11,7 @@
 | adr/ | 25份待决技术选型，每份保留原编号与范围 |
 | acceptance/ | 待执行场景与实际证据模板，所有产品结果NotRun |
 | operations/ | 6种失败/恢复/退出路径的操作顺序与停止条件 |
-| migration/ | 原文错误、编号冲突、旧要求/测试去向及XeLab证据边界 |
+| migration/ | 原文错误、编号冲突、旧要求/测试去向 |
 | sources/ | 输入清单、外部一手资料、逐字节原始归档 |
 | tools/ | 文档生成、校验、封装工具，不是产品服务 |
 | html/ | 无CDN、无网络依赖的完整阅读器 |
@@ -163,8 +163,6 @@ PsiOS-v1/
     legacy-tests.md
     rebuild_legacy_registry.py
     v0-to-v1.md
-    xelab-archive-inspection.json
-    xelab-reuse-boundary.md
   operations/
     README.md
     data-export-exit.md
@@ -236,7 +234,6 @@ PsiOS-v1/
       space-risk-v0.6.metadata.json
       space-unified-v0.6.md
       space-unified-v0.6.metadata.json
-      xelab-package-history.zip
     references.json
     source-inventory.json
   tools/

@@ -22,14 +22,16 @@ def frame(peer):
 
 
 @contextmanager
-def interrupt_delivery(node, token_file, session, key, directory, *, committed):
+def interrupt_delivery(node, token_file, session, key, directory, *, committed, local_model=None):
     endpoint = node.base / "delivery.sock"
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
         listener.bind(str(endpoint))
         listener.listen()
-        listener.settimeout(10)
+        listener.settimeout(45 if local_model else 10)
         command = [node.binaries / "psiosctl", "--socket", endpoint, "--token-file", token_file, "model-step",
                    session, "--key", key, "--decision-dir", directory]
+        if local_model is not None:
+            command.extend(["--local-model", local_model])
         with subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) as worker:
             try:
                 while True:

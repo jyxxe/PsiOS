@@ -175,6 +175,43 @@ class RuntimeTests(unittest.TestCase):
         history = n.call("Session.History", {"id": sid}, self.token)
         self.assertEqual((len(history["turns"]), history["tasks"]), (1, []))
 
+    def test_reported_tokens_bind_once_to_the_accepted_decision(self):
+        n = self.n
+        sid = self.open()
+        claim = self.claim(sid, "metered")
+        self.assertEqual(claim["usage_format"], "tokens.v1")
+        request = dict(session_id=sid, lease_id=claim["lease_id"], decision=dict(action="finish", summary="done"),
+                       usage=dict(input_tokens=17, output_tokens=4))
+        def respond(p):
+            return n.call("Model.Respond", p, self.provider_token)
+        for bad in ({"input_tokens": -1, "output_tokens": 2}, {"output_tokens": 1},
+                    {"input_tokens": 2**32, "output_tokens": 1}, {"input_tokens": 0, "output_tokens": 1, "cost": 2}):
+            self.denied("InvalidArgument", respond, dict(request, usage=bad))
+        with ThreadPoolExecutor(2) as workers:
+            a, b = workers.map(respond, [request, request])
+        self.assertEqual(a, b)
+        ref = a["usage_ref"]
+        observation = n.call("Resource.Resolve", {"reference": ref}, self.token)["value"]
+        self.assertEqual(observation["reported_tokens"], request["usage"])
+        self.assertEqual(observation["measurement_source"], "ProviderReported")
+        self.assertEqual(observation["provider_principal_id"], self.provider["principal_id"])
+        self.assertEqual(observation["budget_ref"], self.grant["budget_ref"])
+        self.assertEqual(observation["call_id"], claim["lease_id"])
+        n.stop(signal.SIGKILL)
+        n.start()
+        self.assertEqual(respond(request), a)
+        self.denied("IdempotencyConflict", respond, dict(request, usage=dict(input_tokens=17, output_tokens=5)))
+        self.denied("IdempotencyConflict", respond, {k:v for k,v in request.items() if k != "usage"})
+        self.assertEqual(n.get(ref["resource_id"])["reference"], ref)
+
+        sid = self.open()
+        lease = self.claim(sid, "unreported")["lease_id"]
+        bare = dict(session_id=sid, lease_id=lease, decision=dict(action="finish", summary="done"))
+        self.assertNotIn("usage_ref", respond(bare))
+        self.denied("IdempotencyConflict", respond, dict(bare, usage=dict(input_tokens=0, output_tokens=0)))
+        budget = n.call("Budget.Get", {"id": self.grant["budget_ref"]["resource_id"]}, self.token)
+        self.assertEqual((budget["model_calls_used"], budget["spent"]), (2, 0))
+
     def test_competing_leases_duplicate_response_and_restricted_context(self):
         n = self.n
         opts = self.options(context_policy="ReferencesOnly", max_turns=1)

@@ -8,7 +8,7 @@ use crate::{
     policy, *,
 };
 pub(crate) use lease::pending_for_grant;
-use psios_api::{canonical, id, sha256};
+use psios_api::{ModelTokenUsage, canonical, id, sha256};
 pub use registry::{model, retire, skill};
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
@@ -243,7 +243,7 @@ pub fn claim(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     }
     let clock = lease::BootClock::sample()?;
     let ctx = context(db, &s, &skill, &m)?;
-    let lease_info = |lease: &str, expires: &str, turn: u32, recovered: bool| json!({"lease_id":lease,"expires_at":expires,"turn":turn,"context":ctx,"recovered":recovered});
+    let lease_info = |lease: &str, expires: &str, turn: u32, recovered: bool| json!({"lease_id":lease,"expires_at":expires,"turn":turn,"context":ctx,"recovered":recovered,"usage_format":"tokens.v1"});
     if let Some((lease, until, turn, _)) = previous {
         require(
             state(&s) == "ModelInFlight"
@@ -300,8 +300,12 @@ pub fn claim(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     b["turn"] = json!(turn);
     b["current_lease"] = json!(lease);
     b["lease_until"] = json!(until);
+    let usage = db.record("ModelUsage", &s.owner, json!({
+        "session_id": s.id, "call_id": lease, "model_ref": m.reference(), "budget_ref": d.body["budget_ref"],
+        "input_bytes": canonical(&ctx).len(), "reserved_calls": 1, "issued_at": now()
+    }))?;
+    b["current_usage_ref"] = usage.reference();
     db.status(&s, b)?;
-    db.record("ModelUsage",&s.owner,json!({"session_id":s.id,"call_id":lease,"model_ref":m.reference(),"input_bytes":canonical(&ctx).len(),"reserved_calls":1,"issued_at":now()}))?;
     Ok(lease_info(&lease, &until, turn, false))
 }
 
@@ -311,6 +315,7 @@ struct Respond {
     session_id: String,
     lease_id: String,
     decision: Value,
+    usage: Option<ModelTokenUsage>,
 }
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -319,6 +324,57 @@ enum Decision {
     Finish { summary: String },
     Fail { reason: String },
 }
+// Older format-5 calls already have a reservation, but its reference was not
+// included in their session checkpoint. Accept only an unambiguous match.
+fn settle_usage(
+    db: &Db<'_>,
+    s: &Doc,
+    model: &Doc,
+    actor: &str,
+    call: &str,
+    tokens: ModelTokenUsage,
+) -> Result<Value> {
+    let usage = if let Some(reference) = s.body.get("current_usage_ref") {
+        db.resolve(reference)?
+    } else {
+        let ids =
+            db.c.prepare(
+                "SELECT id FROM current WHERE kind='ModelUsage' AND owner=?1
+            AND body->>'session_id'=?2 AND body->>'call_id'=?3 LIMIT 2",
+            )?
+            .query_map(params![s.owner, s.id, call], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        require(
+            ids.len() == 1,
+            "RecoveryRequired",
+            "original model reservation unavailable",
+        )?;
+        db.get(&ids[0])?
+    };
+    require(
+        usage.kind == "ModelUsage"
+            && usage.owner == s.owner
+            && usage.body["call_id"] == call
+            && usage.body["reserved_calls"] == 1
+            && usage
+                .body
+                .get("budget_ref")
+                .is_none_or(|r| *r == s.body["budget_ref"])
+            && usage.body["session_id"] == s.id
+            && usage.body["model_ref"] == model.reference()
+            && usage.body.get("reported_tokens").is_none(),
+        "RecoveryRequired",
+        "model reservation mismatch",
+    )?;
+    let mut body = usage.body.clone();
+    body["budget_ref"] = s.body["budget_ref"].clone();
+    body["reported_tokens"] = json!(tokens);
+    body["measurement_source"] = json!("ProviderReported");
+    body["provider_principal_id"] = json!(actor);
+    body["reported_at"] = json!(now());
+    Ok(db.status(&usage, body)?.reference())
+}
+
 pub fn respond(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let p: Respond = decode(p)?;
     let s = db.of(&p.session_id, "Session")?;
@@ -333,8 +389,16 @@ pub fn respond(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let prior:Option<(String,Value)>=db.c.query_row("SELECT decision_digest,receipt FROM session_turns WHERE lease=?1 AND session=?2 AND receipt IS NOT NULL",
         params![p.lease_id,s.id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
     if let Some((old, receipt)) = prior {
+        let previous_usage = receipt
+            .get("usage_ref")
+            .map(|r| db.resolve(r))
+            .transpose()?;
+        let prior_tokens = previous_usage
+            .as_ref()
+            .and_then(|d| d.body.get("reported_tokens"));
+        let supplied = p.usage.map(|u| json!(u));
         require(
-            old == hash,
+            old == hash && prior_tokens == supplied.as_ref(),
             "IdempotencyConflict",
             "lease already bound to another decision",
         )?;
@@ -381,9 +445,17 @@ pub fn respond(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             b["reason"] = json!(reason);
         }
     }
+    let usage_ref = p
+        .usage
+        .map(|tokens| settle_usage(db, &s, &model, actor, &p.lease_id, tokens))
+        .transpose()?;
     b["current_lease"] = Value::Null;
+    b.as_object_mut().unwrap().remove("current_usage_ref");
     let saved = db.status(&s, b)?;
-    let receipt = json!({"session_ref":saved.reference(),"task_id":task,"decision_digest":hash,"output_bytes":bytes.len(),"lifecycle":state(&saved)});
+    let mut receipt = json!({"session_ref":saved.reference(),"task_id":task,"decision_digest":hash,"output_bytes":bytes.len(),"lifecycle":state(&saved)});
+    if let Some(reference) = usage_ref {
+        receipt["usage_ref"] = reference;
+    }
     db.c.execute("UPDATE session_turns SET task=?1,decision_digest=?2,receipt=?3 WHERE session=?4 AND lease=?5",
       params![task,hash,receipt,s.id,p.lease_id])?;
     if let Some(task) = &task {

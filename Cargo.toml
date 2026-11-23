@@ -1,0 +1,17 @@
+[workspace]
+members = ["crates/psios-api", "crates/psios-core"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+
+[profile.dev]
+debug = 1

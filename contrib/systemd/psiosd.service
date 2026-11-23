@@ -1,0 +1,25 @@
+[Unit]
+Description=PsiOS local system authority
+After=local-fs.target
+
+[Service]
+Type=exec
+User=psios
+Group=psios
+StateDirectory=psios psios.witness
+StateDirectoryMode=0700
+RuntimeDirectory=psios
+RuntimeDirectoryMode=0750
+UMask=0077
+ExecStart=/usr/local/bin/psiosd --config /etc/psios/core.json serve
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=120s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

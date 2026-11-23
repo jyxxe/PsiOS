@@ -3,6 +3,7 @@ import argparse
 import contextlib
 import json
 import os
+import shlex
 from pathlib import Path
 import socket
 import subprocess
@@ -36,8 +37,8 @@ def boot(instance, key, number):
                "-o", "HostKeyAlias=" + instance.name, "-o", "UserKnownHostsFile=" + str(instance / "known_hosts"),
                "psios-admin@127.0.0.1"]
 
-        def run(command, *, check=True, timeout=40):
-            return subprocess.run(ssh + [command], check=check, text=True, capture_output=True, timeout=timeout)
+        def run(command, *, check=True, timeout=40, data=None):
+            return subprocess.run(ssh + [command], check=check, input=data, text=True, capture_output=True, timeout=timeout)
         try:
             deadline = time.monotonic() + 360
             while time.monotonic() < deadline:
@@ -74,6 +75,19 @@ def identity(run):
     return identity, run("cat /etc/machine-id").stdout.strip(), run("cat /proc/sys/kernel/random/boot_id").stdout.strip()
 
 
+def verify_management_address(run, node):
+    scope = {"principal_id": "local-owner", "actions": ["task.submit", "task.read", "node.interfaces"],
+             "tool_targets": [node], "units": 1, "ttl_seconds": 300}
+    grant = json.loads(run(CTL + " call Grant.Issue", data=json.dumps(scope)).stdout)["delegation_ref"]["resource_id"]
+    receipt = json.loads(run(CTL + " submit node.interfaces --key boot-interfaces --delegation " + shlex.quote(grant),
+                             data="{}").stdout)
+    result = json.loads(run(CTL + " wait " + shlex.quote(receipt["task_id"])).stdout)
+    sample = json.loads(run(CTL + " call Artifact.Read",
+                            data=json.dumps({"reference": result["result"]["artifact_refs"][0]})).stdout)
+    server_ip = run('printf "%s" "$SSH_CONNECTION"').stdout.split()[2]
+    assert any(a["local"] == server_ip for i in sample["interfaces"] for a in i["addr_info"]), sample
+
+
 def main(base, package):
     with tempfile.TemporaryDirectory(prefix="psios-guest-") as work:
         work = Path(work)
@@ -85,6 +99,7 @@ def main(base, package):
                             "--authorized-key", key.with_suffix(".pub"), "--output", instance], check=True)
         with boot(instances[0], key, 1) as run:
             node, machine, original_boot = identity(run)
+            verify_management_address(run, node)
             receipt = json.loads(run("echo '{}' | " + CTL + " submit system.status --key boot-acceptance").stdout)
             task = receipt["task_id"]
             assert json.loads(run(CTL + " wait " + task).stdout)["lifecycle"] == "Succeeded"

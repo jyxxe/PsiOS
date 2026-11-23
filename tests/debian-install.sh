@@ -56,7 +56,7 @@ task=$(echo '{}' | ctl submit system.status --key package-acceptance | jq -er '.
 ctl wait "$task" | jq -e '.lifecycle == "Succeeded"' >/dev/null
 cp /var/lib/psios.witness/owner.token "$scratch/token"
 pid=$(systemctl show -p MainPID --value psiosd)
-dpkg -i "$package"
+DEBIAN_FRONTEND=noninteractive apt-get install -y "$package"
 [[ $(dpkg-query -W -f='${Version}' psios-core) == "$new_version" ]]
 ready
 [[ $(systemctl show -p MainPID --value psiosd) != "$pid" ]]

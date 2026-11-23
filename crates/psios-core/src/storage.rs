@@ -42,6 +42,16 @@ fn unknown(e: impl std::fmt::Display) -> Error {
         format!("storage receipt unavailable: {e}"),
     )
 }
+fn registered_root(d: &Doc, meta: &fs::Metadata) -> Result<()> {
+    require(
+        meta.is_dir()
+            && d.spec["device"].as_str().and_then(|v| v.parse().ok()) == Some(meta.dev())
+            && d.spec["inode"].as_str().and_then(|v| v.parse().ok()) == Some(meta.ino()),
+        "PreconditionFailed",
+        "volume root changed",
+    )
+}
+
 pub fn volume_dir(cfg: &Config, d: &Doc) -> Result<PathBuf> {
     require(
         d.body["lifecycle"] == "Available",
@@ -58,13 +68,7 @@ pub fn volume_dir(cfg: &Config, d: &Doc) -> Result<PathBuf> {
     )?;
     let data = dir.join("data");
     let meta = fs::symlink_metadata(&data)?;
-    require(
-        meta.is_dir()
-            && d.spec["device"].as_str().and_then(|v| v.parse().ok()) == Some(meta.dev())
-            && d.spec["inode"].as_str().and_then(|v| v.parse().ok()) == Some(meta.ino()),
-        "PreconditionFailed",
-        "volume root changed",
-    )?;
+    registered_root(d, &meta)?;
     Ok(data)
 }
 pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
@@ -196,11 +200,17 @@ fn create_volume(w: &Work, restore: Option<&Doc>) -> Result<Value> {
     }))
 }
 fn child(dir: &File, name: &str, flags: OFlags) -> Result<File> {
+    // Linux openat2 rejects NONBLOCK on O_PATH descriptors.
+    let flags = if flags.contains(OFlags::PATH) {
+        flags
+    } else {
+        flags | OFlags::NONBLOCK
+    };
     Ok(File::from(
         openat2(
             dir,
             name,
-            flags | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            flags | OFlags::CLOEXEC | OFlags::NOFOLLOW,
             Mode::empty(),
             ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
         )
@@ -224,8 +234,21 @@ struct Entry {
 }
 struct Capture<'a> {
     out: &'a Path,
-    entries: Vec<Entry>,
+    entries: Vec<(Entry, fs::Metadata)>,
     total: u64,
+}
+// Reading can advance atime. All identity, content and permission evidence
+// used for this local backup profile must still match at publication.
+fn same_source(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    a.dev() == b.dev()
+        && a.ino() == b.ino()
+        && a.mode() == b.mode()
+        && a.uid() == b.uid()
+        && a.gid() == b.gid()
+        && a.nlink() == b.nlink()
+        && a.len() == b.len()
+        && (a.mtime(), a.mtime_nsec()) == (b.mtime(), b.mtime_nsec())
+        && (a.ctime(), a.ctime_nsec()) == (b.ctime(), b.ctime_nsec())
 }
 impl Capture<'_> {
     fn walk(&mut self, dir: &File, root: &Path, depth: u32) -> Result<()> {
@@ -277,6 +300,7 @@ impl Capture<'_> {
             let m = src.metadata()?;
             require(
                 m.ino() == stat.st_ino
+                    && m.dev() == stat.st_dev
                     && m.uid() == rustix::process::geteuid().as_raw()
                     && m.gid() == rustix::process::getegid().as_raw()
                     && m.mode() & 0o7000 == 0,
@@ -296,7 +320,7 @@ impl Capture<'_> {
                 digest: None,
             };
             if m.is_dir() {
-                self.entries.push(entry);
+                self.entries.push((entry, m));
                 self.walk(&src, &path, depth + 1)?
             } else {
                 regular(&m)?;
@@ -309,7 +333,7 @@ impl Capture<'_> {
                     File::create_new(self.out.join(format!("blob-{}", self.entries.len())))?;
                 let (len, digest) = copy_hash(&mut src, &mut dst, MAX_BACKUP - self.total)?;
                 require(
-                    len == m.len() && src.metadata()?.mtime_nsec() == m.mtime_nsec(),
+                    len == m.len() && same_source(&m, &src.metadata()?),
                     "Conflict",
                     "volume changed during capture",
                 )?;
@@ -317,10 +341,32 @@ impl Capture<'_> {
                 entry.digest = Some(digest);
                 entry.bytes = len;
                 self.total += len;
-                self.entries.push(entry);
+                self.entries.push((entry, m));
             }
         }
         Ok(())
+    }
+
+    fn confirm_source(&self, root: &File, before: &fs::Metadata) -> Result<()> {
+        require(
+            same_source(before, &root.metadata()?),
+            "Conflict",
+            "volume directory changed during backup",
+        )?;
+        for (entry, expected) in &self.entries {
+            let (parent, name) = entry_parent(root, &entry.path)?;
+            let observed = child(&parent, name, OFlags::PATH)?.metadata()?;
+            require(
+                same_source(expected, &observed),
+                "Conflict",
+                "volume entry changed during backup",
+            )?;
+        }
+        require(
+            same_source(before, &root.metadata()?),
+            "Conflict",
+            "volume directory changed during backup",
+        )
     }
 }
 fn copy_hash(r: &mut File, w: &mut impl Write, max: u64) -> Result<(u64, String)> {
@@ -339,6 +385,20 @@ fn copy_hash(r: &mut File, w: &mut impl Write, max: u64) -> Result<(u64, String)
     }
     Ok((len, format!("sha256:{:x}", hash.finalize())))
 }
+fn capture_root(w: &Work) -> Result<File> {
+    let path = volume_dir(&w.cfg, &w.target)?;
+    let root = File::from(
+        rustix::fs::open(
+            path,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?,
+    );
+    registered_root(&w.target, &root.metadata()?)?;
+    Ok(root)
+}
+
 fn backup(w: &Work) -> Result<Value> {
     let parent = w.cfg.state_dir.join("backups");
     let bid = format!("backup-{}", w.op.id);
@@ -351,7 +411,9 @@ fn backup(w: &Work) -> Result<Value> {
         entries: vec![],
         total: 0,
     };
-    capture.walk(&File::open(w.data.as_ref().unwrap())?, Path::new(""), 0)?;
+    let source = capture_root(w)?;
+    let before = source.metadata()?;
+    capture.walk(&source, Path::new(""), 0)?;
     let manifest = json!({
         "schema_version": VERSION,
         "backup_id": bid,
@@ -364,11 +426,13 @@ fn backup(w: &Work) -> Result<Value> {
         "completed_at": now(),
         "failure_domain": "local-filesystem",
         "tool_version": env!("CARGO_PKG_VERSION"),
-        "entries": capture.entries,
+        "entries": capture.entries.iter().map(|(entry, _)| entry).collect::<Vec<_>>(),
         "total_bytes": capture.total.to_string()
     });
     let bytes = canonical(&manifest);
     new_file(&stage.path().join("manifest.json"), &bytes)?;
+    let current = capture_root(w)?;
+    capture.confirm_source(&current, &before)?;
     fs::rename(stage.path(), parent.join(&bid))?;
     File::open(&parent)?.sync_all().map_err(unknown)?;
     Ok(json!({
@@ -415,7 +479,7 @@ fn backup_files(cfg: &Config, b: &Doc) -> Result<(File, Vec<u8>)> {
 }
 
 // The workload may have created a valid hierarchy whose full name exceeds PATH_MAX.
-fn restore_parent<'a>(root: &File, relative: &'a str) -> Result<(File, &'a str)> {
+fn entry_parent<'a>(root: &File, relative: &'a str) -> Result<(File, &'a str)> {
     let mut parts = relative.split('/');
     let name = parts.next_back().unwrap();
     let mut dir = root.try_clone()?;
@@ -446,7 +510,7 @@ fn inspect_backup(cfg: &Config, b: &Doc, destination: Option<&Path>) -> Result<V
         }
         let target = destination
             .as_ref()
-            .map(|dir| restore_parent(dir, &e.path))
+            .map(|dir| entry_parent(dir, &e.path))
             .transpose()?;
         if let Some(expected) = &e.digest {
             let mut original = child(&root, &format!("blob-{i}"), OFlags::RDONLY)?;
@@ -499,7 +563,7 @@ fn inspect_backup(cfg: &Config, b: &Doc, destination: Option<&Path>) -> Result<V
     )?;
     if let Some(root) = destination {
         for (path, mode) in dirs.into_iter().rev() {
-            let (parent, name) = restore_parent(&root, path)?;
+            let (parent, name) = entry_parent(&root, path)?;
             let dir = child(&parent, name, OFlags::RDONLY | OFlags::DIRECTORY)?;
             dir.set_permissions(Permissions::from_mode(mode))?;
             dir.sync_all()?;
@@ -722,4 +786,83 @@ pub fn pool_status(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "failure_domain": "local-filesystem",
         "hard_volume_quota": "Unsupported"
     }))
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+    use std::{
+        fs::FileTimes,
+        time::{Duration, UNIX_EPOCH},
+    };
+
+    #[test]
+    fn publication_rechecks_each_previously_copied_entry() {
+        let source = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let root = File::open(source.path()).unwrap();
+        let nested = source.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        let path = nested.join("record");
+        fs::write(&path, b"old").unwrap();
+        let original_time = UNIX_EPOCH + Duration::new(1_500_000_000, 123_000_000);
+        let record = File::options().write(true).open(&path).unwrap();
+        record
+            .set_times(FileTimes::new().set_modified(original_time))
+            .unwrap();
+        let before = root.metadata().unwrap();
+        let mut capture = Capture {
+            out: staging.path(),
+            entries: vec![],
+            total: 0,
+        };
+        capture.walk(&root, Path::new(""), 0).unwrap();
+        capture.confirm_source(&root, &before).unwrap();
+
+        fs::write(&path, b"new").unwrap();
+        record
+            .set_times(FileTimes::new().set_modified(original_time + Duration::from_secs(1)))
+            .unwrap();
+        assert_eq!(
+            record.metadata().unwrap().mtime_nsec(),
+            capture.entries[1].1.mtime_nsec()
+        );
+        assert_eq!(
+            capture.confirm_source(&root, &before).unwrap_err().0.code,
+            "Conflict"
+        );
+    }
+
+    #[test]
+    fn directory_membership_is_rechecked_even_for_empty_directories() {
+        for nested_change in [true, false] {
+            let source = tempfile::tempdir().unwrap();
+            let staging = tempfile::tempdir().unwrap();
+            let nested = source.path().join("empty");
+            fs::create_dir(&nested).unwrap();
+            let root = File::open(source.path()).unwrap();
+            let changed = if nested_change {
+                nested.as_path()
+            } else {
+                source.path()
+            };
+            File::open(changed)
+                .unwrap()
+                .set_modified(UNIX_EPOCH + Duration::from_secs(1_500_000_000))
+                .unwrap();
+            let before = root.metadata().unwrap();
+            let mut capture = Capture {
+                out: staging.path(),
+                entries: vec![],
+                total: 0,
+            };
+            capture.walk(&root, Path::new(""), 0).unwrap();
+            capture.confirm_source(&root, &before).unwrap();
+            fs::write(changed.join("added"), b"new").unwrap();
+            assert_eq!(
+                capture.confirm_source(&root, &before).unwrap_err().0.code,
+                "Conflict"
+            );
+        }
+    }
 }

@@ -1,6 +1,8 @@
 """Verify stored recovery sets without allocating a volume or granting access to its contents."""
 from contextlib import ExitStack
 import os
+import signal
+import time
 import unittest
 from support import Failure, Node, target
 
@@ -81,6 +83,44 @@ class BackupTests(unittest.TestCase):
         data = self.n.perform("volume.read_chunk", dict(target=target(restored), path="nested/binary", offset=0, limit=4))
         self.assertEqual(data["data_base64"], "AAEC/w==")
 
+
+    def test_changed_offline_source_aborts_publication_and_releases_hold(self):
+        n = self.n
+        volume = n.perform("volume.create", {"name": "offline-records"})
+        root = n.state / "volumes" / volume["resource_id"] / "data"
+        early = root / "00-record"
+        early.write_bytes(b"old")
+        stamp = early.stat()
+        padding = root / "99-padding"
+        with padding.open("wb") as f:
+            f.truncate(32 * 1024 * 1024)
+        backups = n.state / "backups"
+        initial = set(backups.iterdir())
+        task = n.submit("backup.create", target(volume))
+        # The second blob appears only after the first was copied and fsynced.
+        deadline = time.monotonic() + 15
+        while not any(backups.glob(".tmp*/blob-1")):
+            if time.monotonic() >= deadline:
+                self.fail("did not observe the second blob in staging")
+            time.sleep(0.001)
+        n.process.send_signal(signal.SIGSTOP)
+        try:
+            _, status = os.waitpid(n.process.pid, os.WUNTRACED)
+            self.assertTrue(os.WIFSTOPPED(status))
+            self.assertTrue(any(backups.glob(".tmp*/blob-1")))
+            early.write_bytes(b"new")
+            os.utime(early, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        finally:
+            n.process.send_signal(signal.SIGCONT)
+        failed = n.wait(task)
+        self.assertEqual(failed["lifecycle"], "Failed", failed["lifecycle"])
+        self.assertEqual(failed["conditions"][0]["type"], "Conflict", failed)
+        self.assertEqual(set(backups.iterdir()), initial)
+        padding.unlink()
+        saved = n.perform("backup.create", target(volume))
+        restored = n.perform("backup.restore", target(saved))
+        result = n.perform("volume.read", dict(**target(restored), name="00-record"))
+        self.assertEqual(result["content"], "new")
 
     def test_restore_deep_paths_created_by_a_linux_workload(self):
         n = self.n

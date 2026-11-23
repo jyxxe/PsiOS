@@ -38,11 +38,20 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: Verify scoped addresses in a private Linux network namespace
         run: |
-          sudo unshare --net sh -ec '
+          sudo unshare --net --mount --propagation private sh -ec '
             ip link set lo up
             ip address add 192.0.2.1 peer 192.0.2.2/32 dev lo
             ip -6 address add 2001:db8::2/64 dev lo nodad
             runuser -u "$1" -- python3 -m unittest discover -s tests -p test_network.py -v
+            ref=$(mktemp)
+            ip -j address show > "$ref"
+            chown "$1" "$ref"
+            uid=$(id -u "$1")
+            gid=$(id -g "$1")
+            mount -t tmpfs tmpfs /usr/sbin
+            PSIOS_TEST_NETWORK_REFERENCE="$ref" setpriv --reuid "$uid" --regid "$gid" --clear-groups \
+              python3 -m unittest discover -s tests -p test_network.py -v
+            rm -f "$ref"
           ' psios-network "$(id -un)"
       - name: Verify in-place state upgrade from PR 1
         run: |

@@ -12,6 +12,8 @@ trap 'echo "PsiOS boot stopped at $stage; use external rescue media" >/dev/conso
 "$bb" chmod 0755 /
 "$bb" --install -s
 "$bb" hostname psios
+stage=loopback
+"$bb" ip link set lo up
 stage=state-device
 /usr/sbin/modprobe virtio_blk
 /usr/sbin/modprobe ext4

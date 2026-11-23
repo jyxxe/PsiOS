@@ -19,3 +19,6 @@ rustix = { version = "1", features = ["fs", "net", "process", "time"] }
 signal-hook = "0.3"
 tempfile = "3"
 zeroize = "1"
+rtnetlink = "0.24"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+tokio = { version = "1", features = ["rt", "time", "net"] }

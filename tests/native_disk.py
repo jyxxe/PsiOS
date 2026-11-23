@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import secrets
 import select
+import shlex
 import shutil
 import subprocess
 import sys
@@ -109,6 +110,24 @@ def check_state(c):
     return who["authority_id"], submitted, result["result"], c.run("cat /proc/sys/kernel/random/boot_id")
 
 
+def check_native_network(c):
+    def call(method, params):
+        body = shlex.quote(json.dumps(params))
+        return json.loads(c.run(f"printf '%s' {body} | psiosctl call {method}"))
+    node = json.loads(c.run("psiosctl node"))["reference"]["resource_id"]
+    grant = call("Grant.Issue", dict(principal_id="local-owner", tool_targets=[node],
+                 actions=["task.submit", "task.read", "node.interfaces"], units=1, ttl_seconds=120))
+    delegation = shlex.quote(grant["delegation_ref"]["resource_id"])
+    task = json.loads(c.run(f"printf '{{}}' | psiosctl submit node.interfaces --delegation {delegation} --key native-network"))
+    done = json.loads(c.run("psiosctl wait " + shlex.quote(task["task_id"])))
+    assert done["lifecycle"] == "Succeeded", done
+    report = call("Artifact.Read", {"reference": done["result"]["artifact_refs"][0]})
+    assert report["network_namespace_inode"] == c.run("stat -Lc %i /proc/self/ns/net")
+    row, = report["interfaces"]
+    assert row["ifname"] == "lo" and row["link_type"] == "loopback" and "UP" in row["flags"]
+    assert any(a["local"] == "127.0.0.1" and a["prefixlen"] == 8 and a["scope"] == "host" for a in row["addr_info"])
+
+
 def replace_state_partition(image, filesystem):
     with image.open("r+b") as dst, filesystem.open("rb") as src:
         dst.seek(65 * 1024 * 1024)
@@ -141,6 +160,7 @@ def exercise(args, work):
         c.credentials("psios", "wrong-" + secrets.token_hex(10))
         c.until(b"Login incorrect")
         c.login("psios", operator)
+        check_native_network(c)
         first = check_state(c)
         assert not first[1]["deduplicated"]
         # SIGKILL the VM with the OS and Core still running.

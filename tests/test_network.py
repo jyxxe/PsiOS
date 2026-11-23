@@ -1,6 +1,7 @@
 """Local kernel link/address observations through a scoped Task, including live paging."""
 import json
 import os
+from pathlib import Path
 import subprocess
 import unittest
 
@@ -47,12 +48,20 @@ class NetworkTests(unittest.TestCase):
             if after is None:
                 break
             self.assertEqual(after, row["ifindex"])
-        live = json.loads(subprocess.check_output(["/usr/sbin/ip", "-j", "address", "show"]))
+        reference = os.getenv("PSIOS_TEST_NETWORK_REFERENCE")
+        if reference:
+            self.assertFalse(Path("/usr/sbin/ip").exists())
+            live = json.loads(Path(reference).read_bytes())
+        else:
+            live = json.loads(subprocess.check_output(["/usr/sbin/ip", "-j", "address", "show"]))
         self.assertEqual({i["ifindex"] for i in rows}, {i["ifindex"] for i in live})
         links = {i["ifname"]: i for i in live}
         for row in rows:
             raw = links[row["ifname"]]
             self.assertEqual(row["mtu"], raw["mtu"])
+            self.assertEqual(row["link_type"], raw["link_type"])
+            self.assertEqual(set(row["flags"]), set(raw["flags"]))
+            self.assertEqual([a["scope"] for a in row["addr_info"]], [a["scope"] for a in raw["addr_info"]])
             self.assertEqual(row["operstate"], raw["operstate"])
             self.assertEqual([(a["local"], a["prefixlen"], a.get("peer")) for a in row["addr_info"]],
                              [(a["local"], a["prefixlen"], a.get("address")) for a in raw["addr_info"]])

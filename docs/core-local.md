@@ -25,7 +25,7 @@ tar -xzf ./psios-core-linux-amd64.tar.gz -C ./portable-core
 (cd ./portable-core && sha256sum -c SHA256SUMS && cat source-commit)
 ```
 
-下方本机启动示例中的 `target/debug/` 可替换为 `./portable-core/`，并跳过 Cargo 编译。CI 在只读、断网的 Alpine 用户空间以非特权用户运行同一份二进制，覆盖身份授权、任务幂等和进程崩溃后的恢复。该验收覆盖单节点 Core，系统引导和各发行版安装另行验收。
+下方本机启动示例中的 `target/debug/` 可替换为 `./portable-core/`，并跳过 Cargo 编译。CI 在只读、断网的 Alpine 用户空间以非特权用户运行同一份二进制，覆盖身份授权、任务幂等和进程崩溃后的恢复。CI 还将同一归档作为只读根文件系统，直接启动两个程序，强制终止服务后以只读方式核验状态卷，再重放原任务。该验收覆盖单节点 Core，系统引导和各发行版安装另行验收。[空根文件系统恢复验收](../tests/portable_recovery.py)
 
 ## 本机启动
 

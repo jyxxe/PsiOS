@@ -2,6 +2,7 @@
 # Acceptance on a fresh systemd VM. A successful run ends with a purged package
 # and the test node's retained data, so removal semantics can be inspected.
 set -euo pipefail
+trap 'echo "Package acceptance failed at line $LINENO" >&2' ERR
 if [[ ${1:-} != --disposable-systemd-host || $# != 2 || $EUID != 0 ]]; then
     echo "usage: sudo $0 --disposable-systemd-host path/to/psios-core.deb" >&2
     exit 2

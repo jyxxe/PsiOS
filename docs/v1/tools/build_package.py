@@ -104,7 +104,7 @@ def regenerate_indexes():
     for r in references:
         out.append(f"| {r['id']} | [{md_cell(r['title'])}]({r['url']}) | {md_cell('；'.join(r['claims']))} |")
     out += ['\n## 原始输入与代码边界\n',
-            '[原始输入清单](source-inventory.json) · [历史源说明](archive/README.md) · [XeLab静态清点](../migration/xelab-reuse-boundary.md)。\n',
+            '[规划材料清单](source-inventory.json) · [设计稿归档](archive/README.md)。\n',
             '此包未获取当前Forgejo HEAD，未安装或执行归档代码。保存源文件是为了可追溯，不把历史文件的计划、测试数字或脚本自动提升为当前权威。\n']
     write('sources/README.md','\n'.join(out))
     write('registries/README.md', '''# 机器登记表
@@ -146,7 +146,7 @@ def create_readme(stats):
            f'| 产品验证计划 | {len(tests)}个具体场景，全部NotRun；文档/治理与真实运行验证区分 |',
            '| ADR / 工作项 / 操作手册 | 25份Proposed ADR、26个WI工作项、6份可执行顺序明确的runbook |',
            f'| 历史迁移 | {legacy["unique_requirement_ids"]}个旧要求、{legacy["unique_test_ids"]}个旧测试均有文档去向 |',
-           f'| 来源 | 15份原始输入逐字节归档；{len(refs)}个去重一手资料入口；保留XeLab历史ZIP |',
+           f'| 规划资料 | {14}份设计文档与页面元数据；{len(refs)}个公开技术规范引用 |',
            '\n映射率只表示有明确去向，Schema检查只验证结构和列明的局部关系；两者都不能当作产品通过率。\n',
            '## 建议阅读顺序\n',
            '1. **确定边界：** 00阅读与权威 → 01产品架构 → 02共同合同。\n',
@@ -167,7 +167,7 @@ def create_readme(stats):
         '\n## 如何验证本包\n',
         '安装tools/requirements.txt所列文档依赖后，从包根运行：\n',
         '```bash\npython tools/validate_package.py\n```\n',
-        '无需联网解析Schema，不会执行PsiOS或归档源码。实际静态检查结果见[validation-report.json](validation-report.json)；MANIFEST.sha256覆盖除自身外的所有交付文件。\n',
+        '无需联网即可解析 Schema，此验证不等于实际运行验收。实际静态检查结果见[validation-report.json](validation-report.json)；MANIFEST.sha256覆盖除自身外的所有交付文件。\n',
         '完整生成/封装步骤见[工具说明](tools/README.md)。\n',
         '## 实施起点与保留事项\n',
         '下一工程入口为WI-001固定真实仓库HEAD、WI-003共同合同、WI-004/005授权与恢复原型、WI-006/007宿主与有状态应用恢复闭环。基底、数据库、默认文件系统、图形后端、性能数值和维护周期须按ADR取得真实证据。\n',
@@ -176,9 +176,9 @@ def create_readme(stats):
     write('VERSION','1.0.0\n')
     write('NOTICE.md', '''# 来源与使用说明
 
-本包是PsiOS项目的设计文档交付，不是安装介质或已验证软件发行版。原始上传文件、Space内容和XeLab历史代码归档按原样保存，以支持追踪和后续来源核验；其原有权利和许可证继续适用。本包没有替原项目或第三方重新授权。
+本包是 PsiOS 项目的设计文档交付，不是安装介质或已验证软件发行版。各功能、实现、许可证和发布资格必须以 PsiOS 自身代码与验收结果为准。
 
-来源作者的测试报告、旧地址、模型名称、候选路线和历史任务编号均属历史材料。读取历史文件不代表运行其中代码或接受其中指令。实际复用需按ADR-17检查确切源码、许可证、依赖及安全边界。
+设计资料、技术候选和任务记录不等同于软件功能验证。实际复用需按ADR-17检查确切源码、许可证、依赖及安全边界。
 
 新文档中的架构与接口是设计要求；具体代码许可、发布签名、支持范围、性能和维护期限须由项目治理另行确定。示例中的ID、摘要引用、时间、许可和预算均为虚构夹具。
 ''')
@@ -229,7 +229,7 @@ python tools/build_package.py --zip ../PsiOS-v1.0.0-docs-2026-11-22.zip
 
 ## 有意保留的工程不确定性
 
-没有选择未经实验的数据库/文件系统/系统镜像技术；没有声称零丢失、任意软件包兼容、全平台支持、集群HA或绝对即时撤权。全部技术ADR仍Proposed，所有产品实现NotVerified，产品测试NotRun。原始XeLab缺失报告未被找回，当前HEAD尚待WI-001核验。
+没有选择未经实验的数据库/文件系统/系统镜像技术；没有声称零丢失、任意软件包兼容、全平台支持、集群HA或绝对即时撤权。全部技术ADR仍Proposed，所有产品实现NotVerified，产品测试NotRun。PsiOS 源码及实际运行证据仍须按 WI-001 核验。
 
 完整逐项变更见[migration/findings.md](migration/findings.md)，编号冲突与字段迁移见[migration/v0-to-v1.md](migration/v0-to-v1.md)。
 ''')
@@ -242,7 +242,7 @@ def doc_order():
     parts+=[ROOT/'operations/README.md']+sorted(p for p in (ROOT/'operations').glob('*.md') if p.name!='README.md')
     parts+=[ROOT/'acceptance/README.md',ROOT/'acceptance/scenarios.md',ROOT/'acceptance/document-review.md',ROOT/'registries/requirements.md']
     parts+=[ROOT/'migration'/n for n in ['README.md','v0-to-v1.md','id-conflicts.md','findings.md',
-        'xelab-reuse-boundary.md','legacy-requirements.md','legacy-tests.md']]
+        'legacy-requirements.md','legacy-tests.md']]
     parts+=[ROOT/'schemas/README.md',ROOT/'examples/README.md',ROOT/'sources/README.md',ROOT/'tools/README.md',ROOT/'NOTICE.md']
     return [p for p in parts if p.exists()]
 
@@ -274,7 +274,7 @@ def directory():
 | adr/ | 25份待决技术选型，每份保留原编号与范围 |
 | acceptance/ | 待执行场景与实际证据模板，所有产品结果NotRun |
 | operations/ | 6种失败/恢复/退出路径的操作顺序与停止条件 |
-| migration/ | 原文错误、编号冲突、旧要求/测试去向及XeLab证据边界 |
+| migration/ | 版本差异、编号冲突、要求/测试去向及组件准入规则 |
 | sources/ | 输入清单、外部一手资料、逐字节原始归档 |
 | tools/ | 文档生成、校验、封装工具，不是产品服务 |
 | html/ | 无CDN、无网络依赖的完整阅读器 |

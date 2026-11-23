@@ -35,16 +35,16 @@
           "source_file": "sources/archive/space-unified-v0.6.md",
           "section": "35.16 下一步实施任务",
           "legacy_id": "P0-01",
-          "legacy_text": "固定 PsiOS 源仓库当前 Forgejo HEAD；导出 XeLab 模块复用矩阵（TaskEngine、EventStore、Broker、OCI、Identity、Storage、SDK、WebUI）",
-          "mapping_scope": "原仓库 HEAD、XeLab 逐模块来源/许可与复用审计。"
+          "legacy_text": "核验 PsiOS 当前提交；建立核心模块接口矩阵（TaskEngine、EventStore、Broker、OCI、Identity、Storage、SDK、WebUI）",
+          "mapping_scope": "原仓库 HEAD、PsiOS 模块依赖、许可证及接口审计。"
         },
         {
           "source_id": "SRC-IMPORT-ROADMAP",
           "source_file": "sources/archive/project-v06-roadmap.md",
           "section": "首批 P0 工作项",
           "legacy_id": "P0-01",
-          "legacy_text": "固定本地 Forgejo 最新 HEAD，并逐模块审计 XeLab 复用来源及许可证。",
-          "mapping_scope": "本地 Forgejo 最新 HEAD、XeLab 复用来源及许可证。"
+          "legacy_text": "核验 PsiOS 当前源码、模块依赖与许可证。",
+          "mapping_scope": "PsiOS 当前提交、模块接口与依赖审核。"
         }
       ],
       "source_stage_text": "M0",
@@ -1432,12 +1432,12 @@
       "source_file": "sources/archive/space-unified-v0.6.md",
       "section": "35.16 下一步实施任务",
       "legacy_id": "P0-01",
-      "legacy_text": "固定 PsiOS 源仓库当前 Forgejo HEAD；导出 XeLab 模块复用矩阵（TaskEngine、EventStore、Broker、OCI、Identity、Storage、SDK、WebUI）",
+      "legacy_text": "核验 PsiOS 当前提交；建立核心模块接口矩阵（TaskEngine、EventStore、Broker、OCI、Identity、Storage、SDK、WebUI）",
       "legacy_acceptance": "每项附 SHA、许可、耦合、测试、迁移或重写决定；不能假定旧代码可运行",
       "targets": [
         {
           "work_item_id": "WI-001",
-          "mapping_scope": "原仓库 HEAD、XeLab 逐模块来源/许可与复用审计。"
+          "mapping_scope": "原仓库 HEAD、PsiOS 模块依赖、许可证及接口审计。"
         }
       ]
     },
@@ -1676,12 +1676,12 @@
       "source_file": "sources/archive/project-v06-roadmap.md",
       "section": "首批 P0 工作项",
       "legacy_id": "P0-01",
-      "legacy_text": "固定本地 Forgejo 最新 HEAD，并逐模块审计 XeLab 复用来源及许可证。",
+      "legacy_text": "核验 PsiOS 当前源码、模块依赖与许可证。",
       "legacy_acceptance": null,
       "targets": [
         {
           "work_item_id": "WI-001",
-          "mapping_scope": "本地 Forgejo 最新 HEAD、XeLab 复用来源及许可证。"
+          "mapping_scope": "PsiOS 当前提交、模块接口与依赖审核。"
         }
       ]
     },

@@ -16,6 +16,4 @@ Build with `cargo build --locked --workspace`, or use the [portable amd64 Core b
 - [Architecture and API contracts](docs/v1/docs/00-reading-and-authority.md)
 - [ADR register](docs/v1/adr/README.md)
 - [Acceptance plans](docs/v1/acceptance/README.md)
-- [Document validation report](docs/v1/validation-report.json)
-
-Historical material under `docs/v1/sources/archive` is retained for provenance only; it is not an approved implementation baseline. The latest Forgejo/XeLab code requires independent auditing before reuse.
+- [Document validation report](docs/v1/validation-report.json)\n

@@ -32,7 +32,7 @@
 | [ADR-14](ADR-014.md) | 观测与审计后端 | 保持原编号与范围 | Proposed |
 | [ADR-15](ADR-015.md) | 发布信任、兼容窗口与维护政策 | 保持原编号与范围 | Proposed |
 | [ADR-16](ADR-016.md) | 发行版资源和体验基线 | 保持原编号与范围 | Proposed |
-| [ADR-17](ADR-017.md) | XeLab 按模块复用 | 保持原编号与范围 | Proposed |
+| [ADR-17](ADR-017.md) | 第三方组件准入与依赖治理 | 保持原编号与范围 | Proposed |
 | [ADR-18](ADR-018.md) | TableFS 文件/表双视图存储后端 | 保持原编号与范围 | Proposed |
 | [ADR-19](ADR-019.md) | Universal Package Adapter 与发行版兼容 Profile | 保持原编号与范围 | Proposed |
 | [ADR-20](ADR-020.md) | GUI Bridge：窗口、Viewer 与传输后端 | 范围明确/拆分见正文 | Proposed |

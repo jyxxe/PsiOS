@@ -43,7 +43,7 @@
 <a href="#doc-adr-ADR-014">ADR-14　观测与审计后端</a>
 <a href="#doc-adr-ADR-015">ADR-15　发布信任、兼容窗口与维护政策</a>
 <a href="#doc-adr-ADR-016">ADR-16　发行版资源和体验基线</a>
-<a href="#doc-adr-ADR-017">ADR-17　XeLab 按模块复用</a>
+<a href="#doc-adr-ADR-017">ADR-17　第三方组件准入与依赖治理</a>
 <a href="#doc-adr-ADR-018">ADR-18　TableFS 文件/表双视图存储后端</a>
 <a href="#doc-adr-ADR-019">ADR-19　Universal Package Adapter 与发行版兼容 Profile</a>
 <a href="#doc-adr-ADR-020">ADR-20　GUI Bridge：窗口、Viewer 与传输后端</a>
@@ -67,7 +67,7 @@
 <a href="#doc-migration-v0-to-v1">v0.1–v0.6 → v1 设计迁移说明</a>
 <a href="#doc-migration-id-conflicts">旧编号冲突、范围变化与历史勘误</a>
 <a href="#doc-migration-findings">v0.x → v1 问题与修正台账</a>
-<a href="#doc-migration-xelab-reuse-boundary">XeLab 历史归档清点与复用边界</a>
+<a href="#doc-migration-component-readiness">PsiOS 组件准入检查</a>
 <a href="#doc-migration-legacy-requirements">旧规范逐项迁移表</a>
 <a href="#doc-migration-legacy-tests">旧验收逐项保留与迁移</a>
 <a href="#doc-schemas-README">JSON Schema 合同</a>
@@ -121,7 +121,7 @@
 </tr>
 <tr class="odd">
 <td>来源</td>
-<td>15份原始输入逐字节归档；31个去重一手资料入口；保留XeLab历史ZIP</td>
+<td>PsiOS 设计草案、Space 规划与验收记录；技术规范见参考资料清单</td>
 </tr>
 </tbody>
 </table></div>
@@ -225,7 +225,7 @@
 <h2 id="doc-README-如何验证本包">如何验证本包</h2>
 <p>安装tools/requirements.txt所列文档依赖后，从包根运行：</p>
 <div class="sourceCode" id="doc-README-cb1"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="doc-README-cb1-1"><a href="#doc-README-cb1-1" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> tools/validate_package.py</span></code></pre></div>
-<p>无需联网解析Schema，不会执行PsiOS或归档源码。实际静态检查结果见<a href="../validation-report.json">validation-report.json</a>；MANIFEST.sha256覆盖除自身外的所有交付文件。</p>
+<p>无需联网即可解析 Schema，此验证不等于实际运行验收。实际静态检查结果见<a href="../validation-report.json">validation-report.json</a>；MANIFEST.sha256覆盖除自身外的所有交付文件。</p>
 <p>完整生成/封装步骤见<a href="#doc-tools-README">工具说明</a>。</p>
 <h2 id="doc-README-实施起点与保留事项">实施起点与保留事项</h2>
 <p>下一工程入口为WI-001固定真实仓库HEAD、WI-003共同合同、WI-004/005授权与恢复原型、WI-006/007宿主与有状态应用恢复闭环。基底、数据库、默认文件系统、图形后端、性能数值和维护周期须按ADR取得真实证据。</p>
@@ -243,7 +243,7 @@
 <li>保留245个旧要求和141个旧验收编号的去向，原源逐字节存档。</li>
 </ul>
 <h2 id="doc-CHANGELOG-有意保留的工程不确定性">有意保留的工程不确定性</h2>
-<p>没有选择未经实验的数据库/文件系统/系统镜像技术；没有声称零丢失、任意软件包兼容、全平台支持、集群HA或绝对即时撤权。全部技术ADR仍Proposed，所有产品实现NotVerified，产品测试NotRun。原始XeLab缺失报告未被找回，当前HEAD尚待WI-001核验。</p>
+<p>没有选择未经实验的数据库/文件系统/系统镜像技术；没有声称零丢失、任意软件包兼容、全平台支持、集群HA或绝对即时撤权。全部技术ADR仍Proposed，所有产品实现NotVerified，产品测试NotRun。软件源码及运行证据仍须按 WI-001 核验。</p>
 <p>完整逐项变更见<a href="#doc-migration-findings">migration/findings.md</a>，编号冲突与字段迁移见<a href="#doc-migration-v0-to-v1">migration/v0-to-v1.md</a>。</p>
 
 <h2 id="doc-CHANGELOG-addendum-1">同版本文档增补（2026-11-22）</h2>
@@ -290,7 +290,7 @@
 </tr>
 <tr class="even">
 <td>migration/</td>
-<td>原文错误、编号冲突、旧要求/测试去向及XeLab证据边界</td>
+<td>规范差异、编号冲突、要求/测试去向和组件准入规则</td>
 </tr>
 <tr class="odd">
 <td>sources/</td>
@@ -451,8 +451,8 @@
     legacy-tests.md
     rebuild_legacy_registry.py
     v0-to-v1.md
-    xelab-archive-inspection.json
-    xelab-reuse-boundary.md
+
+
   operations/
     README.md
     data-export-exit.md
@@ -524,7 +524,7 @@
       space-risk-v0.6.metadata.json
       space-unified-v0.6.md
       space-unified-v0.6.metadata.json
-      xelab-package-history.zip
+
     references.json
     source-inventory.json
   tools/
@@ -585,7 +585,7 @@
 </tr>
 </tbody>
 </table></div>
-<p><strong>V1-GOV-002｜证据不得跨层推断。</strong> 文档链接检查、Schema 自检和示例验证通过，只证明本包的特定结构条件；不能推出持久性、安全隔离、并发正确性或硬件兼容通过。历史 XeLab 压缩包中的报告是来源作者的记录，不能当成本次执行结果，也不证明最新 Forgejo HEAD 相同。</p>
+<p><strong>V1-GOV-002｜证据不得跨层推断。</strong> 文档链接检查、Schema 自检和示例验证通过，只证明本包的特定结构条件；不能推出持久性、安全隔离、并发正确性或硬件兼容通过。历史文字或报告无法替代当前 PsiOS 实际运行验证。</p>
 <p><code>SpecResolved</code> 旧称统一解释为“已有明确设计约束”，不再用“风险已关闭”概括工程状态。仍需要 PoC 的问题写明候选、测量方法、通过条件、失败后策略、决策责任角色和最迟启用门槛。责任角色可以已明确而具体人员未指派；正式实施前必须指派具体负责人。</p>
 <h2 id="doc-docs-00-reading-and-authority-3-规范用词和优先级">3. 规范用词和优先级</h2>
 <p><strong>必须 / 不得</strong>是对应能力声明支持前的硬要求；<strong>应当</strong>是默认要求，偏离需有记录的替代保证；<strong>可以</strong>是按 Profile 启用的能力。P0/P1/P2 是问题影响与设计优先级，M0～M6 是实施阶段，两者不等同。高优先级的跨节点规则不意味着 M1 就要实现集群。</p>
@@ -647,7 +647,7 @@
 </section>
 <section class="document" id="doc-docs-01-product-and-architecture" data-title="01｜产品边界与统一架构"><p class="source-path">docs/01-product-and-architecture.md</p><h1 id="doc-docs-01-product-and-architecture-01产品边界与统一架构">01｜产品边界与统一架构</h1>
 <h2 id="doc-docs-01-product-and-architecture-1-产品目标与固定约束">1. 产品目标与固定约束</h2>
-<p>PsiOS 是基于 Linux 的 Agent-Native 操作系统。用户通过 CLI、KDE、WebUI、SDK 和 Agent 访问同一组系统资源；模型离线或 Agent 停止后，传统登录、应用运行、数据访问、诊断和救援仍有独立路径。旧 XeLab 提供可审计的代码素材，PsiOS 不承诺保持其 ABI、API、数据库或部署拓扑。</p>
+<p>PsiOS 是基于 Linux 的 Agent-Native 操作系统。用户通过 CLI、KDE、WebUI、SDK 和 Agent 访问同一组系统资源；模型离线或 Agent 停止后，传统登录、应用运行、数据访问、诊断和救援仍有独立路径。PsiOS 的实现依据自身源码、原生 API、持久化契约和部署规范。</p>
 <p><strong>V1-BASE-001｜三版同源。</strong> Helium 是精简版，Neon 是服务器版，Argon 是 KDE Plasma 桌面版。三者共享资源模型、授权、任务和集群接入契约，差异来自默认安装配置和交互场景，不以硬件档次锁住功能。模型可位于本机、局域网、集群或获准的云端；不要求每个节点装大模型或 Controller。</p>
 <div class="table-scroll"><table>
 <thead>
@@ -1358,7 +1358,7 @@
 <p><strong>V1-NET-002｜管理连接变更有确认与回退。</strong> 保存旧配置和generation → 用Operation排他取得配置写权 → 应用新配置 → 在新generation下建立新的认证管理连接，并验证所需路由/DNS → 提交。旧长连接能用不代表新登录可用。确认token绑定operation_id、配置摘要、generation和deadline，不能被另一次变更或旧浏览器复用。</p>
 <p>超时由本机组件回退，回退前仍校验该操作持有的配置generation，避免旧定时器覆盖后来已提交的新配置。断电后根据持久事务决定回退/重新验证。本机控制台是网络错误时的恢复入口；明确主动断网的目标使用单独授权确认，不要求“断网后远程连通”这个不可能条件。</p>
 <p><strong>V1-NET-003｜实际出站路径受控。</strong> Egress规则涵盖DNS结果、重解析、IPv6、重定向、代理出口和本机/链路本地/云元数据地址；凭据不得跟随重定向发往新origin。网络驱动失败不能回退到host network。端口发布明确地址、协议、来源域和授权，配置丢失默认不扩大公网暴露。</p>
-<p><strong>V1-NET-004｜断联不扩权。</strong> 远程服务不可达时本机网络配置、日志和已有获准本地服务可用；涉及在线批准/租约的共享写暂停。跨NAT/代理可选Worker主动连接模式，但API Key只用于引导或规定的受限目的，正式节点访问仍需可轮换身份和明确资源授权；旧XeLab的具体网络拓扑不自动成为PsiOS约束。</p>
+<p><strong>V1-NET-004｜断联不扩权。</strong> 远程服务不可达时本机网络配置、日志和已有获准本地服务可用；涉及在线批准/租约的共享写暂停。跨NAT/代理可选Worker主动连接模式，但API Key只用于引导或规定的受限目的，正式节点访问仍需可轮换身份和明确资源授权；网络方案由 PsiOS 的安全模型和实际验收决定。</p>
 <h2 id="doc-docs-03-host-updates-network-devices-7-设备资源与电源">7. 设备、资源与电源</h2>
 <p><strong>V1-DEV-001｜设备身份不靠路径。</strong> Device含稳定ID、节点、类型、驱动/固件、拓扑、健康、能力、授权、租用及generation。热插拔/重置/驱动更新递增相关generation并使旧租用重新验证；路径被新设备复用不能继承旧Grant。GPU/NPU、USB、音频、摄像头、蓝牙、打印与外部存储按后端适配，不重造上游驱动。</p>
 <p><strong>V1-DEV-002｜承诺与强制能力分开。</strong> CPU/内存/PID/IO/临时盘限额必须落实到实际运行环境，先准入再执行；核心管理/审计/救援保留资源。cgroup v2的memory.high用于压力/节流而非硬上限；memory.max、swap、PID等控制器需单独配置验证；不能只采样指标就宣称隔离。<a href="https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html">Linux cgroup v2</a></p>
@@ -2377,7 +2377,7 @@
 <p>重启、设备热插拔和恢复后，应用启动必须等待同一卷身份及所需内容版本确认。发现卷缺失时保持绑定、停止相关写入并报告错误；严禁自动创建空目录让应用初始化另一套数据。删除需先列引用，拒绝仍被有效附件、快照、备份、任务、恢复或导出保留的对象；强制删除必须说明确切损失范围和独立授权，不作为失败恢复默认路径。</p>
 <h3 id="doc-docs-06-storage-data-tablefs-v1-sto-005容量与可操作性">V1-STO-005：容量与可操作性</h3>
 <p>按数据、元数据/WAL、镜像与模型缓存、临时文件、索引、日志、审计和备份分别记账。准入预留必要提交空间；空间或 inode 耗尽时拒绝新分配，保留只读诊断和救援预算。新数据写入和后台 GC 不得因日志盘满自动删除用户卷。I/O 错误、短写、只读降级、校验失败和健康告警须关联资源与 Operation；“设备在线”不能替代数据可靠性。</p>
-<p>配额包括硬上限、当前用量、预留量、计费范围及超限行为；稀疏文件同时显示逻辑大小和实际占用，不把逻辑预留当真实可用空间。压缩、去重和复制带来的容量节省/增加分别计量；具体数值在发行 Profile 中经测量确定，不沿用旧 XeLab 的固定磁盘分配。</p>
+<p>配额包括硬上限、当前用量、预留量、计费范围及超限行为；稀疏文件同时显示逻辑大小和实际占用，不把逻辑预留当真实可用空间。压缩、去重和复制带来的容量节省/增加分别计量；具体数值在发行 Profile 中经测量确定，具体容量在 PsiOS 目标 Profile 中测量确定。</p>
 <h2 id="doc-docs-06-storage-data-tablefs-2-持久化快照备份与恢复">2. 持久化、快照、备份与恢复</h2>
 <h3 id="doc-docs-06-storage-data-tablefs-v1-sto-006成功响应与故障模型">V1-STO-006：成功响应与故障模型</h3>
 <p>每个写 API 必须区分 <code>Visible</code> 与 <code>Durable</code>，响应注明保证范围。<code>Durable</code> 表示在已声明故障模型内，所需内容、元数据和日志已进入可恢复提交边界；不承诺毁坏唯一物理介质后仍无损。Profile 至少分别声明进程崩溃、宿主断电、单盘损坏、整机损毁的保护范围，并列 <code>ack_durability</code>、故障域、复制/备份要求和 RPO。用户请求高于当前能力的保证时拒绝或经显式授权降低，不能静默给出同样的成功响应。</p>
@@ -5032,7 +5032,7 @@
 <tr class="odd">
 <td>数据、运维与发行复用</td>
 <td>ADR-13～17</td>
-<td>Dataset、观测、发布信任、三版基线及XeLab逐模块复用</td>
+<td>Dataset、观测、发布信任、三版基线及组件准入治理</td>
 </tr>
 <tr class="even">
 <td>可选文件系统、包与GUI</td>
@@ -5750,7 +5750,7 @@
 </tr>
 <tr class="odd">
 <td><a href="#doc-adr-ADR-017">ADR-17</a></td>
-<td>XeLab 按模块复用</td>
+<td>第三方组件准入与依赖治理</td>
 <td>保持原编号与范围</td>
 <td>Proposed</td>
 </tr>
@@ -5858,7 +5858,7 @@
 <p>原 v0.6 主题：<strong>OS 基底、构建工具与平台组合</strong>。v1保持原编号和责任范围，补充实现选择证据与失败门槛，不将行为规范的明确写成技术方案已获批准。文件名使用三位补零便于排序，规范ID仍为 ADR-01。</p>
 <p>原验收范围（继续保留）：统一 Core 构建；发行许可；首批 CPU/固件/虚拟化目标；驱动可用性；依赖锁定和维护方案。</p>
 <h2 id="doc-adr-ADR-001-2-要解决的问题">2. 要解决的问题</h2>
-<p>首个镜像需要可重复构建、合法分发和独立救援，但不能因现有开发机或旧 XeLab 环境直接冻结 OS 基底。平台过宽会扩大驱动、启动和升级验证矩阵。</p>
+<p>首个镜像需要可重复构建、合法分发和独立救援，OS 基底必须依据受支持的硬件与验证结果决定。平台过宽会扩大驱动、启动和升级验证矩阵。</p>
 <h2 id="doc-adr-ADR-001-3-已确认的约束">3. 已确认的约束</h2>
 <p>约束入口：<a href="#doc-docs-01-product-and-architecture">01-product-and-architecture</a>、<a href="#doc-docs-03-host-updates-network-devices">03-host-updates-network-devices</a>。以下行为边界属于本v1文档规范；违反它们的技术方案不能通过仅修改本ADR获得批准。</p>
 <ol type="1">
@@ -6311,9 +6311,9 @@
 </table></div>
 <h2 id="doc-adr-ADR-006-1-范围与旧编号沿革">1. 范围与旧编号沿革</h2>
 <p>原 v0.6 主题：<strong>OCI 执行后端与隔离等级</strong>。v1保持原编号和责任范围，补充实现选择证据与失败门槛，不将行为规范的明确写成技术方案已获批准。文件名使用三位补零便于排序，规范ID仍为 ADR-06。</p>
-<p>原验收范围（继续保留）：XeLab 复用与现成方案的对照；只读根、身份映射、资源和设备限制、重启恢复、撤权。</p>
+<p>原验收范围（继续保留）：标准 OCI 后端与 PsiOS 适配层的对照；只读根、身份映射、资源和设备限制、重启恢复、撤权。</p>
 <h2 id="doc-adr-ADR-006-2-要解决的问题">2. 要解决的问题</h2>
-<p>管理OCI生命周期与保证隔离是不同责任；旧XeLab实现、成熟引擎和增强沙箱需要同一工作负载对照。</p>
+<p>管理OCI生命周期与保证隔离是不同责任；标准 OCI Runtime、成熟隔离引擎和增强沙箱需要同一工作负载对照。</p>
 <h2 id="doc-adr-ADR-006-3-已确认的约束">3. 已确认的约束</h2>
 <p>约束入口：<a href="#doc-docs-07-applications-packages-gui">07-applications-packages-gui</a>、<a href="#doc-docs-04-security-identity">04-security-identity</a>、<a href="#doc-docs-03-host-updates-network-devices">03-host-updates-network-devices</a>。以下行为边界属于本v1文档规范；违反它们的技术方案不能通过仅修改本ADR获得批准。</p>
 <ol type="1">
@@ -7271,7 +7271,7 @@
 <p>复审触发条件：默认服务变化、支持硬件扩大、最低资源目标变化或严重体验退化。</p>
 <p>跨领域约束需要改变时先提交共同契约修订，保留旧决议和迁移关系；不得静默复用原编号表达另一主题。</p>
 </section>
-<section class="document" id="doc-adr-ADR-017" data-title="ADR-17　XeLab 按模块复用"><p class="source-path">adr/ADR-017.md</p><h1 id="doc-adr-ADR-017-adr-17-xelab-按模块复用">ADR-17　XeLab 按模块复用</h1>
+<section class="document" id="doc-adr-ADR-017" data-title="ADR-17　第三方组件准入与依赖治理"><p class="source-path">adr/ADR-017.md</p><h1 id="doc-adr-ADR-017-adr-17-component-admission">ADR-17　第三方组件准入与依赖治理</h1>
 <div class="table-scroll"><table>
 <thead>
 <tr class="header">
@@ -7311,7 +7311,7 @@
 </tbody>
 </table></div>
 <h2 id="doc-adr-ADR-017-1-范围与旧编号沿革">1. 范围与旧编号沿革</h2>
-<p>原 v0.6 主题：<strong>XeLab 按模块复用</strong>。v1保持原编号和责任范围，补充实现选择证据与失败门槛，不将行为规范的明确写成技术方案已获批准。文件名使用三位补零便于排序，规范ID仍为 ADR-17。</p>
+<p>本 ADR 以 PsiOS 组件准入与依赖治理为范围，方案须依据实际实验与证据批准。文件名使用三位补零便于排序，规范ID仍为 ADR-17。</p>
 <p>原验收范围（继续保留）：当前 Forgejo 完整 SHA、依赖/许可、旧约定清除、宿主边界、故障测试与导出清单。</p>
 <h2 id="doc-adr-ADR-017-2-要解决的问题">2. 要解决的问题</h2>
 <p>旧仓库与打包代码是候选素材，不能以历史测试或旧GitHub快照推断当前Forgejo实现，也不能保留不合适的旧授权与数据约定。</p>
@@ -7319,7 +7319,7 @@
 <p>约束入口：<a href="#doc-docs-01-product-and-architecture">01-product-and-architecture</a>、<a href="#doc-docs-02-common-contracts">02-common-contracts</a>、<a href="#doc-docs-13-operations-release-governance">13-operations-release-governance</a>。以下行为边界属于本v1文档规范；违反它们的技术方案不能通过仅修改本ADR获得批准。</p>
 <ol type="1">
 <li>记录实际当前Forgejo完整SHA、模块来源、许可、依赖、测试和迁移决定。</li>
-<li>不承诺旧XeLab ABI/API/数据库兼容；按PsiOS权威契约改造。</li>
+<li>组件必须满足 PsiOS API、身份授权及数据契约。</li>
 <li>已有压缩包的审查报告是历史证据，不等于本轮已复验或完整上游当前状态。</li>
 </ol>
 <h2 id="doc-adr-ADR-017-4-可行候选与代价">4. 可行候选与代价</h2>
@@ -7355,7 +7355,7 @@
 <p>每次实验保存确切仓库SHA、工具/依赖锁、制品摘要、硬件或VM、Profile、输入与故障点、预期/实际、日志/校验和、复核人。性能比较使用同一工作负载和可比较环境；未经测量不填写已达标的预算、RPO/RTO或撤权时限。</p>
 <h2 id="doc-adr-ADR-017-6-否决条件与降级路径">6. 否决条件与降级路径</h2>
 <p><strong>否决条件：</strong> 来源SHA不明、许可无依据、边界依赖隐式宿主特权、测试仅来自无法复验叙述。</p>
-<p><strong>降级/退出：</strong> 该模块不进入主线；保留接口与替代实现计划，历史代码归档不当作已验收产物。</p>
+<p><strong>降级/退出：</strong> 该模块不进入主线；保留接口与替代实现计划，未经测试的制品不得作为已验收产物。</p>
 <p>实验失败应缩小支持范围或更换候选，不能在文档中把缺失保证改成“默认支持”。</p>
 <h2 id="doc-adr-ADR-017-7-取舍批准与复审">7. 取舍、批准与复审</h2>
 <p>当前取舍：<strong>待候选实验完成后填写</strong>；不存在已批准的优胜方案。审批记录必须补齐选定组合、排除方案及原因、证据引用、已知限制、迁移/撤销方案和实际负责人。批准后按治理规则更新状态与依赖锁，不仅修改本文件标题。</p>
@@ -13127,7 +13127,7 @@
 <p>结果以包根<a href="../validation-report.json">validation-report.json</a>为准，包括严格JSON、33份Schema、本地引用、35正例/35反例、5组夹具摘要、规范/测试/ADR/任务索引、原文切片、归档校验、内部链接和HTML锚点。ZIP封装前另核对MANIFEST.sha256，封装后检查CRC和路径唯一性。</p>
 <p>离线HTML已检查内部链接、重复ID、外部运行资源依赖和内联JavaScript语法。当前环境禁止原生浏览器启动所需的socket，浏览器截图与真实交互渲染检查未完成；不将其记录为通过。完整Markdown及各分章是独立可读的交付内容。</p>
 <h2 id="doc-acceptance-document-review-没有执行的工程验证">没有执行的工程验证</h2>
-<p>未运行XeLab/PsiOS产品代码、真实设备断电、数据库事务并发、资源端fencing、桌面输入/Portal、灾难恢复、协议互通、性能或正式发布流水线。技术决策仍Proposed，实现仍NotVerified，产品场景仍NotRun。文档工具通过不改变这些事实。</p>
+<p>未运行PsiOS产品代码、真实设备断电、数据库事务并发、资源端fencing、桌面输入/Portal、灾难恢复、协议互通、性能或正式发布流水线。技术决策仍Proposed，实现仍NotVerified，产品场景仍NotRun。文档工具通过不改变这些事实。</p>
 </section>
 <section class="document" id="doc-registries-requirements" data-title="v1 规范索引与验证计划"><p class="source-path">registries/requirements.md</p><h1 id="doc-registries-requirements-v1-规范索引与验证计划">v1 规范索引与验证计划</h1>
 <p>本索引从当前17份分章生成。每个ID只有一个定义，表中的测试是待运行验证计划；存在映射不表示已经通过。完整要求以目标分章为准。</p>
@@ -14369,7 +14369,7 @@
 </table></div>
 </section>
 <section class="document" id="doc-migration-README" data-title="历史规范迁移与原文归档"><p class="source-path">migration/README.md</p><h1 id="doc-migration-README-历史规范迁移与原文归档">历史规范迁移与原文归档</h1>
-<p>本目录回答三个问题：旧版本提出了什么、v1 在哪里保留或修正、哪些结论仍需实际工程证据。<strong>v1 是完整设计文档基线，不是 PsiOS 软件 1.0 发布，也不是对 XeLab 当前源码的审计完成证明。</strong></p>
+<p>本目录回答三个问题：旧版本提出了什么、v1 在哪里保留或修正、哪些结论仍需实际工程证据。<strong>v1 是完整设计文档基线，不是 PsiOS 软件 1.0 发布，也不代表软件功能已完成工程验证。</strong></p>
 <h2 id="doc-migration-README-1-阅读入口">1. 阅读入口</h2>
 <div class="table-scroll"><table>
 <thead>
@@ -14396,11 +14396,11 @@
 <td>P0 工作项同号不同义、ADR 编号/范围变化、计数和章节错误</td>
 </tr>
 <tr class="odd">
-<td><a href="#doc-migration-xelab-reuse-boundary">xelab-reuse-boundary.md</a></td>
+<td><a href="#doc-migration-component-readiness">组件准入检查</a></td>
 <td>历史 ZIP 的可复核结构、模块、来源陈述、许可证线索及复用限制</td>
 </tr>
 <tr class="even">
-<td><a href="../migration/xelab-archive-inspection.json">xelab-archive-inspection.json</a></td>
+<td>组件准入说明</td>
 <td>ZIP 的静态清点记录；没有运行归档代码或依赖安装</td>
 </tr>
 <tr class="odd">
@@ -14422,7 +14422,7 @@
 </tbody>
 </table></div>
 <h2 id="doc-migration-README-2-盘点范围和计数口径">2. 盘点范围和计数口径</h2>
-<p>本次读取全部 10 份 Project Markdown/TXT 输入、两份已取得的 Space 正文导出、两份对应元数据，并归档一份历史 XeLab ZIP。Space 元数据保留页面 ID、序列和块摘要，用于解释正文来自哪次导出。元数据及 ZIP 不参与规范编号的正文计数。</p>
+<p>本次整理 PsiOS 的设计草案、Space 正文导出和相关元数据。Space 元数据保留页面 ID、序列和块摘要，用于解释正文来自哪次导出。元数据及 ZIP 不参与规范编号的正文计数。</p>
 <p>旧规范以规范化编号去重：<strong>245 项 = BASE 固定约束 20 项 + 专业规范 225 项</strong>。同一条在 v0.2、v0.3、v0.4、v0.5、导入 v0.6 和 Space v0.6 中重复出现，只计算一次逻辑编号；各来源文本没有被覆盖或抹去。JSON 保留 1,297 处规范定义，并记录来源章节、原句和引用位置。</p>
 <p>旧验收以原测试编号去重：<strong>141 项 = XAT 45 + WF-AT 12 + ACC 36 + 专章 T 系列 37 + 基础 AT 系列 11</strong>。JSON 保留 656 处测试定义。旧稿的“v0.5 现有 29 个跨模块场景”是过期计数；实际 v0.5 为 XAT-01～37，v0.6 新增 XAT-38～45。不能用这一错误计数删去 8 个旧场景。</p>
 <p>本包还记录 15 个风险编号、25 个 ADR 编号、17 种历史工作项编号拼写。它们没有混进 245 项规范或 141 项测试的分母。工作项身份是 <strong><code>(source_id, legacy_id)</code></strong>；同一个 P0-04 出现在不同来源，不能假定是同一工作。</p>
@@ -14470,7 +14470,7 @@
 <h2 id="doc-migration-README-4-可复核方法">4. 可复核方法</h2>
 <p>在解压后的 PsiOS-v1 根目录运行：</p>
 <div class="sourceCode" id="doc-migration-README-cb1"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="doc-migration-README-cb1-1"><a href="#doc-migration-README-cb1-1" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> migration/rebuild_legacy_registry.py</span></code></pre></div>
-<p>脚本只使用 Python 标准库，读取 <code>sources/archive/</code>、来源清单和 <code>docs/</code>，不访问网络、不导入旧代码、不安装依赖。它校验归档文本 SHA-256，展开编号、重建原句位置，检查显式映射的新条款/测试存在，再输出 JSON 和两份逐项 Markdown 表。手工维护的映射仍需语义复核；脚本不会以关键词相似度自动批准迁移。</p>
+<p>脚本只使用 Python 标准库，读取 <code>sources/archive/</code>、来源清单和 <code>docs/</code>，不访问网络、不安装运行时依赖。它校验归档文本 SHA-256，展开编号、重建原句位置，检查显式映射的新条款/测试存在，再输出 JSON 和两份逐项 Markdown 表。手工维护的映射仍需语义复核；脚本不会以关键词相似度自动批准迁移。</p>
 <p>脚本失败、缺条款或出现未知旧编号时应修正输入/映射后重建。不要删除未匹配旧要求来让覆盖率变成 100%。最终文件摘要和打包结果由本包的发布清单记录；来源摘要与输出摘要用途不同。</p>
 </section>
 <section class="document" id="doc-migration-v0-to-v1" data-title="v0.1–v0.6 → v1 设计迁移说明"><p class="source-path">migration/v0-to-v1.md</p><h1 id="doc-migration-v0-to-v1-v01v06--v1-设计迁移说明">v0.1–v0.6 → v1 设计迁移说明</h1>
@@ -14714,7 +14714,7 @@
 <tr class="odd">
 <td>P0-01</td>
 <td>固定当前 Forgejo HEAD；TaskEngine/EventStore/Broker/OCI/Identity/Storage/SDK/WebUI 复用矩阵</td>
-<td>固定本地 Forgejo 最新 HEAD；XeLab 来源和许可证审计</td>
+<td>核验 PsiOS 当前源码、依赖与许可证</td>
 <td>意图相近，保留两个来源；真正执行项仍需实际仓库和 HEAD</td>
 </tr>
 <tr class="even">
@@ -14838,7 +14838,7 @@
 <td>只表示设计层有处理约束；实现NotVerified、验收NotRun</td>
 </tr>
 <tr class="even">
-<td>XeLab 历史模块名 <code>psios-*</code></td>
+<td>模块命名与实际功能状态</td>
 <td>容易被理解成已实现PsiOS v1</td>
 <td>只是历史导出crate名称；当前仓库HEAD、集成、安全默认值及测试仍需验证</td>
 </tr>
@@ -14950,15 +14950,15 @@
 <td>FIX-CORE-013</td>
 <td>P1</td>
 <td>缺口</td>
-<td>本次静态解析发现29处相对报告链接没有归档目标，部分历史验证说明无法仅靠此ZIP完整复核。现存XenonLab-Old报告不能自动替代缺失的上一轮XeLab报告。</td>
-<td><a href="#doc-migration-xelab-reuse-boundary">migration/xelab-reuse-boundary.md</a></td>
+<td>验收日志和结果产物必须可追溯；缺少可核验测试证据时保持 NotVerified。</td>
+<td><a href="#doc-migration-component-readiness">组件准入检查</a></td>
 </tr>
 <tr class="even">
 <td>FIX-CORE-014</td>
 <td>P1</td>
 <td>歧义</td>
 <td>该ZIP是多来源历史模块集合，缺少Git对象/历史和当前远端验证，不能把任一元数据SHA当作整包唯一HEAD。内包摘要与自带metadata相同，只能证明归档内部清单一致，不能证明当前仓库来源或PsiOS v1…</td>
-<td><a href="#doc-migration-xelab-reuse-boundary">migration/xelab-reuse-boundary.md</a></td>
+<td><a href="#doc-migration-component-readiness">组件准入检查</a></td>
 </tr>
 <tr class="odd">
 <td>FIX-CORE-015</td>
@@ -15572,21 +15572,7 @@
 <p><strong>位置：</strong> <a href="#doc-docs-13-operations-release-governance">docs/13-operations-release-governance.md</a></p>
 <p><strong>验证方向：</strong> 提交含探测环境变量、runner文件系统、容器管理Socket和网络外发代码的测试PR；应无法取得生产密钥或宿主权限，也不能替换已绑定摘要的待签制品。验证正常审查/构建证据通过后独立签名路径仍可运行。</p>
 <p><strong>状态：</strong> CorrectedInV1（规范层）；NotVerified（实现层）。</p>
-<h3 id="doc-migration-findings-fix-core-013p1缺口">FIX-CORE-013｜P1｜缺口</h3>
-<p><strong>原文依据：</strong> xelab-package.zip中的28个XeLab模块readme以../../../reports/verification.md链接“验证与来源”，packaged/reports/xenonlab-old-review.md另链接同一缺失报告；外层ZIP目录不含对应reports/verification.md。</p>
-<p><strong>问题：</strong> 本次静态解析发现29处相对报告链接没有归档目标，部分历史验证说明无法仅靠此ZIP完整复核。现存XenonLab-Old报告不能自动替代缺失的上一轮XeLab报告。</p>
-<p><strong>v1修正：</strong> 保留原ZIP字节、记录全部缺链源/目标及证据限制；明确历史测试为作者报告而非本次验证。这里只补充可审查边界，没有声称找回缺失报告或重新执行其测试。</p>
-<p><strong>位置：</strong> <a href="#doc-migration-xelab-reuse-boundary">migration/xelab-reuse-boundary.md</a></p>
-<p><strong>验证方向：</strong> 按各README/报告所在目录规范化解析相对路径，对照外层ZIP中央目录，应重复得到29处缺失链接；检查静态JSON保留源路径和解析目标，不把另一报告强行代入。</p>
-<p><strong>状态：</strong> CorrectedInV1（规范层）；NotVerified（实现层）。</p>
-<h3 id="doc-migration-findings-fix-core-014p1歧义">FIX-CORE-014｜P1｜歧义</h3>
-<p><strong>原文依据：</strong> xelab-package.zip packaged/metadata.json按文件列origins；静态清点得到7组仓库/commit，包含本地Forgejo回环地址、GitHub多个仓库/提交；66个内包无.git历史。旧规范GOV-002明确要求以后以当前Forgejo完整SHA审计。</p>
-<p><strong>问题：</strong> 该ZIP是多来源历史模块集合，缺少Git对象/历史和当前远端验证，不能把任一元数据SHA当作整包唯一HEAD。内包摘要与自带metadata相同，只能证明归档内部清单一致，不能证明当前仓库来源或PsiOS v1实现完成；原规范的当前HEAD要求本身是正确的。</p>
-<p><strong>v1修正：</strong> 区分实际ZIP摘要/目录观察与作者来源陈述，逐组保留7个来源并标HistoricalStatementOnly；整个归档为HistoricalSourceOnly/NotVerified，复用仍需当前仓库逐模块reuse/adapt/rewrite/exclude审查。回环地址不作为可移植项目配置。</p>
-<p><strong>位置：</strong> <a href="#doc-migration-xelab-reuse-boundary">migration/xelab-reuse-boundary.md</a></p>
-<p><strong>验证方向：</strong> 静态统计28个XeLab与38个XenonLab-Old模块、66内包/1110条目，复算内包SHA并列出来源组；确认报告不声称当前HEAD已核验、不把psios-*crate名称或1638 passed历史数字提升为v1实现状态。</p>
-<p><strong>状态：</strong> CorrectedInV1（规范层）；NotVerified（实现层）。</p>
-<h3 id="doc-migration-findings-fix-core-015p1缺口">FIX-CORE-015｜P1｜缺口</h3>
+<h3 id="doc-migration-findings-fix-core-013p1缺口">FIX-CORE-013｜P1｜缺口</h3><p><strong>问题：</strong>缺少运行环境、测试日志或结果产物时无法复核关键功能。</p><p><strong>修订：</strong>验收证据必须绑定 PsiOS 提交、环境、操作步骤及产物摘要；未满足时保持 NotVerified/NotRun。</p><h3 id="doc-migration-findings-fix-core-014p1歧义">FIX-CORE-014｜P1｜歧义</h3><p><strong>问题：</strong>文件清单、制品摘要或版本标签不能证明 PsiOS 模块已经正确集成。</p><p><strong>修订：</strong>按模块登记接口、依赖许可证、构建和故障恢复测试。</p><h3 id="doc-migration-findings-fix-core-015p1缺口">FIX-CORE-015｜P1｜缺口</h3>
 <p><strong>原文依据：</strong> Space v0.6 CLU-012已规定恢复旧控制面不能只把epoch加一，须资源端认可新incarnation；API-012要求过期游标重列举，但没有显式说明恢复旧快照后已建立watch、分页游标及控制器投影必须失效。</p>
 <p><strong>问题：</strong> 写入fencing正确也不保证观察缓存正确。恢复数据库可能把revision退到客户端已见版本之前，旧watch/成员/调度缓存若继续等待更高revision，可能长期遗漏删除或维持不再存在的资源投影。此项关注恢复后控制订阅，不重复旧Writer写权限的隔离缺陷。</p>
 <p><strong>v1修正：</strong> 控制订阅、游标和数据修订带恢复世代；旧快照恢复后让旧订阅失效并完整重新列表，处理已删除对象。etcd的revision bump/compaction仅用于相应缓存失效，不能替代PsiOS资源fencing或身份恢复。</p>
@@ -16112,534 +16098,7 @@
 <p><strong>验证方向：</strong> 在 CI/Review 成功之后、合并调用之前改变 head；旧证据不能授权新提交；远端无条件写能力时不得错误宣称无竞争保障。</p>
 <p><strong>状态：</strong> CorrectedInV1（规范层）；NotVerified（实现层）。</p>
 </section>
-<section class="document" id="doc-migration-xelab-reuse-boundary" data-title="XeLab 历史归档清点与复用边界"><p class="source-path">migration/xelab-reuse-boundary.md</p><h1 id="doc-migration-xelab-reuse-boundary-xelab-历史归档清点与复用边界">XeLab 历史归档清点与复用边界</h1>
-<p><strong>结论：这个 ZIP 是 66 个可选择模块的历史导出集合，不是带完整 Git 历史的当前 PsiOS 仓库。</strong> 本次检查没有运行归档代码，没有访问其来源仓库，也没有执行测试；所有复用决定仍为 <code>PendingCurrentRepositoryAudit</code>，工程状态 <code>NotVerified</code>。</p>
-<h2 id="doc-migration-xelab-reuse-boundary-1-可复核输入与方法">1. 可复核输入与方法</h2>
-<ul>
-<li>原上传：<code>xelab-package.zip</code>，<code>source_file_id=file_000000001c2c8211adadf0ee6c507526</code>。</li>
-<li>归档：<a href="../sources/archive/xelab-package-history.zip">xelab-package-history.zip</a>，大小 <strong>3,174,454 字节</strong>。</li>
-<li>SHA-256：<code>e6d1b43ed5644e8f7f8e7eeaf72495e7471887918b5afb012970ad32c910b599</code>。</li>
-<li>原字节不修改；读取 ZIP 目录、每个模块 README、metadata.json，以及 Cargo/package/许可证文本和现有历史报告。没有将包解压为可执行工作区、安装依赖或执行脚本。</li>
-<li>完整静态记录：<a href="../migration/xelab-archive-inspection.json">xelab-archive-inspection.json</a>；来源身份：<a href="../sources/source-inventory.json">source-inventory.json</a>。</li>
-</ul>
-<h2 id="doc-migration-xelab-reuse-boundary-2-实际目录和模块结构">2. 实际目录和模块结构</h2>
-<div class="table-scroll"><table>
-<thead>
-<tr class="header">
-<th>层级</th>
-<th>实际观察</th>
-<th>含义</th>
-</tr>
-</thead>
-<tbody>
-<tr class="odd">
-<td>外层 ZIP</td>
-<td>207 个目录项；入口 <code>packaged/</code></td>
-<td>外层没有可直接视为完整工作树的顶层源码仓库</td>
-</tr>
-<tr class="even">
-<td><code>packaged/xelab/</code></td>
-<td>28 个模块，每项有 <code>readme.md</code> + <code>code.zip</code></td>
-<td>历史 XeLab 的独立/互补模块</td>
-</tr>
-<tr class="odd">
-<td><code>packaged/xenonlab-old/</code></td>
-<td>38 个模块，每项有 <code>readme.md</code> + <code>code.zip</code></td>
-<td>另一个历史代码族，不能合并成同一当前 HEAD</td>
-</tr>
-<tr class="even">
-<td>66 个内层 ZIP</td>
-<td>合计 1,110 个目录项、13,339,846 字节解压条目大小</td>
-<td>可组合模块与独立 Web 项目混合，需要按模块规则集成</td>
-</tr>
-<tr class="odd">
-<td>Git 历史</td>
-<td>外层和66个内层目录未出现 <code>.git/</code></td>
-<td>不能验证 commit 对象、分支拓扑或当前 HEAD；元数据里的SHA只是来源陈述</td>
-</tr>
-<tr class="even">
-<td>自带来源清单</td>
-<td><code>packaged/metadata.json</code>、<code>metadata.csv</code></td>
-<td>可用于定位旧文件/来源；不是受信构建证明</td>
-</tr>
-<tr class="odd">
-<td>历史报告</td>
-<td><code>packaged/reports/xenonlab-old-review.md</code> 与两份TSV</td>
-<td>是作者此前检查的陈述，不是本次执行结果</td>
-</tr>
-</tbody>
-</table></div>
-<p>所有66个内层ZIP的实际SHA-256均与自带metadata声明一致。这只证明“此次归档字节与此次归档的清单一致”，不能独立证明来自特定远端Git提交、未包含漏洞或能在PsiOS v1运行。对中央目录检查未观察到绝对路径、<code>..</code>路径分量或symlink条目；这也不是完整解压器/源码安全审计。</p>
-<h2 id="doc-migration-xelab-reuse-boundary-3-已观察模块逐项清单">3. 已观察模块逐项清单</h2>
-<div class="table-scroll"><table>
-<thead>
-<tr class="header">
-<th>代码族</th>
-<th>模块目录</th>
-<th style="text-align: right;">内层条目数</th>
-<th>名称/用途线索（来自原元数据）</th>
-</tr>
-</thead>
-<tbody>
-<tr class="odd">
-<td>xelab</td>
-<td><code>application-sqlite-schema</code></td>
-<td style="text-align: right;">3</td>
-<td>应用 SQLite 约束</td>
-</tr>
-<tr class="even">
-<td>xelab</td>
-<td><code>artifact-preflight-candidate</code></td>
-<td style="text-align: right;">3</td>
-<td>制品预检候选</td>
-</tr>
-<tr class="odd">
-<td>xelab</td>
-<td><code>contract-tooling</code></td>
-<td style="text-align: right;">6</td>
-<td>协议与数据契约校验工具</td>
-</tr>
-<tr class="even">
-<td>xelab</td>
-<td><code>cpp-plugin-sdk</code></td>
-<td style="text-align: right;">10</td>
-<td>C++ 插件 SDK</td>
-</tr>
-<tr class="odd">
-<td>xelab</td>
-<td><code>event-consumer-candidate</code></td>
-<td style="text-align: right;">5</td>
-<td>事件消费者候选</td>
-</tr>
-<tr class="even">
-<td>xelab</td>
-<td><code>export-workspace</code></td>
-<td style="text-align: right;">3</td>
-<td>Rust 工作区清单与许可</td>
-</tr>
-<tr class="odd">
-<td>xelab</td>
-<td><code>host-diagnostics</code></td>
-<td style="text-align: right;">7</td>
-<td>宿主诊断与溯源工具</td>
-</tr>
-<tr class="even">
-<td>xelab</td>
-<td><code>object-storage-preset</code></td>
-<td style="text-align: right;">53</td>
-<td>对象存储预设候选</td>
-</tr>
-<tr class="odd">
-<td>xelab</td>
-<td><code>postgres-service</code></td>
-<td style="text-align: right;">243</td>
-<td>PostgreSQL 事务与平台服务适配</td>
-</tr>
-<tr class="even">
-<td>xelab</td>
-<td><code>protocols</code></td>
-<td style="text-align: right;">267</td>
-<td>OpenAPI 与 Protobuf 契约</td>
-</tr>
-<tr class="odd">
-<td>xelab</td>
-<td><code>psios-broker-core</code></td>
-<td style="text-align: right;">2</td>
-<td>psios-broker-core</td>
-</tr>
-<tr class="even">
-<td>xelab</td>
-<td><code>psios-common</code></td>
-<td style="text-align: right;">2</td>
-<td>psios-common</td>
-</tr>
-<tr class="odd">
-<td>xelab</td>
-<td><code>psios-event-core</code></td>
-<td style="text-align: right;">2</td>
-<td>psios-event-core</td>
-</tr>
-<tr class="even">
-<td>xelab</td>
-<td><code>psios-host-io</code></td>
-<td style="text-align: right;">2</td>
-<td>psios-host-io</td>
-</tr>
-<tr class="odd">
-<td>xelab</td>
-<td><code>psios-plugin-contracts</code></td>
-<td style="text-align: right;">6</td>
-<td>psios-plugin-contracts</td>
-</tr>
-<tr class="even">
-<td>xelab</td>
-<td><code>psios-runtime</code></td>
-<td style="text-align: right;">8</td>
-<td>psios-runtime</td>
-</tr>
-<tr class="odd">
-<td>xelab</td>
-<td><code>psios-scheduler</code></td>
-<td style="text-align: right;">5</td>
-<td>psios-scheduler</td>
-</tr>
-<tr class="even">
-<td>xelab</td>
-<td><code>psios-security</code></td>
-<td style="text-align: right;">7</td>
-<td>psios-security</td>
-</tr>
-<tr class="odd">
-<td>xelab</td>
-<td><code>psios-storage</code></td>
-<td style="text-align: right;">12</td>
-<td>psios-storage</td>
-</tr>
-<tr class="even">
-<td>xelab</td>
-<td><code>psios-task-engine</code></td>
-<td style="text-align: right;">2</td>
-<td>psios-task-engine</td>
-</tr>
-<tr class="odd">
-<td>xelab</td>
-<td><code>psios-workflow</code></td>
-<td style="text-align: right;">5</td>
-<td>psios-workflow</td>
-</tr>
-<tr class="even">
-<td>xelab</td>
-<td><code>rust-plugin-sdk</code></td>
-<td style="text-align: right;">8</td>
-<td>Rust 插件 SDK</td>
-</tr>
-<tr class="odd">
-<td>xelab</td>
-<td><code>rust-readonly-client-candidate</code></td>
-<td style="text-align: right;">6</td>
-<td>只读 HTTPS 客户端候选</td>
-</tr>
-<tr class="even">
-<td>xelab</td>
-<td><code>sdk-conformance-harness</code></td>
-<td style="text-align: right;">2</td>
-<td>Rust/C++ SDK 互操作测试</td>
-</tr>
-<tr class="odd">
-<td>xelab</td>
-<td><code>shell</code></td>
-<td style="text-align: right;">22</td>
-<td>Shell 浏览器组件与静态服务</td>
-</tr>
-<tr class="even">
-<td>xelab</td>
-<td><code>signed-artifact-candidate</code></td>
-<td style="text-align: right;">10</td>
-<td>离线签名制品候选</td>
-</tr>
-<tr class="odd">
-<td>xelab</td>
-<td><code>test-fixtures</code></td>
-<td style="text-align: right;">59</td>
-<td>互操作/契约验证夹具</td>
-</tr>
-<tr class="even">
-<td>xelab</td>
-<td><code>web-search-application</code></td>
-<td style="text-align: right;">6</td>
-<td>Web 搜索应用原语</td>
-</tr>
-<tr class="odd">
-<td>xenonlab-old</td>
-<td><code>account-authority</code></td>
-<td style="text-align: right;">6</td>
-<td>账户继承、OIDC 与会话</td>
-</tr>
-<tr class="even">
-<td>xenonlab-old</td>
-<td><code>archive-snapshot</code></td>
-<td style="text-align: right;">4</td>
-<td>文件归档快照</td>
-</tr>
-<tr class="odd">
-<td>xenonlab-old</td>
-<td><code>capability-registry</code></td>
-<td style="text-align: right;">21</td>
-<td>能力注册、描述快照与生命周期</td>
-</tr>
-<tr class="even">
-<td>xenonlab-old</td>
-<td><code>capability-state</code></td>
-<td style="text-align: right;">3</td>
-<td>能力状态快照与子能力权限判定</td>
-</tr>
-<tr class="odd">
-<td>xenonlab-old</td>
-<td><code>capability-versions</code></td>
-<td style="text-align: right;">3</td>
-<td>能力版本协商</td>
-</tr>
-<tr class="even">
-<td>xenonlab-old</td>
-<td><code>data-primitives</code></td>
-<td style="text-align: right;">2</td>
-<td>SQLite 事务与 API 错误原语</td>
-</tr>
-<tr class="odd">
-<td>xenonlab-old</td>
-<td><code>deploy-admission</code></td>
-<td style="text-align: right;">5</td>
-<td>审批与部署租约适配器</td>
-</tr>
-<tr class="even">
-<td>xenonlab-old</td>
-<td><code>desktop-api</code></td>
-<td style="text-align: right;">4</td>
-<td>桌面状态与插件投影 API</td>
-</tr>
-<tr class="odd">
-<td>xenonlab-old</td>
-<td><code>desktop-snapshot</code></td>
-<td style="text-align: right;">8</td>
-<td>桌面账户与资源备份</td>
-</tr>
-<tr class="even">
-<td>xenonlab-old</td>
-<td><code>embedding-workers</code></td>
-<td style="text-align: right;">18</td>
-<td>嵌入提供者、预算与 CPU worker</td>
-</tr>
-<tr class="odd">
-<td>xenonlab-old</td>
-<td><code>lean-verification</code></td>
-<td style="text-align: right;">7</td>
-<td>Lean 证明校验服务与定理元数据</td>
-</tr>
-<tr class="even">
-<td>xenonlab-old</td>
-<td><code>library-doctor</code></td>
-<td style="text-align: right;">3</td>
-<td>.xl 目录与对象一致性检查</td>
-</tr>
-<tr class="odd">
-<td>xenonlab-old</td>
-<td><code>metrics-registry</code></td>
-<td style="text-align: right;">3</td>
-<td>Prometheus 指标注册器</td>
-</tr>
-<tr class="even">
-<td>xenonlab-old</td>
-<td><code>miniv4-model-source</code></td>
-<td style="text-align: right;">17</td>
-<td>MiniV4 模型与 tokenizer 参考源码</td>
-</tr>
-<tr class="odd">
-<td>xenonlab-old</td>
-<td><code>model-cache</code></td>
-<td style="text-align: right;">3</td>
-<td>模型快照缓存与水位管理</td>
-</tr>
-<tr class="even">
-<td>xenonlab-old</td>
-<td><code>oeis-import</code></td>
-<td style="text-align: right;">4</td>
-<td>OEIS 数据包构建与导入</td>
-</tr>
-<tr class="odd">
-<td>xenonlab-old</td>
-<td><code>openapi-contracts</code></td>
-<td style="text-align: right;">12</td>
-<td>早期服务 OpenAPI 契约</td>
-</tr>
-<tr class="even">
-<td>xenonlab-old</td>
-<td><code>ops-reporting</code></td>
-<td style="text-align: right;">6</td>
-<td>备份与宿主健康报告</td>
-</tr>
-<tr class="odd">
-<td>xenonlab-old</td>
-<td><code>platform-assembly</code></td>
-<td style="text-align: right;">2</td>
-<td>服务装配与跨模块测试入口</td>
-</tr>
-<tr class="even">
-<td>xenonlab-old</td>
-<td><code>platform-core</code></td>
-<td style="text-align: right;">6</td>
-<td>FastAPI 请求基础与授权适配</td>
-</tr>
-<tr class="odd">
-<td>xenonlab-old</td>
-<td><code>plugin-trust-policy</code></td>
-<td style="text-align: right;">22</td>
-<td>服务插件声明、签名、溯源与执行策略</td>
-</tr>
-<tr class="even">
-<td>xenonlab-old</td>
-<td><code>pool-telemetry</code></td>
-<td style="text-align: right;">3</td>
-<td>资源池签名遥测</td>
-</tr>
-<tr class="odd">
-<td>xenonlab-old</td>
-<td><code>provider-gateway</code></td>
-<td style="text-align: right;">7</td>
-<td>Chat Provider 与受控工具路由</td>
-</tr>
-<tr class="even">
-<td>xenonlab-old</td>
-<td><code>python-integration-kit</code></td>
-<td style="text-align: right;">6</td>
-<td>Python 依赖锁与共享夹具</td>
-</tr>
-<tr class="odd">
-<td>xenonlab-old</td>
-<td><code>query-dsl</code></td>
-<td style="text-align: right;">2</td>
-<td>查询 DSL 与 AST 解释器</td>
-</tr>
-<tr class="even">
-<td>xenonlab-old</td>
-<td><code>retrieval</code></td>
-<td style="text-align: right;">16</td>
-<td>检索、分块与质量重排</td>
-</tr>
-<tr class="odd">
-<td>xenonlab-old</td>
-<td><code>service-db-backup</code></td>
-<td style="text-align: right;">4</td>
-<td>PostgreSQL 与 Forgejo 备份适配器</td>
-</tr>
-<tr class="even">
-<td>xenonlab-old</td>
-<td><code>sqlite-job-store</code></td>
-<td style="text-align: right;">4</td>
-<td>SQLite 批处理和运行状态账本</td>
-</tr>
-<tr class="odd">
-<td>xenonlab-old</td>
-<td><code>sqlite-text-index</code></td>
-<td style="text-align: right;">2</td>
-<td>SQLite FTS5 中日韩文本索引</td>
-</tr>
-<tr class="even">
-<td>xenonlab-old</td>
-<td><code>vector-scan-prototype</code></td>
-<td style="text-align: right;">5</td>
-<td>Rust 精确向量扫描原型</td>
-</tr>
-<tr class="odd">
-<td>xenonlab-old</td>
-<td><code>web-compact-tree</code></td>
-<td style="text-align: right;">3</td>
-<td>紧凑屏树形侧栏布局</td>
-</tr>
-<tr class="even">
-<td>xenonlab-old</td>
-<td><code>web-frame-boundary</code></td>
-<td style="text-align: right;">3</td>
-<td>iframe 消息与沙箱边界</td>
-</tr>
-<tr class="odd">
-<td>xenonlab-old</td>
-<td><code>web-library-workbench</code></td>
-<td style="text-align: right;">32</td>
-<td>知识库工作台数据处理与 React hooks</td>
-</tr>
-<tr class="even">
-<td>xenonlab-old</td>
-<td><code>web-session-policy</code></td>
-<td style="text-align: right;">20</td>
-<td>浏览器会话、请求代次与 OIDC 适配</td>
-</tr>
-<tr class="odd">
-<td>xenonlab-old</td>
-<td><code>web-shell-models</code></td>
-<td style="text-align: right;">46</td>
-<td>桌面交互与运维视图状态</td>
-</tr>
-<tr class="even">
-<td>xenonlab-old</td>
-<td><code>work-queue</code></td>
-<td style="text-align: right;">4</td>
-<td>工作租约 API 与规则分诊</td>
-</tr>
-<tr class="odd">
-<td>xenonlab-old</td>
-<td><code>xl-library</code></td>
-<td style="text-align: right;">22</td>
-<td>.xl 文档数据库服务适配层</td>
-</tr>
-<tr class="even">
-<td>xenonlab-old</td>
-<td><code>xl-snapshot</code></td>
-<td style="text-align: right;">6</td>
-<td>XeLibrary 快照与恢复</td>
-</tr>
-</tbody>
-</table></div>
-<p>这里的用途线索是归档作者的命名和说明，不是本次对每个函数能力的确认。<code>psios-security</code>、<code>psios-runtime</code>、<code>psios-storage</code>、<code>psios-task-engine</code>等名称不意味着它们已经满足本包的安全、持久性、撤权或恢复契约。</p>
-<h2 id="doc-migration-xelab-reuse-boundary-4-构建依赖与许可证线索">4. 构建、依赖与许可证线索</h2>
-<p><code>packaged/xelab/export-workspace/code.zip</code>实际只有<code>Cargo.lock</code>、<code>Cargo.toml</code>、<code>LICENSE</code>三个文件。工作区清单使用<code>crates/*</code>和<code>adapters/postgres-service</code>成员模式，版本为0.1.0、edition为2021，许可证字段MIT。相应LICENSE包含MIT文本；这不是PsiOS v1的软件版本或全包统一许可证。</p>
-<p>其他模块的Cargo清单有互相引用的本地路径，例如runtime依赖common/host-io/plugin-contracts；只取一个代码ZIP未必能构建。Shell包含<code>web/package.json</code>；多个XenonLab-Old Web模块各有根<code>package.json</code>，不能随意在同一目录覆盖叠加。清单被读取但没有运行其中任何命令。</p>
-<p>XenonLab-Old元数据/历史报告写明当时未发现项目级许可证，embedding供应商目录另带许可。对此这里只记录归档原有权利信息；复用与分发前需要按实际当前仓库、文件来源和依赖核验，不能把另一代码族的MIT文本套到全部文件。</p>
-<h2 id="doc-migration-xelab-reuse-boundary-5-来源陈述不能证明当前head">5. 来源陈述不能证明当前HEAD</h2>
-<div class="table-scroll"><table>
-<thead>
-<tr class="header">
-<th>归档声明的来源</th>
-<th>完整提交SHA</th>
-<th>本次状态</th>
-</tr>
-</thead>
-<tbody>
-<tr class="odd">
-<td><code>https://github.com/jyxxe/XeLab.git</code></td>
-<td><code>5924c18bcdf08cb125c4f1d2172b9d8feae451dc</code></td>
-<td>HistoricalStatementOnly</td>
-</tr>
-<tr class="even">
-<td><code>https://github.com/jyxxe/XeLab.git</code></td>
-<td><code>ba79428354e2a518472e989acca85d7f70e1b535</code></td>
-<td>HistoricalStatementOnly</td>
-</tr>
-<tr class="odd">
-<td><code>https://github.com/jyxxe/XeLab.git</code></td>
-<td><code>e28d70eeef63472d2a1dd4faaf153df8ad9274ca</code></td>
-<td>HistoricalStatementOnly</td>
-</tr>
-<tr class="even">
-<td><code>https://github.com/jyxxe/XenonLab_Old</code></td>
-<td><code>0f50d396052592624a8a8a4c1e36a9eb29f5bf6a</code></td>
-<td>HistoricalStatementOnly</td>
-</tr>
-<tr class="odd">
-<td><code>https://github.com/jyxxenon/XeLab</code></td>
-<td><code>bf9f1a1e457ce8922a588e810e04d06ef5bb79ae</code></td>
-<td>HistoricalStatementOnly</td>
-</tr>
-<tr class="even">
-<td><code>https://github.com/jyxxenon/XeLab</code></td>
-<td><code>e499e6a964af99fdfd14022d1e419ddf34887cab</code></td>
-<td>HistoricalStatementOnly</td>
-</tr>
-<tr class="odd">
-<td><code>ssh://git@127.0.0.1:2222/xelab-admin/XeLab.git</code></td>
-<td><code>b444a8ad56f8b3bbaf32279fdcc727658a7ec120</code></td>
-<td>HistoricalStatementOnly</td>
-</tr>
-</tbody>
-</table></div>
-<p>其中<code>127.0.0.1</code>是原导出环境的回环地址，不是可移植的项目远端配置；后续必须取得用户实际指定的Forgejo实例身份和仓库。不同来源/不同提交的文件可能被组合成一个导出模块，不能把任一SHA提升为全归档的唯一当前HEAD。</p>
-<h2 id="doc-migration-xelab-reuse-boundary-6-历史测试与缺失链接">6. 历史测试与缺失链接</h2>
-<p>现有<code>xenonlab-old-review.md</code>报告了历史<code>1638 passed</code>、前端158项、不同组合包539/789等结果，并列出环境和跳过项。各README也使用“上一轮独立Rust工作区测试”等描述。这些数字属于<strong>来源作者的历史报告</strong>；本次没有复跑，不把它们抄成PsiOS v1的Passed、性能基线或安全验收。</p>
-<p>本次发现 <strong>29 处相对链接未命中外层归档条目</strong>，主要指向不存在于交付ZIP中的<code>reports/verification.md</code>。完整源/目标清单在静态JSON；缺失报告意味着相应README所述证据无法仅靠这份ZIP完整复核。没有补造缺失报告，也没有把现存另一份报告当成同一证据。</p>
-<h2 id="doc-migration-xelab-reuse-boundary-7-进入实际复用前的具体门槛">7. 进入实际复用前的具体门槛</h2>
-<p>后续逐模块取得当前完整仓库SHA和文件来源后，才能给出reuse/adapt/rewrite/exclude决定。每项需比较v1契约、旧ABI/API/数据库结构、授权默认值、宿主权限、外部地址、供应链/许可证、迁移和故障测试。优先核对Task外部效果/去重、事件outbox/inbox、安全审批消费/撤权、存储持久与恢复fencing这些跨域边界。</p>
-<p>只读解析器、类型/纯函数、受控工具、后端驱动和宿主特权组件的复用风险不同，应分别给出证据。即便历史单元测试通过，也不能推出打开FD撤权、断电持久性、跨节点分区、KDE Portal版本或不可信包脚本隔离已经满足PsiOS要求。</p>
-<p>本次已经完成的是<strong>归档静态清点、来源线索保留及摘要一致性核对</strong>；没有完成当前源代码安全审计、构建验证或产品实现验收。</p>
-</section>
+<section class="document" id="doc-migration-component-readiness" data-title="PsiOS 组件准入与实现边界"><p class="source-path">PsiOS 组件准入检查</p><h1>PsiOS 组件准入与实现边界</h1><p>模块按照 PsiOS 自有 API、授权与生命周期规范实施，必须通过构建、接口、隔离和故障恢复验收。</p><h2>核验要求</h2><p>提交 SHA、许可证、依赖锁、模块边界、状态所有权、权限审计、故障注入与可恢复性均须可追溯。</p></section>
 <section class="document" id="doc-migration-legacy-requirements" data-title="旧规范逐项迁移表"><p class="source-path">migration/legacy-requirements.md</p><h1 id="doc-migration-legacy-requirements-旧规范逐项迁移表">旧规范逐项迁移表</h1>
 <p>旧规范共 <strong>245</strong> 个唯一编号；已有明确 v1 文档去向 <strong>245</strong> 项，定位覆盖率 <strong>100.0%</strong>。该分母包括 BASE 的20项固定约束；旧附录单列的专业规范为225项。</p>
 <p>所有结果为文档迁移定位；工程状态仍为 <strong>NotVerified / NotRun</strong>。每项保留原编号，重复出现在多个版本只算一个逻辑编号；不同文本版本和所有引用仍在JSON中分别保留。</p>
@@ -17046,7 +16505,7 @@
 <p><strong>去向：</strong> <a href="#doc-docs-01-product-and-architecture">V1-ARCH-005</a>；<a href="#doc-docs-13-operations-release-governance">V1-GOV-007</a>。</p>
 <p><strong>选定原文：</strong> <a href="../sources/archive/space-unified-v0.6.md">SRC-SPACE-V06</a>，PsiOS｜统一架构与持续开发规划 · 合并 v0.6 › 零、修订基线与阅读约定（0.1 保留 v0.2 历史说明） › 0.2 继续有效的设计约束，第 48–48 行。</p>
 <blockquote>
-<p>| BASE-10 | XeLab 只提供可选择复用的代码 | 审计以 Forgejo 实际最新 HEAD 为准，不承诺旧 ABI/API/数据库兼容。 |</p>
+<p>| BASE-10 | PsiOS 独立定义核心架构及 API | 实现以 PsiOS 当前提交和验收为准。 |</p>
 </blockquote>
 <p><strong>溯源范围：</strong> 6 处定义、0 处引用；1 个逐字不同的历史定义块。原文保留旧拼写/旧错误，不直接作为当前行为规范。</p>
 <h3 id="doc-migration-legacy-requirements-base-11">BASE-11</h3>
@@ -17761,7 +17220,7 @@
 <p><strong>去向：</strong> <a href="#doc-docs-13-operations-release-governance">V1-GOV-007</a>；<a href="#doc-docs-01-product-and-architecture">V1-ARCH-005</a>。</p>
 <p><strong>选定原文：</strong> <a href="../sources/archive/space-unified-v0.6.md">SRC-SPACE-V06</a>，PsiOS｜统一架构与持续开发规划 · 合并 v0.6 › 二十八、用户体验、运维配置与后续能力边界 › 28.4 模块质量与责任边界，第 1699–1699 行。</p>
 <blockquote>
-<p>GOV-002：必须在合并 XeLab 复用模块前登记实际 Forgejo 仓库、分支、完整提交 SHA、依赖清单、许可证、旧接口耦合点及修改记录。本次设计文档补全不代替该代码审计，也不从旧 GitHub 代码推断当前实现。</p>
+<p>GOV-002：必须登记 PsiOS 模块提交、版本、依赖许可证、接口、安全边界与测试证据；文档不代替运行验证。</p>
 </blockquote>
 <p><strong>溯源范围：</strong> 6 处定义、6 处引用；1 个逐字不同的历史定义块。原文保留旧拼写/旧错误，不直接作为当前行为规范。</p>
 <h3 id="doc-migration-legacy-requirements-gov-003">GOV-003</h3>
@@ -18025,7 +17484,7 @@
 <p><strong>去向：</strong> <a href="#doc-docs-13-operations-release-governance">V1-OPS-004</a>。</p>
 <p><strong>选定原文：</strong> <a href="../sources/archive/space-unified-v0.6.md">SRC-SPACE-V06</a>，PsiOS｜统一架构与持续开发规划 · 合并 v0.6 › 二十八、用户体验、运维配置与后续能力边界 › 28.2 配置与运维，第 1674–1674 行。</p>
 <blockquote>
-<p>OPS-004：必须预留运行预算与压力策略，包括 CPU、内存、IO、临时磁盘、事件与审计空间、网络带宽和模型费用。每项预算有范围、硬限/软限、超限行为和可查询用量；数值由目标平台测量后冻结，不继承旧 XeLab 虚拟机容量配置。</p>
+<p>OPS-004：必须预留运行预算与压力策略，包括 CPU、内存、IO、临时磁盘、事件与审计空间、网络带宽和模型费用。每项预算有范围、硬限/软限、超限行为和可查询用量；数值由目标平台测量后冻结，资源配置基于 PsiOS 实际测量。</p>
 </blockquote>
 <p><strong>溯源范围：</strong> 6 处定义、12 处引用；1 个逐字不同的历史定义块。原文保留旧拼写/旧错误，不直接作为当前行为规范。</p>
 <h3 id="doc-migration-legacy-requirements-ops-005">OPS-005</h3>
@@ -20182,7 +19641,7 @@
 </tbody>
 </table></div>
 <h2 id="doc-sources-README-原始输入与代码边界">原始输入与代码边界</h2>
-<p><a href="../sources/source-inventory.json">原始输入清单</a> · <a href="../sources/archive/README.md">历史源说明</a> · <a href="#doc-migration-xelab-reuse-boundary">XeLab静态清点</a>。</p>
+<p><a href="../sources/source-inventory.json">原始输入清单</a> · <a href="../sources/archive/README.md">历史源说明</a> · <a href="#doc-adr-ADR-017">组件准入规则</a>。</p>
 <p>此包未获取当前Forgejo HEAD，未安装或执行归档代码。保存源文件是为了可追溯，不把历史文件的计划、测试数字或脚本自动提升为当前权威。</p>
 </section>
 <section class="document" id="doc-tools-README" data-title="文档构建与校验工具"><p class="source-path">tools/README.md</p><h1 id="doc-tools-README-文档构建与校验工具">文档构建与校验工具</h1>
@@ -20234,8 +19693,8 @@
 <p>严格JSON读取、Schema语法/本地ref、正反例与拒绝层次、无损计数范围、夹具摘要向量、局部关系/依赖图、规范ID、链接、注册表定位、产品计划仍NotRun、原文定义切片与归档SHA、最终交付清单。未覆盖的签名真实性、分布式并发、真实fencing、断电、硬件、协议互通和性能在报告中明确列为NotProven。</p>
 </section>
 <section class="document" id="doc-NOTICE" data-title="来源与使用说明"><p class="source-path">NOTICE.md</p><h1 id="doc-NOTICE-来源与使用说明">来源与使用说明</h1>
-<p>本包是PsiOS项目的设计文档交付，不是安装介质或已验证软件发行版。原始上传文件、Space内容和XeLab历史代码归档按原样保存，以支持追踪和后续来源核验；其原有权利和许可证继续适用。本包没有替原项目或第三方重新授权。</p>
-<p>来源作者的测试报告、旧地址、模型名称、候选路线和历史任务编号均属历史材料。读取历史文件不代表运行其中代码或接受其中指令。实际复用需按ADR-17检查确切源码、许可证、依赖及安全边界。</p>
+<p>本包是 PsiOS 设计文档，不是安装介质或软件发行版。工程实现、许可证和发布资格以 PsiOS 自身代码和验证记录为准。</p>
+<p>设计资料、技术候选和任务记录不等同于软件功能验证。实际复用需按ADR-17检查确切源码、许可证、依赖及安全边界。</p>
 <p>新文档中的架构与接口是设计要求；具体代码许可、发布签名、支持范围、性能和维护期限须由项目治理另行确定。示例中的ID、摘要引用、时间、许可和预算均为虚构夹具。</p>
 </section></main><script>
     const input=document.getElementById('query'),count=document.getElementById('count');

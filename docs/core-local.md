@@ -25,7 +25,7 @@ ctl wait "$task" > "$workdir/task.json"
 jq '{reference: .result.artifact_refs[0]}' "$workdir/task.json" | ctl call Artifact.Read
 ```
 
-`kill -TERM "$daemon_pid"` 请求关闭。再次使用同一目录启动会恢复队列、保留原任务身份和已接受回执。系统服务安装时，把二进制放入 `/usr/local/bin`，以专用服务账户初始化状态目录，并将配置安装在 `/etc/psios/core.json`。服务单元与配置示例使用 `psios` 用户、`/run/psios/api.sock`、`/var/lib/psios` 和独立的 `/var/lib/psios.witness`。[systemd 单元](../contrib/systemd/psiosd.service) · [配置示例](../contrib/systemd/core.json)
+`kill -TERM "$daemon_pid"` 请求关闭。再次使用同一目录启动会恢复队列、保留原任务身份和已接受回执。系统服务的打包、首次初始化及升级见[宿主安装指南](host-package.md)。打包单元使用 `/usr/bin/psiosd`。使用过手工单元的主机，迁移前须检查本机单元覆盖和旧二进制路径。服务单元与配置示例使用 `psios` 用户、`/run/psios/api.sock`、`/var/lib/psios` 和独立的 `/var/lib/psios.witness`。[systemd 单元](../contrib/systemd/psiosd.service) · [配置示例](../contrib/systemd/core.json)
 
 ## Agent 授权与执行
 

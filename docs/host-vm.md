@@ -9,7 +9,7 @@
 ```bash
 curl -fL "$(python3 -c 'import json; print(json.load(open("images/qemu/base.json"))["url"])')" -o ubuntu-minimal.img
 python3 images/qemu/create.py --base ubuntu-minimal.img \
-  --package ./psios-core_0.1.0~dev1_amd64.deb --authorized-key ~/.ssh/id_ed25519.pub --output ./node-a
+  --package ./host-build/psios-core_*.deb --authorized-key ~/.ssh/id_ed25519.pub --output ./node-a
 ```
 
 创建器核对基底文件大小和 SHA-256，检查包名与架构，要求输出目录尚不存在。生成的 `manifest.json` 记录原始基底、软件包、未启动的磁盘与种子摘要。基底摘要取自 Ubuntu 签名清单（签名者完整指纹在 `base.json` 中）。该基底用于本配置的实测，系统基底正式选型见 ADR-01。[固定基底](../images/qemu/base.json) · [Ubuntu 签名清单](https://cloud-images.ubuntu.com/minimal/releases/noble/release-20261105/SHA256SUMS.gpg) · [基底决策记录](v1/adr/ADR-001.md)

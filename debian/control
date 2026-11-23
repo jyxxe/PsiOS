@@ -9,7 +9,7 @@ Homepage: https://github.com/jyxxe/PsiOS
 
 Package: psios-core
 Architecture: linux-any
-Depends: ${misc:Depends}, ${shlibs:Depends}, adduser, systemd
+Depends: ${misc:Depends}, ${shlibs:Depends}, adduser, systemd, iproute2
 Description: local PsiOS system authority and command-line client
  Provides the single-node system API, task broker, application and volume
  operations, and persistent agent sessions on an existing Linux host.

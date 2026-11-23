@@ -13,7 +13,7 @@
 
 ## 有意保留的工程不确定性
 
-没有选择未经实验的数据库/文件系统/系统镜像技术；没有声称零丢失、任意软件包兼容、全平台支持、集群HA或绝对即时撤权。全部技术ADR仍Proposed，所有产品实现NotVerified，产品测试NotRun。PsiOS 源码、构建和实际运行证据仍需按 WI-001 核验。
+没有选择未经实验的数据库/文件系统/系统镜像技术；没有声称零丢失、任意软件包兼容、全平台支持、集群HA或绝对即时撤权。全部技术ADR仍Proposed，所有产品实现NotVerified，产品测试NotRun。原始XeLab缺失报告未被找回，当前HEAD尚待WI-001核验。
 
 完整逐项变更见[migration/findings.md](migration/findings.md)，编号冲突与字段迁移见[migration/v0-to-v1.md](migration/v0-to-v1.md)。
 

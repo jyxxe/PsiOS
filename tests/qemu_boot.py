@@ -13,7 +13,7 @@ import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CTL = "sudo -n -u psios /usr/bin/psiosctl --socket /run/psios/api.sock"
+CTL = "sudo -n -u psios /usr/bin/psiosctl"
 
 
 @contextlib.contextmanager

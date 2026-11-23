@@ -51,7 +51,29 @@ fn default_tick() -> u64 {
 fn default_docker() -> PathBuf {
     "/var/run/docker.sock".into()
 }
+impl Default for Config {
+    fn default() -> Self {
+        Self::local(Path::new("/var/lib/psios"))
+    }
+}
 impl Config {
+    /// Explicit paths win. Only an absent system configuration selects the historical local layout.
+    pub fn resolve(config: Option<&Path>, state: Option<&Path>) -> Result<Self> {
+        match (config, state) {
+            (Some(_), Some(_)) => Err(err("InvalidArgument", "choose one of --config and --state")),
+            (Some(file), None) => Self::load(file),
+            (None, Some(path)) => Ok(Self::local(&std::path::absolute(path)?)),
+            (None, None) => {
+                let file = Path::new("/etc/psios/core.json");
+                match fs::symlink_metadata(file) {
+                    Ok(_) => Self::load(file),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+                    Err(e) => Err(e.into()),
+                }
+            }
+        }
+    }
+
     pub fn local(path: &Path) -> Self {
         let mut witness = path.as_os_str().to_owned();
         witness.push(".witness");

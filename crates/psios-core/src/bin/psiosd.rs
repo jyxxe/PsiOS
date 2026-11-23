@@ -34,13 +34,7 @@ enum Cmd {
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let o = Opts::parse();
-    let cfg = if let Some(file) = o.config {
-        Config::load(&file)?
-    } else {
-        Config::local(&std::path::absolute(
-            o.state.unwrap_or_else(|| "/var/lib/psios".into()),
-        )?)
-    };
+    let cfg = Config::resolve(o.config.as_deref(), o.state.as_deref())?;
     match o.cmd {
         Cmd::Init => {
             Store::init(&cfg)?;

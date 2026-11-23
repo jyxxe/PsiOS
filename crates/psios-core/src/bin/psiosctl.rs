@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use psios_api::{Client, StatusProvider, parse};
+use psios_core::Config;
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -12,14 +13,16 @@ use std::{
 #[derive(Parser)]
 #[command(version, about = "PsiOS local system client")]
 struct Opts {
-    #[arg(long, global = true, default_value = "/var/lib/psios/api.sock")]
-    socket: PathBuf,
-    #[arg(
-        long,
-        global = true,
-        default_value = "/var/lib/psios.witness/owner.token"
-    )]
-    token_file: PathBuf,
+    /// Use the daemon configuration for the socket and owner credential paths.
+    #[arg(long, global = true, conflicts_with = "state")]
+    config: Option<PathBuf>,
+    /// Use an isolated state directory and its sibling witness (same layout as psiosd).
+    #[arg(long, global = true)]
+    state: Option<PathBuf>,
+    #[arg(long, global = true)]
+    socket: Option<PathBuf>,
+    #[arg(long, global = true)]
+    token_file: Option<PathBuf>,
     #[arg(long, global = true)]
     service_uid: Option<u32>,
     #[command(subcommand)]
@@ -105,17 +108,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         println!("valid");
         return Ok(());
     }
+    // A caller that supplies a standalone socket is independent of the installed site.
+    let cfg = if o.socket.is_some() && o.config.is_none() && o.state.is_none() {
+        Config::default()
+    } else {
+        Config::resolve(o.config.as_deref(), o.state.as_deref())?
+    };
+    let socket = o.socket.unwrap_or(cfg.socket);
+    let token_file = o
+        .token_file
+        .unwrap_or_else(|| cfg.witness_dir.join("owner.token"));
     let f = fs::OpenOptions::new()
         .read(true)
         .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(o.token_file)?;
+        .open(token_file)?;
     let m = f.metadata()?;
     if !m.is_file() || m.mode() & 0o077 != 0 || m.len() > 128 {
         return Err("expected a private credential file".into());
     }
     let mut token = String::new();
     f.take(129).read_to_string(&mut token)?;
-    let c = Client::new(o.socket, token.trim()).with_service_uid(
+    let c = Client::new(socket, token.trim()).with_service_uid(
         o.service_uid
             .unwrap_or_else(|| rustix::process::geteuid().as_raw()),
     );

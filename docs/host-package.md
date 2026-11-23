@@ -13,12 +13,12 @@ dpkg-buildpackage -b -us -uc -d
 sudo apt install ../psios-core_*.deb
 sudo systemctl start psios-init.service
 sudo systemctl enable --now psiosd.service
-sudo -u psios /usr/bin/psiosctl --socket /run/psios/api.sock node
+sudo -u psios /usr/bin/psiosctl node
 ```
 
 首次安装只创建软件文件和专用的 `psios` 系统账户。管理员显式运行初始化单元，在私有目录中生成节点身份和所有者凭据。它调用与源码部署相同的排他初始化。二次初始化或存在残留文件时会失败。在已有手工部署上，先停旧服务，核对 `systemctl cat psiosd`、账户、配置、state 和 witness 的位置，再用原有状态启动新服务。两种部署都需要同一服务 UID 访问状态与所有者 API。
 
-默认运行目录是 `/run/psios`，状态为 `/var/lib/psios`，见证和凭据在 `/var/lib/psios.witness`。配置由 dpkg 作为 conffile 管理。更改持久目录时，还须在两个单元中同步配置可写路径、属主和挂载依赖。宿主管理员可按需向客户端开放 socket 的组访问，并单独登记和分发客户端凭据。包使用基础工具集，OCI 引擎访问和受管 systemd 单元由宿主管理员另行配置。
+默认运行目录是 `/run/psios`，状态为 `/var/lib/psios`，见证和凭据在 `/var/lib/psios.witness`。配置由 dpkg 作为 conffile 管理。已安装的 `psiosctl` 与 `psiosd` 默认读取 `/etc/psios/core.json`，CLI 使用配置中的 socket 和见证目录。指定其他站点时可给任一命令传入 `--config FILE`；`--state DIR` 选择开发用的目录布局。已有系统配置读取失败时命令报错。显式提供 socket 的老客户端仍可独立运行，单独的 Agent 凭据用 `--token-file` 指定。更改持久目录时，还须在两个单元中同步配置可写路径、属主和挂载依赖。宿主管理员可按需向客户端开放 socket 的组访问，并单独登记和分发客户端凭据。包使用基础工具集，OCI 引擎访问和受管 systemd 单元由宿主管理员另行配置。
 
 ## 升级、卸载与恢复
 

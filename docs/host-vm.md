@@ -30,7 +30,7 @@ qemu-system-x86_64 -accel tcg -cpu max -m 1536 -smp 2 \
 ssh -p 2222 psios-admin@127.0.0.1
 sudo cloud-init status --wait
 sudo systemctl status psiosd
-sudo -u psios psiosctl --socket /run/psios/api.sock node
+sudo -u psios psiosctl node
 sudo systemctl poweroff
 ```
 

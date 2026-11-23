@@ -59,6 +59,13 @@ dpkg -i "$package"
 ready
 [[ $(systemctl show -p MainPID --value psiosd) != "$pid" ]]
 cmp "$scratch/local.json" "$config"
+runuser -u psios -- /usr/bin/psiosctl node | jq -e --arg id "$node" '.reference.resource_id == $id' >/dev/null
+# Explicit socket callers can still operate a running authority while a broken
+# default config is being repaired. Default callers must report the parse error.
+echo '{' > "$config"
+if runuser -u psios -- /usr/bin/psiosctl whoami; then exit 1; fi
+ctl whoami >/dev/null
+cat "$scratch/local.json" > "$config"
 cmp "$scratch/token" /var/lib/psios.witness/owner.token
 ctl node | jq -e --arg id "$node" '.reference.resource_id == $id and .state.configuration.worker_count == 2' >/dev/null
 ctl wait "$task" | jq -e '.lifecycle == "Succeeded"' >/dev/null

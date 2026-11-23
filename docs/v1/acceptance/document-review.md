@@ -36,4 +36,4 @@
 
 ## 没有执行的工程验证
 
-未运行XeLab/PsiOS产品代码、真实设备断电、数据库事务并发、资源端fencing、桌面输入/Portal、灾难恢复、协议互通、性能或正式发布流水线。技术决策仍Proposed，实现仍NotVerified，产品场景仍NotRun。文档工具通过不改变这些事实。
+未运行PsiOS产品代码、真实设备断电、数据库事务并发、资源端fencing、桌面输入/Portal、灾难恢复、协议互通、性能或正式发布流水线。技术决策仍Proposed，实现仍NotVerified，产品场景仍NotRun。文档工具通过不改变这些事实。

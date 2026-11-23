@@ -129,7 +129,7 @@ impl Store {
                 r.get(0)
             })?;
         Ok(
-            json!({"node_id":node, "database_format":checked.version, "migration_required":checked.version == 1,
+            json!({"node_id":node, "database_format":checked.version, "migration_required":checked.version < super::CURRENT_FORMAT,
             "sqlite_integrity":"Verified","foreign_keys":"Verified","witness":witness,
             "owner_rotation":rotation,"copied_bytes":bytes}),
         )

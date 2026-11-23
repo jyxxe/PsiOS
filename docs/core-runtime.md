@@ -4,7 +4,7 @@
 
 ## 从 PR #1 升级
 
-停服并按本机恢复要求保存 state 和 witness。新版第一次打开旧库时，先核对数据库、见证和密钥，再在同一次带见证的事务中升级到状态格式 2。离线的 `psiosd check` 也会执行升级。旧二进制遇到格式 2 会拒绝打开。新授权只添加给本机引导管理员。已有 Agent 的权限、预算、凭据、取消墓碑、审批和任务身份按原记录保留。涉及绑定卷的新派发会检查卷版本。若旧应用启动计划缺少这个前提，需要提交新计划。
+停服并按本机恢复要求保存 state 和 witness。新版第一次打开旧库时，先核对数据库、见证和密钥，再在同一次带见证的事务中升级到状态格式 2。格式 3 在下一次带见证的事务中登记接口观测能力，格式 2 的授权与预算原样保留。格式 2 程序会拒绝打开格式 3。离线的 `psiosd check` 也会执行升级。旧二进制遇到格式 2 会拒绝打开。新授权只添加给本机引导管理员。已有 Agent 的权限、预算、凭据、取消墓碑、审批和任务身份按原记录保留。涉及绑定卷的新派发会检查卷版本。若旧应用启动计划缺少这个前提，需要提交新计划。
 
 ## 宿主与调度
 
@@ -12,6 +12,22 @@
 - 配置中的 `workers` 取 1 至 16，默认 4。工作线程共享事务权威，在数据库锁外等待宿主调用。调度器在有积压的主体之间轮转。同一卷、应用或服务上的冲突写入继续受持久占用保护。所有者用 `Node.Configure` 提交 Node 的 `expected_resource_version` 和 `scheduling`，取值为 `Cordoned` 或 `Enabled`。暂停领取期间可接受任务，在途工作可结算，超时及撤权仍会释放预留。
 - `Task.History` 使用 `id` 和可选 `limit`。下一页带回 `through_version` 和服务器返回的 `next_after_version`（请求字段为 `after_version`），读取同一历史区间。`Task.Archive` 使用任务 ID 和修订，将已结算的终态移出调度表，保留幂等回执、历史、Run 和结果。当前仍需为结果及审计历史预留磁盘空间。
 - `Event.Wait` 复用 Event.Poll 的授权游标，支持 1 至 10000 毫秒的 `timeout_ms` 和可选 `limit`。`psiosctl watch CURSOR --wait-ms 5000` 可直接使用。提交后通知订阅者，等待时释放数据库锁，撤权和超时重新检查。每个守护进程最多有 8 个等待者。
+
+### 网络接口与地址
+
+`node.interfaces` 通过 Task 返回本地网络命名空间中接口的 ifindex、名称、MTU、链路类型、运行状态、标志和已分配的 IPv4/IPv6 地址。地址含前缀长度和 scope，点对点配置另有 peer。结果同时记录 Linux boot ID、网络命名空间 inode 和观测时间。网卡驱动与地址由现有 Linux 网络管理器配置。此接口仅观测，DNS、路由、远端连通性及配置事务尚待实现。
+
+详细拓扑需要显式授权。以下命令接续本机指南中的 `ctl` 函数。为其他 Agent 颁发时替换 principal_id 并使用其凭据执行 Task。
+
+```bash
+node=$(ctl node | jq -er .reference.resource_id)
+grant=$(jq -n --arg node "$node" '{principal_id:"local-owner",actions:["task.submit","task.read","node.interfaces"],
+  tool_targets:[$node],ttl_seconds:300,units:8}' | ctl call Grant.Issue | jq -er .delegation_ref.resource_id)
+task=$(echo '{"limit":32}' | ctl submit node.interfaces --delegation "$grant" --key interface-page-1 | jq -er .task_id)
+ctl wait "$task" | jq '{reference:.result.artifact_refs[0]}' | ctl call Artifact.Read
+```
+
+使用结果的 `next_after_ifindex` 作为下一次 Task 的 `after_ifindex`，并为新页提供新的幂等键。单页上限 128 个接口，底层输出上限 192 KiB。超限或驱动不可用时返回错误。各页反映各次采样时的配置；接口热插拔后 index 可以复用。打包单元允许读取 netlink，服务以普通专用账户运行。
 
 ### 受管 systemd 服务
 

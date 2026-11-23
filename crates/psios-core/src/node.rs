@@ -1,4 +1,5 @@
 //! Linux observation and the operator's explicit systemd allowlist.
+pub mod network;
 use crate::{
     config::Manager,
     db::{Db, Doc},
@@ -313,6 +314,7 @@ fn service(w: &Work) -> Result<Value> {
 pub fn perform(w: &Work) -> Result<Value> {
     match &w.action {
         Action::Inventory {} => inventory(),
+        Action::Interfaces(q) => network::interfaces(q),
         Action::Processes(p) => processes(p),
         Action::Devices {} => devices(),
         _ => service(w),

@@ -1,0 +1,7 @@
+/.debhelper/
+/debhelper-build-stamp
+/files
+/psios-core/
+/psios-core-dbgsym/
+/*.debhelper
+/*.substvars

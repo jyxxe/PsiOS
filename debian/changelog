@@ -1,0 +1,5 @@
+psios-core (0.1.0~dev1) unstable; urgency=medium
+
+  * Package the single-node Core for explicit provisioning on systemd hosts.
+
+ -- PsiOS project <jyxxe@users.noreply.github.com>  Mon, 23 Nov 2026 10:00:00 +0000

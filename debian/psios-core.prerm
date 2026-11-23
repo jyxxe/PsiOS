@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+# The service is manually provisioned. With --no-start debhelper does not
+# emit a removal stop action. Quiesce the authority before dpkg unlinks it.
+if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
+    deb-systemd-invoke stop psiosd.service >/dev/null
+fi
+
+#DEBHELPER#

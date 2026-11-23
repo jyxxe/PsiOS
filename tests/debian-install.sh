@@ -3,11 +3,16 @@
 # and the test node's retained data, so removal semantics can be inspected.
 set -euo pipefail
 trap 'echo "Package acceptance failed at line $LINENO" >&2' ERR
-if [[ ${1:-} != --disposable-systemd-host || $# != 2 || $EUID != 0 ]]; then
-    echo "usage: sudo $0 --disposable-systemd-host path/to/psios-core.deb" >&2
+if [[ ${1:-} != --disposable-systemd-host || $# != 3 || $EUID != 0 ]]; then
+    echo "usage: sudo $0 --disposable-systemd-host previous.deb current.deb" >&2
     exit 2
 fi
-package=$(realpath "$2")
+previous=$(realpath "$2")
+package=$(realpath "$3")
+[[ $(dpkg-deb -f "$previous" Package) == psios-core ]]
+old_version=$(dpkg-deb -f "$previous" Version)
+new_version=$(dpkg-deb -f "$package" Version)
+dpkg --compare-versions "$old_version" lt "$new_version"
 [[ $(dpkg-deb -f "$package" Package) == psios-core && -d /run/systemd/system ]]
 for path in /etc/psios /var/lib/psios /var/lib/psios.witness /run/psios /usr/bin/psios{d,ctl}; do
     [[ ! -e $path && ! -L $path ]] || { echo "$path already exists" >&2; exit 2; }
@@ -21,12 +26,8 @@ fi
 scratch=$(mktemp -d)
 trap 'rm -rf -- "$scratch"' EXIT
 
-# Use the same payload at an earlier Debian revision to exercise dpkg's upgrade
-# path. Cross-schema upgrades use the actual PR 1 binary in tests/upgrade.py.
-dpkg-deb -R "$package" "$scratch/earlier"
-sed -i '/^Version:/s/$/~acceptance/' "$scratch/earlier/DEBIAN/control"
-dpkg-deb --build --root-owner-group "$scratch/earlier" "$scratch/earlier.deb"
-dpkg -i "$scratch/earlier.deb"
+dpkg -i "$previous"
+[[ $(dpkg-query -W -f='${Version}' psios-core) == "$old_version" ]]
 [[ ! -e /var/lib/psios.witness/owner.token ]]
 if systemctl is-enabled --quiet psiosd || systemctl is-active --quiet psiosd; then exit 1; fi
 systemd-analyze verify psios-init.service psiosd.service
@@ -55,7 +56,8 @@ task=$(echo '{}' | ctl submit system.status --key package-acceptance | jq -er '.
 ctl wait "$task" | jq -e '.lifecycle == "Succeeded"' >/dev/null
 cp /var/lib/psios.witness/owner.token "$scratch/token"
 pid=$(systemctl show -p MainPID --value psiosd)
-dpkg -i "$package"
+DEBIAN_FRONTEND=noninteractive apt-get install -y "$package"
+[[ $(dpkg-query -W -f='${Version}' psios-core) == "$new_version" ]]
 ready
 [[ $(systemctl show -p MainPID --value psiosd) != "$pid" ]]
 cmp "$scratch/local.json" "$config"

@@ -36,9 +36,14 @@ fn connection(s: &Shared, stream: &mut UnixStream, stop: &AtomicBool) -> Result<
         let r: Request = serde_json::from_value(parse(&bytes)?)?;
         crate::label(&r.request_id)?;
         rid = r.request_id.clone();
-        if r.method == "Event.Wait" {
+        let read = match r.method.as_str() {
+            "Event.Wait" => Some(("Event.Poll", "events")),
+            "Mailbox.Wait" => Some(("Mailbox.Read", "items")),
+            _ => None,
+        };
+        if let Some((method, items)) = read {
             let changes = state(s)?.changes.clone();
-            return crate::watch::poll(&changes, stop, r, |request| {
+            return crate::watch::poll(&changes, stop, r, method, items, |request| {
                 state(s)?.request(peer, request)
             });
         }

@@ -53,6 +53,14 @@ enum Cmd {
         #[arg(long)]
         wait_ms: Option<u64>,
     },
+    /// Read unacknowledged signals from a mailbox, optionally waiting for delivery.
+    Inbox {
+        id: String,
+        #[arg(long)]
+        limit: Option<u32>,
+        #[arg(long)]
+        wait_ms: Option<u64>,
+    },
     Submit {
         tool: String,
         #[arg(long)]
@@ -150,6 +158,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 json!({"cursor":cursor,"timeout_ms":timeout_ms}),
             )?,
             None => c.call("Event.Poll", json!({"cursor":cursor}))?,
+        },
+        Cmd::Inbox { id, limit, wait_ms } => match wait_ms {
+            Some(timeout_ms) => c.call(
+                "Mailbox.Wait",
+                json!({"id":id,"limit":limit,"timeout_ms":timeout_ms}),
+            )?,
+            None => c.call("Mailbox.Read", json!({"id":id,"limit":limit}))?,
         },
         Cmd::Submit {
             tool,

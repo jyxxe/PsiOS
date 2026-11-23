@@ -133,7 +133,9 @@ pub fn read(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     } else {
         d
     };
-    Ok(json!({"mailbox_ref":d.reference(),"acked":d.body["acked"],"items":items}))
+    Ok(
+        json!({"mailbox_ref":d.reference(),"lifecycle":state(&d),"acked":d.body["acked"],"items":items}),
+    )
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

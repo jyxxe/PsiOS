@@ -1,0 +1,17 @@
+#!/usr/bin/make -f
+
+export CARGO_TARGET_DIR := $(CURDIR)/target/debian-build
+
+%:
+	dh $@ --buildsystem=none
+
+override_dh_auto_build:
+	cargo build --locked --release --workspace
+
+override_dh_auto_test:
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	cargo test --locked --release --workspace
+endif
+
+override_dh_installsystemd:
+	dh_installsystemd --no-enable --no-start --restart-after-upgrade psiosd.service

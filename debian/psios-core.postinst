@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+if [ "$1" = configure ]; then
+    adduser --system --group --no-create-home --home /nonexistent \
+        --shell /usr/sbin/nologin psios
+    # An existing account must also be dedicated to this authority.
+    if [ "$(id -u psios)" = 0 ] || [ "$(id -g psios)" = 0 ] || [ "$(id -gn psios)" != psios ] ||
+       ! getent passwd psios | cut -d: -f7 | grep -qxE '/(usr/)?sbin/nologin|/bin/false'; then
+        echo "psios requires a dedicated non-root system account with a private primary group and login disabled" >&2
+        exit 1
+    fi
+fi
+
+#DEBHELPER#

@@ -1,0 +1,17 @@
+Source: psios-core
+Section: admin
+Priority: optional
+Maintainer: PsiOS project <jyxxe@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 13), cargo:native | rustup:native
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+Homepage: https://github.com/jyxxe/PsiOS
+
+Package: psios-core
+Architecture: linux-any
+Depends: ${misc:Depends}, ${shlibs:Depends}, adduser, systemd
+Description: local PsiOS system authority and command-line client
+ Provides the single-node system API, task broker, application and volume
+ operations, and persistent agent sessions on an existing Linux host.
+ The administrator explicitly initializes local authority state before
+ enabling the system service.

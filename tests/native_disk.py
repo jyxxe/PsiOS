@@ -10,6 +10,7 @@ import secrets
 import select
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -156,6 +157,17 @@ def extract_partition(image, output, offset_mib, size_mib):
             dst.write(chunk)
 
 
+def check_clean_shutdown(image):
+    with image.open("rb") as disk:
+        for start in (65, 257):
+            disk.seek(start * 1024 * 1024 + 1024)
+            superblock = disk.read(1024)
+            magic, state = struct.unpack_from("<HH", superblock, 56)
+            incompatible, readonly_compatible = struct.unpack_from("<II", superblock, 96)
+            assert magic == 0xEF53 and state == 1, (start, state)
+            assert incompatible & 4 == 0 and readonly_compatible & 0x10000 == 0, start
+
+
 def reject_damaged_payload(args, work, image, deployment, intact_efi):
     # Build a real UEFI application, changing just the source marker after its
     # expected digest has been sealed. Keep the original firmware to restore.
@@ -254,8 +266,12 @@ def exercise(args, work):
         c.until(b"Retype password:")
         c.send(rotated)
         c.until(b"password for psios changed")
+        # Keep a home file open across a normal poweroff from the root home.
+        c.run("(trap '' TERM HUP; exec tail -f ./maintenance) </dev/null >/dev/null 2>&1 & "
+              "p=$!; sleep 0.1; test \"$(readlink /proc/$p/cwd)\" = /root")
         c.send("poweroff")
         assert c.vm.wait(35) == 0
+    check_clean_shutdown(image)
     with boot(work, image) as c:
         c.credentials("psios", operator)
         c.until(b"Login incorrect")
@@ -325,7 +341,7 @@ def exercise(args, work):
         assert c.vm.wait(25) == 0
     assert sha(image) == pre_reject
     print(f"Verified source {deployment['source_commit']}, node {first[0]}, task {first[1]['task_id']}, "
-          "matched deployment receipt, authenticated UEFI console, private persistent homes, full-home isolation, offline management, power loss, clean shutdown, external rescue, consumed enrollment and damaged payload and mismatched state/home refusal.")
+          "matched deployment receipt, authenticated UEFI console, private persistent homes, full-home isolation, offline management, power loss, clean shutdown with a held home file, external rescue, consumed enrollment and damaged payload and mismatched state/home refusal.")
 
 
 if __name__ == "__main__":

@@ -11,6 +11,8 @@ trap 'echo "PsiOS boot stopped at $stage; use external rescue media" >/dev/conso
 "$bb" mount -t sysfs sysfs /sys
 "$bb" chmod 0755 /
 "$bb" --install -s
+stage=deployment-payload
+"$bb" sha256sum -c /psios-payload.sha256 >/dev/null
 "$bb" hostname psios
 stage=state-device
 /usr/sbin/modprobe virtio_blk

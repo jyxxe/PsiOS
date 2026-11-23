@@ -1,6 +1,6 @@
 # 实现与验证进度
 
-截至 2026-11-23，PsiOS 单节点 Core 提供独立的 Linux amd64 静态二进制，以及供 Ubuntu 24.04 宿主使用的可选 .deb 包。Alpine 用户空间用于验证 Core 独立运行。Ubuntu Minimal QEMU 开发环境用于验证 systemd 和虚拟机引导。独立的 UEFI 开发盘可直接从 GPT 启动，断网使用本机账户与 CLI，将节点状态保存在 ext4，并用第三分区持久保存用户主目录。CLI 和本机 Agent 都通过同一权威执行任务。PsiOS 原生镜像基底仍由 ADR-01 跟踪，Helium、Neon、Argon 的 EditionReady 验收尚待完成。[独立运行](core-local.md#portable-amd64-core) · [基底决策](v1/adr/ADR-001.md) · [启动验收](../tests/qemu_boot.py) · [独立开发盘](native-disk.md)
+截至 2026-11-23，PsiOS 单节点 Core 提供独立的 Linux amd64 静态二进制，以及供 Ubuntu 24.04 宿主使用的可选 .deb 包。Alpine 用户空间用于验证 Core 独立运行。Ubuntu Minimal QEMU 开发环境用于验证 systemd 和虚拟机引导。独立的 UEFI 开发盘可直接从 GPT 启动，断网使用本机账户与 CLI，将节点状态保存在 ext4，并用第三分区持久保存用户主目录。可用构建回执核对运行清单与 EFI 制品，启动时先检查 Core 及引导脚本摘要。CLI 和本机 Agent 都通过同一权威执行任务。PsiOS 原生镜像基底仍由 ADR-01 跟踪，Helium、Neon、Argon 的 EditionReady 验收尚待完成。[独立运行](core-local.md#portable-amd64-core) · [基底决策](v1/adr/ADR-001.md) · [启动验收](../tests/qemu_boot.py) · [独立开发盘](native-disk.md)
 
 | 领域 | 已实现并验证的范围 | 部分支持、待开发或待取得的证据 |
 | --- | --- | --- |

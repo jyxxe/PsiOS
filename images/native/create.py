@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build a new per-instance PsiOS UEFI development disk. Works without mounts or root."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,11 @@ import boot_media
 
 MIB = 1024 * 1024
 CMDLINE = "console=ttyS0,115200 quiet panic=1 rdinit=/psios-init"
+
+
+def sha256(path):
+    with path.open("rb") as f:
+        return hashlib.file_digest(f, "sha256").hexdigest()
 
 
 def install_core(work, archive, digest):
@@ -77,7 +83,7 @@ def host_config(seed, args):
 
 
 def ramfs(work, args, instance, home_id):
-    boot_media.prepare_kernel(work, args.kernel_iso)
+    base = boot_media.prepare_kernel(work, args.kernel_iso)
     (work / "bin").mkdir()
     install_core(work, args.core_archive, args.core_sha256)
     (work / "psios-disk-uuid").write_text(str(instance) + "\n")
@@ -85,6 +91,20 @@ def ramfs(work, args, instance, home_id):
     shutil.copyfile(HERE / "init", work / "psios-init")
     shutil.copyfile(HERE / "shutdown", work / "psios-shutdown")
     files = ["bin/psiosd", "bin/psiosctl", "psios-source", "psios-init", "psios-disk-uuid", "psios-home-uuid", "psios-shutdown"]
+    payload = {"/" + name: sha256(work / name) for name in files}
+    inputs = {
+        "format": 1, "architecture": "x86_64", "firmware": "UEFI",
+        "core_source_commit": (work / "psios-source").read_text().strip(), "core_archive_sha256": args.core_sha256,
+        "kernel_input": {name: base[name] for name in ("release", "sha256", "kernel_sha256", "initramfs_sha256")},
+        "required_filesystems": {"state": str(instance), "home": str(home_id)},
+        "payload_sha256": payload,
+    }
+    manifest = work / "psios-deployment.json"
+    manifest.write_text(json.dumps(inputs, sort_keys=True, separators=(",", ":")) + "\n")
+    # BusyBox can verify the exact extracted bytes without a JSON interpreter.
+    checks = {**payload, "/psios-deployment.json": sha256(manifest)}
+    (work / "psios-payload.sha256").write_text("".join(f"{digest}  {name}\n" for name, digest in checks.items()))
+    files.extend(["psios-deployment.json", "psios-payload.sha256"])
     for name in files:
         (work / name).chmod(0o755 if name.startswith("bin/") or name == "psios-init" else 0o644)
     with (work / "initrd").open("ab") as out:
@@ -159,6 +179,13 @@ def build(args):
                     shutil.copyfileobj(src, f)
             f.flush()
             os.fsync(f.fileno())
+        receipt = {
+            "format": 1, "image": str(output), "source_commit": source_commit,
+            "state_uuid": str(instance), "home_uuid": str(home_id),
+            "deployment_manifest_sha256": sha256(work / "psios-deployment.json"),
+            "efi_application_sha256": sha256(efi), "installed_initramfs_sha256": sha256(work / "initrd"),
+            "initial_image_sha256": sha256(disk),
+        }
         # No existing image or block device is ever an install target.
         os.link(disk, output)
         fd = os.open(output.parent, os.O_DIRECTORY | os.O_RDONLY)
@@ -166,7 +193,7 @@ def build(args):
             os.fsync(fd)
         finally:
             os.close(fd)
-    print(json.dumps({"state_uuid": str(instance), "home_uuid": str(home_id), "source_commit": source_commit, "image": str(output)}))
+    print(json.dumps(receipt))
 
 
 def main():

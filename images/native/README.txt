@@ -14,7 +14,10 @@ VERIFIED_CORE_SHA256 是上述完整归档核验后记录的 SHA-256。
     openssl passwd -6 > operator.hash
     python3 native/create.py node.raw --kernel-iso "$KERNEL_ISO" \
       --core-archive "$ARCHIVE" --core-sha256 "$VERIFIED_CORE_SHA256" \
-      --console-hash operator.hash
+      --console-hash operator.hash > node-build.json
+
+将 node-build.json 保存在节点外。首次启动前可核对 initial_image_sha256，
+启动后可核对 /psios-deployment.json 的 SHA-256 和记录的 Core 修订。
 
 构建器以当前用户创建全新的 GPT raw 文件。其内核和早期用户空间来自
 核验过的 ISO。每个节点分别生成新盘并设置自己的凭据。需要本机 root

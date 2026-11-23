@@ -19,7 +19,17 @@ struct Opts {
 enum Cmd {
     Init,
     Serve,
+    /// Open the authority normally, including supported migrations and witness finalization.
     Check,
+    /// Verify a stopped authority on a private scratch copy, preserving the source.
+    Verify {
+        /// Maximum combined database and journal input size in MiB.
+        #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u32).range(1..))]
+        max_copy_mib: u32,
+        /// Parent directory for the temporary verification copy (defaults to TMPDIR).
+        #[arg(long)]
+        scratch_dir: Option<PathBuf>,
+    },
     RecoverOwner,
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -43,6 +53,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::RecoverOwner => {
             Store::open(cfg)?.recover_owner()?;
             println!("Local owner credential rotated");
+        }
+        Cmd::Verify {
+            max_copy_mib,
+            scratch_dir,
+        } => {
+            let scratch = scratch_dir.unwrap_or_else(std::env::temp_dir);
+            let report = Store::verify(&cfg, &scratch, u64::from(max_copy_mib) * 1024 * 1024)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Cmd::Check => {
             let _authority = Store::open(cfg)?;

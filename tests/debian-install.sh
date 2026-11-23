@@ -64,6 +64,8 @@ ctl node | jq -e --arg id "$node" '.reference.resource_id == $id and .state.conf
 ctl wait "$task" | jq -e '.lifecycle == "Succeeded"' >/dev/null
 
 systemctl stop psiosd
+runuser -u psios -- psiosd --config "$config" verify |
+    jq -e --arg id "$node" '.node_id == $id and .witness == "Confirmed"' >/dev/null
 dpkg -i "$package"
 if systemctl is-active --quiet psiosd; then exit 1; fi
 # Simulate loss of part of the authority in this test node. Neither package

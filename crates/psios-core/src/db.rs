@@ -7,9 +7,13 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::{Value, json};
 use std::{
     fs::{self, File, OpenOptions},
-    os::unix::fs::OpenOptionsExt,
+    io::{ErrorKind, Read},
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    path::Path,
 };
 use zeroize::Zeroizing;
+
+mod verify;
 
 pub struct Store {
     pub(crate) config: Config,
@@ -119,6 +123,75 @@ fn setup(c: &Connection) -> Result<()> {
     c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF;")?;
     Ok(())
 }
+fn open_regular(path: &Path) -> std::io::Result<File> {
+    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
+    let f = OpenOptions::new()
+        .read(true)
+        .custom_flags(flags.bits() as i32)
+        .open(path)?;
+    let m = f.metadata()?;
+    if !m.is_file() || m.uid() != rustix::process::geteuid().as_raw() {
+        return Err(std::io::Error::new(
+            ErrorKind::PermissionDenied,
+            "expected a private regular file",
+        ));
+    }
+    Ok(f)
+}
+
+fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
+    let mut bytes = Zeroizing::new(Vec::new());
+    open_regular(path)?.take(max + 1).read_to_end(&mut bytes)?;
+    require(
+        bytes.len() as u64 <= max,
+        "RecoveryRequired",
+        "invalid witness file size",
+    )?;
+    Ok(bytes)
+}
+struct CheckedHead {
+    version: u32,
+    head: String,
+    witness: Value,
+    keys: Zeroizing<Vec<u8>>,
+}
+fn checked_head(conn: &Connection, cfg: &Config) -> Result<CheckedHead> {
+    let ver: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    require(
+        matches!(ver, 1 | 2),
+        "SchemaVersionUnsupported",
+        "unsupported state database version",
+    )?;
+    let head: String =
+        conn.query_row("SELECT value FROM meta WHERE key='head'", [], |r| r.get(0))?;
+    let path = cfg.witness_dir.join("head");
+    let witness: Value = witness_bytes(&path, 4096)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(Value::Null);
+    require(
+        witness["committed"] == head || witness["pending"] == head,
+        "RecoveryRequired",
+        "state and external witness disagree; writes quarantined",
+    )?;
+    let keys = witness_bytes(&cfg.witness_dir.join("keys"), 64)
+        .map_err(|_| err("RecoveryRequired", "vault and cursor keys unavailable"))?;
+    let expected: String =
+        conn.query_row("SELECT value FROM meta WHERE key='keys_digest'", [], |r| {
+            r.get(0)
+        })?;
+    require(
+        keys.len() == 64 && sha256(&keys) == expected,
+        "RecoveryRequired",
+        "local key material mismatch",
+    )?;
+    Ok(CheckedHead {
+        version: ver,
+        head,
+        witness,
+        keys,
+    })
+}
 impl Store {
     pub fn init(cfg: &Config) -> Result<()> {
         cfg.validate()?;
@@ -186,42 +259,20 @@ impl Store {
             cfg.state_dir.join("state.db"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
         )?;
-        let ver: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        require(
-            matches!(ver, 1 | 2),
-            "SchemaVersionUnsupported",
-            "unsupported state database version",
-        )?;
-        let head: String =
-            conn.query_row("SELECT value FROM meta WHERE key='head'", [], |r| r.get(0))?;
+        let CheckedHead {
+            version: ver,
+            head,
+            witness,
+            keys,
+        } = checked_head(&conn, &cfg)?;
         let path = cfg.witness_dir.join("head");
-        let witness: Value = fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or(Value::Null);
-        require(
-            witness["committed"] == head || witness["pending"] == head,
-            "RecoveryRequired",
-            "state and external witness disagree; writes quarantined",
-        )?;
-        let keys = fs::read(cfg.witness_dir.join("keys"))
-            .map_err(|_| err("RecoveryRequired", "vault and cursor keys unavailable"))?;
-        let expected: String =
-            conn.query_row("SELECT value FROM meta WHERE key='keys_digest'", [], |r| {
-                r.get(0)
-            })?;
-        require(
-            keys.len() == 64 && sha256(&keys) == expected,
-            "RecoveryRequired",
-            "local key material mismatch",
-        )?;
         if witness.get("pending").is_some() {
             replace(&path, &canonical(&json!({"committed": head})))?;
         }
         // Complete an operator's interrupted credential rotation only when the DB committed it.
         let next = cfg.witness_dir.join("owner.next");
         if next.try_exists()? {
-            let bytes = Zeroizing::new(fs::read(&next)?);
+            let bytes = witness_bytes(&next, 128)?;
             let active: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM credentials WHERE principal=?1 AND digest=?2)",
                 params![policy::OWNER, sha256(&bytes)],
@@ -239,7 +290,7 @@ impl Store {
             config: cfg,
             conn,
             _lock: lock,
-            keys: Zeroizing::new(keys),
+            keys,
             sealed: false,
             changes: Default::default(),
         };

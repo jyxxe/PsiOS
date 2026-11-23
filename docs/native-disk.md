@@ -6,12 +6,15 @@
 
 使用 Linux、Python 3.11+、GNU cpio、isoinfo、GNU GRUB 的 x86_64-efi 模块、mtools、mkfs.fat、sfdisk 及 e2fsprogs。构建可以普通用户运行，目标必须是新文件。先对完整 Core 归档核验主线构建证明，再将已核验归档的摘要传给构建器。内核 ISO 的位置与摘要见输入清单，可在联网机器取得后传入离线环境。[归档核验](core-local.md#portable-amd64-core) · [内核输入](../images/rescue/base.json)
 
-在私有目录执行下列命令。OpenSSL 在终端内询问新密码。在每台实例上使用自己的控制台凭据，构建输出的状态 UUID 绑定本次部署。
+在私有目录解包已核验的完整归档，进入解包目录并执行下列命令。安装器及启动脚本在归档的 `native/` 目录，内核输入清单在同级 `rescue/` 目录。[随包说明](../images/native/README.txt)
+
+OpenSSL 在终端内询问新密码。在每台实例上使用自己的控制台凭据，构建输出的状态 UUID 绑定本次部署。
 
 ```sh
 umask 077
+sha256sum --strict --check SHA256SUMS
 openssl passwd -6 > operator.hash
-python3 images/native/create.py node.raw --kernel-iso alpine-virt.iso \
+python3 native/create.py node.raw --kernel-iso alpine-virt.iso \
   --core-archive psios-core-linux-amd64.tar.gz --core-sha256 "$VERIFIED_CORE_SHA256" \
   --console-hash operator.hash
 cp /usr/share/OVMF/OVMF_VARS_4M.fd node-vars.fd

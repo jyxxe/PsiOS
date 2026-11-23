@@ -55,7 +55,7 @@ jobs:
       - name: Inspect real ext4 images from an independent read-only rescue boot
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 genisoimage cpio e2fsprogs fdisk acl
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils genisoimage cpio e2fsprogs fdisk acl
           if [ -c /dev/kvm ]; then sudo setfacl -m "u:$(id -un):rw" /dev/kvm; fi
           cd "$RUNNER_TEMP/rescue-core"
           tar -xzf psios-core-linux-amd64.tar.gz

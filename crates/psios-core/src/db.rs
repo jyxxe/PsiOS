@@ -149,6 +149,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
+pub(super) const CURRENT_FORMAT: u32 = 3;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -158,7 +159,7 @@ struct CheckedHead {
 fn checked_head(conn: &Connection, cfg: &Config) -> Result<CheckedHead> {
     let ver: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     require(
-        matches!(ver, 1 | 2),
+        (1..=CURRENT_FORMAT).contains(&ver),
         "SchemaVersionUnsupported",
         "unsupported state database version",
     )?;
@@ -300,6 +301,9 @@ impl Store {
                 policy::upgrade(db)?;
                 db.audit(policy::SYSTEM, "Core.Upgrade", None, "Version2")
             })?;
+        }
+        if ver < 3 {
+            store.transaction("core-upgrade-v3", policy::upgrade_interfaces)?;
         }
         store.transaction("node-config", node::sync)?;
         Ok(store)

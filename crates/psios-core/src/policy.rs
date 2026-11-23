@@ -17,6 +17,7 @@ pub const PROFILE: &str = "profile-local";
 pub const TOOLS: &[&str] = &[
     "system.status",
     "node.inventory",
+    "node.interfaces",
     "node.processes",
     "node.devices",
     "service.inspect",
@@ -62,6 +63,7 @@ pub fn readonly(tool: &str) -> bool {
         tool,
         "system.status"
             | "node.inventory"
+            | "node.interfaces"
             | "node.processes"
             | "node.devices"
             | "service.inspect"
@@ -94,6 +96,15 @@ pub fn approval(tool: &str) -> bool {
     )
 }
 
+// Detailed network topology requires an explicit grant, including for the owner CLI.
+fn bootstrap_actions() -> Vec<String> {
+    COMMON
+        .iter()
+        .chain(TOOLS)
+        .filter(|a| **a != "node.interfaces")
+        .map(|a| a.to_string())
+        .collect()
+}
 pub fn bootstrap(db: &Db<'_>, token: &str) -> Result<()> {
     let principal =
         json!({"principal_type": "Human", "name": "Local owner", "lifecycle": "Active"});
@@ -130,7 +141,7 @@ pub fn bootstrap(db: &Db<'_>, token: &str) -> Result<()> {
         db,
         OWNER,
         "owner-delegation",
-        COMMON.iter().chain(TOOLS).map(|s| s.to_string()).collect(),
+        bootstrap_actions(),
         1_000_000,
         after(86400 * 3650),
         true,
@@ -173,6 +184,11 @@ fn install_tools(db: &Db<'_>, profile: &Value) -> Result<()> {
     }
     Ok(())
 }
+pub fn upgrade_interfaces(db: &Db<'_>) -> Result<()> {
+    install_tools(db, &db.get(RUNTIME_PROFILE)?.reference())?;
+    db.c.pragma_update(None, "user_version", 3)?;
+    db.audit(SYSTEM, "Core.Upgrade", None, "Version3")
+}
 pub fn upgrade(db: &Db<'_>) -> Result<()> {
     let profile = db.get(PROFILE)?;
     let mut profile_body = profile.body.clone();
@@ -191,7 +207,7 @@ pub fn upgrade(db: &Db<'_>) -> Result<()> {
     let g = db.of(d.body["grant_id"].as_str().unwrap(), "Grant")?;
     for doc in [&g, &d] {
         let mut body = doc.body.clone();
-        body["actions"] = json!(COMMON.iter().chain(TOOLS).collect::<Vec<_>>());
+        body["actions"] = json!(bootstrap_actions());
         db.update(doc, body.clone(), body)?;
     }
     db.c.execute(

@@ -33,6 +33,14 @@ jobs:
         run: |
           python3 tests/system.py
           python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Verify scoped addresses in a private Linux network namespace
+        run: |
+          sudo unshare --net sh -ec '
+            ip link set lo up
+            ip address add 192.0.2.1 peer 192.0.2.2/32 dev lo
+            ip -6 address add 2001:db8::2/64 dev lo nodad
+            runuser -u "$1" -- python3 -m unittest discover -s tests -p test_network.py -v
+          ' psios-network "$(id -un)"
       - name: Verify in-place state upgrade from PR 1
         run: |
           mkdir "$RUNNER_TEMP/psios-previous"

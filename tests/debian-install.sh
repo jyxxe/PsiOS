@@ -51,6 +51,7 @@ done
 [[ $(stat -c '%U:%G:%a' /var/lib/psios.witness/owner.token) == psios:psios:600 ]]
 [[ $(stat -c '%U:%G:%a' /run/psios/api.sock) == psios:psios:660 ]]
 node=$(ctl node | jq -er '.reference.resource_id')
+owner_ref=$(ctl get owner-delegation | jq -c .reference)
 task=$(echo '{}' | ctl submit system.status --key package-acceptance | jq -er '.task_id')
 ctl wait "$task" | jq -e '.lifecycle == "Succeeded"' >/dev/null
 cp /var/lib/psios.witness/owner.token "$scratch/token"
@@ -62,6 +63,13 @@ cmp "$scratch/local.json" "$config"
 cmp "$scratch/token" /var/lib/psios.witness/owner.token
 ctl node | jq -e --arg id "$node" '.reference.resource_id == $id and .state.configuration.worker_count == 2' >/dev/null
 ctl wait "$task" | jq -e '.lifecycle == "Succeeded"' >/dev/null
+
+[[ $(ctl get owner-delegation | jq -c .reference) == "$owner_ref" ]]
+network_grant=$(jq -n --arg node "$node" '{principal_id:"local-owner",actions:["task.submit","task.read","node.interfaces"],
+    tool_targets:[$node],ttl_seconds:300,units:2}' | ctl call Grant.Issue | jq -er .delegation_ref.resource_id)
+network_task=$(echo '{}' | ctl submit node.interfaces --delegation "$network_grant" --key package-network | jq -er .task_id)
+ctl wait "$network_task" | jq -e '{reference: .result.artifact_refs[0]}' | ctl call Artifact.Read |
+    jq -e '.interfaces | any(.ifname == "lo" and (.addr_info | any(.local == "127.0.0.1")))' >/dev/null
 
 systemctl stop psiosd
 runuser -u psios -- psiosd --config "$config" verify |

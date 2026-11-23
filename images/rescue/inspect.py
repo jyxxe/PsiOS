@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Inspect a stopped PsiOS authority on a raw disk image without booting its OS."""
 import argparse
+from functools import partial
 import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import resource
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -63,7 +66,8 @@ def prepare(work, args):
         (work / name).chmod(0o755)
     # Keep input paths in JSON. The init script sources only these numeric settings.
     settings = (f"PARTITION={args.partition}\nSERVICE_UID={args.uid}\n"
-                f"SERVICE_GID={args.gid if args.gid is not None else args.uid}\nCOPY_MIB={args.max_copy_mib}\n")
+                f"SERVICE_GID={args.gid if args.gid is not None else args.uid}\nCOPY_MIB={args.max_copy_mib}\n"
+                f"OVERLAY={int(args.journal_overlay_mib is not None)}\n")
     (work / "rescue-settings").write_text(settings)
     config = {"state_dir": "/source" + args.state, "witness_dir": "/source" + (args.witness or args.state + ".witness"),
               "socket": "/run/rescue.sock"}
@@ -90,17 +94,41 @@ def inspect(args):
                    "-kernel", str(work / "kernel"), "-initrd", str(work / "initrd"),
                    "-append", "console=ttyS0 quiet panic=1 rdinit=/psios-rescue",
                    "-add-fd", f"fd={fd},set=1", "-blockdev", "driver=file,node-name=disk,filename=/dev/fdset/1,read-only=on,locking=on",
-                   "-blockdev", "driver=raw,node-name=source,file=disk,read-only=on",
-                   "-device", "virtio-blk-pci,drive=source"]
+                   "-blockdev", "driver=raw,node-name=source,file=disk,read-only=on"]
+        drive = "source"
+        limit_child = None
+        if args.journal_overlay_mib is not None:
+            # Limit the length of the host's QCOW2 file, including its metadata.
+            # A guest virtual disk can be much larger. Inherit stricter host limits.
+            limit = args.journal_overlay_mib * 1024 * 1024
+            soft, _ = resource.getrlimit(resource.RLIMIT_FSIZE)
+            if soft != resource.RLIM_INFINITY:
+                limit = min(soft, limit)
+
+            limit_child = partial(resource.setrlimit, resource.RLIMIT_FSIZE, (limit, limit))
+            scratch = str(work / "journal.qcow2")
+            subprocess.run(["qemu-img", "create", "-q", "-f", "qcow2", scratch, str(os.fstat(fd).st_size)],
+                           preexec_fn=limit_child, timeout=20, check=True)
+            command += ["-blockdev", json.dumps({"driver": "file", "node-name": "changes", "filename": scratch}),
+                        "-blockdev", "driver=qcow2,node-name=view,file=changes,backing=source"]
+            drive = "view"
+        command += ["-device", f"virtio-blk-pci,drive={drive},werror=report,rerror=report"]
         result = subprocess.run(command, pass_fds=(fd,), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                timeout=180, check=True)
+                                preexec_fn=limit_child, timeout=180)
+        if limit_child is not None and result.returncode == -signal.SIGXFSZ:
+            raise ValueError("journal overlay file size limit reached")
+        result.check_returncode()
         status, _, body = result.stdout.strip().partition(b"\n")
-        if status.strip() != b"OK":
+        success = {b"OK": None} if args.journal_overlay_mib is None else {
+            b"OK clean": "Clean", b"OK replayed": "ReplayedOnTemporaryOverlay"}
+        if status.strip() not in success:
             failure = re.fullmatch(rb"ERROR ([A-Za-z0-9-]+)", status.strip())
             raise ValueError("rescue inspection failed: " + (failure[1].decode() if failure else "no valid report"))
         report = json.loads(body)
         if report["sqlite_integrity"] != "Verified" or report["foreign_keys"] != "Verified":
             raise ValueError("incomplete authority verification")
+        if args.journal_overlay_mib is not None:
+            report["ext4_journal"] = success[status.strip()]
         return report
 
 
@@ -116,6 +144,8 @@ def main():
     parser.add_argument("--state", type=guest_path, default="/var/lib/psios")
     parser.add_argument("--witness", type=guest_path, help="defaults to STATE.witness")
     parser.add_argument("--max-copy-mib", type=int, default=64, help="database and journal copy limit (1–256 MiB)")
+    parser.add_argument("--journal-overlay-mib", type=int, metavar="MIB",
+                        help="allow ext4 journal replay on a disposable bounded overlay (16–512 MiB)")
     args = parser.parse_args()
     if not re.fullmatch("[0-9a-f]{64}", args.core_sha256):
         parser.error("invalid expected SHA-256")
@@ -123,6 +153,8 @@ def main():
         parser.error("expected a non-root service UID and a valid GID")
     if not 0 <= args.partition <= 128 or not 1 <= args.max_copy_mib <= 256:
         parser.error("invalid partition or copy limit")
+    if args.journal_overlay_mib is not None and not 16 <= args.journal_overlay_mib <= 512:
+        parser.error("journal overlay limit must be 16–512 MiB")
     print(json.dumps(inspect(args), ensure_ascii=True))
 
 

@@ -29,19 +29,43 @@ while [ ! -b "/dev/$device" ] && [ "$i" -lt 50 ]; do
     i=$((i+1))
 done
 [ -b "/dev/$device" ]
-[ "$("$bb" cat /sys/class/block/vda/ro)" = 1 ]
+[ "$("$bb" cat /sys/class/block/vda/ro)" = "$((1-OVERLAY))" ]
 disk=/dev/$device
 # ext superblock fields are little-endian on this x86_64 rescue profile.
 stage=unsupported-filesystem
 magic=$("$bb" od -An -j 1080 -N 2 -t u2 "$disk")
 [ "$((magic))" = 61267 ]
 stage=filesystem-recovery-required
-state=$("$bb" od -An -j 1082 -N 2 -t u2 "$disk")
-incompat=$("$bb" od -An -j 1120 -N 4 -t u4 "$disk")
-ro_compat=$("$bb" od -An -j 1124 -N 4 -t u4 "$disk")
-[ "$((state))" = 1 ]
-[ "$((incompat & 4))" = 0 ]
-[ "$((ro_compat & 65536))" = 0 ]
+read_state() {
+    state=$("$bb" od -An -j 1082 -N 2 -t u2 "$disk")
+    incompat=$("$bb" od -An -j 1120 -N 4 -t u4 "$disk")
+    ro_compat=$("$bb" od -An -j 1124 -N 4 -t u4 "$disk")
+}
+clean() {
+    [ "$((state))" = 1 ] && [ "$((incompat & 4))" = 0 ] && [ "$((ro_compat & 65536))" = 0 ]
+}
+read_state
+status=OK
+if [ "$OVERLAY" = 1 ]; then
+    status='OK clean'
+    if ! clean; then
+        # Only a journaled filesystem with a pending recovery/orphan record
+        # is eligible. Filesystems marked erroneous require separate repair.
+        compat=$("$bb" od -An -j 1116 -N 4 -t u4 "$disk")
+        [ "$((state & ~1))" = 0 ]
+        [ "$((compat & 4))" = 4 ]
+        [ "$(( (incompat & 4) | (ro_compat & 65536) ))" != 0 ]
+        stage=journal-replay
+        "$bb" mount -t ext4 -o ro,nodev,nosuid,noexec "$disk" /source
+        "$bb" umount /source
+        "$bb" blockdev --flushbufs "$disk"
+        read_state
+        status='OK replayed'
+    fi
+    "$bb" blockdev --setro "$disk"
+fi
+clean
+[ "$("$bb" blockdev --getro "$disk")" = 1 ]
 stage=mount
 "$bb" mount -t ext4 -o ro,noload,nodev,nosuid,noexec "$disk" /source
 stage=service-identity
@@ -61,5 +85,5 @@ if ! "$bb" su -s /bin/sh psioscheck -c \
 fi
 stage=report
 [ "$("$bb" wc -c < /report)" -le 65536 ]
-{ printf 'OK\n'; "$bb" cat /report; } > /dev/ttyS1
+{ printf '%s\n' "$status"; "$bb" cat /report; } > /dev/ttyS1
 stage=complete

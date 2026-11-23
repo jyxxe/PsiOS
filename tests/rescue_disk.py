@@ -57,17 +57,24 @@ def exercise(iso, binaries, root):
     core = binaries / "psiosd"
     options = ["--iso", iso, "--core", core, "--core-sha256", digest(core),
                "--uid", str(os.getuid()), "--gid", str(os.getgid()), "--state", "/state", "--witness", "/witness"]
+    scratch = root / "private rescue, scratch"
+    scratch.mkdir(mode=0o700)
 
-    def inspect(image, extra=(), rejection=None):
+    def inspect(image, extra=(), rejection=None, journal=None):
         before = digest(image)
         result = subprocess.run([sys.executable, INSPECT, image, *options, *extra],
-                                capture_output=True, text=True, timeout=210)
+                                capture_output=True, text=True, timeout=210, env={**os.environ, "TMPDIR": str(scratch)})
         assert digest(image) == before, "inspection changed the source image"
+        assert not list(scratch.iterdir()), "temporary boot media or journal overlay left behind"
         if rejection is None:
             assert result.returncode == 0, result.stderr
-            assert json.loads(result.stdout) == expected
+            report = json.loads(result.stdout)
+            if journal is not None:
+                assert report.pop("ext4_journal") == journal
+            assert report == expected
         else:
-            assert result.returncode != 0 and not result.stdout and rejection in result.stderr, result
+            errors = (rejection,) if isinstance(rejection, str) else rejection
+            assert result.returncode != 0 and not result.stdout and any(e in result.stderr for e in errors), result
 
     inspect(volume)
     other_uid = 65532 if os.getuid() != 65532 else 65531
@@ -93,6 +100,7 @@ def exercise(iso, binaries, root):
         dst.seek(MIB)
         shutil.copyfileobj(src, dst)
     inspect(disk, ["--partition", "1"])
+    inspect(disk, ["--partition", "1", "--journal-overlay-mib", "16"], journal="Clean")
     inspect(disk, ["--partition", "2"], "block-device")
 
     # Set EXT4_FEATURE_INCOMPAT_RECOVER on a copy and update its superblock checksum.
@@ -100,6 +108,68 @@ def exercise(iso, binaries, root):
     shutil.copyfile(volume, dirty)
     subprocess.run(["debugfs", "-w", "-R", "feature needs_recovery", dirty], check=True, capture_output=True)
     inspect(dirty, rejection="filesystem-recovery-required")
+    inspect(dirty, ["--journal-overlay-mib", "16"], journal="ReplayedOnTemporaryOverlay")
+    subprocess.run(["debugfs", "-w", "-R", "set_super_value state 3", dirty], check=True, capture_output=True)
+    inspect(dirty, ["--journal-overlay-mib", "16"], "filesystem-recovery-required")
+
+    # The home block contains invalid credential bytes. Put its authentic bytes
+    # only in an ext4 journal transaction. A committed transaction must restore
+    # the verifier's evidence; an uncommitted one must never manufacture success.
+    home_block = int(subprocess.check_output(["debugfs", "-R", "bmap /witness/owner.token 0", volume],
+                                             stderr=subprocess.DEVNULL))
+    with volume.open("rb") as f:
+        f.seek(1024 + 24)  # s_log_block_size
+        block_size = 1024 << int.from_bytes(f.read(4), "little")
+        f.seek(block_size * home_block)
+        original = f.read(block_size)
+    assert node.owner.encode() in original
+    saved = root / "journal-block"
+    saved.write_bytes(original)
+    for name, flag in [("committed", ""), ("uncommitted", "-c ")]:
+        recovery = root / (name + ".raw")
+        shutil.copyfile(volume, recovery)
+        with recovery.open("r+b") as f:
+            f.seek(block_size * home_block)
+            f.write(bytes(block_size))
+        # debugfs sets needs_recovery automatically for a committed transaction.
+        # Model a writer that was still mounted when an uncommitted record was lost.
+        commands = f"journal_open\njournal_write {flag}-b {home_block} journal-block\njournal_close\nfeature needs_recovery\n"
+        subprocess.run(["debugfs", "-w", recovery], cwd=root, input=commands, text=True,
+                       capture_output=True, check=True)
+        inspect(recovery, rejection="filesystem-recovery-required")
+        if name == "committed":
+            inspect(recovery, ["--journal-overlay-mib", "16"], journal="ReplayedOnTemporaryOverlay")
+        else:
+            inspect(recovery, ["--journal-overlay-mib", "16"], "authority-")
+
+    # Scatter real journal writes across 300 different 64 KiB overlay clusters.
+    # The same recoverable filesystem must fail at 16 MiB and succeed at 32 MiB.
+    wide = root / "wide.raw"
+    shutil.copyfile(volume, wide)
+    padding = root / "padding"
+    with padding.open("wb") as f:
+        for _ in range(21):
+            f.write(b"P" * MIB)
+    subprocess.run(["debugfs", "-w", "-R", "write padding /padding", wide], cwd=root,
+                   check=True, capture_output=True)
+    blocks = subprocess.check_output(["debugfs", "-R", "blocks /padding", wide], stderr=subprocess.DEVNULL)
+    selected = {}
+    with wide.open("rb") as disk_file:
+        for block in map(int, blocks.split()):
+            cluster = block * block_size // 65536
+            if cluster not in selected:
+                disk_file.seek(block * block_size)
+                if disk_file.read(block_size) == b"P" * block_size:
+                    selected[cluster] = block
+            if len(selected) == 300:
+                break
+    assert len(selected) == 300
+    (root / "journal-wide").write_bytes(b"Q" * (len(selected) * block_size))
+    block_list = ",".join(map(str, selected.values()))
+    commands = f"journal_open\njournal_write -b {block_list} journal-wide\njournal_close\n"
+    subprocess.run(["debugfs", "-w", wide], cwd=root, input=commands, text=True, check=True, capture_output=True)
+    inspect(wide, ["--journal-overlay-mib", "16"], rejection=("journal overlay file size limit", "journal-replay"))
+    inspect(wide, ["--journal-overlay-mib", "32"], journal="ReplayedOnTemporaryOverlay")
     subprocess.run(["debugfs", "-w", "-R", "unlink /witness/keys", volume], check=True, capture_output=True)
     inspect(volume, rejection="authority-")
 
@@ -118,10 +188,12 @@ def exercise(iso, binaries, root):
                 sock.connect(str(qmp))
                 assert "QMP" in json.loads(sock.makefile("rb").readline())
             inspect(disk, ["--partition", "1"], "lock")
+            inspect(disk, ["--partition", "1", "--journal-overlay-mib", "16"], "lock")
         finally:
             owner.terminate()
-    print("Verified standalone and GPT images, crash WAL, service identity, trust pins, copy limit, dirty filesystem, "
-          "damaged witness, active writer rejection and byte-for-byte source preservation.")
+    print("Verified raw and GPT images, crash WAL, service identity, trust pins, corrupt witness, "
+          "committed and uncommitted ext4 journal recovery, filesystem errors, copy and overlay limits, "
+          "active writer rejection, scratch cleanup and byte-for-byte source preservation.")
 
 
 if __name__ == "__main__":

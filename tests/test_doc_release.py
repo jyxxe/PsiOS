@@ -48,7 +48,7 @@ class DocumentationReleaseTests(unittest.TestCase):
 
     def test_reject_malformed_and_indirect_manifest_entries(self):
         digest = "a" * 64
-        for manifest in ["", "invalid", digest + "  ../other", digest + "  /root", digest + "  a/../b",
+        for manifest in ["", "invalid", digest + "  ../other", digest + "  C:/outside", digest + "  /root", digest + "  a/../b",
                          digest + "  a\\b", (digest + "  entry\n") * 2]:
             with self.subTest(manifest=manifest), self.assertRaises(RuntimeError):
                 release.manifest_entries(manifest)

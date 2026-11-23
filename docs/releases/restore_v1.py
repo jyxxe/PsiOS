@@ -16,7 +16,7 @@ import os
 import re
 import tempfile
 import zipfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 ARCHIVE = "PsiOS-v1.0.0-docs-2026-11-22.zip"
 SHA256 = "b6f2c5510063c1304b11bd623cd159e1155f706dd1c6b8398c1753b1763127c3"
@@ -37,6 +37,14 @@ def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def file_digest(path: Path) -> str:
+    hashed = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            hashed.update(chunk)
+    return hashed.hexdigest()
+
+
 def rebuild(directory: Path) -> Path:
     temp_fd, temp_name = tempfile.mkstemp(prefix="psios-v1-", suffix=".zip", dir=directory)
     temp_path = Path(temp_name)
@@ -45,7 +53,8 @@ def rebuild(directory: Path) -> Path:
     try:
         with temp_path.open("wb") as dest:
             for i, wanted in enumerate(PART_SHA256, 1):
-                chunk = (directory / f"{ARCHIVE}.part{i:02d}").read_bytes()
+                with (directory / f"{ARCHIVE}.part{i:02d}").open("rb") as part:
+                    chunk = part.read(1_200_001)  # Each pinned segment is at most 1,200,000 bytes.
                 if digest(chunk) != wanted:
                     raise RuntimeError(f"Part {i} SHA-256 mismatch")
                 dest.write(chunk)
@@ -69,7 +78,7 @@ def manifest_entries(text: str) -> dict[str, str]:
             raise RuntimeError("Malformed SHA-256 manifest entry")
         sha, name = match.groups()
         path = PurePosixPath(name)
-        if (path.is_absolute() or ".." in path.parts or not path.parts or path.as_posix() != name
+        if (path.is_absolute() or PureWindowsPath(name).drive or ".." in path.parts or not path.parts or path.as_posix() != name
                 or "\\" in name or any(ord(c) < 32 for c in name) or name in entries):
             raise RuntimeError(f"Unsafe or duplicate manifest path: {name!r}")
         entries[name] = sha
@@ -80,14 +89,14 @@ def manifest_entries(text: str) -> dict[str, str]:
 
 def tree_file(root: Path, name: str) -> Path:
     target = root / name
-    if target.resolve() != target or not target.is_file():
+    if not target.is_relative_to(root) or target.resolve() != target or not target.is_file():
         raise RuntimeError(f"Documentation file missing or indirect: {name}")
     return target
 
 
 def verify_tree(root: Path, entries: dict[str, str]) -> None:
     for name, sha in entries.items():
-        if digest(tree_file(root, name).read_bytes()) != sha:
+        if file_digest(tree_file(root, name)) != sha:
             raise RuntimeError(f"Documentation file modified: {name}")
 
 
@@ -104,7 +113,7 @@ def restore_from_zip(archive: Path, docs_root: Path, verify_all: bool, verify_cu
                 raise RuntimeError(f"Indirect restore directory: {target.parent}")
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.exists() or target.is_symlink():
-                if target.is_symlink() or not target.is_file() or digest(target.read_bytes()) != expected_sha:
+                if target.is_symlink() or not target.is_file() or file_digest(target) != expected_sha:
                     raise RuntimeError(f"Refusing to overwrite modified file: {target}")
                 continue
             fd, name = tempfile.mkstemp(prefix=".restore-", dir=target.parent)
@@ -147,7 +156,7 @@ def main() -> None:
         if args.write_zip:
             dest = releases / ARCHIVE
             if dest.exists() or dest.is_symlink():
-                if dest.is_symlink() or not dest.is_file() or digest(dest.read_bytes()) != SHA256:
+                if dest.is_symlink() or not dest.is_file() or file_digest(dest) != SHA256:
                     raise RuntimeError("Existing ZIP differs; refusing to overwrite")
             else:
                 os.replace(temp, dest)

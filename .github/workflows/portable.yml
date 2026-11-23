@@ -61,12 +61,13 @@ jobs:
           tar -xzf psios-core-linux-amd64.tar.gz
           sha256sum --strict --check SHA256SUMS
           cd "$GITHUB_WORKSPACE"
-          curl --fail --location --retry 3 "$(jq -r .url images/rescue/base.json)" -o "$RUNNER_TEMP/rescue.iso"
-          python3 tests/rescue_disk.py --bin-dir "$RUNNER_TEMP/rescue-core" --iso "$RUNNER_TEMP/rescue.iso"
+          curl --fail --location --retry 3 "$(jq -r .url "$RUNNER_TEMP/rescue-core/rescue/base.json")" -o "$RUNNER_TEMP/rescue.iso"
+          python3 tests/rescue_disk.py --bin-dir "$RUNNER_TEMP/rescue-core" --iso "$RUNNER_TEMP/rescue.iso" \
+            --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py"
 
   attest:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'jyxxe/PsiOS'
-    needs: portable-core
+    needs: [portable-core, rescue-disk]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

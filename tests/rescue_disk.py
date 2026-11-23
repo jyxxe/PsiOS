@@ -29,7 +29,7 @@ def image_file(path, size):
         f.truncate(size)
 
 
-def exercise(iso, binaries, root):
+def exercise(iso, binaries, inspector, root):
     node = Node(binaries)
     try:
         identity = node.call("Node.Get", {})["reference"]["resource_id"]
@@ -62,7 +62,7 @@ def exercise(iso, binaries, root):
 
     def inspect(image, extra=(), rejection=None, journal=None):
         before = digest(image)
-        result = subprocess.run([sys.executable, INSPECT, image, *options, *extra],
+        result = subprocess.run([sys.executable, inspector, image, *options, *extra],
                                 capture_output=True, text=True, timeout=210, env={**os.environ, "TMPDIR": str(scratch)})
         assert digest(image) == before, "inspection changed the source image"
         assert not list(scratch.iterdir()), "temporary boot media or journal overlay left behind"
@@ -200,8 +200,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--iso", type=Path, required=True)
     parser.add_argument("--bin-dir", type=Path, required=True)
+    parser.add_argument("--inspector", type=Path, default=INSPECT, help="launcher from the checkout or extracted archive")
     args = parser.parse_args()
     if not os.getuid():
         parser.error("run this acceptance test as a non-root service user")
     with tempfile.TemporaryDirectory(prefix="psios-disk-test-") as tmp:
-        exercise(args.iso.resolve(), args.bin_dir.resolve(), Path(tmp))
+        exercise(args.iso.resolve(), args.bin_dir.resolve(), args.inspector.resolve(), Path(tmp))

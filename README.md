@@ -17,4 +17,4 @@ Build with `cargo build --locked --workspace`. For installation on an existing s
 - [Acceptance plans](docs/v1/acceptance/README.md)
 - [Document validation report](docs/v1/validation-report.json)
 
-Historical material under `docs/v1/sources/archive` is retained for provenance only; it is not an approved implementation baseline. The latest Forgejo/XeLab code requires independent auditing before reuse.
+Historical sources are reference material only. PsiOS implementation status is determined exclusively by its own source commits, interfaces, and verified tests.

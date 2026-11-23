@@ -24,6 +24,6 @@ sudo -u psios /usr/bin/psiosctl --socket /run/psios/api.sock node
 
 升级前安排停机并保存相互匹配的状态和见证，遵循[状态格式升级说明](core-runtime.md)。dpkg 在替换文件后对运行中的服务执行 try-restart，已停止的服务保持停止。用 `systemctl status psiosd`、`journalctl -u psiosd -b` 和上述 CLI 命令核实节点与调度状态。
 
-`apt remove psios-core` 停止服务，保留配置和数据。`apt purge psios-core` 还删除包管理的配置，但保留服务账户、数据库、卷、备份和见证。重新安装后，核对配置并启动原节点。状态或见证不完整时，保留现场，停服后用 `sudo -u psios /usr/bin/psiosd --config /etc/psios/core.json check` 查看诊断。此命令会执行受支持的状态格式迁移；降级二进制前需核对其可读格式。所有者凭据恢复见[单机 Core 指南](core-local.md)。
+`apt remove psios-core` 停止服务，保留配置和数据。`apt purge psios-core` 还删除包管理的配置，但保留服务账户、数据库、卷、备份和见证。重新安装后，核对配置并启动原节点。状态或见证不完整时，保留现场，停服后用 `sudo -u psios /usr/bin/psiosd --config /etc/psios/core.json verify` 在私有副本上核验数据库和见证，报告原状态格式与迁移需求。后续显式使用 `check` 或启动服务才会完成受支持的迁移。降级二进制前需核对其可读格式。所有者凭据恢复见[单机 Core 指南](core-local.md)。
 
 包生命周期验收会在一次性系统中真实安装、升级、停止、清除和重新安装包，并检查节点、任务回执及 Linux 权限。包版本升级用相同载荷的较早测试修订触发 dpkg，跨格式升级另用 PR #1 的真实二进制验证。[包验收脚本](../tests/debian-install.sh) · [状态升级测试](../tests/upgrade.py)

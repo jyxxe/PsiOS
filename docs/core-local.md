@@ -6,9 +6,9 @@
 
 ## Portable amd64 Core
 
-独立二进制开发包包含 `psiosd` 和 `psiosctl`。二者在 Alpine 上以 musl 静态链接，可直接用普通 Linux 用户运行。构建器检查 ELF 的解释器与动态库依赖。开发包不安装系统服务，操作员负责保存状态目录、见证目录与所有者凭据。宿主服务管理、OCI 和网络查询分别需要系统提供对应工具与权限。
+独立开发包包含 `psiosd`、`psiosctl` 和 `rescue/` 下的离线磁盘核验工具。二者在 Alpine 上以 musl 静态链接，可直接用普通 Linux 用户运行。构建器检查 ELF 的解释器与动态库依赖。开发包不安装系统服务，操作员负责保存状态目录、见证目录与所有者凭据。宿主服务管理、OCI 和网络查询分别需要系统提供对应工具与权限。
 
-可从独立的 `PsiOS standalone Core` 工作流下载 `psios-core-linux-amd64` 制品。通过系统测试的主线提交会同时提供 `psios-core-linux-amd64-attestation`。先从可信主线记录取得预期的完整提交 SHA，再下载同一次运行的归档和证明。从可信 checkout 使用支持 `gh attestation verify --source-digest` 的 GitHub CLI 核验归档，随后解包。
+可从独立的 `PsiOS standalone Core` 工作流下载 `psios-core-linux-amd64` 制品。通过系统测试和归档内救援工具启动验收的主线提交会同时提供 `psios-core-linux-amd64-attestation`。先从可信主线记录取得预期的完整提交 SHA，再下载同一次运行的归档和证明。从可信 checkout 使用支持 `gh attestation verify --source-digest` 的 GitHub CLI 核验归档，随后解包。
 
 ```bash
 tools/verify-portable-core ./psios-core-linux-amd64.tar.gz "$EXPECTED_MAIN_SHA" ./provenance.jsonl

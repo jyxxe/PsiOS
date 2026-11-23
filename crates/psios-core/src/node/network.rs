@@ -1,4 +1,5 @@
 //! Bounded, read-only interface observations in the daemon's network namespace.
+mod kernel;
 use crate::{Result, err, now, require};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -43,7 +44,7 @@ struct Address {
     peer: Option<IpAddr>,
 }
 
-pub fn interfaces(q: &Query) -> Result<Value> {
+fn iproute_interfaces() -> Result<Vec<Interface>> {
     let mut cmd = Command::new("/usr/sbin/ip");
     cmd.env_clear()
         .env("LC_ALL", "C")
@@ -54,12 +55,21 @@ pub fn interfaces(q: &Query) -> Result<Value> {
         "QuotaExceeded",
         "interface inventory exceeds the backend output limit",
     )?;
-    let mut interfaces: Vec<Interface> = serde_json::from_slice(&result.stdout).map_err(|_| {
+    serde_json::from_slice(&result.stdout).map_err(|_| {
         err(
             "DependencyUnavailable",
             "invalid interface observation from iproute2",
         )
-    })?;
+    })
+}
+
+pub fn interfaces(q: &Query) -> Result<Value> {
+    let mut interfaces = match fs::canonicalize("/usr/sbin/ip") {
+        Ok(path) if path.file_name().is_some_and(|s| s == "busybox") => kernel::observe()?,
+        Ok(_) => iproute_interfaces()?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => kernel::observe()?,
+        Err(e) => return Err(e.into()),
+    };
     interfaces.sort_unstable_by_key(|i| i.ifindex);
     require(
         !interfaces.windows(2).any(|p| p[0].ifindex == p[1].ifindex),

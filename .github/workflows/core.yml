@@ -69,6 +69,20 @@ jobs:
               setpriv --reuid "$uid" --regid "$gid" --clear-groups \
               python3 -B -m unittest discover -s tests -p test_network.py -v
           ' psios-network "$(id -un)"
+      - name: Export a real network artifact larger than one RPC frame
+        run: |
+          sudo unshare --net --mount --propagation private sh -ec '
+            batch=$(mktemp)
+            trap "rm -f \"$batch\"" EXIT
+            ip link set lo up
+            awk "BEGIN { for (i=1; i<=8000; i++) printf \"address add 2001:db8:abcd::%x/128 dev lo nodad\\n\", i }" > "$batch"
+            ip -batch "$batch"
+            uid=$(id -u "$1")
+            gid=$(id -g "$1")
+            mount -t tmpfs tmpfs /usr/sbin
+            PSIOS_TEST_BULK_NETWORK=1 setpriv --reuid "$uid" --regid "$gid" --clear-groups \
+              python3 -B -m unittest discover -s tests -p test_network.py -k test_large_real_interface_result -v
+          ' psios-artifact "$(id -un)"
       - name: Verify in-place state upgrade from PR 1
         run: |
           mkdir "$RUNNER_TEMP/psios-previous"

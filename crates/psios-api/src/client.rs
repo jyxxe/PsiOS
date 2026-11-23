@@ -1,4 +1,5 @@
 use crate::*;
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use std::{
     io::{Read, Write},
@@ -35,6 +36,15 @@ pub struct Client {
     token: String,
     service_uid: u32,
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactChunk {
+    offset: usize,
+    total_bytes: usize,
+    next_offset: Option<usize>,
+    data_base64: String,
+}
 impl Client {
     pub fn new(socket: impl AsRef<Path>, token: impl Into<String>) -> Self {
         Self {
@@ -47,6 +57,47 @@ impl Client {
     pub fn with_service_uid(mut self, uid: u32) -> Self {
         self.service_uid = uid;
         self
+    }
+    /// Retrieve and verify an immutable JSON artifact, with a caller-supplied byte limit.
+    pub fn artifact_bytes(&self, reference: &ResourceRef, max_bytes: usize) -> ApiResult<Vec<u8>> {
+        let mut bytes = Vec::new();
+        let mut total = None;
+        let invalid_page = || ApiError::new("RecoveryRequired", "invalid artifact chunk sequence");
+        loop {
+            let offset = bytes.len();
+            let result = self.call(
+                "Artifact.ReadChunk",
+                json!({"reference":reference,"offset":offset,"length":MAX_ARTIFACT_CHUNK}),
+            )?;
+            let page: ArtifactChunk = serde_json::from_value(result).map_err(|_| invalid_page())?;
+            if page.total_bytes > max_bytes {
+                return Err(
+                    ApiError::new("QuotaExceeded", "artifact exceeds client byte limit").into(),
+                );
+            }
+            let data = STANDARD
+                .decode(page.data_base64)
+                .map_err(|_| invalid_page())?;
+            let end = offset + data.len();
+            if page.offset != offset
+                || *total.get_or_insert(page.total_bytes) != page.total_bytes
+                || offset >= page.total_bytes
+                || data.len() != (page.total_bytes - offset).min(MAX_ARTIFACT_CHUNK)
+                || page.next_offset != (end < page.total_bytes).then_some(end)
+            {
+                return Err(invalid_page().into());
+            }
+            bytes.extend(data);
+            if page.next_offset.is_none() {
+                break;
+            }
+        }
+        if sha256(&bytes) != reference.digest {
+            return Err(
+                ApiError::new("RecoveryRequired", "artifact content digest mismatch").into(),
+            );
+        }
+        Ok(bytes)
     }
     pub fn call(&self, method: &str, params: Value) -> ApiResult<Value> {
         let req = Request {

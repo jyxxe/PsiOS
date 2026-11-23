@@ -48,6 +48,14 @@ ctl wait "$task" > "$workdir/task.json"
 jq '{reference: .result.artifact_refs[0]}' "$workdir/task.json" | ctl call Artifact.Read
 ```
 
+结果也可导出为与 Artifact 引用摘要一致的规范化 JSON。`ctl artifact` 接受任务回执中的固定版本引用，在输出前核对完整 SHA-256。命令默认最多读取 8 MiB，可用 `--max-bytes` 按调用方需要调整。
+
+```bash
+jq -e '.result.artifact_refs[0]' "$workdir/task.json" | ctl artifact > "$workdir/result.json"
+```
+
+`Artifact.ReadChunk` 接受 `reference`、以字节计的 `offset` 和 `length`，单块长度为 1 至 131072。返回 `data_base64`、`offset`、`total_bytes` 以及到末尾时为 `null` 的 `next_offset`。各次请求都检查当时的读取权限与制品归属。Rust SDK 的 `Client::artifact_bytes` 可在指定字节上限内合并分块并验证摘要。该入口已用超出单帧上限的真实内核盘点结果验收。[端到端网络制品测试](../tests/test_network.py)
+
 `kill -TERM "$daemon_pid"` 请求关闭。再次使用同一目录启动会恢复队列、保留原任务身份和已接受回执。系统服务的打包、首次初始化及升级见[宿主安装指南](host-package.md)。打包单元使用 `/usr/bin/psiosd`。使用过手工单元的主机，迁移前须检查本机单元覆盖和旧二进制路径。服务单元与配置示例使用 `psios` 用户、`/run/psios/api.sock`、`/var/lib/psios` 和独立的 `/var/lib/psios.witness`。[systemd 单元](../contrib/systemd/psiosd.service) · [配置示例](../contrib/systemd/core.json)
 
 ## Agent 授权与执行
@@ -81,7 +89,7 @@ target/debug/psiosctl --socket "$workdir/core/api.sock" --token-file "$workdir/a
 | Task.Prepare、Task.Submit、Task.LookupSubmission | Prepare 把 tool、input、key、delegation_id 和可选 deadline_at 变成可重传的 v1 TaskSubmit。Submit 和 Lookup 接受这个完整对象。SDK 在 ACK 丢失后先查询原键。 |
 | Task.Get、Task.Cancel、Task.CancelOrigin、Task.Retry | Cancel 使用任务版本。CancelOrigin 接收 v1 CancelOrigin 并支持先到墓碑。Retry 需要旧任务版本和新键，创建关联的新任务。 |
 | Approval.Decide、Run.Get、Operation.Get、Operation.Reconcile | 决策绑定已显示的计划摘要、审批请求版本和单次使用单元。Reconcile 使用 Operation 的 id 和 expected_resource_version。可核实文本写入、分块追加、受管服务启停和 OCI 容器删除后的停止结果，以及有启动检查点的在运行容器。 |
-| Artifact.Read、Secret.Put、Secret.Revoke、Audit.List | Artifact.Read 使用 reference。Secret.Put 接受 name/value，仅返回 SecretRef。secret.mac 可使用秘密计算 HMAC。Audit.List 支持 after 和 limit。 |
+| Artifact.Read、Artifact.ReadChunk、Secret.Put、Secret.Revoke、Audit.List | 两个制品读取入口均使用固定版本 reference，分块读取另需 offset 和 length。Secret.Put 接受 name/value，仅返回 SecretRef。secret.mac 可使用秘密计算 HMAC。Audit.List 支持 after 和 limit。 |
 | Tool.Call、Capability.Discover | 即时入口支持 system.status。执行其他注册工具通过 Task.Submit，服务端承担审批、预算、派发和回执保存。 |
 | StoragePool.Get、StoragePool.Configure、Application.Configure | 本地池实时报告容量。所有者用 CAS 开关新卷分配。应用停止后可用 CAS 修改非秘密环境配置。 |
 

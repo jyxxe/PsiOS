@@ -4,7 +4,7 @@ use psios_core::Config;
 use serde_json::{Value, json};
 use std::{
     fs,
-    io::Read,
+    io::{Read, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::PathBuf,
     time::Duration,
@@ -74,6 +74,13 @@ enum Cmd {
         id: String,
         #[arg(long, default_value_t = 30)]
         seconds: u64,
+    },
+    /// Verify and write the canonical JSON for an Artifact reference from a file or stdin.
+    Artifact {
+        #[arg(default_value = "-")]
+        file: String,
+        #[arg(long, default_value_t = 8 * 1024 * 1024)]
+        max_bytes: usize,
     },
     Agent {
         #[arg(long)]
@@ -202,6 +209,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             file,
         } => c.submit(&tool, input(&file)?, &key, &delegation)?,
         Cmd::Wait { id, seconds } => c.wait(&id, Duration::from_secs(seconds))?,
+        Cmd::Artifact { file, max_bytes } => {
+            let reference = serde_json::from_value(input(&file)?)?;
+            std::io::stdout().write_all(&c.artifact_bytes(&reference, max_bytes)?)?;
+            return Ok(());
+        }
         Cmd::Agent { key, delegation } => c.execute_agent(&StatusProvider, &key, &delegation)?,
         Cmd::Validate { .. } => unreachable!(),
     };

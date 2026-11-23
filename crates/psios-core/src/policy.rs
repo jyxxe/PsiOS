@@ -459,16 +459,13 @@ pub fn revoke(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     b["lifecycle"] = json!("Revoked");
     let revoked = db.status(&g, b)?;
     let generation = epoch(db)?;
-    let flight:bool=db.c.query_row("SELECT
+    let host_flight: bool=db.c.query_row("SELECT
         EXISTS(SELECT 1 FROM queue WHERE grant_id=?1 AND phase IN ('Dispatched','Unknown'))
         OR EXISTS(SELECT 1 FROM current a JOIN current op ON op.id=a.body->>'start_operation_id'
            JOIN current t ON t.id=op.spec->>'task_id' JOIN current d ON d.id=t.spec->'delegation_ref'->>'resource_id'
-           WHERE (a.kind='HostService' OR (a.kind='Application' AND a.body->>'lifecycle'='Running')) AND d.body->>'grant_id'=?1)
-        OR EXISTS(SELECT 1 FROM session_turns st JOIN current s ON s.id=st.session
-           JOIN current d ON d.id=s.spec->>'delegation_id' JOIN current m ON m.id=s.spec->'model_ref'->>'resource_id'
-           WHERE st.receipt IS NULL AND julianday(st.expires)>julianday('now')
-           AND (d.body->>'grant_id'=?1 OR (?3 AND m.spec->>'provider_principal_id'=?2)))",
-        params![g.id,g.owner,g.spec["actions"].as_array().unwrap().iter().any(|a|a=="model.serve")],|r|r.get(0))?;
+           WHERE (a.kind='HostService' OR (a.kind='Application' AND a.body->>'lifecycle'='Running')) AND d.body->>'grant_id'=?1)",
+        [&g.id], |r| r.get(0))?;
+    let flight = host_flight || agent::pending_for_grant(db, &g)?;
     let rev = id("revocation");
     let body = json!({
         "schema_version": VERSION,

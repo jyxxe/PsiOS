@@ -68,7 +68,7 @@ def main(previous):
         assert n.call("Budget.Get", {"id": g["budget_ref"]["resource_id"]}, credential)["model_calls_maximum"] == 0
         n.stop()
         with sqlite3.connect(n.state / "state.db") as db:
-            assert db.execute("PRAGMA user_version").fetchone() == (4,)
+            assert db.execute("PRAGMA user_version").fetchone() == (5,)
         old = subprocess.run([str(Path(previous) / "psiosd"), "--config", n.config, "serve"], capture_output=True)
         assert old.returncode != 0 and b"SchemaVersionUnsupported" in old.stderr
         n.start()

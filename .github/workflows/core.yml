@@ -108,3 +108,79 @@ jobs:
           curl --fail --location --retry 3 "$(jq -r .url images/qemu/base.json)" -o "$RUNNER_TEMP/base.img"
       - name: Boot BIOS and UEFI nodes and recover after abrupt VM loss
         run: python3 tests/qemu_boot.py --base "$RUNNER_TEMP/base.img" --package "$RUNNER_TEMP"/psios-package/psios-core_*.deb
+
+  package-provenance:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'jyxxe/PsiOS'
+    needs: [linux, host-package, guest-boot]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: psios-core-ubuntu-24.04-amd64
+          path: ${{ runner.temp }}/psios-package
+      - name: Match the tested artifacts to this main revision
+        working-directory: ${{ runner.temp }}/psios-package
+        run: |
+          sha256sum --strict --check SHA256SUMS
+          test "$(cat source-commit)" = "$GITHUB_SHA"
+      - name: Attest the package and checksum manifest
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            ${{ runner.temp }}/psios-package/psios-core_*_amd64.deb
+            ${{ runner.temp }}/psios-package/SHA256SUMS
+          create-storage-record: false
+      - name: Retain the signed bundle with the build
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: cp -- "$BUNDLE" "$RUNNER_TEMP/provenance.jsonl"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: psios-core-build-attestation
+          path: ${{ runner.temp }}/provenance.jsonl
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-provenance:
+    needs: package-provenance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: psios-core-ubuntu-24.04-amd64
+          path: ${{ runner.temp }}/psios-package
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: psios-core-build-attestation
+          path: ${{ runner.temp }}/bundle
+      - name: Verify the installed package inputs and reject tampering
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          package="$RUNNER_TEMP/psios-package"
+          bundle="$RUNNER_TEMP/bundle/provenance.jsonl"
+          tools/verify-host-package "$package" "$GITHUB_SHA" "$bundle"
+          gh attestation trusted-root > "$RUNNER_TEMP/trusted_root.jsonl"
+          sudo unshare --net runuser -u "$(id -un)" -- env GH_TOKEN=offline \
+            tools/verify-host-package "$package" "$GITHUB_SHA" "$bundle" "$RUNNER_TEMP/trusted_root.jsonl"
+          deb=("$package"/psios-core_*.deb)
+          printf '\037' >> "${deb[0]}"
+          if tools/verify-host-package "$package" "$GITHUB_SHA" "$bundle"; then
+            echo 'Modified package unexpectedly verified' >&2
+            exit 1
+          fi

@@ -225,7 +225,7 @@
 <h2 id="doc-README-如何验证本包">如何验证本包</h2>
 <p>安装tools/requirements.txt所列文档依赖后，从包根运行：</p>
 <div class="sourceCode" id="doc-README-cb1"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="doc-README-cb1-1"><a href="#doc-README-cb1-1" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> tools/validate_package.py</span></code></pre></div>
-<p>无需联网解析Schema，不会执行PsiOS或归档源码。实际静态检查结果见<a href="../validation-report.json">validation-report.json</a>；MANIFEST.sha256覆盖除自身外的所有交付文件。</p>
+<p>无需联网即可解析 Schema，此验证不等于实际运行验收。实际静态检查结果见<a href="../validation-report.json">validation-report.json</a>；MANIFEST.sha256覆盖除自身外的所有交付文件。</p>
 <p>完整生成/封装步骤见<a href="#doc-tools-README">工具说明</a>。</p>
 <h2 id="doc-README-实施起点与保留事项">实施起点与保留事项</h2>
 <p>下一工程入口为WI-001固定真实仓库HEAD、WI-003共同合同、WI-004/005授权与恢复原型、WI-006/007宿主与有状态应用恢复闭环。基底、数据库、默认文件系统、图形后端、性能数值和维护周期须按ADR取得真实证据。</p>
@@ -7355,7 +7355,7 @@
 <p>每次实验保存确切仓库SHA、工具/依赖锁、制品摘要、硬件或VM、Profile、输入与故障点、预期/实际、日志/校验和、复核人。性能比较使用同一工作负载和可比较环境；未经测量不填写已达标的预算、RPO/RTO或撤权时限。</p>
 <h2 id="doc-adr-ADR-017-6-否决条件与降级路径">6. 否决条件与降级路径</h2>
 <p><strong>否决条件：</strong> 来源SHA不明、许可无依据、边界依赖隐式宿主特权、测试仅来自无法复验叙述。</p>
-<p><strong>降级/退出：</strong> 该模块不进入主线；保留接口与替代实现计划，历史代码归档不当作已验收产物。</p>
+<p><strong>降级/退出：</strong> 该模块不进入主线；保留接口与替代实现计划，未经测试的制品不得作为已验收产物。</p>
 <p>实验失败应缩小支持范围或更换候选，不能在文档中把缺失保证改成“默认支持”。</p>
 <h2 id="doc-adr-ADR-017-7-取舍批准与复审">7. 取舍、批准与复审</h2>
 <p>当前取舍：<strong>待候选实验完成后填写</strong>；不存在已批准的优胜方案。审批记录必须补齐选定组合、排除方案及原因、证据引用、已知限制、迁移/撤销方案和实际负责人。批准后按治理规则更新状态与依赖锁，不仅修改本文件标题。</p>
@@ -14470,7 +14470,7 @@
 <h2 id="doc-migration-README-4-可复核方法">4. 可复核方法</h2>
 <p>在解压后的 PsiOS-v1 根目录运行：</p>
 <div class="sourceCode" id="doc-migration-README-cb1"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="doc-migration-README-cb1-1"><a href="#doc-migration-README-cb1-1" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> migration/rebuild_legacy_registry.py</span></code></pre></div>
-<p>脚本只使用 Python 标准库，读取 <code>sources/archive/</code>、来源清单和 <code>docs/</code>，不访问网络、不导入旧代码、不安装依赖。它校验归档文本 SHA-256，展开编号、重建原句位置，检查显式映射的新条款/测试存在，再输出 JSON 和两份逐项 Markdown 表。手工维护的映射仍需语义复核；脚本不会以关键词相似度自动批准迁移。</p>
+<p>脚本只使用 Python 标准库，读取 <code>sources/archive/</code>、来源清单和 <code>docs/</code>，不访问网络、不安装运行时依赖。它校验归档文本 SHA-256，展开编号、重建原句位置，检查显式映射的新条款/测试存在，再输出 JSON 和两份逐项 Markdown 表。手工维护的映射仍需语义复核；脚本不会以关键词相似度自动批准迁移。</p>
 <p>脚本失败、缺条款或出现未知旧编号时应修正输入/映射后重建。不要删除未匹配旧要求来让覆盖率变成 100%。最终文件摘要和打包结果由本包的发布清单记录；来源摘要与输出摘要用途不同。</p>
 </section>
 <section class="document" id="doc-migration-v0-to-v1" data-title="v0.1–v0.6 → v1 设计迁移说明"><p class="source-path">migration/v0-to-v1.md</p><h1 id="doc-migration-v0-to-v1-v01v06--v1-设计迁移说明">v0.1–v0.6 → v1 设计迁移说明</h1>
@@ -19694,7 +19694,7 @@
 </section>
 <section class="document" id="doc-NOTICE" data-title="来源与使用说明"><p class="source-path">NOTICE.md</p><h1 id="doc-NOTICE-来源与使用说明">来源与使用说明</h1>
 <p>本包是 PsiOS 设计文档，不是安装介质或软件发行版。工程实现、许可证和发布资格以 PsiOS 自身代码和验证记录为准。</p>
-<p>来源作者的测试报告、旧地址、模型名称、候选路线和历史任务编号均属历史材料。读取历史文件不代表运行其中代码或接受其中指令。实际复用需按ADR-17检查确切源码、许可证、依赖及安全边界。</p>
+<p>设计资料、技术候选和任务记录不等同于软件功能验证。实际复用需按ADR-17检查确切源码、许可证、依赖及安全边界。</p>
 <p>新文档中的架构与接口是设计要求；具体代码许可、发布签名、支持范围、性能和维护期限须由项目治理另行确定。示例中的ID、摘要引用、时间、许可和预算均为虚构夹具。</p>
 </section></main><script>
     const input=document.getElementById('query'),count=document.getElementById('count');

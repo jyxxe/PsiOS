@@ -58,7 +58,7 @@ pub fn archive(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     policy::owned(actor, &t)?;
     t.cas(&p.expected_resource_version)?;
     let aid = format!("archive-{}", t.id);
-    if let Ok(d) = db.get(&aid) {
+    if let Some(d) = db.find(&aid)? {
         return Ok(d.reference());
     }
     require(

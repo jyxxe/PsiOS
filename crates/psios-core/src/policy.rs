@@ -247,14 +247,27 @@ fn delegations(db: &Db<'_>, actor: &str) -> Result<Vec<Doc>> {
         .collect::<rusqlite::Result<_>>()?)
 }
 pub fn can(db: &Db<'_>, actor: &str, action: &str) -> Result<()> {
+    find_grant(db, actor, action, None)
+}
+pub fn can_target(db: &Db<'_>, actor: &str, action: &str, target: &str) -> Result<()> {
+    find_grant(db, actor, action, Some(target))
+}
+fn find_grant(db: &Db<'_>, actor: &str, action: &str, target: Option<&str>) -> Result<()> {
     for d in delegations(db, actor)? {
-        match delegation(db, actor, &d.id, action) {
-            Ok(_) => return Ok(()),
+        let check = delegation(db, actor, &d.id, action).and_then(|d| match target {
+            Some(resource) => tool_scope(db, &d.reference(), resource),
+            None => Ok(()),
+        });
+        match check {
+            Ok(()) => return Ok(()),
             Err(e) if e.0.code == "PermissionDenied" => {}
             Err(e) => return Err(e),
         }
     }
-    Err(err("PermissionDenied", "action requires an active grant"))
+    Err(err(
+        "PermissionDenied",
+        "action and target require a matching active grant",
+    ))
 }
 fn issue(
     db: &Db<'_>,
@@ -428,9 +441,16 @@ pub fn revoke(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     b["lifecycle"] = json!("Revoked");
     let revoked = db.status(&g, b)?;
     let generation = epoch(db)?;
-    let flight:bool=db.c.query_row("SELECT EXISTS(SELECT 1 FROM queue WHERE grant_id=?1 AND phase IN ('Dispatched','Unknown')) OR EXISTS(
-        SELECT 1 FROM current a JOIN queue q ON q.operation=a.body->>'start_operation_id'
-        WHERE a.kind='Application' AND a.body->>'lifecycle'='Running' AND q.grant_id=?1)",[&g.id],|r|r.get(0))?;
+    let flight:bool=db.c.query_row("SELECT
+        EXISTS(SELECT 1 FROM queue WHERE grant_id=?1 AND phase IN ('Dispatched','Unknown'))
+        OR EXISTS(SELECT 1 FROM current a JOIN current op ON op.id=a.body->>'start_operation_id'
+           JOIN current t ON t.id=op.spec->>'task_id' JOIN current d ON d.id=t.spec->'delegation_ref'->>'resource_id'
+           WHERE (a.kind='HostService' OR (a.kind='Application' AND a.body->>'lifecycle'='Running')) AND d.body->>'grant_id'=?1)
+        OR EXISTS(SELECT 1 FROM session_turns st JOIN current s ON s.id=st.session
+           JOIN current d ON d.id=s.spec->>'delegation_id' JOIN current m ON m.id=s.spec->'model_ref'->>'resource_id'
+           WHERE st.receipt IS NULL AND julianday(st.expires)>julianday('now')
+           AND (d.body->>'grant_id'=?1 OR (?3 AND m.spec->>'provider_principal_id'=?2)))",
+        params![g.id,g.owner,g.spec["actions"].as_array().unwrap().iter().any(|a|a=="model.serve")],|r|r.get(0))?;
     let rev = id("revocation");
     let body = json!({
         "schema_version": VERSION,

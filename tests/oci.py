@@ -5,7 +5,7 @@ import json
 import subprocess
 import tarfile
 
-from support import Node, key, target
+from support import Failure, Node, key, target
 
 
 def main(binaries):
@@ -83,7 +83,20 @@ int main(void) {
         del release["volume"]
         staged = node.perform("application.stage_release", dict(target=target(app), release=release))
         assert node.get(app_id)["resource"]["spec"]["release_ref"] == previous_release
-        other = node.perform("application.install", dict(release, name="isolated"))
+        agent = node.call("Agent.Register", {"name": "installer"})
+        grant = node.call("Grant.Issue", dict(principal_id=agent["principal_id"], actions=["task.submit","task.read","application.install"],
+            ttl_seconds=180, units=2, tool_targets=["profile-local"]))
+        request = node.prepare("application.install", dict(release, name="isolated"), key(), agent["token"], grant["delegation_ref"]["resource_id"])
+        accepted = node.call("Task.Submit", request, agent["token"])
+        installed = node.wait(accepted["task_id"], autoapprove=True)
+        assert installed["lifecycle"] == "Succeeded", installed
+        other = node.call("Artifact.Read", {"reference": installed["result"]["artifact_refs"][0]}, agent["token"])
+        try:
+            node.call("Application.Configure", dict(**target(other), environment={"TEST_NAME":"outside-scope"}), agent["token"])
+        except Failure as e:
+            assert e.code == "PermissionDenied", e
+        else:
+            raise AssertionError("configuration bypassed the install grant target")
         foreign = node.wait(node.submit("application.select_release", dict(target=target(other), release_ref=staged)), autoapprove=True)
         assert foreign["conditions"][0]["type"] == "PreconditionFailed", foreign
         node.perform("application.uninstall", target(other))

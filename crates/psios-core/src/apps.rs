@@ -813,8 +813,8 @@ struct Configure {
     environment: BTreeMap<String, String>,
 }
 pub fn configure(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
-    policy::can(db, actor, "application.install")?;
     let p: Configure = decode(p)?;
+    policy::can_target(db, actor, "application.install", &p.id)?;
     environment(&p.environment)?;
     let d = db.of(&p.id, "Application")?;
     policy::owned(actor, &d)?;

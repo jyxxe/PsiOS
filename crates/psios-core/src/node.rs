@@ -41,19 +41,21 @@ pub fn sync(db: &Db<'_>) -> Result<()> {
     for item in &db.cfg.services {
         let sid = format!("service-{}", item.unit);
         let spec = serde_json::to_value(item)?;
-        let current = db.get(&sid);
+        let current = db.find(&sid)?;
         let observation = current
-            .ok()
+            .as_ref()
             .filter(|d| d.spec == spec && d.body["lifecycle"] == "Registered")
             .map(|d| d.body["observation"].clone())
             .unwrap_or(Value::Null);
-        upsert(
-            db,
-            "HostService",
-            &sid,
-            spec.clone(),
-            json!({"lifecycle":"Registered","configuration":spec,"observation":observation}),
-        )?;
+        let mut body =
+            json!({"lifecycle":"Registered","configuration":spec,"observation":observation});
+        if let Some(start) = current
+            .as_ref()
+            .and_then(|d| d.body.get("start_operation_id"))
+        {
+            body["start_operation_id"] = start.clone();
+        }
+        upsert(db, "HostService", &sid, spec, body)?;
         active.insert(sid);
     }
     let known =
@@ -64,7 +66,9 @@ pub fn sync(db: &Db<'_>) -> Result<()> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for id in known.iter().filter(|id| !active.contains(*id)) {
         let d = db.get(id)?;
-        db.status(&d, json!({"lifecycle":"Unregistered"}))?;
+        let mut body = d.body.clone();
+        body["lifecycle"] = json!("Unregistered");
+        db.status(&d, body)?;
     }
     Ok(())
 }
@@ -94,8 +98,8 @@ pub fn configure(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
 }
 pub fn get(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let _: Empty = decode(p)?;
-    policy::can(db, actor, "node.inventory")?;
     let d = db.of(&db.meta("authority")?, "Node")?;
+    policy::can_target(db, actor, "node.inventory", &d.id)?;
     let mut groups = BTreeMap::new();
     for entry in
         db.c.prepare("SELECT phase,count(*) FROM queue GROUP BY phase")?
@@ -339,10 +343,18 @@ pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
     }
     Ok(())
 }
+pub fn observed_effect(db: &Db<'_>, service: &Doc, op: &str, observation: &Value) -> Result<Doc> {
+    let mut b = service.body.clone();
+    b["observation"] = observation.clone();
+    if observation["active_state"] == "active" {
+        b["start_operation_id"] = json!(op)
+    } else {
+        b.as_object_mut().unwrap().remove("start_operation_id");
+    }
+    db.status(service, b)
+}
 pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
-    let mut b = w.target.body.clone();
-    b["observation"] = r.clone();
-    Ok(json!({"service_ref":db.status(&w.target,b)?.reference(),"observation":r}))
+    Ok(json!({"service_ref":observed_effect(db,&w.target,&w.op.id,r)?.reference(),"observation":r}))
 }
 pub fn enabled(db: &Db<'_>) -> Result<bool> {
     let mode:Option<String>=db.c.query_row("SELECT body->>'scheduling' FROM current WHERE kind='Node' AND id=(SELECT value FROM meta WHERE key='authority')",[],|r|r.get(0)).optional()?;

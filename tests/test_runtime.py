@@ -158,6 +158,18 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual([x["attempt"] for x in history["tasks"]], [1, 2])
         self.assertEqual(len(history["turns"]), 1)
 
+    def test_provider_concurrency_and_inflight_revocation_accounting(self):
+        model = self.n.call("Model.Register", dict(name="one-at-a-time", revision="a", provider_principal_id=self.provider["principal_id"],
+            lease_seconds=30, max_context_bytes=8192, max_output_bytes=1024, max_in_flight=1))
+        a, b = self.open(model_ref=model), self.open(model_ref=model)
+        c = self.claim(a, "first")
+        self.denied("QueueFull", self.claim, b, "busy")
+        self.respond(a, c["lease_id"], dict(action="finish", summary="done"))
+        self.claim(b, "busy")
+        residual = self.n.call("Grant.Revoke", target(self.grant["grant_ref"]))
+        self.assertEqual(residual["status"], "Partial")
+        self.denied("PermissionDenied", self.claim, b, "busy")
+
     def test_revocation_retirement_and_cancel_close_live_leases(self):
         n = self.n
         s = self.open()

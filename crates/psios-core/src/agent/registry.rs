@@ -19,6 +19,7 @@ struct Model {
     max_context_bytes: u32,
     max_output_bytes: u32,
     lease_seconds: u32,
+    max_in_flight: Option<u32>,
 }
 pub(super) fn stable(kind: &str, parts: Value) -> String {
     let digest = sha256(&canonical(&parts));
@@ -94,7 +95,8 @@ pub fn model(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     label(&m.revision)?;
     policy::active(db, &m.provider_principal_id)?;
     require(
-        (1024..=131072).contains(&m.max_context_bytes)
+        (1..=32).contains(&m.max_in_flight.unwrap_or(4))
+            && (1024..=131072).contains(&m.max_context_bytes)
             && (128..=65536).contains(&m.max_output_bytes)
             && (1..=300).contains(&m.lease_seconds),
         "InvalidArgument",

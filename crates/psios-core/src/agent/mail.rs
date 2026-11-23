@@ -12,7 +12,7 @@ pub fn bind(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     label(&v.name)?;
     policy::active(db, &v.sender_principal_id)?;
     let id = registry::stable("mailbox", json!([actor, v.sender_principal_id, v.name]));
-    if let Ok(d) = db.get(&id) {
+    if let Some(d) = db.find(&id)? {
         require(state(&d) == "Open", "PreconditionFailed", "mailbox closed")?;
         return Ok(d.reference());
     }
@@ -72,7 +72,7 @@ pub fn send(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         )?;
     }
     let id = registry::stable("signal", json!([d.id, actor, v.key]));
-    if let Ok(old) = db.get(&id) {
+    if let Some(old) = db.find(&id)? {
         require(
             old.spec == *p,
             "IdempotencyConflict",

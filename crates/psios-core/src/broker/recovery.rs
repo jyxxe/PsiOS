@@ -193,9 +193,7 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
                 "OutcomeUnknown",
                 "observation does not confirm this service postcondition",
             )?;
-            let mut body = target.body.clone();
-            body["observation"] = proof.body.clone();
-            json!({"service_ref":db.status(&target,body)?.reference(),"observation_ref":rf,"conclusion":"ObservedPostcondition"})
+            json!({"service_ref":node::observed_effect(db,&target,&op.id,&proof.body)?.reference(),"observation_ref":rf,"conclusion":"ObservedPostcondition"})
         }
         _ => {
             let receipt = match action {

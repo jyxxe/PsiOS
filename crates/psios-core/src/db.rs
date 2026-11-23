@@ -333,14 +333,18 @@ impl Db<'_> {
             .c
             .query_row("SELECT value FROM meta WHERE key=?1", [key], |r| r.get(0))?)
     }
-    pub fn get(&self, id: &str) -> Result<Doc> {
-        self.c
+    pub fn find(&self, id: &str) -> Result<Option<Doc>> {
+        Ok(self
+            .c
             .query_row(
                 "SELECT * FROM versions WHERE id=?1 ORDER BY rev DESC LIMIT 1",
                 [id],
                 row,
             )
-            .optional()?
+            .optional()?)
+    }
+    pub fn get(&self, id: &str) -> Result<Doc> {
+        self.find(id)?
             .ok_or_else(|| err("NotFound", "resource unavailable"))
     }
     pub fn of(&self, id: &str, kind: &str) -> Result<Doc> {

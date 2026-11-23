@@ -35,6 +35,10 @@ class PlatformTests(unittest.TestCase):
         g = n.call("Grant.Issue", dict(principal_id=a["principal_id"], units=2, ttl_seconds=90,
             actions=["task.submit", "task.read", "node.inventory", "system.status"], tool_targets=[info_id(n)]))
         d = g["delegation_ref"]["resource_id"]
+        wrong = n.call("Agent.Register", {"name": "wrong-node-scope"})
+        n.call("Grant.Issue", dict(principal_id=wrong["principal_id"], units=1, ttl_seconds=90, actions=["node.inventory"],
+            tool_targets=["profile-local"]))
+        self.denied("PermissionDenied", "Node.Get", {}, wrong["token"])
         req = n.prepare("system.status", {}, key(), a["token"], d)
         self.denied("PermissionDenied", "Task.Submit", req, a["token"])
         self.denied("PermissionDenied", "Tool.Call", dict(tool="system.status", input={}, delegation_id=d), a["token"])
@@ -188,6 +192,17 @@ class PlatformTests(unittest.TestCase):
         n.stop()
         n.start()
         self.denied("PermissionDenied", "Task.Submit", req, leaf["token"])
+
+    def test_consumer_scope_and_position_survive_authorization_epoch_change(self):
+        n = self.n
+        prev = n.call("Resource.List", {"kind": "Node"})["watch_start_cursor"]
+        n.call("Event.Ack", dict(consumer="node-observer", cursor=prev))
+        n.agent(["task.read"])
+        wrong = n.call("Resource.List", {"kind": "Task"})["watch_start_cursor"]
+        self.denied("Conflict", "Event.Ack", dict(consumer="node-observer", previous=prev, cursor=wrong))
+        fresh = n.call("Resource.List", {"kind": "Node"})["watch_start_cursor"]
+        ack = n.call("Event.Ack", dict(consumer="node-observer", previous=prev, cursor=fresh))
+        self.assertEqual(ack["cursor"], fresh)
 
     def test_bad_worker_and_service_config(self):
         n = self.n

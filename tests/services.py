@@ -91,6 +91,18 @@ ExecStart=/bin/sh -c 'touch {entered}; while test ! -f {completion}; do sleep .0
         service = n.get(service_id)["reference"]
         stopped = n.perform("service.stop", target(service))
         assert stopped["observation"]["active_state"] == "inactive"
+        agent, grant = n.agent(["task.submit", "task.read", "service.start"])
+        req = n.prepare("service.start", target(stopped["service_ref"]), key(), agent["token"], grant["delegation_ref"]["resource_id"])
+        live = n.call("Task.Submit", req, agent["token"])["task_id"]
+        n.approve(live)
+        done = n.wait(live)
+        assert done["lifecycle"] == "Succeeded", done
+        n.call("Task.Archive", dict(id=live, expected_resource_version=done["task_revision"]))
+        n.stop()
+        n.start()
+        residual = n.call("Grant.Revoke", target(grant["grant_ref"]))
+        assert residual["status"] == "Partial" and residual["targets"][0]["residual_effects"], residual
+        n.perform("service.stop", target(n.get(service_id)["reference"]))
         n.stop()
         cfg["services"][0]["allow_control"] = False
         n.config.write_text(json.dumps(cfg))

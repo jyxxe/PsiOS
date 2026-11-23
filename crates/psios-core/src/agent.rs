@@ -72,7 +72,7 @@ pub fn open(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     )?;
     let d = policy::delegation(db, actor, &o.delegation_id, "session.run")?;
     let sid = registry::stable("session", json!([actor, o.key]));
-    if let Ok(existing) = db.get(&sid) {
+    if let Some(existing) = db.find(&sid)? {
         require(
             existing.spec == *p,
             "IdempotencyConflict",
@@ -254,6 +254,14 @@ pub fn claim(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             || (state(&s) == "ModelInFlight" && expired(s.body["lease_until"].as_str().unwrap())?),
         "Conflict",
         "session already leased, waiting for a task or closed",
+    )?;
+    let active:u32=db.c.query_row("SELECT count(*) FROM session_turns st JOIN current s ON s.id=st.session
+        WHERE s.spec->'model_ref'->>'resource_id'=?1 AND st.receipt IS NULL AND julianday(st.expires)>julianday('now')",
+        [&m.id],|r|r.get(0))?;
+    require(
+        u64::from(active) < m.spec["max_in_flight"].as_u64().unwrap_or(4),
+        "QueueFull",
+        "model provider concurrency exhausted",
     )?;
     let turn = s.body["turn"].as_u64().unwrap() as u32 + 1;
     require(

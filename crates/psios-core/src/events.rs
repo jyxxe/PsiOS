@@ -211,19 +211,20 @@ pub fn ack(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         return Ok(json!({"cursor": p.cursor}));
     }
     require(old == p.previous, "Conflict", "consumer checkpoint changed")?;
-    if let Some(old) = old
-        && let Ok(prev) = Cursor::read(db, &old, actor, "watch")
-    {
+    if let Some(old) = old {
+        // This value was authenticated at its original commit and is read from witnessed storage.
+        // Its old signature cannot authorize a new read after a policy epoch changes.
+        let corrupt = || err("RecoveryRequired", "stored checkpoint is unreadable");
+        let (payload, _) = old.split_once('.').ok_or_else(corrupt)?;
+        let payload = URL_SAFE_NO_PAD.decode(payload).map_err(|_| corrupt())?;
+        let (kind, snapshot, _, position, _): (String, String, i64, i64, i64) =
+            serde_json::from_slice(&payload).map_err(|_| corrupt())?;
+        require(kind == next.kind, "Conflict", "consumer filter changed")?;
         require(
-            prev.kind == next.kind,
-            "Conflict",
-            "consumer filter changed",
-        )?;
-        require(
-            (prev.snapshot == next.snapshot && prev.position <= next.position)
-                || (prev.snapshot != next.snapshot
+            (snapshot == next.snapshot && position <= next.position)
+                || (snapshot != next.snapshot
                     && next.position == next.high
-                    && next.high >= prev.position),
+                    && next.high >= position),
             "Conflict",
             "checkpoint would skip scope or move backwards",
         )?;

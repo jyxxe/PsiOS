@@ -65,7 +65,8 @@ jobs:
           rustup show active-toolchain
       - name: Build the original packaged Core and the current package
         run: |
-          tools/build-host-package "$RUNNER_TEMP/psios-previous-package" 73421114b0a2751bb89b6ab95873fcda5d3ef85f
+          # The historical test harness forks while other tests own locks.
+          RUST_TEST_THREADS=1 tools/build-host-package "$RUNNER_TEMP/psios-previous-package" 73421114b0a2751bb89b6ab95873fcda5d3ef85f
           tools/build-host-package "$RUNNER_TEMP/psios-package"
       - name: Exercise the installed system service across a real package upgrade
         run: |

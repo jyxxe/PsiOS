@@ -1,4 +1,4 @@
-use super::{Store, checked_head, open_regular};
+use super::{StateLock, Store, checked_head, open_regular};
 use crate::{Config, Result, config::private_dir, err, policy, require};
 use psios_api::sha256;
 use rusqlite::{Connection, OpenFlags, params};
@@ -69,6 +69,7 @@ impl Store {
         let lock = open_regular(&cfg.state_dir.join("daemon.lock"))?;
         lock.try_lock_shared()
             .map_err(|_| err("Conflict", "stop the authority before offline verification"))?;
+        let _lock = StateLock(lock);
         let parent = scratch.canonicalize()?;
         require(
             !parent.starts_with(&cfg.state_dir) && !parent.starts_with(&cfg.witness_dir),

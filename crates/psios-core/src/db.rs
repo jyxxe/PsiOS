@@ -18,7 +18,7 @@ mod verify;
 pub struct Store {
     pub(crate) config: Config,
     conn: Connection,
-    _lock: File,
+    _lock: StateLock,
     keys: Zeroizing<Vec<u8>>,
     sealed: bool,
     pub(crate) changes: std::sync::Arc<watch::Changes>,
@@ -108,7 +108,15 @@ fn token() -> String {
 pub(crate) fn credential() -> String {
     token()
 }
-fn lock(c: &Config) -> Result<File> {
+struct StateLock(File);
+impl Drop for StateLock {
+    fn drop(&mut self) {
+        // A concurrent fork can retain the open file description until exec.
+        // The store drops its SQLite connection before dropping this guard.
+        let _ = self.0.unlock();
+    }
+}
+fn lock(c: &Config) -> Result<StateLock> {
     let f = OpenOptions::new()
         .write(true)
         .create(true)
@@ -117,7 +125,7 @@ fn lock(c: &Config) -> Result<File> {
         .open(c.state_dir.join("daemon.lock"))?;
     f.try_lock()
         .map_err(|_| err("Conflict", "another authority holds the state lock"))?;
-    Ok(f)
+    Ok(StateLock(f))
 }
 fn setup(c: &Connection) -> Result<()> {
     c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF;")?;
@@ -507,5 +515,25 @@ impl Db<'_> {
     ) -> Result<()> {
         self.c.execute("INSERT INTO audit(at,actor,method,resource,decision,request) VALUES(?1,?2,?3,?4,?5,?6)",params![now(),actor,method,target,decision,self.correlation])?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod state_lock_tests {
+    use super::*;
+
+    #[test]
+    fn closing_store_releases_lock_even_if_a_fork_retains_the_file_description() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config::local(&dir.path().join("state"));
+        Store::init(&cfg).unwrap();
+        let store = Store::open(cfg.clone()).unwrap();
+        let inherited = store._lock.0.try_clone().unwrap();
+        assert!(matches!(Store::open(cfg.clone()), Err(e) if e.0.code == "Conflict"));
+        drop(store);
+        let reopened = Store::open(cfg.clone()).unwrap();
+        drop(inherited);
+        assert!(matches!(Store::open(cfg), Err(e) if e.0.code == "Conflict"));
+        drop(reopened);
     }
 }

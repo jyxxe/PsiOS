@@ -1,0 +1,5 @@
+target/debian-build/release/psiosd usr/bin/
+target/debian-build/release/psiosctl usr/bin/
+contrib/systemd/psiosd.service usr/lib/systemd/system/
+contrib/systemd/psios-init.service usr/lib/systemd/system/
+contrib/systemd/core.json etc/psios/

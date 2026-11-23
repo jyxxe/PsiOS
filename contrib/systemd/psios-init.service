@@ -1,0 +1,17 @@
+[Unit]
+Description=Initialize a new local PsiOS authority
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=psios
+Group=psios
+StateDirectory=psios psios.witness
+StateDirectoryMode=0700
+UMask=0077
+ExecStart=/usr/bin/psiosd --config /etc/psios/core.json init
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX

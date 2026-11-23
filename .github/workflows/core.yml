@@ -47,3 +47,19 @@ jobs:
           python3 tests/services.py
       - name: Exercise a real OCI engine and persistent volume
         run: python3 tests/oci.py
+
+  host-package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install package build tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends debhelper
+          rustup show active-toolchain
+      - name: Build and test the native Core package
+        # rustup supplies the workspace toolchain outside dpkg's database.
+        run: dpkg-buildpackage -b -us -uc -d
+      - name: Exercise the installed system service across upgrade and removal
+        run: sudo tests/debian-install.sh --disposable-systemd-host ../psios-core_*.deb

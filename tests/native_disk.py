@@ -2,6 +2,7 @@
 import argparse
 from contextlib import contextmanager
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -124,6 +125,33 @@ def extract_partition(image, output, offset_mib, size_mib):
             dst.write(chunk)
 
 
+def reject_damaged_payload(args, work, image, deployment, intact_efi):
+    # Build a real UEFI application, changing just the source marker after its
+    # expected digest has been sealed. Keep the original firmware to restore.
+    damaged = work / "damaged"
+    damaged.mkdir()
+    spec = importlib.util.spec_from_file_location("native_installer", args.installer.resolve())
+    installer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(installer)
+    inputs = argparse.Namespace(kernel_iso=args.kernel_iso, core_archive=args.archive, core_sha256=sha(args.archive))
+    installer.ramfs(damaged, inputs, deployment["state_uuid"], deployment["home_uuid"])
+    (damaged / "psios-source").write_text("damaged source marker\n")
+    with (damaged / "initrd").open("ab") as out:
+        out.write(b"\0" * (-out.tell() % 4))
+        out.flush()
+        subprocess.run(["cpio", "--quiet", "-o", "-H", "newc", "--owner=0:0"], cwd=damaged,
+                       input=b"psios-source\n", stdout=out, check=True)
+    efi = installer.boot_media.efi_application(damaged, installer.CMDLINE)
+    destination = ["mcopy", "-o", "-i", f"{image}@@1048576"]
+    subprocess.run([*destination, efi, "::/EFI/BOOT/BOOTX64.EFI"], check=True)
+    before = sha(image)
+    with boot(work, image) as c:
+        c.until(b"PsiOS boot stopped at deployment-payload")
+        assert c.vm.wait(25) == 0
+    assert sha(image) == before
+    subprocess.run([*destination, intact_efi, "::/EFI/BOOT/BOOTX64.EFI"], check=True)
+
+
 def exercise(args, work):
     operator, op_hash = password(work, "operator.hash")
     admin, root_hash = password(work, "root.hash")
@@ -133,6 +161,10 @@ def exercise(args, work):
              "--root-console-hash", root_hash]
     deployment = json.loads(subprocess.check_output(build))
     before = sha(image)
+    assert before == deployment["initial_image_sha256"]
+    extracted_efi = work / "boot.efi"
+    subprocess.run(["mcopy", "-i", f"{image}@@1048576", "::/EFI/BOOT/BOOTX64.EFI", extracted_efi], check=True)
+    assert sha(extracted_efi) == deployment["efi_application_sha256"]
     assert subprocess.run(build, capture_output=True).returncode != 0 and sha(image) == before
     assert image.stat().st_mode & 0o077 == 0
     for source, target in [("OVMF_CODE_4M.fd", "code.fd"), ("OVMF_VARS_4M.fd", "vars.fd")]:
@@ -141,6 +173,17 @@ def exercise(args, work):
         c.credentials("psios", "wrong-" + secrets.token_hex(10))
         c.until(b"Login incorrect")
         c.login("psios", operator)
+        manifest = json.loads(c.run("cat /psios-deployment.json"))
+        assert manifest["core_archive_sha256"] == sha(args.archive)
+        assert manifest["core_source_commit"] == deployment["source_commit"]
+        assert manifest["kernel_input"]["sha256"] == sha(args.kernel_iso)
+        assert manifest["required_filesystems"] == {"state": deployment["state_uuid"], "home": deployment["home_uuid"]}
+        assert c.run("sha256sum /psios-deployment.json").split()[0] == deployment["deployment_manifest_sha256"]
+        payload = ("/bin/psiosd", "/bin/psiosctl", "/psios-source", "/psios-init",
+                   "/psios-disk-uuid", "/psios-home-uuid", "/psios-shutdown")
+        assert set(manifest["payload_sha256"]) == set(payload)
+        for name in payload:
+            assert c.run(f"sha256sum {name}").split()[0] == manifest["payload_sha256"][name]
         assert c.run("pwd") == "/home/psios"
         assert c.run("stat -c '%u:%g:%a' .") == "1000:1000:700"
         c.run("test ! -r /root && test ! -w /mnt/psios-homes")
@@ -158,6 +201,7 @@ def exercise(args, work):
         c.login("psios", operator)
         assert c.run("./observe") == "persisted"
         c.run("rm ./full && sync -f .")
+        assert c.run("sha256sum /psios-deployment.json").split()[0] == deployment["deployment_manifest_sha256"]
         second = check_state(c)
         assert first[0] == second[0] and second[1]["deduplicated"]
         assert first[1]["task_id"] == second[1]["task_id"] and first[2] == second[2] and first[3] != second[3]
@@ -195,6 +239,7 @@ def exercise(args, work):
                                       "--partition", "2", "--state", "/psios", "--uid", "1000"])
     checked = json.loads(report)
     assert checked["sqlite_integrity"] == "Verified" and checked["node_id"] == first[0] and checked["foreign_keys"] == "Verified"
+    reject_damaged_payload(args, work, image, deployment, extracted_efi)
     # A valid, independently formatted home volume cannot replace the expected
     # filesystem; detecting that mismatch must precede writing either volume.
     original_home = work / "original-home.ext4"
@@ -245,7 +290,7 @@ def exercise(args, work):
         assert c.vm.wait(25) == 0
     assert sha(image) == pre_reject
     print(f"Verified source {deployment['source_commit']}, node {first[0]}, task {first[1]['task_id']}, "
-          "authenticated UEFI console, private persistent homes, full-home isolation, offline management, power loss, clean shutdown, external rescue, consumed enrollment and mismatched state/home refusal.")
+          "matched deployment receipt, authenticated UEFI console, private persistent homes, full-home isolation, offline management, power loss, clean shutdown, external rescue, consumed enrollment and damaged payload and mismatched state/home refusal.")
 
 
 if __name__ == "__main__":

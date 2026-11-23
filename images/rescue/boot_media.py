@@ -47,6 +47,7 @@ def prepare_kernel(work, kernel_iso):
         with path.open("rb") as f:
             if hashlib.file_digest(f, "sha256").hexdigest() != base[digest]:
                 raise ValueError(f"invalid {member} in boot media")
+    return base
 
 
 def run(work, args):

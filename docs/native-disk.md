@@ -16,7 +16,7 @@ sha256sum --strict --check SHA256SUMS
 openssl passwd -6 > operator.hash
 python3 native/create.py node.raw --kernel-iso alpine-virt.iso \
   --core-archive psios-core-linux-amd64.tar.gz --core-sha256 "$VERIFIED_CORE_SHA256" \
-  --console-hash operator.hash
+  --console-hash operator.hash > node-build.json
 cp /usr/share/OVMF/OVMF_VARS_4M.fd node-vars.fd
 qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
   -drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
@@ -26,6 +26,17 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 ```
 
 串口账户 `psios` 和服务使用 UID 1000。登录后可运行 `psiosctl whoami`、`psiosctl node`，或用 `printf '{}' | psiosctl submit system.status --key first-status` 提交任务。需要传统系统管理时，可在生成新盘时传入 `--root-console-hash root.hash` 设置独立的本机 root 密码。默认锁定 root。启用后可用 root 登录串口执行 `poweroff` 正常关机。运行时生成的所有者令牌位于服务账户的私有见证目录。
+
+## 核对安装与运行的制品
+
+构建成功后，将 `node-build.json` 保存在节点外。其中 `initial_image_sha256` 可在首次启动前与 `sha256sum node.raw` 比对。启动会改变数据分区，离线核对引导程序可单独读取 EFI 系统分区。
+
+```sh
+mcopy -i node.raw@@1048576 ::/EFI/BOOT/BOOTX64.EFI boot.efi
+sha256sum boot.efi
+```
+
+将结果与回执的 `efi_application_sha256` 比对。启动后普通账户可运行 `sha256sum /psios-deployment.json` 与回执的 `deployment_manifest_sha256` 比对。该清单列出 Core 源码修订及归档摘要、内核 ISO 及其内核与初始内存盘的输入摘要、两个文件系统 UUID 和 PsiOS 加入启动环境的文件摘要。回执另含组装后的完整 initramfs 摘要。PID 1 在挂载可写分区前核对清单和这些文件，发现不一致时给出 `deployment-payload` 停机阶段。外部回执供操作者比对，固件信任链与远程启动证明仍待验证。
 
 ## 持久性与救援
 

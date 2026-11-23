@@ -4,7 +4,7 @@
 
 ## 准备可信的工具
 
-Linux 宿主需要 Python 3.11+、GNU cpio、`isoinfo` 和 `qemu-system-x86_64`。临时日志重放还需要 `qemu-img`。从可信的 PsiOS checkout 运行。救援内核与初始内存文件系统来自固定的 Alpine virt 3.23.8 测试介质，读取前先核验整个 ISO，提取后再校验这两个文件。介质摘要及上游发布签名者指纹记在仓库中。[固定输入](../images/rescue/base.json) · [上游发布目录](https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/)
+Linux 宿主需要 Python 3.11+、GNU cpio、`isoinfo` 和 `qemu-system-x86_64`。临时日志重放还需要 `qemu-img`。新版独立 Core 归档包含救援启动器、初始化程序、介质清单及离线用法。救援内核与初始内存文件系统来自固定的 Alpine virt 3.23.8 测试介质，读取前先核验整个 ISO，提取后再校验这两个文件。介质摘要及上游发布签名者指纹记在仓库中。[固定输入](../images/rescue/base.json) · [上游发布目录](https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/)
 
 先取得所选主线提交的独立 Core 归档和构建证明。下面的 `EXPECTED_MAIN_SHA` 取自可信主线记录。`trusted_root.jsonl` 是事先通过可信连接取得的信任根。核验后的归档提供救援程序及其预期摘要。[取得和核验独立 Core](core-local.md#portable-amd64-core)
 
@@ -12,15 +12,18 @@ Linux 宿主需要 Python 3.11+、GNU cpio、`isoinfo` 和 `qemu-system-x86_64`�
 tools/verify-portable-core psios-core-linux-amd64.tar.gz "$EXPECTED_MAIN_SHA" provenance.jsonl trusted_root.jsonl
 mkdir rescue-core
 tar -xzf psios-core-linux-amd64.tar.gz -C rescue-core
+(cd rescue-core && sha256sum --strict --check SHA256SUMS)
 core_sha=$(awk '$2=="psiosd" {print $1}' rescue-core/SHA256SUMS)
 ```
+
+所有输入备妥后，检查机可以断网运行，无需 Git、源码检出或 Cargo。只有二进制的早期归档仍可按对应可信源码中的说明运行启动器。
 
 ## 检查状态盘
 
 示例检查 raw 镜像第一分区内的 `/var/lib/psios` 和 `/var/lib/psios.witness`。将 `SERVICE_UID` 设为原服务账户 UID。若目录的访问权限依赖独立 GID，增加 `--gid`。镜像直接包含文件系统时省略 `--partition`。其他布局可用 `--state` 和 `--witness` 指定分区根目录内的绝对路径。
 
 ```bash
-python3 images/rescue/inspect.py node.raw --partition 1 --uid "$SERVICE_UID" \
+python3 rescue-core/rescue/inspect.py node.raw --partition 1 --uid "$SERVICE_UID" \
   --iso alpine-virt-3.23.8-x86_64.iso --core rescue-core/psiosd --core-sha256 "$core_sha"
 ```
 
@@ -34,6 +37,23 @@ qemu-img convert -f qcow2 -O raw ./node-a/system.qcow2 "$export_dir/node.raw"
 ```
 
 启动器以只读文件描述符传递源镜像，并保留 QEMU 镜像访问锁。客户机只读挂载指定设备，关闭日志重放、设备解释和文件执行。客体内的检查进程使用原服务 UID。网络关闭，检查结果从独立串口返回。应使用已停止的镜像或存储层冻结的副本；其他直接改写文件的进程可能忽略 QEMU 锁。默认模式遇到待重放的 ext4 日志时中止。SQLite 自身的 WAL 和回滚日志由既有 Core 核验器处理。
+
+## 从固件启动并导出救援光盘
+
+在前面的检查命令末尾加上 `--firmware bios` 或 `--firmware uefi`，可以从 El Torito 光盘启动同一套检查。再加 `--save-rescue-iso node-rescue.iso`，核验成功后才会发布完整 ISO。输出路径必须尚不存在。光盘同时包含 SeaBIOS 和 amd64 UEFI 的启动入口，带有本次指定的 UID、GID、分区及目录。节点数据库、所有者凭据和 EFI 变量保留在各自设备上。
+
+构建机另需 xorriso、含 x86_64-efi 模块的 GNU GRUB、mtools 及 mkfs.fat。BIOS 使用已固定的 ISOLINUX 文件。UEFI 的 GRUB 可执行文件内嵌内核、初始内存盘和启动配置，直接从自己的内存盘读取。UEFI 验收使用宿主受信任的标准 4 MiB OVMF 固件与独立变量副本，默认从 `/usr/share/OVMF` 读取，可用 `--ovmf-dir` 更改。
+
+可先运行 `sha256sum node-rescue.iso`，通过可信渠道传递摘要，再在另一台装有 QEMU 的 Linux 主机按该摘要复核，并启动这份光盘。下面示例将已停止的节点盘作为第一个只读 virtio 块设备，复用制作光盘时的检查设置。
+
+```bash
+qemu-system-x86_64 -nodefaults -no-user-config -no-reboot -machine pc -m 768 \
+  -nic none -display none -monitor none -serial null -serial stdio \
+  -boot order=d,strict=on -cdrom node-rescue.iso \
+  -drive file=node.raw,format=raw,if=virtio,readonly=on
+```
+
+客户机从第二个串口输出 `PSIOS-RESCUE/1`、状态和核验结果，随后关机。固件可能先在同一串口输出启动消息。光盘只允许检查只读块设备，遇到可写设备或需要文件系统日志重放的盘会停止。临时日志重放仍通过受控的直接内核启动模式执行。此光盘已在 QEMU 的 SeaBIOS 和 OVMF 上验证，物理机和 Secure Boot 仍待验收。归档构建证明覆盖制盘程序；本地生成的 ISO 摘要随工具链、Core 和站点设置而定。
 
 ## 在临时副本重放 ext4 日志
 

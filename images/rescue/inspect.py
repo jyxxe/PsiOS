@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import boot_media
 
 
 HERE = Path(__file__).resolve().parent
@@ -69,14 +70,17 @@ def prepare(work, args):
                 f"SERVICE_GID={args.gid if args.gid is not None else args.uid}\nCOPY_MIB={args.max_copy_mib}\n"
                 f"OVERLAY={int(args.journal_overlay_mib is not None)}\n")
     (work / "rescue-settings").write_text(settings)
+    (work / "rescue-settings").chmod(0o600)
     config = {"state_dir": "/source" + args.state, "witness_dir": "/source" + (args.witness or args.state + ".witness"),
               "socket": "/run/rescue.sock"}
     (work / "rescue.json").write_text(json.dumps(config))
     (work / "rescue.json").chmod(0o644)
+    for name in ("psios-rescue", "psiosd", "rescue-settings", "rescue.json"):
+        os.utime(work / name, (boot_media.EPOCH, boot_media.EPOCH))
     with (work / "initrd").open("ab") as out:
         out.write(b"\0" * (-out.tell() % 4))
         out.flush()
-        subprocess.run(["cpio", "--quiet", "-o", "-H", "newc", "--owner=0:0"], cwd=work,
+        subprocess.run(["cpio", "--quiet", "-o", "-H", "newc", "--reproducible", "--owner=0:0"], cwd=work,
                        input=b"psios-rescue\npsiosd\nrescue-settings\nrescue.json\n", stdout=out, check=True)
 
 
@@ -88,11 +92,15 @@ def inspect(args):
         # backing-file discovery and the guest gets no interface to the network.
         fd = disk.fileno()
         kvm = os.access("/dev/kvm", os.R_OK | os.W_OK)
+        if args.firmware == "direct":
+            boot = ["-machine", "pc", "-kernel", "kernel", "-initrd", "initrd", "-append", boot_media.CMDLINE]
+        else:
+            boot_media.build(work)
+            boot = boot_media.firmware_args(args.firmware, work, args.ovmf_dir)
+            boot += ["-cdrom", "rescue.iso", "-boot", "order=d,strict=on"]
         command = ["qemu-system-x86_64", "-nodefaults", "-no-user-config", "-no-reboot",
-                   "-machine", "pc", "-accel", "kvm" if kvm else "tcg", "-m", "768", "-smp", "2",
+                   *boot, "-accel", "kvm" if kvm else "tcg", "-m", "768", "-smp", "2",
                    "-display", "none", "-monitor", "none", "-nic", "none", "-serial", "null", "-serial", "stdio",
-                   "-kernel", str(work / "kernel"), "-initrd", str(work / "initrd"),
-                   "-append", "console=ttyS0 quiet panic=1 rdinit=/psios-rescue",
                    "-add-fd", f"fd={fd},set=1", "-blockdev", "driver=file,node-name=disk,filename=/dev/fdset/1,read-only=on,locking=on",
                    "-blockdev", "driver=raw,node-name=source,file=disk,read-only=on"]
         drive = "source"
@@ -113,12 +121,17 @@ def inspect(args):
                         "-blockdev", "driver=qcow2,node-name=view,file=changes,backing=source"]
             drive = "view"
         command += ["-device", f"virtio-blk-pci,drive={drive},werror=report,rerror=report"]
-        result = subprocess.run(command, pass_fds=(fd,), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        result = subprocess.run(command, cwd=work, pass_fds=(fd,), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 preexec_fn=limit_child, timeout=180)
         if limit_child is not None and result.returncode == -signal.SIGXFSZ:
             raise ValueError("journal overlay file size limit reached")
         result.check_returncode()
-        status, _, body = result.stdout.strip().partition(b"\n")
+        # OVMF also mirrors its own boot messages to the report UART.
+        output = result.stdout.replace(b"\r\n", b"\n")
+        marker = b"\nPSIOS-RESCUE/1\n"
+        if output.count(marker) != 1:
+            raise ValueError("rescue inspection failed: no unique guest report")
+        status, _, body = output.partition(marker)[2].strip().partition(b"\n")
         success = {b"OK": None} if args.journal_overlay_mib is None else {
             b"OK clean": "Clean", b"OK replayed": "ReplayedOnTemporaryOverlay"}
         if status.strip() not in success:
@@ -129,6 +142,8 @@ def inspect(args):
             raise ValueError("incomplete authority verification")
         if args.journal_overlay_mib is not None:
             report["ext4_journal"] = success[status.strip()]
+        if args.save_rescue_iso is not None:
+            boot_media.publish(work / "rescue.iso", args.save_rescue_iso)
         return report
 
 
@@ -146,6 +161,11 @@ def main():
     parser.add_argument("--max-copy-mib", type=int, default=64, help="database and journal copy limit (1–256 MiB)")
     parser.add_argument("--journal-overlay-mib", type=int, metavar="MIB",
                         help="allow ext4 journal replay on a disposable bounded overlay (16–512 MiB)")
+    parser.add_argument("--firmware", choices=["direct", "bios", "uefi"], default="direct",
+                        help="direct kernel boot or boot an independently built El Torito rescue CD")
+    parser.add_argument("--ovmf-dir", type=Path, default=Path("/usr/share/OVMF"), help="trusted 4 MiB OVMF pair for UEFI")
+    parser.add_argument("--save-rescue-iso", type=Path, metavar="NEW_FILE",
+                        help="publish the tested optical medium after successful firmware inspection")
     args = parser.parse_args()
     if not re.fullmatch("[0-9a-f]{64}", args.core_sha256):
         parser.error("invalid expected SHA-256")
@@ -155,6 +175,13 @@ def main():
         parser.error("invalid partition or copy limit")
     if args.journal_overlay_mib is not None and not 16 <= args.journal_overlay_mib <= 512:
         parser.error("journal overlay limit must be 16–512 MiB")
+    if args.firmware != "direct" and args.journal_overlay_mib is not None:
+        parser.error("firmware media require a read-only block device")
+    if args.save_rescue_iso is not None:
+        if args.firmware == "direct":
+            parser.error("saving an ISO requires bios or uefi firmware inspection")
+        if os.path.lexists(args.save_rescue_iso):
+            parser.error("output already exists")
     print(json.dumps(inspect(args), ensure_ascii=True))
 
 

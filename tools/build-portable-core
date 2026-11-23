@@ -27,8 +27,22 @@ cd "$work/bundle"
 tar --same-permissions -xf "$work/binaries.tar" psiosd psiosctl
 git -C "$repo" show "$sha:Cargo.lock" > Cargo.lock
 printf '%s\n' "$sha" > source-commit
-sha256sum psiosd psiosctl Cargo.lock source-commit > SHA256SUMS
+members=(Cargo.lock SHA256SUMS psiosctl psiosd source-commit)
+checks=(psiosd psiosctl Cargo.lock source-commit)
+# The selected revision determines its archive layout, including when rebuilding
+# an older release with this launcher. Fetch every rescue file from that tree.
+if git -C "$repo" cat-file -e "$sha:images/rescue/README.txt" 2>/dev/null; then
+    mkdir -m 0755 rescue
+    rescue_files=(README.txt base.json init inspect.py)
+    if git -C "$repo" cat-file -e "$sha:images/rescue/boot_media.py" 2>/dev/null; then
+        rescue_files+=(boot_media.py)
+    fi
+    git -C "$repo" archive "$sha:images/rescue" "${rescue_files[@]}" | tar --same-permissions -xf - -C rescue
+    checks+=("${rescue_files[@]/#/rescue/}")
+    members+=(rescue)
+fi
+sha256sum "${checks[@]}" > SHA256SUMS
 tar --mtime="@$epoch" --owner=0 --group=0 --numeric-owner --mode='u+rw,go+r-w' \
-    -cf - Cargo.lock SHA256SUMS psiosctl psiosd source-commit | gzip -n > "$work/core.tar.gz"
+    --sort=name -cf - "${members[@]}" | gzip -n > "$work/core.tar.gz"
 # Hard-link from the same filesystem to publish only a complete, new archive.
 ln -T -- "$work/core.tar.gz" "$output"

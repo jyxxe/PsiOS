@@ -1,4 +1,5 @@
 //! The local runtime coordinates model decisions with (and never independently executes) broker Tasks.
+mod lease;
 pub mod mail;
 mod registry;
 use crate::{
@@ -6,6 +7,7 @@ use crate::{
     db::{Db, Doc},
     policy, *,
 };
+pub(crate) use lease::pending_for_grant;
 use psios_api::{canonical, id, sha256};
 pub use registry::{model, retire, skill};
 use rusqlite::{OptionalExtension, params};
@@ -239,25 +241,25 @@ pub fn claim(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     if let Some((_, _, turn, Some(receipt))) = &previous {
         return Ok(json!({"turn":turn,"completed":receipt}));
     }
+    let clock = lease::BootClock::sample()?;
     let ctx = context(db, &s, &skill, &m)?;
     let lease_info = |lease: &str, expires: &str, turn: u32, recovered: bool| json!({"lease_id":lease,"expires_at":expires,"turn":turn,"context":ctx,"recovered":recovered});
     if let Some((lease, until, turn, _)) = previous {
         require(
-            state(&s) == "ModelInFlight" && s.body["current_lease"] == lease && !expired(&until)?,
+            state(&s) == "ModelInFlight"
+                && s.body["current_lease"] == lease
+                && clock.current(db, &s)?,
             "Fenced",
             "model lease no longer current",
         )?;
         return Ok(lease_info(&lease, &until, turn, true));
     }
     require(
-        state(&s) == "AwaitingModel"
-            || (state(&s) == "ModelInFlight" && expired(s.body["lease_until"].as_str().unwrap())?),
+        state(&s) == "AwaitingModel" || (state(&s) == "ModelInFlight" && !clock.current(db, &s)?),
         "Conflict",
         "session already leased, waiting for a task or closed",
     )?;
-    let active:u32=db.c.query_row("SELECT count(*) FROM session_turns st JOIN current s ON s.id=st.session
-        WHERE s.spec->'model_ref'->>'resource_id'=?1 AND st.receipt IS NULL AND julianday(st.expires)>julianday('now')",
-        [&m.id],|r|r.get(0))?;
+    let active = lease::model_slots(db, &clock, &m.id)?;
     require(
         u64::from(active) < m.spec["max_in_flight"].as_u64().unwrap_or(4),
         "QueueFull",
@@ -278,10 +280,20 @@ pub fn claim(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "root model call budget exhausted",
     )?;
     let lease = id("model-call");
-    let until = after(m.spec["lease_seconds"].as_i64().unwrap());
+    let seconds = m.spec["lease_seconds"].as_i64().unwrap();
+    let until = after(seconds);
     db.c.execute(
-        "INSERT INTO session_turns(session,turn,lease,claim_key,expires) VALUES(?1,?2,?3,?4,?5)",
-        params![s.id, turn, lease, p.key, until],
+        "INSERT INTO session_turns(session,turn,lease,claim_key,expires,boot_id,deadline_boot_ms)
+         VALUES(?1,?2,?3,?4,?5,?6,?7)",
+        params![
+            s.id,
+            turn,
+            lease,
+            p.key,
+            until,
+            clock.boot_id,
+            clock.millis + seconds * 1000
+        ],
     )?;
     let mut b = s.body.clone();
     b["lifecycle"] = json!("ModelInFlight");
@@ -331,7 +343,7 @@ pub fn respond(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     require(
         state(&s) == "ModelInFlight"
             && s.body["current_lease"] == p.lease_id
-            && !expired(s.body["lease_until"].as_str().unwrap())?,
+            && lease::BootClock::sample()?.current(db, &s)?,
         "Fenced",
         "model response outside current lease",
     )?;

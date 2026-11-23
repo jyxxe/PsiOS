@@ -1,5 +1,6 @@
 """Process-level coverage of persisted sessions across distinct agent, provider and owner credentials."""
 import signal
+import sqlite3
 import time
 import unittest
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -169,6 +170,24 @@ class RuntimeTests(unittest.TestCase):
         residual = self.n.call("Grant.Revoke", target(self.grant["grant_ref"]))
         self.assertEqual(residual["status"], "Partial")
         self.denied("PermissionDenied", self.claim, b, "busy")
+
+    def test_wall_clock_projection_does_not_release_live_provider_work(self):
+        model = self.n.call("Model.Register", dict(name="one-slot", revision="elapsed",
+            provider_principal_id=self.provider["principal_id"], lease_seconds=90, max_context_bytes=8192,
+            max_output_bytes=1024, max_in_flight=1))
+        a, b = self.open(model_ref=model), self.open(model_ref=model)
+        lease = self.claim(a, "long")
+        self.n.stop()
+        # Set just the displayed UTC deadline in this private database to the past.
+        with sqlite3.connect(self.n.state / "state.db") as db:
+            db.execute("UPDATE session_turns SET expires=? WHERE lease=?", ("2000-01-01T00:00:00Z", lease["lease_id"]))
+        self.n.start()
+        self.assertEqual(self.claim(a, "long")["lease_id"], lease["lease_id"])
+        self.denied("QueueFull", self.claim, b, "busy")
+        current = self.n.call("Session.Get", {"id": a}, self.token)
+        self.n.call("Session.Cancel", target(current["reference"]), self.token)
+        self.denied("QueueFull", self.claim, b, "busy")
+        self.assertEqual(self.n.call("Grant.Revoke", target(self.grant["grant_ref"]))["status"], "Partial")
 
     def test_revocation_retirement_and_cancel_close_live_leases(self):
         n = self.n

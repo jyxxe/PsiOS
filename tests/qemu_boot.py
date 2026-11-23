@@ -43,7 +43,7 @@ def boot(instance, key, number):
             while time.monotonic() < deadline:
                 if vm.poll() is not None:
                     raise RuntimeError("guest exited before provisioning")
-                status = run("sudo -n test -f /var/lib/psios-provision/complete && systemctl is-active --quiet psiosd",
+                status = run("sudo -n test -f /var/lib/psios-provision/complete && systemctl is-active --quiet psiosd && " + CTL + " whoami >/dev/null",
                              check=False)
                 if status.returncode == 0:
                     break

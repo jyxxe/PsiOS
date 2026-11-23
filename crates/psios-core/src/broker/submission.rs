@@ -326,6 +326,19 @@ pub fn cancel_origin(db: &Db<'_>, actor: &str, s: &Value) -> Result<Value> {
     policy::can(db, actor, "task.submit")?;
     let o = origin(actor, s)?;
     let key = field(s, "idempotency_key");
+    let digest = sha256(&canonical(&json!([actor, s["cancel_request_id"]])));
+    let record_id = format!("cancellation-{}", &digest[7..]);
+    match db.get(&record_id) {
+        Ok(existing) => require(
+            existing.body == *s,
+            "IdempotencyConflict",
+            "cancel request ID already bound",
+        )?,
+        Err(e) if e.0.code == "NotFound" => {
+            db.create("Cancellation", &record_id, actor, json!({}), s.clone())?;
+        }
+        Err(e) => return Err(e),
+    }
     if let Some(old) = prior(db, actor, &o, key)? {
         check_key(s, &old)?;
         if let Some(r) = old.receipt {
@@ -357,6 +370,11 @@ pub fn retry(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     t.cas(&p.expected_resource_version)?;
     label(&p.key)?;
     require(
+        t.body["outcome_knowledge"] != "Unknown",
+        "OutcomeUnknown",
+        "reconcile the original operation before retry",
+    )?;
+    require(
         matches!(t.body["lifecycle"].as_str(), Some("Failed" | "Cancelled")),
         "Conflict",
         "task is not retryable",
@@ -364,8 +382,8 @@ pub fn retry(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     require(
         policy::readonly(field(&t.spec, "task_type"))
             || t.body["outcome_knowledge"] == "NotStarted",
-        "OutcomeUnknown",
-        "write retry requires independent reconciliation",
+        "PreconditionFailed",
+        "write already dispatched; a new effect requires its own approved plan",
     )?;
     let mut s = t.spec.clone();
     require(

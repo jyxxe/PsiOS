@@ -487,14 +487,16 @@ pub fn perform(w: &Work) -> Result<Value> {
             let dir = File::open(w.data.as_ref().unwrap())?;
             let file = child(&dir, &f.name, OFlags::RDONLY)?;
             regular(&file.metadata()?)?;
-            let mut content = String::new();
-            file.take(65537).read_to_string(&mut content)?;
+            let mut content = Vec::new();
+            file.take(65537).read_to_end(&mut content)?;
             require(
                 content.len() <= 65536,
                 "QuotaExceeded",
                 "file exceeds API read limit",
             )?;
-            Ok(json!({"name": f.name, "content": content}))
+            let text = String::from_utf8(content)
+                .map_err(|_| err("UnsupportedCapability", "file read requires UTF-8 data"))?;
+            Ok(json!({"name":f.name,"content":text}))
         }
         Action::Write(f) => {
             let path = w.data.as_ref().unwrap().join(&f.name);

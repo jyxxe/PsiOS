@@ -17,8 +17,10 @@ fn preflight(db: &Db<'_>, t: &Doc) -> Result<(Doc, Doc)> {
 }
 pub fn claim(db: &Db<'_>) -> Result<Option<String>> {
     let invalid:Option<(String,bool)>=db.c.query_row("SELECT q.task,julianday(q.valid_until)<=julianday('now') FROM queue q
-      JOIN current g ON g.id=q.grant_id JOIN current p ON p.id=g.owner WHERE q.phase='WaitingApproval' AND
-      (julianday(q.valid_until)<=julianday('now') OR g.body->>'lifecycle'!='Active' OR p.body->>'lifecycle'!='Active') LIMIT 1",[],
+      JOIN current g ON g.id=q.grant_id JOIN current t ON t.id=q.task
+      JOIN current d ON d.id=json_extract(t.spec,'$.delegation_ref.resource_id')
+      JOIN current p ON p.id=t.owner WHERE q.phase='WaitingApproval' AND
+      (julianday(q.valid_until)<=julianday('now') OR g.body->>'lifecycle'!='Active' OR d.body->>'lifecycle'!='Active' OR p.body->>'lifecycle'!='Active') LIMIT 1",[],
       |r|Ok((r.get(0)?,r.get(1)?))).optional()?;
     if let Some((id, expired)) = invalid {
         close(

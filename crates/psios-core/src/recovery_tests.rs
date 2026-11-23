@@ -151,6 +151,17 @@ fn kill_after_host_write_requires_observed_postcondition() {
     assert_eq!(t["lifecycle"], "Paused");
     assert_eq!(t["outcome_knowledge"], "Unknown");
     assert!(s.transaction("scheduler", broker::claim).unwrap().is_none());
+    assert_eq!(
+        call(
+            &mut s,
+            "Task.Retry",
+            json!({"id":task,"key":"unsafe-retry","expected_resource_version":t["task_revision"]})
+        )
+        .unwrap_err()
+        .0
+        .code,
+        "OutcomeUnknown"
+    );
     let op = &t["operation_refs"][0];
     let p = json!({"id": op["resource_id"], "expected_resource_version": op["version"]});
     let file = c
@@ -248,7 +259,7 @@ fn cancellation_after_dispatch_preserves_successful_effect() {
         .unwrap_err()
         .0
         .code,
-        "OutcomeUnknown"
+        "PreconditionFailed"
     );
 }
 #[test]

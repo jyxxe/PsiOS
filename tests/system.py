@@ -78,11 +78,52 @@ class SystemTests(unittest.TestCase):
         self.assertEqual(n.call("Task.Get", {"id": receipts[0]["task_id"]})["lifecycle"], "Succeeded")
         self.denied("UnsupportedCapability", "Task.Prepare", dict(tool="host.shell", key=key(), input={}, delegation_id="owner-delegation"))
 
+    def test_sdk_lost_submit_ack_queries_original_namespace(self):
+        import socket
+        import struct
+        n = self.n
+        methods = []
+        proxy = n.base / "ack-proxy.sock"
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            listener.bind(str(proxy))
+            listener.listen()
+            listener.settimeout(8)
+
+            def forward():
+                for _ in range(3):
+                    stream, _ = listener.accept()
+                    with stream, stream.makefile("rb") as f, socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as upstream:
+                        size = f.read(4)
+                        payload = f.read(struct.unpack(">I", size)[0])
+                        method = json.loads(payload)["method"]
+                        methods.append(method)
+                        upstream.connect(str(n.socket))
+                        upstream.sendall(size + payload)
+                        with upstream.makefile("rb") as response:
+                            size = response.read(4)
+                            body = response.read(struct.unpack(">I", size)[0])
+                        if method != "Task.Submit":
+                            stream.sendall(size + body)
+
+            with ThreadPoolExecutor(1) as executor:
+                relay = executor.submit(forward)
+                receipt = json.loads(subprocess.check_output([n.binaries / "psiosctl", "--socket", proxy,
+                    "--token-file", n.witness / "owner.token", "submit", "system.status", "--key", "lost-ack"], input=b"{}", timeout=15))
+                relay.result(timeout=8)
+        self.assertEqual(methods, ["Task.Prepare", "Task.Submit", "Task.LookupSubmission"])
+        self.assertTrue(receipt["deduplicated"])
+        self.assertEqual(n.wait(receipt["task_id"])["lifecycle"], "Succeeded")
+        self.assertEqual(len(n.call("Resource.List", {"kind": "Task"})["items"]), 1)
+
     def test_cancel_tombstone_retry_and_approval_cas(self):
         n = self.n
         s = n.prepare("system.status", {}, "cancel-first")
         cancel = {k: s[k] for k in ["schema_version", "origin_ref", "idempotency_key", "request_digest", "cancel_scope_id"]}
-        self.assertEqual(n.call("Task.CancelOrigin", dict(cancel, reason="aborted", cancel_request_id=key()))["status"], "Blocked")
+        request = dict(cancel, reason="aborted", cancel_request_id=key())
+        blocked = n.call("Task.CancelOrigin", request)
+        self.assertEqual(blocked["status"], "Blocked")
+        self.assertEqual(n.call("Task.CancelOrigin", request), blocked)
+        self.denied("IdempotencyConflict", "Task.CancelOrigin", dict(request, reason="changed"))
         self.denied("Cancelled", "Task.Submit", s)
         self.assertEqual(n.call("Task.LookupSubmission", s)["status"], "Expired")
         v = n.perform("volume.create", {"name": "work"})
@@ -156,6 +197,9 @@ class SystemTests(unittest.TestCase):
         failed = n.wait(n.submit("backup.restore", target(b)))
         self.assertEqual(failed["conditions"][0]["type"], "PreconditionFailed")
         files = n.state / "volumes" / v["resource_id"] / "data"
+        (files / "binary").write_bytes(bytes([255]))
+        binary_read = n.wait(n.submit("volume.read", dict(**target(v), name="binary")))
+        self.assertEqual(binary_read["conditions"][0]["type"], "UnsupportedCapability")
         (files / "link").symlink_to(n.witness / "owner.token")
         refused = n.wait(n.submit("backup.create", target(v)))
         self.assertEqual(refused["conditions"][0]["type"], "UnsupportedCapability")

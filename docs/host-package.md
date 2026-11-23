@@ -12,7 +12,7 @@
 tools/verify-host-package ./host-build "$EXPECTED_MAIN_SHA" ./provenance.jsonl
 ```
 
-核验器检查 GitHub 托管 runner 的构建身份证明，限定仓库、工作流、主线引用和提交。deb 和 SHA256SUMS 均为签名对象，buildinfo、源码版本、工具链和依赖锁文件由该清单覆盖。省略 bundle 参数会从 GitHub 取得证明；使用本地 bundle 仍需可用的受信验证根。主线仅在 Linux、包安装升级和虚机启动全部通过后签发。PR 构建可用于测试。正式发行密钥、更新准入和版本回退由后续发布流程管理。[构建证明机制](https://docs.github.com/en/actions/concepts/security/artifact-attestations)
+核验器检查 GitHub 托管 runner 的构建身份证明，限定仓库、工作流、主线引用和提交。deb 和 SHA256SUMS 均为签名对象，buildinfo、源码版本、工具链和依赖锁文件由该清单覆盖。省略 bundle 参数会从 GitHub 取得证明；完全断网核验时，在受信联网机器上运行 `gh attestation trusted-root > trusted_root.jsonl`，经独立可信途径将验证根交给安装人员。将该文件作为脚本的第四个参数，同时提供本地 bundle。主线仅在 Linux、包安装升级和虚机启动全部通过后签发。PR 构建可用于测试。正式发行密钥、更新准入和版本回退由后续发布流程管理。[构建证明机制](https://docs.github.com/en/actions/concepts/security/artifact-attestations)
 
 ## 构建与首次安装
 

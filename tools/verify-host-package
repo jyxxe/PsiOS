@@ -1,8 +1,8 @@
 #!/bin/bash
 # Verify a downloaded main-branch development package against a trusted source revision.
 set -euo pipefail
-if [[ $# -lt 2 || $# -gt 3 || ! $2 =~ ^[0-9a-f]{40}$ ]]; then
-    echo "usage: $0 UNPACKED_PACKAGE_DIR EXPECTED_FULL_MAIN_SHA [ATTESTATION_BUNDLE]" >&2
+if [[ $# -lt 2 || $# -gt 4 || ! $2 =~ ^[0-9a-f]{40}$ ]]; then
+    echo "usage: $0 UNPACKED_PACKAGE_DIR EXPECTED_FULL_MAIN_SHA [ATTESTATION_BUNDLE [TRUSTED_ROOT_JSONL]]" >&2
     exit 2
 fi
 root=$(realpath -e -- "$1")
@@ -11,8 +11,11 @@ repo=jyxxe/PsiOS
 policy=(--repo "$repo" --signer-workflow "$repo/.github/workflows/core.yml"
         --source-ref refs/heads/main --source-digest "$expected" --deny-self-hosted-runners
         --predicate-type https://slsa.dev/provenance/v1)
-if [[ $# == 3 ]]; then
+if [[ $# -ge 3 ]]; then
     policy+=(--bundle "$(realpath -e -- "$3")")
+fi
+if [[ $# == 4 ]]; then
+    policy+=(--custom-trusted-root "$(realpath -e -- "$4")")
 fi
 cd -- "$root"
 shopt -s nullglob

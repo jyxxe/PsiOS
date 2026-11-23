@@ -175,6 +175,9 @@ jobs:
           package="$RUNNER_TEMP/psios-package"
           bundle="$RUNNER_TEMP/bundle/provenance.jsonl"
           tools/verify-host-package "$package" "$GITHUB_SHA" "$bundle"
+          gh attestation trusted-root > "$RUNNER_TEMP/trusted_root.jsonl"
+          sudo unshare --net runuser -u "$(id -un)" -- env GH_TOKEN=offline \
+            tools/verify-host-package "$package" "$GITHUB_SHA" "$bundle" "$RUNNER_TEMP/trusted_root.jsonl"
           deb=("$package"/psios-core_*.deb)
           printf '\037' >> "${deb[0]}"
           if tools/verify-host-package "$package" "$GITHUB_SHA" "$bundle"; then

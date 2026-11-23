@@ -76,14 +76,15 @@ def host_config(seed, args):
     (seed / "etc").chmod(0o755)
 
 
-def ramfs(work, args, instance):
+def ramfs(work, args, instance, home_id):
     boot_media.prepare_kernel(work, args.kernel_iso)
     (work / "bin").mkdir()
     install_core(work, args.core_archive, args.core_sha256)
     (work / "psios-disk-uuid").write_text(str(instance) + "\n")
+    (work / "psios-home-uuid").write_text(str(home_id) + "\n")
     shutil.copyfile(HERE / "init", work / "psios-init")
     shutil.copyfile(HERE / "shutdown", work / "psios-shutdown")
-    files = ["bin/psiosd", "bin/psiosctl", "psios-source", "psios-init", "psios-disk-uuid", "psios-shutdown"]
+    files = ["bin/psiosd", "bin/psiosctl", "psios-source", "psios-init", "psios-disk-uuid", "psios-home-uuid", "psios-shutdown"]
     for name in files:
         (work / name).chmod(0o755 if name.startswith("bin/") or name == "psios-init" else 0o644)
     with (work / "initrd").open("ab") as out:
@@ -93,6 +94,24 @@ def ramfs(work, args, instance):
                        input=("\n".join(files) + "\n").encode(), stdout=out, check=True)
 
 
+def seeded_ext4(work, name, label, identity, size_mib, seed, owners):
+    image = work / name
+    with image.open("xb") as f:
+        f.truncate(size_mib * MIB)
+    boot_media.run(work, ["mkfs.ext4", "-q", "-F", "-U", str(identity), "-L", label,
+                         "-E", "root_owner=0:0", "-d", seed, image])
+    # mke2fs -d preserves builder credentials. Set target UID/GID explicitly.
+    fields = []
+    for path in sorted(seed.rglob("*")):
+        relative = path.relative_to(seed).as_posix()
+        uid = owners.get(relative, 0)
+        fields.extend(f"set_inode_field /{relative} {field} {uid}\n" for field in ("uid", "gid"))
+    subprocess.run(["debugfs", "-w", "-f", "-", image], input="".join(fields), text=True,
+                   stdout=subprocess.DEVNULL, check=True, timeout=20)
+    boot_media.run(work, ["e2fsck", "-f", "-n", image])
+    return image
+
+
 def build(args):
     output = args.output.absolute()
     if os.path.lexists(output):
@@ -100,7 +119,8 @@ def build(args):
     with tempfile.TemporaryDirectory(dir=output.parent, prefix=".psios-disk-") as tmp:
         work = Path(tmp)
         instance = uuid.uuid4()
-        ramfs(work, args, instance)
+        home_id = uuid.uuid4()
+        ramfs(work, args, instance, home_id)
         source_commit = (work / "psios-source").read_text().strip()
         efi = boot_media.efi_application(work, CMDLINE)
         esp = work / "esp.fat"
@@ -117,27 +137,23 @@ def build(args):
         for name in ("initialize-once", "deployment-uuid"):
             (seed / name).chmod(0o444)
         host_config(seed, args)
-        state = work / "state.ext4"
-        with state.open("xb") as f:
-            f.truncate(192 * MIB)
-        boot_media.run(work, ["mkfs.ext4", "-q", "-F", "-U", str(instance), "-L", "PSIOSSTATE",
-                             "-E", "root_owner=0:0", "-d", seed, state])
-        # mke2fs -d preserves the builder's uid. All installed host configuration
-        # and enrollment markers belong to root inside the guest.
-        fields = "".join(f"set_inode_field /{path.relative_to(seed)} {field} 0\n"
-                         for path in sorted(seed.rglob("*")) for field in ("uid", "gid"))
-        subprocess.run(["debugfs", "-w", "-f", "-", state], input=fields, text=True,
-                       stdout=subprocess.DEVNULL, check=True, timeout=20)
-        boot_media.run(work, ["e2fsck", "-f", "-n", state])
+        state = seeded_ext4(work, "state.ext4", "PSIOSSTATE", instance, 192, seed, {})
+        homes = work / "home-seed"
+        homes.mkdir()
+        homes.chmod(0o755)
+        for name in ("root", "psios"):
+            (homes / name).mkdir()
+            (homes / name).chmod(0o700)
+        home = seeded_ext4(work, "home.ext4", "PSIOSHOME", home_id, 64, homes, {"psios": 1000})
         disk = work / "installed.raw"
         with disk.open("xb") as f:
-            f.truncate(259 * MIB)
+            f.truncate(323 * MIB)
         disk.chmod(0o600)
-        layout = "label: gpt\nunit: sectors\nstart=2048,size=131072,type=U\nstart=133120,size=393216,type=L\n"
+        layout = "label: gpt\nunit: sectors\nstart=2048,size=131072,type=U\nstart=133120,size=393216,type=L\nstart=526336,size=131072,type=L\n"
         subprocess.run(["sfdisk", "--quiet", disk], input=layout, text=True, check=True, timeout=30)
         boot_media.run(work, ["sfdisk", "--verify", disk])
         with disk.open("r+b") as f:
-            for start, partition in [(1, esp), (65, state)]:
+            for start, partition in [(1, esp), (65, state), (257, home)]:
                 f.seek(start * MIB)
                 with partition.open("rb") as src:
                     shutil.copyfileobj(src, f)
@@ -150,7 +166,7 @@ def build(args):
             os.fsync(fd)
         finally:
             os.close(fd)
-    print(json.dumps({"state_uuid": str(instance), "source_commit": source_commit, "image": str(output)}))
+    print(json.dumps({"state_uuid": str(instance), "home_uuid": str(home_id), "source_commit": source_commit, "image": str(output)}))
 
 
 def main():

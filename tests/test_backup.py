@@ -1,4 +1,5 @@
 """Verify stored recovery sets without allocating a volume or granting access to its contents."""
+from contextlib import ExitStack
 import os
 import unittest
 from support import Failure, Node, target
@@ -79,3 +80,39 @@ class BackupTests(unittest.TestCase):
         restored = self.n.perform("backup.restore", target(self.backup))
         data = self.n.perform("volume.read_chunk", dict(target=target(restored), path="nested/binary", offset=0, limit=4))
         self.assertEqual(data["data_base64"], "AAEC/w==")
+
+
+    def test_restore_deep_paths_created_by_a_linux_workload(self):
+        n = self.n
+        volume = n.perform("volume.create", {"name": "deep"})
+        parts = [f"level-{i:02d}-" + "a" * 200 for i in range(22)]
+
+        def descend(stack, volume_ref, create):
+            root = n.state / "volumes" / volume_ref["resource_id"] / "data"
+            fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            stack.callback(os.close, fd)
+            for name in parts:
+                if create:
+                    os.mkdir(name, 0o700, dir_fd=fd)
+                fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+                stack.callback(os.close, fd)
+            return fd
+
+        with ExitStack() as stack:
+            leaf = descend(stack, volume, True)
+            fd = os.open("payload", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=leaf)
+            with os.fdopen(fd, "wb") as f:
+                f.write(b"preserved")
+            os.fchmod(leaf, 0o500)
+        try:
+            backup = n.perform("backup.create", target(volume))
+        finally:
+            with ExitStack() as stack:
+                os.fchmod(descend(stack, volume, False), 0o700)
+        restored = n.perform("backup.restore", target(backup))
+        with ExitStack() as stack:
+            leaf = descend(stack, restored, False)
+            stack.callback(os.fchmod, leaf, 0o700)
+            self.assertEqual(os.fstat(leaf).st_mode & 0o777, 0o500)
+            with os.fdopen(os.open("payload", os.O_RDONLY, dir_fd=leaf), "rb") as f:
+                self.assertEqual(f.read(), b"preserved")

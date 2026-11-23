@@ -414,6 +414,16 @@ fn backup_files(cfg: &Config, b: &Doc) -> Result<(File, Vec<u8>)> {
     Ok((root, bytes))
 }
 
+// The workload may have created a valid hierarchy whose full name exceeds PATH_MAX.
+fn restore_parent<'a>(root: &File, relative: &'a str) -> Result<(File, &'a str)> {
+    let mut parts = relative.split('/');
+    let name = parts.next_back().unwrap();
+    let mut dir = root.try_clone()?;
+    for part in parts {
+        dir = child(&dir, part, OFlags::RDONLY | OFlags::DIRECTORY)?;
+    }
+    Ok((dir, name))
+}
 // Verification and restore read exactly the same authority-bound recovery set.
 fn inspect_backup(cfg: &Config, b: &Doc, destination: Option<&Path>) -> Result<Value> {
     let (root, bytes) = backup_files(cfg, b)?;
@@ -427,13 +437,17 @@ fn inspect_backup(cfg: &Config, b: &Doc, destination: Option<&Path>) -> Result<V
         "PreconditionFailed",
         "backup manifest disagrees with authority",
     )?;
+    let destination = destination.map(File::open).transpose()?;
     let mut dirs = vec![];
     let mut total = 0;
     for (i, e) in m.entries.iter().enumerate() {
         for part in e.path.split('/') {
             filename(part)?
         }
-        let path = destination.map(|dir| dir.join(&e.path));
+        let target = destination
+            .as_ref()
+            .map(|dir| restore_parent(dir, &e.path))
+            .transpose()?;
         if let Some(expected) = &e.digest {
             let mut original = child(&root, &format!("blob-{i}"), OFlags::RDONLY)?;
             let meta = original.metadata()?;
@@ -443,7 +457,22 @@ fn inspect_backup(cfg: &Config, b: &Doc, destination: Option<&Path>) -> Result<V
                 "PreconditionFailed",
                 "backup blob length mismatch",
             )?;
-            let mut output = path.map(File::create_new).transpose()?;
+            let mut output = if let Some((dir, name)) = target {
+                let fd = rustix::fs::openat(
+                    &dir,
+                    name,
+                    OFlags::WRONLY
+                        | OFlags::CREATE
+                        | OFlags::EXCL
+                        | OFlags::CLOEXEC
+                        | OFlags::NOFOLLOW,
+                    Mode::RUSR | Mode::WUSR,
+                )
+                .map_err(std::io::Error::from)?;
+                Some(File::from(fd))
+            } else {
+                None
+            };
             let (len, hash) = match &mut output {
                 Some(file) => copy_hash(&mut original, file, e.bytes)?,
                 None => copy_hash(&mut original, &mut std::io::sink(), e.bytes)?,
@@ -458,9 +487,9 @@ fn inspect_backup(cfg: &Config, b: &Doc, destination: Option<&Path>) -> Result<V
                 f.set_permissions(Permissions::from_mode(e.mode))?;
                 f.sync_all()?;
             }
-        } else if let Some(path) = path {
-            fs::create_dir(&path)?;
-            dirs.push((path, e.mode))
+        } else if let Some((dir, name)) = target {
+            rustix::fs::mkdirat(dir, name, Mode::RWXU).map_err(std::io::Error::from)?;
+            dirs.push((&e.path, e.mode))
         }
     }
     require(
@@ -468,10 +497,13 @@ fn inspect_backup(cfg: &Config, b: &Doc, destination: Option<&Path>) -> Result<V
         "PreconditionFailed",
         "backup length mismatch",
     )?;
-    for (path, mode) in dirs.into_iter().rev() {
-        let d = File::open(path)?;
-        d.set_permissions(Permissions::from_mode(mode))?;
-        d.sync_all()?
+    if let Some(root) = destination {
+        for (path, mode) in dirs.into_iter().rev() {
+            let (parent, name) = restore_parent(&root, path)?;
+            let dir = child(&parent, name, OFlags::RDONLY | OFlags::DIRECTORY)?;
+            dir.set_permissions(Permissions::from_mode(mode))?;
+            dir.sync_all()?;
+        }
     }
     Ok(
         json!({"backup_ref":b.reference(), "manifest_digest":b.body["manifest_digest"],

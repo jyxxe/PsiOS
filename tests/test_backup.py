@@ -122,6 +122,28 @@ class BackupTests(unittest.TestCase):
         result = n.perform("volume.read", dict(**target(restored), name="00-record"))
         self.assertEqual(result["content"], "new")
 
+    def test_restore_file_directory_and_root_modification_times(self):
+        n = self.n
+        volume = n.perform("volume.create", {"name": "timeline"})
+        root = n.state / "volumes" / volume["resource_id"] / "data"
+        (root / "project").mkdir()
+        (root / "project/log").write_bytes(b"original")
+        stamps = {"project/log": -333_333_333, "project": 1_600_000_000_123_000_456, ".": 1_600_000_000_000_000_001}
+        for path, ns in stamps.items():
+            os.utime(root / path, ns=(ns, ns))
+            self.assertEqual((root / path).stat().st_mtime_ns, ns)
+        backup = n.perform("backup.create", target(volume))
+        (root / "project/log").write_bytes(b"later")
+        n.stop(signal.SIGKILL)
+        n.start()
+        query = n.prepare("backup.verify", target(backup), delegation=self.issue("local-owner", backup["resource_id"]))
+        self.assertEqual(n.wait(n.call("Task.Submit", query)["task_id"])["lifecycle"], "Succeeded")
+        restored = n.perform("backup.restore", target(backup))
+        output = n.state / "volumes" / restored["resource_id"] / "data"
+        self.assertEqual((output / "project/log").read_bytes(), b"original")
+        for path, ns in stamps.items():
+            self.assertEqual((output / path).stat().st_mtime_ns, ns, path)
+
     def test_restore_deep_paths_created_by_a_linux_workload(self):
         n = self.n
         volume = n.perform("volume.create", {"name": "deep"})

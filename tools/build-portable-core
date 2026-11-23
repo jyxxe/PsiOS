@@ -41,6 +41,13 @@ if git -C "$repo" cat-file -e "$sha:images/rescue/README.txt" 2>/dev/null; then
     checks+=("${rescue_files[@]/#/rescue/}")
     members+=(rescue)
 fi
+if git -C "$repo" cat-file -e "$sha:images/native/README.txt" 2>/dev/null; then
+    mkdir -m 0755 native
+    native_files=(README.txt create.py init shutdown)
+    git -C "$repo" archive "$sha:images/native" "${native_files[@]}" | tar --same-permissions -xf - -C native
+    checks+=("${native_files[@]/#/native/}")
+    members+=(native)
+fi
 sha256sum "${checks[@]}" > SHA256SUMS
 tar --mtime="@$epoch" --owner=0 --group=0 --numeric-owner --mode='u+rw,go+r-w' \
     --sort=name -cf - "${members[@]}" | gzip -n > "$work/core.tar.gz"

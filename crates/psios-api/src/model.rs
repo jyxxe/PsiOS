@@ -15,8 +15,28 @@ pub enum ModelDecision {
     Finish { summary: String },
     Fail { reason: String },
 }
+/// Token quantities reported by the selected inference provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelTokenUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
+pub struct ModelOutput {
+    pub decision: ModelDecision,
+    pub usage: Option<ModelTokenUsage>,
+}
+
 pub trait SessionModel {
     fn decide(&self, context: &Value) -> ApiResult<ModelDecision>;
+
+    fn decide_with_usage(&self, context: &Value) -> ApiResult<ModelOutput> {
+        Ok(ModelOutput {
+            decision: self.decide(context)?,
+            usage: None,
+        })
+    }
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -24,6 +44,8 @@ struct DecisionRequest {
     session_id: String,
     lease_id: String,
     decision: ModelDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    usage: Option<ModelTokenUsage>,
 }
 
 enum Turn {
@@ -49,10 +71,14 @@ impl Client {
             .as_str()
             .ok_or_else(|| crate::invalid("missing model lease"))?
             .to_owned();
+        let output = provider.decide_with_usage(&claim["context"])?;
         Ok(Turn::Decided(DecisionRequest {
             session_id: session.to_owned(),
             lease_id,
-            decision: provider.decide(&claim["context"])?,
+            decision: output.decision,
+            usage: output
+                .usage
+                .filter(|_| claim["usage_format"] == "tokens.v1"),
         }))
     }
 

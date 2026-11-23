@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import time
 
+from model_delivery import interrupt_delivery
 from support import Node, key, target
 
 PINS = json.loads((Path(__file__).resolve().parent / "fixtures/local-inference.json").read_text())
@@ -45,7 +46,7 @@ def ready(server, path):
     raise AssertionError("inference server readiness timeout")
 
 
-def exercise(node, endpoint, work):
+def exercise(node, endpoint, work, *, metered):
     provider = node.call("Agent.Register", {"name": "local-cpu-inference"})
     agent = node.call("Agent.Register", {"name": "local-inventory"})
     node.call("Grant.Issue", dict(principal_id=provider["principal_id"], actions=["model.serve"], units=1, ttl_seconds=300))
@@ -103,7 +104,13 @@ def exercise(node, endpoint, work):
         current = node.call("Session.Get", {"id": sid}, agent["token"])
         node.call("Session.Cancel", target(current["reference"]), agent["token"])
     sid = start()
-    result = step(sid, config)
+    cfg.write_text(json.dumps(config))
+    with interrupt_delivery(node, credential, sid, "first", journal, committed=False, local_model=cfg):
+        pending = json.loads((journal / "psios-model-pending.json").read_bytes())
+        assert pending["format"] == (2 if metered else 1)
+        retained_usage = pending["request"].get("usage")
+        assert (retained_usage is not None) == metered
+    result = step(sid, dict(config, socket=str(work / "absent.sock")))
     assert result.returncode == 0, result.stderr
     receipt = json.loads(result.stdout)
     assert "task_id" in receipt, receipt
@@ -115,6 +122,15 @@ def exercise(node, endpoint, work):
     output = node.call("Artifact.Read", {"reference": task["result"]["artifact_refs"][0]}, agent["token"])
     assert output["boot_id"] == Path("/proc/sys/kernel/random/boot_id").read_text().strip()
     assert output["memory_bytes"]["MemTotal"] > 0
+    if metered:
+        usage = node.call("Resource.Resolve", {"reference": receipt["usage_ref"]})["value"]
+        assert usage["reported_tokens"] == retained_usage
+        assert usage["measurement_source"] == "ProviderReported"
+        assert usage["provider_principal_id"] == provider["principal_id"] and usage["budget_ref"] == grant["budget_ref"]
+        assert usage["reported_tokens"]["input_tokens"] > 0 and 0 < usage["reported_tokens"]["output_tokens"] <= 112
+        print(f"Recorded provider-reported input and output tokens {usage['reported_tokens']} on the original reservation.")
+    else:
+        assert "usage_ref" not in receipt
     # A saved receipt can be queried without contacting an inference service again.
     replay = step(sid, dict(config, socket=str(work / "absent.sock")))
     assert replay.returncode == 0 and json.loads(replay.stdout) == receipt
@@ -131,6 +147,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     for flag in ("--bin-dir", "--server", "--weights"):
         parser.add_argument(flag, type=Path, required=True)
+    parser.add_argument("--legacy-unmetered", action="store_true", help="expect a pre-metering authority with the current CLI")
     args = parser.parse_args()
     with args.weights.open("rb") as f:
         assert hashlib.file_digest(f, "sha256").hexdigest() == PINS["model"]["sha256"]
@@ -144,7 +161,7 @@ if __name__ == "__main__":
                 ready(server, endpoint)
                 n = Node(args.bin_dir)
                 try:
-                    exercise(n, endpoint, work)
+                    exercise(n, endpoint, work, metered=not args.legacy_unmetered)
                 finally:
                     n.close()
             finally:

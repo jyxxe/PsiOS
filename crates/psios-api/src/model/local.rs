@@ -1,5 +1,5 @@
 //! A local, structured inventory provider over a UID-checked Unix socket.
-use super::{ModelDecision, SessionModel};
+use super::{ModelDecision, ModelOutput, ModelTokenUsage, SessionModel};
 use crate::{ApiError, ApiResult, ResourceRef, invalid, parse};
 use http_body_util::{BodyExt, Full};
 use hyper::{Request, StatusCode, body::Bytes, client::conn::http1};
@@ -119,6 +119,9 @@ impl LocalInventoryModel {
 
 impl SessionModel for LocalInventoryModel {
     fn decide(&self, context: &Value) -> ApiResult<ModelDecision> {
+        Ok(self.decide_with_usage(context)?.decision)
+    }
+    fn decide_with_usage(&self, context: &Value) -> ApiResult<ModelOutput> {
         self.validate()?;
         if context["model_ref"] != json!(self.model_ref) {
             return Err(ApiError::new(
@@ -181,8 +184,34 @@ impl SessionModel for LocalInventoryModel {
                 .await
             })
             .map_err(|_| ApiError::new("DeadlineExceeded", "local inference deadline reached"))??;
-        decode_decision(&response, &self.model_alias, tools)
+        Ok(ModelOutput {
+            decision: decode_decision(&response, &self.model_alias, tools)?,
+            usage: decode_usage(&response["usage"])?,
+        })
     }
+}
+
+fn decode_usage(value: &Value) -> ApiResult<Option<ModelTokenUsage>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let count = |field: &str| {
+        value[field]
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| invalid("invalid provider token count"))
+    };
+    let input_tokens = count("prompt_tokens")?;
+    let output_tokens = count("completion_tokens")?;
+    if let Some(total) = value.get("total_tokens")
+        && total.as_u64() != Some(u64::from(input_tokens) + u64::from(output_tokens))
+    {
+        return Err(invalid("inconsistent provider token total"));
+    }
+    Ok(Some(ModelTokenUsage {
+        input_tokens,
+        output_tokens,
+    }))
 }
 
 fn decode_decision(response: &Value, model: &str, tools: &[Value]) -> ApiResult<ModelDecision> {
@@ -223,6 +252,26 @@ fn decode_decision(response: &Value, model: &str, tools: &[Value]) -> ApiResult<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_usage_preserves_unknown_and_checks_reported_counts() {
+        assert_eq!(decode_usage(&Value::Null).unwrap(), None);
+        assert_eq!(
+            decode_usage(&json!({"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}))
+                .unwrap(),
+            Some(ModelTokenUsage {
+                input_tokens: 0,
+                output_tokens: 0
+            })
+        );
+        for bad in [
+            json!({"prompt_tokens":1}),
+            json!({"prompt_tokens":1,"completion_tokens":-1}),
+            json!({"prompt_tokens":1,"completion_tokens":3,"total_tokens":2}),
+        ] {
+            assert_eq!(decode_usage(&bad).unwrap_err().code, "InvalidArgument");
+        }
+    }
 
     #[test]
     fn rejects_responses_outside_the_requested_inventory_contract() {

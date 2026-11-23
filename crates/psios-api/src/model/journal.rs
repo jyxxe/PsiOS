@@ -103,7 +103,8 @@ impl Journal {
         }
         let record: Pending =
             serde_json::from_value(parse(&bytes).map_err(|_| invalid())?).map_err(|_| invalid())?;
-        if record.format != 1 {
+        let expected_format = if record.request.usage.is_some() { 2 } else { 1 };
+        if record.format != expected_format {
             return Err(invalid().into());
         }
         // A previous fsync of the renamed directory entry may have returned an
@@ -178,7 +179,7 @@ impl Client {
                 Turn::Completed(receipt) => return Ok(receipt),
                 Turn::Decided(request) => {
                     let record = Pending {
-                        format: 1,
+                        format: if request.usage.is_some() { 2 } else { 1 },
                         authority: authority.to_owned(),
                         provider: actor.to_owned(),
                         claim_key: key.to_owned(),

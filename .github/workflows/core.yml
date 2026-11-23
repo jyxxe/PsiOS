@@ -56,6 +56,12 @@ jobs:
           git archive 0287ebb3208b00f091ef51977d58d215ad32f47a Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format4"
           cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format4/Cargo.toml"
           python3 tests/model_leases.py --previous-bin "$RUNNER_TEMP/psios-format4/target/debug"
+      - name: Settle a live format 5 reservation across a binary upgrade
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format5"
+          git archive 3bae1ad06d073903c3ab910323bec57152b913c2 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format5"
+          cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format5/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format5/target"
+          python3 tests/model_usage_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format5/target/debug"
       - name: Verify real systemd service control and crash reconciliation
         run: |
           sudo loginctl enable-linger "$(id -un)"

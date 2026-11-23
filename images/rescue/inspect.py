@@ -2,7 +2,6 @@
 """Inspect a stopped PsiOS authority on a raw disk image without booting its OS."""
 import argparse
 from functools import partial
-import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -10,35 +9,14 @@ import re
 import resource
 import shutil
 import signal
-import stat
 import subprocess
 import sys
 import tempfile
 import boot_media
+from boot_media import pinned_copy, regular_file
 
 
 HERE = Path(__file__).resolve().parent
-
-
-def regular_file(path):
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
-        os.close(fd)
-        raise ValueError(f"expected a regular file: {path}")
-    return os.fdopen(fd, "rb")
-
-
-def pinned_copy(source, target, expected, limit):
-    digest = hashlib.sha256()
-    with regular_file(source) as src, target.open("xb") as dst:
-        while chunk := src.read(1024 * 1024):
-            limit -= len(chunk)
-            if limit < 0:
-                raise ValueError(f"input too large: {source}")
-            digest.update(chunk)
-            dst.write(chunk)
-    if digest.hexdigest() != expected:
-        raise ValueError(f"SHA-256 mismatch: {source}")
 
 
 def guest_path(value):
@@ -50,17 +28,7 @@ def guest_path(value):
 
 
 def prepare(work, args):
-    base = json.loads((HERE / "base.json").read_text())
-    iso = work / "base.iso"
-    pinned_copy(args.iso, iso, base["sha256"], base["size_bytes"])
-    for name, member, digest in [("kernel", "vmlinuz-virt", "kernel_sha256"),
-                                 ("initrd", "initramfs-virt", "initramfs_sha256")]:
-        path = work / name
-        with path.open("wb") as out:
-            subprocess.run(["isoinfo", "-R", "-i", iso, "-x", "/boot/" + member], stdout=out, check=True)
-        with path.open("rb") as f:
-            if hashlib.file_digest(f, "sha256").hexdigest() != base[digest]:
-                raise ValueError(f"invalid {member} in boot media")
+    boot_media.prepare_kernel(work, args.iso)
     pinned_copy(args.core, work / "psiosd", args.core_sha256, 64 * 1024 * 1024)
     shutil.copyfile(HERE / "init", work / "psios-rescue")
     for name in ["psiosd", "psios-rescue"]:

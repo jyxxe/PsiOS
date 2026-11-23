@@ -1,0 +1,11 @@
+#!/bin/sh
+# BusyBox init has already ceased respawning services when this action runs.
+pids=$(pidof psiosd) || pids=
+if [ -n "$pids" ]; then
+    kill -TERM $pids
+    i=0
+    while pidof psiosd >/dev/null && [ "$i" -lt 150 ]; do sleep 0.1; i=$((i+1)); done
+fi
+sync -f /var/lib
+umount /etc || mount -o remount,bind,ro /etc
+umount /var/lib || mount -o remount,ro /var/lib

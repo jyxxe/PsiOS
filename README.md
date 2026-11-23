@@ -8,6 +8,7 @@ Build with `cargo build --locked --workspace`. For installation on an existing s
 
 ## Documentation
 
+- [Implementation status, measured scope and remaining gaps](docs/implementation-status.md)
 - [Documentation index](docs/README.md)
 - [v1.0.0 full documentation set](docs/v1/README.md)
 - [Complete specification (Markdown)](docs/v1/PsiOS-v1-complete.md)

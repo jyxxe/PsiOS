@@ -1,11 +1,11 @@
 # PsiOS documentation
 
-**Latest documentation baseline:** v1.0.0 (2026-11-22), design-only. This GitHub repository does not yet demonstrate a deployed or tested operating system.
+The v1.0.0 release dated 2026-11-22 records the design baseline. The [implementation and verification matrix](implementation-status.md) tracks the running software, installation targets, limits and evidence.
 
 
 ## 同版本自主编排增补
 
-GitHub `main` 上 v1.0.0 的 Agent/Task/Chat/PsiFlow 分章已增补 Router–Worker、自主触发、订阅关联与恢复约束，版本号 `1.0.0` 保持不变。请参阅 [Agent 第 9.10 节](v1/docs/09-agents-models-protocols.md)。原始分段 ZIP 为增补前封存快照；当前 GitHub 文档不同于该 ZIP。现有 validation-report.json 仅记录增补前的检查，不能作为当前变更已重新校验的证据。实际产品状态仍 NotVerified/NotRun.
+GitHub `main` 上 v1.0.0 的 Agent/Task/Chat/PsiFlow 分章已增补 Router–Worker、自主触发、订阅关联与恢复约束，版本号 `1.0.0` 保持不变。请参阅 [Agent 第 9.10 节](v1/docs/09-agents-models-protocols.md)。原始分段 ZIP 为增补前封存快照；当前 GitHub 文档不同于该 ZIP。现有 validation-report.json 仅记录增补前的检查，不能作为当前变更已重新校验的证据。原始规范包的历史验收标记保留。当前软件的验证记录随实现单独更新。
 
 ## Start here
 

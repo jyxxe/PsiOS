@@ -2,7 +2,7 @@
 import signal
 import time
 import unittest
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 from support import Failure, Node, key, target
 
@@ -185,6 +185,72 @@ class RuntimeTests(unittest.TestCase):
         n.call("Grant.Revoke", target(self.grant["grant_ref"]))
         self.denied("PermissionDenied", self.claim, s, "new")
         self.assertEqual(n.call("Resource.List", {"kind": "Task"})["items"], [])
+
+    def test_inbox_wait_delivery_replay_and_closed_drain(self):
+        n = self.n
+        sender, _ = n.agent(["mail.send", "mail.receive"])
+        mailbox = n.call("Mailbox.Bind", dict(name="jobs", sender_principal_id=sender["principal_id"]), self.token)
+        box = mailbox["resource_id"]
+        params = dict(id=box, timeout_ms=5000, limit=1)
+        self.denied("PermissionDenied", n.call, "Mailbox.Wait", params, sender["token"])
+        for invalid in [dict(id=box), dict(params, timeout_ms=0), dict(params, timeout_ms=10001),
+                        dict(params, timeout_ms=True), dict(params, offset=1), dict(params, limit=0)]:
+            self.denied("InvalidArgument", n.call, "Mailbox.Wait", invalid, self.token)
+        credential = n.base / "reader.token"
+        credential.write_text(self.token)
+        credential.chmod(0o600)
+        start = time.monotonic()
+        empty = n.cli(credential, "inbox", box, "--wait-ms", "150", "--limit", "1")
+        self.assertGreaterEqual(time.monotonic() - start, .12)
+        self.assertEqual((empty["items"], empty["lifecycle"]), ([], "Open"))
+        with ThreadPoolExecutor(1) as pool:
+            pending = pool.submit(n.call, "Mailbox.Wait", params, self.token)
+            time.sleep(.1)
+            self.assertFalse(pending.done())
+            event = dict(mailbox_id=box, topic="WorkAvailable", key="first")
+            first = n.call("Signal.Send", event, sender["token"])
+            page = pending.result(2)
+            self.assertEqual([item["reference"] for item in page["items"]], [first])
+        second = n.call("Signal.Send", dict(event, key="second"), sender["token"])
+        n.stop(signal.SIGKILL)
+        n.start()
+        replay = n.cli(credential, "inbox", box, "--limit", "1")
+        self.assertEqual((replay["items"], replay["acked"]), (page["items"], 0))
+        n.call("Mailbox.Close", target(replay["mailbox_ref"]), self.token)
+        self.assertEqual(n.call("Mailbox.Wait", params, self.token)["items"], page["items"])
+        n.call("Mailbox.Ack", dict(id=box, previous=0, through=1), self.token)
+        page = n.call("Mailbox.Wait", params, self.token)
+        self.assertEqual([item["reference"] for item in page["items"]], [second])
+        n.call("Mailbox.Ack", dict(id=box, previous=1, through=2), self.token)
+        with ThreadPoolExecutor(1) as pool:
+            drained = pool.submit(n.call, "Mailbox.Wait", params, self.token).result(2)
+        self.assertEqual((drained["items"], drained["lifecycle"], drained["acked"]), ([], "Closed", 2))
+
+    def test_mailbox_and_event_wait_share_slots_and_wake_on_close_or_revoke(self):
+        n = self.n
+        box = n.call("Mailbox.Bind", dict(name="queue", sender_principal_id=self.provider["principal_id"]), self.token)
+        params = dict(id=box["resource_id"], timeout_ms=10000)
+        cursor = n.call("Resource.List", dict(kind="Node"))["watch_start_cursor"]
+        with ThreadPoolExecutor(9) as pool:
+            inbox = [pool.submit(n.call, "Mailbox.Wait", params, self.token) for _ in range(5)]
+            events = [pool.submit(n.call, "Event.Wait", dict(cursor=cursor, timeout_ms=10000)) for _ in range(4)]
+            done, pending = wait(inbox + events, timeout=3, return_when=FIRST_COMPLETED)
+            self.assertEqual(len(done), 1)
+            self.denied("QueueFull", done.pop().result)
+            n.call("Mailbox.Close", target(box), self.token)
+            node = n.call("Node.Get", {})
+            changed = n.call("Node.Configure", dict(scheduling="Cordoned", expected_resource_version=node["reference"]["version"]))
+            for future in pending:
+                result = future.result(2)
+                if future in inbox:
+                    self.assertEqual(result["lifecycle"], "Closed")
+                else:
+                    self.assertEqual(result["events"][0]["resource_ref"], changed)
+            box = n.call("Mailbox.Bind", dict(name="new", sender_principal_id=self.provider["principal_id"]), self.token)
+            listener = pool.submit(n.call, "Mailbox.Wait", dict(params, id=box["resource_id"]), self.token)
+            time.sleep(.1)
+            n.call("Grant.Revoke", target(self.grant["grant_ref"]))
+            self.denied("PermissionDenied", listener.result, 2)
 
     def test_mailbox_to_session_exactly_once_and_no_implicit_resource_sharing(self):
         n = self.n

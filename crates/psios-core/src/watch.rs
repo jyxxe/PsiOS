@@ -1,6 +1,6 @@
 use crate::*;
 use psios_api::Request;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
     sync::{
         Arc, Condvar, Mutex,
@@ -39,29 +39,30 @@ impl Drop for Slot<'_> {
         self.0.waiting.fetch_sub(1, Ordering::AcqRel);
     }
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Wait {
-    cursor: String,
-    limit: Option<u32>,
-    timeout_ms: u64,
-}
 pub fn poll(
     changes: &Arc<Changes>,
     stop: &AtomicBool,
-    req: Request,
+    mut req: Request,
+    read_method: &str,
+    items_field: &str,
     mut invoke: impl FnMut(Request) -> Result<Value>,
 ) -> Result<Value> {
-    let p: Wait = decode(&req.params)?;
+    let timeout_ms = req
+        .params
+        .as_object_mut()
+        .and_then(|fields| fields.remove("timeout_ms"))
+        .and_then(|timeout| timeout.as_u64())
+        .ok_or_else(|| err("InvalidArgument", "wait requires an integer timeout_ms"))?;
+    // The ordinary reader validates all remaining fields and enforces its own policy.
     require(
-        (1..=10_000).contains(&p.timeout_ms),
+        (1..=10_000).contains(&timeout_ms),
         "InvalidArgument",
         "wait must be 1 to 10000 milliseconds",
     )?;
     let prior = changes.waiting.fetch_add(1, Ordering::AcqRel);
     let _slot = Slot(changes);
-    require(prior < 8, "QueueFull", "event waiter limit reached")?;
-    let until = Instant::now() + Duration::from_millis(p.timeout_ms);
+    require(prior < 8, "QueueFull", "waiter limit reached")?;
+    let until = Instant::now() + Duration::from_millis(timeout_ms);
     loop {
         // Sample before the read. A commit between the read and the wait cannot be lost.
         let seq = changes.seq();
@@ -69,10 +70,13 @@ pub fn poll(
             schema_version: req.schema_version.clone(),
             request_id: req.request_id.clone(),
             token: req.token.clone(),
-            method: "Event.Poll".into(),
-            params: json!({"cursor":p.cursor,"limit":p.limit}),
+            method: read_method.into(),
+            params: req.params.clone(),
         })?;
-        if !page["events"].as_array().unwrap().is_empty() || Instant::now() >= until {
+        if !page[items_field].as_array().unwrap().is_empty()
+            || page["lifecycle"] == "Closed"
+            || Instant::now() >= until
+        {
             return Ok(page);
         }
         require(

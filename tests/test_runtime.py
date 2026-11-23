@@ -1,5 +1,6 @@
 """Process-level coverage of persisted sessions across distinct agent, provider and owner credentials."""
 import json
+import os
 import signal
 import subprocess
 import sqlite3
@@ -78,6 +79,24 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(len(n.call("Session.History", {"id": sid}, self.token)["turns"]), 3)
         budget = n.call("Budget.Get", {"id": self.grant["budget_ref"]["resource_id"]}, self.token)
         self.assertEqual((budget["model_calls_used"], budget["spent"]), (3, 2))
+
+    def test_witness_reserve_blocks_new_leases_but_allows_model_settlement(self):
+        n = self.n
+        first, waiting = self.open(), self.open()
+        lease = self.claim(first, "in-flight")
+        cfg = json.loads(n.config.read_text())
+        st = os.statvfs(n.witness)
+        n.stop()
+        n.config.write_text(json.dumps(dict(cfg, authority_reserve={"witness_bytes": st.f_blocks * st.f_frsize + 1})))
+        n.start()
+        self.assertTrue(n.call("Node.Get", {})["authority_storage"]["witness"]["below_reserve"])
+        self.denied("QuotaExceeded", self.claim, waiting, "pending")
+        self.assertEqual(self.claim(first, "in-flight")["lease_id"], lease["lease_id"])
+        result = self.respond(first, lease["lease_id"], dict(action="finish", summary="Retained"))
+        self.assertEqual(result["lifecycle"], "Succeeded")
+        self.assertEqual(self.claim(first, "in-flight")["completed"], result)
+        budget = n.call("Budget.Get", {"id": self.grant["budget_ref"]["resource_id"]}, self.token)
+        self.assertEqual(budget["model_calls_used"], 1)
 
     def test_durable_provider_delivery_survives_both_sides_of_the_response(self):
         n = self.n

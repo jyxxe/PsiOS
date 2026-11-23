@@ -256,7 +256,10 @@ impl Store {
             }
             Ok(out)
         });
-        if let Err(e) = &result {
+        // Repeated headroom refusals must leave space for in-flight work and security records.
+        if let Err(e) = &result
+            && !(e.0.code == "QuotaExceeded" && e.0.retry_condition == "SameRequestAfterBackoff")
+        {
             // Never persist untrusted method strings or payloads as diagnostic text.
             let audit_method = if method.len() <= 64
                 && method.bytes().all(|b| b.is_ascii_alphabetic() || b == b'.')

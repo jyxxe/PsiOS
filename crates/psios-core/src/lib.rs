@@ -13,7 +13,7 @@ pub mod server;
 mod storage;
 mod watch;
 
-pub use config::Config;
+pub use config::{AuthorityReserve, Config};
 pub use db::Store;
 use psios_api::ApiError;
 use serde::{Deserialize, de::DeserializeOwned};

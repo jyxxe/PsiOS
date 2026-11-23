@@ -13,6 +13,16 @@
 - `Task.History` 使用 `id` 和可选 `limit`。下一页带回 `through_version` 和服务器返回的 `next_after_version`（请求字段为 `after_version`），读取同一历史区间。`Task.Archive` 使用任务 ID 和修订，将已结算的终态移出调度表，保留幂等回执、历史、Run 和结果。当前仍需为结果及审计历史预留磁盘空间。
 - `Event.Wait` 复用 Event.Poll 的授权游标，支持 1 至 10000 毫秒的 `timeout_ms` 和可选 `limit`。`psiosctl watch CURSOR --wait-ms 5000` 可直接使用。提交后通知订阅者，等待时释放数据库锁，撤权和超时重新检查。事件和信箱共用每个守护进程的 8 个等待名额。
 
+### 权威存储余量
+
+`psiosctl node` 的 `authority_storage` 显示 state 和 witness 所在文件系统的容量、普通进程可用字节和 inode、配置阈值及观测时间。部署可在 Core 配置中分别设置 `authority_reserve.state_bytes` 与 `authority_reserve.witness_bytes`。默认值为零，仅观测余量。
+
+```json
+{"authority_reserve":{"state_bytes":16777216,"witness_bytes":2097152}}
+```
+
+任一已配置文件系统低于阈值时，新任务、新输入和新模型租约返回可退避重试的 `QuotaExceeded`。幂等重复请求仍返回原回执，已接受任务继续运行、结算或取消。压力期间的准入拒绝直接返回给调用方，节约原来的持久审计空间。容量采样用于准入，物理空间仍由宿主文件系统共享。可用空间恢复后，当前守护进程重新接受请求。[容量与任务回收测试](../tests/test_platform.py) · [模型租约结算测试](../tests/test_runtime.py)
+
 ### 网络接口与地址
 
 `node.interfaces` 通过 Task 返回本地网络命名空间中接口的 ifindex、名称、MTU、链路类型、运行状态、标志和已分配的 IPv4/IPv6 地址。地址含前缀长度和 scope，点对点配置另有 peer。结果同时记录 Linux boot ID、网络命名空间 inode 和观测时间。网卡驱动与地址由现有 Linux 网络管理器配置。

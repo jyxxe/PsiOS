@@ -5,7 +5,7 @@ use crate::{
     policy, *,
 };
 use psios_api::{VERSION, id};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, process::Command};
 
@@ -338,7 +338,7 @@ impl Engine<'_> {
         )?;
         Ok(true)
     }
-    fn managed(&self, w: &Work, id: &str) -> Result<Value> {
+    fn managed(&self, w: &Work, id: &str, start_op: &str) -> Result<Value> {
         if let Some(engine) = w.target.body["engine_id"].as_str() {
             require(
                 self.identity()? == engine,
@@ -351,19 +351,44 @@ impl Engine<'_> {
             v["Id"] == id
                 && v["Config"]["Labels"]["io.psios.application"] == w.target.id
                 && v["Image"] == w.target.spec["image_id"]
-                && v["Config"]["Labels"]["io.psios.operation"]
-                    == if matches!(w.action, Action::Start(_)) {
-                        json!(w.op.id)
-                    } else {
-                        w.target.body["start_operation_id"].clone()
-                    },
+                && v["Config"]["Labels"]["io.psios.operation"] == start_op,
             "PreconditionFailed",
             "container identity mismatch",
         )?;
         Ok(v)
     }
 }
-fn start(w: &Work, e: &Engine<'_>) -> Result<Value> {
+// The checkpoint is an immutable authority resource. A container name or label
+// found after a crash cannot substitute for the ID returned by the original engine.
+pub fn pending_start(db: &Db<'_>, app: &Doc) -> Result<Option<Doc>> {
+    let operation: Option<String> =
+        db.c.query_row(
+            "SELECT h.holder FROM holds h JOIN current o ON o.id=h.holder
+         JOIN current t ON t.id=o.spec->>'task_id'
+         WHERE h.volume=?1 AND t.spec->>'task_type'='application.start'",
+            [&app.id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(op) = operation else { return Ok(None) };
+    let checkpoint = db.find(&format!("oci-start-{op}"))?.ok_or_else(|| {
+        err(
+            "PreconditionFailed",
+            "start has no verified container checkpoint",
+        )
+    })?;
+    require(
+        checkpoint.kind == "OCIStartCheckpoint"
+            && checkpoint.body["application_ref"] == app.reference()
+            && checkpoint.body["start_operation_id"] == op,
+        "RecoveryRequired",
+        "OCI checkpoint no longer matches the application",
+    )?;
+    Ok(Some(checkpoint))
+}
+
+pub fn start(w: &Work, checkpoint: impl FnOnce(&str, &str) -> Result<()>) -> Result<Value> {
+    let e = Engine(&w.cfg);
     let s = w
         .launch
         .as_ref()
@@ -437,16 +462,46 @@ fn start(w: &Work, e: &Engine<'_>) -> Result<Value> {
     let created = e.command(&args, true)?;
     let cid = String::from_utf8_lossy(&created.stdout).trim().to_owned();
     require(
-        cid.len() == 64 && cid.bytes().all(|b| b.is_ascii_hexdigit()),
+        !created.truncated && cid.len() == 64 && cid.bytes().all(|b| b.is_ascii_hexdigit()),
         "OutcomeUnknown",
         "invalid OCI create receipt",
     )?;
-    let v = e.managed(w, &cid).map_err(|_| {
+    let v = e.managed(w, &cid, &w.op.id).map_err(|_| {
         err(
             "OutcomeUnknown",
             "created instance identity requires reconciliation",
         )
     })?;
+    verify_created(w, &v, s, &user)?;
+    require(
+        e.identity().is_ok_and(|id| id == engine_id),
+        "OutcomeUnknown",
+        "engine changed after container creation",
+    )?;
+    checkpoint(&engine_id, &cid).map_err(|_| {
+        err(
+            "OutcomeUnknown",
+            "created container could not be authorized and checkpointed before start",
+        )
+    })?;
+    e.command(&["start".into(), cid.clone()], true)
+        .map_err(|_| err("OutcomeUnknown", "created instance start unconfirmed"))?;
+    let observed = e
+        .managed(w, &cid, &w.op.id)
+        .map_err(|_| err("OutcomeUnknown", "start receipt requires reconciliation"))?;
+    require(
+        e.identity().is_ok_and(|id| id == engine_id),
+        "OutcomeUnknown",
+        "engine changed before the start receipt",
+    )?;
+    Ok(json!({
+        "container_id": cid,
+        "engine_id":engine_id,
+        "process_running": observed["State"]["Running"],
+        "observed_at": now()
+    }))
+}
+fn verify_created(w: &Work, v: &Value, s: &Install, user: &str) -> Result<()> {
     let h = &v["HostConfig"];
     let valid_mount = match &w.data {
         Some(data) => v["Mounts"].as_array().is_some_and(|a| {
@@ -478,23 +533,52 @@ fn start(w: &Work, e: &Engine<'_>) -> Result<Value> {
             }),
         "OutcomeUnknown",
         "created instance failed isolation verification; start withheld",
-    )?;
-    e.command(&["start".into(), cid.clone()], true)?;
-    let observed = e
-        .managed(w, &cid)
-        .map_err(|_| err("OutcomeUnknown", "start receipt requires reconciliation"))?;
-    require(
-        e.identity().is_ok_and(|id| id == engine_id),
-        "OutcomeUnknown",
-        "engine changed before the start receipt",
-    )?;
-    Ok(json!({
-        "container_id": cid,
-        "engine_id":engine_id,
-        "process_running": observed["State"]["Running"],
-        "observed_at": now()
-    }))
+    )
 }
+
+fn observe_start(w: &Work, e: &Engine<'_>, checkpoint: &Doc) -> Result<Value> {
+    let c = &checkpoint.body;
+    let engine = e.check_engine()?;
+    require(
+        c["engine_id"] == engine,
+        "PreconditionFailed",
+        "OCI checkpoint belongs to a different engine",
+    )?;
+    let cid = c["container_id"]
+        .as_str()
+        .ok_or_else(|| err("RecoveryRequired", "checkpoint container ID missing"))?;
+    let op = c["start_operation_id"]
+        .as_str()
+        .ok_or_else(|| err("RecoveryRequired", "checkpoint operation ID missing"))?;
+    let v = e.managed(w, cid, op)?;
+    let user = format!(
+        "{}:{}",
+        rustix::process::geteuid().as_raw(),
+        rustix::process::getegid().as_raw()
+    );
+    let launch = w
+        .launch
+        .as_ref()
+        .ok_or_else(|| err("RecoveryRequired", "checkpoint release unavailable"))?;
+    verify_created(w, &v, launch, &user).map_err(|_| {
+        err(
+            "PreconditionFailed",
+            "checkpointed runtime configuration differs from its release",
+        )
+    })?;
+    require(
+        e.identity()? == engine,
+        "PreconditionFailed",
+        "OCI engine changed during observation",
+    )?;
+    let running = v["State"]["Running"] == true && v["State"]["Status"] == "running";
+    Ok(
+        json!({"container_id":cid, "engine_id":engine, "start_operation_id":op,
+        "checkpoint_ref":checkpoint.reference(), "process_running":running,
+        "runtime_state":v["State"]["Status"], "readiness":"Unknown","health":"Unknown","observed_at":now()}),
+    )
+}
+
 fn logs(e: &Engine<'_>, id: &str) -> Result<Value> {
     let out = e.command(&["logs", "--tail", "64", id].map(String::from), false)?;
     // Keep result + transport encoding inside the frame even for strings consisting of control bytes.
@@ -510,7 +594,9 @@ pub fn perform(w: &Work) -> Result<Value> {
     match &w.action {
         Action::Install(s) | Action::Stage { release: s, .. } => e.image(&s.image_id),
         Action::Select { release_ref, .. } => Ok(json!({"release_ref":release_ref})),
-        Action::Start(_) => start(w, &e),
+        Action::Health(_) if w.start_checkpoint.is_some() => {
+            observe_start(w, &e, w.start_checkpoint.as_ref().unwrap())
+        }
         Action::Uninstall(_) => Ok(json!({"data_retained": true})),
         Action::Refresh(_) | Action::Logs(_) | Action::Health(_)
             if w.target.body["lifecycle"] == "Stopped" =>
@@ -531,7 +617,10 @@ pub fn perform(w: &Work) -> Result<Value> {
             let cid = w.target.body["container_id"]
                 .as_str()
                 .ok_or_else(|| err("RecoveryRequired", "instance ID missing"))?;
-            let v = match e.managed(w, cid) {
+            let start_op = w.target.body["start_operation_id"]
+                .as_str()
+                .ok_or_else(|| err("RecoveryRequired", "instance operation ID missing"))?;
+            let v = match e.managed(w, cid, start_op) {
                 Ok(v) => v,
                 Err(error) if !matches!(w.action, Action::Logs(_)) && e.removed(w, cid)? => {
                     return Ok(
@@ -559,7 +648,7 @@ pub fn perform(w: &Work) -> Result<Value> {
             }
             e.command(&["stop", "--time=5", cid].map(String::from), true)?;
             let v = e
-                .managed(w, cid)
+                .managed(w, cid, start_op)
                 .map_err(|_| err("OutcomeUnknown", "unable to verify stop"))?;
             require(
                 v["State"]["Running"] == false,
@@ -808,9 +897,8 @@ pub fn stopped(
         "health":"Unknown","readiness":"NotReady","observed_at":now()}))?.reference())
 }
 pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
-    let mut b = w.target.body.clone();
     match &w.action {
-        Action::Install(s) => return install(db, w, s, r),
+        Action::Install(s) => install(db, w, s, r),
         Action::Stage { release, .. } => {
             let staged = record_release(
                 db,
@@ -821,21 +909,22 @@ pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
                 release,
                 r,
             )?;
-            return Ok(staged.reference());
+            Ok(staged.reference())
         }
         Action::Select { release_ref, .. } => {
             let release = db.resolve(release_ref)?;
             let spec = db.resolve(&release.body["release_spec_ref"])?;
             let image = db.resolve(&release.body["artifact_ref"])?;
-            return select_deployment(
+            select_deployment(
                 db,
                 &w.target,
                 &release,
                 &image.body["config_digest"],
                 spec.body["execution"]["environment"].clone(),
-            );
+            )
         }
         Action::Refresh(_) => {
+            let mut b = w.target.body.clone();
             b["last_observation"] = r.clone();
             for field in ["runtime_state", "readiness", "health", "observed_at"] {
                 b[field] = r[field].clone();
@@ -848,73 +937,67 @@ pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
                 )?;
                 b["instance_ref"] = instance.reference();
             }
-            return Ok(db.status(&w.target, b)?.reference());
+            Ok(db.status(&w.target, b)?.reference())
         }
-        Action::Start(_) => {
-            b["lifecycle"] = json!("Running");
-            b["container_id"] = r["container_id"].clone();
-            b["start_operation_id"] = json!(w.op.id);
-            b["engine_id"] = r["engine_id"].clone();
-            b["last_observation"] = r.clone();
-        }
-        Action::Stop(_) => {
-            return stopped(db, &w.target, &w.op.id, w.volume.as_ref(), &r["last_logs"]);
-        }
+        Action::Start(_) => started(db, &w.target, &w.op.id, w.volume.as_ref(), r),
+        Action::Stop(_) => stopped(db, &w.target, &w.op.id, w.volume.as_ref(), &r["last_logs"]),
         Action::Uninstall(_) => {
-            b = json!({"lifecycle": "Uninstalled", "data_retained": true});
+            let deployment = db.resolve(&w.target.spec["deployment_ref"])?;
+            let deployment = db.status(
+                &deployment,
+                json!({"lifecycle":"Removed","desired_state":"Removed"}),
+            )?;
+            let mut spec = w.target.spec.clone();
+            spec["deployment_ref"] = deployment.reference();
+            let body = json!({"lifecycle":"Uninstalled","data_retained":true,"desired_state":"Removed",
+                "runtime_state":"Absent","health":"Unknown","observed_at":now(),"readiness":"NotReady"});
+            Ok(db.update(&w.target, spec, body)?.reference())
         }
-        _ => return Ok(r.clone()),
+        _ => Ok(r.clone()),
     }
-    if matches!(w.action, Action::Start(_))
-        && let Some(v) = &w.volume
-    {
-        attachment(db, &w.target, &w.op.id, v, true)?;
+}
+pub fn started(
+    db: &Db<'_>,
+    app: &Doc,
+    op_id: &str,
+    volume: Option<&Doc>,
+    r: &Value,
+) -> Result<Value> {
+    if let Some(v) = volume {
+        attachment(db, app, op_id, v, true)?;
     }
-    let deployment = db.resolve(&w.target.spec["deployment_ref"])?;
-    let (desired, phase, runtime) = match &w.action {
-        Action::Start(_) => (
-            "Running",
-            "Active",
-            if r["process_running"] == true {
-                "Running"
-            } else {
-                "Exited"
-            },
-        ),
-        _ => ("Removed", "Removed", "Absent"),
-    };
+    let deployment = db.resolve(&app.spec["deployment_ref"])?;
     let deployment = db.status(
         &deployment,
-        json!({"lifecycle": phase, "desired_state": desired}),
+        json!({"lifecycle":"Active","desired_state":"Running"}),
     )?;
-    let mut spec = w.target.spec.clone();
+    let running = r["process_running"] == true;
+    let runtime = if running { "Running" } else { "Exited" };
+    let instance = db.create(
+        "RuntimeInstance", &id("instance"), &app.owner,
+        json!({
+            "application_id": app.id, "deployment_ref": deployment.reference(),
+            "container_id": r["container_id"], "engine_id": r["engine_id"], "start_operation_id": op_id
+        }),
+        json!({"lifecycle": runtime, "observed_at": r["observed_at"]}),
+    )?;
+    let mut spec = app.spec.clone();
     spec["deployment_ref"] = deployment.reference();
-    if matches!(w.action, Action::Start(_)) {
-        let instance = db.create(
-            "RuntimeInstance",
-            &id("instance"),
-            &w.target.owner,
-            json!({
-                "application_id": w.target.id,
-                "deployment_ref": deployment.reference(),
-                "container_id": r["container_id"],
-                "start_operation_id": w.op.id,"engine_id":r["engine_id"]
-            }),
-            json!({"lifecycle": runtime, "observed_at": r["observed_at"]}),
-        )?;
-        b["instance_ref"] = instance.reference();
-    }
-    b["desired_state"] = json!(desired);
+    let mut b = app.body.clone();
+    b["lifecycle"] = json!("Running");
+    b["desired_state"] = json!("Running");
     b["runtime_state"] = json!(runtime);
     b["health"] = json!("Unknown");
-    b["observed_at"] = json!(now());
-    b["readiness"] = json!(if runtime == "Running" {
-        "Unknown"
-    } else {
-        "NotReady"
-    });
-    Ok(db.update(&w.target, spec, b)?.reference())
+    b["readiness"] = json!(if running { "Unknown" } else { "NotReady" });
+    b["observed_at"] = r["observed_at"].clone();
+    b["start_operation_id"] = json!(op_id);
+    b["engine_id"] = r["engine_id"].clone();
+    b["container_id"] = r["container_id"].clone();
+    b["instance_ref"] = instance.reference();
+    b["last_observation"] = r.clone();
+    Ok(db.update(app, spec, b)?.reference())
 }
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Configure {

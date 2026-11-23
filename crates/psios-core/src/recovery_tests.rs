@@ -53,7 +53,7 @@ fn dispatch(s: &mut Store, id: &str) -> Work {
 fn execute(s: &mut Store, task: &str) -> Value {
     assert_eq!(claim(s), task);
     let w = dispatch(s, task);
-    let r = w.perform();
+    let r = w.perform(|_, _| unreachable!("not an OCI start"));
     s.transaction("finish", |db| broker::finish(db, &w, r))
         .unwrap();
     let t = call(s, "Task.Get", json!({"id": task})).unwrap();
@@ -94,7 +94,7 @@ fn kill_after_host_write_requires_observed_postcondition() {
         let mut s = Store::open(cfg.clone()).unwrap();
         let task = claim(&mut s);
         let w = dispatch(&mut s, &task);
-        w.perform().unwrap();
+        w.perform(|_, _| unreachable!("not an OCI start")).unwrap();
         fs::write(
             cfg.state_dir.join("test-at-barrier"),
             "effect issued, receipt withheld",
@@ -205,7 +205,7 @@ fn lost_read_gets_new_claim_and_late_receipt_is_fenced() {
     let task = submit(&mut s, "system.status", json!({}));
     assert_eq!(claim(&mut s), task);
     let old = dispatch(&mut s, &task);
-    let receipt = old.perform();
+    let receipt = old.perform(|_, _| unreachable!("not an OCI start"));
     drop(s);
     let mut s = Store::open(c).unwrap();
     s.transaction("recover", broker::recover).unwrap();
@@ -243,7 +243,7 @@ fn cancellation_after_dispatch_preserves_successful_effect() {
     )
     .unwrap();
     assert_eq!(pending["lifecycle"], "Cancelling");
-    let receipt = w.perform();
+    let receipt = w.perform(|_, _| unreachable!("not an OCI start"));
     s.transaction("finish", |db| broker::finish(db, &w, receipt))
         .unwrap();
     let done = call(&mut s, "Task.Get", json!({"id": task})).unwrap();
@@ -429,7 +429,8 @@ fn chunk_receipt_loss_requires_exact_range_and_retains_exclusive_hold() {
     approve(&mut s, &next);
     assert_eq!(claim(&mut s), next);
     let work = dispatch(&mut s, &next);
-    work.perform().unwrap();
+    work.perform(|_, _| unreachable!("not an OCI start"))
+        .unwrap();
     drop(s);
     let mut restarted = Store::open(c.clone()).unwrap();
     restarted.transaction("restart", broker::recover).unwrap();

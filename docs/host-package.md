@@ -2,7 +2,17 @@
 
 `psios-core` 包含本机权威服务、CLI、默认配置和两个 systemd 单元。构建针对当前主机架构。CI 在 Ubuntu 24.04 的 amd64 虚机上执行打包与服务生命周期验收。当前交付范围是已有 Linux 上的单节点 Core。三个发行版的启动介质、磁盘安装器、签名更新通道和系统部署回退仍待实现。
 
-通过验收的 Actions 运行保存 `psios-core-ubuntu-24.04-amd64` 开发制品 14 天。归档含实际测试的 deb、dpkg buildinfo、源码提交、Rust 版本、Cargo.lock 和 SHA-256 清单。从对应的成功运行下载并解压后，在包目录执行 `sha256sum -c SHA256SUMS`。清单用于传输完整性检查，正式发行签名仍待建立。
+通过验收的 Actions 运行保存 `psios-core-ubuntu-24.04-amd64` 开发制品 14 天。归档含实际测试的 deb、dpkg buildinfo、源码提交、Rust 版本、Cargo.lock 和 SHA-256 清单。从对应的成功运行下载并解压后，在包目录执行 `sha256sum -c SHA256SUMS`。主线开发包的来源核验见下文。正式发行通道及其独立信任策略仍待建立。
+
+## 核验主线开发包的来源
+
+在 `main` 的构建记录中选择可信的完整提交 SHA，下载同一次运行的包制品，以及 `psios-core-build-attestation` 中的 `provenance.jsonl`。使用支持 `gh attestation verify --source-digest` 的 GitHub CLI，从可信源码 checkout 执行下例。第二个参数取自所选主线提交。
+
+```bash
+tools/verify-host-package ./host-build "$EXPECTED_MAIN_SHA" ./provenance.jsonl
+```
+
+核验器检查 GitHub 托管 runner 的构建身份证明，限定仓库、工作流、主线引用和提交。deb 和 SHA256SUMS 均为签名对象，buildinfo、源码版本、工具链和依赖锁文件由该清单覆盖。省略 bundle 参数会从 GitHub 取得证明；使用本地 bundle 仍需可用的受信验证根。主线仅在 Linux、包安装升级和虚机启动全部通过后签发。PR 构建可用于测试。正式发行密钥、更新准入和版本回退由后续发布流程管理。[构建证明机制](https://docs.github.com/en/actions/concepts/security/artifact-attestations)
 
 ## 构建与首次安装
 

@@ -79,7 +79,7 @@ v1是文档版本；当前没有宣称软件已发布、最新仓库已审计、
 python tools/validate_package.py
 ```
 
-无需联网解析Schema，不会执行PsiOS或归档源码。实际静态检查结果见[validation-report.json](validation-report.json)；MANIFEST.sha256覆盖除自身外的所有交付文件。
+无需联网即可解析 Schema，此验证不等于实际运行验收。实际静态检查结果见[validation-report.json](validation-report.json)；MANIFEST.sha256覆盖除自身外的所有交付文件。
 
 完整生成/封装步骤见[工具说明](tools/README.md)。
 

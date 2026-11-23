@@ -20,7 +20,7 @@ PsiOS 是 Linux 上的 Agent-Native OS，共用 PsiOS Core，首批发行形态�
 
 ## 首批 P0 工作项
 
-1. `P0-01` 固定本地 Forgejo 最新 HEAD，并逐模块审计 XeLab 复用来源及许可证。
+1. `P0-01` 核验 PsiOS 最新提交，审查核心模块接口、依赖及许可证。
 2. `P0-02` 建立 docs/architecture、docs/adr、api/schema、tests/contracts，CI 保留带 SHA 的证据。
 3. `P0-03` 统一 Principal/Grant/Delegation/Approval/Operation、Task/Run、WorkflowRun、Conversation/Message Schema。
 4. `P0-04` 实现并验证 SecurityState 受限灾难恢复，确认无独立可信撤权记录时默认隔离旧权限。

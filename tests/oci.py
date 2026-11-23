@@ -11,6 +11,7 @@ from support import Node, key, target
 def main(binaries):
     node = Node(binaries)
     tag = "psios-acceptance:" + key()
+    upgraded_tag = tag + "-upgrade"
     app_id = None
     docker = ["docker", "--host", "unix:///var/run/docker.sock"]
     try:
@@ -45,6 +46,15 @@ int main(void) {
         missing = node.wait(node.submit("application.start", target(app)), autoapprove=True)
         assert missing["lifecycle"] == "Failed" and not data.exists(), missing
         detached.rename(data)
+        pending = node.submit("application.start", target(app))
+        approval = node.get(node.wait(pending)["conditions"][0]["message"])["value"]
+        plan = node.call("Resource.Resolve", {"reference": approval["plan_ref"]})["value"]
+        assert [p["resource_ref"]["resource_id"] for p in plan["preconditions"]] == [app_id, volume["resource_id"]]
+        volume = node.perform("volume.write", dict(**target(volume), name="changed", content="new revision"))["volume_ref"]
+        node.approve(pending)
+        invalidated = node.wait(pending)
+        assert invalidated["outcome_knowledge"] == "NotStarted" and invalidated["conditions"][0]["type"] == "ApprovalInvalidated"
+        assert not subprocess.check_output(docker + ["ps", "-aq", "--filter", "label=io.psios.application=" + app_id]).strip()
         app = node.perform("application.start", target(app))
         health = node.perform("application.health", target(app))
         assert health["process_running"] is True, health
@@ -65,22 +75,53 @@ int main(void) {
         app = node.call("Application.Configure", dict(**target(app), environment={"TEST_NAME": "second"}))
         app = node.perform("application.start", target(app))
         app = node.perform("application.stop", target(app))
+        previous_release = node.get(app_id)["resource"]["spec"]["release_ref"]
+        upgraded_image = subprocess.check_output(docker + ["import", "--change", "LABEL test.release=2", "-", upgraded_tag],
+            input=archive.getvalue()).decode().strip()
+        assert upgraded_image != spec["image_id"]
+        release = dict(spec, image_id=upgraded_image, release_version="2.0.0", environment={"TEST_NAME": "upgraded"})
+        del release["volume"]
+        staged = node.perform("application.stage_release", dict(target=target(app), release=release))
+        assert node.get(app_id)["resource"]["spec"]["release_ref"] == previous_release
+        other = node.perform("application.install", dict(release, name="isolated"))
+        foreign = node.wait(node.submit("application.select_release", dict(target=target(other), release_ref=staged)), autoapprove=True)
+        assert foreign["conditions"][0]["type"] == "PreconditionFailed", foreign
+        node.perform("application.uninstall", target(other))
+        app = node.perform("application.select_release", dict(target=target(app), release_ref=staged))
+        app = node.perform("application.start", target(app))
+        changed_cid = node.perform("application.health", target(app))["container_id"]
+        assert json.loads(subprocess.check_output(docker + ["inspect", changed_cid]))[0]["Image"] == upgraded_image
+        subprocess.run(docker + ["kill", changed_cid], check=True, stdout=subprocess.DEVNULL)
+        app = node.perform("application.refresh", target(app))
+        observed = node.get(app_id)["value"]
+        assert observed["desired_state"] == "Running" and observed["runtime_state"] == "Exited"
+        assert node.get(observed["instance_ref"]["resource_id"])["value"]["lifecycle"] == "Exited"
+        node.stop()
+        node.start()
+        assert node.get(app_id)["value"]["readiness"] == "NotReady"
+        app = node.perform("application.stop", target(app))
+        app = node.perform("application.select_release", dict(target=target(app), release_ref=previous_release))
+        app = node.perform("application.start", target(app))
+        reverted = node.perform("application.health", target(app))["container_id"]
+        assert json.loads(subprocess.check_output(docker + ["inspect", reverted]))[0]["Image"] == image_id
+        app = node.perform("application.stop", target(app))
         node.perform("application.uninstall", target(app))
         volume = node.get(volume["resource_id"])["reference"]
-        assert node.perform("volume.read", dict(**target(volume), name="starts"))["content"] == "first\nsecond\n"
+        assert node.perform("volume.read", dict(**target(volume), name="starts"))["content"] == "first\nsecond\nupgraded\nfirst\n"
         backup = node.perform("backup.create", target(volume))
         restored = node.perform("backup.restore", target(backup))
         assert restored["resource_id"] != volume["resource_id"]
-        assert node.perform("volume.read", dict(**target(restored), name="starts"))["content"] == "first\nsecond\n"
+        assert node.perform("volume.read", dict(**target(restored), name="starts"))["content"] == "first\nsecond\nupgraded\nfirst\n"
         node.perform("volume.activate", target(restored))
-        print("PASS live OCI install/start/health/logs, restart, configure, stop/uninstall, persistent volume and backup restore")
+        print("PASS live OCI lifecycle, two image digests, release staging, external exit, rollback, persistent volume and backup restore")
     finally:
         if app_id:
             ids = subprocess.check_output(docker + ["ps", "-aq", "--filter", "label=io.psios.application=" + app_id], text=True).split()
             for cid in ids:
                 subprocess.run(docker + ["rm", "-f", cid], check=True, stdout=subprocess.DEVNULL)
-        if subprocess.run(docker + ["image", "inspect", tag], capture_output=True).returncode == 0:
-            subprocess.run(docker + ["image", "rm", tag], check=True, stdout=subprocess.DEVNULL)
+        for owned_tag in [tag, upgraded_tag]:
+            if subprocess.run(docker + ["image", "inspect", owned_tag], capture_output=True).returncode == 0:
+                subprocess.run(docker + ["image", "rm", owned_tag], check=True, stdout=subprocess.DEVNULL)
         node.close()
 
 

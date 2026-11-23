@@ -4,7 +4,7 @@ PsiOS is a Linux-based **Agent-Native Operating System** project with three plan
 
 The repository contains the **PsiOS v1.0.0 documentation baseline (2026-11-22)** and an initial Rust implementation of the single-node Core. `psiosd` serves the local System API. `psiosctl` and the Rust SDK use that API for identity and policy, durable tasks, OCI applications, local volumes, backups and agent tools.
 
-Build with `cargo build --locked --workspace`. The [local Core guide](docs/core-local.md) covers initialization, running a task, enrolling an agent, approvals, recovery and verification. The sealed v1 documentation retains its original release and acceptance status.
+Build with `cargo build --locked --workspace`. The [local Core guide](docs/core-local.md) covers initialization, running a task, enrolling an agent, approvals, recovery and verification. The [host and Agent Runtime guide](docs/core-runtime.md) covers systemd control, concurrent scheduling, release switching, binary files, versioned Skills and restartable multi-step sessions. The sealed v1 documentation retains its original release and acceptance status.
 
 ## Documentation
 

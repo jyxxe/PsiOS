@@ -11,6 +11,8 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Install the tested Rust toolchain
         run: rustup toolchain install 1.100.0 --profile minimal --component rustfmt,clippy
       - name: Format and lint
@@ -28,6 +30,20 @@ jobs:
           python3 docs/releases/restore_v1.py
           "$RUNNER_TEMP/psios-docs/bin/python" docs/v1/tools/validate_package.py
       - name: Test local system API and process recovery
-        run: python3 tests/system.py
+        run: |
+          python3 tests/system.py
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Verify in-place state upgrade from PR 1
+        run: |
+          mkdir "$RUNNER_TEMP/psios-previous"
+          git archive 26b66ffe7df09525969679b65860f66b00c2698b Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-previous"
+          cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-previous/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-previous/target"
+          python3 tests/upgrade.py --previous-bin "$RUNNER_TEMP/psios-previous/target/debug"
+      - name: Verify real systemd service control and crash reconciliation
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl start "user@$(id -u).service"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          python3 tests/services.py
       - name: Exercise a real OCI engine and persistent volume
         run: python3 tests/oci.py

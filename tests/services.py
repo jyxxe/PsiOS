@@ -1,0 +1,112 @@
+"""Real systemd user manager, worker concurrency and post-crash readback of a service effect."""
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import time
+
+from support import Failure, Node, key, target
+
+
+def eventually(check, timeout=12):
+    expiry = time.monotonic() + timeout
+    while time.monotonic() < expiry:
+        value = check()
+        if value:
+            return value
+        time.sleep(.03)
+    raise AssertionError("condition timed out")
+
+
+def main():
+    n = Node("target/debug")
+    unit = "psios-accept-" + key() + ".service"
+    service_id = "service-" + unit
+    units = Path(f"/run/user/{os.geteuid()}/systemd/user")
+    units.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = units / unit
+    completion = n.base / "allow-start"
+    entered = n.base / "starting"
+    ctl = ["systemctl", "--user"]
+    try:
+        path.write_text(f"""[Unit]
+Description=PsiOS test-owned barrier
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=30
+ExecStart=/bin/sh -c 'touch {entered}; while test ! -f {completion}; do sleep .05; done'
+""")
+        subprocess.run(ctl + ["daemon-reload"], check=True)
+        n.stop()
+        cfg = json.loads(n.config.read_text())
+        cfg.update(workers=3, services=[dict(unit=unit, manager="user", allow_control=False)])
+        n.config.write_text(json.dumps(cfg))
+        n.start()
+        service = n.get(service_id)["reference"]
+        initial = n.perform("service.inspect", target(service))
+        original_unit = path.read_text()
+        n.stop()
+        cfg["services"][0].update(allow_control=True, definition_digest=initial["definition_digest"])
+        n.config.write_text(json.dumps(cfg))
+        n.start()
+        service = n.get(service_id)["reference"]
+        held_plan = n.submit("service.start", target(service))
+        path.write_text(original_unit.replace("test-owned barrier", "different definition"))
+        subprocess.run(ctl + ["daemon-reload"], check=True)
+        n.approve(held_plan)
+        fenced = n.wait(held_plan)
+        assert fenced["conditions"][0]["type"] == "ApprovalInvalidated" and not entered.exists(), fenced
+        path.write_text(original_unit)
+        subprocess.run(ctl + ["daemon-reload"], check=True)
+        prior = n.wait(n.submit("service.inspect", target(service)))
+        assert prior["lifecycle"] == "Succeeded", prior
+        old_evidence = prior["result"]["artifact_refs"][0]
+        start = n.submit("service.start", target(service))
+        n.approve(start)
+        eventually(entered.exists)
+        assert n.call("Task.Get", {"id": start})["outcome_knowledge"] == "InFlight"
+        assert n.perform("node.inventory", {})["boot_id"]
+        assert not completion.exists()
+        n.stop(signal.SIGKILL)
+        n.start()
+        lost = n.wait(start)
+        assert lost["outcome_knowledge"] == "Unknown" and lost["lifecycle"] == "Paused", lost
+        op = n.get(lost["operation_refs"][0]["resource_id"])["reference"]
+        try:
+            n.call("Operation.Reconcile", dict(**target(op), evidence_ref=old_evidence))
+        except Failure as e:
+            assert e.code == "OutcomeUnknown", e
+        else:
+            raise AssertionError("old systemd observation accepted")
+        completion.touch()
+        eventually(lambda: subprocess.run(ctl + ["is-active", "--quiet", unit]).returncode == 0)
+        evidence = n.wait(n.submit("service.inspect", target(service)))["result"]["artifact_refs"][0]
+        observed = n.call("Artifact.Read", {"reference": evidence})
+        assert observed["active_state"] == "active" and observed["invocation_id"], observed
+        # Readback, settling the old task and releasing the service hold happen without a second start.
+        n.call("Operation.Reconcile", dict(**target(op), evidence_ref=evidence))
+        assert n.wait(start)["lifecycle"] == "Succeeded"
+        service = n.get(service_id)["reference"]
+        stopped = n.perform("service.stop", target(service))
+        assert stopped["observation"]["active_state"] == "inactive"
+        n.stop()
+        cfg["services"][0]["allow_control"] = False
+        n.config.write_text(json.dumps(cfg))
+        n.start()
+        service = n.get(service_id)["reference"]
+        failed = n.wait(n.submit("service.start", target(service)), autoapprove=True)
+        assert failed["conditions"][0]["type"] == "PermissionDenied", failed
+        assert n.perform("service.inspect", target(service))["active_state"] == "inactive"
+        print("PASS real systemd allowlist, blocked and concurrent workers, SIGKILL, fresh postcondition, recovery and stop")
+    finally:
+        completion.touch()
+        subprocess.run(ctl + ["stop", unit], capture_output=True)
+        path.unlink(missing_ok=True)
+        subprocess.run(ctl + ["daemon-reload"], check=True)
+        n.close()
+
+
+if __name__ == "__main__":
+    main()

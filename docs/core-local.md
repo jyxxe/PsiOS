@@ -2,6 +2,8 @@
 
 `psiosd` 把资源、任务、授权账本和事件保存在同一个 SQLite 数据库中。`psiosctl`、Rust SDK 和原生 Agent 都通过 Unix socket 访问这个权威服务。这个实现使用 v1.0.0 契约，运行于 Linux。OCI 测试需要可访问的本机 Docker Engine。基础管理、存储和 Agent 状态任务可以独立运行。
 
+节点调度、受管 systemd 服务、分块卷数据、应用版本切换和持久 Agent 会话见[宿主与 Agent Runtime 指南](core-runtime.md)。
+
 ## 本机启动
 
 在仓库根目录执行。第一次初始化要求状态目录及其同级见证目录为空。示例使用新建临时目录，数据随该目录保留。
@@ -55,7 +57,7 @@ target/debug/psiosctl --socket "$workdir/core/api.sock" --token-file "$workdir/a
 | Event.Poll、Event.Ack、Event.Offset | 从列表的 watch_start_cursor 拉取。重读同一位置得到相同 event_id。Ack 用 consumer、previous、cursor 条件更新检查点，Offset 用 id 取回检查点。授权变化或超时需要重新列举。 |
 | Task.Prepare、Task.Submit、Task.LookupSubmission | Prepare 把 tool、input、key、delegation_id 和可选 deadline_at 变成可重传的 v1 TaskSubmit。Submit 和 Lookup 接受这个完整对象。SDK 在 ACK 丢失后先查询原键。 |
 | Task.Get、Task.Cancel、Task.CancelOrigin、Task.Retry | Cancel 使用任务版本。CancelOrigin 接收 v1 CancelOrigin 并支持先到墓碑。Retry 需要旧任务版本和新键，创建关联的新任务。 |
-| Approval.Decide、Run.Get、Operation.Get、Operation.Reconcile | 决策绑定已显示的计划摘要、审批请求版本和单次使用单元。Reconcile 使用 Operation 的 id 和 expected_resource_version。当前可在线核实本地文件写操作。 |
+| Approval.Decide、Run.Get、Operation.Get、Operation.Reconcile | 决策绑定已显示的计划摘要、审批请求版本和单次使用单元。Reconcile 使用 Operation 的 id 和 expected_resource_version。可核实文本写入、分块追加和受管服务启停。 |
 | Artifact.Read、Secret.Put、Secret.Revoke、Audit.List | Artifact.Read 使用 reference。Secret.Put 接受 name/value，仅返回 SecretRef。secret.mac 可使用秘密计算 HMAC。Audit.List 支持 after 和 limit。 |
 | Tool.Call、Capability.Discover | 即时入口支持 system.status。执行其他注册工具通过 Task.Submit，服务端承担审批、预算、派发和回执保存。 |
 | StoragePool.Get、StoragePool.Configure、Application.Configure | 本地池实时报告容量。所有者用 CAS 开关新卷分配。应用停止后可用 CAS 修改非秘密环境配置。 |
@@ -84,7 +86,7 @@ volume.write、volume.delete、volume.activate、backup.delete、application.ins
 
 任务元数据、输入保留、幂等回执、预算预留、Operation 及事件在同一个 SQLite 事务内提交。每个资源版本同时是一条有序持久事件。服务保存历史修订、操作记录和取消墓碑。每个主体最多保留 4096 个不同输入，总输入上限 64 MiB。队列另有独立上限。当前版本尚无归档与检索历史的 GC。
 
-领取 Run 与签发宿主调用分属两个事务。派发事务先记录单用途 ExecutionPermit、Effect、Run 代次、审计及必要的资源占用。进程在领取后丢失，调度器可以在预算内建立新 Run。已派发的写操作丢失回执时，查询会返回 Unknown，相关资源保持占用。对 volume.write，可用 Operation.Reconcile 在原卷身份和占用下按已批准输入核实文件内容。服务附加证据并结算任务。其他未知宿主效果保留待离线核实。取消中的调用收到成功回执时会同时显示 Cancelled 和 Known，并保留结果。
+领取 Run 与签发宿主调用分属两个事务。派发事务先记录单用途 ExecutionPermit、Effect、Run 代次、审计及必要的资源占用。进程在领取后丢失，调度器可以在预算内建立新 Run。已派发的写操作丢失回执时，查询会返回 Unknown，相关资源保持占用。对 volume.write，可用 Operation.Reconcile 在原卷身份和占用下按已批准输入核实文件内容。服务附加证据并结算任务。分块追加按长度和范围内容核实，受管服务可用新观测对账。其他未知宿主效果保留待核实。取消中的调用收到成功回执时会同时显示 Cancelled 和 Known，并保留结果。
 
 独立 witness 目录保存提交标记、密钥与本机所有者凭据。服务先写入本次事务的候选标记，提交数据库，再固定已确认标记，之后才能返回回执或调用宿主。启动时核对标记，可恢复中断提交的相邻两种状态。单独回滚数据库或替换密钥会触发 RecoveryRequired。运行 `psiosd check` 或 `psiosd recover-owner` 需要停服并持有可信状态目录。后者轮换本机所有者令牌。见证和数据库被一起回滚、整机丢失和跨节点接管需要独立信任锚及新的恢复流程。
 
@@ -96,9 +98,10 @@ cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo build --locked --workspace
 cargo test --locked --workspace
 python3 tests/system.py
+python3 -m unittest discover -s tests -p 'test_*.py' -v
 python3 tests/oci.py
 ```
 
 最后一项需要测试账号能够访问本机 Docker、可用的 cgroup/默认 seccomp 和静态 C 编译器。测试在本机生成独立的 scratch 镜像，检查真实容器、服务重启、卷内容和恢复结果，清理本次测试创建的容器和镜像。[进程与故障测试](../crates/psios-core/src/recovery_tests.rs) · [系统 API 测试](../tests/system.py) · [OCI 验收](../tests/oci.py)
 
-当前覆盖单节点、单调度工作线程、本机文件系统与 Docker。跨节点 fencing、在线应用一致性快照、异机备份、完整恢复集重新登记、硬盘断电和 PVE 验证需要下一批环境与驱动。Task 预算计量派发次数；模型 token、费用和长期运行配额需要后续计量器。任意外部清单导入、软件包级 SBOM、定时调度、事件推送消费者及自动重启策略也留待扩展。
+当前覆盖单节点、并发宿主工作线程、本机文件系统、受管 systemd 服务与 Docker。跨节点 fencing、在线应用一致性快照、异机备份、完整恢复集重新登记、硬盘断电和 PVE 验证需要下一批环境与驱动。Task 和模型租约分别计量派发次数。模型 token、费用和长期运行配额需要后续计量器。任意外部清单导入、软件包级 SBOM、定时调度、事件推送消费者及自动重启策略也留待扩展。

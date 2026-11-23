@@ -18,8 +18,6 @@
 | [space-unified-v0.6.metadata.json](space-unified-v0.6.metadata.json) | 同次Space页面/序列/块摘要元数据 |
 | [space-risk-v0.6.md](space-risk-v0.6.md) | Space ADR与风险台账正文导出 |
 | [space-risk-v0.6.metadata.json](space-risk-v0.6.metadata.json) | 对应Space元数据 |
-| [xelab-package-history.zip](xelab-package-history.zip) | 用户提供的历史XeLab/XenonLab-Old模块化归档，不是PsiOS v1软件发行包 |
 
 原文件中的外部链接、旧编号、历史测试数字、未批准选型及说明保持原样，以便独立追溯。旧Project Instructions作为来源数据保存；当前v1工作约束以本包治理与用户实际授权为准。源码归档中的许可证和权利标识仍属于其各自原作者/依赖，不能因为与v1文档一起打包而被改写。
-
-对代码ZIP仅做静态结构、清单及元数据检查；没有运行其脚本、测试、安装器或容器，也没有验证当前Forgejo HEAD。详见[复用边界](../../migration/xelab-reuse-boundary.md)。
+\n

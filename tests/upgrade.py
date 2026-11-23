@@ -29,9 +29,12 @@ def main(previous):
         assert n.call("Task.Get", dict(id=receipt["task_id"]))["lifecycle"] == "Queued"
         w = n.submit("volume.write", dict(**target(v), name="old-data", content="new"))
         n.stop(signal.SIGKILL)
+        binary = str(Path("target/debug/psiosd").absolute())
+        report = json.loads(subprocess.check_output([binary, "--config", n.config, "verify"]))
+        assert report["database_format"] == 1 and report["migration_required"], report
+        assert report["node_id"] == authority
         with sqlite3.connect(n.state / "state.db") as db:
             assert db.execute("PRAGMA user_version").fetchone() == (1,)
-        binary = str(Path("target/debug/psiosd").absolute())
         n.daemon[0] = binary
         n.config.write_text(json.dumps(base))
         n.start()

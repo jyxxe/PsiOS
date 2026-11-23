@@ -90,6 +90,19 @@ volume.write、volume.delete、volume.activate、backup.delete、application.ins
 
 独立 witness 目录保存提交标记、密钥与本机所有者凭据。服务先写入本次事务的候选标记，提交数据库，再固定已确认标记，之后才能返回回执或调用宿主。启动时核对标记，可恢复中断提交的相邻两种状态。单独回滚数据库或替换密钥会触发 RecoveryRequired。运行 `psiosd check` 或 `psiosd recover-owner` 需要停服并持有可信状态目录。后者轮换本机所有者令牌。见证和数据库被一起回滚、整机丢失和跨节点接管需要独立信任锚及新的恢复流程。
 
+## 升级或救援前的离线核验
+
+停服后，以状态文件所属的 Linux 账户运行。独立源码部署可将同一命令改为 `psiosd --state /绝对路径 verify`。
+
+```bash
+sudo systemctl stop psiosd
+sudo -u psios /usr/bin/psiosd --config /etc/psios/core.json verify
+```
+
+`verify` 取得现有状态锁，在私有临时目录复制数据库及 WAL 或回滚日志，重建临时 SQLite 视图，检查数据库结构、外键、见证、密钥摘要和所有者凭据。报告包含节点 ID、状态格式、是否需要迁移、待完成的见证提交和所有者凭据轮换。活动服务占用状态、见证不匹配、数据损坏或副本超限时命令以非零状态结束。格式 1 可在升级前核验，原库、日志、见证、凭据和待执行任务均留在原处。
+
+默认复制上限为 1024 MiB；用 `--max-copy-mib N` 调整。`--scratch-dir PATH` 选择状态和见证以外的可信本机磁盘目录，需有足够空间容纳数据库、日志和 SQLite 工作文件。临时副本包含私有 Core 数据。正常退出自动删除，进程被强杀后须由服务账户清理该目录中的本次副本。卷内容、备份文件、宿主实际效果和整机一致回滚不在这次检查范围内。需要完成待提交标记或受支持的迁移时，原有的离线 `check` 和服务启动路径会执行这些变更。
+
 ## 验证与后续依赖
 
 ```bash

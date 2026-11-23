@@ -2,6 +2,8 @@
 
 `psios-core` 包含本机权威服务、CLI、默认配置和两个 systemd 单元。构建针对当前主机架构。CI 在 Ubuntu 24.04 的 amd64 虚机上执行打包与服务生命周期验收。当前交付范围是已有 Linux 上的单节点 Core。三个发行版的启动介质、磁盘安装器、签名更新通道和系统部署回退仍待实现。
 
+通过验收的 Actions 运行保存 `psios-core-ubuntu-24.04-amd64` 开发制品 14 天。归档含实际测试的 deb、dpkg buildinfo、源码提交、Rust 版本、Cargo.lock 和 SHA-256 清单。从对应的成功运行下载并解压后，在包目录执行 `sha256sum -c SHA256SUMS`。清单用于传输完整性检查，正式发行签名仍待建立。
+
 ## 构建与首次安装
 
 在 Debian 系的构建机安装 `build-essential dpkg-dev debhelper`，按仓库根目录的 `rust-toolchain.toml` 安装 Rust。源依赖取自 `Cargo.lock`。使用外部 rustup 时，dpkg 的依赖库没有这份 Rust 工具链的登记，可按下例构建本机二进制包。首次构建需要联网取得锁定的 crate 或事先填充 Cargo 缓存。

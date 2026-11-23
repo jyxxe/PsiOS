@@ -40,6 +40,6 @@
 
 ## 原始输入与代码边界
 
-[原始输入清单](source-inventory.json) · [历史源说明](archive/README.md) · [XeLab静态清点](../migration/xelab-reuse-boundary.md)。
+[原始输入清单](source-inventory.json) · [历史源说明](archive/README.md)。
 
-此包未获取当前Forgejo HEAD，未安装或执行归档代码。保存源文件是为了可追溯，不把历史文件的计划、测试数字或脚本自动提升为当前权威。
+规划材料用于记录设计变更；实现状态以 PsiOS 源码、构建制品和实际测试为准。

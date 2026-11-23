@@ -18,8 +18,8 @@
 | FIX-CORE-010 | P1 | 歧义 | “单调时钟”并不唯一决定挂起期间是否耗尽期限。若应持续到期的许可使用不计系统挂起时间的CLOCK_MONOTONIC，设备睡眠后可能保留本应消耗的授权/租约余量；原有墙钟回拨和重启规则不能单独消除这个差别。 | [docs/03-host-updates-network-devices.md](../docs/03-host-updates-network-devices.md) |
 | FIX-CORE-011 | P1 | 歧义 | 更新专用状态中仍把“需要恢复”与实际执行阶段/回退完成并列，缺少明确的机器映射，无法准确表示停在Staged还是TrialBoot、是否已回退以及同时需要人工恢复。此项只处理Update领域，不重复Task的O… | [docs/03-host-updates-network-devices.md](../docs/03-host-updates-network-devices.md) |
 | FIX-CORE-012 | P0 | 缺口 | 流水线逻辑上分阶段并不保证来自PR的任意构建/测试代码无法读取同执行器中的发布Secret或宿主挂载。若沿用有高权限凭据的runner，即使最终签名另有审批，不可信代码仍可能事先窃取凭据或修改待签制品。 | [docs/13-operations-release-governance.md](../docs/13-operations-release-governance.md) |
-| FIX-CORE-013 | P1 | 缺口 | 本次静态解析发现29处相对报告链接没有归档目标，部分历史验证说明无法仅靠此ZIP完整复核。现存XenonLab-Old报告不能自动替代缺失的上一轮XeLab报告。 | [migration/xelab-reuse-boundary.md](../migration/xelab-reuse-boundary.md) |
-| FIX-CORE-014 | P1 | 歧义 | 该ZIP是多来源历史模块集合，缺少Git对象/历史和当前远端验证，不能把任一元数据SHA当作整包唯一HEAD。内包摘要与自带metadata相同，只能证明归档内部清单一致，不能证明当前仓库来源或PsiOS v1… | [migration/xelab-reuse-boundary.md](../migration/xelab-reuse-boundary.md) |
+| FIX-CORE-013 | P1 | 缺口 | 当测试日志、运行环境或结果产物缺失时，仅凭文档描述无法复核关键功能与恢复保证。 | [docs/15-acceptance-and-evidence.md](../docs/15-acceptance-and-evidence.md) |
+| FIX-CORE-014 | P1 | 歧义 | 仅有文件清单、制品摘要或某个版本标识，不足以证明当前 PsiOS 模块已正确集成及满足安全边界。 | [adr/ADR-017.md](../adr/ADR-017.md) |
 | FIX-CORE-015 | P1 | 缺口 | 写入fencing正确也不保证观察缓存正确。恢复数据库可能把revision退到客户端已见版本之前，旧watch/成员/调度缓存若继续等待更高revision，可能长期遗漏删除或维持不再存在的资源投影。此项关注… | [docs/12-cluster-coordination.md](../docs/12-cluster-coordination.md) |
 | FIX-SEC-001 | P0 | 歧义 | 系统审批与 Workflow 请求缺少唯一权威和引用关系，可能产生双审批事实。 | [docs/04-security-identity.md](../docs/04-security-identity.md) |
 | FIX-SEC-002 | P0 | 缺口 | 未定义同一单次审批被两个并发 Operation 消费时的原子性。 | [docs/04-security-identity.md](../docs/04-security-identity.md) |
@@ -268,29 +268,29 @@
 
 ### FIX-CORE-013｜P1｜缺口
 
-**原文依据：** xelab-package.zip中的28个XeLab模块readme以../../../reports/verification.md链接“验证与来源”，packaged/reports/xenonlab-old-review.md另链接同一缺失报告；外层ZIP目录不含对应reports/verification.md。
+**原文依据：**PsiOS 设计条款与实际功能验证必须使用可追溯的证据链，不能将缺失测试产物的叙述视为已验证。
 
-**问题：** 本次静态解析发现29处相对报告链接没有归档目标，部分历史验证说明无法仅靠此ZIP完整复核。现存XenonLab-Old报告不能自动替代缺失的上一轮XeLab报告。
+**问题：**当测试日志、运行环境或结果产物缺失时，仅凭文档描述无法复核关键功能与恢复保证。
 
-**v1修正：** 保留原ZIP字节、记录全部缺链源/目标及证据限制；明确历史测试为作者报告而非本次验证。这里只补充可审查边界，没有声称找回缺失报告或重新执行其测试。
+**v1修正：**验收记录绑定确切版本、环境、操作步骤、日志与产物摘要；证据缺失时明确保留 NotVerified/NotRun。
 
-**位置：** [migration/xelab-reuse-boundary.md](../migration/xelab-reuse-boundary.md)
+**位置：**[docs/15-acceptance-and-evidence.md](../docs/15-acceptance-and-evidence.md)
 
-**验证方向：** 按各README/报告所在目录规范化解析相对路径，对照外层ZIP中央目录，应重复得到29处缺失链接；检查静态JSON保留源路径和解析目标，不把另一报告强行代入。
+**验证方向：**抽查恢复、权限撤销、OCI 隔离等场景的证据字段；缺少测试产物时不能升级验收状态。
 
 **状态：** CorrectedInV1（规范层）；NotVerified（实现层）。
 
 ### FIX-CORE-014｜P1｜歧义
 
-**原文依据：** xelab-package.zip packaged/metadata.json按文件列origins；静态清点得到7组仓库/commit，包含本地Forgejo回环地址、GitHub多个仓库/提交；66个内包无.git历史。旧规范GOV-002明确要求以后以当前Forgejo完整SHA审计。
+**原文依据：**PsiOS 模块准入需要当前源代码提交、依赖清单、许可证、构建和运行验证证据。
 
-**问题：** 该ZIP是多来源历史模块集合，缺少Git对象/历史和当前远端验证，不能把任一元数据SHA当作整包唯一HEAD。内包摘要与自带metadata相同，只能证明归档内部清单一致，不能证明当前仓库来源或PsiOS v1实现完成；原规范的当前HEAD要求本身是正确的。
+**问题：**仅有文件清单、制品摘要或某个版本标识，不足以证明当前 PsiOS 模块已正确集成及满足安全边界。
 
-**v1修正：** 区分实际ZIP摘要/目录观察与作者来源陈述，逐组保留7个来源并标HistoricalStatementOnly；整个归档为HistoricalSourceOnly/NotVerified，复用仍需当前仓库逐模块reuse/adapt/rewrite/exclude审查。回环地址不作为可移植项目配置。
+**v1修正：**按模块建立接口、源码提交、依赖/许可、测试和可替换性记录；未经实测的能力保持 NotVerified。
 
-**位置：** [migration/xelab-reuse-boundary.md](../migration/xelab-reuse-boundary.md)
+**位置：**[adr/ADR-017.md](../adr/ADR-017.md)
 
-**验证方向：** 静态统计28个XeLab与38个XenonLab-Old模块、66内包/1110条目，复算内包SHA并列出来源组；确认报告不声称当前HEAD已核验、不把psios-*crate名称或1638 passed历史数字提升为v1实现状态。
+**验证方向：**对 Task、OCI、Storage 等模块核验实际提交、构建、接口契约、权限边界与故障恢复测试。
 
 **状态：** CorrectedInV1（规范层）；NotVerified（实现层）。
 

@@ -18,7 +18,7 @@ v1是文档版本；当前没有宣称软件已发布、最新仓库已审计、
 | 产品验证计划 | 135个具体场景，全部NotRun；文档/治理与真实运行验证区分 |
 | ADR / 工作项 / 操作手册 | 25份Proposed ADR、26个WI工作项、6份可执行顺序明确的runbook |
 | 历史迁移 | 245个旧要求、141个旧测试均有文档去向 |
-| 来源 | 15份原始输入逐字节归档；31个去重一手资料入口；保留XeLab历史ZIP |
+| 规划资料 | PsiOS 设计草案、Space 规划及验收记录；公开技术规范另见参考资料清单 |
 
 映射率只表示有明确去向，Schema检查只验证结构和列明的局部关系；两者都不能当作产品通过率。
 
@@ -79,7 +79,7 @@ v1是文档版本；当前没有宣称软件已发布、最新仓库已审计、
 python tools/validate_package.py
 ```
 
-无需联网解析Schema，不会执行PsiOS或归档源码。实际静态检查结果见[validation-report.json](validation-report.json)；MANIFEST.sha256覆盖除自身外的所有交付文件。
+无需联网即可解析 Schema，此验证不等于实际运行验收。实际静态检查结果见[validation-report.json](validation-report.json)；MANIFEST.sha256覆盖除自身外的所有交付文件。
 
 完整生成/封装步骤见[工具说明](tools/README.md)。
 

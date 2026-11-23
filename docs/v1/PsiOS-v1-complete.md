@@ -29,7 +29,7 @@ v1是文档版本；当前没有宣称软件已发布、最新仓库已审计、
 | 产品验证计划 | 135个具体场景，全部NotRun；文档/治理与真实运行验证区分 |
 | ADR / 工作项 / 操作手册 | 25份Proposed ADR、26个WI工作项、6份可执行顺序明确的runbook |
 | 历史迁移 | 245个旧要求、141个旧测试均有文档去向 |
-| 来源 | 15份原始输入逐字节归档；31个去重一手资料入口；保留XeLab历史ZIP |
+| 规划资料 | PsiOS 设计草案、Space 规划及验收记录；公开技术规范另见参考资料清单 |
 
 映射率只表示有明确去向，Schema检查只验证结构和列明的局部关系；两者都不能当作产品通过率。
 
@@ -90,7 +90,7 @@ v1是文档版本；当前没有宣称软件已发布、最新仓库已审计、
 python tools/validate_package.py
 ```
 
-无需联网解析Schema，不会执行PsiOS或归档源码。实际静态检查结果见[validation-report.json](validation-report.json)；MANIFEST.sha256覆盖除自身外的所有交付文件。
+无需联网即可解析 Schema，此验证不等于实际运行验收。实际静态检查结果见[validation-report.json](validation-report.json)；MANIFEST.sha256覆盖除自身外的所有交付文件。
 
 完整生成/封装步骤见[工具说明](tools/README.md)。
 
@@ -120,16 +120,16 @@ python tools/validate_package.py
 
 ## 有意保留的工程不确定性
 
-没有选择未经实验的数据库/文件系统/系统镜像技术；没有声称零丢失、任意软件包兼容、全平台支持、集群HA或绝对即时撤权。全部技术ADR仍Proposed，所有产品实现NotVerified，产品测试NotRun。原始XeLab缺失报告未被找回，当前HEAD尚待WI-001核验。
+没有选择未经实验的数据库/文件系统/系统镜像技术；没有声称零丢失、任意软件包兼容、全平台支持、集群HA或绝对即时撤权。全部技术ADR仍Proposed，所有产品实现NotVerified，产品测试NotRun。软件源码及实际运行证据仍须按 WI-001 核验。
 
 完整逐项变更见[migration/findings.md](migration/findings.md)，编号冲突与字段迁移见[migration/v0-to-v1.md](migration/v0-to-v1.md)。
-
 
 ## 同版本文档增补（2026-11-22）
 
 在保持 `VERSION = 1.0.0` 的前提下，当前 GitHub 分章补充 Agent 自主编排：Router/Worker、主动事件触发、任务/线程接续、委托权限、非 LLM Watchdog、根预算、恢复和 Forgejo/CI/Review 门禁，关联第 08/09/10/11/14 章。
 
 本次未增加新的正式 V1 规范 ID、Schema 或已批准 ADR，工程 `NotVerified`、增量测试 `NotRun`。原始分段 ZIP 仍是增补前不可变封存快照；此前的静态 validation-report.json 只对增补前文档有效，不能冒充此次修改后的重验证记录。
+
 
 ---
 
@@ -148,7 +148,7 @@ python tools/validate_package.py
 | adr/ | 25份待决技术选型，每份保留原编号与范围 |
 | acceptance/ | 待执行场景与实际证据模板，所有产品结果NotRun |
 | operations/ | 6种失败/恢复/退出路径的操作顺序与停止条件 |
-| migration/ | 原文错误、编号冲突、旧要求/测试去向及XeLab证据边界 |
+| migration/ | 原文错误、编号冲突、旧要求/测试去向 |
 | sources/ | 输入清单、外部一手资料、逐字节原始归档 |
 | tools/ | 文档生成、校验、封装工具，不是产品服务 |
 | html/ | 无CDN、无网络依赖的完整阅读器 |
@@ -300,8 +300,6 @@ PsiOS-v1/
     legacy-tests.md
     rebuild_legacy_registry.py
     v0-to-v1.md
-    xelab-archive-inspection.json
-    xelab-reuse-boundary.md
   operations/
     README.md
     data-export-exit.md
@@ -373,7 +371,6 @@ PsiOS-v1/
       space-risk-v0.6.metadata.json
       space-unified-v0.6.md
       space-unified-v0.6.metadata.json
-      xelab-package-history.zip
     references.json
     source-inventory.json
   tools/
@@ -417,7 +414,7 @@ MANIFEST.sha256逐项记录除自身外所有交付文件的SHA-256；ZIP内部�
 | 实现状态 | NotVerified / ImplementedUnverified / Verified | 全部 NotVerified；不以档案报告替代当前仓库检查 |
 | 验收结果 | NotRun / Passed / Failed / Blocked / NotApplicable | 产品功能验收全部 NotRun |
 
-**V1-GOV-002｜证据不得跨层推断。** 文档链接检查、Schema 自检和示例验证通过，只证明本包的特定结构条件；不能推出持久性、安全隔离、并发正确性或硬件兼容通过。历史 XeLab 压缩包中的报告是来源作者的记录，不能当成本次执行结果，也不证明最新 Forgejo HEAD 相同。
+**V1-GOV-002｜证据不得跨层推断。** 文档链接检查、Schema 自检和示例验证通过，只证明本包的特定结构条件；不能推出持久性、安全隔离、并发正确性或硬件兼容通过。历史报告不能作为本次执行证据，也不能替代 PsiOS 当前提交的实际验证。
 
 `SpecResolved` 旧称统一解释为“已有明确设计约束”，不再用“风险已关闭”概括工程状态。仍需要 PoC 的问题写明候选、测量方法、通过条件、失败后策略、决策责任角色和最迟启用门槛。责任角色可以已明确而具体人员未指派；正式实施前必须指派具体负责人。
 
@@ -462,7 +459,7 @@ MANIFEST.sha256逐项记录除自身外所有交付文件的SHA-256；ZIP内部�
 
 ## 1. 产品目标与固定约束
 
-PsiOS 是基于 Linux 的 Agent-Native 操作系统。用户通过 CLI、KDE、WebUI、SDK 和 Agent 访问同一组系统资源；模型离线或 Agent 停止后，传统登录、应用运行、数据访问、诊断和救援仍有独立路径。旧 XeLab 提供可审计的代码素材，PsiOS 不承诺保持其 ABI、API、数据库或部署拓扑。
+PsiOS 是基于 Linux 的 Agent-Native 操作系统。用户通过 CLI、KDE、WebUI、SDK 和 Agent 访问同一组系统资源；模型离线或 Agent 停止后，传统登录、应用运行、数据访问、诊断和救援仍有独立路径。PsiOS 以独立源码和自身架构为实现基线，由 PsiOS 原生接口、持久化契约和部署规范定义系统行为。
 
 **V1-BASE-001｜三版同源。** Helium 是精简版，Neon 是服务器版，Argon 是 KDE Plasma 桌面版。三者共享资源模型、授权、任务和集群接入契约，差异来自默认安装配置和交互场景，不以硬件档次锁住功能。模型可位于本机、局域网、集群或获准的云端；不要求每个节点装大模型或 Controller。
 
@@ -787,7 +784,7 @@ Task提交payload是其请求去掉`request_digest`；Chat摘要payload是发送
 
 **V1-NET-003｜实际出站路径受控。** Egress规则涵盖DNS结果、重解析、IPv6、重定向、代理出口和本机/链路本地/云元数据地址；凭据不得跟随重定向发往新origin。网络驱动失败不能回退到host network。端口发布明确地址、协议、来源域和授权，配置丢失默认不扩大公网暴露。
 
-**V1-NET-004｜断联不扩权。** 远程服务不可达时本机网络配置、日志和已有获准本地服务可用；涉及在线批准/租约的共享写暂停。跨NAT/代理可选Worker主动连接模式，但API Key只用于引导或规定的受限目的，正式节点访问仍需可轮换身份和明确资源授权；旧XeLab的具体网络拓扑不自动成为PsiOS约束。
+**V1-NET-004｜断联不扩权。** 远程服务不可达时本机网络配置、日志和已有获准本地服务可用；涉及在线批准/租约的共享写暂停。跨NAT/代理可选Worker主动连接模式，但API Key只用于引导或规定的受限目的，正式节点访问仍需可轮换身份和明确资源授权；网络拓扑应按 PsiOS 本身的安全模型、场景和验收结果确定。
 
 ## 7. 设备、资源与电源
 
@@ -1388,7 +1385,7 @@ TableFS 是可选 `StorageDriver`，可以不安装 Dataset/Knowledge 而提供�
 
 按数据、元数据/WAL、镜像与模型缓存、临时文件、索引、日志、审计和备份分别记账。准入预留必要提交空间；空间或 inode 耗尽时拒绝新分配，保留只读诊断和救援预算。新数据写入和后台 GC 不得因日志盘满自动删除用户卷。I/O 错误、短写、只读降级、校验失败和健康告警须关联资源与 Operation；“设备在线”不能替代数据可靠性。
 
-配额包括硬上限、当前用量、预留量、计费范围及超限行为；稀疏文件同时显示逻辑大小和实际占用，不把逻辑预留当真实可用空间。压缩、去重和复制带来的容量节省/增加分别计量；具体数值在发行 Profile 中经测量确定，不沿用旧 XeLab 的固定磁盘分配。
+配额包括硬上限、当前用量、预留量、计费范围及超限行为；稀疏文件同时显示逻辑大小和实际占用，不把逻辑预留当真实可用空间。压缩、去重和复制带来的容量节省/增加分别计量；具体数值在发行 Profile 中经测量确定，不采用未经验证的固定磁盘分配方案。
 
 ## 2. 持久化、快照、备份与恢复
 
@@ -2020,7 +2017,6 @@ Run 生命周期为 `Created / Running / WaitingInput / WaitingApproval / Waitin
 
 上述用例扩展原 `ACC-EVT-01～03`、`AGT-T01～05`、`XAT-39`、`WF-AT-04～06/08`；文档中存在用例不表示测试通过。跨节点仍须满足集群章节的资源端 fencing；灾难恢复遵循恢复章节的外部效果对账屏障。
 
-
 ## 8.10 Agent 自主事件触发与任务派发
 
 本节将 SuperAgent 类系统的事件触发、Router 和 Worker 机制映射到原 Task/Event，不增加第二个 Ticket、Queue、Run 或 Operation 权威；文档仍为 v1.0.0，工程 `NotVerified / NotRun`。
@@ -2030,6 +2026,7 @@ Run 生命周期为 `Created / Running / WaitingInput / WaitingApproval / Waitin
 - **执行选择：** Router 只推荐能力与步骤；Broker/Scheduler 决定 Run、领取租约/代次、隔离 Profile、数据驻留及 Worker。Agent 不得自行声称领取成功或改写权威终态。
 - **恢复：** 非 LLM Watchdog 独立检测任务、租约、取消和预算。Router 或模型离线不妨碍读取已持久记录。失去租约时先 fencing，跨节点/模型/工具不兼容时创建新 Run，并核对已执行 Operation；`OutcomeUnknown` 不盲重试。
 - **验收（未执行）：** 重复 CI 事件只产生一个 Task；后续 Review 进入原 Task；Router 崩溃后无重派发；模型失败不拖垮本机管理；旧 Worker 被 fencing 后无法双写；外部成功但 ACK 遗失先对账。正式新增测试编号须同步测试注册表。
+
 
 ---
 
@@ -2171,7 +2168,6 @@ M3 至少完成一个真实独立第三方实现与原生 Agent 的同类工具�
 
 原 `AGT-T01～07`、`XAT-43/44` 和第三方兼容矩阵继续适用。扩展协议、完整群聊联邦和任意第三方框架的支持必须逐项增加证据；本章没有把 SDK、框架或服务版本锁定为已批准实现。
 
-
 ## 9.10 原生 Agent 自主编排（SuperAgent 类机制）
 
 本节把 Router–Worker、主动任务发现、Ticket 跟踪和 Thread Subscription 作为 PsiOS 原生 Agent 的逻辑能力，不是直接部署 SuperAgent 原型，也不另建高权限控制平面。它是现行 v1.0.0 设计增补，不代表某个 ADR 已批准或任何运行实现已验证。
@@ -2204,6 +2200,7 @@ M3 至少完成一个真实独立第三方实现与原生 Agent 的同类工具�
 ### 9.10.5 增量验收计划（均 NotRun）
 
 重复/乱序事件不增殖 Task；同一 PR Review 被原 Task/Worker 接续且重新检查成员权限；Agent A→B→A 的循环因根预算和跳数停止；恶意评论诱导越权被 Tool Gateway 拦截；两个 Worker 抢占时旧租约无法写入；Router 死亡和模型离线不重放已确认副作用；已发生外部写入但回执丢失保持 `OutcomeUnknown` 并对账；撤权按实际 RevocationMode 截断后续能力。M3 测单机，M4 才验证跨节点与 Forgejo/CI 闭环。沿用现有 AT-TSK、AT-AGT、AT-CHAT、AT-WFL、AT-CORE 分类，待正式注册新用例后才分配独立测试 ID。
+
 
 ---
 
@@ -2352,7 +2349,6 @@ Helium 保留轻量本机会话与 Agent 接入，Neon 可选中心协作服务�
 
 本矩阵具体化 `ACC-CHAT-01～06`、`WF-AT-01～03/08` 和 `XAT-40/41`。结果仍为 NotRun；只有绑定提交、制品、权限配置与故障注入日志后才能提升工程状态。
 
-
 ## 10.11 任务线程订阅与持续协作
 
 SuperAgent 类 Thread Subscription 在 PsiOS 中复用 `Subscription`、`Thread`、`Task` 和 `WorkItem`，不创建可绕过成员授权的第二消息总线。
@@ -2363,6 +2359,7 @@ SuperAgent 类 Thread Subscription 在 PsiOS 中复用 `Subscription`、`Thread`
 - 离线 Agent 通过有界 Inbox/游标恢复，去重相同关联事件；@、DM、跨群传播和桥接回流共享根预算、递归深度和跳数。退出成员关系、任务取消和撤权结束新唤醒，但已在途效果仍按真实 Run/Operation 状态处理。
 
 **增量验收（NotRun）：** 三次 Review 不复制任务；离线/游标过期后可回源恢复；非成员无法通过订阅读 DM；两个 Agent 相互 @ 被有界限流阻断；重新加入不能恢复旧订阅权限。
+
 
 ---
 
@@ -2529,7 +2526,6 @@ M3 提供单机持久 DAG、审批等待、受控重试/取消、基础群聊/DM
 
 以上覆盖 `ACC-WFL-01～05`、`WF-AT-04～08` 及原 XAT-33/35～37/39/44。ADR-22 负责 DSL/编排语义，ADR-23 负责外部同步，ADR-24 负责跨服务提交与审批/Saga，ADR-25 负责存储容量与跨服务恢复；任何实现方案获得批准都仍需独立提交和实测证据。
 
-
 ## 11.12 自主 Agent 开发与项目事件闭环
 
 Router 是 PsiFlow 的计划与调度使用者，不能成为第二个 WorkflowRun、Approval 或 WorkItem 写入权威。Project/Studio 仍可选；未安装时本地 Task、Schedule、Agent 和最小 Workflow 可独立运行。
@@ -2541,6 +2537,7 @@ Router 是 PsiFlow 的计划与调度使用者，不能成为第二个 WorkflowR
 - **成本：** Router 推理、各 Worker、群聊主动消息和重试均计入同一根预算；超限、权限不足和模型/Controller 离线时准确报告阻塞并允许用户暂停。
 
 **增量验收（NotRun）：** 一次 CI 失败触发一个修复 Task；后续 Review 返回原 Worker；head 改变使旧证据失效；重复 Webhook 不双重合并；跨节点分区不双写；禁用 Project UI 后基本任务仍可用。
+
 
 ---
 
@@ -2808,7 +2805,7 @@ claim/lease绑定boot_id及本次启动的截止语义；休眠期限规则按03
 |---|---|---|
 | 宿主与协议基础 | ADR-01～06 | 可重建底座、更新/启动/语言/API、状态事务与恢复 |
 | 网络、设备与执行协作 | ADR-07～12 | 网络、设备、Agent协议、KDE/Portal、Task/Event和集群 |
-| 数据、运维与发行复用 | ADR-13～17 | Dataset、观测、发布信任、三版基线及XeLab逐模块复用 |
+| 数据、运维与发行复用 | ADR-13～17 | Dataset、观测、发布信任、三版基线及独立组件依赖治理 |
 | 可选文件系统、包与GUI | ADR-18～20 | TableFS、包隔离、浏览器图形 |
 | 协作与安全效果 | ADR-21～25 | Conversation、Workflow、外部权威、审批Saga、容量/回收 |
 
@@ -2824,7 +2821,6 @@ claim/lease绑定boot_id及本次启动的截止语义；休眠期限规则按03
 
 本包完成的是旧文档审查、设计合同修订、接口结构样例、追踪索引和验收计划。尚未在真实PsiOS代码上实现这些合同，也未执行宿主启动、断电、资源fence、桌面输入、灾备、协议互操作或发布签名实验。`CorrectedInV1`表示文本已修正；`NotVerified/NotRun`仍是产品实现和产品验收的准确状态。
 
-
 ## 7. 自主 Agent 编排增量路线（文档版本不变）
 
 - **M0：** 在 ADR-04/05/09/11/21/22/23/24/25 下明确 Router/Worker、事件来源、权限/预算、关联订阅、任务权威及故障边界，不额外建立 Ticket 状态机。
@@ -2834,6 +2830,7 @@ claim/lease绑定boot_id及本次启动的截止语义；休眠期限规则按03
 - **M6：** 按 Edition/Profile 用真实环境记录递归/并发上限、容量、撤权、RPO/RTO 和运维退出路径。
 
 这些是目标与验收切片，工程状态维持 `NotVerified / NotRun`。本次不新增正式需求/测试 ID；若将增量用例登记为机器合同，必须同步要求、测试注册表和派生读本。
+
 
 ---
 
@@ -3083,7 +3080,7 @@ JSON读取必须在进入常见字典解析前拒绝重复键；默认“保留�
 | [ADR-14](adr/ADR-014.md) | 观测与审计后端 | 保持原编号与范围 | Proposed |
 | [ADR-15](adr/ADR-015.md) | 发布信任、兼容窗口与维护政策 | 保持原编号与范围 | Proposed |
 | [ADR-16](adr/ADR-016.md) | 发行版资源和体验基线 | 保持原编号与范围 | Proposed |
-| [ADR-17](adr/ADR-017.md) | XeLab 按模块复用 | 保持原编号与范围 | Proposed |
+| [ADR-17](adr/ADR-017.md) | 第三方组件准入与依赖治理 | 保持原编号与范围 | Proposed |
 | [ADR-18](adr/ADR-018.md) | TableFS 文件/表双视图存储后端 | 保持原编号与范围 | Proposed |
 | [ADR-19](adr/ADR-019.md) | Universal Package Adapter 与发行版兼容 Profile | 保持原编号与范围 | Proposed |
 | [ADR-20](adr/ADR-020.md) | GUI Bridge：窗口、Viewer 与传输后端 | 范围明确/拆分见正文 | Proposed |
@@ -3131,7 +3128,7 @@ JSON读取必须在进入常见字典解析前拒绝重复键；默认“保留�
 
 ## 2. 要解决的问题
 
-首个镜像需要可重复构建、合法分发和独立救援，但不能因现有开发机或旧 XeLab 环境直接冻结 OS 基底。平台过宽会扩大驱动、启动和升级验证矩阵。
+首个镜像需要可重复构建、合法分发和独立救援，但不能仅凭某台开发设备的现状直接冻结 OS 基底。平台过宽会扩大驱动、启动和升级验证矩阵。
 
 ## 3. 已确认的约束
 
@@ -3477,11 +3474,11 @@ JSON读取必须在进入常见字典解析前拒绝重复键；默认“保留�
 
 原 v0.6 主题：**OCI 执行后端与隔离等级**。v1保持原编号和责任范围，补充实现选择证据与失败门槛，不将行为规范的明确写成技术方案已获批准。文件名使用三位补零便于排序，规范ID仍为 ADR-06。
 
-原验收范围（继续保留）：XeLab 复用与现成方案的对照；只读根、身份映射、资源和设备限制、重启恢复、撤权。
+原验收范围（继续保留）：主流 OCI 后端与 PsiOS 适配层的对照；只读根、身份映射、资源和设备限制、重启恢复、撤权。
 
 ## 2. 要解决的问题
 
-管理OCI生命周期与保证隔离是不同责任；旧XeLab实现、成熟引擎和增强沙箱需要同一工作负载对照。
+管理OCI生命周期与保证隔离是不同责任；OCI Runtime、成熟隔离引擎和增强沙箱需要使用同一工作负载对照。
 
 ## 3. 已确认的约束
 
@@ -4231,12 +4228,12 @@ CLI、KDE、Shell和集群若各自写网络配置，会形成竞争和管理失
 
 来源文件：`adr/ADR-017.md`
 
-# ADR-17　XeLab 按模块复用
+# ADR-17　第三方组件准入与依赖治理
 
 | 登记字段 | 内容 |
 |---|---|
 | 决策状态 | Proposed |
-| 负责人 | 迁移审查/模块维护者；具体人员待指派 |
+| 负责人 | PsiOS 组件维护/依赖审查者；具体人员待指派 |
 | 实现状态 | NotVerified |
 | 验收状态 | NotRun |
 | 选定结果 | 尚未选择；本文不构成后端批准 |
@@ -4245,21 +4242,21 @@ CLI、KDE、Shell和集群若各自写网络配置，会形成竞争和管理失
 
 ## 1. 范围与旧编号沿革
 
-原 v0.6 主题：**XeLab 按模块复用**。v1保持原编号和责任范围，补充实现选择证据与失败门槛，不将行为规范的明确写成技术方案已获批准。文件名使用三位补零便于排序，规范ID仍为 ADR-17。
+本 ADR 定义 PsiOS 第三方依赖治理、核心接口边界与组件准入要求。技术方案仍需实际评估和验证，不因规范完整而视为已批准。文件名使用三位补零便于排序，规范ID仍为 ADR-17。
 
-原验收范围（继续保留）：当前 Forgejo 完整 SHA、依赖/许可、旧约定清除、宿主边界、故障测试与导出清单。
+验收范围：PsiOS 当前源码提交、可选第三方组件的来源和许可证、接口隔离、宿主边界、故障测试及导出/替换方案。
 
 ## 2. 要解决的问题
 
-旧仓库与打包代码是候选素材，不能以历史测试或旧GitHub快照推断当前Forgejo实现，也不能保留不合适的旧授权与数据约定。
+PsiOS 的启动、构建、运行和发布均遵循自身的技术决策与验证流程。系统权限、API 及持久化契约由 PsiOS 独立定义，并通过其自身测试验收。
 
 ## 3. 已确认的约束
 
 约束入口：[01-product-and-architecture](docs/01-product-and-architecture.md)、[02-common-contracts](docs/02-common-contracts.md)、[13-operations-release-governance](docs/13-operations-release-governance.md)。以下行为边界属于本v1文档规范；违反它们的技术方案不能通过仅修改本ADR获得批准。
 
-1. 记录实际当前Forgejo完整SHA、模块来源、许可、依赖、测试和迁移决定。
-2. 不承诺旧XeLab ABI/API/数据库兼容；按PsiOS权威契约改造。
-3. 已有压缩包的审查报告是历史证据，不等于本轮已复验或完整上游当前状态。
+1. 固定 PsiOS 当前源码提交；对确需引入的第三方组件分别登记来源 SHA、许可证、依赖、测试和采纳/替换决定。
+2. 所有外部组件必须符合 PsiOS 原生 API、身份授权与持久化契约。
+3. 历史压缩包及审查报告仅供追溯，不代表 PsiOS 已验证或当前外部组件仍满足准入要求。
 
 ## 4. 可行候选与代价
 
@@ -4273,7 +4270,7 @@ CLI、KDE、Shell和集群若各自写网络配置，会形成竞争和管理失
 
 ## 5. 选择证据与实验
 
-1. 固定真实HEAD生成模块/文件/许可证矩阵，逐项标reuse/adapt/rewrite/disable及理由。
+1. 固定 PsiOS 自身完整提交 SHA，建立模块/文件/许可证矩阵；对外部依赖按需标记 adopt/adapt/replace/disable 并说明理由。
 2. 在干净环境运行必要测试，复测OCI挂载、任务持久化、撤权和外部副作用危险路径。
 3. 检查旧固定端点、账号、凭据、容量、模型默认与站点部署配置，保留来源追踪。
 
@@ -4283,7 +4280,7 @@ CLI、KDE、Shell和集群若各自写网络配置，会形成竞争和管理失
 
 **否决条件：** 来源SHA不明、许可无依据、边界依赖隐式宿主特权、测试仅来自无法复验叙述。
 
-**降级/退出：** 该模块不进入主线；保留接口与替代实现计划，历史代码归档不当作已验收产物。
+**降级/退出：** 该模块不进入主线；保留接口与替代实现计划，未经测试的制品不得作为已验收产物。
 
 实验失败应缩小支持范围或更换候选，不能在文档中把缺失保证改成“默认支持”。
 
@@ -9378,7 +9375,7 @@ M0 用于合同和竞态模型/初始实现夹具，M1 用于宿主与独立救�
 
 ## 没有执行的工程验证
 
-未运行XeLab/PsiOS产品代码、真实设备断电、数据库事务并发、资源端fencing、桌面输入/Portal、灾难恢复、协议互通、性能或正式发布流水线。技术决策仍Proposed，实现仍NotVerified，产品场景仍NotRun。文档工具通过不改变这些事实。
+未运行PsiOS产品代码、真实设备断电、数据库事务并发、资源端fencing、桌面输入/Portal、灾难恢复、协议互通、性能或正式发布流水线。技术决策仍Proposed，实现仍NotVerified，产品场景仍NotRun。文档工具通过不改变这些事实。
 
 
 ---
@@ -9644,7 +9641,7 @@ M0 用于合同和竞态模型/初始实现夹具，M1 用于宿主与独立救�
 
 # 历史规范迁移与原文归档
 
-本目录回答三个问题：旧版本提出了什么、v1 在哪里保留或修正、哪些结论仍需实际工程证据。**v1 是完整设计文档基线，不是 PsiOS 软件 1.0 发布，也不是对 XeLab 当前源码的审计完成证明。**
+本目录回答三个问题：旧版本提出了什么、v1 在哪里保留或修正、哪些结论仍需实际工程证据。**v1 是完整设计文档基线，不是 PsiOS 软件 1.0 发布，也不代表任何软件功能已经通过工程验证。**
 
 ## 1. 阅读入口
 
@@ -9654,8 +9651,6 @@ M0 用于合同和竞态模型/初始实现夹具，M1 用于宿主与独立救�
 | [legacy-requirements.md](migration/legacy-requirements.md) | 245 个旧规范编号逐项定位到 v1；包含选定原句、章节和来源 |
 | [legacy-tests.md](migration/legacy-tests.md) | 141 个旧验收编号逐项保留；原场景继续作为 NotRun 的工程义务 |
 | [id-conflicts.md](migration/id-conflicts.md) | P0 工作项同号不同义、ADR 编号/范围变化、计数和章节错误 |
-| [xelab-reuse-boundary.md](migration/xelab-reuse-boundary.md) | 历史 ZIP 的可复核结构、模块、来源陈述、许可证线索及复用限制 |
-| [xelab-archive-inspection.json](migration/xelab-archive-inspection.json) | ZIP 的静态清点记录；没有运行归档代码或依赖安装 |
 | [rebuild_legacy_registry.py](migration/rebuild_legacy_registry.py) | 仅从本包归档和当前文档重建旧编号登记、定义引用和两份逐项表 |
 | [legacy-requirements.json](registries/legacy-requirements.json) | 所有定义块、引用、范围展开、来源行号及明确映射的机器登记 |
 | [source-inventory.json](sources/source-inventory.json) | 15 个原始输入的身份、原上传名称、原文件/页面 ID、字节数和 SHA-256 |
@@ -9663,7 +9658,7 @@ M0 用于合同和竞态模型/初始实现夹具，M1 用于宿主与独立救�
 
 ## 2. 盘点范围和计数口径
 
-本次读取全部 10 份 Project Markdown/TXT 输入、两份已取得的 Space 正文导出、两份对应元数据，并归档一份历史 XeLab ZIP。Space 元数据保留页面 ID、序列和块摘要，用于解释正文来自哪次导出。元数据及 ZIP 不参与规范编号的正文计数。
+本次读取全部 10 份 Project Markdown/TXT 输入、两份已取得的 Space 正文导出、两份对应元数据。Space 元数据保留页面 ID、序列和块摘要，用于解释正文来自哪次导出。元数据及 ZIP 不参与规范编号的正文计数。
 
 旧规范以规范化编号去重：**245 项 = BASE 固定约束 20 项 + 专业规范 225 项**。同一条在 v0.2、v0.3、v0.4、v0.5、导入 v0.6 和 Space v0.6 中重复出现，只计算一次逻辑编号；各来源文本没有被覆盖或抹去。JSON 保留 1,297 处规范定义，并记录来源章节、原句和引用位置。
 
@@ -9695,7 +9690,7 @@ M0 用于合同和竞态模型/初始实现夹具，M1 用于宿主与独立救�
 python migration/rebuild_legacy_registry.py
 ```
 
-脚本只使用 Python 标准库，读取 `sources/archive/`、来源清单和 `docs/`，不访问网络、不导入旧代码、不安装依赖。它校验归档文本 SHA-256，展开编号、重建原句位置，检查显式映射的新条款/测试存在，再输出 JSON 和两份逐项 Markdown 表。手工维护的映射仍需语义复核；脚本不会以关键词相似度自动批准迁移。
+脚本只使用 Python 标准库，读取 `sources/archive/`和 `docs/`，不访问网络、不安装运行时依赖。它校验归档文本 SHA-256，展开编号、重建原句位置，检查显式映射的新条款/测试存在，再输出 JSON 和两份逐项 Markdown 表。手工维护的映射仍需语义复核；脚本不会以关键词相似度自动批准迁移。
 
 脚本失败、缺条款或出现未知旧编号时应修正输入/映射后重建。不要删除未匹配旧要求来让覆盖率变成 100%。最终文件摘要和打包结果由本包的发布清单记录；来源摘要与输出摘要用途不同。
 
@@ -9800,7 +9795,7 @@ TableFS 若不能在声明的 POSIX 子集、持久性、权限、导出和同�
 
 | 原编号 | Space v0.6 | Project 路线/导入 v0.6 | v1 处置 |
 |---|---|---|---|
-| P0-01 | 固定当前 Forgejo HEAD；TaskEngine/EventStore/Broker/OCI/Identity/Storage/SDK/WebUI 复用矩阵 | 固定本地 Forgejo 最新 HEAD；XeLab 来源和许可证审计 | 意图相近，保留两个来源；真正执行项仍需实际仓库和 HEAD |
+| P0-01 | 核验 PsiOS 当前提交；建立 Task/Event/Broker/OCI/Identity/Storage/SDK/WebUI 模块接口矩阵 | 以 PsiOS 源码、组件版本、依赖许可证和验收证据为准 | 方案的生效取决于 PsiOS 当前实现证据与审查记录 |
 | P0-02 | 建立 docs/architecture、docs/adr、api/schema、tests/contracts 骨架 | 同类骨架与 CI 证据 | 可合并目标；“目录存在”不等于 CI 或产品验收完成 |
 | P0-03 | Principal/Grant/Delegation/Approval/Operation/**Resource/Event** 样例及统一错误码 | Principal/Grant/Delegation/Approval/Operation、**Task/Run/WorkflowRun/Conversation/Message** | 范围重叠但不相同；共同 Schema 工作必须取完整并集，不能选一边而遗漏另一边 |
 | **P0-04** | **Task/Run、Event outbox、WorkflowRun、Message、WorkItem 的权威/状态机 ADR** | **SecurityState 受限灾难恢复、无可信撤权记录时隔离** | 同号不同工作，禁止按裸 ID 合并；分别归共同契约/编排和恢复安全工作 |
@@ -9836,7 +9831,7 @@ ADR-01～20 保留原主题连续性；所有 ADR 的实际批准状态必须来
 | Space 第35章小节 | 从35.9开始，继承合并前结构 | v1按领域章节重排；旧section作为溯源，不虚构35.1～35.8正文 |
 | Project 导入版标题v0.6 | 容易被当作Space完整逐字导出 | 明确它包含v0.5全文和v0.6风险/路线前言；独有Space章节另行取得并合并 |
 | 原风险“SpecResolved/风险闭合” | 容易被理解成漏洞已修复、测试通过 | 只表示设计层有处理约束；实现NotVerified、验收NotRun |
-| XeLab 历史模块名 `psios-*` | 容易被理解成已实现PsiOS v1 | 只是历史导出crate名称；当前仓库HEAD、集成、安全默认值及测试仍需验证 |
+| 模块命名与实现状态 | 模块名称不证明软件功能已经实现 | 以 PsiOS 自身源码、集成测试及功能验收结果为准 |
 
 ## 4. 版本变体与真正冲突分开
 
@@ -9869,8 +9864,8 @@ ADR-01～20 保留原主题连续性；所有 ADR 的实际批准状态必须来
 | FIX-CORE-010 | P1 | 歧义 | “单调时钟”并不唯一决定挂起期间是否耗尽期限。若应持续到期的许可使用不计系统挂起时间的CLOCK_MONOTONIC，设备睡眠后可能保留本应消耗的授权/租约余量；原有墙钟回拨和重启规则不能单独消除这个差别。 | [docs/03-host-updates-network-devices.md](docs/03-host-updates-network-devices.md) |
 | FIX-CORE-011 | P1 | 歧义 | 更新专用状态中仍把“需要恢复”与实际执行阶段/回退完成并列，缺少明确的机器映射，无法准确表示停在Staged还是TrialBoot、是否已回退以及同时需要人工恢复。此项只处理Update领域，不重复Task的O… | [docs/03-host-updates-network-devices.md](docs/03-host-updates-network-devices.md) |
 | FIX-CORE-012 | P0 | 缺口 | 流水线逻辑上分阶段并不保证来自PR的任意构建/测试代码无法读取同执行器中的发布Secret或宿主挂载。若沿用有高权限凭据的runner，即使最终签名另有审批，不可信代码仍可能事先窃取凭据或修改待签制品。 | [docs/13-operations-release-governance.md](docs/13-operations-release-governance.md) |
-| FIX-CORE-013 | P1 | 缺口 | 本次静态解析发现29处相对报告链接没有归档目标，部分历史验证说明无法仅靠此ZIP完整复核。现存XenonLab-Old报告不能自动替代缺失的上一轮XeLab报告。 | [migration/xelab-reuse-boundary.md](migration/xelab-reuse-boundary.md) |
-| FIX-CORE-014 | P1 | 歧义 | 该ZIP是多来源历史模块集合，缺少Git对象/历史和当前远端验证，不能把任一元数据SHA当作整包唯一HEAD。内包摘要与自带metadata相同，只能证明归档内部清单一致，不能证明当前仓库来源或PsiOS v1… | [migration/xelab-reuse-boundary.md](migration/xelab-reuse-boundary.md) |
+| FIX-CORE-013 | P1 | 缺口 | 当测试日志、运行环境或结果产物缺失时，仅凭文档描述无法复核关键功能与恢复保证。 | [docs/15-acceptance-and-evidence.md](docs/15-acceptance-and-evidence.md) |
+| FIX-CORE-014 | P1 | 歧义 | 仅有文件清单、制品摘要或某个版本标识，不足以证明当前 PsiOS 模块已正确集成及满足安全边界。 | [adr/ADR-017.md](adr/ADR-017.md) |
 | FIX-CORE-015 | P1 | 缺口 | 写入fencing正确也不保证观察缓存正确。恢复数据库可能把revision退到客户端已见版本之前，旧watch/成员/调度缓存若继续等待更高revision，可能长期遗漏删除或维持不再存在的资源投影。此项关注… | [docs/12-cluster-coordination.md](docs/12-cluster-coordination.md) |
 | FIX-SEC-001 | P0 | 歧义 | 系统审批与 Workflow 请求缺少唯一权威和引用关系，可能产生双审批事实。 | [docs/04-security-identity.md](docs/04-security-identity.md) |
 | FIX-SEC-002 | P0 | 缺口 | 未定义同一单次审批被两个并发 Operation 消费时的原子性。 | [docs/04-security-identity.md](docs/04-security-identity.md) |
@@ -10119,29 +10114,29 @@ ADR-01～20 保留原主题连续性；所有 ADR 的实际批准状态必须来
 
 ### FIX-CORE-013｜P1｜缺口
 
-**原文依据：** xelab-package.zip中的28个XeLab模块readme以../../../reports/verification.md链接“验证与来源”，packaged/reports/xenonlab-old-review.md另链接同一缺失报告；外层ZIP目录不含对应reports/verification.md。
+**原文依据：**PsiOS 设计条款与实际功能验证必须使用可追溯的证据链，不能将缺失测试产物的叙述视为已验证。
 
-**问题：** 本次静态解析发现29处相对报告链接没有归档目标，部分历史验证说明无法仅靠此ZIP完整复核。现存XenonLab-Old报告不能自动替代缺失的上一轮XeLab报告。
+**问题：**当测试日志、运行环境或结果产物缺失时，仅凭文档描述无法复核关键功能与恢复保证。
 
-**v1修正：** 保留原ZIP字节、记录全部缺链源/目标及证据限制；明确历史测试为作者报告而非本次验证。这里只补充可审查边界，没有声称找回缺失报告或重新执行其测试。
+**v1修正：**验收记录绑定确切版本、环境、操作步骤、日志与产物摘要；证据缺失时明确保留 NotVerified/NotRun。
 
-**位置：** [migration/xelab-reuse-boundary.md](migration/xelab-reuse-boundary.md)
+**位置：**[docs/15-acceptance-and-evidence.md](docs/15-acceptance-and-evidence.md)
 
-**验证方向：** 按各README/报告所在目录规范化解析相对路径，对照外层ZIP中央目录，应重复得到29处缺失链接；检查静态JSON保留源路径和解析目标，不把另一报告强行代入。
+**验证方向：**抽查恢复、权限撤销、OCI 隔离等场景的证据字段；缺少测试产物时不能升级验收状态。
 
 **状态：** CorrectedInV1（规范层）；NotVerified（实现层）。
 
 ### FIX-CORE-014｜P1｜歧义
 
-**原文依据：** xelab-package.zip packaged/metadata.json按文件列origins；静态清点得到7组仓库/commit，包含本地Forgejo回环地址、GitHub多个仓库/提交；66个内包无.git历史。旧规范GOV-002明确要求以后以当前Forgejo完整SHA审计。
+**原文依据：**PsiOS 模块准入需要当前源代码提交、依赖清单、许可证、构建和运行验证证据。
 
-**问题：** 该ZIP是多来源历史模块集合，缺少Git对象/历史和当前远端验证，不能把任一元数据SHA当作整包唯一HEAD。内包摘要与自带metadata相同，只能证明归档内部清单一致，不能证明当前仓库来源或PsiOS v1实现完成；原规范的当前HEAD要求本身是正确的。
+**问题：**仅有文件清单、制品摘要或某个版本标识，不足以证明当前 PsiOS 模块已正确集成及满足安全边界。
 
-**v1修正：** 区分实际ZIP摘要/目录观察与作者来源陈述，逐组保留7个来源并标HistoricalStatementOnly；整个归档为HistoricalSourceOnly/NotVerified，复用仍需当前仓库逐模块reuse/adapt/rewrite/exclude审查。回环地址不作为可移植项目配置。
+**v1修正：**按模块建立接口、源码提交、依赖/许可、测试和可替换性记录；未经实测的能力保持 NotVerified。
 
-**位置：** [migration/xelab-reuse-boundary.md](migration/xelab-reuse-boundary.md)
+**位置：**[adr/ADR-017.md](adr/ADR-017.md)
 
-**验证方向：** 静态统计28个XeLab与38个XenonLab-Old模块、66内包/1110条目，复算内包SHA并列出来源组；确认报告不声称当前HEAD已核验、不把psios-*crate名称或1638 passed历史数字提升为v1实现状态。
+**验证方向：**对 Task、OCI、Storage 等模块核验实际提交、构建、接口契约、权限边界与故障恢复测试。
 
 **状态：** CorrectedInV1（规范层）；NotVerified（实现层）。
 
@@ -11198,146 +11193,6 @@ ADR-01～20 保留原主题连续性；所有 ADR 的实际批准状态必须来
 
 ---
 
-来源文件：`migration/xelab-reuse-boundary.md`
-
-# XeLab 历史归档清点与复用边界
-
-**结论：这个 ZIP 是 66 个可选择模块的历史导出集合，不是带完整 Git 历史的当前 PsiOS 仓库。** 本次检查没有运行归档代码，没有访问其来源仓库，也没有执行测试；所有复用决定仍为 `PendingCurrentRepositoryAudit`，工程状态 `NotVerified`。
-
-## 1. 可复核输入与方法
-
-- 原上传：`xelab-package.zip`，`source_file_id=file_000000001c2c8211adadf0ee6c507526`。
-- 归档：[xelab-package-history.zip](sources/archive/xelab-package-history.zip)，大小 **3,174,454 字节**。
-- SHA-256：`e6d1b43ed5644e8f7f8e7eeaf72495e7471887918b5afb012970ad32c910b599`。
-- 原字节不修改；读取 ZIP 目录、每个模块 README、metadata.json，以及 Cargo/package/许可证文本和现有历史报告。没有将包解压为可执行工作区、安装依赖或执行脚本。
-- 完整静态记录：[xelab-archive-inspection.json](migration/xelab-archive-inspection.json)；来源身份：[source-inventory.json](sources/source-inventory.json)。
-
-## 2. 实际目录和模块结构
-
-| 层级 | 实际观察 | 含义 |
-|---|---|---|
-| 外层 ZIP | 207 个目录项；入口 `packaged/` | 外层没有可直接视为完整工作树的顶层源码仓库 |
-| `packaged/xelab/` | 28 个模块，每项有 `readme.md` + `code.zip` | 历史 XeLab 的独立/互补模块 |
-| `packaged/xenonlab-old/` | 38 个模块，每项有 `readme.md` + `code.zip` | 另一个历史代码族，不能合并成同一当前 HEAD |
-| 66 个内层 ZIP | 合计 1,110 个目录项、13,339,846 字节解压条目大小 | 可组合模块与独立 Web 项目混合，需要按模块规则集成 |
-| Git 历史 | 外层和66个内层目录未出现 `.git/` | 不能验证 commit 对象、分支拓扑或当前 HEAD；元数据里的SHA只是来源陈述 |
-| 自带来源清单 | `packaged/metadata.json`、`metadata.csv` | 可用于定位旧文件/来源；不是受信构建证明 |
-| 历史报告 | `packaged/reports/xenonlab-old-review.md` 与两份TSV | 是作者此前检查的陈述，不是本次执行结果 |
-
-所有66个内层ZIP的实际SHA-256均与自带metadata声明一致。这只证明“此次归档字节与此次归档的清单一致”，不能独立证明来自特定远端Git提交、未包含漏洞或能在PsiOS v1运行。对中央目录检查未观察到绝对路径、`..`路径分量或symlink条目；这也不是完整解压器/源码安全审计。
-
-## 3. 已观察模块逐项清单
-
-| 代码族 | 模块目录 | 内层条目数 | 名称/用途线索（来自原元数据） |
-|---|---|---:|---|
-| xelab | `application-sqlite-schema` | 3 | 应用 SQLite 约束 |
-| xelab | `artifact-preflight-candidate` | 3 | 制品预检候选 |
-| xelab | `contract-tooling` | 6 | 协议与数据契约校验工具 |
-| xelab | `cpp-plugin-sdk` | 10 | C++ 插件 SDK |
-| xelab | `event-consumer-candidate` | 5 | 事件消费者候选 |
-| xelab | `export-workspace` | 3 | Rust 工作区清单与许可 |
-| xelab | `host-diagnostics` | 7 | 宿主诊断与溯源工具 |
-| xelab | `object-storage-preset` | 53 | 对象存储预设候选 |
-| xelab | `postgres-service` | 243 | PostgreSQL 事务与平台服务适配 |
-| xelab | `protocols` | 267 | OpenAPI 与 Protobuf 契约 |
-| xelab | `psios-broker-core` | 2 | psios-broker-core |
-| xelab | `psios-common` | 2 | psios-common |
-| xelab | `psios-event-core` | 2 | psios-event-core |
-| xelab | `psios-host-io` | 2 | psios-host-io |
-| xelab | `psios-plugin-contracts` | 6 | psios-plugin-contracts |
-| xelab | `psios-runtime` | 8 | psios-runtime |
-| xelab | `psios-scheduler` | 5 | psios-scheduler |
-| xelab | `psios-security` | 7 | psios-security |
-| xelab | `psios-storage` | 12 | psios-storage |
-| xelab | `psios-task-engine` | 2 | psios-task-engine |
-| xelab | `psios-workflow` | 5 | psios-workflow |
-| xelab | `rust-plugin-sdk` | 8 | Rust 插件 SDK |
-| xelab | `rust-readonly-client-candidate` | 6 | 只读 HTTPS 客户端候选 |
-| xelab | `sdk-conformance-harness` | 2 | Rust/C++ SDK 互操作测试 |
-| xelab | `shell` | 22 | Shell 浏览器组件与静态服务 |
-| xelab | `signed-artifact-candidate` | 10 | 离线签名制品候选 |
-| xelab | `test-fixtures` | 59 | 互操作/契约验证夹具 |
-| xelab | `web-search-application` | 6 | Web 搜索应用原语 |
-| xenonlab-old | `account-authority` | 6 | 账户继承、OIDC 与会话 |
-| xenonlab-old | `archive-snapshot` | 4 | 文件归档快照 |
-| xenonlab-old | `capability-registry` | 21 | 能力注册、描述快照与生命周期 |
-| xenonlab-old | `capability-state` | 3 | 能力状态快照与子能力权限判定 |
-| xenonlab-old | `capability-versions` | 3 | 能力版本协商 |
-| xenonlab-old | `data-primitives` | 2 | SQLite 事务与 API 错误原语 |
-| xenonlab-old | `deploy-admission` | 5 | 审批与部署租约适配器 |
-| xenonlab-old | `desktop-api` | 4 | 桌面状态与插件投影 API |
-| xenonlab-old | `desktop-snapshot` | 8 | 桌面账户与资源备份 |
-| xenonlab-old | `embedding-workers` | 18 | 嵌入提供者、预算与 CPU worker |
-| xenonlab-old | `lean-verification` | 7 | Lean 证明校验服务与定理元数据 |
-| xenonlab-old | `library-doctor` | 3 | .xl 目录与对象一致性检查 |
-| xenonlab-old | `metrics-registry` | 3 | Prometheus 指标注册器 |
-| xenonlab-old | `miniv4-model-source` | 17 | MiniV4 模型与 tokenizer 参考源码 |
-| xenonlab-old | `model-cache` | 3 | 模型快照缓存与水位管理 |
-| xenonlab-old | `oeis-import` | 4 | OEIS 数据包构建与导入 |
-| xenonlab-old | `openapi-contracts` | 12 | 早期服务 OpenAPI 契约 |
-| xenonlab-old | `ops-reporting` | 6 | 备份与宿主健康报告 |
-| xenonlab-old | `platform-assembly` | 2 | 服务装配与跨模块测试入口 |
-| xenonlab-old | `platform-core` | 6 | FastAPI 请求基础与授权适配 |
-| xenonlab-old | `plugin-trust-policy` | 22 | 服务插件声明、签名、溯源与执行策略 |
-| xenonlab-old | `pool-telemetry` | 3 | 资源池签名遥测 |
-| xenonlab-old | `provider-gateway` | 7 | Chat Provider 与受控工具路由 |
-| xenonlab-old | `python-integration-kit` | 6 | Python 依赖锁与共享夹具 |
-| xenonlab-old | `query-dsl` | 2 | 查询 DSL 与 AST 解释器 |
-| xenonlab-old | `retrieval` | 16 | 检索、分块与质量重排 |
-| xenonlab-old | `service-db-backup` | 4 | PostgreSQL 与 Forgejo 备份适配器 |
-| xenonlab-old | `sqlite-job-store` | 4 | SQLite 批处理和运行状态账本 |
-| xenonlab-old | `sqlite-text-index` | 2 | SQLite FTS5 中日韩文本索引 |
-| xenonlab-old | `vector-scan-prototype` | 5 | Rust 精确向量扫描原型 |
-| xenonlab-old | `web-compact-tree` | 3 | 紧凑屏树形侧栏布局 |
-| xenonlab-old | `web-frame-boundary` | 3 | iframe 消息与沙箱边界 |
-| xenonlab-old | `web-library-workbench` | 32 | 知识库工作台数据处理与 React hooks |
-| xenonlab-old | `web-session-policy` | 20 | 浏览器会话、请求代次与 OIDC 适配 |
-| xenonlab-old | `web-shell-models` | 46 | 桌面交互与运维视图状态 |
-| xenonlab-old | `work-queue` | 4 | 工作租约 API 与规则分诊 |
-| xenonlab-old | `xl-library` | 22 | .xl 文档数据库服务适配层 |
-| xenonlab-old | `xl-snapshot` | 6 | XeLibrary 快照与恢复 |
-
-这里的用途线索是归档作者的命名和说明，不是本次对每个函数能力的确认。`psios-security`、`psios-runtime`、`psios-storage`、`psios-task-engine`等名称不意味着它们已经满足本包的安全、持久性、撤权或恢复契约。
-
-## 4. 构建、依赖与许可证线索
-
-`packaged/xelab/export-workspace/code.zip`实际只有`Cargo.lock`、`Cargo.toml`、`LICENSE`三个文件。工作区清单使用`crates/*`和`adapters/postgres-service`成员模式，版本为0.1.0、edition为2021，许可证字段MIT。相应LICENSE包含MIT文本；这不是PsiOS v1的软件版本或全包统一许可证。
-
-其他模块的Cargo清单有互相引用的本地路径，例如runtime依赖common/host-io/plugin-contracts；只取一个代码ZIP未必能构建。Shell包含`web/package.json`；多个XenonLab-Old Web模块各有根`package.json`，不能随意在同一目录覆盖叠加。清单被读取但没有运行其中任何命令。
-
-XenonLab-Old元数据/历史报告写明当时未发现项目级许可证，embedding供应商目录另带许可。对此这里只记录归档原有权利信息；复用与分发前需要按实际当前仓库、文件来源和依赖核验，不能把另一代码族的MIT文本套到全部文件。
-
-## 5. 来源陈述不能证明当前HEAD
-
-| 归档声明的来源 | 完整提交SHA | 本次状态 |
-|---|---|---|
-| `https://github.com/jyxxe/XeLab.git` | `5924c18bcdf08cb125c4f1d2172b9d8feae451dc` | HistoricalStatementOnly |
-| `https://github.com/jyxxe/XeLab.git` | `ba79428354e2a518472e989acca85d7f70e1b535` | HistoricalStatementOnly |
-| `https://github.com/jyxxe/XeLab.git` | `e28d70eeef63472d2a1dd4faaf153df8ad9274ca` | HistoricalStatementOnly |
-| `https://github.com/jyxxe/XenonLab_Old` | `0f50d396052592624a8a8a4c1e36a9eb29f5bf6a` | HistoricalStatementOnly |
-| `https://github.com/jyxxenon/XeLab` | `bf9f1a1e457ce8922a588e810e04d06ef5bb79ae` | HistoricalStatementOnly |
-| `https://github.com/jyxxenon/XeLab` | `e499e6a964af99fdfd14022d1e419ddf34887cab` | HistoricalStatementOnly |
-| `ssh://git@127.0.0.1:2222/xelab-admin/XeLab.git` | `b444a8ad56f8b3bbaf32279fdcc727658a7ec120` | HistoricalStatementOnly |
-
-其中`127.0.0.1`是原导出环境的回环地址，不是可移植的项目远端配置；后续必须取得用户实际指定的Forgejo实例身份和仓库。不同来源/不同提交的文件可能被组合成一个导出模块，不能把任一SHA提升为全归档的唯一当前HEAD。
-
-## 6. 历史测试与缺失链接
-
-现有`xenonlab-old-review.md`报告了历史`1638 passed`、前端158项、不同组合包539/789等结果，并列出环境和跳过项。各README也使用“上一轮独立Rust工作区测试”等描述。这些数字属于**来源作者的历史报告**；本次没有复跑，不把它们抄成PsiOS v1的Passed、性能基线或安全验收。
-
-本次发现 **29 处相对链接未命中外层归档条目**，主要指向不存在于交付ZIP中的`reports/verification.md`。完整源/目标清单在静态JSON；缺失报告意味着相应README所述证据无法仅靠这份ZIP完整复核。没有补造缺失报告，也没有把现存另一份报告当成同一证据。
-
-## 7. 进入实际复用前的具体门槛
-
-后续逐模块取得当前完整仓库SHA和文件来源后，才能给出reuse/adapt/rewrite/exclude决定。每项需比较v1契约、旧ABI/API/数据库结构、授权默认值、宿主权限、外部地址、供应链/许可证、迁移和故障测试。优先核对Task外部效果/去重、事件outbox/inbox、安全审批消费/撤权、存储持久与恢复fencing这些跨域边界。
-
-只读解析器、类型/纯函数、受控工具、后端驱动和宿主特权组件的复用风险不同，应分别给出证据。即便历史单元测试通过，也不能推出打开FD撤权、断电持久性、跨节点分区、KDE Portal版本或不可信包脚本隔离已经满足PsiOS要求。
-
-本次已经完成的是**归档静态清点、来源线索保留及摘要一致性核对**；没有完成当前源代码安全审计、构建验证或产品实现验收。
-
-
----
-
 来源文件：`migration/legacy-requirements.md`
 
 # 旧规范逐项迁移表
@@ -11954,7 +11809,7 @@ XenonLab-Old元数据/历史报告写明当时未发现项目级许可证，embe
 
 **选定原文：** [SRC-SPACE-V06](sources/archive/space-unified-v0.6.md)，PsiOS｜统一架构与持续开发规划 · 合并 v0.6 › 零、修订基线与阅读约定（0.1 保留 v0.2 历史说明） › 0.2 继续有效的设计约束，第 48–48 行。
 
-> | BASE-10 | XeLab 只提供可选择复用的代码 | 审计以 Forgejo 实际最新 HEAD 为准，不承诺旧 ABI/API/数据库兼容。 |
+> | BASE-10 | PsiOS 按独立架构和原生接口开发 | 以 PsiOS 当前提交、接口契约及验收结果确认实现状态。 |
 
 **溯源范围：** 6 处定义、0 处引用；1 个逐字不同的历史定义块。原文保留旧拼写/旧错误，不直接作为当前行为规范。
 
@@ -12968,7 +12823,7 @@ XenonLab-Old元数据/历史报告写明当时未发现项目级许可证，embe
 
 **选定原文：** [SRC-SPACE-V06](sources/archive/space-unified-v0.6.md)，PsiOS｜统一架构与持续开发规划 · 合并 v0.6 › 二十八、用户体验、运维配置与后续能力边界 › 28.4 模块质量与责任边界，第 1699–1699 行。
 
-> GOV-002：必须在合并 XeLab 复用模块前登记实际 Forgejo 仓库、分支、完整提交 SHA、依赖清单、许可证、旧接口耦合点及修改记录。本次设计文档补全不代替该代码审计，也不从旧 GitHub 代码推断当前实现。
+> GOV-002：必须对进入 PsiOS 主线的模块登记准确的源代码提交、版本、依赖与许可证、接口契约、安全评估和测试证据。设计文档补全不能替代真实实现验证。
 
 **溯源范围：** 6 处定义、6 处引用；1 个逐字不同的历史定义块。原文保留旧拼写/旧错误，不直接作为当前行为规范。
 
@@ -13348,7 +13203,7 @@ XenonLab-Old元数据/历史报告写明当时未发现项目级许可证，embe
 
 **选定原文：** [SRC-SPACE-V06](sources/archive/space-unified-v0.6.md)，PsiOS｜统一架构与持续开发规划 · 合并 v0.6 › 二十八、用户体验、运维配置与后续能力边界 › 28.2 配置与运维，第 1674–1674 行。
 
-> OPS-004：必须预留运行预算与压力策略，包括 CPU、内存、IO、临时磁盘、事件与审计空间、网络带宽和模型费用。每项预算有范围、硬限/软限、超限行为和可查询用量；数值由目标平台测量后冻结，不继承旧 XeLab 虚拟机容量配置。
+> OPS-004：必须预留运行预算与压力策略，包括 CPU、内存、IO、临时磁盘、事件与审计空间、网络带宽和模型费用。每项预算有范围、硬限/软限、超限行为和可查询用量；数值由目标平台测量后冻结，以 PsiOS 的实测资源预算为准。
 
 **溯源范围：** 6 处定义、12 处引用；1 个逐字不同的历史定义块。原文保留旧拼写/旧错误，不直接作为当前行为规范。
 
@@ -16204,9 +16059,9 @@ XenonLab-Old元数据/历史报告写明当时未发现项目级许可证，embe
 
 ## 原始输入与代码边界
 
-[原始输入清单](sources/source-inventory.json) · [历史源说明](sources/archive/README.md) · [XeLab静态清点](migration/xelab-reuse-boundary.md)。
+[原始输入清单](sources/source-inventory.json) · [历史源说明](sources/archive/README.md)。
 
-此包未获取当前Forgejo HEAD，未安装或执行归档代码。保存源文件是为了可追溯，不把历史文件的计划、测试数字或脚本自动提升为当前权威。
+规划材料用于记录设计变更；实现状态以 PsiOS 源码、构建制品和实际测试为准。
 
 
 ---
@@ -16245,6 +16100,8 @@ python tools/build_package.py --zip ../PsiOS-v1.0.0-docs-2026-11-22.zip
 
 严格JSON读取、Schema语法/本地ref、正反例与拒绝层次、无损计数范围、夹具摘要向量、局部关系/依赖图、规范ID、链接、注册表定位、产品计划仍NotRun、原文定义切片与归档SHA、最终交付清单。未覆盖的签名真实性、分布式并发、真实fencing、断电、硬件、协议互通和性能在报告中明确列为NotProven。
 
+历史映射中的原文切片对应 2026-11-22 封存交付。仓库检出会离线读取并校验同级 releases 目录的五个分段。单独分发修订版时，使用 `python tools/validate_package.py --original-delivery /path/to/PsiOS-v1.0.0-docs-2026-11-22.zip` 复核历史切片。当前分章和来源副本分别按当前清单核验。
+
 
 ---
 
@@ -16252,9 +16109,8 @@ python tools/build_package.py --zip ../PsiOS-v1.0.0-docs-2026-11-22.zip
 
 # 来源与使用说明
 
-本包是PsiOS项目的设计文档交付，不是安装介质或已验证软件发行版。原始上传文件、Space内容和XeLab历史代码归档按原样保存，以支持追踪和后续来源核验；其原有权利和许可证继续适用。本包没有替原项目或第三方重新授权。
+本包是PsiOS项目的设计文档交付，不是安装介质或已验证软件发行版。项目规划文件与技术规范保留可追溯修订信息；所有依赖遵循各自许可证及其适用范围。本包不授予超出许可证的任何权利。
 
-来源作者的测试报告、旧地址、模型名称、候选路线和历史任务编号均属历史材料。读取历史文件不代表运行其中代码或接受其中指令。实际复用需按ADR-17检查确切源码、许可证、依赖及安全边界。
+设计资料、技术候选和任务记录不等同于软件功能验证。组件准入需按 ADR-17 核验许可证、依赖、安全边界和可维护性。
 
 新文档中的架构与接口是设计要求；具体代码许可、发布签名、支持范围、性能和维护期限须由项目治理另行确定。示例中的ID、摘要引用、时间、许可和预算均为虚构夹具。
-

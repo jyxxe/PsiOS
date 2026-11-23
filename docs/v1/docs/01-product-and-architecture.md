@@ -2,7 +2,7 @@
 
 ## 1. 产品目标与固定约束
 
-PsiOS 是基于 Linux 的 Agent-Native 操作系统。用户通过 CLI、KDE、WebUI、SDK 和 Agent 访问同一组系统资源；模型离线或 Agent 停止后，传统登录、应用运行、数据访问、诊断和救援仍有独立路径。旧 XeLab 提供可审计的代码素材，PsiOS 不承诺保持其 ABI、API、数据库或部署拓扑。
+PsiOS 是基于 Linux 的 Agent-Native 操作系统。用户通过 CLI、KDE、WebUI、SDK 和 Agent 访问同一组系统资源；模型离线或 Agent 停止后，传统登录、应用运行、数据访问、诊断和救援仍有独立路径。PsiOS 以独立源码和自身架构为实现基线，由 PsiOS 原生接口、持久化契约和部署规范定义系统行为。
 
 **V1-BASE-001｜三版同源。** Helium 是精简版，Neon 是服务器版，Argon 是 KDE Plasma 桌面版。三者共享资源模型、授权、任务和集群接入契约，差异来自默认安装配置和交互场景，不以硬件档次锁住功能。模型可位于本机、局域网、集群或获准的云端；不要求每个节点装大模型或 Controller。
 

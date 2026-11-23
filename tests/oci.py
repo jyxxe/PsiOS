@@ -6,7 +6,7 @@ import subprocess
 import tarfile
 
 from support import Failure, Node, key, target
-from oci_recovery import lose_stop_receipt
+from oci_recovery import lose_start_receipt, lose_stop_receipt
 
 
 def main(binaries):
@@ -115,7 +115,7 @@ int main(void) {
         assert node.get(app_id)["value"]["readiness"] == "NotReady"
         app = node.perform("application.stop", target(app))
         app = node.perform("application.select_release", dict(target=target(app), release_ref=previous_release))
-        app = node.perform("application.start", target(app))
+        app = lose_start_receipt(node, app, volume)
         reverted = node.perform("application.health", target(app))["container_id"]
         assert json.loads(subprocess.check_output(docker + ["inspect", reverted]))[0]["Image"] == image_id
         app = lose_stop_receipt(node, app, reverted, volume)
@@ -127,7 +127,7 @@ int main(void) {
         assert restored["resource_id"] != volume["resource_id"]
         assert node.perform("volume.read", dict(**target(restored), name="starts"))["content"] == "first\nsecond\nupgraded\nfirst\n"
         node.perform("volume.activate", target(restored))
-        print("PASS live OCI lifecycle, two image digests, release staging, external exit, rollback, SIGKILL after engine removal, fenced volume and verified backup restore")
+        print("PASS live OCI lifecycle, two image digests, release staging, external exit, rollback, SIGKILL after engine start and removal, fenced volume and verified backup restore")
     finally:
         if app_id:
             ids = subprocess.check_output(docker + ["ps", "-aq", "--filter", "label=io.psios.application=" + app_id], text=True).split()

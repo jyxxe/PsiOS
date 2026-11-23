@@ -270,10 +270,37 @@ pub struct Work {
     pub data: Option<PathBuf>,
     pub inline: Option<Value>,
     pub launch: Option<Install>,
+    pub start_checkpoint: Option<Doc>,
     pub volume: Option<Doc>,
 }
 impl Work {
-    pub fn perform(&self) -> Result<Value> {
+    pub fn checkpoint_start(&self, db: &Db<'_>, engine: &str, container: &str) -> Result<()> {
+        let t = db.of(&self.task.id, "Task")?;
+        require(
+            t.body["current_run_id"] == self.run.id
+                && t.body["lifecycle"] == "Running"
+                && t.body["outcome_knowledge"] == "InFlight",
+            "Fenced",
+            "OCI start is no longer current",
+        )?;
+        let target = self.action.target(db, &t.owner)?;
+        let audience = self
+            .action
+            .audience(db, &t.owner, &t.spec["delegation_ref"], &target)?;
+        permit(db, &t, &self.run, &self.op, &self.effect, &audience)?;
+        let evidence = json!({"start_operation_id":self.op.id, "effect_ref":self.effect.reference(),
+            "application_ref":target.reference(),"volume_ref":self.volume.as_ref().map(Doc::reference),
+            "engine_id":engine, "container_id":container});
+        db.create(
+            "OCIStartCheckpoint",
+            &format!("oci-start-{}", self.op.id),
+            &t.owner,
+            json!({}),
+            evidence,
+        )?;
+        Ok(())
+    }
+    pub fn perform(&self, checkpoint: impl FnOnce(&str, &str) -> Result<()>) -> Result<Value> {
         if let Some(v) = &self.inline {
             return Ok(v.clone());
         }
@@ -284,10 +311,10 @@ impl Work {
             | Action::Inventory {}
             | Action::Processes(_)
             | Action::Devices {} => node::perform(self),
+            Action::Start(_) => apps::start(self, checkpoint),
             Action::Stage { .. }
             | Action::Select { .. }
             | Action::Refresh(_)
-            | Action::Start(_)
             | Action::Stop(_)
             | Action::Uninstall(_)
             | Action::Install(_)
@@ -374,22 +401,30 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     } else {
         None
     };
+    let start_checkpoint =
+        if matches!(a, Action::Health(_)) && target.body["lifecycle"] == "Stopped" {
+            apps::pending_start(db, &target)?
+        } else {
+            None
+        };
     let data = if let Some(v) = &volume
-        && !matches!(
-            a,
-            Action::Stop(_) | Action::Logs(_) | Action::Health(_) | Action::Uninstall(_)
-        ) {
+        && (start_checkpoint.is_some()
+            || !matches!(
+                a,
+                Action::Stop(_) | Action::Logs(_) | Action::Health(_) | Action::Uninstall(_)
+            )) {
         policy::owned(actor, v)?;
         Some(storage::volume_dir(db.cfg, v)?)
     } else {
         None
     };
-    let launch = if matches!(a, Action::Start(_)) {
+    let launch = if matches!(a, Action::Start(_)) || start_checkpoint.is_some() {
         Some(apps::launch_spec(db, &target)?)
     } else {
         None
     };
     let w = Work {
+        start_checkpoint,
         launch,
         task,
         run,

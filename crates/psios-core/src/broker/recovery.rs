@@ -171,7 +171,7 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     let (target_id, expected) = match &action {
         Action::Write(p) => (&p.id, &p.expected_resource_version),
         Action::Append(p) => (&p.target.id, &p.target.expected_resource_version),
-        Action::Stop(p) | Action::ServiceStart(p) | Action::ServiceStop(p) => {
+        Action::Start(p) | Action::Stop(p) | Action::ServiceStart(p) | Action::ServiceStop(p) => {
             (&p.id, &p.expected_resource_version)
         }
         _ => {
@@ -219,22 +219,13 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
                 json!({"observation_ref":proof.reference(),"conclusion":"ObservedPostcondition"}),
             )
         }
-        Action::Stop(_) => {
+        Action::Start(_) | Action::Stop(_) => {
             let proof = inspected(
                 db,
                 req.evidence_ref.as_ref(),
                 &op,
                 &target,
                 "application.health",
-            )?;
-            require(
-                target.body["engine_id"].is_string()
-                    && proof.body["removal_confirmed"] == true
-                    && proof.body["engine_id"] == target.body["engine_id"]
-                    && proof.body["container_id"] == target.body["container_id"]
-                    && proof.body["start_operation_id"] == target.body["start_operation_id"],
-                "OutcomeUnknown",
-                "OCI removal has no matching engine and instance evidence",
             )?;
             let vol = target.spec["volume_id"]
                 .as_str()
@@ -252,9 +243,46 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
                     "original bound volume revision unavailable",
                 )?;
             }
+            let (result, conclusion) = if matches!(action, Action::Start(_)) {
+                let c = apps::pending_start(db, &target)?.ok_or_else(|| {
+                    err(
+                        "RecoveryRequired",
+                        "original OCI start checkpoint unavailable",
+                    )
+                })?;
+                require(
+                    c.body["start_operation_id"] == op.id
+                        && c.body["volume_ref"] == json!(vol.as_ref().map(Doc::reference))
+                        && proof.body["checkpoint_ref"] == c.reference()
+                        && proof.body["engine_id"] == c.body["engine_id"]
+                        && proof.body["container_id"] == c.body["container_id"]
+                        && proof.body["start_operation_id"] == op.id
+                        && proof.body["process_running"] == true,
+                    "OutcomeUnknown",
+                    "inspection does not confirm the checkpointed runtime is running",
+                )?;
+                (
+                    apps::started(db, &target, &op.id, vol.as_ref(), &proof.body)?,
+                    "StartConfirmed",
+                )
+            } else {
+                require(
+                    target.body["engine_id"].is_string()
+                        && proof.body["removal_confirmed"] == true
+                        && proof.body["engine_id"] == target.body["engine_id"]
+                        && proof.body["container_id"] == target.body["container_id"]
+                        && proof.body["start_operation_id"] == target.body["start_operation_id"],
+                    "OutcomeUnknown",
+                    "OCI removal has no matching engine and instance evidence",
+                )?;
+                (
+                    apps::stopped(db, &target, &op.id, vol.as_ref(), &proof.body["last_logs"])?,
+                    "RemovalConfirmed",
+                )
+            };
             (
-                apps::stopped(db, &target, &op.id, vol.as_ref(), &proof.body["last_logs"])?,
-                json!({"observation_ref":proof.reference(),"conclusion":"RemovalConfirmed"}),
+                result,
+                json!({"observation_ref":proof.reference(),"conclusion":conclusion}),
             )
         }
         _ => {

@@ -120,7 +120,10 @@ pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
                 matches!(
                     w.action,
                     Action::Stop(_) | Action::Health(_) | Action::Logs(_)
-                ) && h == w.target.id,
+                ) && h == w.target.id
+                    || w.start_checkpoint.as_ref().is_some_and(|c| {
+                        c.body["start_operation_id"] == h && c.body["volume_ref"] == v.reference()
+                    }),
                 "Conflict",
                 "volume held by workload or unresolved operation",
             )?;

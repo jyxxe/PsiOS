@@ -29,7 +29,7 @@ v1是文档版本；当前没有宣称软件已发布、最新仓库已审计、
 | 产品验证计划 | 135个具体场景，全部NotRun；文档/治理与真实运行验证区分 |
 | ADR / 工作项 / 操作手册 | 25份Proposed ADR、26个WI工作项、6份可执行顺序明确的runbook |
 | 历史迁移 | 245个旧要求、141个旧测试均有文档去向 |
-| 来源 | 15份原始输入逐字节归档；31个去重一手资料入口；保留XeLab历史ZIP |
+| 规划资料 | PsiOS 设计草案、Space 规划及验收记录；公开技术规范另见参考资料清单 |
 
 映射率只表示有明确去向，Schema检查只验证结构和列明的局部关系；两者都不能当作产品通过率。
 
@@ -120,10 +120,9 @@ python tools/validate_package.py
 
 ## 有意保留的工程不确定性
 
-没有选择未经实验的数据库/文件系统/系统镜像技术；没有声称零丢失、任意软件包兼容、全平台支持、集群HA或绝对即时撤权。全部技术ADR仍Proposed，所有产品实现NotVerified，产品测试NotRun。原始XeLab缺失报告未被找回，当前HEAD尚待WI-001核验。
+没有选择未经实验的数据库/文件系统/系统镜像技术；没有声称零丢失、任意软件包兼容、全平台支持、集群HA或绝对即时撤权。全部技术ADR仍Proposed，所有产品实现NotVerified，产品测试NotRun。软件源码及实际运行证据仍须按 WI-001 核验。
 
 完整逐项变更见[migration/findings.md](migration/findings.md)，编号冲突与字段迁移见[migration/v0-to-v1.md](migration/v0-to-v1.md)。
-
 
 ## 同版本文档增补（2026-11-22）
 
@@ -148,7 +147,7 @@ python tools/validate_package.py
 | adr/ | 25份待决技术选型，每份保留原编号与范围 |
 | acceptance/ | 待执行场景与实际证据模板，所有产品结果NotRun |
 | operations/ | 6种失败/恢复/退出路径的操作顺序与停止条件 |
-| migration/ | 原文错误、编号冲突、旧要求/测试去向及XeLab证据边界 |
+| migration/ | 原文错误、编号冲突、旧要求/测试去向 |
 | sources/ | 输入清单、外部一手资料、逐字节原始归档 |
 | tools/ | 文档生成、校验、封装工具，不是产品服务 |
 | html/ | 无CDN、无网络依赖的完整阅读器 |
@@ -300,8 +299,6 @@ PsiOS-v1/
     legacy-tests.md
     rebuild_legacy_registry.py
     v0-to-v1.md
-    xelab-archive-inspection.json
-    xelab-reuse-boundary.md
   operations/
     README.md
     data-export-exit.md
@@ -373,7 +370,6 @@ PsiOS-v1/
       space-risk-v0.6.metadata.json
       space-unified-v0.6.md
       space-unified-v0.6.metadata.json
-      xelab-package-history.zip
     references.json
     source-inventory.json
   tools/
@@ -417,7 +413,7 @@ MANIFEST.sha256逐项记录除自身外所有交付文件的SHA-256；ZIP内部�
 | 实现状态 | NotVerified / ImplementedUnverified / Verified | 全部 NotVerified；不以档案报告替代当前仓库检查 |
 | 验收结果 | NotRun / Passed / Failed / Blocked / NotApplicable | 产品功能验收全部 NotRun |
 
-**V1-GOV-002｜证据不得跨层推断。** 文档链接检查、Schema 自检和示例验证通过，只证明本包的特定结构条件；不能推出持久性、安全隔离、并发正确性或硬件兼容通过。历史 XeLab 压缩包中的报告是来源作者的记录，不能当成本次执行结果，也不证明最新 Forgejo HEAD 相同。
+**V1-GOV-002｜证据不得跨层推断。** 文档链接检查、Schema 自检和示例验证通过，只证明本包的特定结构条件；不能推出持久性、安全隔离、并发正确性或硬件兼容通过。历史报告不能作为本次执行证据，也不能替代 PsiOS 当前提交的实际验证。
 
 `SpecResolved` 旧称统一解释为“已有明确设计约束”，不再用“风险已关闭”概括工程状态。仍需要 PoC 的问题写明候选、测量方法、通过条件、失败后策略、决策责任角色和最迟启用门槛。责任角色可以已明确而具体人员未指派；正式实施前必须指派具体负责人。
 
@@ -462,7 +458,7 @@ MANIFEST.sha256逐项记录除自身外所有交付文件的SHA-256；ZIP内部�
 
 ## 1. 产品目标与固定约束
 
-PsiOS 是基于 Linux 的 Agent-Native 操作系统。用户通过 CLI、KDE、WebUI、SDK 和 Agent 访问同一组系统资源；模型离线或 Agent 停止后，传统登录、应用运行、数据访问、诊断和救援仍有独立路径。旧 XeLab 提供可审计的代码素材，PsiOS 不承诺保持其 ABI、API、数据库或部署拓扑。
+PsiOS 是基于 Linux 的 Agent-Native 操作系统。用户通过 CLI、KDE、WebUI、SDK 和 Agent 访问同一组系统资源；模型离线或 Agent 停止后，传统登录、应用运行、数据访问、诊断和救援仍有独立路径。PsiOS 以独立源码和自身架构为实现基线，由 PsiOS 原生接口、持久化契约和部署规范定义系统行为。
 
 **V1-BASE-001｜三版同源。** Helium 是精简版，Neon 是服务器版，Argon 是 KDE Plasma 桌面版。三者共享资源模型、授权、任务和集群接入契约，差异来自默认安装配置和交互场景，不以硬件档次锁住功能。模型可位于本机、局域网、集群或获准的云端；不要求每个节点装大模型或 Controller。
 
@@ -787,7 +783,7 @@ Task提交payload是其请求去掉`request_digest`；Chat摘要payload是发送
 
 **V1-NET-003｜实际出站路径受控。** Egress规则涵盖DNS结果、重解析、IPv6、重定向、代理出口和本机/链路本地/云元数据地址；凭据不得跟随重定向发往新origin。网络驱动失败不能回退到host network。端口发布明确地址、协议、来源域和授权，配置丢失默认不扩大公网暴露。
 
-**V1-NET-004｜断联不扩权。** 远程服务不可达时本机网络配置、日志和已有获准本地服务可用；涉及在线批准/租约的共享写暂停。跨NAT/代理可选Worker主动连接模式，但API Key只用于引导或规定的受限目的，正式节点访问仍需可轮换身份和明确资源授权；旧XeLab的具体网络拓扑不自动成为PsiOS约束。
+**V1-NET-004｜断联不扩权。** 远程服务不可达时本机网络配置、日志和已有获准本地服务可用；涉及在线批准/租约的共享写暂停。跨NAT/代理可选Worker主动连接模式，但API Key只用于引导或规定的受限目的，正式节点访问仍需可轮换身份和明确资源授权；网络拓扑应按 PsiOS 本身的安全模型、场景和验收结果确定。
 
 ## 7. 设备、资源与电源
 
@@ -3067,31 +3063,31 @@ JSON读取必须在进入常见字典解析前拒绝重复键；默认“保留�
 
 | 规范ID | 主题 | 原范围与v1关系 | 状态 |
 |---|---|---|---|
-| [ADR-01](adr/ADR-001.md) | OS 基底、构建工具与平台组合 | 保持原编号与范围 | Proposed |
-| [ADR-02](adr/ADR-002.md) | 启动器、更新后端与持久状态布局 | 保持原编号与范围 | Proposed |
-| [ADR-03](adr/ADR-003.md) | 默认文件系统、卷与备份后端 | 保持原编号与范围 | Proposed |
-| [ADR-04](adr/ADR-004.md) | 身份、授权、Secret 与安全启动 Profile | 保持原编号与范围 | Proposed |
-| [ADR-05](adr/ADR-005.md) | 系统 API、资源 Schema 与元数据实现 | 保持原编号与范围 | Proposed |
-| [ADR-06](adr/ADR-006.md) | OCI 执行后端与隔离等级 | 保持原编号与范围 | Proposed |
-| [ADR-07](adr/ADR-007.md) | 网络配置与策略执行后端 | 保持原编号与范围 | Proposed |
-| [ADR-08](adr/ADR-008.md) | 设备/GPU 和电源能力矩阵 | 保持原编号与范围 | Proposed |
-| [ADR-09](adr/ADR-009.md) | Agent 协议与第三方兼容配置 | 保持原编号与范围 | Proposed |
-| [ADR-10](adr/ADR-010.md) | KDE、Portal 与无头图形后端 | 保持原编号与范围 | Proposed |
-| [ADR-11](adr/ADR-011.md) | 任务/事件持久化与执行语义 | 保持原编号与范围 | Proposed |
-| [ADR-12](adr/ADR-012.md) | 集群控制面、准入、租约与恢复代次 | 保持原编号与范围 | Proposed |
-| [ADR-13](adr/ADR-013.md) | Dataset/Knowledge 引擎和查询实现 | 范围明确/拆分见正文 | Proposed |
-| [ADR-14](adr/ADR-014.md) | 观测与审计后端 | 保持原编号与范围 | Proposed |
-| [ADR-15](adr/ADR-015.md) | 发布信任、兼容窗口与维护政策 | 保持原编号与范围 | Proposed |
-| [ADR-16](adr/ADR-016.md) | 发行版资源和体验基线 | 保持原编号与范围 | Proposed |
-| [ADR-17](adr/ADR-017.md) | XeLab 按模块复用 | 保持原编号与范围 | Proposed |
-| [ADR-18](adr/ADR-018.md) | TableFS 文件/表双视图存储后端 | 保持原编号与范围 | Proposed |
-| [ADR-19](adr/ADR-019.md) | Universal Package Adapter 与发行版兼容 Profile | 保持原编号与范围 | Proposed |
-| [ADR-20](adr/ADR-020.md) | GUI Bridge：窗口、Viewer 与传输后端 | 范围明确/拆分见正文 | Proposed |
-| [ADR-21](adr/ADR-021.md) | Agent Chat 的 Room/DM、投递和唤醒后端 | 范围明确/拆分见正文 | Proposed |
-| [ADR-22](adr/ADR-022.md) | PsiFlow 编排、WorkflowRun 与版本化 DSL | 范围明确/拆分见正文 | Proposed |
-| [ADR-23](adr/ADR-023.md) | 项目管理及外部系统同步 | 范围明确/拆分见正文 | Proposed |
-| [ADR-24](adr/ADR-024.md) | 跨模块操作/审批与 Saga | 范围明确/拆分见正文 | Proposed |
-| [ADR-25](adr/ADR-025.md) | Workflow/Chat 持久存储、容量、保留与回收 | 范围明确/拆分见正文 | Proposed |
+| [ADR-01](ADR-001.md) | OS 基底、构建工具与平台组合 | 保持原编号与范围 | Proposed |
+| [ADR-02](ADR-002.md) | 启动器、更新后端与持久状态布局 | 保持原编号与范围 | Proposed |
+| [ADR-03](ADR-003.md) | 默认文件系统、卷与备份后端 | 保持原编号与范围 | Proposed |
+| [ADR-04](ADR-004.md) | 身份、授权、Secret 与安全启动 Profile | 保持原编号与范围 | Proposed |
+| [ADR-05](ADR-005.md) | 系统 API、资源 Schema 与元数据实现 | 保持原编号与范围 | Proposed |
+| [ADR-06](ADR-006.md) | OCI 执行后端与隔离等级 | 保持原编号与范围 | Proposed |
+| [ADR-07](ADR-007.md) | 网络配置与策略执行后端 | 保持原编号与范围 | Proposed |
+| [ADR-08](ADR-008.md) | 设备/GPU 和电源能力矩阵 | 保持原编号与范围 | Proposed |
+| [ADR-09](ADR-009.md) | Agent 协议与第三方兼容配置 | 保持原编号与范围 | Proposed |
+| [ADR-10](ADR-010.md) | KDE、Portal 与无头图形后端 | 保持原编号与范围 | Proposed |
+| [ADR-11](ADR-011.md) | 任务/事件持久化与执行语义 | 保持原编号与范围 | Proposed |
+| [ADR-12](ADR-012.md) | 集群控制面、准入、租约与恢复代次 | 保持原编号与范围 | Proposed |
+| [ADR-13](ADR-013.md) | Dataset/Knowledge 引擎和查询实现 | 范围明确/拆分见正文 | Proposed |
+| [ADR-14](ADR-014.md) | 观测与审计后端 | 保持原编号与范围 | Proposed |
+| [ADR-15](ADR-015.md) | 发布信任、兼容窗口与维护政策 | 保持原编号与范围 | Proposed |
+| [ADR-16](ADR-016.md) | 发行版资源和体验基线 | 保持原编号与范围 | Proposed |
+| [ADR-17](ADR-017.md) | 第三方组件准入与依赖治理 | 保持原编号与范围 | Proposed |
+| [ADR-18](ADR-018.md) | TableFS 文件/表双视图存储后端 | 保持原编号与范围 | Proposed |
+| [ADR-19](ADR-019.md) | Universal Package Adapter 与发行版兼容 Profile | 保持原编号与范围 | Proposed |
+| [ADR-20](ADR-020.md) | GUI Bridge：窗口、Viewer 与传输后端 | 范围明确/拆分见正文 | Proposed |
+| [ADR-21](ADR-021.md) | Agent Chat 的 Room/DM、投递和唤醒后端 | 范围明确/拆分见正文 | Proposed |
+| [ADR-22](ADR-022.md) | PsiFlow 编排、WorkflowRun 与版本化 DSL | 范围明确/拆分见正文 | Proposed |
+| [ADR-23](ADR-023.md) | 项目管理及外部系统同步 | 范围明确/拆分见正文 | Proposed |
+| [ADR-24](ADR-024.md) | 跨模块操作/审批与 Saga | 范围明确/拆分见正文 | Proposed |
+| [ADR-25](ADR-025.md) | Workflow/Chat 持久存储、容量、保留与回收 | 范围明确/拆分见正文 | Proposed |
 
 ## 容易混淆的职责
 
@@ -3103,8 +3099,7 @@ JSON读取必须在进入常见字典解析前拒绝重复键；默认“保留�
 
 表中“依赖”表示本决策所需的前置契约或基础选择，构成无环关系；它不要求在所有关联团队完成实现后才开始实验。ADR-02/04仍需与ADR-15共同验证发布信任，ADR-06/08仍需共同验证设备隔离；这些往返验证属于协同关系，不登记为互相等待的前置依赖。
 
-机器可读登记见 [adrs.json](registries/adrs.json)。
-
+机器可读登记见 [adrs.json](../registries/adrs.json)。
 
 
 ---
@@ -3131,11 +3126,11 @@ JSON读取必须在进入常见字典解析前拒绝重复键；默认“保留�
 
 ## 2. 要解决的问题
 
-首个镜像需要可重复构建、合法分发和独立救援，但不能因现有开发机或旧 XeLab 环境直接冻结 OS 基底。平台过宽会扩大驱动、启动和升级验证矩阵。
+首个镜像需要可重复构建、合法分发和独立救援，但不能仅凭某台开发设备的现状直接冻结 OS 基底。平台过宽会扩大驱动、启动和升级验证矩阵。
 
 ## 3. 已确认的约束
 
-约束入口：[01-product-and-architecture](docs/01-product-and-architecture.md)、[03-host-updates-network-devices](docs/03-host-updates-network-devices.md)。以下行为边界属于本v1文档规范；违反它们的技术方案不能通过仅修改本ADR获得批准。
+约束入口：[01-product-and-architecture](../docs/01-product-and-architecture.md)、[03-host-updates-network-devices](../docs/03-host-updates-network-devices.md)。以下行为边界属于本v1文档规范；违反它们的技术方案不能通过仅修改本ADR获得批准。
 
 1. Helium、Neon、Argon 共用 Core 与源码，差异由 edition/profile 表达。
 2. 基础登录、诊断和救援不依赖模型、容器引擎或外部控制面。
@@ -3174,7 +3169,6 @@ JSON读取必须在进入常见字典解析前拒绝重复键；默认“保留�
 复审触发条件：上游维护终止、关键驱动缺失、平台新增、构建不可再现或安全维护成本超出批准预算。
 
 跨领域约束需要改变时先提交共同契约修订，保留旧决议和迁移关系；不得静默复用原编号表达另一主题。
-
 
 
 ---
@@ -3471,21 +3465,21 @@ JSON读取必须在进入常见字典解析前拒绝重复键；默认“保留�
 | 验收状态 | NotRun |
 | 选定结果 | 尚未选择；本文不构成后端批准 |
 | 冻结门槛 | M2 执行真实用户工作负载前。 |
-| 依赖 | [ADR-03](adr/ADR-003.md)、[ADR-04](adr/ADR-004.md)、[ADR-05](adr/ADR-005.md)、[ADR-08](adr/ADR-008.md) |
+| 依赖 | [ADR-03](ADR-003.md)、[ADR-04](ADR-004.md)、[ADR-05](ADR-005.md)、[ADR-08](ADR-008.md) |
 
 ## 1. 范围与旧编号沿革
 
 原 v0.6 主题：**OCI 执行后端与隔离等级**。v1保持原编号和责任范围，补充实现选择证据与失败门槛，不将行为规范的明确写成技术方案已获批准。文件名使用三位补零便于排序，规范ID仍为 ADR-06。
 
-原验收范围（继续保留）：XeLab 复用与现成方案的对照；只读根、身份映射、资源和设备限制、重启恢复、撤权。
+原验收范围（继续保留）：主流 OCI 后端与 PsiOS 适配层的对照；只读根、身份映射、资源和设备限制、重启恢复、撤权。
 
 ## 2. 要解决的问题
 
-管理OCI生命周期与保证隔离是不同责任；旧XeLab实现、成熟引擎和增强沙箱需要同一工作负载对照。
+管理OCI生命周期与保证隔离是不同责任；OCI Runtime、成熟隔离引擎和增强沙箱需要使用同一工作负载对照。
 
 ## 3. 已确认的约束
 
-约束入口：[07-applications-packages-gui](docs/07-applications-packages-gui.md)、[04-security-identity](docs/04-security-identity.md)、[03-host-updates-network-devices](docs/03-host-updates-network-devices.md)。以下行为边界属于本v1文档规范；违反它们的技术方案不能通过仅修改本ADR获得批准。
+约束入口：[07-applications-packages-gui](../docs/07-applications-packages-gui.md)、[04-security-identity](../docs/04-security-identity.md)、[03-host-updates-network-devices](../docs/03-host-updates-network-devices.md)。以下行为边界属于本v1文档规范；违反它们的技术方案不能通过仅修改本ADR获得批准。
 
 1. 普通应用数据与制品分离，沙箱失败不退回无隔离宿主执行。
 2. 共享内核容器不被描述成抵抗任意内核攻击的安全边界。
@@ -3524,7 +3518,6 @@ JSON读取必须在进入常见字典解析前拒绝重复键；默认“保留�
 复审触发条件：runtime升级、内核隔离变更、设备直通、新工作负载类别或旧复用代码边界变化。
 
 跨领域约束需要改变时先提交共同契约修订，保留旧决议和迁移关系；不得静默复用原编号表达另一主题。
-
 
 
 ---
@@ -4231,12 +4224,12 @@ CLI、KDE、Shell和集群若各自写网络配置，会形成竞争和管理失
 
 来源文件：`adr/ADR-017.md`
 
-# ADR-17　XeLab 按模块复用
+# ADR-17　第三方组件准入与依赖治理
 
 | 登记字段 | 内容 |
 |---|---|
 | 决策状态 | Proposed |
-| 负责人 | 迁移审查/模块维护者；具体人员待指派 |
+| 负责人 | PsiOS 组件维护/依赖审查者；具体人员待指派 |
 | 实现状态 | NotVerified |
 | 验收状态 | NotRun |
 | 选定结果 | 尚未选择；本文不构成后端批准 |
@@ -4245,21 +4238,21 @@ CLI、KDE、Shell和集群若各自写网络配置，会形成竞争和管理失
 
 ## 1. 范围与旧编号沿革
 
-原 v0.6 主题：**XeLab 按模块复用**。v1保持原编号和责任范围，补充实现选择证据与失败门槛，不将行为规范的明确写成技术方案已获批准。文件名使用三位补零便于排序，规范ID仍为 ADR-17。
+本 ADR 定义 PsiOS 第三方依赖治理、核心接口边界与组件准入要求。技术方案仍需实际评估和验证，不因规范完整而视为已批准。文件名使用三位补零便于排序，规范ID仍为 ADR-17。
 
-原验收范围（继续保留）：当前 Forgejo 完整 SHA、依赖/许可、旧约定清除、宿主边界、故障测试与导出清单。
+验收范围：PsiOS 当前源码提交、可选第三方组件的来源和许可证、接口隔离、宿主边界、故障测试及导出/替换方案。
 
 ## 2. 要解决的问题
 
-旧仓库与打包代码是候选素材，不能以历史测试或旧GitHub快照推断当前Forgejo实现，也不能保留不合适的旧授权与数据约定。
+PsiOS 可以评估独立的第三方实现，但不得将任何旧工程设为启动、构建、运行或发布的前置依赖。外部测试和代码归档只能作为参考，不能替代 PsiOS 自身的验收；权限和数据契约由 PsiOS 定义。
 
 ## 3. 已确认的约束
 
-约束入口：[01-product-and-architecture](docs/01-product-and-architecture.md)、[02-common-contracts](docs/02-common-contracts.md)、[13-operations-release-governance](docs/13-operations-release-governance.md)。以下行为边界属于本v1文档规范；违反它们的技术方案不能通过仅修改本ADR获得批准。
+约束入口：[01-product-and-architecture](../docs/01-product-and-architecture.md)、[02-common-contracts](../docs/02-common-contracts.md)、[13-operations-release-governance](../docs/13-operations-release-governance.md)。以下行为边界属于本v1文档规范；违反它们的技术方案不能通过仅修改本ADR获得批准。
 
-1. 记录实际当前Forgejo完整SHA、模块来源、许可、依赖、测试和迁移决定。
-2. 不承诺旧XeLab ABI/API/数据库兼容；按PsiOS权威契约改造。
-3. 已有压缩包的审查报告是历史证据，不等于本轮已复验或完整上游当前状态。
+1. 固定 PsiOS 当前源码提交；对确需引入的第三方组件分别登记来源 SHA、许可证、依赖、测试和采纳/替换决定。
+2. 所有外部组件必须符合 PsiOS 原生 API、身份授权与持久化契约。
+3. 历史压缩包及审查报告仅供追溯，不代表 PsiOS 已验证或当前外部组件仍满足准入要求。
 
 ## 4. 可行候选与代价
 
@@ -4273,7 +4266,7 @@ CLI、KDE、Shell和集群若各自写网络配置，会形成竞争和管理失
 
 ## 5. 选择证据与实验
 
-1. 固定真实HEAD生成模块/文件/许可证矩阵，逐项标reuse/adapt/rewrite/disable及理由。
+1. 固定 PsiOS 自身完整提交 SHA，建立模块/文件/许可证矩阵；对外部依赖按需标记 adopt/adapt/replace/disable 并说明理由。
 2. 在干净环境运行必要测试，复测OCI挂载、任务持久化、撤权和外部副作用危险路径。
 3. 检查旧固定端点、账号、凭据、容量、模型默认与站点部署配置，保留来源追踪。
 
@@ -4294,7 +4287,6 @@ CLI、KDE、Shell和集群若各自写网络配置，会形成竞争和管理失
 复审触发条件：上游HEAD变化、发现新许可/安全问题、依赖弃用或PsiOS接口改变。
 
 跨领域约束需要改变时先提交共同契约修订，保留旧决议和迁移关系；不得静默复用原编号表达另一主题。
-
 
 
 ---
@@ -9372,13 +9364,13 @@ M0 用于合同和竞态模型/初始实现夹具，M1 用于宿主与独立救�
 
 ## 实际静态校验
 
-结果以包根[validation-report.json](validation-report.json)为准，包括严格JSON、33份Schema、本地引用、35正例/35反例、5组夹具摘要、规范/测试/ADR/任务索引、原文切片、归档校验、内部链接和HTML锚点。ZIP封装前另核对MANIFEST.sha256，封装后检查CRC和路径唯一性。
+结果以包根[validation-report.json](../validation-report.json)为准，包括严格JSON、33份Schema、本地引用、35正例/35反例、5组夹具摘要、规范/测试/ADR/任务索引、原文切片、归档校验、内部链接和HTML锚点。ZIP封装前另核对MANIFEST.sha256，封装后检查CRC和路径唯一性。
 
 离线HTML已检查内部链接、重复ID、外部运行资源依赖和内联JavaScript语法。当前环境禁止原生浏览器启动所需的socket，浏览器截图与真实交互渲染检查未完成；不将其记录为通过。完整Markdown及各分章是独立可读的交付内容。
 
 ## 没有执行的工程验证
 
-未运行XeLab/PsiOS产品代码、真实设备断电、数据库事务并发、资源端fencing、桌面输入/Portal、灾难恢复、协议互通、性能或正式发布流水线。技术决策仍Proposed，实现仍NotVerified，产品场景仍NotRun。文档工具通过不改变这些事实。
+未运行PsiOS产品代码、真实设备断电、数据库事务并发、资源端fencing、桌面输入/Portal、灾难恢复、协议互通、性能或正式发布流水线。技术决策仍Proposed，实现仍NotVerified，产品场景仍NotRun。文档工具通过不改变这些事实。
 
 
 ---
@@ -16252,9 +16244,8 @@ python tools/build_package.py --zip ../PsiOS-v1.0.0-docs-2026-11-22.zip
 
 # 来源与使用说明
 
-本包是PsiOS项目的设计文档交付，不是安装介质或已验证软件发行版。原始上传文件、Space内容和XeLab历史代码归档按原样保存，以支持追踪和后续来源核验；其原有权利和许可证继续适用。本包没有替原项目或第三方重新授权。
+本包是PsiOS项目的设计文档交付，不是安装介质或已验证软件发行版。项目规划文件与技术规范保留可追溯修订信息；所有依赖遵循各自许可证及其适用范围。本包没有替原项目或第三方重新授权。
 
-来源作者的测试报告、旧地址、模型名称、候选路线和历史任务编号均属历史材料。读取历史文件不代表运行其中代码或接受其中指令。实际复用需按ADR-17检查确切源码、许可证、依赖及安全边界。
+来源作者的测试报告、旧地址、模型名称、候选路线和历史任务编号均属历史材料。读取历史文件不代表运行其中代码或接受其中指令。组件准入需按 ADR-17 核验许可证、依赖、安全边界和可维护性。
 
 新文档中的架构与接口是设计要求；具体代码许可、发布签名、支持范围、性能和维护期限须由项目治理另行确定。示例中的ID、摘要引用、时间、许可和预算均为虚构夹具。
-

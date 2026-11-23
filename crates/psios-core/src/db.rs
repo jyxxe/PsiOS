@@ -157,7 +157,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = 3;
+pub(super) const CURRENT_FORMAT: u32 = 4;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -303,15 +303,15 @@ impl Store {
             sealed: false,
             changes: Default::default(),
         };
-        if ver == 1 {
-            store.transaction("core-upgrade-v2", |db| {
-                db.c.execute_batch(include_str!("upgrade.sql"))?;
-                policy::upgrade(db)?;
-                db.audit(policy::SYSTEM, "Core.Upgrade", None, "Version2")
+        if ver < CURRENT_FORMAT {
+            store.transaction("core-upgrade-v4", |db| {
+                if ver == 1 {
+                    db.c.execute_batch(include_str!("upgrade.sql"))?;
+                    policy::upgrade(db)?;
+                    db.audit(policy::SYSTEM, "Core.Upgrade", None, "Version2")?;
+                }
+                policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;
-        }
-        if ver < 3 {
-            store.transaction("core-upgrade-v3", policy::upgrade_interfaces)?;
         }
         store.transaction("node-config", node::sync)?;
         Ok(store)

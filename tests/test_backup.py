@@ -1,0 +1,81 @@
+"""Verify stored recovery sets without allocating a volume or granting access to its contents."""
+import os
+import unittest
+from support import Failure, Node, target
+
+
+class BackupTests(unittest.TestCase):
+    def setUp(self):
+        self.n = Node("target/debug")
+        self.addCleanup(self.n.close)
+        volume = self.n.perform("volume.create", {"name": "records"})
+        volume = self.n.perform("volume.mkdir", dict(target=target(volume), path="nested"))["volume_ref"]
+        self.volume = self.n.perform("volume.append", dict(target=target(volume), path="nested/binary",
+                                    offset=0, data_base64="AAEC/w=="))["volume_ref"]
+        self.backup = self.n.perform("backup.create", target(self.volume))
+        self.grant = self.issue("local-owner", self.backup["resource_id"])
+        self.folder = self.n.state / "backups" / self.backup["resource_id"]
+
+    def issue(self, actor, scope):
+        grant = self.n.call("Grant.Issue", dict(principal_id=actor, tool_targets=[scope],
+                            actions=["task.submit", "task.read", "backup.verify"], units=50, ttl_seconds=300))
+        return grant["delegation_ref"]["resource_id"]
+
+    def submit_check(self, delegation, token=None):
+        submit = self.n.prepare("backup.verify", target(self.backup), delegation=delegation, token=token)
+        return self.n.call("Task.Submit", submit, token)["task_id"]
+
+    def check(self):
+        return self.n.wait(self.submit_check(self.grant))
+
+    def test_verification_obeys_scope_and_needs_no_pool_allocation(self):
+        n = self.n
+        foreign = n.call("Agent.Register", {"name": "auditor"})
+        for delegation, token in [("owner-delegation", n.owner),
+                                  (self.issue(foreign["principal_id"], self.backup["resource_id"]), foreign["token"]),
+                                  (self.issue("local-owner", self.volume["resource_id"]), n.owner)]:
+            with self.assertRaises(Failure) as failure:
+                self.submit_check(delegation, token)
+            self.assertEqual(failure.exception.code, "PermissionDenied")
+        pool = n.call("StoragePool.Get", {"id": "local"})["pool_ref"]
+        n.call("StoragePool.Configure", dict(**target(pool), allocation_enabled=False))
+        volumes = set((n.state / "volumes").iterdir())
+        digest = n.get(self.backup["resource_id"])["value"]["manifest_digest"]
+        job = self.check()
+        self.assertEqual(job["lifecycle"], "Succeeded", job)
+        report = n.call("Artifact.Read", {"reference": job["result"]["artifact_refs"][0]})
+        self.assertEqual((report["backup_ref"], report["entries"], report["bytes"], report["manifest_digest"]),
+                         (self.backup, 2, "4", digest))
+        self.assertEqual(n.get(self.backup["resource_id"])["reference"], self.backup)
+        self.assertEqual(set((n.state / "volumes").iterdir()), volumes)
+
+    def test_manifest_and_blob_faults_release_the_backup_and_preserve_source(self):
+        blob = next(self.folder.glob("blob-*"))
+        manifest = self.folder / "manifest.json"
+        initial = blob.read_bytes()
+        original = manifest.read_bytes()
+        for path, corrupted in [(blob, b"xxxx"), (blob, b""), (manifest, original + b" ")]:
+            saved = path.read_bytes()
+            path.write_bytes(corrupted)
+            job = self.check()
+            self.assertEqual((job["lifecycle"], job["conditions"][0]["type"]), ("Failed", "PreconditionFailed"), job)
+            path.write_bytes(saved)
+        blob.unlink()
+        os.mkfifo(blob)
+        self.assertEqual(self.check()["lifecycle"], "Failed")
+        blob.unlink()
+        blob.write_bytes(initial)
+        manifest.unlink()
+        manifest.symlink_to(blob)
+        self.assertEqual(self.check()["lifecycle"], "Failed")
+        manifest.unlink()
+        with manifest.open("wb") as f:
+            f.truncate(73 * 1024 * 1024)
+        self.assertEqual(self.check()["conditions"][0]["type"], "QuotaExceeded")
+        manifest.write_bytes(original)
+        self.n.stop()
+        self.n.start()
+        self.assertEqual(self.check()["lifecycle"], "Succeeded")
+        restored = self.n.perform("backup.restore", target(self.backup))
+        data = self.n.perform("volume.read_chunk", dict(target=target(restored), path="nested/binary", offset=0, limit=4))
+        self.assertEqual(data["data_base64"], "AAEC/w==")

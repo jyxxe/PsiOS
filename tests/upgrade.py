@@ -20,6 +20,7 @@ def main(previous):
         s = n.prepare("system.status", {}, "accepted-before-upgrade", credential, d)
         v = n.perform("volume.create", dict(name="old-volume"))
         v = n.perform("volume.write", dict(**target(v), name="old-data", content="retained"))["volume_ref"]
+        legacy_backup = n.perform("backup.create", target(v))
         legacy_secret = n.call("Secret.Put", dict(name="previous-secret", value="old-key"))
         n.stop()
         base = json.loads(n.config.read_text())
@@ -49,6 +50,13 @@ def main(previous):
         assert n.call("Task.LookupSubmission", s, credential)["accepted"]["task_id"] == receipt["task_id"]
         assert n.call("Task.Submit", s, credential)["deduplicated"]
         assert n.perform("volume.read", dict(**target(v), name="old-data"))["content"] == "retained"
+        grant = n.call("Grant.Issue", dict(principal_id="local-owner", actions=["task.submit", "task.read", "backup.verify"],
+                       units=2, ttl_seconds=120, tool_targets=[legacy_backup["resource_id"]]))
+        verify = n.prepare("backup.verify", target(legacy_backup), delegation=grant["delegation_ref"]["resource_id"])
+        checked = n.wait(n.call("Task.Submit", verify)["task_id"])
+        assert checked["lifecycle"] == "Succeeded", checked
+        evidence = n.call("Artifact.Read", {"reference": checked["result"]["artifact_refs"][0]})
+        assert evidence["bytes"] == str(len("retained")) and evidence["backup_ref"] == legacy_backup
         n.approve(w)
         assert n.wait(w)["lifecycle"] == "Succeeded"
         try:
@@ -60,7 +68,7 @@ def main(previous):
         assert n.call("Budget.Get", {"id": g["budget_ref"]["resource_id"]}, credential)["model_calls_maximum"] == 0
         n.stop()
         with sqlite3.connect(n.state / "state.db") as db:
-            assert db.execute("PRAGMA user_version").fetchone() == (3,)
+            assert db.execute("PRAGMA user_version").fetchone() == (4,)
         old = subprocess.run([str(Path(previous) / "psiosd"), "--config", n.config, "serve"], capture_output=True)
         assert old.returncode != 0 and b"SchemaVersionUnsupported" in old.stderr
         n.start()

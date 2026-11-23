@@ -82,6 +82,10 @@ volume.write、volume.delete、volume.activate、backup.delete、application.ins
 
 应用停止后，backup.create 才能取得排他占用。后端保存文件内容、长度、模式、目录和摘要，支持服务 UID/GID 的普通文件及目录。遇到符号链接、硬链接文件、扩展属性或嵌套挂载会拒绝备份。单份备份上限 256 MiB、4096 个条目。恢复核验权威记录的清单摘要和每个文件的内容摘要，在暂存目录完成后发布新卷。故障域为同一本机文件系统，故障保证为单卷离线 crash_consistent。卸载应用保留卷，原卷与恢复卷具有不同身份及数据世代。
 
+### 原地核验一份备份
+
+停用新卷分配时也能用 `backup.verify` 检查已存备份。给实际备份所有者签发含 `task.submit`、`task.read`、`backup.verify` 且 `tool_targets` 指向该 Backup ID 的 Grant，使用它的 delegation 提交 Task。输入与恢复一样要求备份 ID 和预期修订。核验与还原共用清单摘要和逐文件流式内容检查。核验期间占用该备份，阻止其他 Task 同时删除或恢复它。成功结果记录 `backup_ref`、`manifest_digest`、`entries`、`bytes` 和 `verified_at`，不会分配新卷。启动应用及验证其中数据库的可读性仍需实际恢复演练。
+
 ## 持久状态与恢复
 
 任务元数据、输入保留、幂等回执、预算预留、Operation 及事件在同一个 SQLite 事务内提交。每个资源版本同时是一条有序持久事件。服务保存历史修订、操作记录和取消墓碑。每个主体最多保留 4096 个不同输入，总输入上限 64 MiB。队列另有独立上限。当前版本尚无归档与检索历史的 GC。

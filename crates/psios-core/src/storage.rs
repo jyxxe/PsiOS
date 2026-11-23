@@ -21,6 +21,9 @@ use std::{
 
 const MAX_BACKUP: u64 = 256 * 1024 * 1024;
 const MAX_ENTRIES: usize = 4096;
+// A capture permits 33 components of 240 bytes per path. Quotes and backslashes
+// can double their JSON representation. Keep room for digests and manifest metadata.
+const MAX_MANIFEST: u64 = 72 * 1024 * 1024;
 pub fn filename(s: &str) -> Result<()> {
     require(
         !s.is_empty()
@@ -171,7 +174,7 @@ fn create_volume(w: &Work, restore: Option<&Doc>) -> Result<Value> {
     let data = stage.path().join("data");
     private_dir(&data, true)?;
     if let Some(backup) = restore {
-        restore_backup(&w.cfg, backup, &data)?
+        inspect_backup(&w.cfg, backup, Some(&data))?;
     }
     new_file(
         &stage.path().join("identity"),
@@ -320,7 +323,7 @@ impl Capture<'_> {
         Ok(())
     }
 }
-fn copy_hash(r: &mut File, w: &mut File, max: u64) -> Result<(u64, String)> {
+fn copy_hash(r: &mut File, w: &mut impl Write, max: u64) -> Result<(u64, String)> {
     let mut hash = Sha256::new();
     let mut buf = [0u8; 32 * 1024];
     let mut len = 0;
@@ -375,48 +378,93 @@ fn backup(w: &Work) -> Result<Value> {
         "entries": capture.entries.len()
     }))
 }
-fn restore_backup(cfg: &Config, b: &Doc, target: &Path) -> Result<()> {
-    let src = cfg.state_dir.join("backups").join(&b.id);
-    let bytes = fs::read(src.join("manifest.json"))?;
+#[derive(Deserialize)]
+struct BackupManifest {
+    backup_id: String,
+    source: Value,
+    entries: Vec<Entry>,
+    total_bytes: String,
+}
+
+fn backup_files(cfg: &Config, b: &Doc) -> Result<(File, Vec<u8>)> {
+    let parent = cfg.state_dir.join("backups");
+    private_dir(&parent, false)?;
+    let parent = File::open(parent)?;
+    let root = child(&parent, &b.id, OFlags::RDONLY | OFlags::DIRECTORY)?;
+    let manifest = child(&root, "manifest.json", OFlags::RDONLY)?;
+    let meta = manifest.metadata()?;
+    regular(&meta)?;
+    require(
+        meta.len() <= MAX_MANIFEST,
+        "QuotaExceeded",
+        "backup manifest size limit",
+    )?;
+    let mut bytes = Vec::new();
+    manifest.take(MAX_MANIFEST + 1).read_to_end(&mut bytes)?;
+    require(
+        bytes.len() as u64 <= MAX_MANIFEST,
+        "QuotaExceeded",
+        "backup manifest size limit",
+    )?;
     require(
         sha256(&bytes) == b.body["manifest_digest"],
         "PreconditionFailed",
         "backup manifest integrity failed",
     )?;
-    let m = psios_api::parse(&bytes)?;
+    Ok((root, bytes))
+}
+
+// Verification and restore read exactly the same authority-bound recovery set.
+fn inspect_backup(cfg: &Config, b: &Doc, destination: Option<&Path>) -> Result<Value> {
+    let (root, bytes) = backup_files(cfg, b)?;
+    let m: BackupManifest = serde_json::from_slice(&bytes)?;
     require(
-        m["backup_id"] == b.id && m["source"] == b.spec["source_ref"],
+        m.backup_id == b.id
+            && m.source == b.spec["source_ref"]
+            && m.entries.len() <= MAX_ENTRIES
+            && b.body["entries"] == m.entries.len()
+            && b.body["bytes"] == m.total_bytes,
         "PreconditionFailed",
-        "backup source mismatch",
+        "backup manifest disagrees with authority",
     )?;
-    let entries: Vec<Entry> = decode(&m["entries"])?;
     let mut dirs = vec![];
     let mut total = 0;
-    for (i, e) in entries.iter().enumerate() {
+    for (i, e) in m.entries.iter().enumerate() {
         for part in e.path.split('/') {
             filename(part)?
         }
-        let path = target.join(&e.path);
+        let path = destination.map(|dir| dir.join(&e.path));
         if let Some(expected) = &e.digest {
-            let mut f = File::create_new(&path)?;
-            let mut original = child(&File::open(&src)?, &format!("blob-{i}"), OFlags::RDONLY)?;
-            regular(&original.metadata()?)?;
-            let (len, hash) = copy_hash(&mut original, &mut f, MAX_BACKUP - total)?;
+            let mut original = child(&root, &format!("blob-{i}"), OFlags::RDONLY)?;
+            let meta = original.metadata()?;
+            regular(&meta)?;
+            require(
+                meta.len() == e.bytes && e.bytes <= MAX_BACKUP - total,
+                "PreconditionFailed",
+                "backup blob length mismatch",
+            )?;
+            let mut output = path.map(File::create_new).transpose()?;
+            let (len, hash) = match &mut output {
+                Some(file) => copy_hash(&mut original, file, e.bytes)?,
+                None => copy_hash(&mut original, &mut std::io::sink(), e.bytes)?,
+            };
             require(
                 hash == *expected && len == e.bytes,
                 "PreconditionFailed",
                 "backup content integrity failed",
             )?;
             total += len;
-            f.set_permissions(Permissions::from_mode(e.mode))?;
-            f.sync_all()?;
-        } else {
+            if let Some(f) = output {
+                f.set_permissions(Permissions::from_mode(e.mode))?;
+                f.sync_all()?;
+            }
+        } else if let Some(path) = path {
             fs::create_dir(&path)?;
             dirs.push((path, e.mode))
         }
     }
     require(
-        m["total_bytes"].as_str().and_then(|v| v.parse().ok()) == Some(total),
+        m.total_bytes.parse::<u64>().ok() == Some(total),
         "PreconditionFailed",
         "backup length mismatch",
     )?;
@@ -425,7 +473,10 @@ fn restore_backup(cfg: &Config, b: &Doc, target: &Path) -> Result<()> {
         d.set_permissions(Permissions::from_mode(mode))?;
         d.sync_all()?
     }
-    Ok(())
+    Ok(
+        json!({"backup_ref":b.reference(), "manifest_digest":b.body["manifest_digest"],
+              "verified_at":now(), "entries":m.entries.len(), "bytes":m.total_bytes}),
+    )
 }
 // Names are resolved beneath a pinned directory. A nested mount is never traversed.
 fn remove_contents(dir: &File, depth: usize) -> Result<()> {
@@ -480,16 +531,11 @@ pub fn perform(w: &Work) -> Result<Value> {
         Action::Create { .. } => create_volume(w, None),
         Action::Restore(_) => create_volume(w, Some(&w.target)),
         Action::Backup(_) => backup(w),
+        Action::VerifyBackup(_) => inspect_backup(&w.cfg, &w.target, None),
         Action::DeleteBackup(_) => {
             let root = w.cfg.state_dir.join("backups").join(&w.target.id);
-            private_dir(&root, false)?;
-            let manifest = fs::read(root.join("manifest.json"))?;
-            require(
-                sha256(&manifest) == w.target.body["manifest_digest"],
-                "PreconditionFailed",
-                "backup identity mismatch",
-            )?;
-            remove_contents(&File::open(&root)?, 0).map_err(unknown)?;
+            let (dir, _) = backup_files(&w.cfg, &w.target)?;
+            remove_contents(&dir, 0).map_err(unknown)?;
             fs::remove_dir(&root).map_err(unknown)?;
             File::open(root.parent().unwrap())?
                 .sync_all()

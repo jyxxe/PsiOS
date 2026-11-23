@@ -6,7 +6,7 @@
 
 | 原编号 | Space v0.6 | Project 路线/导入 v0.6 | v1 处置 |
 |---|---|---|---|
-| P0-01 | 固定当前 Forgejo HEAD；TaskEngine/EventStore/Broker/OCI/Identity/Storage/SDK/WebUI 复用矩阵 | 固定本地 Forgejo 最新 HEAD；XeLab 来源和许可证审计 | 意图相近，保留两个来源；真正执行项仍需实际仓库和 HEAD |
+| P0-01 | 核验 PsiOS 当前提交；建立 Task/Event/Broker/OCI/Identity/Storage/SDK/WebUI 模块接口矩阵 | 以 PsiOS 源码、组件版本、依赖许可证和验收证据为准 | 方案的生效取决于 PsiOS 当前实现证据与审查记录 |
 | P0-02 | 建立 docs/architecture、docs/adr、api/schema、tests/contracts 骨架 | 同类骨架与 CI 证据 | 可合并目标；“目录存在”不等于 CI 或产品验收完成 |
 | P0-03 | Principal/Grant/Delegation/Approval/Operation/**Resource/Event** 样例及统一错误码 | Principal/Grant/Delegation/Approval/Operation、**Task/Run/WorkflowRun/Conversation/Message** | 范围重叠但不相同；共同 Schema 工作必须取完整并集，不能选一边而遗漏另一边 |
 | **P0-04** | **Task/Run、Event outbox、WorkflowRun、Message、WorkItem 的权威/状态机 ADR** | **SecurityState 受限灾难恢复、无可信撤权记录时隔离** | 同号不同工作，禁止按裸 ID 合并；分别归共同契约/编排和恢复安全工作 |
@@ -42,7 +42,7 @@ ADR-01～20 保留原主题连续性；所有 ADR 的实际批准状态必须来
 | Space 第35章小节 | 从35.9开始，继承合并前结构 | v1按领域章节重排；旧section作为溯源，不虚构35.1～35.8正文 |
 | Project 导入版标题v0.6 | 容易被当作Space完整逐字导出 | 明确它包含v0.5全文和v0.6风险/路线前言；独有Space章节另行取得并合并 |
 | 原风险“SpecResolved/风险闭合” | 容易被理解成漏洞已修复、测试通过 | 只表示设计层有处理约束；实现NotVerified、验收NotRun |
-| XeLab 历史模块名 `psios-*` | 容易被理解成已实现PsiOS v1 | 只是历史导出crate名称；当前仓库HEAD、集成、安全默认值及测试仍需验证 |
+| 模块命名与实现状态 | 模块名称不证明软件功能已经实现 | 以 PsiOS 自身源码、集成测试及功能验收结果为准 |
 
 ## 4. 版本变体与真正冲突分开
 

@@ -15,6 +15,4 @@ Build with `cargo build --locked --workspace`. For installation on an existing s
 - [Architecture and API contracts](docs/v1/docs/00-reading-and-authority.md)
 - [ADR register](docs/v1/adr/README.md)
 - [Acceptance plans](docs/v1/acceptance/README.md)
-- [Document validation report](docs/v1/validation-report.json)
-
-Historical sources are reference material only. PsiOS implementation status is determined exclusively by its own source commits, interfaces, and verified tests.
+- [Document validation report](docs/v1/validation-report.json)\n

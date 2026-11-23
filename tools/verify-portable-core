@@ -1,0 +1,18 @@
+#!/bin/bash
+# Verify the whole standalone Core archive before reading its embedded revision.
+set -euo pipefail
+if [[ $# -lt 2 || $# -gt 4 || ! $2 =~ ^[0-9a-f]{40}$ ]]; then
+    echo "usage: $0 ARCHIVE EXPECTED_FULL_MAIN_SHA [ATTESTATION_BUNDLE [TRUSTED_ROOT_JSONL]]" >&2
+    exit 2
+fi
+archive=$(realpath -e -- "$1")
+sha=$2
+shift 2
+source "$(dirname "$0")/lib/attestation.sh"
+verify_core_attestation portable.yml "$sha" "$archive" "$@"
+revision=$(tar -xOzf "$archive" source-commit)
+if [[ $revision != "$sha" ]]; then
+    echo "archive source differs from the requested revision" >&2
+    exit 1
+fi
+printf 'Verified %s from %s\n' "${archive##*/}" "$sha"

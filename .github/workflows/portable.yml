@@ -1,0 +1,109 @@
+name: PsiOS standalone Core
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: psios-portable-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  portable-core:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build standalone amd64 binaries with the Alpine musl toolchain
+        run: tools/build-portable-core "$RUNNER_TEMP/psios-core-linux-amd64.tar.gz"
+      - name: Run the system API and crash recovery suite as an offline unprivileged Alpine user
+        run: |
+          mkdir "$RUNNER_TEMP/standalone"
+          cd "$RUNNER_TEMP/standalone"
+          tar -xzf "$RUNNER_TEMP/psios-core-linux-amd64.tar.gz"
+          sha256sum --strict --check SHA256SUMS
+          test "$(cat source-commit)" = "$GITHUB_SHA"
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --user 65534:65534 --tmpfs /tmp:rw,nosuid,nodev,size=128m,mode=1777 \
+            --mount "type=bind,src=$PWD,dst=/core,readonly" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/tests,dst=/tests,readonly" \
+            python@sha256:f9a9704946281a492ad813560c8fd26d81bd9b81197db8acea2c0e46d18b713d \
+            python3 -B /tests/system.py --bin-dir /core
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: psios-core-linux-amd64
+          path: ${{ runner.temp }}/psios-core-linux-amd64.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  attest:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'jyxxe/PsiOS'
+    needs: portable-core
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: psios-core-linux-amd64
+          path: ${{ runner.temp }}/archive
+      - name: Check the tested archive revision
+        run: |
+          revision=$(tar -xOzf "$RUNNER_TEMP/archive/psios-core-linux-amd64.tar.gz" source-commit)
+          test "$revision" = "$GITHUB_SHA"
+      - name: Attest the complete archive
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/archive/psios-core-linux-amd64.tar.gz
+          create-storage-record: false
+      - name: Retain the offline verification bundle
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: cp -- "$BUNDLE" "$RUNNER_TEMP/provenance.jsonl"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: psios-core-linux-amd64-attestation
+          path: ${{ runner.temp }}/provenance.jsonl
+          if-no-files-found: error
+          retention-days: 14
+
+  verify:
+    needs: attest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: psios-core-linux-amd64
+          path: ${{ runner.temp }}/archive
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: psios-core-linux-amd64-attestation
+          path: ${{ runner.temp }}/bundle
+      - name: Verify the published bytes offline and reject a modified archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          archive="$RUNNER_TEMP/archive/psios-core-linux-amd64.tar.gz"
+          bundle="$RUNNER_TEMP/bundle/provenance.jsonl"
+          trust="$RUNNER_TEMP/trusted_root.jsonl"
+          gh attestation trusted-root > "$trust"
+          offline=(sudo unshare --net runuser -u "$(id -un)" -- env GH_TOKEN=offline)
+          "${offline[@]}" tools/verify-portable-core "$archive" "$GITHUB_SHA" "$bundle" "$trust"
+          printf x >> "$archive"
+          if "${offline[@]}" tools/verify-portable-core "$archive" "$GITHUB_SHA" "$bundle" "$trust"; then
+            echo 'Modified archive unexpectedly verified' >&2
+            exit 1
+          fi

@@ -9,6 +9,7 @@ Build with `cargo build --locked --workspace`, or use the [portable amd64 Core b
 ## Documentation
 
 - [Implementation status, measured scope and remaining gaps](docs/implementation-status.md)
+- [Build and boot an independent PsiOS UEFI development disk](docs/native-disk.md)
 - [Offline inspection of a stopped node's ext4 disk image](docs/offline-rescue.md)
 - [Documentation index](docs/README.md)
 - [v1.0.0 full documentation set](docs/v1/README.md)

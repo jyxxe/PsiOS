@@ -271,7 +271,7 @@
     "rejection_conditions": "默认privileged、共享宿主root/引擎Socket、清理失败毁坏独立数据、或无资源强制却宣称严格配额。",
     "fallback": "只发布已验证的隔离Profile；不满足高风险任务要求时拒绝准入，不放宽到宿主root执行。",
     "review_triggers": "runtime升级、内核隔离变更、设备直通、新工作负载类别或旧复用代码边界变化。",
-    "legacy_validation_scope": "XeLab 复用与现成方案的对照；只读根、身份映射、资源和设备限制、重启恢复、撤权。",
+    "legacy_validation_scope": "标准 OCI 执行后端与适配方案的对照；只读根、身份映射、资源和设备限制、重启恢复、撤权。",
     "legacy_gate": "M2 执行真实用户工作负载前。"
   },
   {
@@ -757,7 +757,7 @@
     "adr_id": "ADR-17",
     "path": "adr/ADR-017.md",
     "title": "第三方组件准入与依赖治理",
-    "legacy_title": "XeLab 按模块复用",
+    "legacy_title": "模块准入与依赖治理",
     "scope_change": "原专题从特定旧项目迁移调整为 PsiOS 通用组件准入；保留历史映射",
     "status": "Proposed",
     "owner_role": "PsiOS 组件维护/依赖审查者",

@@ -4,7 +4,7 @@
 
 ## 从 PR #1 升级
 
-停服并按本机恢复要求保存 state 和 witness。新版首次打开旧库时核对数据库、见证和密钥，在一次带见证的事务中升级至格式 5。旧格式 1 还会迁移到多工作线程的资源和预算结构；已有授权和预算原样保留。格式 3 登记了网络接口观测，格式 4 增加备份核验，二者均需显式授权。格式 5 给模型租约记录 Linux 启动身份和经过时间期限。升级前已经结算的模型回执可继续查询。旧库中尚未结算的调用缺少启动证明，Provider 需要使用新的领取键并消耗新一轮预算。旧二进制拒绝打开超出自身支持范围的格式。离线 `psiosd verify` 报告是否需要升级，`check` 或启动服务会执行升级。已有 Agent 的权限、预算、凭据、取消墓碑、审批和任务身份按原记录保留。涉及绑定卷的新派发会检查卷版本。若旧应用启动计划缺少这个前提，需要提交新计划。
+停服并按本机恢复要求保存 state 和 witness。新版首次打开旧库时核对数据库、见证和密钥，在一次带见证的事务中升级至格式 6。旧格式 1 还会迁移到多工作线程的资源和预算结构。格式 3 登记了网络接口观测，格式 4 增加备份核验。格式 5 给模型租约记录 Linux 启动身份和经过时间期限。格式 6 登记路由观测工具，仍需显式授权。升级前已经结算的模型回执可继续查询。从格式 4 或更早升级时，未结算的旧模型调用缺少启动证明，Provider 需要使用新的领取键并消耗新一轮预算。旧二进制拒绝打开超出自身支持范围的格式，软件回退需恢复升级前配对保存的 state 和 witness。离线 `psiosd verify` 报告是否需要升级，`check` 或启动服务会执行升级。已有 Agent 的权限、预算、凭据、取消墓碑、审批和任务身份按原记录保留。涉及绑定卷的新派发会检查卷版本。若旧应用启动计划缺少这个前提，需要提交新计划。
 
 ## 宿主与调度
 
@@ -15,7 +15,7 @@
 
 ### 网络接口与地址
 
-`node.interfaces` 通过 Task 返回本地网络命名空间中接口的 ifindex、名称、MTU、链路类型、运行状态、标志和已分配的 IPv4/IPv6 地址。地址含前缀长度和 scope，点对点配置另有 peer。结果同时记录 Linux boot ID、网络命名空间 inode 和观测时间。网卡驱动与地址由现有 Linux 网络管理器配置。此接口仅观测，DNS、路由、远端连通性及配置事务尚待实现。
+`node.interfaces` 通过 Task 返回本地网络命名空间中接口的 ifindex、名称、MTU、链路类型、运行状态、标志和已分配的 IPv4/IPv6 地址。地址含前缀长度和 scope，点对点配置另有 peer。结果同时记录 Linux boot ID、网络命名空间 inode 和观测时间。网卡驱动与地址由现有 Linux 网络管理器配置。
 
 详细拓扑需要显式授权。以下命令接续本机指南中的 `ctl` 函数。为其他 Agent 颁发时替换 principal_id 并使用其凭据执行 Task。
 
@@ -28,6 +28,20 @@ ctl wait "$task" | jq '{reference:.result.artifact_refs[0]}' | ctl call Artifact
 ```
 
 使用结果的 `next_after_ifindex` 作为下一次 Task 的 `after_ifindex`，并为新页提供新的幂等键。单页上限 128 个接口。本机 iproute2 后端最多读取 192 KiB 输出；缺少该命令或只有 BusyBox 时，Core 直接读取 Linux RTNETLINK 的接口与地址，每次内核转储上限 1 MiB。两个后端均有五秒期限，权限及结果字段一致。独立 UEFI 开发盘启动时启用环回接口，盘点可在无外部网卡和无 iproute2 时完成。超限或驱动不可用时返回错误。各页反映各次采样时的配置；接口热插拔后 index 可以复用。打包单元允许读取 netlink，服务以普通专用账户运行。
+
+### 路由表观测
+
+`node.routes` 在本机权威所在的网络命名空间直接读取 RTNETLINK。动态路由和管理员配置均由 Linux 路由表提供。可用 `family`（`inet` 或 `inet6`）和数字 `table` 过滤。省略两者时读取两种地址族的全部路由表。默认路由表示为 `0.0.0.0/0` 或 `::/0`。路由记录包含按 Linux 编号表示的 `kind`、`protocol` 和 `scope`，以及目标、源前缀、优先级 `metric`、首选源、网关、出口 ifindex、多下一跳及可选 `nexthop_id`。内核编号和 ifindex 适用于返回的 boot ID 和网络命名空间。策略路由规则、下一跳对象细节、实际选路与可达性验证仍待开发。[Linux RTNETLINK](https://docs.kernel.org/userspace-api/netlink/intro.html)
+
+```bash
+node=$(ctl node | jq -er .reference.resource_id)
+grant=$(jq -n --arg node "$node" '{principal_id:"local-owner",actions:["task.submit","task.read","node.routes"],
+  tool_targets:[$node],ttl_seconds:300,units:8}' | ctl call Grant.Issue | jq -er .delegation_ref.resource_id)
+task=$(echo '{"family":"inet","table":254,"limit":32}' | ctl submit node.routes --delegation "$grant" --key route-page-1 | jq -er .task_id)
+ctl wait "$task" | jq '{reference:.result.artifact_refs[0]}' | ctl call Artifact.Read
+```
+
+`next_cursor` 可直接作为同一主体、委托和过滤条件下新 Task 的 `cursor`。每页重新核对排序后的可见路由摘要。结果变动时新 Task 以 `ResyncRequired` 结束，可从首页重新观测。已结算页作为原 Task 的制品保留。默认每页 32 条，上限 128 条和 128 KiB 路由数据。每种地址族的内核转储限 1 MiB，整个查询限时五秒。丢包、中断或超限时 Task 失败。两种地址族分别采样，结果适合作为诊断观察。[命名空间与变更测试](../tests/test_network.py)
 
 ### 受管 systemd 服务
 

@@ -15,10 +15,9 @@ base64 = "0.22"
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 ring = "0.17"
-rustix = { version = "1", features = ["fs", "net", "process", "time"] }
+rustix = { version = "1", features = ["event", "fs", "net", "process", "time"] }
 signal-hook = "0.3"
 tempfile = "3"
 zeroize = "1"
-rtnetlink = "0.24"
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
-tokio = { version = "1", features = ["rt", "time", "net"] }
+netlink-packet-core = "0.9"
+netlink-packet-route = "0.34"

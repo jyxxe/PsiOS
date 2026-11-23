@@ -36,22 +36,38 @@ jobs:
         run: |
           python3 tests/system.py
           python3 -m unittest discover -s tests -p 'test_*.py' -v
-      - name: Verify scoped addresses in a private Linux network namespace
+      - name: Verify scoped addresses and routes in a private Linux network namespace
         run: |
           sudo unshare --net --mount --propagation private sh -ec '
             ip link set lo up
             ip address add 192.0.2.1 peer 192.0.2.2/32 dev lo
             ip -6 address add 2001:db8::2/64 dev lo nodad
-            runuser -u "$1" -- python3 -m unittest discover -s tests -p test_network.py -v
+            ip link add psios-test type dummy
+            ip link set psios-test up
+            ip address add 198.51.100.2/24 dev psios-test
+            ip -6 address add 2001:db8:1::2/64 dev psios-test nodad
+            ip -4 route add default via 198.51.100.1 dev psios-test metric 23 table 1000
+            ip -6 route add default via 2001:db8:1::1 dev psios-test metric 24 table 1000
+            ip -6 route add 2001:db8:2::/64 from 2001:db8:1::/64 via 2001:db8:1::1 dev psios-test table 1000
+            ip -4 route add blackhole 203.0.113.128/25 table 1000 metric 900
+            ip -4 route add 203.0.113.0/25 table 1000 nexthop via 198.51.100.3 dev psios-test weight 1 nexthop via 198.51.100.4 dev psios-test weight 256
+            ip -4 route add 192.0.2.0/24 via inet6 2001:db8:1::1 dev psios-test table 1000
+            ip -4 nexthop add id 123 via 198.51.100.5 dev psios-test
+            ip -4 route add 198.18.0.0/24 nhid 123 table 1000
+            PSIOS_TEST_MUTATE_ROUTES=1 python3 -B -m unittest discover -s tests -p test_network.py -v
             ref=$(mktemp)
+            routes=$(mktemp)
+            trap "rm -f \"$ref\" \"$routes\"" EXIT
             ip -j address show > "$ref"
-            chown "$1" "$ref"
+            { printf "["; ip -j -N link show; printf ","; ip -j -N -4 route show table all;
+              printf ","; ip -j -N -6 route show table all; printf "]\n"; } > "$routes"
+            chown "$1" "$ref" "$routes"
             uid=$(id -u "$1")
             gid=$(id -g "$1")
             mount -t tmpfs tmpfs /usr/sbin
-            PSIOS_TEST_NETWORK_REFERENCE="$ref" setpriv --reuid "$uid" --regid "$gid" --clear-groups \
-              python3 -m unittest discover -s tests -p test_network.py -v
-            rm -f "$ref"
+            PSIOS_TEST_NETWORK_REFERENCE="$ref" PSIOS_TEST_ROUTE_REFERENCE="$routes" \
+              setpriv --reuid "$uid" --regid "$gid" --clear-groups \
+              python3 -B -m unittest discover -s tests -p test_network.py -v
           ' psios-network "$(id -un)"
       - name: Verify in-place state upgrade from PR 1
         run: |
@@ -71,7 +87,13 @@ jobs:
           git archive 3bae1ad06d073903c3ab910323bec57152b913c2 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format5"
           cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format5/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format5/target"
           python3 tests/model_usage_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format5/target/debug"
-          python3 tests/backup_times_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format5/target/debug"
+      - name: Upgrade the existing tool catalog and verify retained volume manifests
+        run: |
+          mkdir "$RUNNER_TEMP/psios-last-format5"
+          git archive f9a74d4a1175eaa7eb95349320fe845cde918d99 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-last-format5"
+          cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-last-format5/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-last-format5/target"
+          python3 tests/network_routes_upgrade.py --previous-bin "$RUNNER_TEMP/psios-last-format5/target/debug"
+          python3 tests/backup_times_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format5/target/debug" --format5-writer-bin "$RUNNER_TEMP/psios-last-format5/target/debug"
       - name: Verify real systemd service control and crash reconciliation
         run: |
           sudo loginctl enable-linger "$(id -un)"

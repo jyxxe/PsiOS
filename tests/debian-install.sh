@@ -74,11 +74,14 @@ ctl node | jq -e --arg id "$node" '.reference.resource_id == $id and .state.conf
 ctl wait "$task" | jq -e '.lifecycle == "Succeeded"' >/dev/null
 
 [[ $(ctl get owner-delegation | jq -c .reference) == "$owner_ref" ]]
-network_grant=$(jq -n --arg node "$node" '{principal_id:"local-owner",actions:["task.submit","task.read","node.interfaces"],
+network_grant=$(jq -n --arg node "$node" '{principal_id:"local-owner",actions:["task.submit","task.read","node.interfaces","node.routes"],
     tool_targets:[$node],ttl_seconds:300,units:2}' | ctl call Grant.Issue | jq -er .delegation_ref.resource_id)
 network_task=$(echo '{}' | ctl submit node.interfaces --delegation "$network_grant" --key package-network | jq -er .task_id)
 ctl wait "$network_task" | jq -e '{reference: .result.artifact_refs[0]}' | ctl call Artifact.Read |
     jq -e '.interfaces | any(.ifname == "lo" and (.addr_info | any(.local == "127.0.0.1")))' >/dev/null
+routes_task=$(echo '{"family":"inet","table":255}' | ctl submit node.routes --delegation "$network_grant" --key package-routes | jq -er .task_id)
+ctl wait "$routes_task" | jq -e '{reference: .result.artifact_refs[0]}' | ctl call Artifact.Read |
+    jq -e '.routes | any(.kind == 2 and .destination == {address:"127.0.0.1",length:32})' >/dev/null
 
 systemctl stop psiosd
 runuser -u psios -- psiosd --config "$config" verify |

@@ -315,6 +315,7 @@ pub fn perform(w: &Work) -> Result<Value> {
     match &w.action {
         Action::Inventory {} => inventory(),
         Action::Interfaces(q) => network::interfaces(q),
+        Action::Routes(q) => network::observe_routes(q, w),
         Action::Processes(p) => processes(p),
         Action::Devices {} => devices(),
         _ => service(w),

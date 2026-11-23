@@ -1,4 +1,4 @@
-"""Verify both directions of the backup manifest extension with a real format 5 binary."""
+"""Verify backup manifest compatibility across two format 5 binaries and their successor."""
 import argparse
 import json
 from pathlib import Path
@@ -12,7 +12,7 @@ def switch(node, binaries):
     node.start()
 
 
-def exercise(previous, current):
+def exercise(previous, format5_writer, current):
     node = Node(previous)
     try:
         source = node.perform("volume.create", {"name": "records"})
@@ -33,7 +33,7 @@ def exercise(previous, current):
             data = node.state / "volumes" / restored["resource_id"] / "data"
             assert (data / "entry").read_bytes() == b"previous volume"
             return data
-        switch(node, current)
+        switch(node, format5_writer)
         check_restore(older)
         newer = node.perform("backup.create", target(source))
         assert "mtime_unix_v1" in manifest(newer)
@@ -41,7 +41,11 @@ def exercise(previous, current):
         assert (data / "entry").stat().st_mtime_ns == (folder / "entry").stat().st_mtime_ns
         switch(node, previous)
         check_restore(newer)
-        print("PASS pre-extension recovery with the new reader and file-content recovery with the old reader")
+        switch(node, current)
+        check_restore(older)
+        data = check_restore(newer)
+        assert (data / "entry").stat().st_mtime_ns == (folder / "entry").stat().st_mtime_ns
+        print("PASS both format 5 backup-manifest directions and recovery of both manifests after upgrade")
     finally:
         node.close()
 
@@ -49,6 +53,7 @@ def exercise(previous, current):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--previous-bin", type=Path, required=True)
+    parser.add_argument("--format5-writer-bin", type=Path, required=True)
     parser.add_argument("--current-bin", type=Path, default=Path("target/debug"))
     args = parser.parse_args()
-    exercise(args.previous_bin, args.current_bin)
+    exercise(args.previous_bin, args.format5_writer_bin, args.current_bin)

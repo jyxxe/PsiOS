@@ -118,7 +118,7 @@ def check_native_network(c):
         return json.loads(c.run(f"printf '%s' {body} | psiosctl call {method}"))
     node = json.loads(c.run("psiosctl node"))["reference"]["resource_id"]
     grant = call("Grant.Issue", dict(principal_id="local-owner", tool_targets=[node],
-                 actions=["task.submit", "task.read", "node.interfaces"], units=1, ttl_seconds=120))
+                 actions=["task.submit", "task.read", "node.interfaces", "node.routes"], units=2, ttl_seconds=120))
     delegation = shlex.quote(grant["delegation_ref"]["resource_id"])
     task = json.loads(c.run(f"printf '{{}}' | psiosctl submit node.interfaces --delegation {delegation} --key native-network"))
     done = json.loads(c.run("psiosctl wait " + shlex.quote(task["task_id"])))
@@ -128,6 +128,14 @@ def check_native_network(c):
     row, = report["interfaces"]
     assert row["ifname"] == "lo" and row["link_type"] == "loopback" and "UP" in row["flags"]
     assert any(a["local"] == "127.0.0.1" and a["prefixlen"] == 8 and a["scope"] == "host" for a in row["addr_info"])
+    query = shlex.quote(json.dumps({"family": "inet", "table": 255}))
+    task = json.loads(c.run(f"printf '%s' {query} | psiosctl submit node.routes --delegation {delegation} --key native-routes"))
+    done = json.loads(c.run("psiosctl wait " + shlex.quote(task["task_id"])))
+    assert done["lifecycle"] == "Succeeded", done
+    routes = call("Artifact.Read", {"reference": done["result"]["artifact_refs"][0]})
+    assert routes["network_namespace_inode"] == report["network_namespace_inode"], routes
+    assert any(r["destination"] == {"address": "127.0.0.1", "length": 32}
+               and r["kind"] == 2 and r["output_ifindex"] == row["ifindex"] for r in routes["routes"]), routes
 
 
 def replace_partition(image, filesystem, offset_mib):

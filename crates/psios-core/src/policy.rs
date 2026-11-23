@@ -18,6 +18,7 @@ pub const TOOLS: &[&str] = &[
     "system.status",
     "node.inventory",
     "node.interfaces",
+    "node.routes",
     "node.processes",
     "node.devices",
     "service.inspect",
@@ -65,6 +66,7 @@ pub fn readonly(tool: &str) -> bool {
         "system.status"
             | "node.inventory"
             | "node.interfaces"
+            | "node.routes"
             | "node.processes"
             | "node.devices"
             | "service.inspect"
@@ -103,7 +105,7 @@ fn bootstrap_actions() -> Vec<String> {
     COMMON
         .iter()
         .chain(TOOLS)
-        .filter(|a| !matches!(**a, "node.interfaces" | "backup.verify"))
+        .filter(|a| !matches!(**a, "node.interfaces" | "node.routes" | "backup.verify"))
         .map(|a| a.to_string())
         .collect()
 }

@@ -56,6 +56,8 @@ pub enum Action {
     Inventory {},
     #[serde(rename = "node.interfaces")]
     Interfaces(node::network::Query),
+    #[serde(rename = "node.routes")]
+    Routes(node::network::RouteQuery),
     #[serde(rename = "node.devices")]
     Devices {},
     #[serde(rename = "node.processes")]
@@ -126,6 +128,7 @@ impl Action {
         match &a {
             Self::Processes(p) => p.validate()?,
             Self::Interfaces(q) => q.validate()?,
+            Self::Routes(q) => q.validate()?,
             Self::Create { name } => label(name)?,
             Self::Read(f) => storage::filename(&f.name)?,
             Self::Write(f) => {
@@ -184,7 +187,11 @@ impl Action {
     pub fn target(&self, db: &Db<'_>, actor: &str) -> Result<Doc> {
         let (id, version, kind) = match self {
             Self::Status {} => return db.get(policy::PROFILE),
-            Self::Processes(_) | Self::Interfaces(_) | Self::Inventory {} | Self::Devices {} => {
+            Self::Processes(_)
+            | Self::Interfaces(_)
+            | Self::Routes(_)
+            | Self::Inventory {}
+            | Self::Devices {} => {
                 return db.of(&db.meta("authority")?, "Node");
             }
             Self::ServiceInspect(t) | Self::ServiceStart(t) | Self::ServiceStop(t) => {
@@ -316,6 +323,7 @@ impl Work {
             | Action::Inventory {}
             | Action::Processes(_)
             | Action::Interfaces(_)
+            | Action::Routes(_)
             | Action::Devices {} => node::perform(self),
             Action::Start(_) => apps::start(self, checkpoint),
             Action::Stage { .. }

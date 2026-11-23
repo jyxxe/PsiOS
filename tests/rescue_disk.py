@@ -29,7 +29,7 @@ def image_file(path, size):
         f.truncate(size)
 
 
-def exercise(iso, binaries, inspector, root):
+def exercise(iso, binaries, inspector, root, firmware_media):
     node = Node(binaries)
     try:
         identity = node.call("Node.Get", {})["reference"]["resource_id"]
@@ -77,6 +77,31 @@ def exercise(iso, binaries, inspector, root):
             assert result.returncode != 0 and not result.stdout and any(e in result.stderr for e in errors), result
 
     inspect(volume)
+    if firmware_media:
+        bios = root / "BIOS rescue.iso"
+        uefi = root / "UEFI rescue.iso"
+        inspect(volume, ["--firmware", "bios", "--save-rescue-iso", bios])
+        inspect(volume, ["--firmware", "uefi", "--save-rescue-iso", uefi])
+        original = digest(bios)
+        assert original == digest(uefi)
+        inspect(volume, ["--firmware", "bios", "--save-rescue-iso", bios], "output already exists")
+        assert digest(bios) == original
+        inspect(volume, ["--firmware", "bios", "--journal-overlay-mib", "16"], "read-only block device")
+        rejected = root / "unverified.iso"
+        wrong_uid = 65532 if os.getuid() != 65532 else 65531
+        inspect(volume, ["--firmware", "bios", "--uid", str(wrong_uid), "--save-rescue-iso", rejected],
+                "authority-PermissionDenied")
+        assert not rejected.exists()
+        # Reboot the exported CD without the build tree or launcher. A writable
+        # subject attached directly by another VMM must be rejected before mount.
+        before = digest(volume)
+        boot = subprocess.run(["qemu-system-x86_64", "-nodefaults", "-no-user-config", "-no-reboot",
+                               "-machine", "pc", "-m", "768", "-display", "none", "-monitor", "none", "-nic", "none",
+                               "-serial", "null", "-serial", "stdio", "-boot", "order=d,strict=on", "-cdrom", bios,
+                               "-drive", f"file={volume},format=raw,if=virtio"], stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=180, check=True)
+        assert boot.stdout.replace(b"\r\n", b"\n").endswith(b"PSIOS-RESCUE/1\nERROR block-device\n"), boot.stdout
+        assert digest(volume) == before
     other_uid = 65532 if os.getuid() != 65532 else 65531
     inspect(volume, ["--uid", str(other_uid)], "authority-PermissionDenied")
     inspect(volume, ["--core-sha256", "0" * 64], "SHA-256 mismatch")
@@ -201,8 +226,9 @@ if __name__ == "__main__":
     parser.add_argument("--iso", type=Path, required=True)
     parser.add_argument("--bin-dir", type=Path, required=True)
     parser.add_argument("--inspector", type=Path, default=INSPECT, help="launcher from the checkout or extracted archive")
+    parser.add_argument("--firmware-media", action="store_true", help="also build, export and boot a BIOS/UEFI CD")
     args = parser.parse_args()
     if not os.getuid():
         parser.error("run this acceptance test as a non-root service user")
     with tempfile.TemporaryDirectory(prefix="psios-disk-test-") as tmp:
-        exercise(args.iso.resolve(), args.bin_dir.resolve(), args.inspector.resolve(), Path(tmp))
+        exercise(args.iso.resolve(), args.bin_dir.resolve(), args.inspector.resolve(), Path(tmp), args.firmware_media)

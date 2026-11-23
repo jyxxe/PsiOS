@@ -21,3 +21,9 @@ SERVICE_UID 为原服务账户的数字 UID。独立 GID 可用 --gid 指定。�
 遇到需要重放的 ext4 日志时，安装 qemu-img，再添加
 --journal-overlay-mib 128。恢复写入仅进入一次性的限额副本。退出码为
 零时，标准输出是 Core 的核验结果。核验不会修复原盘或启动受检系统。
+
+从固件启动时，可添加 --firmware bios 或 --firmware uefi。再添加
+--save-rescue-iso node-rescue.iso 可在核验成功后保存光盘。该模式需要
+xorriso、含 x86_64-efi 模块的 GNU GRUB、mtools 和 mkfs.fat。UEFI
+测试还需要标准 4 MiB OVMF。光盘配置了本次检查所需的 UID 与路径，
+重新启动时须把源镜像作为第一个只读 virtio 块设备并读取第二串口。

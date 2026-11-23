@@ -34,6 +34,9 @@ checks=(psiosd psiosctl Cargo.lock source-commit)
 if git -C "$repo" cat-file -e "$sha:images/rescue/README.txt" 2>/dev/null; then
     mkdir -m 0755 rescue
     rescue_files=(README.txt base.json init inspect.py)
+    if git -C "$repo" cat-file -e "$sha:images/rescue/boot_media.py" 2>/dev/null; then
+        rescue_files+=(boot_media.py)
+    fi
     git -C "$repo" archive "$sha:images/rescue" "${rescue_files[@]}" | tar --same-permissions -xf - -C rescue
     checks+=("${rescue_files[@]/#/rescue/}")
     members+=(rescue)

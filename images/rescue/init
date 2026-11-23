@@ -6,7 +6,7 @@ bb=/bin/busybox
 stage=startup
 finish() {
     if [ "$stage" != complete ]; then
-        printf 'ERROR %s\n' "$stage" > /dev/ttyS1
+        printf '\nPSIOS-RESCUE/1\nERROR %s\n' "$stage" > /dev/ttyS1
     fi
     "$bb" poweroff -f
 }
@@ -85,5 +85,5 @@ if ! "$bb" su -s /bin/sh psioscheck -c \
 fi
 stage=report
 [ "$("$bb" wc -c < /report)" -le 65536 ]
-{ printf '%s\n' "$status"; "$bb" cat /report; } > /dev/ttyS1
+{ printf '\nPSIOS-RESCUE/1\n%s\n' "$status"; "$bb" cat /report; } > /dev/ttyS1
 stage=complete

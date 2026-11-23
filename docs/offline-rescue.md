@@ -38,6 +38,23 @@ qemu-img convert -f qcow2 -O raw ./node-a/system.qcow2 "$export_dir/node.raw"
 
 启动器以只读文件描述符传递源镜像，并保留 QEMU 镜像访问锁。客户机只读挂载指定设备，关闭日志重放、设备解释和文件执行。客体内的检查进程使用原服务 UID。网络关闭，检查结果从独立串口返回。应使用已停止的镜像或存储层冻结的副本；其他直接改写文件的进程可能忽略 QEMU 锁。默认模式遇到待重放的 ext4 日志时中止。SQLite 自身的 WAL 和回滚日志由既有 Core 核验器处理。
 
+## 从固件启动并导出救援光盘
+
+在前面的检查命令末尾加上 `--firmware bios` 或 `--firmware uefi`，可以从 El Torito 光盘启动同一套检查。再加 `--save-rescue-iso node-rescue.iso`，核验成功后才会发布完整 ISO。输出路径必须尚不存在。光盘同时包含 SeaBIOS 和 amd64 UEFI 的启动入口，带有本次指定的 UID、GID、分区及目录。节点数据库、所有者凭据和 EFI 变量保留在各自设备上。
+
+构建机另需 xorriso、含 x86_64-efi 模块的 GNU GRUB、mtools 及 mkfs.fat。BIOS 使用已固定的 ISOLINUX 文件。UEFI 的 GRUB 可执行文件内嵌内核、初始内存盘和启动配置，直接从自己的内存盘读取。UEFI 验收使用宿主受信任的标准 4 MiB OVMF 固件与独立变量副本，默认从 `/usr/share/OVMF` 读取，可用 `--ovmf-dir` 更改。
+
+可先运行 `sha256sum node-rescue.iso`，通过可信渠道传递摘要，再在另一台装有 QEMU 的 Linux 主机按该摘要复核，并启动这份光盘。下面示例将已停止的节点盘作为第一个只读 virtio 块设备，复用制作光盘时的检查设置。
+
+```bash
+qemu-system-x86_64 -nodefaults -no-user-config -no-reboot -machine pc -m 768 \
+  -nic none -display none -monitor none -serial null -serial stdio \
+  -boot order=d,strict=on -cdrom node-rescue.iso \
+  -drive file=node.raw,format=raw,if=virtio,readonly=on
+```
+
+客户机从第二个串口输出 `PSIOS-RESCUE/1`、状态和核验结果，随后关机。固件可能先在同一串口输出启动消息。光盘只允许检查只读块设备，遇到可写设备或需要文件系统日志重放的盘会停止。临时日志重放仍通过受控的直接内核启动模式执行。此光盘已在 QEMU 的 SeaBIOS 和 OVMF 上验证，物理机和 Secure Boot 仍待验收。归档构建证明覆盖制盘程序；本地生成的 ISO 摘要随工具链、Core 和站点设置而定。
+
 ## 在临时副本重放 ext4 日志
 
 突然断电后，可在同一条检查命令末尾增加 `--journal-overlay-mib 128`。QEMU 将只读原盘作为后备，所有恢复写入定向到一次性 QCOW2 文件。内核以只读挂载触发必要的 ext4 日志重放，卸载后再次检查文件系统状态，把客户机块设备设为只读，再执行 Core 核验。重放或核验失败时退出，原盘始终以只读方式打开。源文件系统已标记有错误时仍需单独修复。

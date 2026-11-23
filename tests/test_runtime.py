@@ -1,10 +1,13 @@
 """Process-level coverage of persisted sessions across distinct agent, provider and owner credentials."""
+import json
 import signal
+import subprocess
 import sqlite3
 import time
 import unittest
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
+from model_delivery import interrupt_delivery
 from support import Failure, Node, key, target
 
 
@@ -75,6 +78,102 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(len(n.call("Session.History", {"id": sid}, self.token)["turns"]), 3)
         budget = n.call("Budget.Get", {"id": self.grant["budget_ref"]["resource_id"]}, self.token)
         self.assertEqual((budget["model_calls_used"], budget["spent"]), (3, 2))
+
+    def test_durable_provider_delivery_survives_both_sides_of_the_response(self):
+        n = self.n
+        pending = n.base / "provider"
+        pending.mkdir(mode=0o700)
+        record = pending / "psios-model-pending.json"
+        token = n.base / "provider.token"
+        token.write_text(self.provider_token)
+        token.chmod(0o600)
+        sid = self.open()
+
+        def invoke(session, key, credential=token):
+            return subprocess.run([n.binaries / "psiosctl", "--socket", n.socket, "--token-file", credential,
+                                   "model-step", session, "--key", key, "--decision-dir", pending],
+                                  capture_output=True, text=True, timeout=10)
+
+        for i, committed in enumerate((False, True)):
+            key = f"turn-{i}"
+            with interrupt_delivery(n, token, sid, key, pending, committed=committed):
+                self.assertIn("Conflict", invoke(sid, key).stderr)
+                self.assertEqual(record.stat().st_mode & 0o777, 0o600)
+            stored = json.loads(record.read_text())
+            self.assertEqual(stored["request"]["decision"], dict(action="tool", tool=self.tools[i], input={}))
+            self.assertNotIn(self.provider_token, record.read_text())
+            self.assertNotIn("context", stored)
+            self.assertIn("Conflict", invoke(sid, "other-key").stderr)
+            self.assertIn("Conflict", invoke(sid, key, n.witness / "owner.token").stderr)
+            if i == 0:
+                other = Node("target/debug")
+                try:
+                    wrong_node = subprocess.run([other.binaries / "psiosctl", "--socket", other.socket,
+                        "--token-file", other.witness / "owner.token", "model-step", sid, "--key", key,
+                        "--decision-dir", pending], capture_output=True, text=True)
+                    self.assertIn("Conflict", wrong_node.stderr)
+                finally:
+                    other.close()
+            self.assertTrue(record.exists())
+            n.stop(signal.SIGKILL)
+            n.start()
+            result = invoke(sid, key)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            task = json.loads(result.stdout)["task_id"]
+            self.assertEqual(n.wait(task)["lifecycle"], "Succeeded")
+            self.assertFalse(record.exists())
+            replay = invoke(sid, key)
+            self.assertEqual(json.loads(replay.stdout)["task_id"], task)
+        history = n.call("Session.History", {"id": sid}, self.token)
+        self.assertEqual((len(history["turns"]), len(history["tasks"])), (2, 2))
+        budget = n.call("Budget.Get", {"id": self.grant["budget_ref"]["resource_id"]}, self.token)
+        self.assertEqual((budget["model_calls_used"], budget["spent"]), (2, 2))
+
+    def test_durable_provider_respects_fencing_and_private_storage(self):
+        n = self.n
+        pending = n.base / "provider"
+        pending.mkdir(mode=0o700)
+        token = n.base / "model.token"
+        token.write_text(self.provider_token)
+        token.chmod(0o600)
+        sid = self.open()
+        args = [n.binaries / "psiosctl", "--socket", n.socket, "--token-file", token,
+                "model-step", sid, "--key", "turn", "--decision-dir", pending]
+        pending.chmod(0o755)
+        refused = subprocess.run(args, capture_output=True, text=True)
+        self.assertIn("PermissionDenied", refused.stderr)
+        self.assertFalse(n.call("Session.History", {"id": sid}, self.token)["turns"])
+        pending.chmod(0o700)
+        with interrupt_delivery(n, token, sid, "turn", pending, committed=False):
+            pass
+        n.call("Session.Cancel", target(n.call("Session.Get", {"id": sid}, self.token)["reference"]), self.token)
+        refused = subprocess.run(args, capture_output=True, text=True)
+        self.assertIn("Fenced", refused.stderr)
+        self.assertEqual(list(pending.iterdir()), [])
+        self.assertFalse(n.call("Session.History", {"id": sid}, self.token)["tasks"])
+
+    def test_missing_or_unreadable_decision_never_restarts_inference(self):
+        n = self.n
+        journal = n.base / "provider"
+        journal.mkdir(mode=0o700)
+        token = n.base / "model.token"
+        token.write_text(self.provider_token)
+        token.chmod(0o600)
+        sid = self.open()
+        self.claim(sid, "started")
+        args = [n.binaries / "psiosctl", "--socket", n.socket, "--token-file", token, "model-step",
+                sid, "--key", "started", "--decision-dir", journal]
+        partial = journal / ".psios-model-pending.tmp"
+        partial.write_bytes(b'{"incomplete"')
+        self.assertIn("OutcomeUnknown", subprocess.run(args, capture_output=True, text=True).stderr)
+        self.assertFalse(partial.exists())
+        pending = journal / "psios-model-pending.json"
+        pending.write_bytes(b'{"incomplete"')
+        pending.chmod(0o600)
+        self.assertIn("RecoveryRequired", subprocess.run(args, capture_output=True, text=True).stderr)
+        self.assertEqual(pending.read_bytes(), b'{"incomplete"')
+        history = n.call("Session.History", {"id": sid}, self.token)
+        self.assertEqual((len(history["turns"]), history["tasks"]), (1, []))
 
     def test_competing_leases_duplicate_response_and_restricted_context(self):
         n = self.n

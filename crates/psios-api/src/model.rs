@@ -1,4 +1,5 @@
 //! Provider implementations run as authenticated peers. Only the authority can commit a tool step.
+mod journal;
 use crate::{ApiError, ApiResult, Client};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -13,26 +14,61 @@ pub enum ModelDecision {
 pub trait SessionModel {
     fn decide(&self, context: &Value) -> ApiResult<ModelDecision>;
 }
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DecisionRequest {
+    session_id: String,
+    lease_id: String,
+    decision: ModelDecision,
+}
+
+enum Turn {
+    Completed(Value),
+    Decided(DecisionRequest),
+}
+
 impl Client {
+    fn decide_turn(
+        &self,
+        session: &str,
+        key: &str,
+        provider: &impl SessionModel,
+    ) -> ApiResult<Turn> {
+        let claim = self.call("Model.Claim", json!({"session_id":session,"key":key}))?;
+        if let Some(receipt) = claim.get("completed") {
+            return Ok(Turn::Completed(receipt.clone()));
+        }
+        if claim["recovered"] == true {
+            return Err(ApiError::new("OutcomeUnknown","provider call may have started; submit the retained decision or wait for a new lease").into());
+        }
+        let lease_id = claim["lease_id"]
+            .as_str()
+            .ok_or_else(|| crate::invalid("missing model lease"))?
+            .to_owned();
+        Ok(Turn::Decided(DecisionRequest {
+            session_id: session.to_owned(),
+            lease_id,
+            decision: provider.decide(&claim["context"])?,
+        }))
+    }
+
+    fn send_decision(&self, decision: &DecisionRequest) -> ApiResult<Value> {
+        let request = json!(decision);
+        match self.call("Model.Respond", request.clone()) {
+            Err(e) if e.code == "DependencyUnavailable" => self.call("Model.Respond", request),
+            other => other,
+        }
+    }
+
     pub fn model_turn(
         &self,
         session: &str,
         key: &str,
         provider: &impl SessionModel,
     ) -> ApiResult<Value> {
-        let claim = self.call("Model.Claim", json!({"session_id":session,"key":key}))?;
-        if let Some(receipt) = claim.get("completed") {
-            return Ok(receipt.clone());
-        }
-        if claim["recovered"] == true {
-            return Err(ApiError::new("OutcomeUnknown","provider call may have started; submit the retained decision or wait for a new lease").into());
-        }
-        let decision = provider.decide(&claim["context"])?;
-        let request =
-            json!({"session_id":session,"lease_id":claim["lease_id"],"decision":decision});
-        match self.call("Model.Respond", request.clone()) {
-            Err(e) if e.code == "DependencyUnavailable" => self.call("Model.Respond", request),
-            other => other,
+        match self.decide_turn(session, key, provider)? {
+            Turn::Completed(receipt) => Ok(receipt),
+            Turn::Decided(decision) => self.send_decision(&decision),
         }
     }
 }

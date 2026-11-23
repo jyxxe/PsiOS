@@ -129,7 +129,7 @@ def exercise(args, work):
     operator, op_hash = password(work, "operator.hash")
     admin, root_hash = password(work, "root.hash")
     image = work / "installed.raw"
-    build = [sys.executable, REPO / "images/native/create.py", image, "--kernel-iso", args.kernel_iso,
+    build = [sys.executable, args.installer.resolve(), image, "--kernel-iso", args.kernel_iso,
              "--core-archive", args.archive, "--core-sha256", sha(args.archive), "--console-hash", op_hash,
              "--root-console-hash", root_hash]
     deployment = json.loads(subprocess.check_output(build))
@@ -256,6 +256,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     for flag in ("--kernel-iso", "--archive", "--psiosd", "--inspector"):
         parser.add_argument(flag, type=Path, required=True)
+    parser.add_argument("--installer", type=Path, default=REPO / "images/native/create.py")
     parser.add_argument("--ovmf-dir", type=Path, default=Path("/usr/share/OVMF"))
     opts = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="psios-installed-test-") as directory:

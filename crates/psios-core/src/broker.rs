@@ -1,5 +1,7 @@
 mod approval;
 mod execution;
+mod history;
+pub(crate) use history::{archive, history};
 mod recovery;
 mod submission;
 
@@ -15,7 +17,7 @@ pub(crate) use recovery::{reconcile, recover};
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use submission::{authority, deadline};
-pub(crate) use submission::{cancel_origin, lookup, prepare, retry, submit};
+pub(crate) use submission::{cancel_origin, lookup, prepare, retry, retry_in_session, submit};
 
 fn field<'v>(v: &'v Value, k: &str) -> &'v str {
     v[k].as_str().expect("validated persisted field")
@@ -92,6 +94,18 @@ fn close(
         }
     }
     if matches!(phase.as_str(), "WaitingApproval" | "Queued" | "Claimed") {
+        let decision:Option<String>=db.c.query_row("SELECT a.decision FROM approval_bindings a JOIN current d ON d.id=a.decision
+            WHERE a.task=?1 AND a.operation IS NULL AND d.kind='ApprovalDecision' AND d.body->>'decision'='Approved' ",[&t.id],|r|r.get(0)).optional()?;
+        if let Some(decision) = decision {
+            let use_ = db.of(&format!("use-{decision}"), "ApprovalUse")?;
+            let mut b = use_.body.clone();
+            b["validity_status"] = json!(match reason.map(|e| e.0.code.as_str()) {
+                Some("DeadlineExceeded") => "Expired",
+                Some("PermissionDenied") => "Revoked",
+                _ => "Superseded",
+            });
+            db.status(&use_, b)?;
+        }
         db.c.execute("UPDATE budgets SET reserved=reserved-1 WHERE id=(SELECT budget FROM queue WHERE task=?1)",[&t.id])?;
     }
     let unknown = knowledge == "Unknown";
@@ -113,7 +127,9 @@ fn close(
             })
         }
         if let Some(a) = artifact {
-            b["evidence_refs"] = json!([a.reference()])
+            let mut refs = vec![a.reference()];
+            refs.extend(a.spec.get("reconciliation_evidence_ref").cloned());
+            b["evidence_refs"] = json!(refs);
         }
         *r = db.status(&e, b)?.reference();
     }
@@ -153,9 +169,11 @@ fn close(
         db.c.execute("DELETE FROM holds WHERE holder=?1", [&op.id])?;
     }
     db.audit(&t.owner, "Task.Terminate", Some(&t.id), state)?;
-    db.status(t, task)
+    let t = db.status(t, task)?;
+    agent::task_closed(db, &t)?;
+    Ok(t)
 }
-fn cancel_task(db: &Db<'_>, t: &Doc) -> Result<Doc> {
+pub(crate) fn cancel_task(db: &Db<'_>, t: &Doc) -> Result<Doc> {
     match field(&t.body, "lifecycle") {
         "Succeeded" | "Failed" | "Cancelled" | "Paused" | "Cancelling" => Ok(t.clone()),
         "Running" => {

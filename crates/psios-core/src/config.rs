@@ -17,8 +17,30 @@ pub struct Config {
     pub queue_limit: u32,
     #[serde(default = "default_tick")]
     pub tick_ms: u64,
+    #[serde(default = "default_workers")]
+    pub workers: u32,
+    #[serde(default)]
+    pub services: Vec<ServiceConfig>,
     #[serde(default = "default_docker")]
     pub docker_socket: PathBuf,
+}
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Manager {
+    User,
+    System,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceConfig {
+    pub unit: String,
+    pub manager: Manager,
+    #[serde(default)]
+    pub allow_control: bool,
+    pub definition_digest: Option<String>,
+}
+fn default_workers() -> u32 {
+    4
 }
 fn default_queue() -> u32 {
     256
@@ -38,6 +60,8 @@ impl Config {
             witness_dir: witness.into(),
             socket: path.join("api.sock"),
             queue_limit: default_queue(),
+            workers: default_workers(),
+            services: Vec::new(),
             tick_ms: default_tick(),
             docker_socket: default_docker(),
         }
@@ -73,8 +97,36 @@ impl Config {
             "InvalidArgument",
             "witness must be outside state directory",
         )?;
+        let mut units = std::collections::HashSet::new();
         require(
-            (1..=4096).contains(&self.queue_limit) && (5..=5000).contains(&self.tick_ms),
+            self.services.len() <= 64
+                && self.services.iter().all(|s| {
+                    s.unit.len() <= 120
+                        && s.unit.ends_with(".service")
+                        && s.unit
+                            .as_bytes()
+                            .first()
+                            .is_some_and(u8::is_ascii_alphanumeric)
+                        && s.unit
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"_.@-".contains(&b))
+                        && (!s.allow_control || s.definition_digest.is_some())
+                        && s.definition_digest.as_deref().is_none_or(|d| {
+                            d.strip_prefix("sha256:").is_some_and(|h| {
+                                h.len() == 64
+                                    && h.bytes()
+                                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                            })
+                        })
+                        && units.insert(&s.unit)
+                }),
+            "InvalidArgument",
+            "invalid service allowlist or missing control definition digest",
+        )?;
+        require(
+            (1..=16).contains(&self.workers)
+                && (1..=4096).contains(&self.queue_limit)
+                && (5..=5000).contains(&self.tick_ms),
             "InvalidArgument",
             "invalid scheduler limits",
         )

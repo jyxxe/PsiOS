@@ -404,3 +404,99 @@ fn queue_full_fails_atomically_and_revocation_between_claim_and_dispatch_is_enfo
         "PermissionDenied"
     );
 }
+
+#[test]
+fn chunk_receipt_loss_requires_exact_range_and_retains_exclusive_hold() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (c, mut s) = initialized(tmp.path());
+    let create = submit(&mut s, "volume.create", json!({"name":"chunked"}));
+    let v = execute(&mut s, &create);
+    let target = json!({"id":v["resource_id"],"expected_resource_version":v["version"]});
+    let first = submit(
+        &mut s,
+        "volume.append",
+        json!({"target":target,"path":"data","offset":0,"data_base64":"AP8="}),
+    );
+    approve(&mut s, &first);
+    let r = execute(&mut s, &first);
+    let target =
+        json!({"id":v["resource_id"],"expected_resource_version":r["volume_ref"]["version"]});
+    let next = submit(
+        &mut s,
+        "volume.append",
+        json!({"target":target,"path":"data","offset":2,"data_base64":"AQI="}),
+    );
+    approve(&mut s, &next);
+    assert_eq!(claim(&mut s), next);
+    let work = dispatch(&mut s, &next);
+    work.perform().unwrap();
+    drop(s);
+    let mut restarted = Store::open(c.clone()).unwrap();
+    restarted.transaction("restart", broker::recover).unwrap();
+    let task = call(&mut restarted, "Task.Get", json!({"id":next})).unwrap();
+    assert_eq!(task["outcome_knowledge"], "Unknown");
+    let op = &task["operation_refs"][0];
+    let args = json!({"id":op["resource_id"],"expected_resource_version":op["version"]});
+    let path = c
+        .state_dir
+        .join("volumes")
+        .join(v["resource_id"].as_str().unwrap())
+        .join("data/data");
+    assert_eq!(fs::read(&path).unwrap(), [0, 255, 1, 2]);
+    fs::write(&path, [0, 255, 1]).unwrap();
+    assert_eq!(
+        call(&mut restarted, "Operation.Reconcile", args.clone())
+            .unwrap_err()
+            .0
+            .code,
+        "OutcomeUnknown"
+    );
+    fs::write(&path, [0, 255, 2, 1]).unwrap();
+    assert_eq!(
+        call(&mut restarted, "Operation.Reconcile", args.clone())
+            .unwrap_err()
+            .0
+            .code,
+        "OutcomeUnknown"
+    );
+    fs::write(&path, [0, 255, 1, 2]).unwrap();
+    assert_eq!(
+        call(&mut restarted, "Operation.Reconcile", args).unwrap()["outcome_knowledge"],
+        "Known"
+    );
+    assert_eq!(fs::read(path).unwrap(), [0, 255, 1, 2]);
+}
+
+#[test]
+fn fair_claims_do_not_starve_a_second_principal_behind_an_owner_backlog() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, mut s) = initialized(tmp.path());
+    let agent = call(&mut s, "Agent.Register", json!({"name":"second"})).unwrap();
+    let grant=call(&mut s,"Grant.Issue",json!({"principal_id":agent["principal_id"],"actions":["task.submit","task.read","system.status"],
+        "units":2,"ttl_seconds":300})).unwrap();
+    let first = submit(&mut s, "system.status", json!({}));
+    for _ in 0..4 {
+        submit(&mut s, "system.status", json!({}));
+    }
+    let as_agent = |s: &mut Store, method: &str, params: Value| {
+        s.request(
+            rustix::process::geteuid().as_raw(),
+            Request {
+                schema_version: VERSION.into(),
+                request_id: id("test"),
+                method: method.into(),
+                token: agent["token"].as_str().unwrap().into(),
+                params,
+            },
+        )
+        .unwrap()
+    };
+    let req = as_agent(
+        &mut s,
+        "Task.Prepare",
+        json!({"tool":"system.status","input":{},"key":"one","delegation_id":grant["delegation_ref"]["resource_id"]}),
+    );
+    let second = as_agent(&mut s, "Task.Submit", req);
+    assert_eq!(claim(&mut s), first);
+    assert_eq!(claim(&mut s), second["task_id"].as_str().unwrap());
+}

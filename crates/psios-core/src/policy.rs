@@ -3,19 +3,33 @@ use crate::{
     *,
 };
 use psios_api::{VERSION, canonical, id, sha256};
-use ring::{
-    aead, hmac,
-    rand::{SecureRandom, SystemRandom},
-};
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
-use zeroize::Zeroizing;
+mod delegations;
+mod secrets;
+pub use delegations::{delegate, delegation, revoke_delegation, tool_scope};
+pub use secrets::{mac, secret_put, secret_revoke, secret_rotate};
 
 pub const OWNER: &str = "local-owner";
 pub const SYSTEM: &str = "system";
+pub const RUNTIME_PROFILE: &str = "runtime-local-v2";
 pub const PROFILE: &str = "profile-local";
 pub const TOOLS: &[&str] = &[
     "system.status",
+    "node.inventory",
+    "node.processes",
+    "node.devices",
+    "service.inspect",
+    "service.start",
+    "service.stop",
+    "volume.files",
+    "volume.mkdir",
+    "volume.read_chunk",
+    "volume.append",
+    "volume.remove_entry",
+    "application.stage_release",
+    "application.select_release",
+    "application.refresh",
     "secret.mac",
     "volume.create",
     "volume.activate",
@@ -38,17 +52,39 @@ pub const COMMON: &[&str] = &[
     "resource.read",
     "event.read",
     "secret.manage",
+    "session.run",
+    "model.serve",
+    "mail.send",
+    "mail.receive",
 ];
 pub fn readonly(tool: &str) -> bool {
     matches!(
         tool,
-        "system.status" | "secret.mac" | "volume.read" | "application.health" | "application.logs"
+        "system.status"
+            | "node.inventory"
+            | "node.processes"
+            | "node.devices"
+            | "service.inspect"
+            | "volume.files"
+            | "volume.read_chunk"
+            | "application.refresh"
+            | "secret.mac"
+            | "volume.read"
+            | "application.health"
+            | "application.logs"
     )
 }
 pub fn approval(tool: &str) -> bool {
     matches!(
         tool,
         "volume.write"
+            | "volume.append"
+            | "volume.remove_entry"
+            | "volume.mkdir"
+            | "application.stage_release"
+            | "application.select_release"
+            | "service.start"
+            | "service.stop"
             | "volume.activate"
             | "volume.delete"
             | "backup.delete"
@@ -89,7 +125,28 @@ pub fn bootstrap(db: &Db<'_>, token: &str) -> Result<()> {
     });
     db.create("StoragePool", "local", SYSTEM, pool.clone(), pool)?;
     apps::profiles(db)?;
+    install_tools(db, &profile)?;
+    issue(
+        db,
+        OWNER,
+        "owner-delegation",
+        COMMON.iter().chain(TOOLS).map(|s| s.to_string()).collect(),
+        1_000_000,
+        after(86400 * 3650),
+        true,
+    )?;
+    db.audit(OWNER, "Core.Init", None, "Allowed")
+}
+fn install_tools(db: &Db<'_>, profile: &Value) -> Result<()> {
     for tool in TOOLS {
+        let exists: bool = db.c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM versions WHERE id=?1)",
+            [format!("tool-{tool}")],
+            |r| r.get(0),
+        )?;
+        if exists {
+            continue;
+        }
         let body = json!({
             "schema_version": VERSION,
             "capability_id": tool,
@@ -114,16 +171,35 @@ pub fn bootstrap(db: &Db<'_>, token: &str) -> Result<()> {
             body,
         )?;
     }
-    issue(
-        db,
-        OWNER,
-        "owner-delegation",
-        COMMON.iter().chain(TOOLS).map(|s| s.to_string()).collect(),
-        1_000_000,
-        after(86400 * 3650),
-        true,
+    Ok(())
+}
+pub fn upgrade(db: &Db<'_>) -> Result<()> {
+    let profile = db.get(PROFILE)?;
+    let mut profile_body = profile.body.clone();
+    profile_body["writer"] =
+        json!("single transactional authority with bounded parallel host workers");
+    profile_body["worker_limit"] = json!(16);
+    let profile = db.create(
+        "Profile",
+        RUNTIME_PROFILE,
+        SYSTEM,
+        profile_body.clone(),
+        profile_body,
     )?;
-    db.audit(OWNER, "Core.Init", None, "Allowed")
+    install_tools(db, &profile.reference())?;
+    let d = db.of("owner-delegation", "Delegation")?;
+    let g = db.of(d.body["grant_id"].as_str().unwrap(), "Grant")?;
+    for doc in [&g, &d] {
+        let mut body = doc.body.clone();
+        body["actions"] = json!(COMMON.iter().chain(TOOLS).collect::<Vec<_>>());
+        db.update(doc, body.clone(), body)?;
+    }
+    db.c.execute(
+        "INSERT INTO model_budgets(budget,maximum) VALUES(?1,1000000)",
+        [d.body["budget_ref"]["resource_id"].as_str().unwrap()],
+    )?;
+    epoch(db)?;
+    Ok(())
 }
 pub fn authenticate(db: &Db<'_>, token: &str) -> Result<String> {
     require(
@@ -163,48 +239,6 @@ fn epoch(db: &Db<'_>) -> Result<String> {
     )?;
     db.meta("epoch")
 }
-pub fn delegation(db: &Db<'_>, actor: &str, id: &str, action: &str) -> Result<Doc> {
-    let d = db.of(id, "Delegation")?;
-    require(
-        d.owner == actor,
-        "PermissionDenied",
-        "delegation audience mismatch",
-    )?;
-    require(
-        d.body["lifecycle"] == "Active"
-            && !expired(d.body["valid_until"].as_str().unwrap())?
-            && d.body["actions"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|v| v == action),
-        "PermissionDenied",
-        "delegation expired, revoked or action outside delegated scope",
-    )?;
-    if let Some(parent) = d.body.get("parent_ref") {
-        let version = db.resolve(parent)?;
-        let current = db.get(&version.id)?;
-        active(db, &current.owner)?;
-        require(
-            current.version() == version.version() && current.body["lifecycle"] == "Active",
-            "PermissionDenied",
-            "parent delegation no longer current",
-        )?;
-    }
-    let g = db.of(d.body["grant_id"].as_str().unwrap(), "Grant")?;
-    require(
-        g.body["lifecycle"] == "Active"
-            && !expired(g.spec["valid_until"].as_str().unwrap())?
-            && g.spec["actions"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|v| v == action),
-        "PermissionDenied",
-        "grant expired, revoked or action outside scope",
-    )?;
-    Ok(d)
-}
 fn delegations(db: &Db<'_>, actor: &str) -> Result<Vec<Doc>> {
     Ok(db
         .c
@@ -213,14 +247,27 @@ fn delegations(db: &Db<'_>, actor: &str) -> Result<Vec<Doc>> {
         .collect::<rusqlite::Result<_>>()?)
 }
 pub fn can(db: &Db<'_>, actor: &str, action: &str) -> Result<()> {
+    find_grant(db, actor, action, None)
+}
+pub fn can_target(db: &Db<'_>, actor: &str, action: &str, target: &str) -> Result<()> {
+    find_grant(db, actor, action, Some(target))
+}
+fn find_grant(db: &Db<'_>, actor: &str, action: &str, target: Option<&str>) -> Result<()> {
     for d in delegations(db, actor)? {
-        match delegation(db, actor, &d.id, action) {
-            Ok(_) => return Ok(()),
+        let check = delegation(db, actor, &d.id, action).and_then(|d| match target {
+            Some(resource) => tool_scope(db, &d.reference(), resource),
+            None => Ok(()),
+        });
+        match check {
+            Ok(()) => return Ok(()),
             Err(e) if e.0.code == "PermissionDenied" => {}
             Err(e) => return Err(e),
         }
     }
-    Err(err("PermissionDenied", "action requires an active grant"))
+    Err(err(
+        "PermissionDenied",
+        "action and target require a matching active grant",
+    ))
 }
 fn issue(
     db: &Db<'_>,
@@ -302,6 +349,10 @@ struct GrantIssue {
     principal_id: String,
     actions: Vec<String>,
     units: u32,
+    #[serde(default)]
+    model_calls: u32,
+    max_delegation_depth: Option<u32>,
+    tool_targets: Option<Vec<String>>,
     ttl_seconds: u32,
     #[serde(default)]
     allow_delegation: bool,
@@ -325,11 +376,29 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "unregistered grant action",
     )?;
     require(
-        (1..=1_000_000).contains(&p.units) && (1..=86400 * 30).contains(&p.ttl_seconds),
+        p.model_calls <= 1_000_000
+            && (1..=1_000_000).contains(&p.units)
+            && (1..=86400 * 30).contains(&p.ttl_seconds),
         "InvalidArgument",
         "invalid budget or TTL",
     )?;
-    issue(
+    if let Some(ids) = &p.tool_targets {
+        require(
+            !ids.is_empty() && ids.len() <= 64,
+            "InvalidArgument",
+            "target scope must contain 1 to 64 resource IDs",
+        )?;
+        for id in ids {
+            db.get(id)?;
+        }
+    }
+    require(
+        p.max_delegation_depth
+            .is_none_or(|n| p.allow_delegation && (1..=4).contains(&n)),
+        "InvalidArgument",
+        "invalid opt-in delegation depth",
+    )?;
+    let mut issued = issue(
         db,
         &p.principal_id,
         &id("delegation"),
@@ -337,71 +406,26 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         p.units,
         after(p.ttl_seconds.into()),
         p.allow_delegation,
-    )
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Delegate {
-    parent_id: String,
-    principal_id: String,
-    actions: Vec<String>,
-    ttl_seconds: u32,
-}
-pub fn delegate(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
-    let p: Delegate = decode(p)?;
-    active(db, &p.principal_id)?;
-    require(
-        !p.actions.is_empty() && p.actions.len() <= 5 && (1..=86400).contains(&p.ttl_seconds),
-        "InvalidArgument",
-        "invalid delegation bounds",
     )?;
-    let parent = db.of(&p.parent_id, "Delegation")?;
-    require(
-        parent.body["redelegation"] == true && parent.owner == actor && p.principal_id != actor,
-        "PermissionDenied",
-        "delegation cannot be extended",
+    db.c.execute(
+        "INSERT INTO model_budgets(budget,maximum) VALUES(?1,?2)",
+        params![
+            issued["budget_ref"]["resource_id"].as_str().unwrap(),
+            p.model_calls
+        ],
     )?;
-    for action in &p.actions {
-        require(
-            matches!(
-                action.as_str(),
-                "system.status" | "task.submit" | "task.read" | "resource.read" | "event.read"
-            ),
-            "PermissionDenied",
-            "child delegation restricted to local status tasks",
-        )?;
-        delegation(db, actor, &parent.id, action)?;
+    if p.tool_targets.is_some() || p.max_delegation_depth.is_some() {
+        let g = db.resolve(&issued["grant_ref"])?;
+        let mut b = g.body.clone();
+        if let Some(ids) = p.tool_targets {
+            b["tool_targets"] = json!(ids);
+        }
+        if let Some(n) = p.max_delegation_depth {
+            b["max_delegation_depth"] = json!(n);
+        }
+        issued["grant_ref"] = db.update(&g, b.clone(), b)?.reference();
     }
-    let until =
-        after(p.ttl_seconds.into()).min(parent.body["valid_until"].as_str().unwrap().to_owned());
-    let body = json!({
-        "issuer": actor,
-        "subject": p.principal_id,
-        "parent_ref": parent.reference(),
-        "grant_id": parent.body["grant_id"],
-        "actions": p.actions,
-        "budget_ref": parent.body["budget_ref"],
-        "redelegation": false,
-        "valid_until": until,
-        "lifecycle": "Active"
-    });
-    let d = db.record("Delegation", &p.principal_id, body)?;
-    epoch(db)?;
-    Ok(d.reference())
-}
-pub fn revoke_delegation(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
-    let p: Conditional = decode(p)?;
-    let d = db.of(&p.id, "Delegation")?;
-    require(
-        d.id != "owner-delegation" && (actor == OWNER || d.body["issuer"] == actor),
-        "PermissionDenied",
-        "delegation issuer required",
-    )?;
-    d.cas(&p.expected_resource_version)?;
-    let mut b = d.body.clone();
-    b["lifecycle"] = json!("Revoked");
-    epoch(db)?;
-    Ok(db.status(&d, b)?.reference())
+    Ok(issued)
 }
 pub fn revoke(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     admin(actor)?;
@@ -417,9 +441,16 @@ pub fn revoke(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     b["lifecycle"] = json!("Revoked");
     let revoked = db.status(&g, b)?;
     let generation = epoch(db)?;
-    let flight:bool=db.c.query_row("SELECT EXISTS(SELECT 1 FROM queue WHERE grant_id=?1 AND phase IN ('Dispatched','Unknown')) OR EXISTS(
-        SELECT 1 FROM current a JOIN queue q ON q.operation=a.body->>'start_operation_id'
-        WHERE a.kind='Application' AND a.body->>'lifecycle'='Running' AND q.grant_id=?1)",[&g.id],|r|r.get(0))?;
+    let flight:bool=db.c.query_row("SELECT
+        EXISTS(SELECT 1 FROM queue WHERE grant_id=?1 AND phase IN ('Dispatched','Unknown'))
+        OR EXISTS(SELECT 1 FROM current a JOIN current op ON op.id=a.body->>'start_operation_id'
+           JOIN current t ON t.id=op.spec->>'task_id' JOIN current d ON d.id=t.spec->'delegation_ref'->>'resource_id'
+           WHERE (a.kind='HostService' OR (a.kind='Application' AND a.body->>'lifecycle'='Running')) AND d.body->>'grant_id'=?1)
+        OR EXISTS(SELECT 1 FROM session_turns st JOIN current s ON s.id=st.session
+           JOIN current d ON d.id=s.spec->>'delegation_id' JOIN current m ON m.id=s.spec->'model_ref'->>'resource_id'
+           WHERE st.receipt IS NULL AND julianday(st.expires)>julianday('now')
+           AND (d.body->>'grant_id'=?1 OR (?3 AND m.spec->>'provider_principal_id'=?2)))",
+        params![g.id,g.owner,g.spec["actions"].as_array().unwrap().iter().any(|a|a=="model.serve")],|r|r.get(0))?;
     let rev = id("revocation");
     let body = json!({
         "schema_version": VERSION,
@@ -486,94 +517,12 @@ pub fn budget(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let p: ById = decode(p)?;
     let b = db.of(&p.id, "Budget")?;
     owned(actor, &b)?;
-    Ok(db.c.query_row("SELECT maximum,reserved,spent FROM budgets WHERE id=?1",[&b.id],|r|{
-        Ok(json!({"maximum":r.get::<_,u32>(0)?,"reserved":r.get::<_,u32>(1)?,"spent":r.get::<_,u32>(2)?}))})?)
+    Ok(db.c.query_row("SELECT b.maximum,b.reserved,b.spent,coalesce(m.maximum,0),coalesce(m.used,0)
+        FROM budgets b LEFT JOIN model_budgets m ON m.budget=b.id WHERE b.id=?1",[&b.id],|r|{
+        Ok(json!({"maximum":r.get::<_,u32>(0)?,"reserved":r.get::<_,u32>(1)?,"spent":r.get::<_,u32>(2)?,
+            "model_calls_maximum":r.get::<_,u32>(3)?,"model_calls_used":r.get::<_,u32>(4)?}))})?)
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SecretPut {
-    name: String,
-    value: String,
-}
-fn vault(db: &Db<'_>) -> Result<aead::LessSafeKey> {
-    Ok(aead::LessSafeKey::new(
-        aead::UnboundKey::new(&aead::AES_256_GCM, &db.keys[..32])
-            .map_err(|_| err("RecoveryRequired", "vault key unavailable"))?,
-    ))
-}
-pub fn secret_put(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
-    can(db, actor, "secret.manage")?;
-    let s: SecretPut = decode(p)?;
-    label(&s.name)?;
-    require(
-        (1..=8192).contains(&s.value.len()),
-        "InvalidArgument",
-        "secret size outside limit",
-    )?;
-    let d = db.record(
-        "Secret",
-        actor,
-        json!({"name": s.name, "lifecycle": "Active", "use": "secret.mac"}),
-    )?;
-    let mut nonce = [0u8; 12];
-    SystemRandom::new()
-        .fill(&mut nonce)
-        .map_err(|_| err("InternalError", "entropy unavailable"))?;
-    let mut bytes = Zeroizing::new(s.value.into_bytes());
-    vault(db)?
-        .seal_in_place_append_tag(
-            aead::Nonce::assume_unique_for_key(nonce),
-            aead::Aad::from(d.id.as_bytes()),
-            &mut *bytes,
-        )
-        .map_err(|_| err("InternalError", "vault encryption failed"))?;
-    db.c.execute(
-        "INSERT INTO secrets VALUES(?1,?2,?3)",
-        params![d.id, nonce.as_slice(), bytes.as_slice()],
-    )?;
-    Ok(d.reference())
-}
-pub fn secret_revoke(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
-    can(db, actor, "secret.manage")?;
-    let p: Conditional = decode(p)?;
-    let d = db.of(&p.id, "Secret")?;
-    owned(actor, &d)?;
-    d.cas(&p.expected_resource_version)?;
-    db.c.execute("DELETE FROM secrets WHERE id=?1", [&d.id])?;
-    let mut b = d.body.clone();
-    b["lifecycle"] = json!("Revoked");
-    epoch(db)?;
-    Ok(db.status(&d, b)?.reference())
-}
-pub fn mac(db: &Db<'_>, actor: &str, secret: &str, message: &str) -> Result<Value> {
-    let d = db.of(secret, "Secret")?;
-    owned(actor, &d)?;
-    require(
-        d.body["lifecycle"] == "Active",
-        "PermissionDenied",
-        "secret revoked",
-    )?;
-    let (n, c): (Vec<u8>, Vec<u8>) = db.c.query_row(
-        "SELECT nonce,ciphertext FROM secrets WHERE id=?1",
-        [secret],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
-    let mut bytes = Zeroizing::new(c);
-    let nonce = aead::Nonce::try_assume_unique_for_key(&n)
-        .map_err(|_| err("RecoveryRequired", "invalid vault nonce"))?;
-    let plain = vault(db)?
-        .open_in_place(nonce, aead::Aad::from(secret.as_bytes()), &mut bytes)
-        .map_err(|_| err("RecoveryRequired", "vault authentication failed"))?;
-    let tag = hmac::sign(
-        &hmac::Key::new(hmac::HMAC_SHA256, plain),
-        message.as_bytes(),
-    );
-    use base64::Engine;
-    Ok(
-        json!({"algorithm": "HMAC-SHA256", "tag": base64::engine::general_purpose::STANDARD.encode(tag)}),
-    )
-}
 pub fn intern_input(db: &Db<'_>, actor: &str, input: &Value) -> Result<Doc> {
     let digest = sha256(&canonical(&json!([actor, input])));
     let id = format!("input-{}", &digest[7..]);

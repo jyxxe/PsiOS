@@ -17,6 +17,7 @@ pub struct Store {
     _lock: File,
     keys: Zeroizing<Vec<u8>>,
     sealed: bool,
+    pub(crate) changes: std::sync::Arc<watch::Changes>,
 }
 pub(crate) struct Db<'a> {
     pub c: &'a Connection,
@@ -187,7 +188,7 @@ impl Store {
         )?;
         let ver: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         require(
-            ver == 1,
+            matches!(ver, 1 | 2),
             "SchemaVersionUnsupported",
             "unsupported state database version",
         )?;
@@ -234,13 +235,23 @@ impl Store {
             File::open(&cfg.witness_dir)?.sync_all()?;
         }
         setup(&conn)?;
-        Ok(Self {
+        let mut store = Self {
             config: cfg,
             conn,
             _lock: lock,
             keys: Zeroizing::new(keys),
             sealed: false,
-        })
+            changes: Default::default(),
+        };
+        if ver == 1 {
+            store.transaction("core-upgrade-v2", |db| {
+                db.c.execute_batch(include_str!("upgrade.sql"))?;
+                policy::upgrade(db)?;
+                db.audit(policy::SYSTEM, "Core.Upgrade", None, "Version2")
+            })?;
+        }
+        store.transaction("node-config", node::sync)?;
+        Ok(store)
     }
     /// Offline recovery requires the Linux service account, exclusive lock and a fresh witness.
     pub fn recover_owner(&mut self) -> Result<()> {
@@ -312,6 +323,7 @@ impl Store {
         tx.commit()?;
         replace(&path, &canonical(&json!({"committed": head})))?;
         self.sealed = false;
+        self.changes.notify();
         Ok(result)
     }
 }
@@ -321,14 +333,18 @@ impl Db<'_> {
             .c
             .query_row("SELECT value FROM meta WHERE key=?1", [key], |r| r.get(0))?)
     }
-    pub fn get(&self, id: &str) -> Result<Doc> {
-        self.c
+    pub fn find(&self, id: &str) -> Result<Option<Doc>> {
+        Ok(self
+            .c
             .query_row(
                 "SELECT * FROM versions WHERE id=?1 ORDER BY rev DESC LIMIT 1",
                 [id],
                 row,
             )
-            .optional()?
+            .optional()?)
+    }
+    pub fn get(&self, id: &str) -> Result<Doc> {
+        self.find(id)?
             .ok_or_else(|| err("NotFound", "resource unavailable"))
     }
     pub fn of(&self, id: &str, kind: &str) -> Result<Doc> {

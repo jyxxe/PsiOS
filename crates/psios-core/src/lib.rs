@@ -1,13 +1,17 @@
+mod agent;
 mod api;
 mod apps;
 mod broker;
+mod command;
 mod config;
 mod db;
 mod events;
 mod host;
+mod node;
 mod policy;
 pub mod server;
 mod storage;
+mod watch;
 
 pub use config::Config;
 pub use db::Store;

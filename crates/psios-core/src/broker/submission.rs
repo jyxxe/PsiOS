@@ -102,10 +102,10 @@ fn check_key(s: &Value, old: &Submission) -> Result<()> {
         "submission key bound to another request",
     )
 }
-fn plan(db: &Db<'_>, actor: &str, s: &Value, target: &Doc) -> Result<Doc> {
-    let profile = db.get(policy::PROFILE)?.reference();
+fn plan(db: &Db<'_>, actor: &str, s: &Value, audience: &[Value]) -> Result<Doc> {
+    let profile = db.get(policy::RUNTIME_PROFILE)?.reference();
     let tool = field(s, "task_type");
-    let target = target.reference();
+    let target = &audience[0];
     let pid = id("plan");
     let d = db.resolve(&s["delegation_ref"])?;
     let g = db.get(field(&d.body, "grant_id"))?;
@@ -127,7 +127,7 @@ fn plan(db: &Db<'_>, actor: &str, s: &Value, target: &Doc) -> Result<Doc> {
         "allowed_effects": [{"resource_ref":target,"action":tool,"scope_ref":s["delegation_ref"]}],
         "input_refs": [s["input_ref"]],
         "runtime_refs": [db.get(&format!("tool-{tool}"))?.reference()],
-        "preconditions": [{"resource_ref":target,"kind":"ContentDigest","expected":target["digest"],"enforcement":"ConditionalApply"}],
+        "preconditions": audience.iter().map(|r|json!({"resource_ref":r,"kind":"ContentDigest","expected":r["digest"],"enforcement":"ConditionalApply"})).collect::<Vec<_>>(),
         "budget_ref": s["budget_ref"],
         "deadline_at": deadline,
         "data_policy_ref": profile,
@@ -165,6 +165,7 @@ pub fn submit(db: &Db<'_>, actor: &str, s: &Value, retry: Option<&str>) -> Resul
     deadline(s)?;
     let a = Action::parse(tool, &input.body)?;
     let target = a.target(db, actor)?;
+    let audience = a.audience(db, actor, &s["delegation_ref"], &target)?;
     let depth: u32 = db.c.query_row(
         "SELECT count(*) FROM queue WHERE phase NOT IN ('Done')",
         [],
@@ -184,7 +185,7 @@ pub fn submit(db: &Db<'_>, actor: &str, s: &Value, retry: Option<&str>) -> Resul
         "QuotaExceeded",
         "delegation has no available execution units",
     )?;
-    let plan = plan(db, actor, s, &target)?;
+    let plan = plan(db, actor, s, &audience)?;
     let task = id("task");
     let op = id("op");
     let at = now();
@@ -216,7 +217,7 @@ pub fn submit(db: &Db<'_>, actor: &str, s: &Value, retry: Option<&str>) -> Resul
             "plan_ref": plan.reference(),
             "plan_digest": plan.body["plan_digest"],
             "requester_principal_id": actor,
-            "approver_policy_ref": db.get(policy::PROFILE)?.reference(),
+            "approver_policy_ref": db.get(policy::RUNTIME_PROFILE)?.reference(),
             "status": "Pending",
             "expires_at": plan.body["deadline_at"]
         });
@@ -253,7 +254,7 @@ pub fn submit(db: &Db<'_>, actor: &str, s: &Value, retry: Option<&str>) -> Resul
         "idempotency_key": key,
         "deduplicated": false,
         "durability_profile": {
-            "profile_ref": db.get(policy::PROFILE)?.reference(),
+            "profile_ref": db.get(policy::RUNTIME_PROFILE)?.reference(),
             "ack_level": "Durable",
             "fault_scope": ["ProcessCrash"],
             "rpo_seconds": "0"
@@ -360,6 +361,17 @@ struct Retry {
     expected_resource_version: String,
 }
 pub fn retry(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
+    let req: Retry = decode(p)?;
+    let t = db.of(&req.id, "Task")?;
+    policy::owned(actor, &t)?;
+    require(
+        agent::session_for_task(db, &t.id)?.is_none(),
+        "PreconditionFailed",
+        "use Session.RetryTask for a session-owned tool",
+    )?;
+    retry_in_session(db, actor, p)
+}
+pub fn retry_in_session(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let p: Retry = decode(p)?;
     let t = db.of(&p.id, "Task")?;
     require(

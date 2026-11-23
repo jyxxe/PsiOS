@@ -112,10 +112,52 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
     Ok(())
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Reconcile {
+    id: String,
+    expected_resource_version: String,
+    evidence_ref: Option<Value>,
+}
+fn inspected(
+    db: &Db<'_>,
+    reference: Option<&Value>,
+    op: &Doc,
+    target: &Doc,
+    tool: &str,
+) -> Result<Doc> {
+    let rf = reference.ok_or_else(|| {
+        err(
+            "PreconditionFailed",
+            "a fresh runtime inspection artifact is required",
+        )
+    })?;
+    let proof = db.resolve(rf)?;
+    require(
+        proof.kind == "Artifact",
+        "PreconditionFailed",
+        "expected a retained inspection artifact",
+    )?;
+    let observation_task = db.of(field(&proof.spec, "task_id"), "Task")?;
+    let inspect_op = db.of(field(&proof.spec, "operation_id"), "Operation")?;
+    let inspect_plan = db.resolve(&inspect_op.body["plan_ref"])?;
+    let fresh:bool=db.c.query_row("SELECT EXISTS(SELECT 1 FROM versions sample JOIN versions lost
+                ON sample.seq>lost.seq WHERE sample.kind='Run' AND sample.id=?1 AND sample.rev=1 AND lost.id=?2 AND lost.rev=?3)",
+                params![proof.spec["run_id"].as_str(),op.id,op.rev],|r|r.get(0))?;
+    require(
+        fresh
+            && observation_task.spec["task_type"] == tool
+            && observation_task.body["lifecycle"] == "Succeeded"
+            && inspect_plan.body["allowed_effects"][0]["resource_ref"] == target.reference(),
+        "OutcomeUnknown",
+        "inspection does not witness this operation after recovery",
+    )?;
+    Ok(proof)
+}
 /// Reconcile only an independently verifiable local postcondition. Never dispatch the write again.
 pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     policy::admin(actor)?;
-    let req: Conditional = decode(params)?;
+    let req: Reconcile = decode(params)?;
     let op = db.of(&req.id, "Operation")?;
     op.cas(&req.expected_resource_version)?;
     require(
@@ -125,26 +167,115 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     )?;
     let t = db.of(field(&op.spec, "task_id"), "Task")?;
     let input = db.resolve(&t.spec["input_ref"])?;
-    let Action::Write(write) = Action::parse(field(&t.spec, "task_type"), &input.body)? else {
-        return Err(err(
-            "UnsupportedCapability",
-            "this operation requires offline reconciliation",
-        ));
+    let action = Action::parse(field(&t.spec, "task_type"), &input.body)?;
+    let (target_id, expected) = match &action {
+        Action::Write(p) => (&p.id, &p.expected_resource_version),
+        Action::Append(p) => (&p.target.id, &p.target.expected_resource_version),
+        Action::Stop(p) | Action::ServiceStart(p) | Action::ServiceStop(p) => {
+            (&p.id, &p.expected_resource_version)
+        }
+        _ => {
+            return Err(err(
+                "UnsupportedCapability",
+                "no postcondition verifier for this operation",
+            ));
+        }
     };
-    let volume = db.of(&write.id, "Volume")?;
+    let target = db.get(target_id)?;
     let held: bool = db.c.query_row(
         "SELECT EXISTS(SELECT 1 FROM holds WHERE volume=?1 AND holder=?2)",
-        params![volume.id, op.id],
+        params![target.id, op.id],
         |r| r.get(0),
     )?;
     require(
-        held && volume.version() == write.expected_resource_version,
+        held && target.version() == *expected,
         "RecoveryRequired",
-        "original exclusive hold or volume revision unavailable",
+        "original exclusive hold or target revision unavailable",
     )?;
-    let receipt = storage::confirm_write(db.cfg, &volume, &write.name, &write.content)?;
-    let volume = db.status(&volume, volume.body.clone())?;
-    let evidence = json!({"volume_ref": volume.reference(), "receipt": receipt});
+    let (result, proof_details) = match action {
+        Action::ServiceStart(_) | Action::ServiceStop(_) => {
+            let proof = inspected(
+                db,
+                req.evidence_ref.as_ref(),
+                &op,
+                &target,
+                "service.inspect",
+            )?;
+            let wanted = if matches!(action, Action::ServiceStart(_)) {
+                "active"
+            } else {
+                "inactive"
+            };
+            require(
+                proof.body["unit"] == target.spec["unit"]
+                    && proof.body["active_state"] == wanted
+                    && proof.body["needs_reload"] == false
+                    && proof.body["definition_digest"] == target.spec["definition_digest"],
+                "OutcomeUnknown",
+                "observation does not confirm this service postcondition",
+            )?;
+            (
+                json!({"service_ref":node::observed_effect(db,&target,&op.id,&proof.body)?.reference(),"observation":proof.body}),
+                json!({"observation_ref":proof.reference(),"conclusion":"ObservedPostcondition"}),
+            )
+        }
+        Action::Stop(_) => {
+            let proof = inspected(
+                db,
+                req.evidence_ref.as_ref(),
+                &op,
+                &target,
+                "application.health",
+            )?;
+            require(
+                target.body["engine_id"].is_string()
+                    && proof.body["removal_confirmed"] == true
+                    && proof.body["engine_id"] == target.body["engine_id"]
+                    && proof.body["container_id"] == target.body["container_id"]
+                    && proof.body["start_operation_id"] == target.body["start_operation_id"],
+                "OutcomeUnknown",
+                "OCI removal has no matching engine and instance evidence",
+            )?;
+            let vol = target.spec["volume_id"]
+                .as_str()
+                .map(|id| db.of(id, "Volume"))
+                .transpose()?;
+            if let Some(v) = &vol {
+                let plan = db.resolve(&op.body["plan_ref"])?;
+                require(
+                    plan.body["preconditions"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|c| c["resource_ref"] == v.reference()),
+                    "RecoveryRequired",
+                    "original bound volume revision unavailable",
+                )?;
+            }
+            (
+                apps::stopped(db, &target, &op.id, vol.as_ref(), &proof.body["last_logs"])?,
+                json!({"observation_ref":proof.reference(),"conclusion":"RemovalConfirmed"}),
+            )
+        }
+        _ => {
+            require(
+                req.evidence_ref.is_none(),
+                "InvalidArgument",
+                "file reconciliation reads the original volume directly",
+            )?;
+            let receipt = match action {
+                Action::Write(p) => storage::confirm_write(db.cfg, &target, &p.name, &p.content)?,
+                Action::Append(p) => storage::files::confirm(db.cfg, &target, &p)?,
+                _ => unreachable!(),
+            };
+            (
+                json!({"volume_ref":db.status(&target,target.body.clone())?.reference(),"receipt":receipt}),
+                json!({"observation":receipt,"conclusion":"ObservedPostcondition"}),
+            )
+        }
+    };
+    let evidence=db.record("RecoveryEvidence",&t.owner,json!({"operation_ref":op.reference(),"target_ref":target.reference(),"verified_at":now(),"evidence":proof_details}))?;
+    let bytes = canonical(&result);
     let artifact = db.create(
         "Artifact",
         &id("artifact"),
@@ -155,10 +286,11 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
             "run_id": t.body["current_run_id"],
             "effect_ref": op.body["effect_refs"][0],
             "media_type": "application/json",
-            "size_bytes": canonical(&evidence).len().to_string(),
-            "digest": sha256(&canonical(&evidence))
+            "size_bytes":bytes.len().to_string(),
+            "digest":sha256(&bytes),
+            "reconciliation_evidence_ref":evidence.reference()
         }),
-        evidence,
+        result,
     )?;
     let state = if t.body["lifecycle"] == "Cancelled" {
         "Cancelled"

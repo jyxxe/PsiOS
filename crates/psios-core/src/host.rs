@@ -52,8 +52,30 @@ pub struct Install {
 pub enum Action {
     #[serde(rename = "system.status")]
     Status {},
+    #[serde(rename = "node.inventory")]
+    Inventory {},
+    #[serde(rename = "node.devices")]
+    Devices {},
+    #[serde(rename = "node.processes")]
+    Processes(node::ProcessQuery),
+    #[serde(rename = "service.inspect")]
+    ServiceInspect(Target),
+    #[serde(rename = "service.start")]
+    ServiceStart(Target),
+    #[serde(rename = "service.stop")]
+    ServiceStop(Target),
     #[serde(rename = "secret.mac")]
     Mac { secret_id: String, message: String },
+    #[serde(rename = "volume.files")]
+    Files(storage::files::Page),
+    #[serde(rename = "volume.read_chunk")]
+    Chunk(storage::files::ReadChunk),
+    #[serde(rename = "volume.append")]
+    Append(storage::files::Append),
+    #[serde(rename = "volume.mkdir")]
+    MakeDir(storage::files::PathInput),
+    #[serde(rename = "volume.remove_entry")]
+    RemoveEntry(storage::files::PathInput),
     #[serde(rename = "volume.create")]
     Create { name: String },
     #[serde(rename = "volume.read")]
@@ -70,6 +92,12 @@ pub enum Action {
     DeleteBackup(Target),
     #[serde(rename = "backup.restore")]
     Restore(Target),
+    #[serde(rename = "application.stage_release")]
+    Stage { target: Target, release: Install },
+    #[serde(rename = "application.select_release")]
+    Select { target: Target, release_ref: Value },
+    #[serde(rename = "application.refresh")]
+    Refresh(Target),
     #[serde(rename = "application.install")]
     Install(Install),
     #[serde(rename = "application.start")]
@@ -92,6 +120,7 @@ impl Action {
         )?;
         let a: Self = decode(&json!({"tool": tool, "input": input}))?;
         match &a {
+            Self::Processes(p) => p.validate()?,
             Self::Create { name } => label(name)?,
             Self::Read(f) => storage::filename(&f.name)?,
             Self::Write(f) => {
@@ -103,6 +132,17 @@ impl Action {
                 )?
             }
             Self::Install(s) => apps::validate(s)?,
+            Self::Stage { release, .. } => {
+                apps::validate(release)?;
+                require(
+                    release.volume.is_none(),
+                    "InvalidArgument",
+                    "staged release inherits the application volume",
+                )?;
+            }
+            Self::Select { release_ref, .. } => {
+                let _: psios_api::ResourceRef = decode(release_ref)?;
+            }
             Self::Mac { message, .. } => require(
                 message.len() <= 8192,
                 "QuotaExceeded",
@@ -110,13 +150,70 @@ impl Action {
             )?,
             _ => {}
         }
+        storage::files::validate(&a)?;
         Ok(a)
+    }
+    /// The primary target is first. A mounted volume and allocation pool are independent policy subjects.
+    pub fn audience(
+        &self,
+        db: &Db<'_>,
+        actor: &str,
+        delegation: &Value,
+        primary: &Doc,
+    ) -> Result<Vec<Value>> {
+        let mut resources = vec![primary.reference()];
+        match self {
+            Self::Start(_) | Self::Stop(_) if primary.spec["volume_id"].is_string() => {
+                let volume = db.of(primary.spec["volume_id"].as_str().unwrap(), "Volume")?;
+                policy::owned(actor, &volume)?;
+                resources.push(volume.reference());
+            }
+            Self::Restore(_) => resources.push(db.of("local", "StoragePool")?.reference()),
+            _ => {}
+        }
+        for r in &resources {
+            policy::tool_scope(db, delegation, r["resource_id"].as_str().unwrap())?;
+        }
+        Ok(resources)
     }
     pub fn target(&self, db: &Db<'_>, actor: &str) -> Result<Doc> {
         let (id, version, kind) = match self {
             Self::Status {} => return db.get(policy::PROFILE),
+            Self::Processes(_) | Self::Inventory {} | Self::Devices {} => {
+                return db.of(&db.meta("authority")?, "Node");
+            }
+            Self::ServiceInspect(t) | Self::ServiceStart(t) | Self::ServiceStop(t) => {
+                let d = db.of(&t.id, "HostService")?;
+                d.cas(&t.expected_resource_version)?;
+                require(
+                    d.body["lifecycle"] == "Registered",
+                    "PreconditionFailed",
+                    "unregistered system unit",
+                )?;
+                return Ok(d);
+            }
             Self::Create { .. } => return db.get("local"),
             Self::Mac { secret_id, .. } => (secret_id, None, "Secret"),
+            Self::Files(p) => (
+                &p.target.id,
+                Some(&p.target.expected_resource_version),
+                "Volume",
+            ),
+            Self::Chunk(p) => (
+                &p.target.id,
+                Some(&p.target.expected_resource_version),
+                "Volume",
+            ),
+            Self::Append(p) => (
+                &p.target.id,
+                Some(&p.target.expected_resource_version),
+                "Volume",
+            ),
+            Self::MakeDir(p) | Self::RemoveEntry(p) => (
+                &p.target.id,
+                Some(&p.target.expected_resource_version),
+                "Volume",
+            ),
             Self::Read(f) => (&f.id, Some(&f.expected_resource_version), "Volume"),
             Self::Write(f) => (&f.id, Some(&f.expected_resource_version), "Volume"),
             Self::Activate(t) | Self::Delete(t) | Self::Backup(t) => {
@@ -129,7 +226,10 @@ impl Action {
                 Some(t) => (&t.id, Some(&t.expected_resource_version), "Volume"),
                 None => return db.get(policy::PROFILE),
             },
-            Self::Start(t)
+            Self::Stage { target: t, .. }
+            | Self::Select { target: t, .. }
+            | Self::Refresh(t)
+            | Self::Start(t)
             | Self::Stop(t)
             | Self::Uninstall(t)
             | Self::Health(t)
@@ -152,6 +252,7 @@ pub fn status(db: &Db<'_>) -> Result<Value> {
     Ok(json!({
         "schema_version": VERSION,
         "authority_id": db.meta("authority")?,
+        "execution_profile_ref": db.get(policy::RUNTIME_PROFILE)?.reference(),
         "recovery_incarnation": db.incarnation,
         "kernel_release": std::fs::read_to_string("/proc/sys/kernel/osrelease")?.trim(),
         "uptime_seconds": uptime,
@@ -177,7 +278,16 @@ impl Work {
             return Ok(v.clone());
         }
         match &self.action {
-            Action::Start(_)
+            Action::ServiceInspect(_)
+            | Action::ServiceStart(_)
+            | Action::ServiceStop(_)
+            | Action::Inventory {}
+            | Action::Processes(_)
+            | Action::Devices {} => node::perform(self),
+            Action::Stage { .. }
+            | Action::Select { .. }
+            | Action::Refresh(_)
+            | Action::Start(_)
             | Action::Stop(_)
             | Action::Uninstall(_)
             | Action::Install(_)
@@ -187,7 +297,14 @@ impl Work {
         }
     }
 }
-fn permit(db: &Db<'_>, task: &Doc, run: &Doc, op: &Doc, effect: &Doc, target: &Doc) -> Result<()> {
+fn permit(
+    db: &Db<'_>,
+    task: &Doc,
+    run: &Doc,
+    op: &Doc,
+    effect: &Doc,
+    audience: &[Value],
+) -> Result<()> {
     let permit = db.resolve(&effect.spec["permit_ref"])?;
     let proof = db.resolve(&permit.body["auth_proof"]["record_ref"])?;
     let plan = db.resolve(&op.body["plan_ref"])?;
@@ -202,7 +319,7 @@ fn permit(db: &Db<'_>, task: &Doc, run: &Doc, op: &Doc, effect: &Doc, target: &D
             && permit.body["operation_id"] == op.id
             && permit.body["effect_id"] == effect.id
             && permit.body["plan_digest"] == plan.body["plan_digest"]
-            && permit.body["audience_resource_refs"] == json!([target.reference()])
+            && permit.body["audience_resource_refs"] == json!(audience)
             && permit.body["authorization_ref"] == task.spec["delegation_ref"]
             && permit.body["authorization_epoch"] == db.meta("epoch")?
             && permit.body["recovery_incarnation"] == db.incarnation
@@ -210,7 +327,7 @@ fn permit(db: &Db<'_>, task: &Doc, run: &Doc, op: &Doc, effect: &Doc, target: &D
             && proof.body["claim_id"] == run.body["claim_id"]
             && proof.body["claim_epoch"] == run.body["claim_epoch"]
             && proof.body["permit_id"] == permit.id
-            && proof.body["audience"] == target.reference()
+            && proof.body["audience_resource_refs"] == json!(audience)
             && plan.body["allowed_effects"][0]["action"] == tool
             && !expired(permit.body["not_after"].as_str().unwrap())?,
         "Fenced",
@@ -235,7 +352,8 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     let actor = &task.owner;
     let a = Action::parse(task.spec["task_type"].as_str().unwrap(), &input.body)?;
     let target = a.target(db, actor)?;
-    permit(db, &task, &run, &op, &effect, &target)?;
+    let audience = a.audience(db, actor, &task.spec["delegation_ref"], &target)?;
+    permit(db, &task, &run, &op, &effect, &audience)?;
     let inline = match &a {
         Action::Status {} => Some(status(db)?),
         Action::Mac { secret_id, message } => Some(policy::mac(db, actor, secret_id, message)?),
@@ -243,7 +361,12 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     };
     let volume = if target.kind == "Volume" {
         Some(target.clone())
-    } else if target.kind == "Application" {
+    } else if target.kind == "Application"
+        && !matches!(
+            a,
+            Action::Stage { .. } | Action::Select { .. } | Action::Refresh(_)
+        )
+    {
         target.spec["volume_id"]
             .as_str()
             .map(|id| db.of(id, "Volume"))
@@ -279,13 +402,18 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
         inline,
         volume,
     };
+    node::reserve(db, &w)?;
     storage::reserve(db, &w)?;
     apps::preflight(db, &w)?;
     Ok(w)
 }
 pub fn apply(db: &Db<'_>, w: &Work, receipt: &Value) -> Result<Value> {
     match w.action {
-        Action::Install(_)
+        Action::ServiceStart(_) | Action::ServiceStop(_) => node::apply(db, w, receipt),
+        Action::Stage { .. }
+        | Action::Select { .. }
+        | Action::Refresh(_)
+        | Action::Install(_)
         | Action::Start(_)
         | Action::Stop(_)
         | Action::Health(_)

@@ -7,13 +7,7 @@ use crate::{
 use psios_api::{VERSION, id};
 use rusqlite::params;
 use serde_json::{Value, json};
-use std::{
-    collections::BTreeMap,
-    io::Read,
-    process::{Command, Stdio},
-    thread,
-    time::{Duration, Instant},
-};
+use std::{collections::BTreeMap, process::Command};
 
 fn environment(env: &BTreeMap<String, String>) -> Result<()> {
     require(
@@ -187,8 +181,26 @@ pub fn launch_spec(db: &Db<'_>, app: &Doc) -> Result<Install> {
     validate(&launch)?;
     Ok(launch)
 }
-pub fn preflight(_db: &Db<'_>, w: &Work) -> Result<()> {
+pub fn preflight(db: &Db<'_>, w: &Work) -> Result<()> {
     match w.action {
+        Action::Stage { ref release, .. } => require(
+            w.target.body["lifecycle"] != "Uninstalled" && w.target.spec["name"] == release.name,
+            "PreconditionFailed",
+            "staged release must belong to an installed application with the same name",
+        )?,
+        Action::Select {
+            ref release_ref, ..
+        } => {
+            let release = db.resolve(release_ref)?;
+            require(
+                w.target.body["lifecycle"] == "Stopped"
+                    && release.kind == "ApplicationRelease"
+                    && release.body["application_id"] == w.target.id
+                    && release.owner == w.target.owner,
+                "PreconditionFailed",
+                "release selection requires a stopped application and its own immutable release",
+            )?;
+        }
         Action::Start(_) | Action::Uninstall(_) => require(
             w.target.body["lifecycle"] == "Stopped",
             "PreconditionFailed",
@@ -199,7 +211,7 @@ pub fn preflight(_db: &Db<'_>, w: &Work) -> Result<()> {
             "PreconditionFailed",
             "application has no active deployment",
         )?,
-        Action::Logs(_) | Action::Health(_) => require(
+        Action::Refresh(_) | Action::Logs(_) | Action::Health(_) => require(
             w.target.body["lifecycle"] != "Uninstalled",
             "PreconditionFailed",
             "application uninstalled",
@@ -217,81 +229,16 @@ pub fn preflight(_db: &Db<'_>, w: &Work) -> Result<()> {
     }
     Ok(())
 }
-fn capture(r: impl Read) -> std::io::Result<(Vec<u8>, bool)> {
-    let mut r = r;
-    let mut kept = Vec::new();
-    let mut buf = [0; 8192];
-    let mut truncated = false;
-    loop {
-        let n = r.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        let take = n.min((192 * 1024usize).saturating_sub(kept.len()));
-        kept.extend_from_slice(&buf[..take]);
-        truncated |= take < n
-    }
-    Ok((kept, truncated))
-}
-struct Output {
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-    truncated: bool,
-}
 struct Engine<'a>(&'a Config);
 impl Engine<'_> {
-    fn command(&self, args: &[String], effect: bool) -> Result<Output> {
+    fn command(&self, args: &[String], effect: bool) -> Result<crate::command::Output> {
         let mut cmd = Command::new("/usr/bin/docker");
         cmd.env_clear()
             .env("PATH", "/usr/bin:/bin")
             .arg("--host")
             .arg(format!("unix://{}", self.0.docker_socket.display()))
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = cmd
-            .spawn()
-            .map_err(|_| err("DependencyUnavailable", "Docker CLI unavailable"))?;
-        let stdout = child.stdout.take().unwrap();
-        let stderr = child.stderr.take().unwrap();
-        let out = thread::spawn(move || capture(stdout));
-        let errors = thread::spawn(move || capture(stderr));
-        let deadline = Instant::now() + Duration::from_secs(20);
-        let code = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break Some(status),
-                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(15)),
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break None;
-                }
-            }
-        };
-        let failure = || {
-            err(
-                if effect {
-                    "OutcomeUnknown"
-                } else {
-                    "DependencyUnavailable"
-                },
-                "local OCI engine did not confirm the request",
-            )
-        };
-        let (stdout, a) = out.join().map_err(|_| failure())?.map_err(|_| failure())?;
-        let (stderr, b) = errors
-            .join()
-            .map_err(|_| failure())?
-            .map_err(|_| failure())?;
-        if !code.is_some_and(|s| s.success()) {
-            return Err(failure());
-        }
-        Ok(Output {
-            stdout,
-            stderr,
-            truncated: a || b,
-        })
+            .args(args);
+        crate::command::capture(cmd, effect, "Docker", 20)
     }
     fn inspect(&self, kind: &str, id: &str) -> Result<Value> {
         let args = [kind, "inspect", "--format", "{{json .}}", id].map(String::from);
@@ -324,7 +271,7 @@ impl Engine<'_> {
             "inspected_at": now()
         }))
     }
-    fn check_engine(&self) -> Result<()> {
+    fn check_engine(&self) -> Result<String> {
         let out = self.command(&["info", "--format", "{{json .}}"].map(String::from), false)?;
         let v: Value = serde_json::from_slice(&out.stdout)
             .map_err(|_| err("DependencyUnavailable", "cannot inspect engine limits"))?;
@@ -338,14 +285,78 @@ impl Engine<'_> {
                 }),
             "UnsupportedCapability",
             "engine lacks required cgroup or seccomp enforcement",
-        )
+        )?;
+        let engine = v["ID"]
+            .as_str()
+            .filter(|id| (16..=128).contains(&id.len()))
+            .ok_or_else(|| err("UnsupportedCapability", "engine identity unavailable"))?;
+        Ok(engine.into())
+    }
+    fn identity(&self) -> Result<String> {
+        let out = self.command(&["info", "--format", "{{.ID}}"].map(String::from), false)?;
+        let value = std::str::from_utf8(&out.stdout)
+            .ok()
+            .map(str::trim)
+            .filter(|id| !out.truncated && (16..=128).contains(&id.len()))
+            .ok_or_else(|| err("DependencyUnavailable", "engine identity unavailable"))?;
+        Ok(value.into())
+    }
+    /// Only successful full listings from the same engine can prove removal.
+    fn removed(&self, w: &Work, cid: &str) -> Result<bool> {
+        let Some(engine) = w.target.body["engine_id"].as_str() else {
+            return Ok(false);
+        };
+        require(
+            self.identity()? == engine,
+            "PreconditionFailed",
+            "OCI engine identity changed",
+        )?;
+        for filter in [
+            format!("id={cid}"),
+            format!("label=io.psios.application={}", w.target.id),
+        ] {
+            let args = [
+                "container",
+                "ls",
+                "--all",
+                "--no-trunc",
+                "--format",
+                "{{.ID}}",
+                "--filter",
+                &filter,
+            ]
+            .map(String::from);
+            let listing = self.command(&args, false)?;
+            if listing.truncated || !listing.stdout.iter().all(u8::is_ascii_whitespace) {
+                return Ok(false);
+            }
+        }
+        require(
+            self.identity()? == engine,
+            "PreconditionFailed",
+            "OCI engine changed during observation",
+        )?;
+        Ok(true)
     }
     fn managed(&self, w: &Work, id: &str) -> Result<Value> {
+        if let Some(engine) = w.target.body["engine_id"].as_str() {
+            require(
+                self.identity()? == engine,
+                "PreconditionFailed",
+                "instance belongs to a different engine",
+            )?;
+        }
         let v = self.inspect("container", id)?;
         require(
             v["Id"] == id
                 && v["Config"]["Labels"]["io.psios.application"] == w.target.id
-                && v["Image"] == w.target.spec["image_id"],
+                && v["Image"] == w.target.spec["image_id"]
+                && v["Config"]["Labels"]["io.psios.operation"]
+                    == if matches!(w.action, Action::Start(_)) {
+                        json!(w.op.id)
+                    } else {
+                        w.target.body["start_operation_id"].clone()
+                    },
             "PreconditionFailed",
             "container identity mismatch",
         )?;
@@ -358,7 +369,7 @@ fn start(w: &Work, e: &Engine<'_>) -> Result<Value> {
         .as_ref()
         .ok_or_else(|| err("PreconditionFailed", "missing validated release"))?;
     e.image(&s.image_id)?;
-    e.check_engine()?;
+    let engine_id = e.check_engine()?;
     let uid = rustix::process::geteuid().as_raw();
     let gid = rustix::process::getegid().as_raw();
     require(
@@ -472,8 +483,14 @@ fn start(w: &Work, e: &Engine<'_>) -> Result<Value> {
     let observed = e
         .managed(w, &cid)
         .map_err(|_| err("OutcomeUnknown", "start receipt requires reconciliation"))?;
+    require(
+        e.identity().is_ok_and(|id| id == engine_id),
+        "OutcomeUnknown",
+        "engine changed before the start receipt",
+    )?;
     Ok(json!({
         "container_id": cid,
+        "engine_id":engine_id,
         "process_running": observed["State"]["Running"],
         "observed_at": now()
     }))
@@ -491,10 +508,13 @@ fn logs(e: &Engine<'_>, id: &str) -> Result<Value> {
 pub fn perform(w: &Work) -> Result<Value> {
     let e = Engine(&w.cfg);
     match &w.action {
-        Action::Install(s) => e.image(&s.image_id),
+        Action::Install(s) | Action::Stage { release: s, .. } => e.image(&s.image_id),
+        Action::Select { release_ref, .. } => Ok(json!({"release_ref":release_ref})),
         Action::Start(_) => start(w, &e),
         Action::Uninstall(_) => Ok(json!({"data_retained": true})),
-        Action::Logs(_) | Action::Health(_) if w.target.body["lifecycle"] == "Stopped" => {
+        Action::Refresh(_) | Action::Logs(_) | Action::Health(_)
+            if w.target.body["lifecycle"] == "Stopped" =>
+        {
             Ok(if matches!(w.action, Action::Logs(_)) {
                 w.target.body["last_logs"].clone()
             } else {
@@ -507,15 +527,26 @@ pub fn perform(w: &Work) -> Result<Value> {
                 })
             })
         }
-        Action::Logs(_) | Action::Health(_) | Action::Stop(_) => {
+        Action::Refresh(_) | Action::Logs(_) | Action::Health(_) | Action::Stop(_) => {
             let cid = w.target.body["container_id"]
                 .as_str()
                 .ok_or_else(|| err("RecoveryRequired", "instance ID missing"))?;
-            let v = e.managed(w, cid)?;
+            let v = match e.managed(w, cid) {
+                Ok(v) => v,
+                Err(error) if !matches!(w.action, Action::Logs(_)) && e.removed(w, cid)? => {
+                    return Ok(
+                        json!({"container_id":cid,"engine_id":w.target.body["engine_id"],
+                        "start_operation_id":w.target.body["start_operation_id"],"removal_confirmed":true,
+                        "process_running":false,"runtime_state":"Absent","readiness":"NotReady","health":"Unknown",
+                        "observed_at":now(),"last_logs":{"availability":"Unavailable","cause":error.0.code}}),
+                    );
+                }
+                Err(e) => return Err(e),
+            };
             if matches!(w.action, Action::Logs(_)) {
                 return logs(&e, cid);
             }
-            if matches!(w.action, Action::Health(_)) {
+            if matches!(w.action, Action::Refresh(_) | Action::Health(_)) {
                 return Ok(json!({
                     "container_id": cid,
                     "process_running": v["State"]["Running"],
@@ -542,9 +573,15 @@ pub fn perform(w: &Work) -> Result<Value> {
         _ => Err(err("UnsupportedCapability", "unknown OCI operation")),
     }
 }
-fn install(db: &Db<'_>, w: &Work, s: &Install, r: &Value) -> Result<Value> {
-    let owner = &w.task.owner;
-    let app = format!("app-{}", w.op.id);
+fn record_release(
+    db: &Db<'_>,
+    operation: &str,
+    app: &str,
+    owner: &str,
+    has_volume: bool,
+    s: &Install,
+    r: &Value,
+) -> Result<Doc> {
     let release = id("release");
     let specid = id("release-spec");
     let profile = db.get("oci-local")?.reference();
@@ -554,7 +591,7 @@ fn install(db: &Db<'_>, w: &Work, s: &Install, r: &Value) -> Result<Value> {
         owner,
         json!({"config_digest": s.image_id, "inspection": r, "source": "local-engine"}),
     )?;
-    let admission=db.record("AdmissionRecord",owner,json!({"operation": w.op.id, "source_trust": "UserSuppliedUnverified", "scope": "local-image-id"}))?.reference();
+    let admission=db.record("AdmissionRecord",owner,json!({"operation": operation, "source_trust": "UserSuppliedUnverified", "scope": "local-image-id"}))?.reference();
     let license=db.record("LicenseMaterial",owner,json!({"declared_by": owner, "expression": s.license_expression, "verification": "Unverified"}))?.reference();
     let build = db
         .record(
@@ -581,7 +618,7 @@ fn install(db: &Db<'_>, w: &Work, s: &Install, r: &Value) -> Result<Value> {
             }),
         )?
         .reference();
-    let bindings = if s.volume.is_some() {
+    let bindings = if has_volume {
         json!([{"manifest_volume_name":"data","mount_path":"/data","requested_access":"ReadWrite"}])
     } else {
         json!([])
@@ -627,7 +664,7 @@ fn install(db: &Db<'_>, w: &Work, s: &Install, r: &Value) -> Result<Value> {
         "backup_scope_ref": db.get("local-backup")?.reference()
     });
     let spec = db.create("ApplicationReleaseSpec", &specid, owner, json!({}), spec)?;
-    let volumes = if s.volume.is_some() {
+    let volumes = if has_volume {
         json!([{"name":"data","minimum_bytes":"1","access_mode":"single_node_rw","schema_ref":db.get("local-files")?.reference()}])
     } else {
         json!([])
@@ -650,7 +687,12 @@ fn install(db: &Db<'_>, w: &Work, s: &Install, r: &Value) -> Result<Value> {
         "rollback_policy_ref": db.get("local-rollback")?.reference(),
         "compatibility_claims": [{"capability":"Recognized","result":"Passed","profile_ref":profile,"evidence_refs":[image.reference()],"limitations":["Local image inspection only"]}]
     });
-    let release = db.create("ApplicationRelease", &release, owner, json!({}), manifest)?;
+    db.create("ApplicationRelease", &release, owner, json!({}), manifest)
+}
+fn install(db: &Db<'_>, w: &Work, s: &Install, r: &Value) -> Result<Value> {
+    let owner = &w.task.owner;
+    let app = format!("app-{}", w.op.id);
+    let release = record_release(db, &w.op.id, &app, owner, w.volume.is_some(), s, r)?;
     let deploy_spec = json!({
         "application_id": app,
         "release_ref": release.reference(),
@@ -691,7 +733,7 @@ fn install(db: &Db<'_>, w: &Work, s: &Install, r: &Value) -> Result<Value> {
         )?
         .reference())
 }
-fn attachment(db: &Db<'_>, w: &Work, v: &Doc, start: bool) -> Result<Value> {
+fn attachment(db: &Db<'_>, app: &Doc, op_id: &str, v: &Doc, start: bool) -> Result<Value> {
     let mut b = v.body.clone();
     if start {
         let aid = id("attachment");
@@ -701,57 +743,132 @@ fn attachment(db: &Db<'_>, w: &Work, v: &Doc, start: bool) -> Result<Value> {
             "volume_id": v.id,
             "data_incarnation": v.body["data_incarnation"],
             "node_id": db.meta("authority")?,
-            "workload_id": w.target.id,
+            "workload_id": app.id,
             "requested_access": "ReadWrite",
             "effective_access": "ReadWrite",
             "lifecycle": "Attached"
         });
-        let a = db.create("VolumeAttachment", &aid, &w.target.owner, json!({}), body)?;
+        let a = db.create("VolumeAttachment", &aid, &app.owner, json!({}), body)?;
         b["attachment_refs"] = json!([a.reference()]);
         require(
             db.c.execute(
                 "UPDATE holds SET holder=?1 WHERE volume=?2 AND holder=?3",
-                params![w.target.id, v.id, w.op.id],
+                params![app.id, v.id, op_id],
             )? == 1,
             "RecoveryRequired",
             "volume hold lost",
         )?;
     } else {
         let a = db.resolve(&b["attachment_refs"][0])?;
+        require(
+            a.body["workload_id"] == app.id
+                && a.body["data_incarnation"] == v.body["data_incarnation"],
+            "RecoveryRequired",
+            "volume attachment identity changed",
+        )?;
         let mut ab = a.body.clone();
         ab["effective_access"] = json!("Blocked");
         ab["lifecycle"] = json!("Detached");
         db.status(&a, ab)?;
         b["attachment_refs"] = json!([]);
-        db.c.execute(
-            "DELETE FROM holds WHERE volume=?1 AND holder=?2",
-            params![v.id, w.target.id],
+        require(
+            db.c.execute(
+                "DELETE FROM holds WHERE volume=?1 AND holder=?2",
+                params![v.id, app.id],
+            )? == 1,
+            "RecoveryRequired",
+            "application volume hold is absent",
         )?;
     }
     Ok(db.status(v, b)?.reference())
+}
+pub fn stopped(
+    db: &Db<'_>,
+    app: &Doc,
+    op_id: &str,
+    volume: Option<&Doc>,
+    logs: &Value,
+) -> Result<Value> {
+    if let Some(volume) = volume {
+        attachment(db, app, op_id, volume, false)?;
+    }
+    let deploy = db.resolve(&app.spec["deployment_ref"])?;
+    let deploy = db.status(
+        &deploy,
+        json!({"lifecycle":"Active","desired_state":"Stopped"}),
+    )?;
+    let instance = db.resolve(&app.body["instance_ref"])?;
+    db.status(
+        &instance,
+        json!({"lifecycle":"Absent","observed_at":now(),"stop_operation_id":op_id}),
+    )?;
+    let mut spec = app.spec.clone();
+    spec["deployment_ref"] = deploy.reference();
+    Ok(db.update(app,spec,json!({"lifecycle":"Stopped","desired_state":"Stopped","runtime_state":"Absent","last_logs":logs,
+        "health":"Unknown","readiness":"NotReady","observed_at":now()}))?.reference())
 }
 pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
     let mut b = w.target.body.clone();
     match &w.action {
         Action::Install(s) => return install(db, w, s, r),
+        Action::Stage { release, .. } => {
+            let staged = record_release(
+                db,
+                &w.op.id,
+                &w.target.id,
+                &w.target.owner,
+                w.target.spec["volume_id"].is_string(),
+                release,
+                r,
+            )?;
+            return Ok(staged.reference());
+        }
+        Action::Select { release_ref, .. } => {
+            let release = db.resolve(release_ref)?;
+            let spec = db.resolve(&release.body["release_spec_ref"])?;
+            let image = db.resolve(&release.body["artifact_ref"])?;
+            return select_deployment(
+                db,
+                &w.target,
+                &release,
+                &image.body["config_digest"],
+                spec.body["execution"]["environment"].clone(),
+            );
+        }
+        Action::Refresh(_) => {
+            b["last_observation"] = r.clone();
+            for field in ["runtime_state", "readiness", "health", "observed_at"] {
+                b[field] = r[field].clone();
+            }
+            if let Some(reference) = w.target.body.get("instance_ref") {
+                let instance = db.resolve(reference)?;
+                let instance = db.status(
+                    &instance,
+                    json!({"lifecycle":r["runtime_state"],"observation":r}),
+                )?;
+                b["instance_ref"] = instance.reference();
+            }
+            return Ok(db.status(&w.target, b)?.reference());
+        }
         Action::Start(_) => {
             b["lifecycle"] = json!("Running");
             b["container_id"] = r["container_id"].clone();
             b["start_operation_id"] = json!(w.op.id);
+            b["engine_id"] = r["engine_id"].clone();
             b["last_observation"] = r.clone();
         }
         Action::Stop(_) => {
-            b = json!({"lifecycle": "Stopped", "last_logs": r["last_logs"]});
+            return stopped(db, &w.target, &w.op.id, w.volume.as_ref(), &r["last_logs"]);
         }
         Action::Uninstall(_) => {
             b = json!({"lifecycle": "Uninstalled", "data_retained": true});
         }
         _ => return Ok(r.clone()),
     }
-    if matches!(w.action, Action::Start(_) | Action::Stop(_))
+    if matches!(w.action, Action::Start(_))
         && let Some(v) = &w.volume
     {
-        attachment(db, w, v, matches!(w.action, Action::Start(_)))?;
+        attachment(db, &w.target, &w.op.id, v, true)?;
     }
     let deployment = db.resolve(&w.target.spec["deployment_ref"])?;
     let (desired, phase, runtime) = match &w.action {
@@ -764,7 +881,6 @@ pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
                 "Exited"
             },
         ),
-        Action::Stop(_) => ("Stopped", "Active", "Absent"),
         _ => ("Removed", "Removed", "Absent"),
     };
     let deployment = db.status(
@@ -782,17 +898,11 @@ pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
                 "application_id": w.target.id,
                 "deployment_ref": deployment.reference(),
                 "container_id": r["container_id"],
-                "start_operation_id": w.op.id
+                "start_operation_id": w.op.id,"engine_id":r["engine_id"]
             }),
             json!({"lifecycle": runtime, "observed_at": r["observed_at"]}),
         )?;
         b["instance_ref"] = instance.reference();
-    } else if matches!(w.action, Action::Stop(_)) {
-        let instance = db.resolve(&w.target.body["instance_ref"])?;
-        db.status(
-            &instance,
-            json!({"lifecycle": "Absent", "observed_at": now(), "stop_operation_id": w.op.id}),
-        )?;
     }
     b["desired_state"] = json!(desired);
     b["runtime_state"] = json!(runtime);
@@ -813,8 +923,8 @@ struct Configure {
     environment: BTreeMap<String, String>,
 }
 pub fn configure(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
-    policy::can(db, actor, "application.install")?;
     let p: Configure = decode(p)?;
+    policy::can_target(db, actor, "application.install", &p.id)?;
     environment(&p.environment)?;
     let d = db.of(&p.id, "Application")?;
     policy::owned(actor, &d)?;
@@ -829,6 +939,16 @@ pub fn configure(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "Conflict",
         "configuration requires an idle stopped application",
     )?;
+    let release = db.resolve(&d.spec["release_ref"])?;
+    select_deployment(db, &d, &release, &d.spec["image_id"], json!(p.environment))
+}
+fn select_deployment(
+    db: &Db<'_>,
+    d: &Doc,
+    release: &Doc,
+    image: &Value,
+    environment: Value,
+) -> Result<Value> {
     let mut spec = d.spec.clone();
     let previous = db.resolve(&d.spec["deployment_ref"])?;
     db.status(
@@ -836,7 +956,10 @@ pub fn configure(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         json!({"lifecycle": "Superseded", "desired_state": "Stopped"}),
     )?;
     let mut config = previous.spec.clone();
-    config["environment"] = json!(p.environment);
+    config["environment"] = environment;
+    config["release_ref"] = release.reference();
+    spec["release_ref"] = release.reference();
+    spec["image_id"] = image.clone();
     let selected = db.create(
         "Deployment",
         &id("deployment"),
@@ -845,5 +968,5 @@ pub fn configure(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         json!({"lifecycle": "Prepared", "desired_state": "Stopped"}),
     )?;
     spec["deployment_ref"] = selected.reference();
-    Ok(db.update(&d, spec, d.body.clone())?.reference())
+    Ok(db.update(d, spec, d.body.clone())?.reference())
 }

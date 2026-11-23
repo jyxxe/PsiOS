@@ -86,6 +86,9 @@ enum Cmd {
         session: String,
         #[arg(long)]
         key: String,
+        /// Existing private directory for this provider worker's pending decision.
+        #[arg(long)]
+        decision_dir: Option<PathBuf>,
     },
     Node,
     Validate {
@@ -141,7 +144,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_else(|| rustix::process::geteuid().as_raw()),
     );
     let v = match o.cmd {
-        Cmd::ModelStep { session, key } => c.model_turn(&session, &key, &psios_api::NodeSurvey)?,
+        Cmd::ModelStep {
+            session,
+            key,
+            decision_dir,
+        } => match decision_dir {
+            Some(dir) => c.model_turn_durable(&session, &key, &psios_api::NodeSurvey, &dir)?,
+            None => c.model_turn(&session, &key, &psios_api::NodeSurvey)?,
+        },
         Cmd::Node => c.call("Node.Get", json!({}))?,
         Cmd::Whoami => c.call("Principal.WhoAmI", json!({}))?,
         Cmd::Capabilities => c.call("Capability.Discover", json!({}))?,

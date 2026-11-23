@@ -9,6 +9,7 @@ Build with `cargo build --locked --workspace`, or use the [portable amd64 Core b
 ## Documentation
 
 - [Implementation status, measured scope and remaining gaps](docs/implementation-status.md)
+- [Offline inspection of a stopped node's ext4 disk image](docs/offline-rescue.md)
 - [Documentation index](docs/README.md)
 - [v1.0.0 full documentation set](docs/v1/README.md)
 - [Complete specification (Markdown)](docs/v1/PsiOS-v1-complete.md)

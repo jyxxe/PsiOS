@@ -501,3 +501,64 @@ fn fair_claims_do_not_starve_a_second_principal_behind_an_owner_backlog() {
     assert_eq!(claim(&mut s), first);
     assert_eq!(claim(&mut s), second["task_id"].as_str().unwrap());
 }
+
+#[test]
+fn backup_check_excludes_restore_and_retries_after_lost_receipt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, mut s) = initialized(tmp.path());
+    let task = submit(&mut s, "volume.create", json!({"name":"archive"}));
+    let volume = execute(&mut s, &task);
+    let task = submit(
+        &mut s,
+        "backup.create",
+        json!({"id":volume["resource_id"],"expected_resource_version":volume["version"]}),
+    );
+    let backup = execute(&mut s, &task);
+    let target = json!({"id":backup["resource_id"],"expected_resource_version":backup["version"]});
+    let grant = call(
+        &mut s,
+        "Grant.Issue",
+        json!({"principal_id":"local-owner","actions":["backup.verify","task.submit","task.read"],
+        "tool_targets":[backup["resource_id"]],"ttl_seconds":120,"units":4}),
+    )
+    .unwrap();
+    let request = call(
+        &mut s,
+        "Task.Prepare",
+        json!({"tool":"backup.verify","input":target,
+        "delegation_id":grant["delegation_ref"]["resource_id"],"key":"integrity"}),
+    )
+    .unwrap();
+    let task = call(&mut s, "Task.Submit", request).unwrap()["task_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(claim(&mut s), task);
+    let worker = dispatch(&mut s, &task);
+    let reading = worker.perform(|_, _| unreachable!()).unwrap();
+    let competing = submit(&mut s, "backup.restore", target.clone());
+    assert_eq!(claim(&mut s), competing);
+    let conflict = s
+        .transaction("restore", |db| broker::dispatch(db, &competing))
+        .err()
+        .unwrap();
+    assert_eq!(conflict.0.code, "Conflict");
+    s.transaction("close", |db| {
+        broker::dispatch_failed(db, &competing, &conflict)
+    })
+    .unwrap();
+
+    drop(s);
+    let mut s = Store::open(cfg).unwrap();
+    s.transaction("restart", broker::recover).unwrap();
+    let replay = execute(&mut s, &task);
+    assert_eq!(replay["backup_ref"], backup);
+    assert_eq!(replay["manifest_digest"], reading["manifest_digest"]);
+    let restore = submit(&mut s, "backup.restore", target);
+    assert!(
+        execute(&mut s, &restore)["resource_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("volume-")
+    );
+}

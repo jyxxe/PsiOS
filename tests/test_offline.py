@@ -42,7 +42,7 @@ class OfflineVerification(unittest.TestCase):
         before = self.contents()
         result = self.verify()
         self.assertEqual((result["node_id"], result["database_format"], result["witness"]),
-                         (node, 3, "Confirmed"))
+                         (node, 4, "Confirmed"))
         self.assertEqual(self.contents(), before)
         head = n.witness / "head"
         committed = json.loads(head.read_text())["committed"]

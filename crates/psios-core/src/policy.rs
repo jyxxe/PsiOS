@@ -38,6 +38,7 @@ pub const TOOLS: &[&str] = &[
     "volume.write",
     "volume.delete",
     "backup.create",
+    "backup.verify",
     "backup.delete",
     "backup.restore",
     "application.install",
@@ -71,6 +72,7 @@ pub fn readonly(tool: &str) -> bool {
             | "volume.read_chunk"
             | "application.refresh"
             | "secret.mac"
+            | "backup.verify"
             | "volume.read"
             | "application.health"
             | "application.logs"
@@ -96,12 +98,12 @@ pub fn approval(tool: &str) -> bool {
     )
 }
 
-// Detailed network topology requires an explicit grant, including for the owner CLI.
+// New inspection scopes require explicit grants, including for the owner CLI.
 fn bootstrap_actions() -> Vec<String> {
     COMMON
         .iter()
         .chain(TOOLS)
-        .filter(|a| **a != "node.interfaces")
+        .filter(|a| !matches!(**a, "node.interfaces" | "backup.verify"))
         .map(|a| a.to_string())
         .collect()
 }
@@ -184,10 +186,10 @@ fn install_tools(db: &Db<'_>, profile: &Value) -> Result<()> {
     }
     Ok(())
 }
-pub fn upgrade_interfaces(db: &Db<'_>) -> Result<()> {
+pub fn upgrade_tool_catalog(db: &Db<'_>, version: u32) -> Result<()> {
     install_tools(db, &db.get(RUNTIME_PROFILE)?.reference())?;
-    db.c.pragma_update(None, "user_version", 3)?;
-    db.audit(SYSTEM, "Core.Upgrade", None, "Version3")
+    db.c.pragma_update(None, "user_version", version)?;
+    db.audit(SYSTEM, "Core.Upgrade", None, &format!("Version{version}"))
 }
 pub fn upgrade(db: &Db<'_>) -> Result<()> {
     let profile = db.get(PROFILE)?;

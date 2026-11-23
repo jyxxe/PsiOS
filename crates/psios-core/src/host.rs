@@ -90,6 +90,8 @@ pub enum Action {
     Delete(Target),
     #[serde(rename = "backup.create")]
     Backup(Target),
+    #[serde(rename = "backup.verify")]
+    VerifyBackup(Target),
     #[serde(rename = "backup.delete")]
     DeleteBackup(Target),
     #[serde(rename = "backup.restore")]
@@ -222,7 +224,7 @@ impl Action {
             Self::Activate(t) | Self::Delete(t) | Self::Backup(t) => {
                 (&t.id, Some(&t.expected_resource_version), "Volume")
             }
-            Self::Restore(t) | Self::DeleteBackup(t) => {
+            Self::Restore(t) | Self::VerifyBackup(t) | Self::DeleteBackup(t) => {
                 (&t.id, Some(&t.expected_resource_version), "Backup")
             }
             Self::Install(s) => match &s.volume {

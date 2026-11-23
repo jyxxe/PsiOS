@@ -14,7 +14,7 @@ Every other v1 source ZIP entry, including all 17 normative chapters, 25 ADRs, 3
 Run from the repository root:
 
 ```sh
-python3 docs/releases/restore_v1.py --verify-all --write-zip
+python3 docs/releases/restore_v1.py --verify-current --write-zip
 ```
 
 This verifies all five archive parts, reconstructs the exact original ZIP, checks ZIP CRC, safely restores the two oversized entries without overwriting modified files, and verifies the 211-file SHA-256 manifest. Recovery itself does not execute historical source code.

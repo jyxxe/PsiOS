@@ -30,7 +30,7 @@ jobs:
         run: |
           python3 -m venv "$RUNNER_TEMP/psios-docs"
           "$RUNNER_TEMP/psios-docs/bin/pip" install -r docs/v1/tools/requirements.txt
-          python3 docs/releases/restore_v1.py
+          python3 docs/releases/restore_v1.py --verify-current
           "$RUNNER_TEMP/psios-docs/bin/python" docs/v1/tools/validate_package.py
       - name: Test local system API and process recovery
         run: |

@@ -29,7 +29,7 @@ The exact original 5,566,788-byte ZIP is stored byte-for-byte as five Git blobs 
 From the repository root:
 
 ```bash
-python3 docs/releases/restore_v1.py --verify-all --write-zip
+python3 docs/releases/restore_v1.py --verify-current --write-zip
 ```
 
 This restores the two large files to their original paths, verifies the full package manifest and creates the original ZIP in `docs/releases/`. See [GitHub layout notes](v1/GITHUB_LAYOUT.md). No network access, models, containers or agent are needed for reconstruction.

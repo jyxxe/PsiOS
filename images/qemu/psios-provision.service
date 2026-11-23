@@ -1,0 +1,17 @@
+[Unit]
+Description=Provision PsiOS Core from the local instance seed
+After=local-fs.target
+ConditionPathExists=!/var/lib/psios-provision/complete
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/psios-provision
+StateDirectory=psios-provision
+StateDirectoryMode=0700
+RuntimeDirectory=psios-provision
+PrivateMounts=yes
+TimeoutStartSec=180
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

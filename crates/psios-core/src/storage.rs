@@ -232,6 +232,47 @@ struct Entry {
     bytes: u64,
     digest: Option<String>,
 }
+// Stored at the manifest top level so older readers can still verify and
+// restore the original file/permission profile without decoding new entries.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct ModifiedTime {
+    seconds: i64,
+    nanoseconds: u32,
+}
+impl ModifiedTime {
+    fn from_metadata(meta: &fs::Metadata) -> Self {
+        Self {
+            seconds: meta.mtime(),
+            nanoseconds: meta.mtime_nsec() as u32,
+        }
+    }
+    fn restore(self, file: &File) -> Result<()> {
+        use rustix::fs::{Timestamps, UTIME_OMIT, futimens};
+        use rustix::time::Timespec;
+        let times = Timestamps {
+            last_access: Timespec {
+                tv_sec: 0,
+                tv_nsec: UTIME_OMIT,
+            },
+            last_modification: Timespec {
+                tv_sec: self.seconds,
+                tv_nsec: self.nanoseconds.into(),
+            },
+        };
+        futimens(file, &times).map_err(std::io::Error::from)?;
+        require(
+            Self::from_metadata(&file.metadata()?) == self,
+            "UnsupportedCapability",
+            "destination cannot represent the backup modification time",
+        )
+    }
+}
+#[derive(Serialize, Deserialize)]
+struct BackupTimes {
+    root: ModifiedTime,
+    entries: Vec<ModifiedTime>,
+}
+
 struct Capture<'a> {
     out: &'a Path,
     entries: Vec<(Entry, fs::Metadata)>,
@@ -426,6 +467,10 @@ fn backup(w: &Work) -> Result<Value> {
         "completed_at": now(),
         "failure_domain": "local-filesystem",
         "tool_version": env!("CARGO_PKG_VERSION"),
+        "mtime_unix_v1": BackupTimes {
+            root: ModifiedTime::from_metadata(&before),
+            entries: capture.entries.iter().map(|(_, meta)| ModifiedTime::from_metadata(meta)).collect()
+        },
         "entries": capture.entries.iter().map(|(entry, _)| entry).collect::<Vec<_>>(),
         "total_bytes": capture.total.to_string()
     });
@@ -448,6 +493,7 @@ struct BackupManifest {
     source: Value,
     entries: Vec<Entry>,
     total_bytes: String,
+    mtime_unix_v1: Option<BackupTimes>,
 }
 
 fn backup_files(cfg: &Config, b: &Doc) -> Result<(File, Vec<u8>)> {
@@ -501,10 +547,21 @@ fn inspect_backup(cfg: &Config, b: &Doc, destination: Option<&Path>) -> Result<V
         "PreconditionFailed",
         "backup manifest disagrees with authority",
     )?;
+    if let Some(times) = &m.mtime_unix_v1 {
+        require(
+            times.entries.len() == m.entries.len()
+                && std::iter::once(&times.root)
+                    .chain(&times.entries)
+                    .all(|t| t.nanoseconds < 1_000_000_000),
+            "PreconditionFailed",
+            "invalid backup modification times",
+        )?;
+    }
     let destination = destination.map(File::open).transpose()?;
     let mut dirs = vec![];
     let mut total = 0;
     for (i, e) in m.entries.iter().enumerate() {
+        let mtime = m.mtime_unix_v1.as_ref().map(|times| times.entries[i]);
         for part in e.path.split('/') {
             filename(part)?
         }
@@ -549,11 +606,14 @@ fn inspect_backup(cfg: &Config, b: &Doc, destination: Option<&Path>) -> Result<V
             total += len;
             if let Some(f) = output {
                 f.set_permissions(Permissions::from_mode(e.mode))?;
+                if let Some(time) = mtime {
+                    time.restore(&f)?;
+                }
                 f.sync_all()?;
             }
         } else if let Some((dir, name)) = target {
             rustix::fs::mkdirat(dir, name, Mode::RWXU).map_err(std::io::Error::from)?;
-            dirs.push((&e.path, e.mode))
+            dirs.push((&e.path, e.mode, mtime))
         }
     }
     require(
@@ -562,11 +622,18 @@ fn inspect_backup(cfg: &Config, b: &Doc, destination: Option<&Path>) -> Result<V
         "backup length mismatch",
     )?;
     if let Some(root) = destination {
-        for (path, mode) in dirs.into_iter().rev() {
+        for (path, mode, mtime) in dirs.into_iter().rev() {
             let (parent, name) = entry_parent(&root, path)?;
             let dir = child(&parent, name, OFlags::RDONLY | OFlags::DIRECTORY)?;
             dir.set_permissions(Permissions::from_mode(mode))?;
+            if let Some(time) = mtime {
+                time.restore(&dir)?;
+            }
             dir.sync_all()?;
+        }
+        if let Some(times) = &m.mtime_unix_v1 {
+            times.root.restore(&root)?;
+            root.sync_all()?;
         }
     }
     Ok(

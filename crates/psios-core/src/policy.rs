@@ -546,6 +546,7 @@ pub fn intern_input(db: &Db<'_>, actor: &str, input: &Value) -> Result<Doc> {
     match db.get(&id) {
         Ok(d) => Ok(d),
         Err(e) if e.0.code == "NotFound" => {
+            db.cfg.check_admission_space()?;
             let (count,size):(i64,i64)=db.c.query_row("SELECT count(*),coalesce(sum(length(CAST(body AS BLOB))),0) FROM versions WHERE kind='Input' AND owner=?1",[actor],|r|Ok((r.get(0)?,r.get(1)?)))?;
             require(
                 count < 4096 && size + canonical(input).len() as i64 <= 64 * 1024 * 1024,

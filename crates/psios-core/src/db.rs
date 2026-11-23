@@ -13,6 +13,7 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+mod space;
 mod verify;
 
 pub struct Store {

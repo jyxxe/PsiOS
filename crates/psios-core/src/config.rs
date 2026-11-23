@@ -23,6 +23,14 @@ pub struct Config {
     pub services: Vec<ServiceConfig>,
     #[serde(default = "default_docker")]
     pub docker_socket: PathBuf,
+    #[serde(default)]
+    pub authority_reserve: AuthorityReserve,
+}
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuthorityReserve {
+    pub state_bytes: u64,
+    pub witness_bytes: u64,
 }
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -86,6 +94,7 @@ impl Config {
             services: Vec::new(),
             tick_ms: default_tick(),
             docker_socket: default_docker(),
+            authority_reserve: AuthorityReserve::default(),
         }
     }
     pub fn load(path: &Path) -> Result<Self> {

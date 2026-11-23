@@ -259,6 +259,7 @@ pub fn claim(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "Conflict",
         "session already leased, waiting for a task or closed",
     )?;
+    db.cfg.check_admission_space()?;
     let active = lease::model_slots(db, &clock, &m.id)?;
     require(
         u64::from(active) < m.spec["max_in_flight"].as_u64().unwrap_or(4),

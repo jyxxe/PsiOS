@@ -46,6 +46,66 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(n.wait(n.call("Task.Submit", req, a["token"])["task_id"])["lifecycle"], "Succeeded")
         self.denied("PermissionDenied", "Node.Configure", dict(scheduling="Cordoned", expected_resource_version="r1"), a["token"])
 
+    def test_pauses_new_work_below_authority_reserve_and_preserves_existing_tasks(self):
+        n = self.n
+        cfg = json.loads(n.config.read_text())
+        constrained_fs = os.getenv("PSIOS_TEST_CAPACITY_ALLOCATION") == "1"
+        reserve = 4 * 1024 * 1024
+        if not constrained_fs:
+            reserve = int(n.call("Node.Get", {})["authority_storage"]["state"]["capacity_bytes"]) + 1
+        node = n.call("Node.Get", {})
+        n.call("Node.Configure", dict(expected_resource_version=node["reference"]["version"], scheduling="Cordoned"))
+        saved_request = n.prepare("system.status", {}, "accepted-before-pressure")
+        accepted = n.call("Task.Submit", saved_request)
+        canceled = n.submit("system.status", {})
+        not_submitted = n.prepare("system.status", {}, "new-during-pressure")
+        budget_id = n.get("owner-delegation")["value"]["budget_ref"]["resource_id"]
+        baseline = n.call("Budget.Get", {"id": budget_id})
+
+        n.stop()
+        n.config.write_text(json.dumps(dict(cfg, authority_reserve={"state_bytes": reserve})))
+        n.start()
+        filler = n.base / "filler"
+        if constrained_fs:
+            before = n.call("Node.Get", {})["authority_storage"]["state"]
+            self.assertLessEqual(int(before["capacity_bytes"]), 32 * 1024 * 1024)
+            self.assertFalse(before["below_reserve"])
+            with filler.open("xb") as handle:
+                os.posix_fallocate(handle.fileno(), 0, int(before["available_bytes"]) - 2 * 1024 * 1024)
+
+        storage = n.call("Node.Get", {})["authority_storage"]
+        self.assertTrue(storage["state"]["below_reserve"])
+        self.assertFalse(storage["witness"]["below_reserve"])
+        self.assertEqual(storage["state"]["reserve_bytes"], str(reserve))
+        self.assertTrue(storage["observed_at"])
+        before_audit = n.call("Audit.List", {"limit": 128})
+        for _ in range(3):
+            with self.assertRaises(Failure) as denied:
+                n.call("Task.Submit", not_submitted)
+            error = denied.exception.args[0]
+            self.assertEqual((error["code"], error["retry_condition"]), ("QuotaExceeded", "SameRequestAfterBackoff"))
+        self.assertEqual(before_audit, n.call("Audit.List", {"limit": 128}))
+        self.denied("QuotaExceeded", "Task.Prepare", {"tool": "node.processes", "input": {"limit": 1},
+                    "key": "new-input", "delegation_id": "owner-delegation"})
+        self.assertEqual(n.call("Budget.Get", {"id": budget_id}), baseline)
+        self.assertEqual(n.call("Task.Submit", saved_request)["task_id"], accepted["task_id"])
+
+        queued = n.call("Task.Get", {"id": canceled})
+        n.call("Task.Cancel", dict(id=canceled, expected_resource_version=queued["task_revision"]))
+        node = n.call("Node.Get", {})
+        n.call("Node.Configure", dict(expected_resource_version=node["reference"]["version"], scheduling="Enabled"))
+        self.assertEqual(n.wait(canceled)["lifecycle"], "Cancelled")
+        self.assertEqual(n.wait(accepted["task_id"])["lifecycle"], "Succeeded")
+        if constrained_fs:
+            filler.unlink()
+        else:
+            n.stop()
+            n.config.write_text(json.dumps(cfg))
+            n.start()
+        resumed = n.call("Task.Submit", not_submitted)
+        self.assertFalse(resumed["deduplicated"])
+        self.assertEqual(n.wait(resumed["task_id"])["lifecycle"], "Succeeded")
+
     def test_cordon_resumes_durable_queue_history_archive_and_dedup(self):
         n = self.n
         node = n.call("Node.Get", {})

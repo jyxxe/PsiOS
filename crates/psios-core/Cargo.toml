@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-psios-api = { path = "../psios-api" }
+psios-api = { path = "../psios-api", features = ["local-inference"] }
 rusqlite = { version = "0.38", features = ["bundled", "serde_json"] }
 serde.workspace = true
 serde_json.workspace = true

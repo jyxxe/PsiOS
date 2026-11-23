@@ -1,6 +1,10 @@
 //! Provider implementations run as authenticated peers. Only the authority can commit a tool step.
 mod journal;
+#[cfg(feature = "local-inference")]
+mod local;
 use crate::{ApiError, ApiResult, Client};
+#[cfg(feature = "local-inference")]
+pub use local::LocalInventoryModel;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -32,7 +36,7 @@ impl Client {
         &self,
         session: &str,
         key: &str,
-        provider: &impl SessionModel,
+        provider: &(impl SessionModel + ?Sized),
     ) -> ApiResult<Turn> {
         let claim = self.call("Model.Claim", json!({"session_id":session,"key":key}))?;
         if let Some(receipt) = claim.get("completed") {
@@ -64,7 +68,7 @@ impl Client {
         &self,
         session: &str,
         key: &str,
-        provider: &impl SessionModel,
+        provider: &(impl SessionModel + ?Sized),
     ) -> ApiResult<Value> {
         match self.decide_turn(session, key, provider)? {
             Turn::Completed(receipt) => Ok(receipt),

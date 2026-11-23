@@ -1,0 +1,16 @@
+{
+  "runtime": {
+    "revision": "f5e6915c28f10330885fcb9243a93ae98d3115ab",
+    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12651/llama-b12651-bin-ubuntu-x64.tar.gz",
+    "sha256": "17b242259181d5b1b1f7719aba27929700a8b0dab39bfaef1b971a992b397b38",
+    "size_bytes": 23297838,
+    "executable": "llama-b12651/llama-server"
+  },
+  "model": {
+    "revision": "09816acd5d99df7be770d85ea30822623dab342c",
+    "url": "https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/09816acd5d99df7be770d85ea30822623dab342c/SmolLM2-135M-Instruct-Q4_K_M.gguf",
+    "sha256": "2e8040ceae7815abe0dcb3540b9995eaa1fa0d2ca9e797d0a635ae4433c68c2d",
+    "size_bytes": 105454432,
+    "license": "Apache-2.0"
+  }
+}

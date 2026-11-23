@@ -149,7 +149,7 @@ impl Client {
         &self,
         session: &str,
         key: &str,
-        provider: &impl SessionModel,
+        provider: &(impl SessionModel + ?Sized),
         dir: &Path,
     ) -> ApiResult<Value> {
         let journal = Journal::open(dir)?;

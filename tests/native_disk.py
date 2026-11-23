@@ -59,6 +59,8 @@ class Console:
         marker = "PSIOSLOGIN" + secrets.token_hex(6)
         self.send(f"stty -echo; export PS1=''; printf '\\n{marker}\\n'")
         self.until(("\n" + marker + "\n").encode())
+        if user == "psios":
+            self.run("for i in $(seq 1 100); do psiosctl whoami >/dev/null 2>&1 && exit 0; sleep 0.1; done; exit 1")
 
     def run(self, command):
         marker = "PSIOSCMD" + secrets.token_hex(6)
@@ -99,7 +101,8 @@ def password(work, name):
 
 
 def check_state(c):
-    assert c.run("id -u") == "1000"
+    uid = c.run("id -u")
+    assert uid == "1000", uid
     assert c.run(". /etc/os-release; echo \"$ID\"") == "psios"
     assert c.run("awk '/^Uid:/ {print $2}' /proc/$(pidof psiosd)/status") == "1000"
     c.run("test -d /sys/firmware/efi && test -d /sys/class/net/lo || exit 1; "

@@ -42,6 +42,21 @@ sha256sum boot.efi
 
 首次启动在挂载前分别核对状态和主目录的文件系统 UUID，核对部署记录，在磁盘上持久消费一次性初始化标记，然后创建节点。每次启动在启动服务前复核 Core 权威及见证。初始化中断或状态盘不匹配时，系统停机并在串口指明失败阶段。保留原盘，使用同版本救援归档检查 `--partition 2 --state /psios --uid 1000`。强制断电产生的待重放日志可用有容量限制的临时覆盖层检查。[离线救援](offline-rescue.md)
 
-本版生成的 323 MiB 新盘给主目录分配独立的 64 MiB ext4。普通账户可以在 `/home/psios` 保存文件并执行脚本；root 的 `/root` 独立设为私有，两者共享这 64 MiB。主目录写满时仍可向 Core 提交任务。第三分区丢失或 UUID 不符时，启动在挂载前停止。早期两分区开发盘的主目录在 RAM，已有磁盘继续使用它们原有的引导程序；此构建器只创建新盘。
+本版生成的 323 MiB 新盘给主目录分配独立的 64 MiB ext4。普通账户可以在 `/home/psios` 保存文件并执行脚本，root 的 `/root` 独立设为私有，两者共享这 64 MiB。主目录写满时仍可向 Core 提交任务。第三分区丢失或 UUID 不符时，启动在挂载前停止。早期两分区开发盘的主目录在 RAM，已有磁盘继续使用它们原有的引导程序。
 
-该组合限单个 virtio 系统盘、标准 4 MiB amd64 OVMF 和本机串口。本机账户及密码摘要保存在状态分区的 /etc 配置中。root 可运行 passwd psios 更换密码，重启后生效。磁盘数据为明文。状态与见证位于同一物理故障域。新实例应重新生成磁盘，复制已经初始化的镜像也会复制节点身份和密钥。物理安装、Secure Boot、加密、系统 A/B 更新及回退，以及三个发行版的 EditionReady 验收尚待实现或验证。[虚机故障验收](../tests/native_disk.py)
+该组合限单个 virtio 系统盘、标准 4 MiB amd64 OVMF 和本机串口。本机账户及密码摘要保存在状态分区的 /etc 配置中。root 可运行 passwd psios 更换密码，重启后生效。磁盘数据为明文。状态与见证位于同一物理故障域。新节点应重新生成磁盘。物理安装、Secure Boot、加密、自动系统更新与回退，以及三个发行版的 EditionReady 验收尚待实现或验证。[虚机故障验收](../tests/native_disk.py)
+
+## 停机升级到另一份原生磁盘
+
+适用于已初始化且停机的 323 MiB 三分区开发盘，使用标准 `/var/lib/psios` 和 `/var/lib/psios.witness`。保留当前可用的 EFI 变量文件和节点外可信构建回执。使用目标版本的已核验 Core 归档及安装器。构建机还需 `qemu-img`、`qemu-system-x86_64` 和约 1 GiB 可用工作空间。
+
+```sh
+umask 077
+python3 native/create.py next.raw --upgrade-from node.raw --previous-receipt node-build.json \
+  --kernel-iso alpine-virt.iso --core-archive psios-core-linux-amd64.tar.gz \
+  --core-sha256 "$VERIFIED_CORE_SHA256" > next-build.json
+```
+
+安装器用 QEMU 的一致性读锁复制源盘，检查原 GPT 布局、旧 EFI 摘要、文件系统 UUID 和部署标记。待重放的 ext4 内部日志在固定大小的私有分区副本上重放，随后执行只读文件系统检查。新版本 Core 由独立救援内核在只读候选盘上核验权威及见证。通过后替换候选盘的 EFI 分区，保留原 GPT、状态、卷、凭据、站点配置和主目录。回执记录源盘摘要、目标制品摘要、升级前的数据库格式及已重放日志的分区。活动的 QEMU 写入、身份不匹配或需要进一步修复时停止发布。创建完成后可核对 `initial_image_sha256`。[QEMU 文件锁](https://www.qemu.org/docs/master/system/qemu-block-drivers.html#disk-image-file-locking) · [ext4 日志重放](https://man7.org/linux/man-pages/man8/e2fsck.8.html) · [救援核验](offline-rescue.md)
+
+保留原盘，使用 EFI 变量文件的副本启动 `next.raw`。启动检查会按新 Core 的格式要求迁移候选盘。登录后比对 `/psios-deployment.json` 摘要、节点 ID 和已有任务回执，再恢复工作流。原盘与候选盘共享节点身份和密钥，只启动其中一个。验收失败且尚未产生需保留的新写入时，可停掉候选盘并用原盘及对应的 EFI 变量文件重新启动。候选盘开始接受业务写入后，回退前需要另行处理候选盘内的新状态与外部效果。[双版本启动与保留数据测试](../tests/native_upgrade.py)

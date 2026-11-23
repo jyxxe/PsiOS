@@ -45,9 +45,11 @@ jobs:
   rescue-disk:
     needs: portable-core
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: psios-core-linux-amd64
@@ -82,6 +84,18 @@ jobs:
             --kernel-iso "$RUNNER_TEMP/rescue.iso" \
             --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
             --psiosd "$RUNNER_TEMP/rescue-core/psiosd" --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py"
+
+      - name: Upgrade a running release through a stopped UEFI disk and boot both generations
+        run: |
+          mkdir "$RUNNER_TEMP/native-format5"
+          prior="$RUNNER_TEMP/native-format5/core.tar.gz"
+          tools/build-portable-core "$prior" f9a74d4a1175eaa7eb95349320fe845cde918d99
+          tar -xzf "$prior" -C "$RUNNER_TEMP/native-format5"
+          (cd "$RUNNER_TEMP/native-format5" && sha256sum --strict --check SHA256SUMS)
+          python3 tests/native_upgrade.py --kernel-iso "$RUNNER_TEMP/rescue.iso" \
+            --previous-archive "$prior" --previous-installer "$RUNNER_TEMP/native-format5/native/create.py" \
+            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
+            --installer "$RUNNER_TEMP/rescue-core/native/create.py"
 
   local-inference:
     needs: portable-core

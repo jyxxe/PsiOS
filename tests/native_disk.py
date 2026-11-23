@@ -109,16 +109,16 @@ def check_state(c):
     return who["authority_id"], submitted, result["result"], c.run("cat /proc/sys/kernel/random/boot_id")
 
 
-def replace_state_partition(image, filesystem):
+def replace_partition(image, filesystem, offset_mib):
     with image.open("r+b") as dst, filesystem.open("rb") as src:
-        dst.seek(65 * 1024 * 1024)
+        dst.seek(offset_mib * 1024 * 1024)
         shutil.copyfileobj(src, dst)
 
 
-def extract_state_partition(image, output):
+def extract_partition(image, output, offset_mib, size_mib):
     with image.open("rb") as src, output.open("wb") as dst:
-        src.seek(65 * 1024 * 1024)
-        for _ in range(192):
+        src.seek(offset_mib * 1024 * 1024)
+        for _ in range(size_mib):
             chunk = src.read(1024 * 1024)
             assert len(chunk) == 1024 * 1024
             dst.write(chunk)
@@ -141,17 +141,31 @@ def exercise(args, work):
         c.credentials("psios", "wrong-" + secrets.token_hex(10))
         c.until(b"Login incorrect")
         c.login("psios", operator)
+        assert c.run("pwd") == "/home/psios"
+        assert c.run("stat -c '%u:%g:%a' .") == "1000:1000:700"
+        c.run("test ! -r /root && test ! -w /mnt/psios-homes")
+        c.run("printf '#!/bin/sh\\necho persisted\\n' > ./observe && chmod 700 ./observe && sync -f .")
+        assert c.run("./observe") == "persisted"
+        # Fill only the user's filesystem; a fresh Core submission still needs
+        # durable writes to the authority and its witness on partition two.
+        failure = c.run("dd if=/dev/zero of=./full bs=64K 2>&1; test $? -ne 0")
+        assert "No space left on device" in failure, failure
+        assert int(c.run("stat -c %s ./full")) >= 40 * 1024 * 1024
         first = check_state(c)
         assert not first[1]["deduplicated"]
         # SIGKILL the VM with the OS and Core still running.
     with boot(work, image) as c:
         c.login("psios", operator)
+        assert c.run("./observe") == "persisted"
+        c.run("rm ./full && sync -f .")
         second = check_state(c)
         assert first[0] == second[0] and second[1]["deduplicated"]
         assert first[1]["task_id"] == second[1]["task_id"] and first[2] == second[2] and first[3] != second[3]
         c.send("exit")
         c.login("root", admin)
         assert c.run("id -u") == "0"
+        assert c.run("pwd; stat -c '%u:%g:%a' .").splitlines() == ["/root", "0:0:700"]
+        c.run("umask 077; echo operator-rotated > ./maintenance")
         # passwd replaces /etc/shadow atomically. The host account database must
         # survive a reboot without restoring the credentials from initial enrollment.
         rotated = secrets.token_urlsafe(26)
@@ -167,9 +181,12 @@ def exercise(args, work):
         c.credentials("psios", operator)
         c.until(b"Login incorrect")
         c.login("psios", rotated)
+        assert c.run("./observe") == "persisted"
+        c.run("test ! -r /root/maintenance")
         assert json.loads(c.run("psiosctl whoami"))["authority_id"] == first[0]
         c.send("exit")
         c.login("root", admin)
+        assert c.run("cat ./maintenance") == "operator-rotated"
         c.send("poweroff")
         assert c.vm.wait(35) == 0
     # Inspect the *installed* second partition from the external read-only rescue kernel.
@@ -178,10 +195,25 @@ def exercise(args, work):
                                       "--partition", "2", "--state", "/psios", "--uid", "1000"])
     checked = json.loads(report)
     assert checked["sqlite_integrity"] == "Verified" and checked["node_id"] == first[0] and checked["foreign_keys"] == "Verified"
+    # A valid, independently formatted home volume cannot replace the expected
+    # filesystem; detecting that mismatch must precede writing either volume.
+    original_home = work / "original-home.ext4"
+    extract_partition(image, original_home, 257, 64)
+    foreign_home = work / "foreign-home.ext4"
+    with foreign_home.open("xb") as f:
+        f.truncate(64 * 1024 * 1024)
+    subprocess.run(["mkfs.ext4", "-q", "-F", foreign_home], check=True)
+    replace_partition(image, foreign_home, 257)
+    mismatched = sha(image)
+    with boot(work, image) as c:
+        c.until(b"PsiOS boot stopped at home-device")
+        assert c.vm.wait(25) == 0
+    assert sha(image) == mismatched
+    replace_partition(image, original_home, 257)
     # Lose only the database of the stopped guest. The consumed enrollment must
     # never authorize a second initialization, even with the genuine disk UUID.
     partition = work / "state.ext4"
-    extract_state_partition(image, partition)
+    extract_partition(image, partition, 65, 192)
     def read_owner():
         return subprocess.check_output(["debugfs", "-R", "cat /psios.witness/owner.token", partition],
                                        stderr=subprocess.DEVNULL)
@@ -189,11 +221,11 @@ def exercise(args, work):
     assert len(original_owner) == 64
     subprocess.run(["debugfs", "-w", "-R", "rm /psios/state.db", partition], check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    replace_state_partition(image, partition)
+    replace_partition(image, partition, 65)
     with boot(work, image) as c:
         c.until(b"PsiOS boot stopped at authority")
         assert c.vm.wait(25) == 0
-    extract_state_partition(image, partition)
+    extract_partition(image, partition, 65, 192)
     assert read_owner() == original_owner
     absent = subprocess.run(["debugfs", "-R", "stat /psios/state.db", partition], capture_output=True)
     assert b"File not found" in absent.stderr
@@ -206,14 +238,14 @@ def exercise(args, work):
     with alien.open("xb") as f:
         f.truncate(192 * 1024 * 1024)
     subprocess.run(["mkfs.ext4", "-q", "-F", "-d", seed, alien], check=True)
-    replace_state_partition(image, alien)
+    replace_partition(image, alien, 65)
     pre_reject = sha(image)
     with boot(work, image) as c:
         c.until(b"PsiOS boot stopped at state-device")
         assert c.vm.wait(25) == 0
     assert sha(image) == pre_reject
     print(f"Verified source {deployment['source_commit']}, node {first[0]}, task {first[1]['task_id']}, "
-          "authenticated UEFI console, offline management, power loss, clean shutdown, external rescue, consumed enrollment and foreign-disk refusal.")
+          "authenticated UEFI console, private persistent homes, full-home isolation, offline management, power loss, clean shutdown, external rescue, consumed enrollment and mismatched state/home refusal.")
 
 
 if __name__ == "__main__":

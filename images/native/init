@@ -1,6 +1,6 @@
 #!/bin/sh
-# PID 1 of the independent amd64 VM candidate. The only writable persistent
-# mount is the filesystem selected when this particular disk was constructed.
+# PID 1 of the independent amd64 VM candidate. The writable persistent
+# mounts use filesystem identities pinned when this disk was constructed.
 set -eu
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 bb=/bin/busybox
@@ -16,12 +16,17 @@ stage=state-device
 /usr/sbin/modprobe virtio_blk
 /usr/sbin/modprobe ext4
 i=0
-while [ ! -b /dev/vda2 ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+while { [ ! -b /dev/vda2 ] || [ ! -b /dev/vda3 ]; } && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
 set -- /sys/class/block/vd?
 [ "$#" -eq 1 ] && [ "$1" = /sys/class/block/vda ] || exit 1
 id=$(cat /psios-disk-uuid)
 blkid /dev/vda2 | grep -F " UUID=\"$id\"" >/dev/null
-mkdir -p /var/lib /run/psios /home/psios /root
+stage=home-device
+[ -b /dev/vda3 ]
+home_id=$(cat /psios-home-uuid)
+blkid /dev/vda3 | grep -F " UUID=\"$home_id\"" >/dev/null
+mkdir -p /var/lib /run/psios /home /root /mnt/psios-homes
+stage=state-device
 mount -t ext4 -o nodev,nosuid,noexec /dev/vda2 /var/lib
 [ "$(stat -c '%u:%g:%a' /var/lib)" = 0:0:755 ]
 [ "$(stat -c '%u:%g:%a' /var/lib/deployment-uuid)" = 0:0:444 ]
@@ -30,8 +35,20 @@ stage=host-config
 [ "$(stat -c '%u:%g:%a' /var/lib/etc)" = 0:0:755 ]
 [ "$(stat -c '%u:%g:%a' /var/lib/etc/shadow)" = 0:0:600 ]
 mount -o bind /var/lib/etc /etc
-chmod 0700 /run/psios /home/psios /root
-chown 1000:1000 /run/psios /home/psios
+chmod 0700 /run/psios
+chown 1000:1000 /run/psios
+stage=home-mount
+mount -t ext4 -o nodev,nosuid /dev/vda3 /mnt/psios-homes
+[ "$(stat -c '%u:%g:%a' /mnt/psios-homes)" = 0:0:755 ]
+for name in psios root; do
+    dir=/mnt/psios-homes/$name
+    [ -d "$dir" ] && [ ! -L "$dir" ] || exit 1
+done
+[ "$(stat -c '%u:%g' /mnt/psios-homes/psios)" = 1000:1000 ]
+[ "$(stat -c '%u:%g' /mnt/psios-homes/root)" = 0:0 ]
+mkdir -p /home/psios
+mount -o bind /mnt/psios-homes/psios /home/psios
+mount -o bind /mnt/psios-homes/root /root
 stage=authority
 if [ -f /var/lib/initialize-once ]; then
     [ "$(stat -c '%u:%g:%a' /var/lib/initialize-once)" = 0:0:444 ]

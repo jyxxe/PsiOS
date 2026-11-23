@@ -102,6 +102,8 @@ def exercise(iso, binaries, inspector, root, firmware_media):
                               capture_output=True, timeout=180, check=True)
         assert boot.stdout.replace(b"\r\n", b"\n").endswith(b"PSIOS-RESCUE/1\nERROR block-device\n"), boot.stdout
         assert digest(volume) == before
+        print(f"Verified SeaBIOS, OVMF and standalone read-only enforcement; identical ISO SHA-256 {original}",
+              flush=True)
     other_uid = 65532 if os.getuid() != 65532 else 65531
     inspect(volume, ["--uid", str(other_uid)], "authority-PermissionDenied")
     inspect(volume, ["--core-sha256", "0" * 64], "SHA-256 mismatch")

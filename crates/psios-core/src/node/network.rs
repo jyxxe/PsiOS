@@ -1,6 +1,8 @@
-//! Bounded, read-only interface observations in the daemon's network namespace.
+//! Bounded, read-only observations in the daemon's network namespace.
 mod kernel;
+mod routes;
 use crate::{Result, err, now, require};
+pub use routes::{RouteQuery, observe_routes};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{fs, net::IpAddr, os::unix::fs::MetadataExt, process::Command};
@@ -44,6 +46,21 @@ struct Address {
     peer: Option<IpAddr>,
 }
 
+#[derive(Serialize)]
+struct Namespace {
+    boot_id: String,
+    network_namespace_inode: String,
+}
+
+fn namespace() -> Result<Namespace> {
+    Ok(Namespace {
+        boot_id: fs::read_to_string("/proc/sys/kernel/random/boot_id")?
+            .trim()
+            .into(),
+        network_namespace_inode: fs::metadata("/proc/self/ns/net")?.ino().to_string(),
+    })
+}
+
 fn iproute_interfaces() -> Result<Vec<Interface>> {
     let mut cmd = Command::new("/usr/sbin/ip");
     cmd.env_clear()
@@ -65,9 +82,11 @@ fn iproute_interfaces() -> Result<Vec<Interface>> {
 
 pub fn interfaces(q: &Query) -> Result<Value> {
     let mut interfaces = match fs::canonicalize("/usr/sbin/ip") {
-        Ok(path) if path.file_name().is_some_and(|s| s == "busybox") => kernel::observe()?,
+        Ok(path) if path.file_name().is_some_and(|s| s == "busybox") => {
+            kernel::observe_interfaces()?
+        }
         Ok(_) => iproute_interfaces()?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => kernel::observe()?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => kernel::observe_interfaces()?,
         Err(e) => return Err(e.into()),
     };
     interfaces.sort_unstable_by_key(|i| i.ifindex);
@@ -91,9 +110,9 @@ pub fn interfaces(q: &Query) -> Result<Value> {
         )?;
     }
     let next = more.then(|| interfaces.last().unwrap().ifindex);
+    let namespace = namespace()?;
     Ok(json!({
         "interfaces": interfaces, "next_after_ifindex": next, "observed_at": now(),
-        "boot_id": fs::read_to_string("/proc/sys/kernel/random/boot_id")?.trim(),
-        "network_namespace_inode": fs::metadata("/proc/self/ns/net")?.ino().to_string(),
+        "boot_id": namespace.boot_id, "network_namespace_inode": namespace.network_namespace_inode,
     }))
 }

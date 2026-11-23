@@ -1,35 +1,146 @@
-//! RTNETLINK inventory for minimal hosts without iproute2 JSON support.
+//! Authenticated, bounded RTNETLINK dumps in the caller's network namespace.
 use super::{Address, Interface};
 use crate::{Result, err, require};
-use futures_util::StreamExt;
-use rtnetlink::{
-    Handle,
-    packet_core::{NLM_F_DUMP, NLM_F_DUMP_INTR, NLM_F_REQUEST, NetlinkMessage, NetlinkPayload},
-    packet_route::{
-        AddressFamily, RouteNetlinkMessage,
-        address::{AddressAttribute, AddressMessage, AddressScope},
-        link::{LinkAttribute, LinkFlags, LinkLayerType, LinkMessage},
-    },
+use netlink_packet_core::{
+    NLM_F_DUMP, NLM_F_DUMP_INTR, NLM_F_REQUEST, NetlinkBuffer, NetlinkMessage, NetlinkPayload,
+    Parseable,
 };
-use std::{collections::BTreeMap, time::Duration};
+use netlink_packet_route::{
+    AddressFamily, RouteNetlinkMessage,
+    address::{AddressAttribute, AddressMessage, AddressScope},
+    link::{LinkAttribute, LinkFlags, LinkLayerType, LinkMessage},
+};
+use rustix::{
+    event::{PollFd, PollFlags, Timespec, poll},
+    fd::OwnedFd,
+    io::Errno,
+    net::{self, RecvFlags, SendFlags, SocketFlags, SocketType, netlink::SocketAddrNetlink},
+};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant},
+};
 
-async fn dump(
-    handle: &mut Handle,
-    query: RouteNetlinkMessage,
-    mut observe: impl FnMut(RouteNetlinkMessage) -> Result<()>,
-) -> Result<()> {
-    let mut request = NetlinkMessage::from(query);
-    request.header.flags = NLM_F_DUMP | NLM_F_REQUEST;
-    let mut replies = handle
-        .request(request)
-        .map_err(|_| err("DependencyUnavailable", "cannot request network inventory"))?;
-    let mut bytes = 0;
-    while let Some(reply) = replies.next().await {
-        bytes += reply.buffer_len();
+const KERNEL: SocketAddrNetlink = SocketAddrNetlink::new(0, 0);
+
+pub(super) struct Observer {
+    socket: OwnedFd,
+    deadline: Instant,
+    sequence: u32,
+}
+
+impl Observer {
+    pub(super) fn open() -> Result<Self> {
+        // The default protocol for AF_NETLINK is NETLINK_ROUTE (zero).
+        let socket = net::socket_with(
+            net::AddressFamily::NETLINK,
+            SocketType::RAW,
+            SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
+            None,
+        )
+        .map_err(io_error)?;
+        net::bind(&socket, &KERNEL).map_err(io_error)?;
+        Ok(Self {
+            socket,
+            deadline: Instant::now() + Duration::from_secs(5),
+            sequence: 0,
+        })
+    }
+
+    fn receive(&self, buf: &mut [u8]) -> Result<usize> {
+        loop {
+            let timeout = self.deadline.saturating_duration_since(Instant::now());
+            let expired = || {
+                err(
+                    "DependencyUnavailable",
+                    "kernel network observation timed out",
+                )
+            };
+            if timeout.is_zero() {
+                return Err(expired());
+            }
+            let timeout = Timespec::try_from(timeout).expect("network timeout fits timespec");
+            let mut fds = [PollFd::new(&self.socket, PollFlags::IN)];
+            match poll(&mut fds, Some(&timeout)) {
+                Ok(0) => return Err(expired()),
+                Ok(_) => {}
+                Err(Errno::INTR) => continue,
+                Err(e) => return Err(io_error(e)),
+            }
+            // MSG_TRUNC reports the full datagram length, even if the buffer was too small.
+            match net::recvfrom(&self.socket, &mut *buf, RecvFlags::TRUNC) {
+                Ok((_, len, sender)) => {
+                    require(
+                        sender.and_then(|addr| SocketAddrNetlink::try_from(addr).ok())
+                            == Some(KERNEL),
+                        "DependencyUnavailable",
+                        "network dump sender is not the kernel",
+                    )?;
+                    require(
+                        len != 0 && len <= buf.len(),
+                        "QuotaExceeded",
+                        "invalid network datagram size",
+                    )?;
+                    return Ok(len);
+                }
+                Err(Errno::AGAIN | Errno::INTR) => continue,
+                Err(Errno::NOBUFS) => return Err(err("Conflict", "kernel network dump lost data")),
+                Err(e) => return Err(io_error(e)),
+            }
+        }
+    }
+
+    pub(super) fn dump(
+        &mut self,
+        query: RouteNetlinkMessage,
+        mut observe: impl FnMut(RouteNetlinkMessage) -> Result<()>,
+    ) -> Result<()> {
+        self.sequence += 1;
+        let mut request = NetlinkMessage::from(query);
+        request.header.sequence_number = self.sequence;
+        request.header.flags = NLM_F_DUMP | NLM_F_REQUEST;
+        request.finalize();
+        let mut encoded = vec![0; request.buffer_len()];
+        request.serialize(&mut encoded);
+        let size =
+            net::sendto(&self.socket, &encoded, SendFlags::empty(), &KERNEL).map_err(io_error)?;
         require(
-            bytes <= 1024 * 1024,
-            "QuotaExceeded",
-            "network observation exceeds one MiB",
+            size == encoded.len(),
+            "DependencyUnavailable",
+            "incomplete network dump request",
+        )?;
+        let mut buf = vec![0; 128 * 1024];
+        let mut bytes = 0;
+        loop {
+            let size = self.receive(&mut buf)?;
+            bytes += size;
+            require(
+                bytes <= 1024 * 1024,
+                "QuotaExceeded",
+                "network dump exceeds one MiB",
+            )?;
+            if consume(&buf[..size], self.sequence, &mut observe)? {
+                return Ok(());
+            }
+        }
+    }
+}
+
+fn consume(
+    mut messages: &[u8],
+    sequence: u32,
+    observe: &mut impl FnMut(RouteNetlinkMessage) -> Result<()>,
+) -> Result<bool> {
+    while !messages.is_empty() {
+        let invalid = |_| err("DependencyUnavailable", "invalid kernel network message");
+        let buffer = NetlinkBuffer::new_checked(&messages).map_err(invalid)?;
+        let reply = NetlinkMessage::<RouteNetlinkMessage>::parse(&buffer).map_err(invalid)?;
+        let len = buffer.length() as usize;
+        messages = &messages[len.next_multiple_of(4).min(messages.len())..];
+        require(
+            reply.header.sequence_number == sequence,
+            "DependencyUnavailable",
+            "unexpected network dump sequence",
         )?;
         require(
             reply.header.flags & NLM_F_DUMP_INTR == 0,
@@ -38,7 +149,7 @@ async fn dump(
         )?;
         match reply.payload {
             NetlinkPayload::InnerMessage(message) => observe(message)?,
-            NetlinkPayload::Done(done) if done.code == 0 => return Ok(()),
+            NetlinkPayload::Done(done) if done.code == 0 && messages.is_empty() => return Ok(true),
             _ => {
                 return Err(err(
                     "DependencyUnavailable",
@@ -47,10 +158,14 @@ async fn dump(
             }
         }
     }
-    Err(err(
+    Ok(false)
+}
+
+fn io_error(e: Errno) -> crate::Error {
+    err(
         "DependencyUnavailable",
-        "incomplete network observation",
-    ))
+        format!("kernel network observation: {e}"),
+    )
 }
 
 fn link(message: LinkMessage) -> Result<Interface> {
@@ -147,13 +262,10 @@ fn address(message: AddressMessage) -> Result<Option<Address>> {
     }))
 }
 
-async fn inventory() -> Result<Vec<Interface>> {
-    let (mut connection, mut handle, _) = rtnetlink::new_connection()?;
-    connection.set_forward_done(true);
-    tokio::spawn(connection);
+pub(super) fn observe_interfaces() -> Result<Vec<Interface>> {
+    let mut observer = Observer::open()?;
     let mut links = BTreeMap::new();
-    dump(
-        &mut handle,
+    observer.dump(
         RouteNetlinkMessage::GetLink(LinkMessage::default()),
         |message| {
             let RouteNetlinkMessage::NewLink(record) = message else {
@@ -169,10 +281,8 @@ async fn inventory() -> Result<Vec<Interface>> {
                 "duplicate interface index",
             )
         },
-    )
-    .await?;
-    dump(
-        &mut handle,
+    )?;
+    observer.dump(
         RouteNetlinkMessage::GetAddress(AddressMessage::default()),
         |message| {
             let RouteNetlinkMessage::NewAddress(record) = message else {
@@ -191,23 +301,56 @@ async fn inventory() -> Result<Vec<Interface>> {
             }
             Ok(())
         },
-    )
-    .await?;
+    )?;
     Ok(links.into_values().collect())
 }
 
-pub(super) fn observe() -> Result<Vec<Interface>> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    runtime.block_on(async {
-        tokio::time::timeout(Duration::from_secs(5), inventory())
-            .await
-            .map_err(|_| {
-                err(
-                    "DependencyUnavailable",
-                    "kernel network inventory timed out",
-                )
-            })?
-    })
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use netlink_packet_core::{DoneMessage, NetlinkHeader};
+
+    fn packet(mut reply: NetlinkMessage<RouteNetlinkMessage>, flags: u16) -> Vec<u8> {
+        reply.header.sequence_number = 17;
+        reply.header.flags = flags;
+        reply.finalize();
+        let mut bytes = vec![0; reply.buffer_len()];
+        reply.serialize(&mut bytes);
+        bytes
+    }
+
+    #[test]
+    fn accepts_only_complete_matching_network_dumps() {
+        let mut count = 0;
+        let mut observe = |_| {
+            count += 1;
+            Ok(())
+        };
+        let record = packet(
+            RouteNetlinkMessage::NewLink(LinkMessage::default()).into(),
+            0,
+        );
+        let done = |code, flags| {
+            let mut reply = DoneMessage::default();
+            reply.code = code;
+            packet(
+                NetlinkMessage::new(NetlinkHeader::default(), NetlinkPayload::Done(reply)),
+                flags,
+            )
+        };
+        assert!(!consume(&record, 17, &mut observe).unwrap());
+        assert!(consume(&done(0, 0), 17, &mut observe).unwrap());
+        assert_eq!(
+            consume(&done(0, NLM_F_DUMP_INTR), 17, &mut observe)
+                .unwrap_err()
+                .0
+                .code,
+            "Conflict"
+        );
+        assert!(consume(&done(-4, 0), 17, &mut observe).is_err());
+        assert!(consume(&done(0, 0), 18, &mut observe).is_err());
+        assert!(consume(&record[..record.len() - 1], 17, &mut observe).is_err());
+        assert!(consume(&[done(0, 0), record].concat(), 17, &mut observe).is_err());
+        assert_eq!(count, 1);
+    }
 }

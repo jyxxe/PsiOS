@@ -115,11 +115,19 @@ class RuntimeTests(unittest.TestCase):
                 finally:
                     other.close()
             self.assertTrue(record.exists())
+            history = n.call("Session.History", {"id": sid}, self.token)
+            self.assertEqual(len(history["tasks"]), i + int(committed))
+            accepted = history["tasks"][-1]["task_id"] if committed else None
+            if accepted:
+                # Keep a worker crash during a read out of this delivery test.
+                self.assertEqual(n.wait(accepted)["lifecycle"], "Succeeded")
             n.stop(signal.SIGKILL)
             n.start()
             result = invoke(sid, key)
             self.assertEqual(result.returncode, 0, result.stderr)
             task = json.loads(result.stdout)["task_id"]
+            if accepted:
+                self.assertEqual(task, accepted)
             self.assertEqual(n.wait(task)["lifecycle"], "Succeeded")
             self.assertFalse(record.exists())
             replay = invoke(sid, key)

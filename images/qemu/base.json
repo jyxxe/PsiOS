@@ -1,0 +1,9 @@
+{
+  "architecture": "amd64",
+  "format": "qcow2",
+  "release": "Ubuntu Minimal 24.04 LTS, 20261105",
+  "url": "https://cloud-images.ubuntu.com/minimal/releases/noble/release-20261105/ubuntu-24.04-minimal-cloudimg-amd64.img",
+  "sha256": "406630c08b5e545fcc7209854b129d47e3af822db128c9f19336593b5a2d3fe0",
+  "size_bytes": 259981312,
+  "checksum_signer": "D2EB44626FDDC30B513D5BB71A5D6C4C7DB87C81"
+}

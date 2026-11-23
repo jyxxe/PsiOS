@@ -22,10 +22,14 @@ def main():
     if manifest["architecture"] != "amd64":
         parser.error("expected an amd64 instance")
     firmware = []
+    seed = "file=seed.iso,format=raw,media=cdrom,readonly=on"
     if manifest["firmware"] == "OVMF":
         with Path("uefi-code.fd").open("rb") as code:
             if hashlib.file_digest(code, "sha256").hexdigest() != manifest["ovmf"]["code_sha256"]:
                 parser.error("OVMF code differs from the prepared instance")
+        # The minimal kernel already needs virtio-blk for its root. Present the
+        # NoCloud ISO as a read-only block disk on q35 as well.
+        seed = "file=seed.iso,format=raw,if=virtio,readonly=on"
         firmware = ["-machine", "q35", "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=uefi-code.fd",
                     "-drive", "if=pflash,format=raw,unit=1,file=uefi-vars.fd"]
     elif manifest["firmware"] != "SeaBIOS":
@@ -36,7 +40,7 @@ def main():
     command = ["qemu-system-x86_64", "-accel", accel, "-cpu", "host" if accel == "kvm" else "max",
                "-m", "1536", "-smp", "2", "-display", "none", "-monitor", "none", "-serial", serial, *firmware,
                "-drive", "file=system.qcow2,format=qcow2,if=virtio",
-               "-drive", "file=seed.iso,format=raw,media=cdrom,readonly=on",
+               "-drive", seed,
                "-nic", f"user,model=virtio-net-pci,restrict=on,hostfwd=tcp:127.0.0.1:{args.ssh_port}-:22"]
     os.execvp(command[0], command)
 

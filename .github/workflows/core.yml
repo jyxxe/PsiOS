@@ -79,3 +79,23 @@ jobs:
           path: ${{ runner.temp }}/psios-package/
           if-no-files-found: error
           retention-days: 14
+
+  guest-boot:
+    needs: host-package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: psios-core-ubuntu-24.04-amd64
+          path: ${{ runner.temp }}/psios-package
+      - name: Prepare the pinned guest base and QEMU
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils genisoimage seabios
+          if [ -c /dev/kvm ]; then sudo setfacl -m "u:$(id -un):rw" /dev/kvm; fi
+          (cd "$RUNNER_TEMP/psios-package" && sha256sum -c SHA256SUMS)
+          curl --fail --location --retry 3 "$(jq -r .url images/qemu/base.json)" -o "$RUNNER_TEMP/base.img"
+      - name: Boot two independent nodes and restart the first
+        run: python3 tests/qemu_boot.py --base "$RUNNER_TEMP/base.img" --package "$RUNNER_TEMP"/psios-package/psios-core_*.deb

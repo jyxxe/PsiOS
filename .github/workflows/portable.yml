@@ -15,7 +15,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build standalone amd64 binaries with the Alpine musl toolchain
-        run: tools/build-portable-core "$RUNNER_TEMP/psios-core-linux-amd64.tar.gz"
+        run: |
+          umask 077
+          tools/build-portable-core "$RUNNER_TEMP/psios-core-linux-amd64.tar.gz"
       - name: Run the system API and crash recovery suite as an offline unprivileged Alpine user
         run: |
           mkdir "$RUNNER_TEMP/standalone"

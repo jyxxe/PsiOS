@@ -24,7 +24,7 @@ git -C "$repo" archive "$sha" Cargo.toml Cargo.lock crates docs/v1/schemas contr
         --output "type=tar,dest=$work/binaries.tar" -
 mkdir "$work/bundle"
 cd "$work/bundle"
-tar -xf "$work/binaries.tar" psiosd psiosctl
+tar --same-permissions -xf "$work/binaries.tar" psiosd psiosctl
 git -C "$repo" show "$sha:Cargo.lock" > Cargo.lock
 printf '%s\n' "$sha" > source-commit
 sha256sum psiosd psiosctl Cargo.lock source-commit > SHA256SUMS

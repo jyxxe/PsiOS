@@ -63,8 +63,9 @@ class Console:
         self.send(f"printf '\\n{marker}\\n'; ( {command} ); r=$?; printf '\\n{marker}:%s\\n' \"$r\"")
         self.until(("\n" + marker + "\n").encode())
         output = self.until(("\n" + marker + ":").encode())
-        if self.until(b"\n") != b"0":
-            raise AssertionError(f"guest command failed: {command}")
+        status = self.until(b"\n")
+        if status != b"0":
+            raise AssertionError(f"guest command {command!r} exited {status!r}: {output[-512:]!r}")
         return output.decode().strip()
 
 
@@ -157,7 +158,10 @@ def exercise(args, work):
     with boot(work, image) as c:
         c.login("psios", operator)
         assert c.run("./observe") == "persisted"
-        c.run("rm ./full && sync -f .")
+        # Only the executable was synced before the power cut. The fill file
+        # has served its capacity test and may be absent after journal replay.
+        c.run("rm -f ./full")
+        c.run("sync -f .")
         second = check_state(c)
         assert first[0] == second[0] and second[1]["deduplicated"]
         assert first[1]["task_id"] == second[1]["task_id"] and first[2] == second[2] and first[3] != second[3]

@@ -29,3 +29,5 @@ python tools/build_package.py --zip ../PsiOS-v1.0.0-docs-2026-11-22.zip
 ## 实际检查范围
 
 严格JSON读取、Schema语法/本地ref、正反例与拒绝层次、无损计数范围、夹具摘要向量、局部关系/依赖图、规范ID、链接、注册表定位、产品计划仍NotRun、原文定义切片与归档SHA、最终交付清单。未覆盖的签名真实性、分布式并发、真实fencing、断电、硬件、协议互通和性能在报告中明确列为NotProven。
+
+历史映射中的原文切片对应 2026-11-22 封存交付。仓库检出会离线读取并校验同级 releases 目录的五个分段。单独分发修订版时，使用 `python tools/validate_package.py --original-delivery /path/to/PsiOS-v1.0.0-docs-2026-11-22.zip` 复核历史切片。当前分章和来源副本分别按当前清单核验。

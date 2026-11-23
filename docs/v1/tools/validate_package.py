@@ -7,9 +7,11 @@ external action, hardware test or product test is executed by this tool.
 from __future__ import annotations
 import argparse
 import hashlib
+import io
 import json
 import re
 import sys
+import zipfile
 from collections import Counter
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -54,6 +56,34 @@ def strict_load(path):
             for k,x in v.items():unicode_check(k);unicode_check(x)
     unicode_check(value)
     return value
+
+
+def historical_sources(paths, delivery=None):
+    """Read the source edition that the immutable excerpt registry indexes."""
+    for path in paths:
+        member = Path(path)
+        if member.parts[:2] != ('sources', 'archive') or '..' in member.parts or member.as_posix() != path:
+            raise ValueError('Unexpected historical source path')
+    archive_name = 'PsiOS-v1.0.0-docs-2026-11-22.zip'
+    releases = ROOT.parent / 'releases'
+    if delivery:
+        inputs = [delivery]
+    elif (releases / (archive_name + '.part01')).exists():
+        inputs = [releases / f'{archive_name}.part{i:02d}' for i in range(1, 6)]
+    else:
+        # An original standalone package already contains the unedited inputs.
+        return {path: (ROOT / path).read_text(encoding='utf-8').splitlines() for path in paths}
+    data = io.BytesIO()
+    expected_size = 5566788
+    for part in inputs:
+        with part.open('rb') as source:
+            data.write(source.read(expected_size - data.tell() + 1))
+        if data.tell() > expected_size:
+            raise ValueError('Original delivery exceeds its published length')
+    if hashlib.sha256(data.getbuffer()).hexdigest() != 'b6f2c5510063c1304b11bd623cd159e1155f706dd1c6b8398c1753b1763127c3':
+        raise ValueError('Original delivery SHA-256 mismatch')
+    with zipfile.ZipFile(data) as archive:
+        return {path: archive.read('PsiOS-v1/' + path).decode('utf-8').splitlines() for path in paths}
 
 
 def fixture_jcs(value):
@@ -199,6 +229,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--contracts-only',action='store_true')
     parser.add_argument('--report',type=Path)
+    parser.add_argument('--original-delivery', type=Path, help='sealed v1 ZIP for checking historical source excerpts')
     args=parser.parse_args()
     failures=[];checks=Counter();results=[]
     def fail(scope,message):failures.append({'scope':scope,'message':message})
@@ -321,6 +352,13 @@ def main():
             if f['implementation_status']!='NotVerified':fail(f['id'],'Unverified code represented as verified')
         checks['document_findings']=len(findings)
         legacy=strict_load(ROOT/'registries/legacy-requirements.json')
+        paths = {definition['source_file'] for category in ['requirements', 'tests'] for row in legacy[category]
+                 for definition in row['source_definitions']}
+        try:
+            originals = historical_sources(paths, args.original_delivery)
+        except (OSError, ValueError, KeyError, zipfile.BadZipFile) as error:
+            fail('original delivery', str(error))
+            originals = {}
         for category in ['requirements','tests']:
             for row in legacy[category]:
                 if row['migration']['status']!='Mapped':fail(row['legacy_id'],'Unmapped legacy entry')
@@ -330,7 +368,7 @@ def main():
                         fail(row['legacy_id'],'Missing migrated requirement '+target['requirement_id'])
                     checks['legacy_mapping_targets']+=1
                 for definition in row['source_definitions']:
-                    lines=(ROOT/definition['source_file']).read_text(encoding='utf-8').splitlines()
+                    lines=originals.get(definition['source_file'], [])
                     actual='\n'.join(lines[definition['line_start']-1:definition['line_end']])
                     if actual!=definition['original_text']:fail(row['legacy_id'],'Original excerpt differs from preserved archive')
                     checks['legacy_definition_slices']+=1

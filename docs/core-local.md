@@ -8,7 +8,15 @@
 
 独立二进制开发包包含 `psiosd` 和 `psiosctl`。二者在 Alpine 上以 musl 静态链接，可直接用普通 Linux 用户运行。构建器检查 ELF 的解释器与动态库依赖。开发包不安装系统服务，操作员负责保存状态目录、见证目录与所有者凭据。宿主服务管理、OCI 和网络查询分别需要系统提供对应工具与权限。
 
-可从 CI 的 `psios-core-linux-amd64` 制品取得 tar.gz，或在安装了 Git、GNU tar、gzip 及 Docker Buildx 的 Linux 构建机上，从指定提交生成。归档保留可执行权限、完整源码提交、Cargo.lock 和文件校验和。若构建网络使用专用 CA，设置 `CARGO_HTTP_CAINFO` 指向受信任的 CA 文件。使用下载的开发包前应确认制品来自所选仓库和提交的 CI 运行。
+可从独立的 `PsiOS standalone Core` 工作流下载 `psios-core-linux-amd64` 制品。通过系统测试的主线提交会同时提供 `psios-core-linux-amd64-attestation`。先从可信主线记录取得预期的完整提交 SHA，再下载同一次运行的归档和证明。从可信 checkout 使用支持 `gh attestation verify --source-digest` 的 GitHub CLI 核验归档，随后解包。
+
+```bash
+tools/verify-portable-core ./psios-core-linux-amd64.tar.gz "$EXPECTED_MAIN_SHA" ./provenance.jsonl
+```
+
+离线核验时，提前通过受信任的连接执行 `gh attestation trusted-root > trusted_root.jsonl`，将该文件作为上述命令的第四个参数。核验覆盖整个 tar.gz，并绑定仓库、构建工作流、主线提交和 GitHub 托管执行器。只提供文件摘要的早期开发包可从对应提交自行构建。
+
+也可在安装了 Git、GNU tar、gzip 及 Docker Buildx 的 Linux 构建机上直接生成。归档保留可执行权限、完整源码提交、Cargo.lock 和文件校验和。若构建网络使用专用 CA，设置 `CARGO_HTTP_CAINFO` 指向受信任的 CA 文件。
 
 ```bash
 tools/build-portable-core ./psios-core-linux-amd64.tar.gz HEAD
@@ -17,7 +25,7 @@ tar -xzf ./psios-core-linux-amd64.tar.gz -C ./portable-core
 (cd ./portable-core && sha256sum -c SHA256SUMS && cat source-commit)
 ```
 
-下方本机启动示例中的 `target/debug/` 可替换为 `./portable-core/`，并跳过 Cargo 编译。CI 在只读、断网的 Alpine 用户空间以非特权用户运行同一份二进制，覆盖身份授权、任务幂等和进程崩溃后的恢复。该验收覆盖单节点 Core，系统引导和各发行版安装另行验收。
+下方本机启动示例中的 `target/debug/` 可替换为 `./portable-core/`，并跳过 Cargo 编译。CI 在只读、断网的 Alpine 用户空间以非特权用户运行同一份二进制，覆盖身份授权、任务幂等和进程崩溃后的恢复。CI 还将同一归档作为只读根文件系统，直接启动两个程序，强制终止服务后以只读方式核验状态卷，再重放原任务。该验收覆盖单节点 Core，系统引导和各发行版安装另行验收。[空根文件系统恢复验收](../tests/portable_recovery.py)
 
 ## 本机启动
 

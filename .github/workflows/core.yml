@@ -59,33 +59,6 @@ jobs:
       - name: Exercise a real OCI engine and persistent volume
         run: python3 tests/oci.py
 
-  portable-core:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Build standalone amd64 binaries with the Alpine musl toolchain
-        run: tools/build-portable-core "$RUNNER_TEMP/psios-core-linux-amd64.tar.gz"
-      - name: Run the system API and crash recovery suite as an offline unprivileged Alpine user
-        run: |
-          mkdir "$RUNNER_TEMP/standalone"
-          cd "$RUNNER_TEMP/standalone"
-          tar -xzf "$RUNNER_TEMP/psios-core-linux-amd64.tar.gz"
-          sha256sum --strict --check SHA256SUMS
-          test "$(cat source-commit)" = "$GITHUB_SHA"
-          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
-            --user 65534:65534 --tmpfs /tmp:rw,nosuid,nodev,size=128m,mode=1777 \
-            --mount "type=bind,src=$PWD,dst=/core,readonly" \
-            --mount "type=bind,src=$GITHUB_WORKSPACE/tests,dst=/tests,readonly" \
-            python@sha256:f9a9704946281a492ad813560c8fd26d81bd9b81197db8acea2c0e46d18b713d \
-            python3 -B /tests/system.py --bin-dir /core
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: psios-core-linux-amd64
-          path: ${{ runner.temp }}/psios-core-linux-amd64.tar.gz
-          if-no-files-found: error
-          retention-days: 14
-
   host-package:
     runs-on: ubuntu-24.04
     timeout-minutes: 25

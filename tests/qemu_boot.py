@@ -1,10 +1,11 @@
-"""Boot two freshly provisioned guests and restart one from its own disk."""
+"""Boot two firmware profiles and check persisted state after shutdown and abrupt guest loss."""
 import argparse
 import contextlib
 import json
-import os
+import hashlib
 import shlex
 from pathlib import Path
+import signal
 import socket
 import subprocess
 import sys
@@ -17,21 +18,15 @@ CTL = "sudo -n -u psios /usr/bin/psiosctl"
 
 
 @contextlib.contextmanager
-def boot(instance, key, number):
+def boot(instance, key, number, *, power_cut=False):
     # Bind forwarding only on loopback. restrict=on prevents guest access to
     # external package mirrors, registries or model endpoints during acceptance.
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
-    accel = "kvm" if os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
     serial = instance / f"serial-{number}.log"
-    with subprocess.Popen([
-        "qemu-system-x86_64", "-accel", accel, "-cpu", "host" if accel == "kvm" else "max",
-        "-m", "1536", "-smp", "2", "-display", "none", "-monitor", "none", "-no-reboot",
-        "-serial", "file:" + str(serial), "-drive", "file=system.qcow2,format=qcow2,if=virtio",
-        "-drive", "file=seed.iso,format=raw,media=cdrom,readonly=on",
-        "-nic", f"user,model=virtio-net-pci,restrict=on,hostfwd=tcp:127.0.0.1:{port}-:22",
-    ], cwd=instance) as vm:
+    with subprocess.Popen([sys.executable, ROOT / "images/qemu/run.py", instance, "--serial-log", serial,
+                           "--ssh-port", str(port)]) as vm:
         ssh = ["ssh", "-T", "-p", str(port), "-i", str(key), "-o", "BatchMode=yes",
                "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=4",
                "-o", "HostKeyAlias=" + instance.name, "-o", "UserKnownHostsFile=" + str(instance / "known_hosts"),
@@ -54,6 +49,11 @@ def boot(instance, key, number):
             else:
                 raise RuntimeError("guest provisioning readiness timeout")
             yield run
+            if power_cut:
+                vm.kill()
+                if vm.wait(timeout=10) != -signal.SIGKILL:
+                    raise RuntimeError("guest exited before injected power loss")
+                return
             run("sudo -n systemctl poweroff", check=False)
             if vm.wait(timeout=90) != 0:
                 raise RuntimeError("guest did not shut down cleanly")
@@ -94,11 +94,12 @@ def main(base, package):
         key = work / "admin"
         subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", key], check=True)
         instances = [work / "first", work / "second"]
-        for instance in instances:
+        for instance, firmware in zip(instances, ("bios", "uefi"), strict=True):
             subprocess.run([sys.executable, ROOT / "images/qemu/create.py", "--base", base, "--package", package,
-                            "--authorized-key", key.with_suffix(".pub"), "--output", instance], check=True)
+                            "--authorized-key", key.with_suffix(".pub"), "--output", instance, "--firmware", firmware], check=True)
         with boot(instances[0], key, 1) as run:
             node, machine, original_boot = identity(run)
+            run("test ! -d /sys/firmware/efi")
             verify_management_address(run, node)
             receipt = json.loads(run("echo '{}' | " + CTL + " submit system.status --key boot-acceptance").stdout)
             task = receipt["task_id"]
@@ -107,10 +108,41 @@ def main(base, package):
             again, same_machine, new_boot = identity(run)
             assert (again, same_machine) == (node, machine) and original_boot != new_boot
             assert json.loads(run(CTL + " wait " + task).stdout)["lifecycle"] == "Succeeded"
-        with boot(instances[1], key, 1) as run:
-            other, other_machine, _ = identity(run)
+        uefi = instances[1]
+        manifest = json.loads((uefi / "manifest.json").read_text())
+        with (uefi / "uefi-vars.fd").open("rb") as f:
+            assert hashlib.file_digest(f, "sha256").hexdigest() == manifest["ovmf"]["initial_vars_sha256"]
+        with boot(uefi, key, 1, power_cut=True) as run:
+            other, other_machine, before_cut = identity(run)
             assert other != node and other_machine != machine
-        print("PASS two independent Linux guests, SSH administrator login, offline provisioning, real reboot and durable Task")
+            run("test -d /sys/firmware/efi/efivars")
+            # A nonvolatile EFI variable belongs to this VM, independently of the system disk.
+            marker = "/sys/firmware/efi/efivars/PsiOSAcceptance-6ecbc2fa-bbb1-4b43-b71a-a98d6b50fd89"
+            run("sudo -n python3 -c " + shlex.quote(
+                f"from pathlib import Path; Path('{marker}').write_bytes(bytes([7, 0, 0, 0]) + b'psios')"))
+            receipt = json.loads(run(CTL + " submit system.status --key before-power-cut", data="{}").stdout)
+            prior = json.loads(run(CTL + " wait " + shlex.quote(receipt["task_id"])).stdout)
+            assert prior["lifecycle"] == "Succeeded"
+        with boot(uefi, key, 2) as run:
+            same, machine_after_cut, after_cut = identity(run)
+            assert (same, machine_after_cut) == (other, other_machine) and after_cut != before_cut
+            run("sudo -n python3 -c " + shlex.quote(
+                f"from pathlib import Path; assert Path('{marker}').read_bytes() == bytes([7, 0, 0, 0]) + b'psios'"))
+            replay = json.loads(run(CTL + " submit system.status --key before-power-cut", data="{}").stdout)
+            assert replay["task_id"] == receipt["task_id"]
+            recovered = json.loads(run(CTL + " wait " + shlex.quote(replay["task_id"])).stdout)
+            assert recovered["lifecycle"] == "Succeeded" and recovered["result"] == prior["result"]
+        code = uefi / "uefi-code.fd"
+        code.chmod(0o600)
+        with code.open("r+b") as f:
+            first = f.read(1)
+            f.seek(0)
+            f.write(bytes([first[0] ^ 1]))
+        rejected = subprocess.run([sys.executable, ROOT / "images/qemu/run.py", uefi],
+                                  capture_output=True, text=True, timeout=5)
+        assert rejected.returncode != 0 and "OVMF code differs" in rejected.stderr, rejected.stderr
+        print("PASS independent BIOS and UEFI guests, persistent OVMF variables, warm restart, "
+              "abrupt VM loss and durable Task replay")
 
 
 if __name__ == "__main__":

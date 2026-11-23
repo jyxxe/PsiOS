@@ -19,7 +19,7 @@ def digest(path):
         return hashlib.file_digest(f, "sha256").hexdigest()
 
 
-def create(base_path, package, key_path, output):
+def create(base_path, package, key_path, output, firmware, ovmf_dir):
     base = json.loads((HERE / "base.json").read_text())
     if not base_path.is_file() or base_path.stat().st_size != base["size_bytes"]:
         raise ValueError("unexpected base image size")
@@ -70,11 +70,24 @@ def create(base_path, package, key_path, output):
             (seed / "meta-data").write_text(json.dumps({"instance-id": instance_id, "local-hostname": "psios"}) + "\n")
             subprocess.run(["genisoimage", "-quiet", "-volid", "cidata", "-joliet", "-rock",
                             "-output", (output / "seed.iso").absolute(), "."], cwd=seed, check=True)
+        firmware_inputs = {}
+        if firmware == "uefi":
+            code = output / "uefi-code.fd"
+            variables = output / "uefi-vars.fd"
+            shutil.copyfile(ovmf_dir / "OVMF_CODE_4M.fd", code)
+            shutil.copyfile(ovmf_dir / "OVMF_VARS_4M.fd", variables)
+            if code.stat().st_size + variables.stat().st_size != 4 * 1024 * 1024:
+                raise ValueError("expected a matching 4 MiB OVMF code and variable-store pair")
+            code.chmod(0o400)
+            variables.chmod(0o600)
+            firmware_inputs = {"code_sha256": digest(code), "initial_vars_sha256": digest(variables)}
         # This manifest marks a fully prepared, unbooted instance. Disk contents
         # and its digest naturally change after the operator starts the guest.
-        manifest = {"architecture": "amd64", "firmware": "SeaBIOS", "base": base,
+        manifest = {"architecture": "amd64", "firmware": "OVMF" if firmware == "uefi" else "SeaBIOS", "base": base,
                     "instance_id": instance_id, "package_version": fields[2], "package_sha256": checksum,
                     "disk_sha256": digest(disk), "seed_sha256": digest(output / "seed.iso")}
+        if firmware_inputs:
+            manifest["ovmf"] = firmware_inputs
         (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     except BaseException:
         shutil.rmtree(output)
@@ -87,6 +100,9 @@ if __name__ == "__main__":
     parser.add_argument("--package", type=Path, required=True)
     parser.add_argument("--authorized-key", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True, help="new directory")
+    parser.add_argument("--firmware", choices=["bios", "uefi"], default="bios")
+    parser.add_argument("--ovmf-dir", type=Path, default=Path("/usr/share/OVMF"),
+                        help="trusted distribution directory containing the standard 4 MiB OVMF pair")
     args = parser.parse_args()
     os.umask(0o077)
-    create(args.base, args.package, args.authorized_key, args.output)
+    create(args.base, args.package, args.authorized_key, args.output, args.firmware, args.ovmf_dir)

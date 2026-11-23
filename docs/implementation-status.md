@@ -4,7 +4,7 @@
 
 | 领域 | 已实现并验证的范围 | 部分支持、待开发或待取得的证据 |
 | --- | --- | --- |
-| 安装、升级与发布 | Ubuntu 24.04 amd64 上用 apt 从实际旧包升级，验证启停、清除、重装、配置和节点数据保留。QEMU/SeaBIOS 从固定的 Ubuntu Minimal 基底启动，两份实例独立初始化，同一实例重启后保留节点和 Task。 | 开发包按源码版本排序；CI 暂存制品 14 天。正式签名渠道、物理安装、整机部署升级和引导回退待开发。Secure Boot 和真实硬件验收仍需对应环境。[包验收](../tests/debian-install.sh) · [安装说明](host-vm.md) |
+| 安装、升级与发布 | Ubuntu 24.04 amd64 上用 apt 从实际旧包升级，验证启停、清除、重装、配置和节点数据保留。QEMU 的 SeaBIOS 和 OVMF 配置从固定 Ubuntu Minimal 基底独立启动。覆盖正常重启、UEFI 虚机被强制终止后重启，以及节点、EFI 变量与 Task 回执的保留。 | 开发包按源码版本排序；CI 暂存制品 14 天。正式签名渠道、物理安装、整机部署升级和引导回退待开发。Secure Boot 和真实硬件验收仍需对应环境。[包验收](../tests/debian-install.sh) · [安装说明](host-vm.md) |
 | 宿主与网络 | 查询真实 procfs、sysfs 和本机网络命名空间。接口 Task 有独立的节点授权。真实 systemd 单元可在配置的允许范围内查询、启停及核实未知结果。 | 已覆盖观察网卡、地址及对端；网络配置事务、路由、DNS、驱动与固件生命周期待开发。[宿主管理](core-runtime.md) · [网络测试](../tests/test_network.py) · [服务测试](../tests/services.py) |
 | Core、身份与恢复 | 本机 Unix socket 核验主体与 UID。资源版本、审批、授权预算、Task、Operation 和事件共享 SQLite 权威。调度器支持并发、排空新领取、取消及幂等重试。停服核验可在私有副本检查 WAL、外键、见证和所有者凭据。 | 权威在单机；数据库与见证同时回滚或整块介质丢失时仍需独立信任锚和恢复流程。历史资源保留与磁盘长期回收尚不完整。[系统测试](../tests/system.py) · [故障恢复](../tests/test_offline.py) · [旧状态升级](../tests/upgrade.py) |
 | 应用与存储 | Docker OCI 按本机镜像摘要安装、限额运行、停止、切换或选回 Release。支持单卷文件访问、内容核验、离线备份和恢复至新卷。已核实启动检查点的运行中容器可在回执丢失后结算原 Task。 | 无检查点、容器已退出等场景仍保持效果未知。跨机备份、在线多卷一致性、Flatpak、第三方商店与可选 Dataset、Knowledge、TableFS 待开发。[OCI 真机引擎测试](../tests/oci.py) · [丢回执测试](../tests/oci_recovery.py) · [存储范围](core-local.md) |

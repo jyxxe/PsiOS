@@ -102,9 +102,9 @@ jobs:
       - name: Prepare the pinned guest base and QEMU
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils genisoimage seabios acl
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils genisoimage seabios ovmf acl
           if [ -c /dev/kvm ]; then sudo setfacl -m "u:$(id -un):rw" /dev/kvm; fi
           (cd "$RUNNER_TEMP/psios-package" && sha256sum -c SHA256SUMS)
           curl --fail --location --retry 3 "$(jq -r .url images/qemu/base.json)" -o "$RUNNER_TEMP/base.img"
-      - name: Boot two independent nodes and restart the first
+      - name: Boot BIOS and UEFI nodes and recover after abrupt VM loss
         run: python3 tests/qemu_boot.py --base "$RUNNER_TEMP/base.img" --package "$RUNNER_TEMP"/psios-package/psios-core_*.deb

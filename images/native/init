@@ -24,6 +24,10 @@ stage=deployment-payload
 "$bb" sha256sum -c /psios-payload.sha256 >/dev/null
 payload_verified=yes
 "$bb" hostname psios
+stage=temporary-storage
+mkdir -p /tmp
+[ -d /tmp ] && [ ! -L /tmp ] || exit 1
+mount -t tmpfs -o nodev,nosuid,size=32m,nr_inodes=4096,mode=1777 tmpfs /tmp
 stage=loopback
 "$bb" ip link set lo up
 stage=state-device

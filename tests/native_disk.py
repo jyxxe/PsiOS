@@ -134,6 +134,34 @@ def call(c, method, params):
     return json.loads(c.run(f"printf '%s' {body} | psiosctl call {method}"))
 
 
+def check_temporary_storage(c):
+    assert c.run("stat -c '%u:%g:%a' /tmp") == "0:0:1777"
+    mount = c.run("awk '$5 == \"/tmp\" {for (i=7; i<NF; i++) "
+                  "if ($i == \"-\") print $6, $(i+1), $(i+3)}' /proc/self/mountinfo")
+    assert mount, "missing dedicated /tmp mount"
+    flags, filesystem, limits = mount.split()
+    assert filesystem == "tmpfs" and {"rw", "nodev", "nosuid"} <= set(flags.split(",")), mount
+    assert {"size=32768k", "nr_inodes=4096"} <= set(limits.split(",")), mount
+    c.run("test -f /tmp/psios-root-scratch && ! rm -f /tmp/psios-root-scratch 2>/dev/null && "
+          "test -f /tmp/psios-root-scratch")
+    assert c.run("tmp=$(mktemp) && stat -c '%u:%a' \"$tmp\" && rm \"$tmp\"") == "1000:600"
+
+    failure = c.run("dd if=/dev/zero of=/tmp/psios-fill bs=64K count=513 2>&1; test $? -ne 0")
+    assert "No space left on device" in failure, failure
+    assert int(c.run("stat -c %s /tmp/psios-fill")) == 32 * 1024 * 1024
+    task = json.loads(c.run("printf '{}' | psiosctl submit system.status --key native-full-tmp"))
+    done = json.loads(c.run("psiosctl wait " + shlex.quote(task["task_id"])))
+    assert done["lifecycle"] == "Succeeded", done
+    c.run("rm /tmp/psios-fill")
+
+    failure = c.run("mkdir /tmp/psios-inodes || exit 1; i=0; "
+                    "while true 2>&1 > \"/tmp/psios-inodes/$i\"; do "
+                    "i=$((i+1)); test \"$i\" -le 4096 || exit 1; done; printf '\\n%s\\n' \"$i\"")
+    assert "No space left on device" in failure, failure
+    assert 4064 <= int(failure.splitlines()[-1]) < 4096, failure
+    c.run("rm -rf /tmp/psios-inodes && printf 'volatile\\n' > /tmp/psios-scratch-marker")
+
+
 def check_native_network(c):
     node = json.loads(c.run("psiosctl node"))["reference"]["resource_id"]
     grant = call(c, "Grant.Issue", dict(principal_id="local-owner", tool_targets=[node],
@@ -266,6 +294,9 @@ def exercise(args, work):
     with boot(work, image) as c:
         c.credentials("psios", "wrong-" + secrets.token_hex(10))
         c.until(b"Login incorrect")
+        c.login("root", admin)
+        c.run("touch /tmp/psios-root-scratch")
+        c.send("exit")
         c.login("psios", operator)
         manifest = json.loads(c.run("cat /psios-deployment.json"))
         assert manifest["core_archive_sha256"] == sha(args.archive)
@@ -281,6 +312,7 @@ def exercise(args, work):
             assert c.run(f"sha256sum {name}").split()[0] == manifest["payload_sha256"][name]
         assert c.run("pwd") == "/home/psios"
         assert c.run("stat -c '%u:%g:%a' .") == "1000:1000:700"
+        check_temporary_storage(c)
         c.run("test ! -e /etc/psios/dhcp-mac && ! pidof udhcpc")
         c.run("test ! -r /root && test ! -w /mnt/psios-homes")
         c.run("printf '#!/bin/sh\\necho persisted\\n' > ./observe && chmod 700 ./observe && sync -f .")
@@ -298,6 +330,8 @@ def exercise(args, work):
     with boot(work, image) as c:
         c.login("psios", operator)
         assert c.run("./observe") == "persisted"
+        c.run("test ! -e /tmp/psios-scratch-marker && test ! -e /tmp/psios-root-scratch && "
+              "touch /tmp/psios-scratch-marker")
         # Only the executable was synced before the power cut. The fill file
         # has served its capacity test and may be absent after journal replay.
         c.run("rm -f ./full")
@@ -324,7 +358,11 @@ def exercise(args, work):
         # Keep a home file open across a normal poweroff from the root home.
         c.run("(trap '' TERM HUP; exec tail -f ./maintenance) </dev/null >/dev/null 2>&1 & "
               "p=$!; sleep 0.1; test \"$(readlink /proc/$p/cwd)\" = /root")
+        c.run("(cd /tmp && trap '' TERM HUP && exec tail -f ./psios-scratch-marker) "
+              "</dev/null >/dev/null 2>&1 & p=$!; sleep 0.1; test \"$(readlink /proc/$p/cwd)\" = /tmp")
         c.send("poweroff")
+        serial = c.until(b"Power down", timeout=30)
+        assert b"PsiOS shutdown could not close" not in serial, serial[-2000:]
         assert c.vm.wait(35) == 0
     check_clean_shutdown(image)
     with boot(work, image) as c:
@@ -332,6 +370,7 @@ def exercise(args, work):
         c.until(b"Login incorrect")
         c.login("psios", rotated)
         assert c.run("./observe") == "persisted"
+        c.run("test ! -e /tmp/psios-scratch-marker")
         c.run("test ! -r /root/maintenance")
         assert json.loads(c.run("psiosctl whoami"))["authority_id"] == first[0]
         c.send("exit")
@@ -398,7 +437,8 @@ def exercise(args, work):
     assert sha(image) == pre_reject
     print(f"Verified source {deployment['source_commit']}, node {first[0]}, task {first[1]['task_id']}, "
           "matched deployment receipt, authenticated UEFI console, private persistent homes, full-home isolation, "
-          "offline management, Task and schedule recovery after power loss, clean shutdown with a held home file, external rescue, clean ext4 "
+          "bounded volatile /tmp, offline management, Task and schedule recovery after power loss, "
+          "clean shutdown with active home and /tmp readers, external rescue, clean ext4 "
           "after authority refusal, consumed enrollment and damaged payload and mismatched state/home refusal.")
 
 

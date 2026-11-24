@@ -281,7 +281,7 @@ fn context(db: &Db<'_>, s: &Doc, skill: &Doc, model: &Doc) -> Result<Value> {
                 "PermissionDenied",
                 "foreign tool result",
             )?;
-            last["local_tool_result"] = artifact.body;
+            last["local_tool_result"] = artifact::read(db, &artifact, None)?;
         }
     }
     let v = json!({"session_id":s.id,"goal":s.spec["goal"],"skill_ref":s.spec["skill_ref"],"model_ref":s.spec["model_ref"],

@@ -1,5 +1,5 @@
 use super::{StateLock, Store, checked_head, open_regular};
-use crate::{Config, Result, config::private_dir, err, policy, require};
+use crate::{Config, Result, artifact, config::private_dir, err, policy, require};
 use psios_api::sha256;
 use rusqlite::{Connection, OpenFlags, params};
 use serde_json::{Value, json};
@@ -106,6 +106,9 @@ impl Store {
             "foreign key integrity check failed",
         )?;
         let checked = checked_head(&copy, cfg)?;
+        if checked.version >= artifact::FORMAT {
+            artifact::verify(&copy)?;
+        }
         let next = cfg.witness_dir.join("owner.next");
         let rotation = match fs::symlink_metadata(&next) {
             Err(e) if e.kind() == ErrorKind::NotFound => "None",

@@ -11,7 +11,7 @@ use crate::{
     policy, *,
 };
 pub(crate) use approval::decide;
-pub(crate) use execution::{claim, dispatch, dispatch_failed, finish};
+pub(crate) use execution::{claim, dispatch, dispatch_failed, finish, settlement_failed};
 use psios_api::{VERSION, canonical, contract, digest, id, sha256};
 pub(crate) use recovery::{reconcile, recover, release_unstarted_claim};
 use rusqlite::{OptionalExtension, params};

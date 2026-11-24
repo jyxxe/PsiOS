@@ -1,9 +1,8 @@
 use crate::{
-    db::{Db, Store},
+    db::{Db, Doc, Store},
     host, policy, *,
 };
-use base64::{Engine, engine::general_purpose::STANDARD};
-use psios_api::{MAX_ARTIFACT_CHUNK, Request, VERSION, canonical, contract};
+use psios_api::{MAX_ARTIFACT_CHUNK, MAX_FRAME, Request, VERSION, contract};
 use rusqlite::params;
 use serde_json::{Value, json};
 
@@ -20,7 +19,7 @@ struct ArtifactPage {
     length: usize,
 }
 
-fn artifact(db: &Db<'_>, actor: &str, reference: &Value) -> Result<Value> {
+fn owned_artifact(db: &Db<'_>, actor: &str, reference: &Value) -> Result<Doc> {
     let d = db.resolve(reference)?;
     require(
         d.kind == "Artifact",
@@ -28,25 +27,7 @@ fn artifact(db: &Db<'_>, actor: &str, reference: &Value) -> Result<Value> {
         "expected result artifact",
     )?;
     policy::owned(actor, &d)?;
-    Ok(d.body)
-}
-
-fn artifact_page(db: &Db<'_>, actor: &str, page: ArtifactPage) -> Result<Value> {
-    require(
-        (1..=MAX_ARTIFACT_CHUNK).contains(&page.length),
-        "InvalidArgument",
-        "artifact chunk length must be 1 to 131072 bytes",
-    )?;
-    let bytes = canonical(&artifact(db, actor, &page.reference)?);
-    require(
-        page.offset <= bytes.len(),
-        "InvalidArgument",
-        "artifact offset beyond end",
-    )?;
-    let end = page.offset.saturating_add(page.length).min(bytes.len());
-    Ok(json!({"offset": page.offset, "total_bytes": bytes.len(),
-        "data_base64":STANDARD.encode(&bytes[page.offset..end]),
-        "next_offset":(end < bytes.len()).then_some(end)}))
+    Ok(d)
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -142,18 +123,32 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
                     )?;
                     let env = d.envelope(&db.meta("authority")?);
                     contract("resource-envelope", &env)?;
-                    Ok(json!({"reference": d.reference(), "resource": env, "value": d.body}))
+                    let reference = d.reference();
+                    let value = if artifact::stored_digest(&d).is_some() {
+                        artifact::read(db, &d, Some(MAX_FRAME))?
+                    } else {
+                        d.body
+                    };
+                    Ok(json!({"reference": reference, "resource": env, "value": value}))
                 }
             }
         }
         "Artifact.Read" => {
             policy::can(db, actor, "task.read")?;
             let p: Reference = decode(p)?;
-            artifact(db, actor, &p.reference)
+            let d = owned_artifact(db, actor, &p.reference)?;
+            artifact::read(db, &d, Some(MAX_FRAME))
         }
         "Artifact.ReadChunk" => {
             policy::can(db, actor, "task.read")?;
-            artifact_page(db, actor, decode(p)?)
+            let p: ArtifactPage = decode(p)?;
+            require(
+                (1..=MAX_ARTIFACT_CHUNK).contains(&p.length),
+                "InvalidArgument",
+                "artifact chunk length must be 1 to 131072 bytes",
+            )?;
+            let d = owned_artifact(db, actor, &p.reference)?;
+            artifact::page(db, &d, p.offset, p.length)
         }
         "Secret.Rotate" => policy::secret_rotate(db, actor, p),
         "Secret.Put" => policy::secret_put(db, actor, p),

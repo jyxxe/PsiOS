@@ -50,10 +50,13 @@ impl Doc {
         format!("r{}", self.rev)
     }
     pub fn reference(&self) -> Value {
+        let digest = artifact::stored_digest(self)
+            .cloned()
+            .unwrap_or_else(|| json!(sha256(&canonical(&self.body))));
         json!({
             "resource_id": self.id,
             "version": self.version(),
-            "digest": sha256(&canonical(&self.body))
+            "digest": digest
         })
     }
     pub fn envelope(&self, domain: &str) -> Value {
@@ -161,7 +164,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     Ok(bytes)
 }
 // Older writers cannot dispatch workflow steps with pinned input mappings.
-pub(super) const CURRENT_FORMAT: u32 = 29;
+pub(super) const CURRENT_FORMAT: u32 = 30;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -340,6 +343,9 @@ impl Store {
                 }
                 if ver < 25 {
                     db.c.execute_batch(include_str!("policy/deadlines.sql"))?;
+                }
+                if ver < artifact::FORMAT {
+                    db.c.execute_batch(include_str!("artifact.sql"))?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

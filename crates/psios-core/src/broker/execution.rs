@@ -297,6 +297,16 @@ pub fn dispatch_failed(db: &Db<'_>, task: &str, e: &Error) -> Result<()> {
     }
     Ok(())
 }
+
+pub fn settlement_failed(db: &Db<'_>, w: &Work) -> Result<()> {
+    let reason = if policy::readonly(field(&w.task.spec, "task_type")) {
+        err("StorageUnavailable", "read result could not be committed")
+    } else {
+        err("OutcomeUnknown", "effect result could not be committed")
+    };
+    finish(db, w, Err(reason))
+}
+
 pub fn finish(db: &Db<'_>, w: &Work, result: Result<Value>) -> Result<()> {
     let t = db.get(&w.task.id)?;
     if t.body["current_run_id"] != w.run.id
@@ -328,21 +338,16 @@ pub fn finish(db: &Db<'_>, w: &Work, result: Result<Value>) -> Result<()> {
     match result {
         Ok(receipt) => {
             let body = host::apply(db, w, &receipt)?;
-            let bytes = canonical(&body);
-            let a = db.create(
-                "Artifact",
-                &id("artifact"),
+            let a = artifact::publish(
+                db,
                 &t.owner,
                 json!({
                     "task_id": t.id,
                     "run_id": w.run.id,
                     "operation_id": w.op.id,
-                    "effect_id": w.effect.id,
-                    "media_type": "application/json",
-                    "size_bytes": bytes.len().to_string(),
-                    "digest": sha256(&bytes)
+                    "effect_id": w.effect.id
                 }),
-                body,
+                &body,
             )?;
             close(
                 db,

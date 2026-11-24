@@ -178,7 +178,7 @@ fn inspected(
     op: &Doc,
     target: &Doc,
     tool: &str,
-) -> Result<Doc> {
+) -> Result<(Doc, Value)> {
     let rf = reference.ok_or_else(|| {
         err(
             "PreconditionFailed",
@@ -205,7 +205,8 @@ fn inspected(
         "OutcomeUnknown",
         "inspection does not witness this operation after recovery",
     )?;
-    Ok(proof)
+    let observation = artifact::read(db, &proof, None)?;
+    Ok((proof, observation))
 }
 /// Reconcile only an independently verifiable local postcondition. Never dispatch the write again.
 pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
@@ -249,17 +250,17 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     )?;
     let (result, proof_details) = match action {
         Action::Backup(_) => {
-            let proof = inspected(
+            let (proof, observation) = inspected(
                 db,
                 req.evidence_ref.as_ref(),
                 &op,
                 &op,
                 storage::publication::INSPECT,
             )?;
-            storage::publication::reconcile(db, &op, &target, &proof)?
+            storage::publication::reconcile(db, &op, &target, &proof, &observation)?
         }
         Action::ServiceStart(_) | Action::ServiceStop(_) => {
-            let proof = inspected(
+            let (proof, observation) = inspected(
                 db,
                 req.evidence_ref.as_ref(),
                 &op,
@@ -272,20 +273,20 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
                 "inactive"
             };
             require(
-                proof.body["unit"] == target.spec["unit"]
-                    && proof.body["active_state"] == wanted
-                    && proof.body["needs_reload"] == false
-                    && proof.body["definition_digest"] == target.spec["definition_digest"],
+                observation["unit"] == target.spec["unit"]
+                    && observation["active_state"] == wanted
+                    && observation["needs_reload"] == false
+                    && observation["definition_digest"] == target.spec["definition_digest"],
                 "OutcomeUnknown",
                 "observation does not confirm this service postcondition",
             )?;
             (
-                json!({"service_ref":node::observed_effect(db,&target,&op.id,&proof.body)?.reference(),"observation":proof.body}),
+                json!({"service_ref":node::observed_effect(db,&target,&op.id,&observation)?.reference(),"observation":observation}),
                 json!({"observation_ref":proof.reference(),"conclusion":"ObservedPostcondition"}),
             )
         }
         Action::Start(_) | Action::Stop(_) => {
-            let proof = inspected(
+            let (proof, observation) = inspected(
                 db,
                 req.evidence_ref.as_ref(),
                 &op,
@@ -318,34 +319,34 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
                 require(
                     c.body["start_operation_id"] == op.id
                         && c.body["volume_ref"] == json!(vol.as_ref().map(Doc::reference))
-                        && proof.body["checkpoint_ref"] == c.reference()
-                        && proof.body["engine_id"] == c.body["engine_id"]
-                        && proof.body["container_id"] == c.body["container_id"]
-                        && proof.body["start_operation_id"] == op.id
+                        && observation["checkpoint_ref"] == c.reference()
+                        && observation["engine_id"] == c.body["engine_id"]
+                        && observation["container_id"] == c.body["container_id"]
+                        && observation["start_operation_id"] == op.id
                         && matches!(
-                            proof.body["effective_limits"]["source"].as_str(),
+                            observation["effective_limits"]["source"].as_str(),
                             Some("LinuxCgroupV2" | "DockerCgroupV1")
                         )
-                        && proof.body["process_running"] == true,
+                        && observation["process_running"] == true,
                     "OutcomeUnknown",
                     "inspection does not confirm the checkpointed runtime and resource limits",
                 )?;
                 (
-                    apps::started(db, &target, &op.id, vol.as_ref(), &proof.body)?,
+                    apps::started(db, &target, &op.id, vol.as_ref(), &observation)?,
                     "StartConfirmed",
                 )
             } else {
                 require(
                     target.body["engine_id"].is_string()
-                        && proof.body["removal_confirmed"] == true
-                        && proof.body["engine_id"] == target.body["engine_id"]
-                        && proof.body["container_id"] == target.body["container_id"]
-                        && proof.body["start_operation_id"] == target.body["start_operation_id"],
+                        && observation["removal_confirmed"] == true
+                        && observation["engine_id"] == target.body["engine_id"]
+                        && observation["container_id"] == target.body["container_id"]
+                        && observation["start_operation_id"] == target.body["start_operation_id"],
                     "OutcomeUnknown",
                     "OCI removal has no matching engine and instance evidence",
                 )?;
                 (
-                    apps::stopped(db, &target, &op.id, vol.as_ref(), &proof.body["last_logs"])?,
+                    apps::stopped(db, &target, &op.id, vol.as_ref(), &observation["last_logs"])?,
                     "RemovalConfirmed",
                 )
             };
@@ -372,22 +373,17 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         }
     };
     let evidence=db.record("RecoveryEvidence",&t.owner,json!({"operation_ref":op.reference(),"target_ref":target.reference(),"verified_at":now(),"evidence":proof_details}))?;
-    let bytes = canonical(&result);
-    let artifact = db.create(
-        "Artifact",
-        &id("artifact"),
+    let artifact = artifact::publish(
+        db,
         &t.owner,
         json!({
             "task_id": t.id,
             "operation_id": op.id,
             "run_id": t.body["current_run_id"],
             "effect_ref": op.body["effect_refs"][0],
-            "media_type": "application/json",
-            "size_bytes":bytes.len().to_string(),
-            "digest":sha256(&bytes),
             "reconciliation_evidence_ref":evidence.reference()
         }),
-        result,
+        &result,
     )?;
     let state = if t.body["lifecycle"] == "Cancelled" {
         "Cancelled"

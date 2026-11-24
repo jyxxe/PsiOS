@@ -1,6 +1,7 @@
 mod agent;
 mod api;
 mod apps;
+mod artifact;
 mod broker;
 mod chat;
 mod command;

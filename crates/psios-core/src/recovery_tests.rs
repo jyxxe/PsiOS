@@ -416,6 +416,101 @@ fn workflow_step_inherits_the_runs_elapsed_deadline() {
 }
 
 #[test]
+fn workflow_keeps_the_materialized_artifact_input_across_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, mut store) = initialized(tmp.path());
+    let creation = submit(&mut store, "volume.create", json!({"name":"mapped-result"}));
+    let volume = execute(&mut store, &creation);
+    let grant = call(
+        &mut store,
+        "Grant.Issue",
+        json!({"principal_id":policy::OWNER,"actions":[workflow::ACTION,"task.submit","task.read","system.status","volume.write"],
+                "tool_targets":["profile-local",volume["resource_id"]],"units":2,"ttl_seconds":120}),
+    )
+    .unwrap();
+    let definition = call(
+        &mut store,
+        "Workflow.Define",
+        json!({"key":"mapped","steps":[
+            {"id":"snapshot","tool":"system.status","input":{},"after":[]},
+            {"id":"record","tool":"volume.write","after":["snapshot"],
+             "input":{"id":volume["resource_id"],"expected_resource_version":volume["version"],"name":"authority","content":"seed"},
+             "inputs_from":{"content":{"step":"snapshot","pointer":"/authority_id"}}}]}),
+    )
+    .unwrap();
+    assert_eq!(definition["definition"]["dsl_version"], 3);
+    let run = call(
+        &mut store,
+        "Workflow.Start",
+        json!({"key":"mapped-run","definition_ref":definition["reference"],
+               "delegation_id":grant["delegation_ref"]["resource_id"],"deadline_at":after(60)}),
+    )
+    .unwrap();
+    let lookup = json!({"id":run["reference"]["resource_id"]});
+    workflow::tick(&mut store).unwrap();
+    let admitted = call(&mut store, "Workflow.Get", lookup.clone()).unwrap();
+    let source = admitted["state"]["steps"][0]["task_receipt"]["task_id"]
+        .as_str()
+        .unwrap();
+    let snapshot = execute(&mut store, source);
+    workflow::tick(&mut store).unwrap();
+    workflow::tick(&mut store).unwrap();
+    let pinned = call(&mut store, "Workflow.Get", lookup.clone()).unwrap();
+    let binding = &pinned["state"]["steps"][1]["input_binding"];
+    assert_eq!(
+        binding["sources"][0]["source_task_ref"],
+        pinned["state"]["steps"][0]["task_ref"]
+    );
+    assert!(pinned["state"]["steps"][1]["task_receipt"].is_null());
+    let materialized = call(
+        &mut store,
+        "Resource.Get",
+        json!({"id":binding["input_ref"]["resource_id"]}),
+    )
+    .unwrap();
+    assert_eq!(materialized["value"]["content"], snapshot["authority_id"]);
+    drop(store);
+
+    let data = cfg
+        .state_dir
+        .join("volumes")
+        .join(volume["resource_id"].as_str().unwrap())
+        .join("data/authority");
+    let mut store = Store::open(cfg).unwrap();
+    workflow::tick(&mut store).unwrap();
+    let awaiting = call(&mut store, "Workflow.Get", lookup.clone()).unwrap();
+    assert_eq!(awaiting["state"]["lifecycle"], "WaitingApproval");
+    assert_eq!(awaiting["state"]["steps"][1]["input_binding"], *binding);
+    let receipt = &awaiting["state"]["steps"][1]["task_receipt"];
+    assert_eq!(receipt["request_digest"], binding["request_digest"]);
+    let task = receipt["task_id"].as_str().unwrap();
+    let pending = call(&mut store, "Task.Get", json!({"id":task})).unwrap();
+    let req = call(
+        &mut store,
+        "Resource.Get",
+        json!({"id":pending["conditions"][0]["message"]}),
+    )
+    .unwrap();
+    let plan = call(
+        &mut store,
+        "Resource.Get",
+        json!({"id":req["value"]["plan_ref"]["resource_id"]}),
+    )
+    .unwrap();
+    assert_eq!(plan["value"]["input_refs"][0], binding["input_ref"]);
+    assert!(!data.exists());
+    approve(&mut store, task);
+    execute(&mut store, task);
+    workflow::tick(&mut store).unwrap();
+    let completed = call(&mut store, "Workflow.Get", lookup).unwrap();
+    assert_eq!(completed["state"]["lifecycle"], "Succeeded");
+    assert_eq!(
+        fs::read_to_string(data).unwrap(),
+        snapshot["authority_id"].as_str().unwrap()
+    );
+}
+
+#[test]
 fn workflow_keeps_dependents_blocked_until_real_effect_reconciliation() {
     let tmp = tempfile::tempdir().unwrap();
     let (c, mut s) = initialized(tmp.path());

@@ -298,6 +298,12 @@ jobs:
           git archive a21fb0d0f91dfaa4f4ae31dd91e7e3087871ec15 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format27"
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format27" "$RUNNER_TEMP/psios-compatibility-target"
           python3 -B tests/schedule_deadline_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
+      - name: Resume a format 28 conditional approval and fence writers without pinned input mappings
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format28"
+          git archive f8cc8e6df7715a3f8958eddd148daf210f86e6cb Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format28"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format28" "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/workflow_input_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Verify real systemd service control and crash reconciliation
         run: |
           sudo loginctl enable-linger "$(id -un)"

@@ -1,5 +1,7 @@
 """Run literal Task DAGs through the real authority, approval and crash recovery."""
+import base64
 from concurrent.futures import ThreadPoolExecutor
+import hmac
 import json
 import signal
 import time
@@ -62,6 +64,54 @@ class WorkflowTests(unittest.TestCase):
 
     def phases(self, current):
         return {step["step_id"]: step for step in current["state"]["steps"]}
+
+    def test_artifact_mapping_requires_read_scope_and_rejects_invalid_inputs(self):
+        n = self.node
+        volume = n.perform("volume.create", {"name": "binding-fences"})
+        targets = ["profile-local", volume["resource_id"]]
+        scope = self.grant(["system.status", "volume.write"], targets, units=4)
+        prepare = step("source")
+        base = step("write", "volume.write", dict(**target(volume), name="never", content="seed"), after=["source"])
+        text = {"step": "source", "pointer": "/authority_id"}
+        for invalid in (dict(base, inputs_from={"id": text}),
+                        dict(base, after=[], after_selected=["source"], inputs_from={"content": text}),
+                        dict(base, inputs_from={"content": dict(text, pointer="/~2bad")})):
+            self.rejected("InvalidArgument", "Workflow.Define", {"key": key(), "steps": [prepare, invalid]})
+
+        valid = self.define([prepare, dict(base, inputs_from={"content": text})])
+        no_read = n.call("Grant.Issue", {"principal_id": "local-owner", "units": 2, "ttl_seconds": 120,
+            "actions": ["workflow.manage", "task.submit", "system.status", "volume.write"], "tool_targets": targets})
+        self.rejected("PermissionDenied", "Workflow.Start", self.request(valid, no_read))
+
+        for pointer in ("/absent", ""):
+            with self.subTest(pointer=pointer):
+                definition = self.define([prepare,
+                    dict(base, inputs_from={"content": dict(text, pointer=pointer)})])
+                run = n.call("Workflow.Start", self.request(definition, scope))
+                failed = self.wait(run, "Failed")
+                projection = self.phases(failed)["write"]
+                self.assertEqual(projection["reason"], "PreconditionFailed")
+                self.assertIsNone(projection["task_receipt"])
+                self.assertNotIn("input_binding", projection)
+        self.assertEqual(self.budget(scope), (0, 2))
+        self.assertFalse((n.state / "volumes" / volume["resource_id"] / "data" / "never").exists())
+
+    def test_artifact_mapping_can_feed_a_scoped_mac(self):
+        n = self.node
+        key_bytes = b"workflow-testing-key"
+        secret = n.call("Secret.Put", {"name": "mapped-key", "value": key_bytes.decode()})
+        scope = self.grant(["secret.mac", "system.status"], [secret["resource_id"], "profile-local"], units=2)
+        mac = step("seal", "secret.mac", {"secret_id": secret["resource_id"], "message": "seed"}, after=["source"])
+        mac["inputs_from"] = {"message": {"step": "source", "pointer": "/authority_id"}}
+        definition = self.define([step("source"), mac])
+        run = n.call("Workflow.Start", self.request(definition, scope))
+        finished = self.wait(run, "Succeeded")
+        task = self.phases(finished)["seal"]["task_receipt"]["task_id"]
+        reference, = n.wait(task)["result"]["artifact_refs"]
+        tag = n.call("Artifact.Read", {"reference": reference})["tag"]
+        authority = n.call("Principal.WhoAmI", {})["authority_id"]
+        self.assertEqual(base64.b64decode(tag), hmac.digest(key_bytes, authority.encode(), "sha256"))
+        self.assertEqual(self.budget(scope), (0, 2))
 
     def test_join_resumes_original_approval_and_executes_each_step_once(self):
         n = self.node

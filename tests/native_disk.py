@@ -160,6 +160,20 @@ def call(c, method, params, token_file=None):
     return json.loads(c.run(f"printf '%s' {body} | psiosctl{options} call {method}"))
 
 
+def check_resource_watch(c):
+    node = call(c, "Node.Get", {})["reference"]
+    identity = shlex.quote(node["resource_id"])
+    snapshot = json.loads(c.run(f"psiosctl list Node --id {identity}"))
+    assert snapshot["items"] == [node] and snapshot["complete"], snapshot
+    paused = call(c, "Node.Configure", {"expected_resource_version": node["version"], "scheduling": "Cordoned"})
+    other = json.loads(c.run("printf '{}' | psiosctl submit system.status --key native-scoped-event"))
+    call(c, "Task.Cancel", {"id": other["task_id"], "expected_resource_version": other["task_revision"]})
+    enabled = call(c, "Node.Configure", {"expected_resource_version": paused["version"], "scheduling": "Enabled"})
+    cursor = shlex.quote(snapshot["watch_start_cursor"])
+    events = json.loads(c.run(f"psiosctl watch {cursor} --wait-ms 5000"))["events"]
+    assert [event["resource_ref"] for event in events] == [paused, enabled], events
+
+
 def stage_guest_chat_token(c, secret):
     path = "/tmp/psios-chat-fixture.token"
     try:
@@ -490,6 +504,7 @@ def exercise(args, work):
         check_native_volume_usage(c)
         check_native_mount_topology(c)
         check_native_network(c)
+        check_resource_watch(c)
         workflow = check_native_workflow(c)
         # Unrelated tool grants issued by the checks above must preserve chat sends.
         first = check_state(c)

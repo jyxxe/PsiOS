@@ -193,105 +193,105 @@ jobs:
         run: |
           mkdir "$RUNNER_TEMP/psios-format7"
           git archive 412eb56ea36930f75e713288d8833deabf92343e Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format7"
-          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format7/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format7/target"
-          python3 tests/network_rules_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format7/target/debug"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format7/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-compatibility-target"
+          python3 tests/network_rules_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Migrate format 8 state and dispatch a scheduled Task
         run: |
           mkdir "$RUNNER_TEMP/psios-format8"
           git archive c43ac95ae95b7918f79e8e352deeef5c57ba684c Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format8"
-          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format8/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format8/target"
-          python3 tests/schedule_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format8/target/debug"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format8/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-compatibility-target"
+          python3 tests/schedule_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Migrate format 9 state with a pending timer and exercise kernel lookup
         run: |
           mkdir "$RUNNER_TEMP/psios-format9"
           git archive 121a8c1e11e0f34bcfec4a356a0a36f511731db1 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format9"
-          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format9/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format9/target"
-          python3 tests/route_lookup_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format9/target/debug"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format9/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-compatibility-target"
+          python3 tests/route_lookup_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Migrate a format 10 timer and exercise interval trigger history
         run: |
           mkdir "$RUNNER_TEMP/psios-format10"
           git archive 918d80c9be636fe7a6eab287939cf8bc7df86c23 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format10"
-          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format10/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format10/target"
-          python3 tests/schedule_repeat_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format10/target/debug"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format10/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-compatibility-target"
+          python3 tests/schedule_repeat_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Migrate format 11 and execute an authorized local workflow
         run: |
           mkdir "$RUNNER_TEMP/psios-format11"
           git archive ad512d24f0f6dfbbd69c6e68b3c29de3efa1798e Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format11"
-          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format11/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format11/target"
-          python3 tests/workflow_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format11/target/debug"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format11/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-compatibility-target"
+          python3 tests/workflow_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Migrate format 12 and exercise direct chat with a retained workflow
         run: |
           mkdir "$RUNNER_TEMP/psios-format12"
           git archive afb73c71ce7a75b3cc7fa89c7d41c8d52dc828c0 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format12"
-          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format12/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format12/target"
-          python3 tests/chat_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format12/target/debug"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format12/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-compatibility-target"
+          python3 tests/chat_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Retain pending timers and direct chat when migrating format 13
         run: |
           mkdir "$RUNNER_TEMP/psios-format13"
           git archive 6735900e933346ec944fea285cf3358495e8ea62 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format13"
-          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format13/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format13/target"
-          python3 tests/calendar_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format13/target/debug"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format13/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-compatibility-target"
+          python3 tests/calendar_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Upgrade the volume usage catalog without widening existing grants
         run: |
           mkdir "$RUNNER_TEMP/psios-format14"
           git archive 9d40b0a24e2b93bed7615739c9f8f5bbc63a13c8 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format14"
-          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format14/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format14/target"
-          python3 tests/volume_usage_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format14/target/debug"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format14/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-compatibility-target"
+          python3 tests/volume_usage_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Publish mount topology without widening format 15 inventory grants
         run: |
           mkdir "$RUNNER_TEMP/psios-format15"
           git archive 588cb54ddde884db6350d989db87f58fc4b88a93 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format15"
-          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format15/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format15/target"
-          python3 tests/mounts_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format15/target/debug"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format15/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-compatibility-target"
+          python3 tests/mounts_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Preserve format 19 private messages, send windows and read positions
         run: |
           mkdir "$RUNNER_TEMP/psios-format19"
           git archive d46adb502897e915b24abd78148c2b8287cb1713 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format19"
-          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format19/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format19/target"
-          python3 tests/rooms_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format19/target/debug"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format19/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-compatibility-target"
+          python3 tests/rooms_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Upgrade format 20 and require an explicit grant to probe the network
         run: |
           mkdir "$RUNNER_TEMP/psios-format20"
           git archive 2f67646aab1edebe83cd9b813421179029bc3123 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format20"
-          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format20/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format20/target"
-          python3 -B tests/network_probe_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format20/target/debug"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format20/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/network_probe_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Upgrade format 21 and require a new grant to read resource pressure
         run: |
           mkdir "$RUNNER_TEMP/psios-format21"
           git archive d7c08a36454bae006d5eb08b0229eab9f1c159f1 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format21"
-          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format21/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format21/target"
-          python3 -B tests/pressure_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format21/target/debug"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format21/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/pressure_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Upgrade format 22 and keep existing device inventory grants scoped
         run: |
           mkdir "$RUNNER_TEMP/psios-format22"
           git archive 0e1c6be464906583f79c4c709209610a2e78f2a4 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format22"
-          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format22/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format22/target"
-          python3 -B tests/block_layout_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format22/target/debug"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format22/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/block_layout_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Preserve a pending format 23 workflow and fence old writers before conditional execution
         run: |
           mkdir "$RUNNER_TEMP/psios-format23"
           git archive 0f7b52c1ffea0621a0685dc6ebf09e6bdcec57de Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format23"
-          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format23/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format23/target"
-          python3 -B tests/workflow_conditions_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format23/target/debug"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format23/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/workflow_conditions_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Keep format 24 grants and enforce new deadlines across time namespaces
         run: |
           mkdir "$RUNNER_TEMP/psios-format24"
           git archive 14ef93d0c1c1d75dbf847d51942b832596ec4c70 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format24"
-          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format24/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format24/target"
-          python3 -B tests/grant_deadline_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format24/target/debug"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format24/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/grant_deadline_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
           sudo python3 -B tests/grant_time_namespace.py
       - name: Resume a format 25 approval and fence writers without elapsed Task deadlines
         run: |
           mkdir "$RUNNER_TEMP/psios-format25"
           git archive 01d34aef4d45048f87bbc8a36f2fe84f74f3c910 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format25"
-          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format25/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format25/target"
-          python3 -B tests/task_deadline_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format25/target/debug"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format25/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/task_deadline_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Resume a format 26 WorkflowRun and fence writers without elapsed run deadlines
         run: |
           mkdir "$RUNNER_TEMP/psios-format26"
           git archive 465f1a0a8a1bcafcd8b7d4a0db35def0e9aa75af Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format26"
-          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format26/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format26/target"
-          python3 -B tests/workflow_deadline_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format26/target/debug"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format26/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/workflow_deadline_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Verify real systemd service control and crash reconciliation
         run: |
           sudo loginctl enable-linger "$(id -un)"

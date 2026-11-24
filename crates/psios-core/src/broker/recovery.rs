@@ -102,16 +102,12 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             op = op_update(db, &op, "Pending", "NotStarted", effects, json!([]))?;
             db.c.execute("DELETE FROM holds WHERE holder=?1", [&op.id])?;
         }
-        let r = db.get(field(&t.body, "current_run_id"))?;
-        let mut b = r.body.clone();
-        b["operation_refs"] = json!([op.reference()]);
-        b["lifecycle"] = json!("Lost");
-        b["outcome_knowledge"] = json!(if read && phase == "Dispatched" {
+        let knowledge = if read && phase == "Dispatched" {
             "Unknown"
         } else {
             "NotStarted"
-        });
-        b["conditions"] = if phase == "Dispatched" {
+        };
+        let conditions = if phase == "Dispatched" {
             json!([
                 condition("OutcomeUnknown", "read result lost with worker"),
                 condition("LeaseLost", "local worker restarted")
@@ -119,15 +115,53 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
         } else {
             json!([condition("LeaseLost", "local worker restarted")])
         };
-        db.status(&r, b)?;
-        let mut b = t.body.clone();
-        b.as_object_mut().unwrap().remove("current_run_id");
-        b["lifecycle"] = json!("Queued");
-        b["operation_refs"] = json!([op.reference()]);
-        b["outcome_knowledge"] = json!("NotStarted");
-        db.status(&t, b)?;
-        db.c.execute("UPDATE queue SET phase='Queued' WHERE task=?1", [&task])?;
+        requeue(db, &t, &op, knowledge, conditions)?;
     }
+    Ok(())
+}
+
+pub fn release_unstarted_claim(db: &Db<'_>, task: &str) -> Result<()> {
+    let claimed = db.c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM queue WHERE task=?1 AND phase='Claimed')",
+        [task],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !claimed {
+        return Ok(());
+    }
+    let t = db.of(task, "Task")?;
+    require(
+        t.body["lifecycle"] == "Running" && t.body["outcome_knowledge"] == "NotStarted",
+        "RecoveryRequired",
+        "claimed task cannot be returned after an effect has started",
+    )?;
+    requeue(
+        db,
+        &t,
+        &operation(db, &t)?,
+        "NotStarted",
+        json!([condition(
+            "LeaseLost",
+            "authority stopped before effect dispatch"
+        )]),
+    )
+}
+
+fn requeue(db: &Db<'_>, task: &Doc, op: &Doc, knowledge: &str, conditions: Value) -> Result<()> {
+    let run = db.get(field(&task.body, "current_run_id"))?;
+    let mut state = run.body.clone();
+    state["operation_refs"] = json!([op.reference()]);
+    state["lifecycle"] = json!("Lost");
+    state["outcome_knowledge"] = json!(knowledge);
+    state["conditions"] = conditions;
+    db.status(&run, state)?;
+    let mut state = task.body.clone();
+    state.as_object_mut().unwrap().remove("current_run_id");
+    state["lifecycle"] = json!("Queued");
+    state["operation_refs"] = json!([op.reference()]);
+    state["outcome_knowledge"] = json!("NotStarted");
+    db.status(task, state)?;
+    db.c.execute("UPDATE queue SET phase='Queued' WHERE task=?1", [&task.id])?;
     Ok(())
 }
 

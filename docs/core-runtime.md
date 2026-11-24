@@ -179,7 +179,7 @@ jq -n --arg id "$schedule" '{id:$id}' | ctl call Schedule.Get
 
 在截止前重启、解除封锁或腾出队列空间时，Core 会用原 `trigger_id` 提交一次 Task。Task、预算预留和触发回执原子提交。派发仍按照普通 Task 重新授权和审批。队列满或权威存储低于预留空间时，触发继续等待。截止后记录 `Expired`，撤权或目标修订失效时记录 `Rejected`。`Schedule.Cancel` 接受 ID 和 `expected_resource_version`，用于取消待触发的调度。`Triggered` 包含可用 `Task.Get` 或 `ctl wait` 跟踪的 Task 回执，已经触发的 Task 使用原有取消入口。[调度故障与权限验收](../tests/test_schedule.py)
 
-从格式 28 创建的调度以 UTC 决定何时到达触发时间，同一内核启动内同时以经过时间约束各触发窗口何时结束。固定间隔和当地日历沿用定义中的窗间距。时钟回拨、节点封锁和守护进程重启后仍可按原窗口结算过期触发，已提交的 Task 继承该次窗口截止点。旧调度和跨内核启动继续使用原 UTC 截止时间。[回拨验收](../tests/native_grant_deadline.py) · [格式 27 升级](../tests/schedule_deadline_upgrade.py)
+从格式 28 创建的调度以 UTC 决定何时到达触发时间，同一内核启动内同时以经过时间约束各触发窗口何时结束。固定间隔和当地日历沿用定义中的窗间距。时钟回拨、节点封锁和守护进程重启后仍可按原窗口结算过期触发，已提交的 Task 继承该次窗口截止点。低于存储预留阈值时，调度仍可结算过期和跳过的窗口，提交新 Task 须满足 Broker 的存储余量要求。旧调度和跨内核启动继续使用原 UTC 截止时间。[调度状态验收](../tests/test_schedule.py) · [回拨验收](../tests/native_grant_deadline.py) · [格式 27 升级](../tests/schedule_deadline_upgrade.py)
 
 在 `Schedule.Create` 请求中加入 `repeat` 可创建有限次的 UTC 固定间隔调度。例如每 60 秒运行一次，共运行三次，并在恢复时最多保留两次可执行的触发。
 

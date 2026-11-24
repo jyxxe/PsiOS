@@ -37,7 +37,7 @@ impl Clock {
     ) -> Result<()> {
         let at = chrono::DateTime::parse_from_rfc3339(utc)
             .map_err(|_| err("InvalidArgument", "invalid UTC deadline"))?;
-        let remaining_ms = (at - chrono::Utc::now()).num_milliseconds();
+        let remaining_ms = (at.to_utc() - chrono::Utc::now()).num_milliseconds();
         let mut deadline_ms = self.boot.millis.saturating_add(remaining_ms);
         if let Some(source) = inherited_from {
             let prior: Option<(String, i64)> = db.c.query_row(

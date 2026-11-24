@@ -131,7 +131,7 @@ def host_config(seed, args):
     (seed / "etc").chmod(0o755)
 
 
-def ramfs(work, args, instance, home_id, layout=Layout()):
+def ramfs(work, args, instance, home_id, layout=Layout(), signing=None):
     base = boot_media.prepare_kernel(work, args.kernel_iso)
     (work / "bin").mkdir()
     install_core(work, args.core_archive, args.core_sha256)
@@ -153,6 +153,8 @@ def ramfs(work, args, instance, home_id, layout=Layout()):
         "required_filesystems": {"state": str(instance), "home": str(home_id)},
         "payload_sha256": payload,
     }
+    if signing:
+        inputs["secure_boot"] = signing.receipt()
     manifest = work / "psios-deployment.json"
     manifest.write_text(json.dumps(inputs, sort_keys=True, separators=(",", ":")) + "\n")
     # BusyBox can verify the exact extracted bytes without a JSON interpreter.
@@ -249,7 +251,7 @@ def read_receipt(path):
     if len(raw) > 16 * 1024:
         raise ValueError("previous build receipt exceeds size limit")
     prior = json.loads(raw)
-    if not isinstance(prior, dict) or type(prior.get("format")) is not int or prior["format"] not in (1, 2):
+    if not isinstance(prior, dict) or type(prior.get("format")) is not int or prior["format"] not in (1, 2, 3):
         raise ValueError("unsupported previous build receipt format")
     for name, pattern in (("source_commit", r"[0-9a-f]{40}"), ("efi_application_sha256", r"[0-9a-f]{64}")):
         if not isinstance(prior.get(name), str) or not re.fullmatch(pattern, prior[name]):
@@ -261,13 +263,22 @@ def read_receipt(path):
     if prior["state_uuid"] == prior["home_uuid"]:
         raise ValueError("previous deployment filesystems have identical UUIDs")
     layout = Layout()
-    if prior["format"] == 2:
+    if prior["format"] >= 2:
         geometry = prior.get("geometry_mib")
         if not isinstance(geometry, dict) or set(geometry) != {"state_mib", "home_mib", "image_mib"}:
             raise ValueError("invalid previous build receipt geometry")
         layout = Layout(geometry["state_mib"], geometry["home_mib"])
         if type(geometry["image_mib"]) is not int or geometry != layout.receipt():
             raise ValueError("invalid previous build receipt image size")
+    if prior["format"] == 3:
+        trust = prior.get("secure_boot")
+        if (not isinstance(trust, dict) or set(trust) != {"scheme", "certificate_sha256", "efi_stub_sha256"}
+                or trust["scheme"] != boot_media.SECURE_BOOT_SCHEME or any(
+                    not isinstance(trust[key], str) or not re.fullmatch(r"[0-9a-f]{64}", trust[key])
+                    for key in ("certificate_sha256", "efi_stub_sha256"))):
+            raise ValueError("invalid Secure Boot evidence in previous build receipt")
+    elif "secure_boot" in prior:
+        raise ValueError("Secure Boot evidence requires build receipt format 3")
     return prior, layout
 
 
@@ -338,7 +349,7 @@ def read_partition_file(work, fs, member, limit):
     return data
 
 
-def source_snapshot(work, disk, args, prior, layout):
+def source_snapshot(work, disk, args, prior, layout, signing):
     disk_size = layout.image_mib * MIB
     with boot_media.regular_file(args.upgrade_from) as source:
         fd = source.fileno()
@@ -360,6 +371,8 @@ def source_snapshot(work, disk, args, prior, layout):
     boot_media.run(work, ["mcopy", "-i", f"{disk.name}@@{ESP[0] * MIB}", EFI_PATH, old_efi])
     if sha256(old_efi) != prior["efi_application_sha256"]:
         raise ValueError("previous EFI application does not match the trusted build receipt")
+    if prior.get("secure_boot"):
+        signing.verify(work, old_efi)
     state, replayed_state = check_filesystem(work, disk, 1, prior["state_uuid"], layout)
     homes, replayed_home = check_filesystem(work, disk, 2, prior["home_uuid"], layout)
     homes.unlink()
@@ -391,20 +404,27 @@ def build(args):
         work = Path(tmp)
         disk = work / "installed.raw"
         prior = None
+        signing = None
+        if args.secure_boot_key:
+            signing = boot_media.prepare_secure_boot(work, args.secure_boot_key, args.secure_boot_cert,
+                                                    args.efi_stub, args.efi_stub_sha256)
         if args.upgrade_from:
             prior, layout = read_receipt(args.previous_receipt)
+            if prior.get("secure_boot") and (signing is None or
+                    signing.certificate_sha256 != prior["secure_boot"]["certificate_sha256"]):
+                raise ValueError("a Secure Boot upgrade requires the existing signing certificate")
             instance, home_id = prior["state_uuid"], prior["home_uuid"]
-            source_digest, replayed = source_snapshot(work, disk, args, prior, layout)
+            source_digest, replayed = source_snapshot(work, disk, args, prior, layout, signing)
         else:
             layout = Layout(MIN_STATE_MIB if args.state_mib is None else args.state_mib,
                             MIN_HOME_MIB if args.home_mib is None else args.home_mib)
             instance, home_id = str(uuid.uuid4()), str(uuid.uuid4())
             new_disk(work, disk, args, instance, home_id, layout)
         disk.chmod(0o600)
-        ramfs(work, args, instance, home_id, layout)
+        ramfs(work, args, instance, home_id, layout, signing)
         source_commit = (work / "psios-source").read_text().strip()
         authority = verify_authority(work, disk) if prior else None
-        efi = boot_media.efi_application(work, CMDLINE)
+        efi = boot_media.secure_efi_application(work, CMDLINE, signing) if signing else boot_media.efi_application(work, CMDLINE)
         esp = work / "esp.fat"
         with esp.open("xb") as f:
             f.truncate(ESP[1] * MIB)
@@ -415,12 +435,14 @@ def build(args):
         with disk.open("rb") as completed:
             os.fsync(completed.fileno())
         receipt = {
-            "format": 2, "image": str(output), "source_commit": source_commit, "geometry_mib": layout.receipt(),
+            "format": 3 if signing else 2, "image": str(output), "source_commit": source_commit, "geometry_mib": layout.receipt(),
             "state_uuid": instance, "home_uuid": home_id,
             "deployment_manifest_sha256": sha256(work / "psios-deployment.json"),
             "efi_application_sha256": sha256(efi), "installed_initramfs_sha256": sha256(work / "initrd"),
             "initial_image_sha256": sha256(disk),
         }
+        if signing:
+            receipt["secure_boot"] = signing.receipt()
         if prior:
             receipt["upgrade"] = {
                 "previous_image_sha256": source_digest,
@@ -449,12 +471,20 @@ def main():
     mode.add_argument("--upgrade-from", type=Path, help="stopped native development disk to copy without changes")
     parser.add_argument("--previous-receipt", type=Path, help="trusted build receipt for the stopped disk")
     parser.add_argument("--root-console-hash", type=Path, help="optional private hash for local system administration; default locks root")
+    parser.add_argument("--secure-boot-key", type=Path, help="private local PEM key for an enrolled UEFI signing certificate")
+    parser.add_argument("--secure-boot-cert", type=Path, help="PEM signing certificate trusted by the target UEFI firmware")
+    parser.add_argument("--efi-stub", type=Path, help="trusted systemd linuxx64.efi.stub input for a signed Unified Kernel Image")
+    parser.add_argument("--efi-stub-sha256", help="SHA-256 of the exact trusted EFI stub input")
     parser.add_argument("--dhcp-mac", type=unicast_mac, help="enable IPv4 DHCP on the matching virtio NIC of a new disk")
     parser.add_argument("--state-mib", type=int, help=f"state partition size of a new disk (default {MIN_STATE_MIB} MiB)")
     parser.add_argument("--home-mib", type=int, help=f"home partition size of a new disk (default {MIN_HOME_MIB} MiB)")
     args = parser.parse_args()
     if not re.fullmatch(r"[0-9a-f]{64}", args.core_sha256):
         parser.error("invalid Core archive SHA-256")
+    secure = (args.secure_boot_key, args.secure_boot_cert, args.efi_stub, args.efi_stub_sha256)
+    if any(value is not None for value in secure) and (
+            not all(secure) or not re.fullmatch(r"[0-9a-f]{64}", args.efi_stub_sha256)):
+        parser.error("Secure Boot requires the key, certificate, EFI stub and its lowercase SHA-256")
     if args.upgrade_from and (not args.previous_receipt or args.root_console_hash or args.dhcp_mac):
         parser.error("upgrade requires --previous-receipt and preserves console credentials and network configuration")
     if args.upgrade_from and (args.state_mib is not None or args.home_mib is not None):

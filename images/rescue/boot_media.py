@@ -7,11 +7,13 @@ import shutil
 import stat
 import subprocess
 import tempfile
+from typing import NamedTuple
 
 
 EPOCH = 946684800  # 2000-01-01 UTC, also representable by FAT and ISO 9660.
 CMDLINE = "console=ttyS0,115200 quiet panic=1 rdinit=/psios-rescue"
 MIB = 1024 * 1024
+SECURE_BOOT_SCHEME = "uefi-uki-authenticode"
 
 
 def regular_file(path):
@@ -50,10 +52,10 @@ def prepare_kernel(work, kernel_iso):
     return base
 
 
-def run(work, args):
+def run(work, args, *, pass_fds=()):
     env = {**os.environ, "LC_ALL": "C", "TZ": "UTC", "SOURCE_DATE_EPOCH": str(EPOCH)}
     subprocess.run(args, cwd=work, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                   timeout=90, check=True)
+                   pass_fds=pass_fds, timeout=90, check=True)
 
 
 def efi_application(work, cmdline):
@@ -68,6 +70,52 @@ def efi_application(work, cmdline):
     run(work, ["grub-mkstandalone", "--format=x86_64-efi", "--modules=" + modules, "--install-modules=" + modules,
          "--locales=", "--fonts=", "--themes=", "--output", efi, "boot/grub/grub.cfg=grub.cfg",
          "boot/kernel=kernel", "boot/initrd=initrd"])
+    os.utime(efi, (EPOCH, EPOCH))
+    return efi
+
+
+class SecureBoot(NamedTuple):
+    key: Path
+    certificate: Path
+    stub: Path
+    certificate_sha256: str
+    stub_sha256: str
+
+    def receipt(self):
+        return {"scheme": SECURE_BOOT_SCHEME, "certificate_sha256": self.certificate_sha256,
+                "efi_stub_sha256": self.stub_sha256}
+
+    def verify(self, work, image):
+        run(work, ["sbverify", "--cert", self.certificate, image])
+
+
+def prepare_secure_boot(work, key, certificate, stub, stub_digest):
+    pinned_stub = work / "linuxx64.efi.stub"
+    pinned_copy(stub, pinned_stub, stub_digest, 2 * MIB)
+    with regular_file(certificate) as source:
+        pem = source.read(64 * 1024 + 1)
+        if len(pem) > 64 * 1024:
+            raise ValueError("Secure Boot certificate exceeds size limit")
+    trusted = work / "uki-signer.pem"
+    trusted.write_bytes(pem)
+    der = subprocess.check_output(["openssl", "x509", "-in", trusted, "-outform", "DER"],
+                                  stdin=subprocess.DEVNULL, timeout=10)
+    return SecureBoot(key, trusted, pinned_stub, hashlib.sha256(der).hexdigest(), stub_digest)
+
+
+def secure_efi_application(work, cmdline, signing):
+    unsigned = work / "unsigned.efi"
+    efi = work / "BOOTX64.EFI"
+    run(work, ["ukify", "build", "--config=/dev/null", "--efi-arch=x64", "--stub", signing.stub,
+               "--linux", work / "kernel", "--initrd", work / "initrd", "--cmdline", cmdline,
+               "--os-release=ID=psios\nNAME=PsiOS\n", "--output", unsigned])
+    with regular_file(signing.key) as key:
+        info = os.fstat(key.fileno())
+        if info.st_uid != os.geteuid() or info.st_mode & 0o077 or not 0 < info.st_size <= 64 * 1024:
+            raise ValueError("Secure Boot key must be a private regular file owned by the builder")
+        run(work, ["sbsign", "--key", f"/proc/self/fd/{key.fileno()}", "--cert", signing.certificate,
+                   "--output", efi, unsigned], pass_fds=(key.fileno(),))
+    signing.verify(work, efi)
     os.utime(efi, (EPOCH, EPOCH))
     return efi
 

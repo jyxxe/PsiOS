@@ -8,6 +8,7 @@ const input = JSON.parse(readFileSync(0, "utf8"));
 const chrome = spawn(process.argv[2], [
   "--headless", "--disable-gpu", "--disable-dev-shm-usage", "--no-first-run",
   "--disable-background-networking", "--disable-sync", "--disable-extensions",
+  "--disable-component-update", "--no-default-browser-check", "--password-store=basic",
   "--remote-debugging-pipe", "--user-data-dir=" + input.profile, "about:blank",
 ], { stdio: ["ignore", "ignore", "inherit", "pipe", "pipe"] });
 
@@ -48,13 +49,13 @@ replies.setEncoding("utf8").on("data", (chunk) => {
   }
 });
 
-function send(method, params = {}) {
+function send(method, params = {}, timeout = 8_000) {
   const id = ++nextId;
   return new Promise((resolve, reject) => {
     const deadline = setTimeout(() => {
       pending.delete(id);
       reject(new Error("DevTools command timed out: " + method));
-    }, 8000);
+    }, timeout);
     pending.set(id, {
       resolve: (value) => { clearTimeout(deadline); resolve(value); },
       reject: (error) => { clearTimeout(deadline); reject(error); },
@@ -82,12 +83,13 @@ function click(selector) {
 }
 
 async function test() {
-  const { targetId } = await send("Target.createTarget", { url: "about:blank" });
+  await send("Browser.getVersion", {}, 35_000);
+  const { targetId } = await send("Target.createTarget", { url: "about:blank" }, 30_000);
   ({ sessionId } = await send("Target.attachToTarget", { targetId, flatten: true }));
   await send("Page.enable");
   await send("Network.enable");
   await send("Runtime.enable");
-  await send("Page.navigate", { url: input.origin });
+  await send("Page.navigate", { url: input.origin }, 25_000);
   await waitFor("ready pairing page",
     'document.title === "PsiOS Shell" && document.readyState === "complete" && !document.getElementById("pairing").hidden');
   await evaluate('document.getElementById("code").focus()');

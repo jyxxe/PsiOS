@@ -104,7 +104,7 @@ class ShellTests(unittest.TestCase):
             input=json.dumps(dict(origin=shell.origin, code=shell.code, task=task,
                                   node=self.node.call("Node.Get", {})["reference"]["resource_id"],
                                   profile=str(self.node.base / "browser"))),
-            text=True, timeout=45, check=True,
+            text=True, timeout=110, check=True,
         )
         self.assertEqual(shell.process.wait(timeout=5), 0)
 

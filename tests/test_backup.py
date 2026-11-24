@@ -143,7 +143,7 @@ class BackupTests(unittest.TestCase):
         task = n.submit("backup.create", target(volume))
         # The second blob appears only after the first was copied and fsynced.
         deadline = time.monotonic() + 15
-        while not any(backups.glob(".tmp*/blob-1")):
+        while not any(backups.glob(".stage-*/blob-1")):
             if time.monotonic() >= deadline:
                 self.fail("did not observe the second blob in staging")
             time.sleep(0.001)
@@ -151,7 +151,7 @@ class BackupTests(unittest.TestCase):
         try:
             _, status = os.waitpid(n.process.pid, os.WUNTRACED)
             self.assertTrue(os.WIFSTOPPED(status))
-            self.assertTrue(any(backups.glob(".tmp*/blob-1")))
+            self.assertTrue(any(backups.glob(".stage-*/blob-1")))
             early.write_bytes(b"new")
             os.utime(early, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
         finally:

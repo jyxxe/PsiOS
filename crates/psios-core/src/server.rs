@@ -155,6 +155,7 @@ fn bind(path: &Path) -> Result<(UnixListener, Endpoint<'_>)> {
 pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     let mut db = Store::open(cfg.clone())?;
     let (listener, _endpoint) = bind(&cfg.socket)?;
+    crate::storage::reclaim_on_startup(&cfg);
     db.transaction("restart-recovery", broker::recover)?;
     let db = Arc::new(Mutex::new(db));
     let mut workers = Vec::new();

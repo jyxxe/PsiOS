@@ -453,7 +453,11 @@ fn permit(
             && proof.body["permit_id"] == permit.id
             && proof.body["audience_resource_refs"] == json!(audience)
             && plan.body["allowed_effects"][0]["action"] == tool
-            && !expired(permit.body["not_after"].as_str().unwrap())?,
+            && !policy::deadline::Clock::sample()?.expired(
+                db,
+                &permit.id,
+                permit.body["not_after"].as_str().unwrap(),
+            )?,
         "Fenced",
         "host permit does not authorize this execution",
     )?;

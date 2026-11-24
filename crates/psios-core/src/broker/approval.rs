@@ -13,14 +13,18 @@ pub fn decide(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let p: Decision = decode(p)?;
     let req = db.of(&p.id, "ApprovalRequest")?;
     req.cas(&p.expected_resource_version)?;
+    let t = db.of(field(&req.spec, "task_id"), "Task")?;
     require(
         req.body["status"] == "Pending"
             && req.body["plan_digest"] == p.plan_digest
-            && !expired(field(&req.body, "expires_at"))?,
+            && !policy::deadline::Clock::sample()?.expired(
+                db,
+                &t.id,
+                field(&req.body, "expires_at"),
+            )?,
         "ApprovalInvalidated",
         "plan or approval validity changed",
     )?;
-    let t = db.of(field(&req.spec, "task_id"), "Task")?;
     require(
         t.body["lifecycle"] == "WaitingApproval",
         "Conflict",

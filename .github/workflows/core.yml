@@ -83,6 +83,8 @@ jobs:
             mount -t tmpfs -o size=32m,nr_inodes=512,mode=1777 tmpfs "$1"
             TMPDIR="$1" PSIOS_TEST_CAPACITY_ALLOCATION=1 runuser -u "$2" -- \
               python3 -B -m unittest discover -s tests -p test_platform.py -k test_pauses_new_work -v
+            TMPDIR="$1" PSIOS_TEST_CAPACITY_ALLOCATION=1 runuser -u "$2" -- \
+              python3 -B -m unittest discover -s tests -p test_backup.py -k test_restore_preflights -v
           ' psios-headroom "$scratch" "$(id -un)"
       - name: Migrate active and completed model calls from format 4
         run: |

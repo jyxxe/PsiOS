@@ -1,5 +1,7 @@
 """Verify stored recovery sets without allocating a volume or granting access to its contents."""
 from contextlib import ExitStack
+import hashlib
+import json
 import os
 import signal
 import time
@@ -51,6 +53,48 @@ class BackupTests(unittest.TestCase):
                          (self.backup, 2, "4", digest))
         self.assertEqual(n.get(self.backup["resource_id"])["reference"], self.backup)
         self.assertEqual(set((n.state / "volumes").iterdir()), volumes)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_CAPACITY_ALLOCATION") == "1", "requires a bounded filesystem")
+    def test_restore_preflights_shared_filesystem_without_publishing_partial_volume(self):
+        n = self.n
+        volumes = n.state / "volumes"
+        original = volumes / self.volume["resource_id"] / "data" / "record"
+        with original.open("xb") as file:
+            os.posix_fallocate(file.fileno(), 0, 6 * 1024 * 1024)
+        for index in range(18):
+            (original.parent / f"empty-{index}").touch()
+        saved = n.perform("backup.create", target(self.volume))
+        cfg = json.loads(n.config.read_text())
+        n.stop()
+        n.config.write_text(json.dumps(dict(cfg, authority_reserve={"state_bytes": 4 * 1024 * 1024})))
+        n.start()
+        snapshot = set(volumes.iterdir())
+        filler = n.base / "allocation"
+        stats = os.statvfs(n.state)
+        with filler.open("xb") as file:
+            os.posix_fallocate(file.fileno(), 0, stats.f_bavail * stats.f_frsize - 6 * 1024 * 1024)
+        self.assertFalse(n.call("Node.Get", {})["authority_storage"]["state"]["below_reserve"])
+        refused = n.wait(n.submit("backup.restore", target(saved)), autoapprove=True)
+        self.assertEqual((refused["lifecycle"], refused["conditions"][0]["type"]), ("Failed", "QuotaExceeded"), refused)
+        self.assertIn("destination blocks", refused["conditions"][0]["message"])
+        self.assertEqual(set(volumes.iterdir()), snapshot)
+        self.assertEqual(n.get(saved["resource_id"])["reference"], saved)
+        filler.unlink()
+
+        inodes = n.base / "inodes"
+        inodes.mkdir()
+        for index in range(os.statvfs(inodes).f_favail - 10):
+            (inodes / str(index)).touch()
+        refused = n.wait(n.submit("backup.restore", target(saved)), autoapprove=True)
+        self.assertEqual((refused["lifecycle"], refused["conditions"][0]["type"]), ("Failed", "QuotaExceeded"), refused)
+        self.assertIn("destination inodes", refused["conditions"][0]["message"])
+        self.assertEqual(set(volumes.iterdir()), snapshot)
+        for entry in inodes.iterdir():
+            entry.unlink()
+        restored = n.perform("backup.restore", target(saved))
+        restored_path = volumes / restored["resource_id"] / "data" / "record"
+        with original.open("rb") as source, restored_path.open("rb") as output:
+            self.assertEqual(hashlib.file_digest(output, "sha256").digest(), hashlib.file_digest(source, "sha256").digest())
 
     def test_manifest_and_blob_faults_release_the_backup_and_preserve_source(self):
         blob = next(self.folder.glob("blob-*"))

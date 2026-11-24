@@ -557,7 +557,26 @@ fn inspect_backup(cfg: &Config, b: &Doc, destination: Option<&Path>) -> Result<V
             "invalid backup modification times",
         )?;
     }
+    let declared = m
+        .total_bytes
+        .parse::<u64>()
+        .ok()
+        .filter(|n| *n <= MAX_BACKUP)
+        .ok_or_else(|| err("PreconditionFailed", "invalid backup byte count"))?;
+    let file_sizes = m
+        .entries
+        .iter()
+        .filter(|entry| entry.digest.is_some())
+        .map(|entry| entry.bytes);
+    require(
+        file_sizes.clone().try_fold(0u64, u64::checked_add) == Some(declared),
+        "PreconditionFailed",
+        "backup length mismatch",
+    )?;
     let destination = destination.map(File::open).transpose()?;
+    if let Some(dir) = &destination {
+        cfg.check_restore_space(dir, file_sizes, m.entries.len() as u64)?;
+    }
     let mut dirs = vec![];
     let mut total = 0;
     for (i, e) in m.entries.iter().enumerate() {
@@ -617,7 +636,7 @@ fn inspect_backup(cfg: &Config, b: &Doc, destination: Option<&Path>) -> Result<V
         }
     }
     require(
-        m.total_bytes.parse::<u64>().ok() == Some(total),
+        total == declared,
         "PreconditionFailed",
         "backup length mismatch",
     )?;
@@ -635,6 +654,7 @@ fn inspect_backup(cfg: &Config, b: &Doc, destination: Option<&Path>) -> Result<V
             times.root.restore(&root)?;
             root.sync_all()?;
         }
+        cfg.check_restore_space(&root, std::iter::empty(), 0)?;
     }
     Ok(
         json!({"backup_ref":b.reference(), "manifest_digest":b.body["manifest_digest"],

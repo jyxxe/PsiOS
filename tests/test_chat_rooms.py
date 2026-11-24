@@ -117,6 +117,68 @@ class RoomTests(unittest.TestCase):
         after(short["expires_at"])
         self.assertEqual(self.get(short, self.a)["lifecycle"], "Archived")
         self.rejected("PreconditionFailed", "Message.OpenSendWindow", dict(id=short["id"], ttl_seconds=60), self.a)
+        archived = self.node.call("Conversation.Archive", self.version(short), self.a)
+        self.rejected("PreconditionFailed", "Conversation.Reopen", self.version(archived), self.a)
+
+    def test_owner_transfer_preserves_new_owners_history_boundary(self):
+        n = self.node
+        room = self.create()
+        private = self.send(room, self.a, "before successor joined")
+        successor = self.join(room, self.bob)
+        invited = self.invite(successor, self.carol)
+        room = invited["conversation"]
+        self.rejected("PreconditionFailed", "Conversation.TransferOwner", dict(
+            self.version(room), membership_id=invited["membership_id"]), self.a)
+        change = dict(self.version(room), membership_id=successor["membership_id"])
+        self.rejected("Conflict", "Conversation.TransferOwner", dict(
+            change, expected_resource_version=successor["resource_version"]), self.a)
+        self.rejected("PermissionDenied", "Conversation.TransferOwner", change, self.b)
+        n.call("Grant.Revoke", target(self.bob_grant["grant_ref"]))
+        self.rejected("PermissionDenied", "Conversation.TransferOwner", change, self.a)
+        n.call("Grant.Issue", dict(principal_id=self.bob["principal_id"], actions=ACTIONS, ttl_seconds=120, units=1))
+        room = n.call("Conversation.TransferOwner", change, self.a)
+        self.assertEqual(room["owner_principal_id"], self.bob["principal_id"])
+        self.rejected("PermissionDenied", "Conversation.Archive", self.version(room), self.a)
+        self.rejected("NotFound", "Message.Get", dict(
+            conversation_id=room["id"], message_id=private["message_id"]), self.b)
+
+        departed = n.call("Conversation.Leave", self.version(room), self.a)
+        self.assertEqual(departed["membership"]["lifecycle"], "Left")
+        n.call("Principal.Revoke", target(n.get(self.alice["principal_id"])["reference"]))
+        n.stop(signal.SIGKILL)
+        n.start()
+        room = self.get(room, self.b)
+        self.assertEqual((room["lifecycle"], room["membership_id"]), ("Active", successor["membership_id"]))
+        joined = n.call("Conversation.Respond", dict(self.version(room),
+            membership_id=invited["membership_id"], accept=True), self.c)
+        self.assertEqual(joined["lifecycle"], "Active")
+        self.assertEqual(self.send(room, self.b, "owned after restart")["conversation_seq"], "2")
+
+    def test_archive_and_reopen_retire_pending_windows_and_invitations(self):
+        n = self.node
+        room = self.join(self.create(), self.bob)
+        invitation = self.invite(room, self.carol)
+        room = invitation["conversation"]
+        accepted = self.send(room, self.b, "accepted before archive")
+        old = self.prepare(room, self.b, "prepared before archive")
+        archived = n.call("Conversation.Archive", self.version(room), self.a)
+        self.assertEqual(archived["lifecycle"], "Archived")
+        self.assertEqual(self.page(room, self.b)["items"][0]["message"]["message_id"], accepted["message_id"])
+        self.rejected("PermissionDenied", "Conversation.Get", {"id": room["id"]}, self.c)
+        self.rejected("PreconditionFailed", "Message.Send", old, self.b)
+        self.rejected("PermissionDenied", "Conversation.Reopen", self.version(archived), self.b)
+        self.rejected("Conflict", "Conversation.Reopen", self.version(room), self.a)
+
+        n.stop(signal.SIGKILL)
+        n.start()
+        reopened = n.call("Conversation.Reopen", self.version(archived), self.a)
+        self.assertEqual(reopened["lifecycle"], "Active")
+        self.rejected("IdempotencyKeyExpired", "Message.Send", old, self.b)
+        fresh = self.invite(reopened, self.carol)
+        self.assertNotEqual(fresh["membership_id"], invitation["membership_id"])
+        self.rejected("PermissionDenied", "Conversation.Respond", dict(self.version(fresh["conversation"]),
+            membership_id=invitation["membership_id"], accept=True), self.c)
+        self.assertEqual(self.send(reopened, self.b, "written after reopen")["conversation_seq"], "2")
 
     def test_history_begins_at_join_and_hidden_reply_is_filtered(self):
         n = self.node

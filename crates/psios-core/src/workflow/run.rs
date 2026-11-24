@@ -130,19 +130,51 @@ fn dispatch(
         "workflow index disagrees with dispatch state",
     )?;
     let steps: Vec<PreparedStep> = decode(&run.spec["steps"])?;
+    require(
+        steps
+            .iter()
+            .any(|step| step.when.is_some() || !step.after_selected.is_empty())
+            == (run.spec["dsl_version"] == 2),
+        "RecoveryRequired",
+        "workflow run version disagrees with conditional steps",
+    )?;
     let statuses = run.body["steps"]
         .as_array()
         .ok_or_else(|| err("RecoveryRequired", "workflow steps missing"))?;
-    let has_status = |id: &str, phase: &str| {
-        statuses
-            .iter()
-            .any(|step| step["step_id"] == id && step["lifecycle"] == phase)
-    };
+    let state = |id: &str| statuses.iter().find(|step| step["step_id"] == id);
+    let has_status =
+        |id: &str, phase: &str| state(id).is_some_and(|step| step["lifecycle"] == phase);
+    for step in steps.iter().filter(|step| has_status(&step.id, "Pending")) {
+        let skipped_parent = step.after.iter().find(|dep| has_status(dep, "Skipped"));
+        let all_branches_skipped = !step.after_selected.is_empty()
+            && step
+                .after_selected
+                .iter()
+                .all(|dep| has_status(dep, "Skipped"));
+        if skipped_parent.is_none() && !all_branches_skipped {
+            continue;
+        }
+        let mut body = run.body.clone();
+        let skipped = progress(&mut body, &step.id)?;
+        skipped["lifecycle"] = json!("Skipped");
+        if let Some(dependency) = skipped_parent {
+            skipped["reason"] = json!("DependencyNotSelected");
+            skipped["skipped_dependency"] = json!(dependency);
+        } else {
+            skipped["reason"] = json!("NoSelectedPredecessor");
+            skipped["joined_predecessors"] = json!([]);
+        }
+        return persist_selection(db, run, body, ready_ms);
+    }
     let step = steps
         .iter()
         .find(|step| {
             has_status(&step.id, "Pending")
                 && step.after.iter().all(|dep| has_status(dep, "Succeeded"))
+                && step
+                    .after_selected
+                    .iter()
+                    .all(|dep| has_status(dep, "Succeeded") || has_status(dep, "Skipped"))
         })
         .ok_or_else(|| {
             err(
@@ -163,13 +195,47 @@ fn dispatch(
         .ok_or_else(|| err("RecoveryRequired", "workflow tool missing"))?;
     policy::delegation(db, &run.owner, delegation, ACTION)?;
     check_tool(db, tool, &step.tool_ref)?;
+    if step.when.is_some() || !step.after_selected.is_empty() {
+        policy::delegation(db, &run.owner, delegation, "task.read")?;
+    }
+    if let Some(predicate) = &step.when {
+        let existing = &state(&step.id).unwrap()["condition"];
+        if existing.is_null() {
+            let source = state(&predicate.step)
+                .ok_or_else(|| err("RecoveryRequired", "workflow condition predecessor missing"))?;
+            let choice = predicate.evaluate(db, run, source)?;
+            let mut body = run.body.clone();
+            let selection = progress(&mut body, &step.id)?;
+            if choice["selected"] == false {
+                selection["lifecycle"] = json!("Skipped");
+                selection["reason"] = json!("ConditionFalse");
+            }
+            selection["condition"] = choice;
+            return persist_selection(db, run, body, ready_ms);
+        }
+        require(
+            existing["selected"] == true && existing["predicate_digest"] == predicate.digest(),
+            "RecoveryRequired",
+            "stored workflow selection disagrees with the definition",
+        )?;
+    }
     let receipt = broker::submit_workflow(db, &run.owner, &step.request, &run.id, &step.step_key)?;
     let task_id = receipt["task_id"]
         .as_str()
         .ok_or_else(|| err("RecoveryRequired", "workflow task receipt has no ID"))?;
     let task = db.of(task_id, "Task")?;
     let mut body = run.body.clone();
-    progress(&mut body, &step.id)?["task_receipt"] = receipt;
+    let projection = progress(&mut body, &step.id)?;
+    projection["task_receipt"] = receipt;
+    if !step.after_selected.is_empty() {
+        let selected: Vec<_> = step
+            .after_selected
+            .iter()
+            .filter_map(|id| state(id).filter(|dep| dep["lifecycle"] == "Succeeded"))
+            .map(|dep| json!({"step_id":dep["step_id"],"task_ref":dep["task_ref"]}))
+            .collect();
+        projection["joined_predecessors"] = json!(selected);
+    }
     body["active_step"] = json!(step.id);
     require(
         db.c.execute("UPDATE active_workflows SET task=?2,task_rev=?3,ready_ms=?4 WHERE run=?1 AND task IS NULL AND stopping=0",
@@ -178,6 +244,31 @@ fn dispatch(
         "workflow admission did not replace a ready entry",
     )?;
     observe(db, run, body, &task)?;
+    Ok(())
+}
+
+fn all_steps_complete(body: &Value) -> bool {
+    body["steps"].as_array().is_some_and(|steps| {
+        steps
+            .iter()
+            .all(|step| step["lifecycle"] == "Succeeded" || step["lifecycle"] == "Skipped")
+    })
+}
+
+fn persist_selection(db: &Db<'_>, run: &Doc, body: Value, ready_ms: i64) -> Result<()> {
+    if all_steps_complete(&body) {
+        finish(db, run, body, "Succeeded", None)?;
+    } else {
+        require(
+            db.c.execute(
+                "UPDATE active_workflows SET ready_ms=?2 WHERE run=?1 AND task IS NULL AND stopping=0",
+                params![run.id, ready_ms],
+            )? == 1,
+            "RecoveryRequired",
+            "workflow selection lacks a ready entry",
+        )?;
+        db.status(run, body)?;
+    }
     Ok(())
 }
 
@@ -203,6 +294,11 @@ fn observe(db: &Db<'_>, run: &Doc, mut body: Value, task: &Doc) -> Result<Doc> {
         .as_str()
         .ok_or_else(|| err("RecoveryRequired", "workflow task lifecycle missing"))?;
     let knowledge = &task.body["outcome_knowledge"];
+    require(
+        phase != "Succeeded" || knowledge == "Known",
+        "RecoveryRequired",
+        "successful predecessor must have a known outcome",
+    )?;
     step["task_ref"] = task.reference();
     step["outcome_knowledge"] = knowledge.clone();
     step["lifecycle"] = json!(match phase {
@@ -223,12 +319,7 @@ fn observe(db: &Db<'_>, run: &Doc, mut body: Value, task: &Doc) -> Result<Doc> {
             };
             return finish(db, run, body, "Failed", Some(reason));
         }
-        if body["steps"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|step| step["lifecycle"] == "Succeeded")
-        {
+        if all_steps_complete(&body) {
             return finish(db, run, body, "Succeeded", None);
         }
         require(

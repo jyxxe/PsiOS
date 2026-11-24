@@ -9,8 +9,13 @@ from support import Failure, Node, key, target
 from test_schedule import timestamp
 
 
-def step(name, tool="system.status", input=None, after=()):
-    return dict(id=name, tool=tool, input={} if input is None else input, after=list(after))
+def step(name, tool="system.status", input=None, after=(), when=None, after_selected=()):
+    definition = dict(id=name, tool=tool, input={} if input is None else input, after=list(after))
+    if when is not None:
+        definition["when"] = when
+    if after_selected:
+        definition["after_selected"] = list(after_selected)
+    return definition
 
 
 class WorkflowTests(unittest.TestCase):
@@ -116,7 +121,9 @@ class WorkflowTests(unittest.TestCase):
         scope = self.grant()
         for steps in ([step("same"), step("same")], [step("dangling", after=["absent"])],
                       [step("left", after=["right"]), step("right", after=["left"])],
-                      [step("dup-parent"), step("later", after=["dup-parent", "dup-parent"])]):
+                      [step("dup-parent"), step("later", after=["dup-parent", "dup-parent"])],
+                      [step("left", after_selected=["right"]), step("right", after=["left"])],
+                      [step("first"), step("join", after=["first"], after_selected=["first"])]):
             self.rejected("InvalidArgument", "Workflow.Define", dict(raw, steps=steps))
         definition = n.call("Workflow.Define", raw)
         self.assertEqual(n.call("Workflow.Define", raw), definition)
@@ -126,6 +133,87 @@ class WorkflowTests(unittest.TestCase):
         self.rejected("InvalidArgument", "Workflow.Start", self.request(definition, scope, 180))
         self.assertEqual(self.budget(scope), (0, 0))
         self.assertEqual(n.call("Resource.List", {"kind": "WorkflowRun"})["items"], [])
+
+    def test_persisted_condition_selects_one_write_and_skips_unselected_dependents(self):
+        node = self.node
+        volume = node.perform("volume.create", {"name": "workflow-branches"})
+        grant = self.grant(["system.status", "volume.write"], ["profile-local", volume["resource_id"]], units=5)
+        authority = node.call("Principal.WhoAmI", {})["authority_id"]
+        selector = {"step": "observe", "pointer": "/authority_id"}
+        definition = self.define([
+            step("observe"),
+            step("unselected", "volume.write", dict(**target(volume), name="never", content="no"),
+                 ["observe"], dict(selector, equals="different-node")),
+            step("dependent", after=["unselected"]),
+            step("selected", "volume.write", dict(**target(volume), name="proof", content="once"),
+                 ["observe"], dict(selector, equals=authority)),
+            step("verify", after_selected=["unselected", "selected"]),
+        ])
+        self.assertEqual(definition["definition"]["dsl_version"], 2)
+        request = self.request(definition, grant)
+        run = node.call("Workflow.Start", request)
+        pending = self.phases(self.wait(run, "WaitingApproval"))
+        self.assertEqual(pending["unselected"]["reason"], "ConditionFalse")
+        self.assertFalse(pending["unselected"]["condition"]["selected"])
+        self.assertEqual(pending["dependent"]["skipped_dependency"], "unselected")
+        for name in ("unselected", "dependent"):
+            self.assertEqual(pending[name]["lifecycle"], "Skipped")
+            self.assertIsNone(pending[name]["task_receipt"])
+        chosen = pending["selected"]
+        write = chosen["task_receipt"]["task_id"]
+        evidence = chosen["condition"]
+        self.assertTrue(evidence["selected"])
+        self.assertEqual(evidence["source_task_ref"], pending["observe"]["task_ref"])
+        parent = node.wait(pending["observe"]["task_receipt"]["task_id"])
+        self.assertEqual(evidence["source_artifact_ref"], parent["result"]["artifact_refs"][0])
+        node.stop(signal.SIGKILL)
+        node.start()
+        self.assertEqual(self.phases(self.wait(run, "WaitingApproval"))["selected"], chosen)
+        node.approve(write)
+        finished = self.wait(run, "Succeeded")
+        self.assertEqual(node.call("Workflow.Start", request), finished)
+        phases = self.phases(finished)
+        self.assertEqual(phases["selected"]["condition"], evidence)
+        self.assertEqual(phases["verify"]["joined_predecessors"], [
+            {"step_id": "selected", "task_ref": phases["selected"]["task_ref"]}])
+        tree = node.state / "volumes" / volume["resource_id"] / "data"
+        self.assertEqual({path.name: path.read_text() for path in tree.iterdir()}, {"proof": "once"})
+        self.assertEqual(self.budget(grant), (0, 3))
+
+    def test_join_of_unselected_branches_has_no_task(self):
+        node = self.node
+        grant = self.grant(units=4)
+        false = {"step": "observe", "pointer": "/authority_id", "equals": "different-node"}
+        definition = self.define([step("observe"), step("branch-a", after=["observe"], when=false),
+            step("branch-b", after=["observe"], when=false), step("join", after_selected=["branch-a", "branch-b"])])
+        run = node.call("Workflow.Start", self.request(definition, grant))
+        finished = self.phases(self.wait(run, "Succeeded"))
+        self.assertEqual(finished["join"]["reason"], "NoSelectedPredecessor")
+        self.assertEqual(finished["join"]["joined_predecessors"], [])
+        for name in ("branch-a", "branch-b", "join"):
+            self.assertEqual(finished[name]["lifecycle"], "Skipped")
+            self.assertIsNone(finished[name]["task_receipt"])
+        self.assertEqual(self.budget(grant), (0, 1))
+
+    def test_condition_rejects_invalid_types_paths_and_missing_task_read(self):
+        node = self.node
+        grant = self.grant(units=3)
+        premise = {"step": "observe", "pointer": "/authority_id", "equals": "node"}
+        for predicate in (dict(premise, step="unrelated"), dict(premise, pointer="/a~2b"),
+                          dict(premise, equals={"code": "node"}), dict(premise, wildcard=True)):
+            self.rejected("InvalidArgument", "Workflow.Define", {"key": key(),
+                "steps": [step("observe"), step("blocked", after=["observe"], when=predicate)]})
+        no_read = node.call("Grant.Issue", {"principal_id": "local-owner", "tool_targets": ["profile-local"],
+            "actions": ["workflow.manage", "task.submit", "system.status"], "units": 2, "ttl_seconds": 120})
+        for selector in (dict(premise, pointer="/missing"), dict(premise, equals=True)):
+            definition = self.define([step("observe"), step("blocked", after=["observe"], when=selector)])
+            self.rejected("PermissionDenied", "Workflow.Start", self.request(definition, no_read))
+            run = node.call("Workflow.Start", self.request(definition, grant))
+            failed = self.wait(run, "Failed")
+            blocked = self.phases(failed)["blocked"]
+            self.assertEqual((blocked["lifecycle"], blocked["reason"]), ("Failed", "PreconditionFailed"))
+            self.assertIsNone(blocked["task_receipt"])
+        self.assertEqual(self.budget(grant), (0, 2))
 
     def test_cancel_before_approval_leaves_no_write_or_successor(self):
         n = self.node

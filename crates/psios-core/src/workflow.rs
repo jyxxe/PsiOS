@@ -1,4 +1,5 @@
 //! Local, immutable DAG definitions and durable Task-broker admission.
+mod condition;
 mod run;
 
 use crate::{
@@ -9,6 +10,7 @@ use crate::{
     label, policy, require,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
+use condition::Predicate;
 use psios_api::{canonical, sha256};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -28,6 +30,20 @@ struct Step {
     tool: String,
     input: Value,
     after: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    after_selected: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    when: Option<Predicate>,
+}
+
+impl Step {
+    fn predecessors(&self) -> impl Iterator<Item = &String> {
+        self.after.iter().chain(&self.after_selected)
+    }
+
+    fn uses_branching(&self) -> bool {
+        self.when.is_some() || !self.after_selected.is_empty()
+    }
 }
 
 #[derive(Deserialize)]
@@ -53,10 +69,15 @@ struct FrozenStep {
 }
 
 #[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct PreparedStep {
     id: String,
     step_key: String,
     after: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    after_selected: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    when: Option<Predicate>,
     tool_ref: Value,
     request: Value,
 }
@@ -89,18 +110,22 @@ fn plan(db: &Db<'_>, steps: Vec<Step>) -> Result<Vec<FrozenStep>> {
     )?;
     for step in &steps {
         label(&step.id)?;
-        let parents: BTreeSet<_> = step.after.iter().map(String::as_str).collect();
+        let parents: BTreeSet<_> = step.predecessors().map(String::as_str).collect();
         require(
-            parents.len() == step.after.len()
+            parents.len() == step.after.len() + step.after_selected.len()
                 && parents.iter().all(|p| ids.contains(p) && *p != step.id),
             "InvalidArgument",
             "workflow step dependencies must be distinct existing steps",
         )?;
+        if let Some(predicate) = &step.when {
+            predicate.validate(&step.after)?;
+        }
     }
     let mut visited = BTreeSet::new();
     while visited.len() < steps.len() {
         let ready = steps.iter().find(|s| {
-            !visited.contains(s.id.as_str()) && s.after.iter().all(|p| visited.contains(p.as_str()))
+            !visited.contains(s.id.as_str())
+                && s.predecessors().all(|p| visited.contains(p.as_str()))
         });
         let ready =
             ready.ok_or_else(|| err("InvalidArgument", "workflow dependencies contain a cycle"))?;
@@ -144,8 +169,13 @@ pub fn define(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         return Ok(definition(&existing));
     }
     db.cfg.check_admission_space()?;
+    let version = if request.steps.iter().any(Step::uses_branching) {
+        2
+    } else {
+        1
+    };
     let steps = plan(db, request.steps)?;
-    let mut spec = json!({"dsl_version": 1, "definition_version": "r1", "steps": steps});
+    let mut spec = json!({"dsl_version": version, "definition_version": "r1", "steps": steps});
     spec["definition_digest"] = json!(sha256(&canonical(&spec)));
     spec["creation_digest"] = json!(creation);
     let d = db.create(
@@ -223,11 +253,20 @@ pub fn start(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     let d = db.resolve(&request.definition_ref)?;
     policy::owned(actor, &d)?;
     require(
-        d.kind == DEFINITION && d.spec["dsl_version"] == 1,
+        d.kind == DEFINITION && matches!(d.spec["dsl_version"].as_u64(), Some(1 | 2)),
         "UnsupportedCapability",
         "unsupported workflow definition",
     )?;
     let frozen: Vec<FrozenStep> = decode(&d.spec["steps"])?;
+    let conditional = frozen.iter().any(|step| step.step.uses_branching());
+    require(
+        conditional == (d.spec["dsl_version"] == 2),
+        "RecoveryRequired",
+        "workflow definition version disagrees with conditional steps",
+    )?;
+    if conditional {
+        policy::delegation(db, actor, &request.delegation_id, "task.read")?;
+    }
     db.cfg.check_admission_space()?;
     let active: u32 =
         db.c.query_row("SELECT count(*) FROM active_workflows", [], |row| {
@@ -274,6 +313,8 @@ pub fn start(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
                 id: step.id,
                 step_key,
                 after: step.after,
+                after_selected: step.after_selected,
+                when: step.when,
                 tool_ref,
                 request: task,
             })
@@ -291,6 +332,7 @@ pub fn start(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         &id,
         actor,
         json!({"definition_ref": d.reference(), "creation_digest": creation, "steps": steps,
+               "dsl_version": d.spec["dsl_version"],
                "delegation_id": request.delegation_id, "deadline_at": deadline_at}),
         json!({"lifecycle": "Ready", "outcome_knowledge": "NotStarted", "reason": null,
                "active_step": null, "stop_reason": null, "steps": projections}),

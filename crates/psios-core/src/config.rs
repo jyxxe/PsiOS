@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
     io::Write,
+    net::SocketAddr,
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };
@@ -21,6 +22,8 @@ pub struct Config {
     pub workers: u32,
     #[serde(default)]
     pub services: Vec<ServiceConfig>,
+    #[serde(default)]
+    pub network_probes: Vec<NetworkProbeConfig>,
     #[serde(default = "default_docker")]
     pub docker_socket: PathBuf,
     #[serde(default)]
@@ -46,6 +49,27 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub allow_control: bool,
     pub definition_digest: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkProbeConfig {
+    pub name: String,
+    pub endpoint: SocketAddr,
+    #[serde(default = "default_probe_timeout")]
+    pub timeout_ms: u64,
+    pub dns: Option<DnsProbeConfig>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DnsProbeConfig {
+    pub resolver: SocketAddr,
+    pub name: String,
+}
+
+fn default_probe_timeout() -> u64 {
+    2_000
 }
 fn default_workers() -> u32 {
     4
@@ -92,6 +116,7 @@ impl Config {
             queue_limit: default_queue(),
             workers: default_workers(),
             services: Vec::new(),
+            network_probes: Vec::new(),
             tick_ms: default_tick(),
             docker_socket: default_docker(),
             authority_reserve: AuthorityReserve::default(),
@@ -154,6 +179,7 @@ impl Config {
             "InvalidArgument",
             "invalid service allowlist or missing control definition digest",
         )?;
+        node::network::probe::validate(&self.network_probes)?;
         require(
             (1..=16).contains(&self.workers)
                 && (1..=4096).contains(&self.queue_limit)

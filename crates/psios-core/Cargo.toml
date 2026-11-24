@@ -23,6 +23,7 @@ zeroize = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
-tokio = { version = "1", features = ["rt", "net", "sync", "time"] }
+tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "time"] }
+hickory-proto = { version = "0.26.3", default-features = false, features = ["std"] }
 netlink-packet-core = "0.9"
 netlink-packet-route = "0.34"

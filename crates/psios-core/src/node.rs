@@ -72,7 +72,7 @@ pub fn sync(db: &Db<'_>) -> Result<()> {
         body["lifecycle"] = json!("Unregistered");
         db.status(&d, body)?;
     }
-    Ok(())
+    network::probe::sync(db, &id)
 }
 
 #[derive(Deserialize)]
@@ -322,6 +322,7 @@ pub fn perform(w: &Work) -> Result<Value> {
         Action::Routes(q) => network::observe_routes(q, w),
         Action::RouteLookup(q) => network::observe_lookup(q),
         Action::RoutingRules(q) => network::observe_rules(q, w),
+        Action::NetworkProbe(_) => network::probe::perform(w),
         Action::Processes(p) => processes(p),
         Action::Devices {} => devices(),
         Action::Mounts {} => mounts::observe(),

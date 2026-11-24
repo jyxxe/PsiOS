@@ -21,6 +21,7 @@ pub const TOOLS: &[&str] = &[
     "node.interfaces",
     "node.routes",
     "node.route_lookup",
+    node::network::probe::TOOL,
     "node.routing_rules",
     "node.processes",
     "node.devices",
@@ -79,6 +80,7 @@ pub fn readonly(tool: &str) -> bool {
             | "node.interfaces"
             | "node.routes"
             | "node.route_lookup"
+            | node::network::probe::TOOL
             | "node.routing_rules"
             | "node.processes"
             | "node.devices"
@@ -127,6 +129,7 @@ fn bootstrap_actions() -> Vec<String> {
                 "node.interfaces"
                     | "node.routes"
                     | "node.route_lookup"
+                    | node::network::probe::TOOL
                     | "node.routing_rules"
                     | "node.mounts"
                     | "backup.verify"

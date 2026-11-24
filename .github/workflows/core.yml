@@ -38,6 +38,8 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: Pair and inspect real Tasks in headless Chrome
         run: PSIOS_TEST_SHELL_BROWSER=1 python3 -B -m unittest discover -s tests -p test_shell.py -k test_browser -v
+      - name: Verify scoped IPv6 probes across a real private veth pair
+        run: sudo unshare --net --propagation private python3 -B tests/network_probe_netns.py
       - name: Verify scoped addresses, routes and rules in a private Linux network namespace
         run: |
           sudo unshare --net sh -ec '
@@ -219,6 +221,12 @@ jobs:
           git archive d46adb502897e915b24abd78148c2b8287cb1713 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format19"
           CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format19/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format19/target"
           python3 tests/rooms_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format19/target/debug"
+      - name: Upgrade format 20 and require an explicit grant to probe the network
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format20"
+          git archive 2f67646aab1edebe83cd9b813421179029bc3123 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format20"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format20/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format20/target"
+          python3 -B tests/network_probe_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format20/target/debug"
       - name: Verify real systemd service control and crash reconciliation
         run: |
           sudo loginctl enable-linger "$(id -un)"

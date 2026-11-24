@@ -31,6 +31,9 @@ MIN_HOME_MIB = 64
 MAX_IMAGE_MIB = 8192
 EFI_PATH = "::/EFI/BOOT/BOOTX64.EFI"
 STATIC_IPV4 = "virtio-static-ipv4"
+STATIC_IPV6 = "virtio-static-ipv6"
+STATIC_DUAL = "virtio-static-dual-stack"
+STATIC_MODES = {STATIC_IPV4: "static", STATIC_IPV6: "static6", STATIC_DUAL: "dual"}
 
 
 @dataclass(frozen=True)
@@ -121,21 +124,55 @@ def static_profile(mac, address, gateway, dns):
     return "\n".join([mac, str(address), str(gateway) if gateway else "-", *map(str, dns)]) + "\n"
 
 
+def static_ipv6_profile(mac, address, gateway, dns):
+    subnet = address.network
+
+    def unicast(ip):
+        return (ip.scope_id is None and ip.ipv4_mapped is None
+                and not (ip.is_unspecified or ip.is_multicast))
+
+    def on_link_host(ip):
+        return (ip in subnet and not (ip.is_loopback or ip.is_link_local)
+                and (subnet.prefixlen >= 127 or ip != subnet.network_address))
+
+    if not (address.scope_id is None and subnet.prefixlen > 0 and unicast(address.ip) and on_link_host(address.ip)):
+        raise ValueError("static IPv6 address must be an unscoped host address with a nonzero prefix")
+    if gateway is not None and (not unicast(gateway) or gateway == address.ip
+                                or not (gateway.is_link_local or on_link_host(gateway))):
+        raise ValueError("static IPv6 gateway must be a different on-link or link-local address")
+    if len(dns) > 3 or any(not unicast(ip) or ip.is_link_local for ip in dns):
+        raise ValueError("static DNS accepts at most three unicast IPv6 addresses without a zone")
+    host = f"{address.ip.exploded}/{subnet.prefixlen}"
+    return "\n".join([mac, host, gateway.exploded if gateway else "-", *(ip.exploded for ip in dns)]) + "\n"
+
+
 def static_config(args, parser):
+    options4 = args.static_address is not None or args.static_gateway is not None or args.static_dns
+    options6 = args.static_ipv6_address is not None or args.static_ipv6_gateway is not None or args.static_ipv6_dns
     if args.static_mac is None:
-        if args.static_address is not None or args.static_gateway is not None or args.static_dns:
-            parser.error("static IPv4 options require --static-mac")
-        return None
-    if args.static_address is None:
-        parser.error("--static-mac requires --static-address")
+        if options4 or options6:
+            parser.error("static network options require --static-mac")
+        return None, None
+    if not (options4 or options6):
+        parser.error("--static-mac requires a static address")
+    if options4 and args.static_address is None:
+        parser.error("IPv4 gateway or DNS requires --static-address")
+    if options6 and args.static_ipv6_address is None:
+        parser.error("IPv6 gateway or DNS requires --static-ipv6-address")
+    if len(args.static_dns) + len(args.static_ipv6_dns) > 3:
+        parser.error("static networking accepts at most three DNS servers in total")
     try:
-        return static_profile(args.static_mac, args.static_address, args.static_gateway, args.static_dns)
+        v4 = (static_profile(args.static_mac, args.static_address, args.static_gateway, args.static_dns)
+              if options4 else None)
+        v6 = (static_ipv6_profile(args.static_mac, args.static_ipv6_address, args.static_ipv6_gateway, args.static_ipv6_dns)
+              if options6 else None)
+        return v4, v6
     except ValueError as e:
         parser.error(str(e))
 
 
-def validate_persisted_static(work, state):
-    path = "/etc/psios/static-ipv4"
+def validate_persisted_static(work, state, version):
+    path = f"/etc/psios/static-ipv{version}"
     try:
         inode = subprocess.check_output(["debugfs", "-R", f"stat {path}", state], cwd=work,
                                         stderr=subprocess.DEVNULL, text=True, timeout=20)
@@ -143,15 +180,16 @@ def validate_persisted_static(work, state):
                 or not re.search(r"\bUser:\s+0\s+Group:\s+0\b", inode)
                 or not re.search(r"^Links:\s+1\b", inode, re.MULTILINE)):
             raise ValueError("expected a private root-owned file")
-        previous = read_partition_file(work, state, path, 128).decode("ascii")
+        previous = read_partition_file(work, state, path, 128 if version == 4 else 256).decode("ascii")
         mac, address, gateway, *dns = previous.splitlines()
-        normalized = static_profile(unicast_mac(mac), ipaddress.IPv4Interface(address),
-                                    None if gateway == "-" else ipaddress.IPv4Address(gateway),
-                                    [ipaddress.IPv4Address(ip) for ip in dns])
+        interface, ip, profile = ((ipaddress.IPv4Interface, ipaddress.IPv4Address, static_profile) if version == 4 else
+                                  (ipaddress.IPv6Interface, ipaddress.IPv6Address, static_ipv6_profile))
+        normalized = profile(unicast_mac(mac), interface(address), None if gateway == "-" else ip(gateway), list(map(ip, dns)))
         if previous != normalized:
             raise ValueError("expected canonical saved network settings")
+        return mac, len(dns)
     except (OSError, ValueError, argparse.ArgumentTypeError, subprocess.SubprocessError) as e:
-        raise ValueError("invalid persisted static IPv4 profile") from e
+        raise ValueError(f"invalid persisted static IPv{version} profile") from e
 
 
 def host_config(seed, args):
@@ -170,19 +208,22 @@ def host_config(seed, args):
     inittab = ("::respawn:/bin/su -s /bin/sh psios -c 'exec /bin/psiosd serve'\n"
                "ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100\n"
                "::shutdown:/bin/sh /psios-shutdown\n")
-    if args.static_network:
-        (seed / "etc/psios/static-ipv4").write_text(args.static_network)
-        inittab += "::once:/bin/sh /psios-dhcp static\n"
+    if args.network_profile:
+        for name, config in (("static-ipv4", args.static_network), ("static-ipv6", args.static_ipv6_network)):
+            if config:
+                (seed / "etc/psios" / name).write_text(config)
+        inittab += f"::once:/bin/sh /psios-dhcp {STATIC_MODES[args.network_profile]}\n"
     elif args.dhcp_mac:
         (seed / "etc/psios/dhcp-mac").write_text(args.dhcp_mac + "\n")
         inittab += "::respawn:/bin/sh /psios-dhcp\n"
-    if args.dhcp_mac or args.static_network:
+    if args.dhcp_mac or args.network_profile:
         (seed / "etc/resolv.conf").symlink_to("/run/psios-network/resolv.conf")
     (seed / "etc/inittab").write_text(inittab)
     # Target permissions are independent of the builder's umask.
     for path in (seed / "etc").rglob("*"):
         if not path.is_symlink():
-            path.chmod(0o755 if path.is_dir() else (0o600 if path.name in ("shadow", "dhcp-mac", "static-ipv4") else 0o644))
+            path.chmod(0o755 if path.is_dir() else (0o600 if path.name in
+                       ("shadow", "dhcp-mac", "static-ipv4", "static-ipv6") else 0o644))
     (seed / "etc").chmod(0o755)
 
 
@@ -194,7 +235,7 @@ def ramfs(work, args, instance, home_id, layout=Layout(), signing=None, network_
     (work / "psios-home-uuid").write_text(str(home_id) + "\n")
     sectors = [str(mib * 2048) for start, size, _ in layout.partitions[1:] for mib in (start, size)]
     (work / "psios-storage-layout").write_text(" ".join(sectors) + "\n")
-    boot_scripts = ["init", "shutdown", "dhcp", "dhcp-event", "ipv4", "storage", "enroll"]
+    boot_scripts = ["init", "shutdown", "dhcp", "dhcp-event", "ipv4", "ipv6", "static", "storage", "enroll"]
     for script in boot_scripts:
         shutil.copyfile(HERE / script, work / f"psios-{script}")
     files = ["bin/psiosd", "bin/psiosctl", "psios-source", "psios-disk-uuid", "psios-home-uuid", "psios-storage-layout"]
@@ -308,7 +349,7 @@ def read_receipt(path):
     if len(raw) > 16 * 1024:
         raise ValueError("previous build receipt exceeds size limit")
     prior = json.loads(raw)
-    if not isinstance(prior, dict) or type(prior.get("format")) is not int or prior["format"] not in (1, 2, 3, 4):
+    if not isinstance(prior, dict) or type(prior.get("format")) is not int or prior["format"] not in (1, 2, 3, 4, 5):
         raise ValueError("unsupported previous build receipt format")
     for name, pattern in (("source_commit", r"[0-9a-f]{40}"), ("efi_application_sha256", r"[0-9a-f]{64}")):
         if not isinstance(prior.get(name), str) or not re.fullmatch(pattern, prior[name]):
@@ -327,12 +368,13 @@ def read_receipt(path):
         layout = Layout(geometry["state_mib"], geometry["home_mib"])
         if type(geometry["image_mib"]) is not int or geometry != layout.receipt():
             raise ValueError("invalid previous build receipt image size")
-    if prior["format"] == 4:
-        if prior.get("network_profile") != STATIC_IPV4:
+    profiles = {4: (STATIC_IPV4,), 5: (STATIC_IPV6, STATIC_DUAL)}
+    if prior["format"] in profiles:
+        if prior.get("network_profile") not in profiles[prior["format"]]:
             raise ValueError("invalid network profile in previous build receipt")
     elif "network_profile" in prior:
-        raise ValueError("static IPv4 requires build receipt format 4")
-    if prior["format"] == 3 or (prior["format"] == 4 and "secure_boot" in prior):
+        raise ValueError("static networking requires build receipt format 4 or 5")
+    if prior["format"] == 3 or (prior["format"] >= 4 and "secure_boot" in prior):
         trust = prior.get("secure_boot")
         if (not isinstance(trust, dict) or set(trust) != {"scheme", "certificate_sha256", "efi_stub_sha256"}
                 or trust["scheme"] != boot_media.SECURE_BOOT_SCHEME or any(
@@ -442,8 +484,16 @@ def source_snapshot(work, disk, args, prior, layout, signing):
     if marker != (prior["state_uuid"] + "\n").encode():
         raise ValueError("state partition deployment marker does not match the prior receipt")
     cfg = json.loads(read_partition_file(work, state, "/etc/psios/core.json", 64 * 1024))
-    if prior.get("network_profile") == STATIC_IPV4:
-        validate_persisted_static(work, state)
+    network = prior.get("network_profile")
+    if network == STATIC_IPV4:
+        validate_persisted_static(work, state, 4)
+    if network == STATIC_IPV6:
+        validate_persisted_static(work, state, 6)
+    if network == STATIC_DUAL:
+        mac4, dns4 = validate_persisted_static(work, state, 4)
+        mac6, dns6 = validate_persisted_static(work, state, 6)
+        if mac4 != mac6 or dns4 + dns6 > 3:
+            raise ValueError("inconsistent persisted dual-stack profile")
     state.unlink()
     if not isinstance(cfg, dict) or (cfg.get("state_dir"), cfg.get("witness_dir")) != ("/var/lib/psios", "/var/lib/psios.witness"):
         raise ValueError("offline upgrade requires the native state and witness locations")
@@ -468,7 +518,7 @@ def build(args):
         work = Path(tmp)
         disk = work / "installed.raw"
         prior = None
-        network_profile = STATIC_IPV4 if args.static_network else None
+        network_profile = args.network_profile
         signing = None
         if args.secure_boot_key:
             signing = boot_media.prepare_secure_boot(work, args.secure_boot_key, args.secure_boot_cert,
@@ -500,8 +550,9 @@ def build(args):
         write_partition(disk, ESP, esp, replace=prior is not None)
         with disk.open("rb") as completed:
             os.fsync(completed.fileno())
+        receipt_format = {STATIC_IPV4: 4, STATIC_IPV6: 5, STATIC_DUAL: 5}
         receipt = {
-            "format": 4 if network_profile else (3 if signing else 2),
+            "format": receipt_format.get(network_profile, 3 if signing else 2),
             "image": str(output), "source_commit": source_commit, "geometry_mib": layout.receipt(),
             "state_uuid": instance, "home_uuid": home_id,
             "deployment_manifest_sha256": sha256(work / "psios-deployment.json"),
@@ -543,18 +594,26 @@ def main():
     boot_media.add_signing_arguments(parser)
     network = parser.add_mutually_exclusive_group()
     network.add_argument("--dhcp-mac", type=unicast_mac, help="enable IPv4 DHCP on the matching virtio NIC of a new disk")
-    network.add_argument("--static-mac", type=unicast_mac, help="enable static IPv4 on the matching virtio NIC of a new disk")
+    network.add_argument("--static-mac", type=unicast_mac, help="enable static networking on the matching virtio NIC of a new disk")
     parser.add_argument("--static-address", type=ipaddress.IPv4Interface, help="static IPv4 address and prefix")
     parser.add_argument("--static-gateway", type=ipaddress.IPv4Address, help="optional IPv4 gateway on the static subnet")
     parser.add_argument("--static-dns", type=ipaddress.IPv4Address, action="append", default=[], help="optional IPv4 DNS server, repeat up to three times")
+    parser.add_argument("--static-ipv6-address", type=ipaddress.IPv6Interface, help="static IPv6 address and prefix")
+    parser.add_argument("--static-ipv6-gateway", type=ipaddress.IPv6Address, help="optional IPv6 on-link or link-local gateway")
+    parser.add_argument("--static-ipv6-dns", type=ipaddress.IPv6Address, action="append", default=[], help="optional unscoped IPv6 DNS server")
     parser.add_argument("--state-mib", type=int, help=f"state partition size of a new disk (default {MIN_STATE_MIB} MiB)")
     parser.add_argument("--home-mib", type=int, help=f"home partition size of a new disk (default {MIN_HOME_MIB} MiB)")
     args = parser.parse_args()
     if not re.fullmatch(r"[0-9a-f]{64}", args.core_sha256):
         parser.error("invalid Core archive SHA-256")
     boot_media.signing_requested(args, parser)
-    args.static_network = static_config(args, parser)
-    if args.upgrade_from and (not args.previous_receipt or args.root_console_hash or args.dhcp_mac or args.static_network):
+    args.static_network, args.static_ipv6_network = static_config(args, parser)
+    args.network_profile = None
+    if args.static_network:
+        args.network_profile = STATIC_DUAL if args.static_ipv6_network else STATIC_IPV4
+    elif args.static_ipv6_network:
+        args.network_profile = STATIC_IPV6
+    if args.upgrade_from and (not args.previous_receipt or args.root_console_hash or args.dhcp_mac or args.network_profile):
         parser.error("upgrade requires --previous-receipt and preserves console credentials and network configuration")
     if args.upgrade_from and (args.state_mib is not None or args.home_mib is not None):
         parser.error("upgrade preserves the partition sizes from its previous build receipt")

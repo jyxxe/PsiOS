@@ -1,0 +1,97 @@
+# Parse the builder's expanded IPv6 addresses before handing them to Linux.
+ipv6_hex() {
+    local value="$1" IFS=: group result=
+    case "$value" in ''|*[!0-9a-f:]*) return 1 ;; esac
+    set -- $value
+    [ "$#" -eq 8 ] && [ "$value" = "$1:$2:$3:$4:$5:$6:$7:$8" ] || return 1
+    for group do
+        case "$group" in ????) result="$result$group" ;; *) return 1 ;; esac
+    done
+    printf '%s\n' "$result"
+}
+
+unicast_ipv6() {
+    case "$1" in
+        00000000000000000000000000000000|00000000000000000000ffff*|ff*) return 1 ;;
+    esac
+}
+
+link_local_ipv6() {
+    case "$1" in fe[89ab]*) return 0 ;; *) return 1 ;; esac
+}
+
+same_ipv6_prefix() {
+    local left="$1" right="$2" bits="$3" a b
+    while [ "$bits" -ge 4 ]; do
+        [ "${left%"${left#?}"}" = "${right%"${right#?}"}" ] || return 1
+        left=${left#?}
+        right=${right#?}
+        bits=$((bits - 4))
+    done
+    [ "$bits" -ne 0 ] || return 0
+    a=${left%"${left#?}"}
+    b=${right%"${right#?}"}
+    [ "$(((0x$a ^ 0x$b) >> (4 - bits)))" -eq 0 ]
+}
+
+ipv6_host_bits() {
+    local hex="$1" bits="$2" digit
+    [ "$bits" -lt 127 ] || return 0
+    while [ "$bits" -ge 4 ]; do
+        hex=${hex#?}
+        bits=$((bits - 4))
+    done
+    if [ "$bits" -ne 0 ]; then
+        digit=${hex%"${hex#?}"}
+        [ "$((0x$digit & (15 >> bits)))" -eq 0 ] || return 0
+        hex=${hex#?}
+    fi
+    case "$hex" in *[1-9a-f]*) return 0 ;; *) return 1 ;; esac
+}
+
+load_static_ipv6() {
+    local config="$1" server hex gateway count=0
+    [ -f "$config" ] && [ ! -L "$config" ] || return 1
+    [ "$(stat -c '%u:%g:%a:%h' "$config")" = 0:0:600:1 ] && [ "$(stat -c '%s' "$config")" -le 256 ] || return 1
+    {
+        IFS= read -r mac && IFS= read -r static6_address && IFS= read -r static6_gateway || return 1
+        while IFS= read -r server; do
+            count=$((count + 1))
+            hex=$(ipv6_hex "$server") && [ "$count" -le 3 ] &&
+                unicast_ipv6 "$hex" && ! link_local_ipv6 "$hex" || return 1
+            static6_dns="$static6_dns $server"
+        done
+        [ -z "$server" ] || return 1
+    } < "$config"
+    static6_prefix=${static6_address##*/}
+    case "$static6_prefix" in ''|0*|*[!0-9]*|????*) return 1 ;; esac
+    [ "$static6_prefix" -le 128 ] || return 1
+    static6_hex=$(ipv6_hex "${static6_address%/*}") &&
+        unicast_ipv6 "$static6_hex" && ! link_local_ipv6 "$static6_hex" &&
+        [ "$static6_hex" != 00000000000000000000000000000001 ] &&
+        ipv6_host_bits "$static6_hex" "$static6_prefix" || return 1
+    [ "$static6_gateway" != - ] || return 0
+    gateway=$(ipv6_hex "$static6_gateway") && unicast_ipv6 "$gateway" &&
+        [ "$gateway" != "$static6_hex" ] && [ "$gateway" != 00000000000000000000000000000001 ] || return 1
+    link_local_ipv6 "$gateway" ||
+        { same_ipv6_prefix "$static6_hex" "$gateway" "$static6_prefix" && ipv6_host_bits "$gateway" "$static6_prefix"; }
+}
+
+wait_ipv6_dad() {
+    local address index prefix scope flags interface tries=0
+    while [ "$tries" -lt 50 ]; do
+        while read -r address index prefix scope flags interface; do
+            [ "$address" = "$static6_hex" ] && [ "$interface" = "$link" ] || continue
+            # IFA_F_DADFAILED and IFA_F_TENTATIVE from Linux if_addr.h.
+            if [ "$((0x$flags & 8))" -ne 0 ]; then
+                echo "Duplicate IPv6 address on $link" >&2
+                return 1
+            fi
+            [ "$((0x$flags & 64))" -ne 0 ] || return 0
+        done < /proc/net/if_inet6
+        tries=$((tries + 1))
+        sleep 0.1
+    done
+    echo "IPv6 address did not complete duplicate address detection on $link" >&2
+    return 1
+}

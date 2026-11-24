@@ -51,7 +51,16 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 --static-gateway 192.0.2.2 --static-dns 192.0.2.53
 ```
 
-系统从根用户拥有的 `/etc/psios/static-ipv4` 读取并验证配置，启用匹配网口的静态地址和可选默认路由。默认路由使用 metric 30320。路由冲突时移除本次添加的地址，保留原路线和 resolver。启动状态仍写入 `/run/psios-network/status`。格式 4 的构建回执标识静态配置，停机升级会检查保存的配置内容和权限，保留有效的本机设置，拒绝发布配置损坏的候选盘。多网口、无线、IPv6 管理和远程确认回退事务仍待开发。[静态 IPv4 验收](../tests/native_static_ipv4.py)
+静态 IPv6 可以独立启用，也可以与同一 MAC 的静态 IPv4 同时启用。IPv6 默认网关可用链路本地地址或同子网的另一个主机地址，由系统绑定到该网口。两种地址族合计最多三个 DNS 服务器，IPv4 服务器排在 IPv6 服务器之前。
+
+```sh
+--static-mac 52:54:00:51:6f:20 --static-ipv6-address 2001:db8:70::20/64 \
+--static-ipv6-gateway fe80::2 --static-ipv6-dns 2001:db8:70::53
+```
+
+启动时读入 root 私有的 `/etc/psios/static-ipv4` 或 `/etc/psios/static-ipv6`，按 MAC 匹配唯一的 virtio 网口。静态 IPv6 网口关闭路由器通告、自动配置和重定向，等待 Linux 重复地址检测通过后才发布 IPv6 默认路由。静态路由使用 metric 30320。地址或路由配置失败时清理本次添加的地址和路由，保留已有条目与解析器配置。两种地址族都配置成功后一次性更新双栈 DNS。可查看 `/run/psios-network/status` 和 `busybox ip -6 route show`。多网口、无线、DHCPv6、SLAAC 和远程确认回退事务仍待开发。[静态 IPv4 验收](../tests/native_static_ipv4.py) · [静态 IPv6 和双栈验收](../tests/native_static_ipv6.py)
+
+仅启用静态 IPv4 的盘使用格式 4 回执。静态 IPv6 和双栈使用格式 5。停机升级会检查保存的配置内容和权限。双栈还会核对两个配置的 MAC 和合计 DNS 数量。配置损坏时保留源盘并拒绝发布候选盘。
 
 ## 核对安装与运行的制品
 

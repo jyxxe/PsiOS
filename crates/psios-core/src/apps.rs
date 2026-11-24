@@ -9,6 +9,8 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, process::Command};
 
+mod cgroup;
+
 fn environment(env: &BTreeMap<String, String>) -> Result<()> {
     require(
         env.len() <= 32
@@ -230,6 +232,19 @@ pub fn preflight(db: &Db<'_>, w: &Work) -> Result<()> {
     Ok(())
 }
 struct Engine<'a>(&'a Config);
+struct EngineProfile {
+    id: String,
+    unified_cgroups: bool,
+}
+impl EngineProfile {
+    fn observe_limits(&self, cid: &str, state: &Value, release: &Install) -> Result<Value> {
+        if self.unified_cgroups {
+            cgroup::observe(cid, state, release)
+        } else {
+            Ok(json!({"source": "DockerCgroupV1"}))
+        }
+    }
+}
 impl Engine<'_> {
     fn command(&self, args: &[String], effect: bool) -> Result<crate::command::Output> {
         let mut cmd = Command::new("/usr/bin/docker");
@@ -271,7 +286,7 @@ impl Engine<'_> {
             "inspected_at": now()
         }))
     }
-    fn check_engine(&self) -> Result<String> {
+    fn check_engine(&self) -> Result<EngineProfile> {
         let out = self.command(&["info", "--format", "{{json .}}"].map(String::from), false)?;
         let v: Value = serde_json::from_slice(&out.stdout)
             .map_err(|_| err("DependencyUnavailable", "cannot inspect engine limits"))?;
@@ -291,7 +306,23 @@ impl Engine<'_> {
             .as_str()
             .filter(|id| (16..=128).contains(&id.len()))
             .ok_or_else(|| err("UnsupportedCapability", "engine identity unavailable"))?;
-        Ok(engine.into())
+        let unified_cgroups = match v["CgroupVersion"].as_str() {
+            Some("1") => false,
+            Some("2") => {
+                cgroup::root()?;
+                true
+            }
+            _ => {
+                return Err(err(
+                    "UnsupportedCapability",
+                    "engine cgroup version unavailable",
+                ));
+            }
+        };
+        Ok(EngineProfile {
+            id: engine.into(),
+            unified_cgroups,
+        })
     }
     fn identity(&self) -> Result<String> {
         let out = self.command(&["info", "--format", "{{.ID}}"].map(String::from), false)?;
@@ -395,7 +426,7 @@ pub fn start(w: &Work, checkpoint: impl FnOnce(&str, &str) -> Result<()>) -> Res
         .as_ref()
         .ok_or_else(|| err("PreconditionFailed", "missing validated release"))?;
     e.image(&s.image_id)?;
-    let engine_id = e.check_engine()?;
+    let engine = e.check_engine()?;
     let uid = rustix::process::geteuid().as_raw();
     let gid = rustix::process::getegid().as_raw();
     require(
@@ -472,11 +503,11 @@ pub fn start(w: &Work, checkpoint: impl FnOnce(&str, &str) -> Result<()>) -> Res
     })?;
     verify_isolation(w, &v, s, &user)?;
     require(
-        e.identity().is_ok_and(|id| id == engine_id),
+        e.identity().is_ok_and(|id| id == engine.id),
         "OutcomeUnknown",
         "engine changed after container creation",
     )?;
-    checkpoint(&engine_id, &cid).map_err(|_| {
+    checkpoint(&engine.id, &cid).map_err(|_| {
         err(
             "OutcomeUnknown",
             "created container could not be authorized and checkpointed before start",
@@ -488,15 +519,27 @@ pub fn start(w: &Work, checkpoint: impl FnOnce(&str, &str) -> Result<()>) -> Res
         .managed(w, &cid, &w.op.id)
         .map_err(|_| err("OutcomeUnknown", "start receipt requires reconciliation"))?;
     verify_isolation(w, &observed, s, &user)?;
+    let state = &observed["State"];
+    let running = state["Running"]
+        .as_bool()
+        .ok_or_else(|| err("OutcomeUnknown", "running state unavailable"))?;
+    let limits = if running {
+        engine
+            .observe_limits(&cid, state, s)
+            .map_err(|e| err("OutcomeUnknown", e.0.message))?
+    } else {
+        Value::Null
+    };
     require(
-        e.identity().is_ok_and(|id| id == engine_id),
+        e.identity().is_ok_and(|id| id == engine.id),
         "OutcomeUnknown",
         "engine changed before the start receipt",
     )?;
     Ok(json!({
         "container_id": cid,
-        "engine_id":engine_id,
-        "process_running": observed["State"]["Running"],
+        "engine_id":engine.id,
+        "process_running": running,
+        "effective_limits": limits,
         "observed_at": now()
     }))
 }
@@ -586,7 +629,7 @@ fn observe_start(w: &Work, e: &Engine<'_>, checkpoint: &Doc) -> Result<Value> {
     let c = &checkpoint.body;
     let engine = e.check_engine()?;
     require(
-        c["engine_id"] == engine,
+        c["engine_id"] == engine.id,
         "PreconditionFailed",
         "OCI checkpoint belongs to a different engine",
     )?;
@@ -612,16 +655,24 @@ fn observe_start(w: &Work, e: &Engine<'_>, checkpoint: &Doc) -> Result<Value> {
             "checkpointed runtime configuration differs from its release",
         )
     })?;
+    let state = &v["State"];
+    let running = state["Running"] == true && state["Status"] == "running";
+    let limits = if running {
+        engine
+            .observe_limits(cid, state, launch)
+            .map_err(|e| err("PreconditionFailed", e.0.message))?
+    } else {
+        Value::Null
+    };
     require(
-        e.identity()? == engine,
+        e.identity()? == engine.id,
         "PreconditionFailed",
         "OCI engine changed during observation",
     )?;
-    let running = v["State"]["Running"] == true && v["State"]["Status"] == "running";
     Ok(
-        json!({"container_id":cid, "engine_id":engine, "start_operation_id":op,
+        json!({"container_id":cid, "engine_id":engine.id, "start_operation_id":op,
         "checkpoint_ref":checkpoint.reference(), "process_running":running,
-        "runtime_state":v["State"]["Status"], "readiness":"Unknown","health":"Unknown","observed_at":now()}),
+        "runtime_state":state["Status"], "effective_limits":limits, "readiness":"Unknown","health":"Unknown","observed_at":now()}),
     )
 }
 

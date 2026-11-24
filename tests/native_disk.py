@@ -58,7 +58,7 @@ class Console:
 
     def send_secret(self, secret):
         # Give BusyBox time to switch off echo after printing the prompt.
-        # Under KVM, keep password bursts smaller than the emulated UART FIFO.
+        # Keep password bursts smaller than the emulated UART FIFO.
         time.sleep(0.03)
         for start in range(0, len(secret), 8):
             self.vm.stdin.write(secret[start:start + 8].encode())
@@ -96,7 +96,9 @@ class Console:
 
 @contextmanager
 def boot(work, image, network_mac=None, extra_disk=None, tap=None):
-    accel = "kvm" if os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
+    # The privileged TAP fixture has a reproducible serial stall on hosted KVM.
+    # Use a portable CPU emulator for that fixture; keep its real virtio and TAP.
+    accel = "kvm" if tap is None and os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
     cmd = ["qemu-system-x86_64", "-nodefaults", "-no-user-config", "-no-reboot", "-machine", "q35",
            "-accel", accel, "-m", "768", "-smp", "2", "-display", "none",
            "-monitor", "none", "-serial", "stdio",

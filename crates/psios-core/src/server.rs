@@ -71,6 +71,15 @@ fn state(s: &Shared) -> Result<MutexGuard<'_, Store>> {
     s.lock()
         .map_err(|_| err("RecoveryRequired", "authority mutex poisoned"))
 }
+fn accepting<'a>(s: &'a Shared, stop: &AtomicBool) -> Result<MutexGuard<'a, Store>> {
+    let store = state(s)?;
+    crate::require(
+        !stop.load(Ordering::Acquire),
+        "DependencyUnavailable",
+        "Core is shutting down",
+    )?;
+    Ok(store)
+}
 fn ensure_peer_connected(stream: &UnixStream) -> Result<()> {
     let mut fds = [PollFd::new(stream, PollFlags::empty())];
     let now = Timespec {
@@ -101,9 +110,9 @@ fn connection(s: &Shared, stream: &mut UnixStream, stop: &AtomicBool) -> Result<
         crate::label(&r.request_id)?;
         rid = r.request_id.clone();
         if r.method == crate::storage::export::METHOD {
-            let job = state(s)?.prepare_export(peer, &r)?;
+            let job = accepting(s, stop)?.prepare_export(peer, &r)?;
             let read = job.read();
-            return state(s)?.finish_export(peer, &r, read);
+            return accepting(s, stop)?.finish_export(peer, &r, read);
         }
         let wait: Option<(&str, WaitCondition)> = match r.method.as_str() {
             "Event.Wait" => Some(("Event.Poll", WaitCondition::Items("events"))),
@@ -113,7 +122,7 @@ fn connection(s: &Shared, stream: &mut UnixStream, stop: &AtomicBool) -> Result<
             _ => None,
         };
         if let Some((method, ready)) = wait {
-            let changes = state(s)?.changes.clone();
+            let changes = accepting(s, stop)?.changes.clone();
             return crate::watch::poll(
                 &changes,
                 stop,
@@ -121,14 +130,14 @@ fn connection(s: &Shared, stream: &mut UnixStream, stop: &AtomicBool) -> Result<
                 method,
                 |page| ready.ready(page),
                 |request| {
-                    let mut authority = state(s)?;
+                    let mut authority = accepting(s, stop)?;
                     // A write-half shutdown still permits a response.
                     ensure_peer_connected(stream)?;
                     authority.request(peer, request)
                 },
             );
         }
-        state(s)?.request(peer, r)
+        accepting(s, stop)?.request(peer, r)
     })();
     let mut answer = match result {
         Ok(result) => json!({"request_id": rid, "result": result}),
@@ -146,6 +155,18 @@ fn connection(s: &Shared, stream: &mut UnixStream, stop: &AtomicBool) -> Result<
     let _ = stream.shutdown(Shutdown::Both);
     Ok(())
 }
+fn dispatch_when_active(
+    store: &mut Store,
+    stop: &AtomicBool,
+    correlation: &str,
+    task: &str,
+) -> Result<Option<crate::host::Work>> {
+    if stop.load(Ordering::Acquire) {
+        store.transaction(correlation, |db| broker::release_unstarted_claim(db, task))?;
+        return Ok(None);
+    }
+    store.transaction(correlation, |db| broker::dispatch(db, task))
+}
 fn worker(s: Shared, stop: Arc<AtomicBool>, tick: Duration) -> Result<()> {
     while !stop.load(Ordering::Acquire) {
         let correlation = id("scheduler");
@@ -157,10 +178,13 @@ fn worker(s: Shared, stop: Arc<AtomicBool>, tick: Duration) -> Result<()> {
             store.transaction(&correlation, broker::claim)?
         };
         let Some(task) = task else {
-            thread::sleep(tick);
+            thread::park_timeout(tick);
             continue;
         };
-        let dispatch = state(&s)?.transaction(&correlation, |db| broker::dispatch(db, &task));
+        let dispatch = {
+            let mut store = state(&s)?;
+            dispatch_when_active(&mut store, &stop, &correlation, &task)
+        };
         let work = match dispatch {
             Ok(Some(w)) => w,
             Ok(None) => continue,
@@ -377,3 +401,6 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

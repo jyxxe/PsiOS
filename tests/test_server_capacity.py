@@ -1,5 +1,6 @@
 """Exercise the daemon's real Linux descriptor ceiling without altering the host."""
 from contextlib import contextmanager
+import json
 import os
 from pathlib import Path
 import resource
@@ -66,3 +67,24 @@ class ServerCapacityTests(unittest.TestCase):
                 stream.recv(1)
             self.assertIsNone(node.process.poll())
         self.assert_ready(identity, pid)
+
+    def test_shutdown_wakes_idle_workers_and_incomplete_connections(self):
+        node = self.node
+        identity = node.call("Principal.WhoAmI", {})
+        node.stop()
+        node.config.write_text(json.dumps(dict(json.loads(node.config.read_text()), tick_ms=5000)))
+        node.start()
+        with socket.socket(socket.AF_UNIX) as client:
+            client.settimeout(3)
+            client.connect(str(node.socket))
+            client.sendall(b"\x00\x00")
+            time.sleep(0.15)
+            started = time.monotonic()
+            node.stop()
+            self.assertLess(time.monotonic() - started, 2.5)
+            try:
+                self.assertEqual(client.recv(1), b"")
+            except ConnectionResetError:
+                pass
+        node.start()
+        self.assertEqual(node.call("Principal.WhoAmI", {}), identity)

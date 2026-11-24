@@ -13,7 +13,46 @@ use psios_api::{ModelTokenUsage, canonical, id, sha256};
 pub use queue::{claim_next, claim_status};
 pub use registry::{model, retire, skill};
 use rusqlite::{OptionalExtension, params};
+use serde::Serialize;
 use serde_json::{Value, json};
+
+pub(crate) const START_SESSION: &str = "agent.session.start";
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SessionBlueprint {
+    goal: String,
+    skill_ref: Value,
+    model_ref: Value,
+    context_policy: String,
+    max_turns: u32,
+}
+
+fn session_limits(goal: &str, context_policy: &str, max_turns: u32) -> Result<()> {
+    require(
+        (1..=8192).contains(&goal.len())
+            && (1..=32).contains(&max_turns)
+            && matches!(context_policy, "ReferencesOnly" | "LocalToolResults"),
+        "InvalidArgument",
+        "invalid session context or budget",
+    )
+}
+
+impl SessionBlueprint {
+    pub(crate) fn validate(&self) -> Result<()> {
+        let _: psios_api::ResourceRef = decode(&self.skill_ref)?;
+        let _: psios_api::ResourceRef = decode(&self.model_ref)?;
+        session_limits(&self.goal, &self.context_policy, self.max_turns)
+    }
+
+    pub(crate) fn model(&self, db: &Db<'_>) -> Result<Doc> {
+        registry::pinned(db, &self.model_ref, "Model")
+    }
+
+    pub(crate) fn skill(&self, db: &Db<'_>) -> Result<Doc> {
+        registry::pinned(db, &self.skill_ref, "Skill")
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -63,24 +102,39 @@ fn deps(db: &Db<'_>, s: &Doc) -> Result<(Doc, Doc, Doc)> {
     Ok((d, skill, m))
 }
 pub fn open(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
+    open_session(db, actor, p, None)
+}
+
+pub(crate) fn open_for_task(
+    db: &Db<'_>,
+    task: &Doc,
+    blueprint: &SessionBlueprint,
+) -> Result<Value> {
+    let mut p = serde_json::to_value(blueprint)?;
+    p["key"] = json!(task.id);
+    p["delegation_id"] = task.spec["delegation_ref"]["resource_id"].clone();
+    p["provider_queue"] = json!(true);
+    let admitted = open_session(db, &task.owner, &p, Some(task))?;
+    Ok(json!({"session_ref":admitted["reference"]}))
+}
+
+fn open_session(db: &Db<'_>, actor: &str, p: &Value, origin_task: Option<&Doc>) -> Result<Value> {
     let o: Open = decode(p)?;
     label(&o.key)?;
     label(&o.delegation_id)?;
-    require(
-        (1..=8192).contains(&o.goal.len())
-            && (1..=32).contains(&o.max_turns)
-            && matches!(
-                o.context_policy.as_str(),
-                "ReferencesOnly" | "LocalToolResults"
-            ),
-        "InvalidArgument",
-        "invalid session context or budget",
-    )?;
+    session_limits(&o.goal, &o.context_policy, o.max_turns)?;
     let d = policy::delegation(db, actor, &o.delegation_id, "session.run")?;
-    let sid = registry::stable("session", json!([actor, o.key]));
+    let mut spec = p.clone();
+    let identity = if let Some(task) = origin_task {
+        spec["origin_task_ref"] = task.reference();
+        json!([actor, "task", task.id])
+    } else {
+        json!([actor, o.key])
+    };
+    let sid = registry::stable("session", identity);
     if let Some(existing) = db.find(&sid)? {
         require(
-            existing.spec == *p,
+            existing.spec == spec,
             "IdempotencyConflict",
             "session key already bound",
         )?;
@@ -93,12 +147,17 @@ pub fn open(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "active sessions per principal exceeded",
     )?;
     if o.provider_queue {
+        db.cfg.check_admission_space()?;
         let model = registry::pinned(db, &o.model_ref, "Model")?;
         queue::check_capacity(db, &model.id)?;
     }
-    let session=db.create("Session",&sid,actor,p.clone(),json!({"lifecycle":"AwaitingModel","checkpoint_version":"1",
+    let mut state = json!({"lifecycle":"AwaitingModel","checkpoint_version":"1",
       "turn":0,"goal":o.goal,"skill_ref":o.skill_ref,"model_ref":o.model_ref,"context_policy":o.context_policy,
-      "budget_ref":d.body["budget_ref"],"delegation_ref":d.reference(),"max_turns":o.max_turns,"last_task":null,"current_lease":null}))?;
+      "budget_ref":d.body["budget_ref"],"delegation_ref":d.reference(),"max_turns":o.max_turns,"last_task":null,"current_lease":null});
+    if let Some(task) = origin_task {
+        state["origin_task_ref"] = task.reference();
+    }
+    let session = db.create("Session", &sid, actor, spec, state)?;
     deps(db, &session)?;
     if let Some(r) = o.trigger_signal_ref {
         mail::consume(db, actor, &r, &session.id)?;

@@ -1,5 +1,6 @@
 """Provider work is delivered through the real Unix API and daemon."""
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 import json
 import signal
 import socket
@@ -65,6 +66,17 @@ class ModelQueueTests(unittest.TestCase):
 
     def worker(self, *args):
         return ["model-worker", self.model_file, "--decision-dir", self.journal, "--wait-ms", "300", *args]
+
+    def blueprint(self):
+        return dict(goal="Inspect this node", skill_ref=self.skill, model_ref=self.model,
+                    context_policy="LocalToolResults", max_turns=3)
+
+    def grant_for_start(self, *actions, tool_targets=None):
+        grant = dict(principal_id=self.agent["principal_id"], units=3, model_calls=3, ttl_seconds=180,
+                     actions=["agent.session.start", "task.submit", "task.read", *actions])
+        if tool_targets is not None:
+            grant["tool_targets"] = tool_targets
+        return self.n.call("Grant.Issue", grant)
 
     def test_identity_queue_order_and_concurrent_replay(self):
         manual = self.open(provider_queue=False)
@@ -254,3 +266,64 @@ class ModelQueueTests(unittest.TestCase):
         claim = self.next_turn()
         self.assertEqual(claim["session_id"], next_session["resource_id"])
         self.finish(claim)
+
+    def test_durable_schedule_admits_one_session_then_provider_finishes_its_tools(self):
+        n = self.n
+        grant = self.grant_for_start("schedule.manage", "session.run", *self.tools)
+        owner = self.agent["token"]
+        at = datetime.now(timezone.utc) + timedelta(seconds=2)
+        request = dict(key="scheduled-local-survey", tool="agent.session.start", input=self.blueprint(),
+                       delegation_id=grant["delegation_ref"]["resource_id"],
+                       run_at=at.isoformat(), deadline_at=(at + timedelta(seconds=30)).isoformat())
+        schedule = n.call("Schedule.Create", request, owner)
+        n.stop(signal.SIGKILL)
+        time.sleep(2.1)
+        n.start()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            observed = n.call("Schedule.Get", {"id": schedule["reference"]["resource_id"]}, owner)["state"]
+            if observed["lifecycle"] != "Pending":
+                break
+            time.sleep(.05)
+        self.assertEqual(observed["lifecycle"], "Triggered", observed)
+        admitted = n.wait(observed["task_receipt"]["task_id"])
+        self.assertEqual(admitted["lifecycle"], "Succeeded")
+        output = n.call("Artifact.Read", {"reference": admitted["result"]["artifact_refs"][0]}, owner)
+        session = output["session_ref"]
+        self.assertEqual(self.status(session)["session"]["origin_task_ref"]["resource_id"], admitted["task_id"])
+        n.stop(signal.SIGKILL)
+        n.start()
+        repeated = n.call("Schedule.Create", request, owner)
+        self.assertEqual(repeated["state"]["task_receipt"], observed["task_receipt"])
+        for turn in range(3):
+            result = n.cli(self.token_file, *self.worker("--once"))
+            self.assertEqual(result["session_ref"]["resource_id"], session["resource_id"])
+            if turn < 2:
+                self.assertEqual(n.wait(result["task_id"])["lifecycle"], "Succeeded")
+        self.assertEqual(self.status(session)["session"]["lifecycle"], "Succeeded")
+        usage = n.call("Budget.Get", {"id": grant["budget_ref"]["resource_id"]}, owner)
+        self.assertEqual((usage["spent"], usage["model_calls_used"]), (3, 3))
+        self.assertEqual(self.next_turn(), {"available": False})
+
+    def test_session_admission_respects_both_targets_and_rolls_back_an_ungranted_session(self):
+        n = self.n
+        token = self.agent["token"]
+        scoped = self.grant_for_start("session.run", *self.tools, tool_targets=[self.model["resource_id"]])
+        prepared = n.prepare("agent.session.start", self.blueprint(), token=token,
+                             delegation=scoped["delegation_ref"]["resource_id"])
+        with self.assertRaises(Failure) as scope:
+            n.call("Task.Submit", prepared, token)
+        self.assertEqual(scope.exception.code, "PermissionDenied")
+        denied = self.grant_for_start()
+        params = n.prepare("agent.session.start", self.blueprint(), token=token,
+                           delegation=denied["delegation_ref"]["resource_id"])
+        task = n.wait(n.call("Task.Submit", params, token)["task_id"])
+        self.assertEqual((task["lifecycle"], task["outcome_knowledge"]), ("Failed", "NotStarted"))
+        self.assertEqual(task["conditions"][0]["type"], "PermissionDenied")
+        budget = n.call("Budget.Get", {"id": denied["budget_ref"]["resource_id"]}, token)
+        self.assertEqual((budget["reserved"], budget["spent"], budget["model_calls_used"]), (0, 0, 0))
+        self.assertEqual(self.next_turn(), {"available": False})
+        with self.assertRaises(Failure) as recursion:
+            n.call("Skill.Publish", dict(name="recursive", version="1", tools=["agent.session.start"],
+                source="local-test", license="0BSD", instructions="Schedule more sessions."))
+        self.assertEqual(recursion.exception.code, "UnsupportedCapability")

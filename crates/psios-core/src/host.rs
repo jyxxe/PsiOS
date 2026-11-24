@@ -52,6 +52,8 @@ pub struct Install {
 pub enum Action {
     #[serde(rename = "system.status")]
     Status {},
+    #[serde(rename = "agent.session.start")]
+    StartAgentSession(agent::SessionBlueprint),
     #[serde(rename = "node.inventory")]
     Inventory {},
     #[serde(rename = "node.interfaces")]
@@ -136,6 +138,7 @@ impl Action {
         )?;
         let a: Self = decode(&json!({"tool": tool, "input": input}))?;
         match &a {
+            Self::StartAgentSession(blueprint) => blueprint.validate()?,
             Self::Processes(p) => p.validate()?,
             Self::Interfaces(q) => q.validate()?,
             Self::Routes(q) => q.validate()?,
@@ -184,6 +187,7 @@ impl Action {
     ) -> Result<Vec<Value>> {
         let mut resources = vec![primary.reference()];
         match self {
+            Self::StartAgentSession(blueprint) => resources.push(blueprint.skill(db)?.reference()),
             Self::Start(_) | Self::Stop(_) if primary.spec["volume_id"].is_string() => {
                 let volume = db.of(primary.spec["volume_id"].as_str().unwrap(), "Volume")?;
                 policy::owned(actor, &volume)?;
@@ -200,6 +204,7 @@ impl Action {
     pub fn target(&self, db: &Db<'_>, actor: &str) -> Result<Doc> {
         let (id, version, kind) = match self {
             Self::Status {} => return db.get(policy::PROFILE),
+            Self::StartAgentSession(blueprint) => return blueprint.model(db),
             Self::Processes(_)
             | Self::Interfaces(_)
             | Self::Routes(_)

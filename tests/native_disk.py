@@ -10,6 +10,7 @@ import secrets
 import select
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -59,6 +60,8 @@ class Console:
         marker = "PSIOSLOGIN" + secrets.token_hex(6)
         self.send(f"stty -echo; export PS1=''; printf '\\n{marker}\\n'")
         self.until(("\n" + marker + "\n").encode())
+        if user == "psios":
+            self.run("for i in $(seq 1 100); do psiosctl whoami >/dev/null 2>&1 && exit 0; sleep 0.1; done; exit 1")
 
     def run(self, command):
         marker = "PSIOSCMD" + secrets.token_hex(6)
@@ -99,7 +102,8 @@ def password(work, name):
 
 
 def check_state(c):
-    assert c.run("id -u") == "1000"
+    uid = c.run("id -u")
+    assert uid == "1000", uid
     assert c.run(". /etc/os-release; echo \"$ID\"") == "psios"
     assert c.run("awk '/^Uid:/ {print $2}' /proc/$(pidof psiosd)/status") == "1000"
     c.run("test -d /sys/firmware/efi && test -d /sys/class/net/lo || exit 1; "
@@ -151,6 +155,17 @@ def extract_partition(image, output, offset_mib, size_mib):
             chunk = src.read(1024 * 1024)
             assert len(chunk) == 1024 * 1024
             dst.write(chunk)
+
+
+def check_clean_shutdown(image):
+    with image.open("rb") as disk:
+        for start in (65, 257):
+            disk.seek(start * 1024 * 1024 + 1024)
+            superblock = disk.read(1024)
+            magic, state = struct.unpack_from("<HH", superblock, 56)
+            incompatible, readonly_compatible = struct.unpack_from("<II", superblock, 96)
+            assert magic == 0xEF53 and state == 1, (start, state)
+            assert incompatible & 4 == 0 and readonly_compatible & 0x10000 == 0, start
 
 
 def reject_damaged_payload(args, work, image, deployment, intact_efi):
@@ -251,8 +266,12 @@ def exercise(args, work):
         c.until(b"Retype password:")
         c.send(rotated)
         c.until(b"password for psios changed")
+        # Keep a home file open across a normal poweroff from the root home.
+        c.run("(trap '' TERM HUP; exec tail -f ./maintenance) </dev/null >/dev/null 2>&1 & "
+              "p=$!; sleep 0.1; test \"$(readlink /proc/$p/cwd)\" = /root")
         c.send("poweroff")
         assert c.vm.wait(35) == 0
+    check_clean_shutdown(image)
     with boot(work, image) as c:
         c.credentials("psios", operator)
         c.until(b"Login incorrect")
@@ -322,7 +341,7 @@ def exercise(args, work):
         assert c.vm.wait(25) == 0
     assert sha(image) == pre_reject
     print(f"Verified source {deployment['source_commit']}, node {first[0]}, task {first[1]['task_id']}, "
-          "matched deployment receipt, authenticated UEFI console, private persistent homes, full-home isolation, offline management, power loss, clean shutdown, external rescue, consumed enrollment and damaged payload and mismatched state/home refusal.")
+          "matched deployment receipt, authenticated UEFI console, private persistent homes, full-home isolation, offline management, power loss, clean shutdown with a held home file, external rescue, consumed enrollment and damaged payload and mismatched state/home refusal.")
 
 
 if __name__ == "__main__":

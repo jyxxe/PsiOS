@@ -38,6 +38,10 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: Verify scoped addresses, routes and rules in a private Linux network namespace
         run: |
+          sudo unshare --net sh -ec '
+            ip link set lo up
+            python3 -B -m unittest discover -s tests -p test_network.py -k test_route_lookup -v
+          '
           sudo unshare --net --mount --propagation private sh -ec '
             ip link set lo up
             ip address add 192.0.2.1 peer 192.0.2.2/32 dev lo
@@ -78,7 +82,8 @@ jobs:
             { printf "["; ip -j -N link show; printf ","; ip -j -N -4 route show table all;
               printf ","; ip -j -N -6 route show table all; printf "]\n"; } > "$routes"
             { printf "["; ip -j -N -4 rule show; printf ","; ip -j -N -6 rule show; printf "]\n"; } > "$rules"
-            { printf "["; ip -j -N -4 route get 198.20.0.7 mark 55; printf ",";
+            { printf "["; ip -j -N -4 route get 127.0.0.1; printf ",";
+              ip -j -N -6 route get ::1; printf ","; ip -j -N -4 route get 198.20.0.7 mark 55; printf ",";
               ip -j -N -6 route get 2001:db8:3::5 from 2001:db8:1::2 ipproto tcp sport 20000 dport 443;
               printf ","; ip -j -N -4 route get 198.20.2.7 uid 4242; printf "]\n"; } > "$lookups"
             chown "$1" "$ref" "$routes" "$rules" "$lookups"

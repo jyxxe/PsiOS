@@ -87,7 +87,7 @@ ctl wait "$rules_task" | jq -e '{reference: .result.artifact_refs[0]}' | ctl cal
     jq -e '.rules | any(.priority == 0 and .table == 255 and .action == 1)' >/dev/null
 lookup=$(echo '{"destination":"127.0.0.1"}' | ctl submit node.route_lookup --delegation "$network_grant" --key package-route-lookup | jq -er .task_id)
 ctl wait "$lookup" | jq -e '{reference: .result.artifact_refs[0]}' | ctl call Artifact.Read |
-    jq -e '.outcome == "Resolved" and .route.table == 255 and .route.kind == 2' >/dev/null
+    jq -e '.outcome == "Resolved" and .route.table > 0 and .route.kind == 2 and .route.destination.address == "127.0.0.1"' >/dev/null
 
 systemctl stop psiosd
 runuser -u psios -- psiosd --config "$config" verify |

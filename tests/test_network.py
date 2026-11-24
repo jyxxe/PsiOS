@@ -339,6 +339,27 @@ class NetworkTests(unittest.TestCase):
         self.assertEqual(denied.exception.code, "PermissionDenied")
         token, grant = self.actor(n, actions, node)
 
+        reference = os.getenv("PSIOS_TEST_LOOKUP_REFERENCE")
+        expected = json.loads(Path(reference).read_bytes()) if reference else None
+        if reference:
+            self.assertFalse(Path("/usr/sbin/ip").exists())
+
+        def ip_lookup(args):
+            return json.loads(subprocess.check_output(["/usr/sbin/ip", "-j", "-N", *args]))
+
+        def check_local(result, family, address):
+            route = result["route"]
+            self.assertEqual((route["family"], route["kind"], route["output_ifindex"]), (family, 2, lo))
+            v4 = family == "inet"
+            if expected is not None:
+                record, = expected[0 if v4 else 1]
+            elif Path("/usr/sbin/ip").exists():
+                record, = ip_lookup(["-4" if v4 else "-6", "route", "get", address])
+            else:
+                self.assertGreater(route["table"], 0)
+                return
+            self.assertEqual(route["table"], int(record.get("table", 254)))
+
         def look(params):
             request = n.prepare(tool, params, token=token, delegation=grant)
             task = n.wait(n.call("Task.Submit", request, token)["task_id"])
@@ -357,8 +378,7 @@ class NetworkTests(unittest.TestCase):
         self.assertEqual(local["network_namespace_inode"], str(os.stat("/proc/self/ns/net").st_ino))
         self.assertEqual(local["user_namespace_inode"], str(os.stat("/proc/self/ns/user").st_ino))
         lo = socket.if_nametoindex("lo")
-        self.assertEqual((local["route"]["kind"], local["route"]["table"], local["route"]["output_ifindex"]),
-                         (2, 255, lo))
+        check_local(local, "inet", "127.0.0.1")
         self.assertIsNone(local["kernel_errno"])
         bound, _ = look(dict(loopback, output_ifindex=lo))
         self.assertEqual((bound["outcome"], bound["route"]["output_ifindex"]), ("Resolved", lo))
@@ -366,13 +386,11 @@ class NetworkTests(unittest.TestCase):
         if ipv6.exists() and ipv6.read_text().strip() == "0":
             local6, _ = look({"destination": "::1"})
             self.assertEqual(local6["outcome"], "Resolved", local6)
-            self.assertEqual((local6["route"]["family"], local6["route"]["table"], local6["route"]["output_ifindex"]),
-                             ("inet6", 255, lo))
+            check_local(local6, "inet6", "::1")
         with self.assertRaises(Failure) as denied:
             n.call("Artifact.Read", {"reference": ref}, route_reader)
         self.assertEqual(denied.exception.code, "PermissionDenied")
 
-        reference = os.getenv("PSIOS_TEST_LOOKUP_REFERENCE")
         mutate = os.getenv("PSIOS_TEST_MUTATE_ROUTES")
         if not (mutate or reference):
             return
@@ -383,13 +401,9 @@ class NetworkTests(unittest.TestCase):
                                         "sport", "20000", "dport", "443"]),
             ({"destination": "198.20.2.7", "uid": 4242}, ["-4", "route", "get", "198.20.2.7", "uid", "4242"]),
         ]
-        if reference:
-            self.assertFalse(Path("/usr/sbin/ip").exists())
-            expected = json.loads(Path(reference).read_bytes())
-        else:
-            expected = [json.loads(subprocess.check_output(["/usr/sbin/ip", "-j", "-N", *args])) for _, args in flows]
+        flow_references = expected[2:] if expected else [ip_lookup(args) for _, args in flows]
         resolved = []
-        for (params, _), (result,) in zip(flows, expected, strict=True):
+        for (params, _), (result,) in zip(flows, flow_references, strict=True):
             report, original = look(params)
             self.assertEqual(report["outcome"], "Resolved", report)
             self.assertEqual(report["lookup_uid"], params.get("uid", os.getuid()))

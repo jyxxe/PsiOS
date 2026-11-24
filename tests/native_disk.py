@@ -169,7 +169,7 @@ def check_native_network(c):
     assert done["lifecycle"] == "Succeeded", done
     lookup = call(c, "Artifact.Read", {"reference": done["result"]["artifact_refs"][0]})
     assert lookup["outcome"] == "Resolved" and lookup["route"]["output_ifindex"] == row["ifindex"], lookup
-    assert lookup["route"]["table"] == 255 and lookup["route"]["kind"] == 2, lookup
+    assert lookup["route"]["table"] > 0 and lookup["route"]["kind"] == 2, lookup
 
 
 def schedule_across_power_cut(c):

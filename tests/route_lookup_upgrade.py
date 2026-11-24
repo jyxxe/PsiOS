@@ -52,7 +52,7 @@ def upgrade(previous, current):
         assert lookup["lifecycle"] == "Succeeded", lookup
         ref, = lookup["result"]["artifact_refs"]
         result = n.call("Artifact.Read", {"reference": ref})
-        assert result["outcome"] == "Resolved" and result["route"]["table"] == 255, result
+        assert result["outcome"] == "Resolved" and result["route"]["kind"] == 2 and result["route"]["table"] > 0, result
         status_request = {"id": scheduled["reference"]["resource_id"]}
         for _ in range(100):
             state = n.call("Schedule.Get", status_request)["state"]

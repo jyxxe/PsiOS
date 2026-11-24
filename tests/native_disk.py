@@ -129,9 +129,51 @@ def check_state(c):
     return who["authority_id"], submitted, result["result"], c.run("cat /proc/sys/kernel/random/boot_id")
 
 
-def call(c, method, params):
+def call(c, method, params, token_file=None):
     body = shlex.quote(json.dumps(params))
-    return json.loads(c.run(f"printf '%s' {body} | psiosctl call {method}"))
+    options = f" --token-file {shlex.quote(token_file)}" if token_file else ""
+    return json.loads(c.run(f"printf '%s' {body} | psiosctl{options} call {method}"))
+
+
+def stage_guest_chat_token(c, secret):
+    path = "/tmp/psios-chat-fixture.token"
+    try:
+        c.run(f"umask 077; printf '%s' {shlex.quote(secret)} > {path}")
+    except AssertionError:
+        raise AssertionError("guest could not stage the private chat test credential") from None
+    return path
+
+
+def check_native_chat(c):
+    agent = call(c, "Agent.Register", {"name": "native-conversation-peer"})
+    call(c, "Grant.Issue", dict(principal_id="local-owner", units=1, ttl_seconds=120,
+                               actions=["chat.invite", "chat.read", "chat.send"]))
+    call(c, "Grant.Issue", dict(principal_id=agent["principal_id"], units=1, ttl_seconds=120, actions=["chat.read"]))
+    token = stage_guest_chat_token(c, agent["token"])
+    invite = call(c, "Conversation.OpenDirect", dict(key="native-handoff", name="serial handoff",
+                  recipient_principal_id=agent["principal_id"], ttl_seconds=60))
+    room = call(c, "Conversation.Respond", dict(id=invite["id"], accept=True,
+                expected_resource_version=invite["resource_version"]), token)
+    window = call(c, "Message.OpenSendWindow", dict(id=room["id"], ttl_seconds=110))
+    prepared = call(c, "Message.Prepare", dict(conversation_id=room["id"],
+                    client_send_id=window["namespace"] + ":original", text="offline handoff"))
+    receipt = call(c, "Message.Send", prepared)
+    history = call(c, "Message.List", {"id": room["id"]}, token)
+    entry, = history["items"]
+    assert receipt["message_id"] == entry["message"]["message_id"]
+    assert history["read_sequence"] == "0"
+    assert call(c, "Message.AckRead", dict(id=room["id"], cursor=history["cursor"]), token) == {"read_sequence": "1"}
+    c.run("rm " + token)
+    return room["id"], agent["token"], entry, prepared, receipt
+
+
+def check_recovered_chat(c, observed):
+    conversation, secret, entry, original_request, receipt = observed
+    token = stage_guest_chat_token(c, secret)
+    history = call(c, "Message.List", {"id": conversation}, token)
+    assert history["items"] == [entry] and history["read_sequence"] == "1"
+    assert call(c, "Message.Send", original_request) == dict(receipt, deduplicated=True)
+    c.run("rm " + token)
 
 
 def check_native_workflow(c):
@@ -360,6 +402,7 @@ def exercise(args, work):
         assert c.run("pwd") == "/home/psios"
         assert c.run("stat -c '%u:%g:%a' .") == "1000:1000:700"
         check_temporary_storage(c)
+        chat = check_native_chat(c)
         c.run("test ! -e /etc/psios/dhcp-mac && ! pidof udhcpc")
         c.run("test ! -r /root && test ! -w /mnt/psios-homes")
         c.run("printf '#!/bin/sh\\necho persisted\\n' > ./observe && chmod 700 ./observe && sync -f .")
@@ -389,6 +432,7 @@ def exercise(args, work):
         assert first[0] == second[0] and second[1]["deduplicated"]
         assert first[1]["task_id"] == second[1]["task_id"] and first[2] == second[2] and first[3] != second[3]
         assert call(c, "Workflow.Get", {"id": workflow["reference"]["resource_id"]}) == workflow
+        check_recovered_chat(c, chat)
         check_recovered_schedule(c, pending_schedule)
         c.send("exit")
         c.login("root", admin)
@@ -486,7 +530,7 @@ def exercise(args, work):
     assert sha(image) == pre_reject
     print(f"Verified source {deployment['source_commit']}, node {first[0]}, task {first[1]['task_id']}, "
           "matched deployment receipt, authenticated UEFI console, private persistent homes, full-home isolation, "
-          "bounded volatile /tmp, offline management, Task, schedule and workflow recovery after power loss, "
+          "bounded volatile /tmp, offline management, Task, schedule, workflow and chat recovery after power loss, "
           "clean shutdown with active home and /tmp readers, external rescue, clean ext4 "
           "after authority refusal, consumed enrollment and damaged payload and mismatched state/home refusal.")
 

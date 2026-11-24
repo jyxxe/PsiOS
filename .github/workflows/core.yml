@@ -127,6 +127,8 @@ jobs:
               python3 -B -m unittest discover -s tests -p test_backup.py -k test_restore_preflights -v
             TMPDIR="$1" PSIOS_TEST_CAPACITY_ALLOCATION=1 runuser -u "$2" -- \
               python3 -B -m unittest discover -s tests -p test_schedule.py -k test_waits_for_authority -v
+            TMPDIR="$1" PSIOS_TEST_CAPACITY_ALLOCATION=1 runuser -u "$2" -- \
+              python3 -B -m unittest discover -s tests -p test_chat.py -k test_low_disk -v
           ' psios-headroom "$scratch" "$(id -un)"
       - name: Migrate active and completed model calls from format 4
         run: |
@@ -177,6 +179,12 @@ jobs:
           git archive ad512d24f0f6dfbbd69c6e68b3c29de3efa1798e Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format11"
           CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format11/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format11/target"
           python3 tests/workflow_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format11/target/debug"
+      - name: Migrate format 12 and exercise direct chat with a retained workflow
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format12"
+          git archive afb73c71ce7a75b3cc7fa89c7d41c8d52dc828c0 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format12"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format12/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format12/target"
+          python3 tests/chat_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format12/target/debug"
       - name: Verify real systemd service control and crash reconciliation
         run: |
           sudo loginctl enable-linger "$(id -un)"

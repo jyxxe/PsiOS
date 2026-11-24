@@ -56,6 +56,9 @@ pub const COMMON: &[&str] = &[
     "task.read",
     schedule::ACTION,
     workflow::ACTION,
+    chat::INVITE,
+    chat::READ,
+    chat::SEND,
     "resource.read",
     "event.read",
     "secret.manage",
@@ -121,6 +124,9 @@ fn bootstrap_actions() -> Vec<String> {
                     | "backup.verify"
                     | schedule::ACTION
                     | workflow::ACTION
+                    | chat::INVITE
+                    | chat::READ
+                    | chat::SEND
             )
         })
         .map(|a| a.to_string())

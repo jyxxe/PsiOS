@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
@@ -89,6 +90,22 @@ class SecureBoot(NamedTuple):
         run(work, ["sbverify", "--cert", self.certificate, image])
 
 
+def add_signing_arguments(parser):
+    parser.add_argument("--secure-boot-key", type=Path, help="private local PEM key for an enrolled UEFI signing certificate")
+    parser.add_argument("--secure-boot-cert", type=Path, help="PEM signing certificate trusted by the target UEFI firmware")
+    parser.add_argument("--efi-stub", type=Path, help="trusted systemd linuxx64.efi.stub input for a signed Unified Kernel Image")
+    parser.add_argument("--efi-stub-sha256", help="SHA-256 of the exact trusted EFI stub input")
+
+
+def signing_requested(args, parser):
+    inputs = (args.secure_boot_key, args.secure_boot_cert, args.efi_stub, args.efi_stub_sha256)
+    if all(value is None for value in inputs):
+        return False
+    if not all(inputs) or not re.fullmatch(r"[0-9a-f]{64}", args.efi_stub_sha256):
+        parser.error("Secure Boot requires the key, certificate, EFI stub and its lowercase SHA-256")
+    return True
+
+
 def prepare_secure_boot(work, key, certificate, stub, stub_digest):
     pinned_stub = work / "linuxx64.efi.stub"
     pinned_copy(stub, pinned_stub, stub_digest, 2 * MIB)
@@ -120,11 +137,9 @@ def secure_efi_application(work, cmdline, signing):
     return efi
 
 
-def build(work):
-    tree = work / "cd"
+def bios_loader(work, tree):
     bios = tree / "boot/syslinux"
-    bios.mkdir(parents=True)
-    uefi = tree / "boot/efi.img"
+    bios.mkdir()
     for name, digest in (
         ("isolinux.bin", "d27cf552dcd95651447178bc2bdd084b3f821911bf68b95502735b1acab83941"),
         ("ldlinux.c32", "6bb315e3a4def84f4ae55cda933e4848fb28bb0745282cf8f86bb9283085590b"),
@@ -140,7 +155,16 @@ def build(work):
         os.link(work / name, tree / "boot" / name)
     (bios / "isolinux.cfg").write_text("DEFAULT psios\nPROMPT 0\nTIMEOUT 1\nLABEL psios\n"
                                        f" KERNEL /boot/kernel\n APPEND initrd=/boot/initrd {CMDLINE}\n")
-    efi = efi_application(work, CMDLINE)
+    return ["-b", "boot/syslinux/isolinux.bin", "-c", "boot/syslinux/boot.cat", "-no-emul-boot",
+            "-boot-load-size", "4", "-boot-info-table", "-eltorito-alt-boot"]
+
+
+def build(work, signing=None):
+    tree = work / "cd"
+    uefi = tree / "boot/efi.img"
+    uefi.parent.mkdir(parents=True)
+    bios = [] if signing else bios_loader(work, tree)
+    efi = secure_efi_application(work, CMDLINE, signing) if signing else efi_application(work, CMDLINE)
     with uefi.open("xb") as image:
         image.truncate((efi.stat().st_size // (4 * MIB) + 2) * 4 * MIB)
     run(work, ["mkfs.fat", "--invariant", "-n", "PSIOSRESCUE", uefi])
@@ -149,20 +173,28 @@ def build(work):
     image = work / "rescue.iso"
     run(work, ["xorriso", "-as", "mkisofs", "-quiet", "-R", "-V", "PSIOS_RESCUE", "--modification-date=2000010100000000",
          "--set_all_file_dates", "2000010100000000", "-uid", "0", "-gid", "0", "-file-mode", "0444",
-         "-dir-mode", "0555", "-b", "boot/syslinux/isolinux.bin", "-c", "boot/syslinux/boot.cat",
-         "-no-emul-boot", "-boot-load-size", "4", "-boot-info-table", "-eltorito-alt-boot", "-e", "boot/efi.img",
+         "-dir-mode", "0555", *bios, "-e", "boot/efi.img",
          "-no-emul-boot", "-o", image, tree])
     return image
 
 
-def firmware_args(mode, work, ovmf):
+def firmware_args(mode, work, ovmf, secure_vars=None):
     if mode == "bios":
         return ["-machine", "pc"]
-    for source, name in [("OVMF_CODE_4M.fd", "code.fd"), ("OVMF_VARS_4M.fd", "vars.fd")]:
-        shutil.copyfile(ovmf / source, work / name)
+    code = "OVMF_CODE_4M.secboot.fd" if secure_vars else "OVMF_CODE_4M.fd"
+    shutil.copyfile(ovmf / code, work / "code.fd")
+    if secure_vars:
+        with regular_file(secure_vars) as source:
+            variables = source.read(4 * MIB)
+        if not 0 < len(variables) < 4 * MIB:
+            raise ValueError("unexpected OVMF variable-store size")
+        (work / "vars.fd").write_bytes(variables)
+    else:
+        shutil.copyfile(ovmf / "OVMF_VARS_4M.fd", work / "vars.fd")
     if (work / "code.fd").stat().st_size + (work / "vars.fd").stat().st_size != 4 * MIB:
         raise ValueError("expected a matching 4 MiB OVMF code and variable-store pair")
-    return ["-machine", "q35", "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=code.fd",
+    machine = ["-machine", "q35,smm=on", "-global", "driver=cfi.pflash01,property=secure,value=on"] if secure_vars else ["-machine", "q35"]
+    return [*machine, "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=code.fd",
             "-drive", "if=pflash,format=raw,unit=1,file=vars.fd"]
 
 

@@ -53,7 +53,19 @@ qemu-system-x86_64 -nodefaults -no-user-config -no-reboot -machine pc -m 768 \
   -drive file=node.raw,format=raw,if=virtio,readonly=on
 ```
 
-客户机从第二个串口输出 `PSIOS-RESCUE/1`、状态和核验结果，随后关机。固件可能先在同一串口输出启动消息。光盘只允许检查只读块设备，遇到可写设备或需要文件系统日志重放的盘会停止。临时日志重放仍通过受控的直接内核启动模式执行。此光盘已在 QEMU 的 SeaBIOS 和 OVMF 上验证，物理机和 Secure Boot 仍待验收。归档构建证明覆盖制盘程序；本地生成的 ISO 摘要随工具链、Core 和站点设置而定。
+客户机从第二个串口输出 `PSIOS-RESCUE/1`、状态和核验结果，随后关机。固件可能先在同一串口输出启动消息。光盘只允许检查只读块设备，遇到可写设备或需要文件系统日志重放的盘会停止。临时日志重放仍通过受控的直接内核启动模式执行。默认光盘已在 QEMU 的 SeaBIOS 和 OVMF 上验证。归档构建证明覆盖制盘程序；本地生成的 ISO 摘要随工具链、Core 和站点设置而定。
+
+### 在 Secure Boot 下核验
+
+将下列参数附加到检查命令，可生成由已登记证书签名的 UEFI 救援光盘。构建机需要 `ukify`、`sbsign`、`sbverify`、OpenSSL 及可信的 systemd EFI stub。`--ovmf-vars` 指向已登记签名证书并启用 Secure Boot 的 4 MiB OVMF 变量文件，检查器只使用该文件的临时副本。
+
+```sh
+--firmware uefi --ovmf-vars enrolled-vars.fd --save-rescue-iso node-secure-rescue.iso \
+--secure-boot-key signing.key --secure-boot-cert signing.pem \
+--efi-stub /usr/lib/systemd/boot/efi/linuxx64.efi.stub --efi-stub-sha256 "$VERIFIED_STUB_SHA256"
+```
+
+签名介质在触碰受检磁盘前由来宾内核确认 Secure Boot 已强制启用。成功报告增加 `secure_boot` 字段，记载签名证书与 EFI stub 摘要。已验证的 ISO 可独立启动。为 QEMU 选择 `q35,smm=on`、`OVMF_CODE_4M.secboot.fd` 和单独复制的登记变量文件，并使用 `-global cfi.pflash01.secure=on`。继续将源盘作为第一个只读 virtio 设备，报告仍在第二串口。Secure Boot 未启用或源盘可写时，救援程序停止。该配置已在 amd64 OVMF 验收，物理机与加密卷属于后续验证范围。[原生签名盘说明](native-disk.md#使用已登记证书构建-secure-boot-盘) · [独立签名介质验收](../tests/rescue_secure_boot.py)
 
 ## 在临时副本重放 ext4 日志
 

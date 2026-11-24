@@ -187,9 +187,7 @@ fn create_volume(w: &Work, restore: Option<&Doc>) -> Result<Value> {
     let stats = rustix::fs::statvfs(&data).map_err(std::io::Error::from)?;
     let capacity = stats.f_blocks.saturating_mul(stats.f_frsize);
     File::open(&data)?.sync_all()?;
-    File::open(stage.path())?.sync_all()?;
-    fs::rename(stage.path(), &final_path)?;
-    File::open(&parent)?.sync_all().map_err(unknown)?;
+    stage.publish(&vid)?;
     Ok(json!({
         "id": vid,
         "incarnation": inc,
@@ -475,13 +473,14 @@ fn backup(w: &Work) -> Result<Value> {
     new_file(&stage.path().join("manifest.json"), &bytes)?;
     let current = capture_root(w)?;
     capture.confirm_source(&current, &before)?;
-    fs::rename(stage.path(), parent.join(&bid))?;
-    File::open(&parent)?.sync_all().map_err(unknown)?;
+    let total = capture.total;
+    let entries = capture.entries.len();
+    stage.publish(&bid)?;
     Ok(json!({
         "id": bid,
         "manifest_digest": sha256(&bytes),
-        "bytes": capture.total.to_string(),
-        "entries": capture.entries.len()
+        "bytes": total.to_string(),
+        "entries": entries
     }))
 }
 #[derive(Deserialize)]

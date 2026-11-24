@@ -78,6 +78,47 @@ def workflow_expired(console, run, budget):
     return workflow
 
 
+def utc(stamp):
+    return datetime.fromtimestamp(stamp, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def scheduled_observations(console, wall):
+    grant = call(console, "Grant.Issue", {"principal_id": "local-owner", "actions": ["schedule.manage",
+        "system.status", "task.submit", "task.read"], "tool_targets": ["profile-local"], "ttl_seconds": 120, "units": 4})
+    common = {"tool": "system.status", "input": {}, "delegation_id": grant["delegation_ref"]["resource_id"]}
+    once = call(console, "Schedule.Create", dict(common, key="elapsed-once", run_at=utc(wall + 11),
+        deadline_at=utc(wall + 19)))
+    interval = call(console, "Schedule.Create", dict(common, key="elapsed-series", run_at=utc(wall + 11),
+        deadline_at=utc(wall + 15), repeat={"interval_seconds": 4, "count": 3,
+            "missed": {"mode": "BoundedCatchUp", "limit": 2}, "overlap": "Allow"}))
+    due = datetime.fromtimestamp(wall + 11, timezone.utc)
+    calendar = call(console, "Schedule.Create", dict(common, key="elapsed-calendar", calendar={
+        "timezone": "UTC", "start_date": due.date().isoformat(), "local_time": due.time().isoformat(),
+        "days": 1, "window_seconds": 5, "gap": "Reject", "fold": "Earlier",
+        "missed": {"mode": "Skip"}, "overlap": "Allow"}))
+    series_ids = [series["reference"]["resource_id"] for series in (interval, calendar)]
+    return once["reference"]["resource_id"], series_ids, grant["budget_ref"]["resource_id"]
+
+
+def schedules_expired(console, once, series_ids, budget):
+    one = owner(console, "Schedule.Get", {"id": once})
+    assert one["state"]["lifecycle"] == "Expired" and one["state"]["task_receipt"] is None, one
+    completed = []
+    for schedule, ordinals in zip(series_ids, ([1, 2, 3], [1]), strict=True):
+        series = owner(console, "Schedule.Get", {"id": schedule})
+        assert series["state"]["lifecycle"] == "Completed", series
+        triggers = [owner(console, "Schedule.TriggerGet", {"id": ref["resource_id"]})["state"]
+                    for ref in series["state"]["trigger_refs"]]
+        assert [trigger["ordinal"] for trigger in triggers] == ordinals, triggers
+        for trigger in triggers:
+            assert (trigger["lifecycle"], trigger["reason"], trigger["task_receipt"]) == (
+                "Expired", "DeadlineExceeded", None), trigger
+        completed.append(series)
+    usage = owner(console, "Budget.Get", {"id": budget})
+    assert (usage["reserved"], usage["spent"]) == (0, 0), usage
+    return one, completed
+
+
 def exercise(args, work):
     user, operator_hash = password(work, "operator.hash")
     admin, root_hash = password(work, "root.hash")
@@ -104,8 +145,10 @@ def exercise(args, work):
             "delegation_id": delegation}, credential)
         task = call(console, "Task.Submit", request, credential)["task_id"]
         assert call(console, "Task.Get", {"id": task})["lifecycle"] == "Queued"
-        task_expiry = int(console.run("date -u +%s")) + 27
-        deadline = datetime.fromtimestamp(task_expiry, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        before = int(console.run("date -u +%s"))
+        task_expiry = before + 27
+        deadline = utc(task_expiry)
+        schedules = scheduled_observations(console, before)
         workflow, budget = cordoned_workflow(console, deadline)
         timed = timed_write(console, volume, "missed-approval", deadline)
         pending = call(console, "Task.Get", {"id": timed["task_id"]})
@@ -130,6 +173,7 @@ def exercise(args, work):
         wait_expiry(console, timed["task_id"], timed["task_revision"])
         wait_expiry(console, retried["task_id"], retried["task_revision"])
         expired_workflow = workflow_expired(console, workflow, budget)
+        expired_schedules = schedules_expired(console, *schedules)
         req = owner(console, "Resource.Get", {"id": approval_id})
         assert req["value"]["status"] == "Expired" and "decision_ref" not in req["value"], req
         approve = {"id": approval_id, "expected_resource_version": req["reference"]["version"],
@@ -149,6 +193,7 @@ def exercise(args, work):
         assert "PermissionDenied" in rejection(console, check)
         assert owner(console, "Task.Get", {"id": task}) == finished
         assert workflow_expired(console, workflow, budget) == expired_workflow
+        assert schedules_expired(console, *schedules) == expired_schedules
         fresh = owner(console, "Grant.Issue", issue)["delegation_ref"]["resource_id"]
         reissued = user_command(f"psiosctl --token-file {shlex.quote(credential)} status --delegation {shlex.quote(fresh)}")
         assert json.loads(console.run(reissued))["authority_id"] == node["resource_id"]
@@ -159,7 +204,7 @@ def exercise(args, work):
         console.run("now=$(date -u +%s); date -u -s \"@$((now+180))\" >/dev/null")
         poweroff(console)
     check_clean_shutdown(disk)
-    print("PASS UTC rollback, elapsed grant, Task and WorkflowRun expiry, approval and retry fencing, daemon restart")
+    print("PASS UTC rollback, elapsed grant, Task, WorkflowRun and Schedule expiry, restart and stable receipts")
 
 
 if __name__ == "__main__":

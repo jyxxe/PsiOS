@@ -327,14 +327,14 @@ fn fire(db: &Db<'_>, rejection: &mut Option<Rejection>) -> Result<()> {
         "WITH checked AS (
             SELECT p.schedule,p.deadline_ms,
                 CASE WHEN elapsed.resource IS NULL THEN ?1
-                     WHEN elapsed.time_ns!=?3 THEN 9223372036854775807
+                     WHEN elapsed.time_ns!=?3 THEN ?5
                      ELSE max(?1,p.deadline_ms+(?4-elapsed.deadline_boot_ms))
                 END AS through
             FROM pending_schedules p LEFT JOIN authorization_deadlines elapsed
                  ON elapsed.resource=p.schedule AND elapsed.boot_id=?2
         )
         SELECT schedule,through FROM checked WHERE deadline_ms<=through ORDER BY deadline_ms,schedule LIMIT 1",
-        params![at,clock.boot.boot_id,clock.time_ns,clock.boot.millis], |r| Ok((r.get(0)?,r.get(1)?)),
+        params![at,clock.boot.boot_id,clock.time_ns,clock.boot.millis,i64::MAX], |r| Ok((r.get(0)?,r.get(1)?)),
     ).optional()?;
     let (id, expired_through) = if let Some((id, through)) = expired {
         (id, Some(through))

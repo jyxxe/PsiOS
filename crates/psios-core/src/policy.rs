@@ -18,6 +18,7 @@ pub const TOOLS: &[&str] = &[
     "system.status",
     agent::START_SESSION,
     "node.inventory",
+    node::pressure::TOOL,
     "node.interfaces",
     "node.routes",
     "node.route_lookup",
@@ -77,6 +78,7 @@ pub fn readonly(tool: &str) -> bool {
         tool,
         "system.status"
             | "node.inventory"
+            | node::pressure::TOOL
             | "node.interfaces"
             | "node.routes"
             | "node.route_lookup"
@@ -132,6 +134,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | node::network::probe::TOOL
                     | "node.routing_rules"
                     | "node.mounts"
+                    | node::pressure::TOOL
                     | "backup.verify"
                     | storage::publication::INSPECT
                     | agent::START_SESSION

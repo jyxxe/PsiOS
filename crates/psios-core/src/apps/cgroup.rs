@@ -1,9 +1,9 @@
 //! Observe live cgroup v2 controls for the trusted local Docker adapter.
-use crate::{Result, err, host::Install, require};
+use crate::{Result, err, host::Install, linux_cgroup, require};
 use rustix::{
     event::{PollFd, PollFlags, Timespec, poll},
     fd::OwnedFd,
-    fs::{Mode, OFlags, ResolveFlags, fstat, fstatfs, open, openat, openat2},
+    fs::{Mode, OFlags, fstat, open, openat},
     process::{Pid, PidfdFlags, pidfd_open},
 };
 use serde_json::{Value, json};
@@ -13,8 +13,6 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-const ROOT: &str = "/sys/fs/cgroup";
-const CGROUP2_SUPER_MAGIC: u32 = 0x6367_7270;
 const DIRECTORY: OFlags = OFlags::PATH
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
@@ -22,21 +20,18 @@ const DIRECTORY: OFlags = OFlags::PATH
 const CONTROL_BYTES: usize = 8192;
 
 pub(super) fn root() -> Result<OwnedFd> {
-    let fd = open(ROOT, DIRECTORY, Mode::empty()).map_err(io::Error::from)?;
-    require(
-        fstatfs(&fd).map_err(io::Error::from)?.f_type as u32 == CGROUP2_SUPER_MAGIC,
-        "UnsupportedCapability",
-        "local cgroup v2 filesystem is not visible",
-    )?;
-    Ok(fd)
+    linux_cgroup::root().map_err(|error| match error.kind() {
+        io::ErrorKind::Unsupported => err(
+            "UnsupportedCapability",
+            "local cgroup v2 filesystem is not visible",
+        ),
+        _ => error.into(),
+    })
 }
 
-fn read(dir: &OwnedFd, name: &str) -> Result<String> {
-    let flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
-    let fd = openat(dir, name, flags, Mode::empty()).map_err(io::Error::from)?;
+fn read(file: File) -> Result<String> {
     let mut text = String::new();
-    File::from(fd)
-        .take(CONTROL_BYTES as u64 + 1)
+    file.take(CONTROL_BYTES as u64 + 1)
         .read_to_string(&mut text)?;
     require(
         text.len() <= CONTROL_BYTES,
@@ -47,7 +42,9 @@ fn read(dir: &OwnedFd, name: &str) -> Result<String> {
 }
 
 fn membership(process: &OwnedFd, container: &str) -> Result<PathBuf> {
-    let current = read(process, "cgroup")?;
+    let flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
+    let fd = openat(process, "cgroup", flags, Mode::empty()).map_err(io::Error::from)?;
+    let current = read(File::from(fd))?;
     let relative = current
         .strip_prefix("0::/")
         .and_then(|line| line.strip_suffix('\n'))
@@ -101,22 +98,16 @@ pub(super) fn observe(container: &str, state: &Value, approval: &Install) -> Res
     let lifetime = pidfd_open(pid, PidfdFlags::empty()).map_err(io::Error::from)?;
     let proc = open(format!("/proc/{raw}"), DIRECTORY, Mode::empty()).map_err(io::Error::from)?;
     let path = membership(&proc, container)?;
-    let group = openat2(
-        root()?,
-        &path,
-        DIRECTORY,
-        Mode::empty(),
-        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
-    )
-    .map_err(io::Error::from)?;
-    let cpu = read(&group, "cpu.max")?;
+    let group = linux_cgroup::group(root()?, &path)?;
+    let control = |name| read(linux_cgroup::control(&group, name)?);
+    let cpu = control("cpu.max")?;
     let mut cpu = cpu.split_whitespace();
     let quota = finite(cpu.next())?;
     let period = finite(cpu.next())?;
-    let memory = finite(Some(read(&group, "memory.max")?.trim()))?;
-    let swap = finite(Some(read(&group, "memory.swap.max")?.trim()))?;
-    let pids = finite(Some(read(&group, "pids.max")?.trim()))?;
-    let burst = read(&group, "cpu.max.burst")?;
+    let memory = finite(Some(control("memory.max")?.trim()))?;
+    let swap = finite(Some(control("memory.swap.max")?.trim()))?;
+    let pids = finite(Some(control("pids.max")?.trim()))?;
+    let burst = control("cpu.max.burst")?;
     require(
         cpu.next().is_none()
             && quota > 0

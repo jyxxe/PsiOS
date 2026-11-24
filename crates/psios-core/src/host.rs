@@ -56,6 +56,8 @@ pub enum Action {
     StartAgentSession(agent::SessionBlueprint),
     #[serde(rename = "node.inventory")]
     Inventory {},
+    #[serde(rename = "node.pressure")]
+    Pressure {},
     #[serde(rename = "node.interfaces")]
     Interfaces(node::network::Query),
     #[serde(rename = "node.routes")]
@@ -214,6 +216,7 @@ impl Action {
             | Self::RouteLookup(_)
             | Self::RoutingRules(_)
             | Self::Inventory {}
+            | Self::Pressure {}
             | Self::Mounts {}
             | Self::Devices {} => {
                 return db.of(&db.meta("authority")?, "Node");
@@ -382,6 +385,7 @@ impl Work {
             | Action::ServiceStart(_)
             | Action::ServiceStop(_)
             | Action::Inventory {}
+            | Action::Pressure {}
             | Action::Processes(_)
             | Action::Interfaces(_)
             | Action::Routes(_)

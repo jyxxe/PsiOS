@@ -1,0 +1,76 @@
+#!/bin/sh
+# Apply only the DHCP lease of the pinned device. The resolver is runtime state.
+set -efu
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+run=/run/psios-network
+metric=30310
+device=/sys/class/net/${interface-}
+[ -n "${PSIOS_DHCP_INTERFACE-}" ] && [ "${interface-}" = "$PSIOS_DHCP_INTERFACE" ] || exit 1
+[ "$(cat "$device/ifindex")" = "$PSIOS_DHCP_IFINDEX" ] && [ "$(cat "$device/address")" = "$PSIOS_DHCP_MAC" ] || exit 1
+
+ipv4() {
+    case "$1" in ''|*[!0-9.]*) return 1 ;; esac
+}
+
+write_resolver() (
+    file=$(mktemp "$run/.resolv.XXXXXX") || return 1
+    trap 'rm -f "$file"' EXIT
+    count=0
+    for server do
+        if ipv4 "$server"; then
+            printf 'nameserver %s\n' "$server" >> "$file" || return 1
+            count=$((count + 1))
+            [ "$count" -lt 3 ] || break
+        fi
+    done
+    chmod 0644 "$file" && mv -f "$file" "$run/resolv.conf"
+)
+
+forget_lease() {
+    result=0
+    rm -f "$run/resolv.conf" || result=1
+    ip -4 route del default dev "$interface" metric "$metric" 2>/dev/null || :
+    ip -4 addr flush dev "$interface" || result=1
+    return "$result"
+}
+
+apply_lease() {
+    ipv4 "${ip-}" || return 1
+    case "${mask-}" in [1-9]|[12][0-9]|3[012]) ;; *) return 1 ;; esac
+    gateway=${router-}
+    gateway=${gateway%% *}
+    if [ -n "${staticroutes-}" ]; then
+        # A classless routing policy takes precedence over the router option.
+        gateway=
+    fi
+    [ -z "$gateway" ] || ipv4 "$gateway" || return 1
+    current=$(ip -4 addr show dev "$interface" | awk '$1 == "inet" {print $2}') || return 1
+    if [ "$current" != "$ip/$mask" ]; then
+        ip -4 addr flush dev "$interface" && ip -4 addr add "$ip/$mask" dev "$interface" || return 1
+    fi
+    ip -4 route del default dev "$interface" metric "$metric" 2>/dev/null || :
+    if [ -n "$gateway" ]; then
+        ip -4 route add default via "$gateway" dev "$interface" metric "$metric" || return 1
+    fi
+    # Each option is a whitespace-separated list of numeric values from BusyBox.
+    write_resolver ${dns-}
+}
+
+case "${1-}" in
+    deconfig|leasefail|nak)
+        if ! forget_lease; then
+            printf 'Could not clear the lease on %s\n' "$interface" > "$run/status"
+            exit 1
+        fi
+        printf 'No active lease on %s\n' "$interface" > "$run/status"
+        ;;
+    bound|renew)
+        if ! apply_lease; then
+            forget_lease || :
+            printf 'Could not apply the lease on %s\n' "$interface" > "$run/status"
+            exit 1
+        fi
+        printf 'Bound %s/%s on %s\n' "$ip" "$mask" "$interface" > "$run/status"
+        ;;
+    *) exit 1 ;;
+esac

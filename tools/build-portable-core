@@ -44,6 +44,9 @@ fi
 if git -C "$repo" cat-file -e "$sha:images/native/README.txt" 2>/dev/null; then
     mkdir -m 0755 native
     native_files=(README.txt create.py init shutdown)
+    if git -C "$repo" cat-file -e "$sha:images/native/dhcp" 2>/dev/null; then
+        native_files+=(dhcp dhcp-event)
+    fi
     git -C "$repo" archive "$sha:images/native" "${native_files[@]}" | tar --same-permissions -xf - -C native
     checks+=("${native_files[@]/#/native/}")
     members+=(native)

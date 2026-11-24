@@ -27,6 +27,17 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 
 串口账户 `psios` 和服务使用 UID 1000。登录后可运行 `psiosctl whoami`、`psiosctl node`，或用 `printf '{}' | psiosctl submit system.status --key first-status` 提交任务。需要传统系统管理时，可在生成新盘时传入 `--root-console-hash root.hash` 设置独立的本机 root 密码。默认锁定 root。启用后可用 root 在串口执行 `poweroff`。关机钩子先允许 Core 结算，随后关闭其余会话与进程，刷盘并卸载状态和主目录。运行时生成的所有者令牌位于服务账户的私有见证目录。[关机验收](../tests/native_disk.py)
 
+## 可选有线接入
+
+新盘可用 `--dhcp-mac 52:54:00:51:6f:20` 启用单个 virtio 网口的 IPv4 DHCP。为虚机配置同一个 MAC。下面的 QEMU 参数可用于只验证租约的隔离网络。
+
+```sh
+-netdev user,id=lan,restrict=on \
+-device virtio-net-pci,netdev=lan,mac=52:54:00:51:6f:20,romfile=
+```
+
+该配置独占匹配网口的 IPv4 地址、DHCP 默认路由和 `/etc/resolv.conf`。DHCP 提供地址后，默认路由和最多三个 DNS 服务器按租约配置，释放租约时清理。普通账户可用 `busybox ip -4 addr show`、`busybox ip -4 route show` 和 `cat /etc/resolv.conf` 检查。最新租约或故障信息在 `/run/psios-network/status`。配置的网口缺失时，串口账户与 Core 可照常使用。静态网络配置、无线、IPv6 管理和远程配置事务仍待开发。[隔离网络中的真实续租和释放验收](../tests/native_dhcp.py)
+
 ## 核对安装与运行的制品
 
 构建成功后，将 `node-build.json` 保存在节点外。其中 `initial_image_sha256` 可在首次启动前与 `sha256sum node.raw` 比对。启动会改变数据分区，离线核对引导程序可单独读取 EFI 系统分区。

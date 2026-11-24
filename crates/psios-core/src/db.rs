@@ -158,7 +158,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = 8;
+pub(super) const CURRENT_FORMAT: u32 = 9;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -317,6 +317,9 @@ impl Store {
                      ALTER TABLE session_turns ADD COLUMN deadline_boot_ms INTEGER;
                      CREATE INDEX pending_model_turns ON session_turns(session) WHERE receipt IS NULL;",
                     )?;
+                }
+                if ver < 9 {
+                    db.c.execute_batch(include_str!("schedule.sql"))?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

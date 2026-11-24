@@ -9,6 +9,7 @@ mod events;
 mod host;
 mod node;
 mod policy;
+mod schedule;
 pub mod server;
 mod storage;
 mod watch;

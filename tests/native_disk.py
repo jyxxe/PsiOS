@@ -1,6 +1,7 @@
 """Boot a generated disk from OVMF, use its local console and recover after power loss."""
 import argparse
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import hashlib
 import importlib.util
 import json
@@ -128,19 +129,21 @@ def check_state(c):
     return who["authority_id"], submitted, result["result"], c.run("cat /proc/sys/kernel/random/boot_id")
 
 
+def call(c, method, params):
+    body = shlex.quote(json.dumps(params))
+    return json.loads(c.run(f"printf '%s' {body} | psiosctl call {method}"))
+
+
 def check_native_network(c):
-    def call(method, params):
-        body = shlex.quote(json.dumps(params))
-        return json.loads(c.run(f"printf '%s' {body} | psiosctl call {method}"))
     node = json.loads(c.run("psiosctl node"))["reference"]["resource_id"]
-    grant = call("Grant.Issue", dict(principal_id="local-owner", tool_targets=[node],
+    grant = call(c, "Grant.Issue", dict(principal_id="local-owner", tool_targets=[node],
                  actions=["task.submit", "task.read", "node.interfaces", "node.routes", "node.routing_rules"],
                  units=3, ttl_seconds=120))
     delegation = shlex.quote(grant["delegation_ref"]["resource_id"])
     task = json.loads(c.run(f"printf '{{}}' | psiosctl submit node.interfaces --delegation {delegation} --key native-network"))
     done = json.loads(c.run("psiosctl wait " + shlex.quote(task["task_id"])))
     assert done["lifecycle"] == "Succeeded", done
-    report = call("Artifact.Read", {"reference": done["result"]["artifact_refs"][0]})
+    report = call(c, "Artifact.Read", {"reference": done["result"]["artifact_refs"][0]})
     assert report["network_namespace_inode"] == c.run("stat -Lc %i /proc/self/ns/net")
     row, = report["interfaces"]
     assert row["ifname"] == "lo" and row["link_type"] == "loopback" and "UP" in row["flags"]
@@ -149,7 +152,7 @@ def check_native_network(c):
     task = json.loads(c.run(f"printf '%s' {query} | psiosctl submit node.routes --delegation {delegation} --key native-routes"))
     done = json.loads(c.run("psiosctl wait " + shlex.quote(task["task_id"])))
     assert done["lifecycle"] == "Succeeded", done
-    routes = call("Artifact.Read", {"reference": done["result"]["artifact_refs"][0]})
+    routes = call(c, "Artifact.Read", {"reference": done["result"]["artifact_refs"][0]})
     assert routes["network_namespace_inode"] == report["network_namespace_inode"], routes
     assert any(r["destination"] == {"address": "127.0.0.1", "length": 32}
                and r["kind"] == 2 and r["output_ifindex"] == row["ifindex"] for r in routes["routes"]), routes
@@ -157,9 +160,37 @@ def check_native_network(c):
                             f"--delegation {delegation} --key native-routing-rules"))
     done = json.loads(c.run("psiosctl wait " + shlex.quote(task["task_id"])))
     assert done["lifecycle"] == "Succeeded", done
-    rules = call("Artifact.Read", {"reference": done["result"]["artifact_refs"][0]})
+    rules = call(c, "Artifact.Read", {"reference": done["result"]["artifact_refs"][0]})
     assert rules["network_namespace_inode"] == report["network_namespace_inode"], rules
     assert any(r["priority"] == 0 and r["table"] == 255 and r["action"] == 1 for r in rules["rules"]), rules
+
+
+def schedule_across_power_cut(c):
+    grant = call(c, "Grant.Issue", dict(principal_id="local-owner", tool_targets=["profile-local"],
+                 actions=["schedule.manage", "task.submit", "task.read", "system.status"], units=1, ttl_seconds=180))
+    stamp = int(c.run("date -u +%s"))
+    schedule = call(c, "Schedule.Create", dict(key="native-power-cut-schedule", tool="system.status", input={},
+                    delegation_id=grant["delegation_ref"]["resource_id"],
+                    run_at=datetime.fromtimestamp(stamp + 5, timezone.utc).isoformat(),
+                    deadline_at=datetime.fromtimestamp(stamp + 120, timezone.utc).isoformat()))
+    assert schedule["state"]["lifecycle"] == "Pending", schedule
+    return schedule
+
+
+def check_recovered_schedule(c, pending):
+    request = {"id": pending["reference"]["resource_id"]}
+    until = time.monotonic() + 20
+    while True:
+        current = call(c, "Schedule.Get", request)["state"]
+        if current["lifecycle"] != "Pending" or time.monotonic() >= until:
+            break
+        time.sleep(0.25)
+    assert current["lifecycle"] == "Triggered", current
+    assert current["trigger_id"] == pending["state"]["trigger_id"], current
+    receipt = current["task_receipt"]
+    assert receipt["idempotency_key"] == current["trigger_id"], receipt
+    result = json.loads(c.run("psiosctl wait " + shlex.quote(receipt["task_id"])))
+    assert result["lifecycle"] == "Succeeded", result
 
 
 def replace_partition(image, filesystem, offset_mib):
@@ -262,6 +293,7 @@ def exercise(args, work):
         check_native_network(c)
         first = check_state(c)
         assert not first[1]["deduplicated"]
+        pending_schedule = schedule_across_power_cut(c)
         # SIGKILL the VM with the OS and Core still running.
     with boot(work, image) as c:
         c.login("psios", operator)
@@ -274,6 +306,7 @@ def exercise(args, work):
         second = check_state(c)
         assert first[0] == second[0] and second[1]["deduplicated"]
         assert first[1]["task_id"] == second[1]["task_id"] and first[2] == second[2] and first[3] != second[3]
+        check_recovered_schedule(c, pending_schedule)
         c.send("exit")
         c.login("root", admin)
         assert c.run("id -u") == "0"
@@ -365,7 +398,7 @@ def exercise(args, work):
     assert sha(image) == pre_reject
     print(f"Verified source {deployment['source_commit']}, node {first[0]}, task {first[1]['task_id']}, "
           "matched deployment receipt, authenticated UEFI console, private persistent homes, full-home isolation, "
-          "offline management, power loss, clean shutdown with a held home file, external rescue, clean ext4 "
+          "offline management, Task and schedule recovery after power loss, clean shutdown with a held home file, external rescue, clean ext4 "
           "after authority refusal, consumed enrollment and damaged payload and mismatched state/home refusal.")
 
 

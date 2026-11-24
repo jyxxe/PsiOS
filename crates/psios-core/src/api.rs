@@ -158,6 +158,9 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "StoragePool.Get" => storage::pool_status(db, actor, p),
         "StoragePool.Configure" => storage::pool_configure(db, actor, p),
         "Application.Configure" => apps::configure(db, actor, p),
+        "Schedule.Create" => schedule::create(db, actor, p),
+        "Schedule.Get" => schedule::get(db, actor, p),
+        "Schedule.Cancel" => schedule::cancel(db, actor, p),
         "Task.Prepare" => broker::prepare(db, actor, p),
         "Task.Submit" => broker::submit(db, actor, p, None),
         "Task.LookupSubmission" => broker::lookup(db, actor, p),
@@ -246,6 +249,8 @@ impl Store {
                     | "Approval.Decide"
                     | "StoragePool.Configure"
                     | "Application.Configure"
+                    | "Schedule.Create"
+                    | "Schedule.Cancel"
                     | "Task.Cancel"
                     | "Task.CancelOrigin"
                     | "Task.Archive"

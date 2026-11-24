@@ -1,4 +1,4 @@
-use crate::{Config, Result, Store, broker, err};
+use crate::{Config, Result, Store, broker, err, schedule};
 use psios_api::{ApiError, Request, id, parse, read_frame, write_frame};
 use serde_json::{Value, json};
 use std::{
@@ -101,6 +101,21 @@ fn worker(s: Shared, stop: Arc<AtomicBool>, tick: Duration) -> Result<()> {
     }
     Ok(())
 }
+
+fn timer(s: Shared, stop: Arc<AtomicBool>) -> Result<()> {
+    while !stop.load(Ordering::Acquire) {
+        {
+            let mut store = state(&s)?;
+            if stop.load(Ordering::Acquire) {
+                break;
+            }
+            schedule::tick(&mut store)?;
+        }
+        thread::park_timeout(Duration::from_millis(250));
+    }
+    Ok(())
+}
+
 struct Endpoint<'a> {
     path: &'a Path,
     _lock: File,
@@ -159,6 +174,9 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     db.transaction("restart-recovery", broker::recover)?;
     let db = Arc::new(Mutex::new(db));
     let mut workers = Vec::new();
+    let scheduling = db.clone();
+    let shutdown = stop.clone();
+    workers.push(thread::spawn(move || timer(scheduling, shutdown)));
     for _ in 0..cfg.workers {
         let running = db.clone();
         let shutdown = stop.clone();
@@ -210,6 +228,9 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     }
     stop.store(true, Ordering::Release);
     state(&db)?.changes.notify();
+    for worker in &workers {
+        worker.thread().unpark();
+    }
     drop(listener);
     for (s, h) in clients {
         let _ = s.shutdown(Shutdown::Both);

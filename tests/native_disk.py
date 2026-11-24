@@ -236,7 +236,7 @@ def exercise(args, work):
         assert c.run("sha256sum /psios-deployment.json").split()[0] == deployment["deployment_manifest_sha256"]
         payload = ("/bin/psiosd", "/bin/psiosctl", "/psios-source", "/psios-init",
                    "/psios-disk-uuid", "/psios-home-uuid", "/psios-shutdown", "/psios-dhcp", "/psios-dhcp-event",
-                   "/psios-storage", "/psios-storage-layout")
+                   "/psios-storage", "/psios-storage-layout", "/psios-enroll")
         assert set(manifest["payload_sha256"]) == set(payload)
         for name in payload:
             assert c.run(f"sha256sum {name}").split()[0] == manifest["payload_sha256"][name]

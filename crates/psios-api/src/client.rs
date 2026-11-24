@@ -37,6 +37,14 @@ pub struct Client {
     service_uid: u32,
 }
 
+/// States at which a completion wait returns control to the task operator.
+pub fn task_wait_ready(task: &Value) -> bool {
+    matches!(
+        task["lifecycle"].as_str(),
+        Some("Succeeded" | "Failed" | "Cancelled" | "Paused" | "WaitingApproval")
+    )
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ArtifactChunk {
@@ -189,16 +197,35 @@ impl Client {
     }
     pub fn wait(&self, task: &str, timeout: Duration) -> ApiResult<Value> {
         let start = std::time::Instant::now();
+        let mut legacy = false;
         loop {
-            let v = self.call("Task.Get", json!({"id": task}))?;
-            match v["lifecycle"].as_str() {
-                Some("Succeeded" | "Failed" | "Cancelled" | "Paused" | "WaitingApproval") => {
-                    return Ok(v);
+            let left = timeout.saturating_sub(start.elapsed());
+            let mut polled = legacy || left.is_zero();
+            let result = if polled {
+                self.call("Task.Get", json!({"id": task}))?
+            } else {
+                let timeout_ms = left.as_millis().clamp(1, 10_000) as u64;
+                match self.call("Task.Wait", json!({"id": task, "timeout_ms":timeout_ms})) {
+                    Ok(result) => result,
+                    Err(error)
+                        if matches!(error.code.as_str(), "QueueFull" | "UnsupportedCapability") =>
+                    {
+                        legacy = error.code == "UnsupportedCapability";
+                        polled = true;
+                        self.call("Task.Get", json!({"id": task}))?
+                    }
+                    Err(error) => return Err(error),
                 }
-                _ if start.elapsed() >= timeout => {
-                    return Err(ApiError::new("DeadlineExceeded", "wait deadline reached").into());
-                }
-                _ => std::thread::sleep(Duration::from_millis(60)),
+            };
+            if task_wait_ready(&result) {
+                return Ok(result);
+            }
+            let left = timeout.saturating_sub(start.elapsed());
+            if left.is_zero() {
+                return Err(ApiError::new("DeadlineExceeded", "wait deadline reached").into());
+            }
+            if polled {
+                std::thread::sleep(left.min(Duration::from_millis(125)));
             }
         }
     }

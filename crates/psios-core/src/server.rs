@@ -19,7 +19,54 @@ use std::{
 };
 
 type Shared = Arc<Mutex<Store>>;
-type WaitCondition = fn(&Value) -> bool;
+
+enum WaitCondition {
+    Items(&'static str),
+    Available,
+    Task(Option<i64>),
+}
+
+fn task_revision(value: &str) -> Option<i64> {
+    let revision = value.strip_prefix('r')?.parse::<i64>().ok()?;
+    (revision > 0 && value == format!("r{revision}")).then_some(revision)
+}
+
+impl WaitCondition {
+    fn task(params: &mut Value) -> Result<Self> {
+        let version = params
+            .as_object_mut()
+            .and_then(|fields| fields.remove("after_version"));
+        let version =
+            match version {
+                None | Some(Value::Null) => None,
+                Some(value) => Some(value.as_str().and_then(task_revision).ok_or_else(|| {
+                    err("InvalidArgument", "after_version must be a task revision")
+                })?),
+            };
+        Ok(Self::Task(version))
+    }
+
+    fn ready(&self, value: &Value) -> Result<bool> {
+        match self {
+            Self::Items(key) => Ok(value[key].as_array().is_some_and(|items| !items.is_empty())),
+            Self::Available => Ok(value["available"] == true),
+            Self::Task(None) => Ok(psios_api::task_wait_ready(value)),
+            Self::Task(Some(after)) => {
+                let current = value["task_revision"]
+                    .as_str()
+                    .and_then(task_revision)
+                    .ok_or_else(|| err("RecoveryRequired", "task revision is unavailable"))?;
+                crate::require(
+                    current >= *after,
+                    "PreconditionFailed",
+                    "task wait revision is ahead of current state",
+                )?;
+                Ok(current > *after)
+            }
+        }
+    }
+}
+
 fn state(s: &Shared) -> Result<MutexGuard<'_, Store>> {
     s.lock()
         .map_err(|_| err("RecoveryRequired", "authority mutex poisoned"))
@@ -36,7 +83,7 @@ fn ensure_peer_connected(stream: &UnixStream) -> Result<()> {
             .revents()
             .intersects(PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL),
         "DependencyUnavailable",
-        "model worker disconnected before it could receive a lease",
+        "client disconnected while waiting for the authority",
     )
 }
 fn connection(s: &Shared, stream: &mut UnixStream, stop: &AtomicBool) -> Result<()> {
@@ -50,7 +97,7 @@ fn connection(s: &Shared, stream: &mut UnixStream, stop: &AtomicBool) -> Result<
     let mut rid = id("request");
     let result = (|| -> Result<Value> {
         let bytes = read_frame(stream)?;
-        let r: Request = serde_json::from_value(parse(&bytes)?)?;
+        let mut r: Request = serde_json::from_value(parse(&bytes)?)?;
         crate::label(&r.request_id)?;
         rid = r.request_id.clone();
         if r.method == crate::storage::export::METHOD {
@@ -59,26 +106,27 @@ fn connection(s: &Shared, stream: &mut UnixStream, stop: &AtomicBool) -> Result<
             return state(s)?.finish_export(peer, &r, read);
         }
         let wait: Option<(&str, WaitCondition)> = match r.method.as_str() {
-            "Event.Wait" => Some(("Event.Poll", |page| {
-                !page["events"].as_array().unwrap().is_empty()
-            })),
-            "Mailbox.Wait" => Some(("Mailbox.Read", |page| {
-                !page["items"].as_array().unwrap().is_empty()
-            })),
-            "Model.WaitNext" => Some(("Model.ClaimNext", |page| page["available"] == true)),
+            "Event.Wait" => Some(("Event.Poll", WaitCondition::Items("events"))),
+            "Mailbox.Wait" => Some(("Mailbox.Read", WaitCondition::Items("items"))),
+            "Model.WaitNext" => Some(("Model.ClaimNext", WaitCondition::Available)),
+            "Task.Wait" => Some(("Task.Get", WaitCondition::task(&mut r.params)?)),
             _ => None,
         };
         if let Some((method, ready)) = wait {
             let changes = state(s)?.changes.clone();
-            return crate::watch::poll(&changes, stop, r, method, ready, |request| {
-                let mut authority = state(s)?;
-                if method == "Model.ClaimNext" {
-                    // A long poll can outlive its worker. Check before each
-                    // budget reservation. A write-half shutdown still permits replies.
+            return crate::watch::poll(
+                &changes,
+                stop,
+                r,
+                method,
+                |page| ready.ready(page),
+                |request| {
+                    let mut authority = state(s)?;
+                    // A write-half shutdown still permits a response.
                     ensure_peer_connected(stream)?;
-                }
-                authority.request(peer, request)
-            });
+                    authority.request(peer, request)
+                },
+            );
         }
         state(s)?.request(peer, r)
     })();

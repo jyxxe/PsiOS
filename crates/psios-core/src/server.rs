@@ -116,6 +116,9 @@ fn connection(s: &Shared, stream: &mut UnixStream, stop: &AtomicBool) -> Result<
         }
         let wait: Option<(&str, WaitCondition)> = match r.method.as_str() {
             "Event.Wait" => Some(("Event.Poll", WaitCondition::Items("events"))),
+            "Resource.Watch" if r.params.get("timeout_ms").is_some() => {
+                Some(("Resource.Watch", WaitCondition::Items("events")))
+            }
             "Mailbox.Wait" => Some(("Mailbox.Read", WaitCondition::Items("items"))),
             "Model.WaitNext" => Some(("Model.ClaimNext", WaitCondition::Available)),
             "Task.Wait" => Some(("Task.Get", WaitCondition::task(&mut r.params)?)),

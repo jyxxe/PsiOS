@@ -6,7 +6,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use psios_api::{VERSION, contract};
 use ring::hmac;
 use rusqlite::{OptionalExtension, params};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 struct Cursor {
@@ -15,12 +15,32 @@ struct Cursor {
     epoch: String,
     incarnation: String,
     kind: String,
+    resource: Option<String>,
     snapshot: String,
     high: i64,
     position: i64,
     until: i64,
 }
+
+#[derive(Deserialize, Serialize)]
+struct CursorPayload(
+    String,
+    String,
+    i64,
+    i64,
+    i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")] Option<String>,
+);
+
 impl Cursor {
+    fn signing_mode(mode: &str, scoped: bool) -> &str {
+        match (mode, scoped) {
+            ("page", true) => "page-by-resource",
+            ("watch", true) => "watch-by-resource",
+            (mode, _) => mode,
+        }
+    }
+
     fn key(db: &Db<'_>, actor: &str, mode: &str, epoch: &str) -> Result<hmac::Key> {
         let root = hmac::Key::new(hmac::HMAC_SHA256, &db.keys[32..]);
         let scope = serde_json::to_vec(&("psios/cursor/1", actor, mode, epoch, &db.incarnation))?;
@@ -30,14 +50,16 @@ impl Cursor {
         ))
     }
     fn sign(&self, db: &Db<'_>) -> Result<String> {
-        let data = serde_json::to_vec(&(
-            &self.kind,
-            &self.snapshot,
+        let data = serde_json::to_vec(&CursorPayload(
+            self.kind.clone(),
+            self.snapshot.clone(),
             self.high,
             self.position,
             self.until,
+            self.resource.clone(),
         ))?;
-        let key = Self::key(db, &self.actor, &self.mode, &self.epoch)?;
+        let mode = Self::signing_mode(&self.mode, self.resource.is_some());
+        let key = Self::key(db, &self.actor, mode, &self.epoch)?;
         Ok(format!(
             "{}.{}",
             URL_SAFE_NO_PAD.encode(&data),
@@ -55,9 +77,11 @@ impl Cursor {
         let data = URL_SAFE_NO_PAD.decode(data).map_err(|_| bad())?;
         let tag = URL_SAFE_NO_PAD.decode(tag).map_err(|_| bad())?;
         let epoch = db.meta("epoch")?;
-        hmac::verify(&Self::key(db, actor, mode, &epoch)?, &data, &tag).map_err(|_| bad())?;
-        let (kind, snapshot, high, position, until) =
+        let CursorPayload(kind, snapshot, high, position, until, resource) =
             serde_json::from_slice(&data).map_err(|_| bad())?;
+        let signing_mode = Self::signing_mode(mode, resource.is_some());
+        hmac::verify(&Self::key(db, actor, signing_mode, &epoch)?, &data, &tag)
+            .map_err(|_| bad())?;
         if chrono::Utc::now().timestamp() >= until {
             return Err(bad());
         }
@@ -67,6 +91,7 @@ impl Cursor {
             epoch,
             incarnation: db.incarnation.clone(),
             kind,
+            resource,
             snapshot,
             high,
             position,
@@ -87,6 +112,7 @@ pub(crate) fn sign_position(
         epoch: db.meta("epoch")?,
         incarnation: db.incarnation.clone(),
         kind: scope.into(),
+        resource: None,
         snapshot: String::new(),
         high: 0,
         position,
@@ -103,7 +129,7 @@ pub(crate) fn read_position(db: &Db<'_>, actor: &str, scope: &str, token: &str) 
     )?;
     let c = Cursor::read(db, token, actor, "ordered-stream")?;
     require(
-        c.kind == scope,
+        c.kind == scope && c.resource.is_none(),
         "CursorExpired",
         "cursor outside authorized stream",
     )?;
@@ -114,6 +140,7 @@ pub(crate) fn read_position(db: &Db<'_>, actor: &str, scope: &str, token: &str) 
 #[serde(default, deny_unknown_fields)]
 struct List {
     kind: String,
+    id: Option<String>,
     cursor: Option<String>,
     limit: Option<u32>,
 }
@@ -134,10 +161,16 @@ pub fn list(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "InvalidArgument",
         "invalid kind filter",
     )?;
+    if let Some(id) = &p.id {
+        label(id)?;
+    }
     let mut c = if let Some(token) = p.cursor {
         let c = Cursor::read(db, &token, actor, "page")?;
         require(
-            p.kind.is_empty() || p.kind == c.kind,
+            (p.kind.is_empty() || p.kind == c.kind)
+                && p.id
+                    .as_ref()
+                    .is_none_or(|id| c.resource.as_ref() == Some(id)),
             "CursorExpired",
             "query filter changed",
         )?;
@@ -149,6 +182,7 @@ pub fn list(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             epoch: db.meta("epoch")?,
             incarnation: db.incarnation.clone(),
             kind: p.kind,
+            resource: p.id,
             snapshot: uuid::Uuid::new_v4().simple().to_string(),
             high: db
                 .c
@@ -160,8 +194,9 @@ pub fn list(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         }
     };
     let mut docs=db.c.prepare("SELECT * FROM versions v WHERE v.seq<=?1 AND v.seq>?2 AND (?3='' OR v.kind=?3)
+      AND (?7 IS NULL OR v.id=?7)
       AND (?4=?5 OR v.owner IN (?4,'system')) AND NOT EXISTS(SELECT 1 FROM versions w WHERE w.id=v.id AND w.seq<=?1 AND w.rev>v.rev)
-      ORDER BY v.seq LIMIT ?6")?.query_map(params![c.high,c.position,c.kind,actor,policy::OWNER,n+1],|r|Ok((r.get::<_,i64>("seq")?,row(r)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+      ORDER BY v.seq LIMIT ?6")?.query_map(params![c.high,c.position,c.kind,actor,policy::OWNER,n+1,c.resource],|r|Ok((r.get::<_,i64>("seq")?,row(r)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
     let complete = docs.len() <= n as usize;
     docs.truncate(n as usize);
     if let Some(d) = docs.last() {
@@ -200,8 +235,20 @@ pub fn poll(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let n = limit(p.limit)?;
     let auth = db.meta("authority")?;
     let context = db.get(policy::PROFILE)?.reference();
-    let mut stmt=db.c.prepare("SELECT * FROM versions WHERE seq>?1 AND (?2='' OR kind=?2) AND (?3=?4 OR owner IN (?3,'system')) ORDER BY seq LIMIT ?5")?;
-    let mut rows = stmt.query(params![c.position, c.kind, actor, policy::OWNER, n])?;
+    let query = if c.resource.is_some() {
+        "SELECT * FROM versions WHERE seq>?1 AND (?2='' OR kind=?2) AND (?3=?4 OR owner IN (?3,'system')) AND id=?6 ORDER BY seq LIMIT ?5"
+    } else {
+        "SELECT * FROM versions WHERE seq>?1 AND (?2='' OR kind=?2) AND (?3=?4 OR owner IN (?3,'system')) AND ?6 IS NULL ORDER BY seq LIMIT ?5"
+    };
+    let mut stmt = db.c.prepare_cached(query)?;
+    let mut rows = stmt.query(params![
+        c.position,
+        c.kind,
+        actor,
+        policy::OWNER,
+        n,
+        c.resource
+    ])?;
     let mut events = Vec::new();
     while let Some(r) = rows.next()? {
         let d = row(r)?;
@@ -253,9 +300,13 @@ pub fn ack(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         let corrupt = || err("RecoveryRequired", "stored checkpoint is unreadable");
         let (payload, _) = old.split_once('.').ok_or_else(corrupt)?;
         let payload = URL_SAFE_NO_PAD.decode(payload).map_err(|_| corrupt())?;
-        let (kind, snapshot, _, position, _): (String, String, i64, i64, i64) =
+        let CursorPayload(kind, snapshot, _, position, _, resource) =
             serde_json::from_slice(&payload).map_err(|_| corrupt())?;
-        require(kind == next.kind, "Conflict", "consumer filter changed")?;
+        require(
+            kind == next.kind && resource == next.resource,
+            "Conflict",
+            "consumer filter changed",
+        )?;
         require(
             (snapshot == next.snapshot && position <= next.position)
                 || (snapshot != next.snapshot
@@ -278,4 +329,17 @@ pub fn offset(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         )
         .optional()?;
     Ok(json!({"cursor": cursor}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unscoped_tokens_keep_the_original_payload() {
+        let legacy = r#"["Task","original-snapshot",42,29,1000]"#;
+        let decoded: CursorPayload = serde_json::from_str(legacy).unwrap();
+        assert!(decoded.5.is_none());
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), legacy);
+    }
 }

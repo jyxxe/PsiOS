@@ -115,16 +115,16 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
                 )),
             }
         }
-        "Resource.Get" | "Resource.Resolve" | "Resource.List" | "Event.Poll" | "Event.Ack"
-        | "Event.Offset" => {
+        "Resource.Get" | "Resource.Resolve" | "Resource.List" | "Resource.Watch" | "Event.Poll"
+        | "Event.Ack" | "Event.Offset" => {
             policy::can(db, actor, "resource.read")?;
             policy::can(db, actor, "task.read")?;
-            if method.starts_with("Event.") {
+            if method == "Resource.Watch" || method.starts_with("Event.") {
                 policy::can(db, actor, "event.read")?
             }
             match method {
                 "Resource.List" => events::list(db, actor, p),
-                "Event.Poll" => events::poll(db, actor, p),
+                "Event.Poll" | "Resource.Watch" => events::poll(db, actor, p),
                 "Event.Ack" => events::ack(db, actor, p),
                 "Event.Offset" => events::offset(db, actor, p),
                 _ => {

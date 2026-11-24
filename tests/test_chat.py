@@ -5,6 +5,7 @@ import os
 import signal
 import socket
 import struct
+import subprocess
 import time
 import unittest
 
@@ -101,6 +102,11 @@ class DirectChatTests(unittest.TestCase):
             self.assertLess(time.monotonic(), end)
             time.sleep(0.05)
         original, = items
+        unrelated = n.call("Grant.Issue", dict(principal_id=self.alice["principal_id"], actions=["system.status"],
+                           tool_targets=["profile-local"], units=1, ttl_seconds=60))
+        n.call("Grant.Revoke", target(unrelated["grant_ref"]))
+        self.assertEqual(self.window(room, self.a), a_window)
+        self.assertEqual(self.window(room, self.b), b_window)
         n.stop(signal.SIGKILL)
         n.start()
         with ThreadPoolExecutor(max_workers=4) as threads:
@@ -128,6 +134,26 @@ class DirectChatTests(unittest.TestCase):
         self.rejected("PermissionDenied", "Message.Get", dict(conversation_id=room["id"], message_id=answer["message_id"]), self.e)
         self.assertEqual(n.call("Resource.List", {"kind": "Message"})["items"], [])
         self.rejected("NotFound", "Resource.Get", {"id": answer["message_id"]})
+
+    def test_owner_credential_recovery_and_peer_disable_close_send_windows(self):
+        n = self.node
+        n.call("Grant.Issue", dict(principal_id="local-owner", actions=ACTIONS, units=1, ttl_seconds=90))
+        invitation = n.call("Conversation.OpenDirect", self.invitation())
+        room = self.respond(invitation)
+        accepted = self.message(room, self.window(room, self.b), "accepted", "keep this message", self.b)
+        first = n.call("Message.Send", accepted, self.b)
+        original_owner = n.owner
+        n.stop()
+        subprocess.run([*n.daemon, "recover-owner"], check=True, capture_output=True)
+        n.owner = (n.witness / "owner.token").read_text()
+        self.assertNotEqual(n.owner, original_owner)
+        n.start()
+        self.rejected("IdempotencyKeyExpired", "Message.Send", accepted, self.b)
+        self.assertEqual(self.page(room, None)["items"][0]["message"]["message_id"], first["message_id"])
+        pending = self.message(room, self.window(room, None), "pending", "permission will change", None)
+        n.call("Principal.Revoke", target(n.get(self.bob["principal_id"])["reference"]))
+        self.rejected("PermissionDenied", "Message.Send", pending)
+        self.assertEqual(len(self.page(room, None)["items"]), 1)
 
     def test_actor_and_conversation_bound_cursors_and_read_acknowledgments(self):
         n = self.node

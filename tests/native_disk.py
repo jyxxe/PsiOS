@@ -146,15 +146,15 @@ def stage_guest_chat_token(c, secret):
 
 def check_native_chat(c):
     agent = call(c, "Agent.Register", {"name": "native-conversation-peer"})
-    call(c, "Grant.Issue", dict(principal_id="local-owner", units=1, ttl_seconds=120,
+    call(c, "Grant.Issue", dict(principal_id="local-owner", units=1, ttl_seconds=600,
                                actions=["chat.invite", "chat.read", "chat.send"]))
-    call(c, "Grant.Issue", dict(principal_id=agent["principal_id"], units=1, ttl_seconds=120, actions=["chat.read"]))
+    call(c, "Grant.Issue", dict(principal_id=agent["principal_id"], units=1, ttl_seconds=600, actions=["chat.read"]))
     token = stage_guest_chat_token(c, agent["token"])
     invite = call(c, "Conversation.OpenDirect", dict(key="native-handoff", name="serial handoff",
                   recipient_principal_id=agent["principal_id"], ttl_seconds=60))
     room = call(c, "Conversation.Respond", dict(id=invite["id"], accept=True,
                 expected_resource_version=invite["resource_version"]), token)
-    window = call(c, "Message.OpenSendWindow", dict(id=room["id"], ttl_seconds=110))
+    window = call(c, "Message.OpenSendWindow", dict(id=room["id"], ttl_seconds=540))
     prepared = call(c, "Message.Prepare", dict(conversation_id=room["id"],
                     client_send_id=window["namespace"] + ":original", text="offline handoff"))
     receipt = call(c, "Message.Send", prepared)
@@ -414,6 +414,7 @@ def exercise(args, work):
         assert int(c.run("stat -c %s ./full")) >= 40 * 1024 * 1024
         check_native_network(c)
         workflow = check_native_workflow(c)
+        # Unrelated tool grants issued by the checks above must preserve chat sends.
         first = check_state(c)
         assert not first[1]["deduplicated"]
         pending_schedule = schedule_across_power_cut(c)

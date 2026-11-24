@@ -3,6 +3,7 @@ use super::{
     kernel::Observer,
     namespace,
     snapshot::{self, Cursor},
+    user_namespace_inode,
 };
 use crate::{Result, err, host::Work, now, require};
 use netlink_packet_core::Nla;
@@ -12,7 +13,7 @@ use netlink_packet_route::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{fs, net::IpAddr, os::unix::fs::MetadataExt};
+use std::net::IpAddr;
 
 const FRA_PAD: u16 = 18;
 
@@ -185,7 +186,7 @@ fn collect(q: &RuleQuery) -> Result<Vec<Rule>> {
 
 pub fn observe_rules(q: &RuleQuery, w: &Work) -> Result<Value> {
     let namespace = namespace()?;
-    let user_namespace_inode = fs::metadata("/proc/self/ns/user")?.ino().to_string();
+    let user_namespace_inode = user_namespace_inode()?;
     let rules = collect(q)?;
     let digest = psios_api::sha256(&serde_json::to_vec(&(
         "psios/node.routing_rules/1",

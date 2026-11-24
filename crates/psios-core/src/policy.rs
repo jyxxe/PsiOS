@@ -19,6 +19,7 @@ pub const TOOLS: &[&str] = &[
     "node.inventory",
     "node.interfaces",
     "node.routes",
+    "node.route_lookup",
     "node.routing_rules",
     "node.processes",
     "node.devices",
@@ -69,6 +70,7 @@ pub fn readonly(tool: &str) -> bool {
             | "node.inventory"
             | "node.interfaces"
             | "node.routes"
+            | "node.route_lookup"
             | "node.routing_rules"
             | "node.processes"
             | "node.devices"
@@ -113,6 +115,7 @@ fn bootstrap_actions() -> Vec<String> {
                 **a,
                 "node.interfaces"
                     | "node.routes"
+                    | "node.route_lookup"
                     | "node.routing_rules"
                     | "backup.verify"
                     | schedule::ACTION

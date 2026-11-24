@@ -2,11 +2,13 @@
 from concurrent.futures import ThreadPoolExecutor
 import json
 import signal
+import socket
+import struct
 import subprocess
 import time
 import unittest
 
-from model_delivery import interrupt_worker_delivery
+from model_delivery import frame, interrupt_worker_delivery
 from support import Failure, Node, key, target
 
 
@@ -152,6 +154,28 @@ class ModelQueueTests(unittest.TestCase):
         self.n.call("Session.Cancel", target(first), self.agent["token"])
         admitted = self.open(peer, grant)
         self.assertEqual(self.status(admitted, peer)["session"]["lifecycle"], "AwaitingModel")
+
+    def test_disconnected_waiter_does_not_charge_a_later_session(self):
+        def request(stream, claim_key):
+            payload = json.dumps(dict(schema_version="1.0.0", request_id=key(), token=self.provider["token"],
+                method="Model.WaitNext", params=dict(model_ref=self.model, key=claim_key, timeout_ms=5000))).encode()
+            stream.connect(str(self.n.socket))
+            stream.sendall(struct.pack(">I", len(payload)) + payload)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as lost:
+            request(lost, "disconnected")
+            time.sleep(.15)
+        session = self.open()
+        time.sleep(.6)
+        self.assertEqual(self.status(session)["session"]["turn"], 0)
+        # A caller may finish sending and still receive its lease.
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connected:
+            connected.settimeout(3)
+            request(connected, "connected")
+            connected.shutdown(socket.SHUT_WR)
+            result = json.loads(frame(connected)[4:])["result"]
+        self.assertEqual(result["session_id"], session["resource_id"])
+        self.assertFalse(result["recovered"])
+        self.finish(result)
 
     def test_detached_provider_recovers_exact_decision_before_claiming_new_work(self):
         n = self.n

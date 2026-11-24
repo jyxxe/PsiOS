@@ -1,5 +1,6 @@
 use crate::{Config, Result, Store, broker, err, schedule, workflow};
 use psios_api::{ApiError, Request, id, parse, read_frame, write_frame};
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use serde_json::{Value, json};
 use std::{
     fs::{self, File, OpenOptions, Permissions},
@@ -22,6 +23,21 @@ type WaitCondition = fn(&Value) -> bool;
 fn state(s: &Shared) -> Result<MutexGuard<'_, Store>> {
     s.lock()
         .map_err(|_| err("RecoveryRequired", "authority mutex poisoned"))
+}
+fn ensure_peer_connected(stream: &UnixStream) -> Result<()> {
+    let mut fds = [PollFd::new(stream, PollFlags::empty())];
+    let now = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    poll(&mut fds, Some(&now)).map_err(std::io::Error::from)?;
+    crate::require(
+        !fds[0]
+            .revents()
+            .intersects(PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL),
+        "DependencyUnavailable",
+        "model worker disconnected before it could receive a lease",
+    )
 }
 fn connection(s: &Shared, stream: &mut UnixStream, stop: &AtomicBool) -> Result<()> {
     let time = Some(Duration::from_secs(3));
@@ -50,7 +66,13 @@ fn connection(s: &Shared, stream: &mut UnixStream, stop: &AtomicBool) -> Result<
         if let Some((method, ready)) = wait {
             let changes = state(s)?.changes.clone();
             return crate::watch::poll(&changes, stop, r, method, ready, |request| {
-                state(s)?.request(peer, request)
+                let mut authority = state(s)?;
+                if method == "Model.ClaimNext" {
+                    // A long poll can outlive its worker. Check before each
+                    // budget reservation. A write-half shutdown still permits replies.
+                    ensure_peer_connected(stream)?;
+                }
+                authority.request(peer, request)
             });
         }
         state(s)?.request(peer, r)

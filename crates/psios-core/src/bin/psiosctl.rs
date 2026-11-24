@@ -142,10 +142,18 @@ fn input(path: &str) -> Result<Value, Box<dyn std::error::Error>> {
     Ok(parse(&bytes)?)
 }
 
-fn model_provider(path: Option<&str>) -> Result<Box<dyn SessionModel>, Box<dyn std::error::Error>> {
+fn model_provider(
+    path: Option<&str>,
+    expected_model: Option<&ResourceRef>,
+) -> Result<Box<dyn SessionModel>, Box<dyn std::error::Error>> {
     if let Some(path) = path {
         let model: LocalInventoryModel = serde_json::from_value(input(path)?)?;
         model.validate()?;
+        if expected_model.is_some_and(|reference| model.model_ref != *reference) {
+            return Err(
+                "local inference configuration must name the worker's Model revision".into(),
+            );
+        }
         Ok(Box::new(model))
     } else {
         Ok(Box::new(psios_api::NodeSurvey))
@@ -177,7 +185,7 @@ fn model_worker(
                 if e.retryable
                     || matches!(
                         e.code.as_str(),
-                        "Fenced" | "OutcomeUnknown" | "DependencyUnavailable"
+                        "Fenced" | "OutcomeUnknown" | "DependencyUnavailable" | "DeadlineExceeded"
                     ) =>
             {
                 eprintln!("model worker: {}", e.code);
@@ -227,7 +235,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             decision_dir,
             local_model,
         } => {
-            let provider = model_provider(local_model.as_deref())?;
+            let provider = model_provider(local_model.as_deref(), None)?;
             match decision_dir {
                 Some(dir) => c.model_turn_durable(&session, &key, &*provider, &dir)?,
                 None => c.model_turn(&session, &key, &*provider)?,
@@ -241,7 +249,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             once,
         } => {
             let reference = serde_json::from_value(input(&model)?)?;
-            let provider = model_provider(local_model.as_deref())?;
+            let provider = model_provider(local_model.as_deref(), Some(&reference))?;
             return model_worker(
                 &c,
                 &reference,

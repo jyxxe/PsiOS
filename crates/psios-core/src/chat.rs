@@ -1,5 +1,6 @@
-//! Local direct conversations using the Core identity and commit witness.
+//! Local conversations using the Core identity and commit witness.
 mod message;
+mod room;
 
 use crate::{ById, Conditional, Result, db::Db, decode, err, label, now, policy, require};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -9,11 +10,13 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 pub use message::{ack, get_message, list_messages, open_window, prepare, send};
+pub use room::{invite, leave, open as open_room, remove};
 pub const INVITE: &str = "chat.invite";
 pub const READ: &str = "chat.read";
 pub const SEND: &str = "chat.send";
 
-const SELECT: &str = "SELECT id,inviter,invitee,name,phase,revision,last_seq,invitation_until,created_at,creation_digest FROM direct_chats";
+const SELECT: &str = "SELECT d.id,inviter,invitee,name,phase,revision,l.last_seq,invitation_until,created_at,
+                     creation_digest,l.writer_epoch FROM direct_chats d JOIN chat_logs l ON l.id=d.id";
 
 struct Chat {
     id: String,
@@ -26,6 +29,7 @@ struct Chat {
     invitation_until: i64,
     created_at: String,
     creation_digest: String,
+    writer_epoch: i64,
 }
 
 impl Chat {
@@ -49,6 +53,7 @@ impl Chat {
             invitation_until: row.get(7)?,
             created_at: row.get(8)?,
             creation_digest: row.get(9)?,
+            writer_epoch: row.get(10)?,
         })
     }
 
@@ -113,12 +118,65 @@ fn chat_id(prefix: &str, fields: Value) -> String {
 fn find(db: &Db<'_>, id: &str) -> Result<Option<Chat>> {
     Ok(db
         .c
-        .query_row(&format!("{SELECT} WHERE id=?1"), [id], Chat::from_row)
+        .query_row(&format!("{SELECT} WHERE d.id=?1"), [id], Chat::from_row)
         .optional()?)
 }
 
+struct Access {
+    id: String,
+    writable: bool,
+    last_seq: i64,
+    writer_epoch: i64,
+    membership_revision: i64,
+    membership: String,
+    read_after: i64,
+    peer: Option<String>,
+}
+
+fn access(db: &Db<'_>, actor: &str, id: &str) -> Result<Access> {
+    if room::is_room(id) {
+        return room::access(db, actor, id);
+    }
+    let chat = active_member(db, actor, id)?;
+    Ok(Access {
+        peer: Some(chat.peer(actor).to_owned()),
+        membership_revision: chat.membership_revision(),
+        id: chat.id,
+        writable: chat.phase == "Active",
+        last_seq: chat.last_seq,
+        writer_epoch: chat.writer_epoch,
+        membership: String::new(),
+        read_after: 0,
+    })
+}
+
+fn conversation_capacity(db: &Db<'_>) -> Result<()> {
+    let total: u32 =
+        db.c.query_row("SELECT count(*) FROM chat_logs", [], |row| row.get(0))?;
+    require(
+        total < 512,
+        "QueueFull",
+        "node conversation capacity reached",
+    )
+}
+
+fn principal_capacity(db: &Db<'_>, actor: &str, current: Option<&str>) -> Result<()> {
+    let count: u32 = db.c.query_row(
+        "SELECT (SELECT count(*) FROM direct_chats WHERE inviter=?1 OR invitee=?1)
+              + (SELECT count(DISTINCT conversation) FROM room_memberships
+                 WHERE principal=?1 AND (?2 IS NULL OR conversation!=?2))",
+        params![actor, current],
+        |row| row.get(0),
+    )?;
+    require(
+        count < 64,
+        "QueueFull",
+        "principal conversation capacity reached",
+    )
+}
+
 fn member(db: &Db<'_>, actor: &str, id: &str) -> Result<Chat> {
-    policy::can(db, actor, READ)?;
+    policy::can_target(db, actor, READ, id)?;
     find(db, id)?
         .filter(|chat| chat.inviter == actor || chat.invitee == actor)
         .ok_or_else(|| {
@@ -149,8 +207,6 @@ struct Open {
 }
 
 pub fn open(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
-    policy::can(db, actor, INVITE)?;
-    policy::can(db, actor, READ)?;
     let p: Open = decode(request)?;
     label(&p.key)?;
     label(&p.name)?;
@@ -160,6 +216,8 @@ pub fn open(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
         "a direct invitation requires another principal and a bounded lifetime",
     )?;
     let id = chat_id("direct", json!([db.meta("authority")?, actor, p.key]));
+    policy::can_target(db, actor, INVITE, &id)?;
+    policy::can_target(db, actor, READ, &id)?;
     let digest = sha256(&canonical(request));
     if let Some(chat) = find(db, &id)? {
         require(
@@ -171,26 +229,12 @@ pub fn open(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
     }
     policy::active(db, &p.recipient_principal_id)?;
     db.cfg.check_admission_space()?;
-    let total: u32 =
-        db.c.query_row("SELECT count(*) FROM direct_chats", [], |row| row.get(0))?;
-    require(
-        total < 512,
-        "QueueFull",
-        "node conversation capacity reached",
-    )?;
+    conversation_capacity(db)?;
     for person in [actor, &p.recipient_principal_id] {
-        let count: u32 = db.c.query_row(
-            "SELECT count(*) FROM direct_chats WHERE inviter=?1 OR invitee=?1",
-            [person],
-            |row| row.get(0),
-        )?;
-        require(
-            count < 64,
-            "QueueFull",
-            "principal conversation capacity reached",
-        )?;
+        principal_capacity(db, person, None)?;
     }
     let until = Utc::now().timestamp() + i64::from(p.ttl_seconds);
+    db.c.execute("INSERT INTO chat_logs(id) VALUES(?1)", [&id])?;
     db.c.execute(
         "INSERT INTO direct_chats(id,inviter,invitee,name,invitation_until,created_at,creation_digest)
          VALUES(?1,?2,?3,?4,?5,?6,?7)",
@@ -201,6 +245,9 @@ pub fn open(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
 
 pub fn get(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
     let p: ById = decode(request)?;
+    if room::is_room(&p.id) {
+        return room::get(db, actor, &p.id);
+    }
     Ok(member(db, actor, &p.id)?.view())
 }
 
@@ -211,12 +258,18 @@ pub fn list(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
     let _: List = decode(request)?;
     policy::can(db, actor, READ)?;
     let mut statement = db.c.prepare(&format!(
-        "{SELECT} WHERE inviter=?1 OR invitee=?1 ORDER BY created_at,id"
+        "{SELECT} WHERE inviter=?1 OR invitee=?1 ORDER BY created_at,d.id"
     ))?;
-    let items = statement
-        .query_map([actor], Chat::from_row)?
-        .map(|row| row.map(|chat| chat.view()))
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut items = Vec::new();
+    for row in statement.query_map([actor], Chat::from_row)? {
+        let chat = row?;
+        match policy::can_target(db, actor, READ, &chat.id) {
+            Ok(()) => items.push(chat.view()),
+            Err(error) if error.0.code == "PermissionDenied" => {}
+            Err(error) => return Err(error),
+        }
+    }
+    items.extend(room::list(db, actor)?);
     Ok(json!({"items": items}))
 }
 
@@ -226,10 +279,19 @@ struct Respond {
     id: String,
     expected_resource_version: String,
     accept: bool,
+    membership_id: Option<String>,
 }
 
 pub fn respond(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
     let p: Respond = decode(request)?;
+    if room::is_room(&p.id) {
+        return room::respond(db, actor, p);
+    }
+    require(
+        p.membership_id.is_none(),
+        "InvalidArgument",
+        "direct conversations use a fixed invitation",
+    )?;
     let chat = member(db, actor, &p.id)?;
     require(
         chat.invitee == actor,
@@ -255,6 +317,9 @@ pub fn respond(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
 
 pub fn archive(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
     let p: Conditional = decode(request)?;
+    if room::is_room(&p.id) {
+        return room::archive(db, actor, p);
+    }
     let chat = active_member(db, actor, &p.id)?;
     require(
         chat.inviter == actor,
@@ -268,6 +333,25 @@ pub fn archive(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
         "conversation already archived",
     )?;
     transition(db, actor, chat, "Archived")
+}
+
+pub(crate) fn principal_revoked(db: &Db<'_>, principal: &str) -> Result<()> {
+    db.c.execute(
+        "UPDATE chat_rooms SET phase='Archived',revision=revision+1 WHERE owner=?1 AND phase='Active'",
+        [principal],
+    )?;
+    db.c.execute(
+        "UPDATE chat_rooms SET revision=revision+1,membership_revision=membership_revision+1
+         WHERE id IN (SELECT conversation FROM room_memberships WHERE principal=?1
+                       AND role='Member' AND phase IN('Invited','Active'))",
+        [principal],
+    )?;
+    db.c.execute(
+        "UPDATE room_memberships SET phase='Removed',reason='PrincipalRevoked'
+         WHERE principal=?1 AND role='Member' AND phase IN('Invited','Active')",
+        [principal],
+    )?;
+    Ok(())
 }
 
 fn transition(db: &Db<'_>, actor: &str, chat: Chat, phase: &str) -> Result<Value> {

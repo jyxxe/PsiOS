@@ -542,6 +542,7 @@ pub fn disable(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let mut body = d.body.clone();
     body["lifecycle"] = json!("Revoked");
     db.c.execute("DELETE FROM credentials WHERE principal=?1", [&d.id])?;
+    chat::principal_revoked(db, &d.id)?;
     epoch(db)?;
     Ok(db.status(&d, body)?.reference())
 }

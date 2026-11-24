@@ -1,5 +1,6 @@
 //! Single-node directory volumes. A writer or an uncertain operation retains the volume hold.
 pub mod files;
+mod restore_proof;
 mod staging;
 use crate::{
     config::{Config, new_file, private_dir, replace},
@@ -176,9 +177,10 @@ fn create_volume(w: &Work, restore: Option<&Doc>) -> Result<Value> {
     let stage = staging::create(&parent)?;
     let data = stage.path().join("data");
     private_dir(&data, true)?;
-    if let Some(backup) = restore {
-        inspect_backup(&w.cfg, backup, Some(&data))?;
-    }
+    let proof = match restore {
+        Some(backup) => inspect_backup(&w.cfg, backup, Some(&data))?["restore_proof"].clone(),
+        None => Value::Null,
+    };
     new_file(
         &stage.path().join("identity"),
         &canonical(&json!([vid, inc])),
@@ -193,7 +195,8 @@ fn create_volume(w: &Work, restore: Option<&Doc>) -> Result<Value> {
         "incarnation": inc,
         "device": m.dev().to_string(),
         "inode": m.ino().to_string(),
-        "capacity": capacity.to_string()
+        "capacity": capacity.to_string(),
+        "restore_proof": proof
     }))
 }
 fn child(dir: &File, name: impl rustix::path::Arg, flags: OFlags) -> Result<File> {
@@ -271,7 +274,7 @@ struct BackupTimes {
 }
 
 struct Capture<'a> {
-    out: &'a Path,
+    out: Option<&'a Path>,
     entries: Vec<(Entry, fs::Metadata)>,
     total: u64,
 }
@@ -367,15 +370,23 @@ impl Capture<'_> {
                     "QuotaExceeded",
                     "backup exceeds 256 MiB",
                 )?;
-                let mut dst =
-                    File::create_new(self.out.join(format!("blob-{}", self.entries.len())))?;
-                let (len, digest) = copy_hash(&mut src, &mut dst, MAX_BACKUP - self.total)?;
+                let blob = self
+                    .out
+                    .map(|out| File::create_new(out.join(format!("blob-{}", self.entries.len()))))
+                    .transpose()?;
+                let max = MAX_BACKUP - self.total;
+                let (len, digest) = if let Some(mut dst) = blob {
+                    let copied = copy_hash(&mut src, &mut dst, max)?;
+                    dst.sync_all()?;
+                    copied
+                } else {
+                    copy_hash(&mut src, &mut std::io::sink(), max)?
+                };
                 require(
                     len == m.len() && same_source(&m, &src.metadata()?),
                     "Conflict",
                     "volume changed during capture",
                 )?;
-                dst.sync_all()?;
                 entry.digest = Some(digest);
                 entry.bytes = len;
                 self.total += len;
@@ -443,7 +454,7 @@ fn backup(w: &Work) -> Result<Value> {
     let stage = staging::create(&parent)?;
     let started = now();
     let mut capture = Capture {
-        out: stage.path(),
+        out: Some(stage.path()),
         entries: vec![],
         total: 0,
     };
@@ -636,6 +647,8 @@ fn inspect_backup(cfg: &Config, b: &Doc, destination: Option<&Path>) -> Result<V
         "PreconditionFailed",
         "backup length mismatch",
     )?;
+    let mut report = json!({"backup_ref":b.reference(), "manifest_digest":b.body["manifest_digest"],
+                            "verified_at":now(), "entries":m.entries.len(), "bytes":m.total_bytes});
     if let Some(root) = destination {
         for (path, mode, mtime) in dirs.into_iter().rev() {
             let (parent, name) = entry_parent(&root, path)?;
@@ -651,11 +664,9 @@ fn inspect_backup(cfg: &Config, b: &Doc, destination: Option<&Path>) -> Result<V
             root.sync_all()?;
         }
         cfg.check_restore_space(&root, std::iter::empty(), 0)?;
+        report["restore_proof"] = serde_json::to_value(restore_proof::from_manifest(&m)?)?;
     }
-    Ok(
-        json!({"backup_ref":b.reference(), "manifest_digest":b.body["manifest_digest"],
-              "verified_at":now(), "entries":m.entries.len(), "bytes":m.total_bytes}),
-    )
+    Ok(report)
 }
 // Names are resolved beneath a pinned directory. A nested mount is never traversed.
 fn remove_contents(dir: &File, depth: usize, staging: bool) -> Result<()> {
@@ -711,7 +722,7 @@ pub fn perform(w: &Work) -> Result<Value> {
         | Action::Append(_)
         | Action::MakeDir(_)
         | Action::RemoveEntry(_) => files::perform(w),
-        Action::Activate(_) => Ok(json!({"validated": true})),
+        Action::Activate(_) => restore_proof::verify(w),
         Action::Create { .. } => create_volume(w, None),
         Action::Restore(_) => create_volume(w, Some(&w.target)),
         Action::Backup(_) => backup(w),
@@ -778,6 +789,7 @@ pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
                 _ => {
                     spec["restored_from"] = w.target.reference();
                     spec["storage_restore_phase"] = json!("AwaitingActivation");
+                    spec["restore_proof"] = r["restore_proof"].clone();
                 }
             }
             let b = json!({
@@ -818,6 +830,20 @@ pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
         Action::Activate(_) => {
             let mut spec = w.target.spec.clone();
             spec["storage_restore_phase"] = json!("Activated");
+            if r["verified_at"].is_string() {
+                let verification = db.record(
+                    "RecoveryEvidence",
+                    actor,
+                    json!({
+                        "operation_ref": w.op.reference(),
+                        "volume_ref": w.target.reference(),
+                        "backup_ref": spec["restored_from"],
+                        "tree_digest": spec["restore_proof"]["tree_digest"],
+                        "verified_at": r["verified_at"]
+                    }),
+                )?;
+                spec["restore_verification_ref"] = verification.reference();
+            }
             Ok(db
                 .update(&w.target, spec, w.target.body.clone())?
                 .reference())
@@ -900,7 +926,7 @@ mod capture_tests {
             .unwrap();
         let before = root.metadata().unwrap();
         let mut capture = Capture {
-            out: staging.path(),
+            out: Some(staging.path()),
             entries: vec![],
             total: 0,
         };
@@ -940,7 +966,7 @@ mod capture_tests {
                 .unwrap();
             let before = root.metadata().unwrap();
             let mut capture = Capture {
-                out: staging.path(),
+                out: Some(staging.path()),
                 entries: vec![],
                 total: 0,
             };

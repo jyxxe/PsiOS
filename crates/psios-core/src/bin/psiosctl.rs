@@ -92,6 +92,14 @@ enum Cmd {
         #[arg(long, default_value_t = 8 * 1024 * 1024)]
         max_bytes: usize,
     },
+    /// Export a verified backup to a new directory under a private parent.
+    BackupExport {
+        #[arg(long)]
+        output: PathBuf,
+        /// JSON Backup ResourceRef from a file or stdin.
+        #[arg(default_value = "-")]
+        file: String,
+    },
     Agent {
         #[arg(long)]
         key: String,
@@ -300,6 +308,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let reference = serde_json::from_value(input(&file)?)?;
             std::io::stdout().write_all(&c.artifact_bytes(&reference, max_bytes)?)?;
             return Ok(());
+        }
+        Cmd::BackupExport { output, file } => {
+            let reference = serde_json::from_value(input(&file)?)?;
+            psios_core::download_backup(&c, &reference, &output)?
         }
         Cmd::Agent { key, delegation } => c.execute_agent(&StatusProvider, &key, &delegation)?,
         Cmd::Validate { .. } => unreachable!(),

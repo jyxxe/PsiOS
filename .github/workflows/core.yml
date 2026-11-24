@@ -160,13 +160,15 @@ jobs:
             TMPDIR="$1" PSIOS_TEST_CAPACITY_ALLOCATION=1 runuser -u "$2" -- \
               python3 -B -m unittest discover -s tests -p test_chat.py -k test_low_disk -v
           ' psios-headroom "$scratch" "$(id -un)"
-      - name: Refuse offline backup restore onto an undersized filesystem
+      - name: Refuse backup restore and export onto undersized filesystems
         run: |
           scratch=$(mktemp -d)
           trap 'rmdir "$scratch"' EXIT
           sudo unshare --mount --propagation private sh -ec '
             mount -t tmpfs -o size=1m,nr_inodes=256,mode=0700 tmpfs "$1"
             PSIOS_TEST_DETACHED_TARGET="$1" python3 -B -m unittest discover -s tests -p test_detached_backup.py -k test_full_target -v
+            mount -o remount,size=128k "$1"
+            PSIOS_TEST_EXPORT_TARGET="$1" python3 -B -m unittest discover -s tests -p test_backup_export.py -k test_export_capacity -v
           ' psios-detached "$scratch"
       - name: Migrate active and completed model calls from format 4
         run: |

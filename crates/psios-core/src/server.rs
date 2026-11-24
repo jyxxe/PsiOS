@@ -53,6 +53,11 @@ fn connection(s: &Shared, stream: &mut UnixStream, stop: &AtomicBool) -> Result<
         let r: Request = serde_json::from_value(parse(&bytes)?)?;
         crate::label(&r.request_id)?;
         rid = r.request_id.clone();
+        if r.method == crate::storage::export::METHOD {
+            let job = state(s)?.prepare_export(peer, &r)?;
+            let read = job.read();
+            return state(s)?.finish_export(peer, &r, read);
+        }
         let wait: Option<(&str, WaitCondition)> = match r.method.as_str() {
             "Event.Wait" => Some(("Event.Poll", |page| {
                 !page["events"].as_array().unwrap().is_empty()

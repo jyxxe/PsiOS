@@ -23,6 +23,7 @@ use psios_api::ApiError;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::fmt;
+pub use storage::export::download_backup;
 pub use storage::inspect_detached_backup;
 
 #[derive(Debug)]

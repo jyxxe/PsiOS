@@ -1,6 +1,8 @@
 //! Local system API contracts, bounded framing and synchronous Rust client.
+mod backup;
 mod client;
 mod model;
+pub use backup::{BackupChunk, BackupMember, BackupMemberReceipt};
 pub use model::*;
 mod json;
 pub use client::*;

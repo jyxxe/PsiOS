@@ -44,7 +44,7 @@ pub fn poll(
     stop: &AtomicBool,
     mut req: Request,
     read_method: &str,
-    ready: impl Fn(&Value) -> bool,
+    ready: impl Fn(&Value) -> Result<bool>,
     mut invoke: impl FnMut(Request) -> Result<Value>,
 ) -> Result<Value> {
     let timeout_ms = req
@@ -73,7 +73,7 @@ pub fn poll(
             method: read_method.into(),
             params: req.params.clone(),
         })?;
-        if ready(&page) || page["lifecycle"] == "Closed" || Instant::now() >= until {
+        if ready(&page)? || page["lifecycle"] == "Closed" || Instant::now() >= until {
             return Ok(page);
         }
         require(

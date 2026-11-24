@@ -75,6 +75,15 @@ jobs:
           git archive 26b66ffe7df09525969679b65860f66b00c2698b Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-previous"
           cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-previous/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-previous/target"
           python3 tests/upgrade.py --previous-bin "$RUNNER_TEMP/psios-previous/target/debug"
+      - name: Exercise authority backpressure on a bounded Linux filesystem
+        run: |
+          scratch=$(mktemp -d)
+          trap 'rmdir "$scratch"' EXIT
+          sudo unshare --mount --propagation private sh -ec '
+            mount -t tmpfs -o size=32m,nr_inodes=512,mode=1777 tmpfs "$1"
+            TMPDIR="$1" PSIOS_TEST_CAPACITY_ALLOCATION=1 runuser -u "$2" -- \
+              python3 -B -m unittest discover -s tests -p test_platform.py -k test_pauses_new_work -v
+          ' psios-headroom "$scratch" "$(id -un)"
       - name: Migrate active and completed model calls from format 4
         run: |
           mkdir "$RUNNER_TEMP/psios-format4"

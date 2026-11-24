@@ -166,6 +166,7 @@ pub fn submit(db: &Db<'_>, actor: &str, s: &Value, retry: Option<&str>) -> Resul
     let a = Action::parse(tool, &input.body)?;
     let target = a.target(db, actor)?;
     let audience = a.audience(db, actor, &s["delegation_ref"], &target)?;
+    db.cfg.check_admission_space()?;
     let depth: u32 = db.c.query_row(
         "SELECT count(*) FROM queue WHERE phase NOT IN ('Done')",
         [],

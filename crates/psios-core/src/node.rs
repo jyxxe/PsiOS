@@ -109,7 +109,10 @@ pub fn get(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         let (phase, count) = entry?;
         groups.insert(phase, count);
     }
-    Ok(json!({"reference":d.reference(),"state":d.body,"queue":groups}))
+    Ok(
+        json!({"reference":d.reference(),"state":d.body,"queue":groups,
+        "authority_storage":db.cfg.authority_storage()?}),
+    )
 }
 
 #[derive(Debug, Clone, Deserialize)]

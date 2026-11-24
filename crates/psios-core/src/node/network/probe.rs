@@ -12,12 +12,26 @@ use crate::{
     now, policy, require,
 };
 use psios_api::{canonical, sha256};
-use rustix::time::{ClockId, clock_gettime};
+use rustix::{
+    fd::OwnedFd,
+    time::{
+        ClockId, Itimerspec, TimerfdClockId, TimerfdFlags, TimerfdTimerFlags, Timespec,
+        clock_gettime, timerfd_create, timerfd_settime,
+    },
+};
 use serde_json::{Value, json};
-use std::{collections::HashSet, io, net::SocketAddr, time::Duration};
+use std::{
+    collections::HashSet,
+    future::{Future, poll_fn},
+    io,
+    net::SocketAddr,
+    pin::pin,
+    task::Poll,
+    time::Duration,
+};
 use tokio::{
+    io::{Interest, unix::AsyncFd},
     net::TcpStream,
-    time::{Instant, timeout_at},
 };
 
 pub const TOOL: &str = "node.network_probe";
@@ -164,6 +178,65 @@ fn boot_time() -> Duration {
     Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
 }
 
+struct ProbeDeadline {
+    starting_at: Duration,
+    expires_at: Duration,
+    expiration: AsyncFd<OwnedFd>,
+}
+
+impl ProbeDeadline {
+    fn start(budget: Duration) -> io::Result<Self> {
+        let starting_at = boot_time();
+        let expires_at = starting_at + budget;
+        let timer = timerfd_create(
+            TimerfdClockId::Boottime,
+            TimerfdFlags::CLOEXEC | TimerfdFlags::NONBLOCK,
+        )
+        .map_err(io::Error::from)?;
+        timerfd_settime(
+            &timer,
+            TimerfdTimerFlags::ABSTIME,
+            &Itimerspec {
+                it_interval: Timespec::default(),
+                it_value: Timespec {
+                    tv_sec: expires_at.as_secs() as i64,
+                    tv_nsec: expires_at.subsec_nanos().into(),
+                },
+            },
+        )
+        .map_err(io::Error::from)?;
+        // SAFETY: AsyncFd owns the nonblocking OwnedFd with a fixed descriptor identity.
+        let expiration = unsafe { AsyncFd::register_with_interest(timer, Interest::READABLE) }
+            .map_err(io::Error::from)?;
+        Ok(Self {
+            starting_at,
+            expires_at,
+            expiration,
+        })
+    }
+
+    async fn until_expiration<T>(
+        &self,
+        operation: impl Future<Output = T>,
+    ) -> io::Result<Option<T>> {
+        let mut expiration = pin!(self.expiration.readable());
+        let mut operation = pin!(operation);
+        poll_fn(|cx| {
+            if boot_time() >= self.expires_at {
+                return Poll::Ready(Ok(None));
+            }
+            if let Poll::Ready(readiness) = expiration.as_mut().poll(cx) {
+                return Poll::Ready(readiness.map(|_| None));
+            }
+            operation
+                .as_mut()
+                .poll(cx)
+                .map(|value| Ok((boot_time() < self.expires_at).then_some(value)))
+        })
+        .await
+    }
+}
+
 fn transport_error(error: &io::Error) -> Value {
     use io::ErrorKind::*;
     let status = match error.kind() {
@@ -191,17 +264,14 @@ async fn dial(endpoint: SocketAddr) -> io::Result<TcpStream> {
     Ok(stream)
 }
 
-async fn observe(probe: &NetworkProbeConfig) -> Value {
-    let started = boot_time();
-    let budget = Duration::from_millis(probe.timeout_ms);
-    let deadline = Instant::now() + budget;
+async fn observe(probe: &NetworkProbeConfig) -> Result<Value> {
+    let deadline = ProbeDeadline::start(Duration::from_millis(probe.timeout_ms))?;
     let dns = match &probe.dns {
         Some(resolver) => {
-            let report =
-                match timeout_at(deadline, dns::observe(resolver, probe.endpoint.ip())).await {
-                    Ok(result) => result,
-                    Err(_) => json!({"status":"TimedOut"}),
-                };
+            let report = deadline
+                .until_expiration(dns::observe(resolver, probe.endpoint.ip()))
+                .await?
+                .unwrap_or_else(|| json!({"status":"TimedOut"}));
             Some(json!({"resolver":resolver.resolver,"name":resolver.name,"result":report}))
         }
         None => None,
@@ -211,18 +281,14 @@ async fn observe(probe: &NetworkProbeConfig) -> Value {
         .is_some_and(|result| result["result"]["status"] != "Verified")
     {
         json!({"status":"Skipped","reason":"DnsUnverified"})
-    } else if boot_time().saturating_sub(started) >= budget {
-        json!({"status":"TimedOut"})
     } else {
-        match timeout_at(deadline, dial(probe.endpoint)).await {
-            Ok(Ok(stream)) if boot_time().saturating_sub(started) < budget => {
-                match stream.local_addr() {
-                    Ok(local) => json!({"status":"Connected","local_address":local}),
-                    Err(error) => transport_error(&error),
-                }
-            }
-            Ok(Err(error)) => transport_error(&error),
-            _ => json!({"status":"TimedOut"}),
+        match deadline.until_expiration(dial(probe.endpoint)).await? {
+            Some(Ok(stream)) => match stream.local_addr() {
+                Ok(local) => json!({"status":"Connected","local_address":local}),
+                Err(error) => transport_error(&error),
+            },
+            Some(Err(error)) => transport_error(&error),
+            None => json!({"status":"TimedOut"}),
         }
     };
     let status = if tcp["status"] == "Connected" {
@@ -236,8 +302,10 @@ async fn observe(probe: &NetworkProbeConfig) -> Value {
     } else {
         "Offline"
     };
-    json!({"status":status,"endpoint":probe.endpoint,"dns":dns,"tcp":tcp,
-           "elapsed_ms":boot_time().saturating_sub(started).as_millis() as u64})
+    Ok(
+        json!({"status":status,"endpoint":probe.endpoint,"dns":dns,"tcp":tcp,
+           "elapsed_ms":boot_time().saturating_sub(deadline.starting_at).as_millis() as u64}),
+    )
 }
 
 pub fn perform(work: &Work) -> Result<Value> {
@@ -246,10 +314,68 @@ pub fn perform(work: &Work) -> Result<Value> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let observation = runtime.block_on(observe(probe));
+    let observation = runtime.block_on(observe(probe))?;
     Ok(json!({
         "target_ref":work.target.reference(), "boot_id":namespace.boot_id,
         "network_namespace_inode":namespace.network_namespace_inode, "observed_at":now(),
         "observation":observation
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        cell::Cell,
+        future::{pending, ready},
+        os::fd::AsRawFd,
+    };
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn expired_kernel_deadline_wakes_pending_observation_and_blocks_new_stage() {
+        runtime().block_on(async {
+            let deadline = ProbeDeadline::start(Duration::from_millis(30)).unwrap();
+            assert!(
+                deadline
+                    .until_expiration(pending::<()>())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(boot_time() >= deadline.expires_at);
+            let started = Cell::new(false);
+            let work = async { started.set(true) };
+            assert!(deadline.until_expiration(work).await.unwrap().is_none());
+            assert!(!started.get());
+        });
+    }
+
+    #[test]
+    fn sequential_stages_share_active_deadline() {
+        runtime().block_on(async {
+            let deadline = ProbeDeadline::start(Duration::from_secs(5)).unwrap();
+            let fd = deadline.expiration.get_ref().as_raw_fd();
+            let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{fd}")).unwrap();
+            let clock = info.lines().find_map(|line| line.strip_prefix("clockid:"));
+            assert_eq!(
+                clock.unwrap().trim(),
+                (TimerfdClockId::Boottime as u32).to_string()
+            );
+            assert_eq!(
+                deadline.until_expiration(ready(10)).await.unwrap(),
+                Some(10)
+            );
+            assert_eq!(
+                deadline.until_expiration(ready(20)).await.unwrap(),
+                Some(20)
+            );
+        });
+    }
 }

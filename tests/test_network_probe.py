@@ -185,6 +185,11 @@ class NetworkProbeTests(unittest.TestCase):
         def stall(connection, _):
             self.assertEqual(connection.recv(1), b"")
 
+        def truncated_stream(connection, query):
+            reply = dns_reply(query, answers[:1])
+            connection.sendall(struct.pack("!H", len(reply)) + reply[:1])
+            stall(connection, query)
+
         cycle = [record(POINTER, 5, wire_name("loop.test.")),
                  record(wire_name("loop.test."), 5, wire_name(QNAME))]
         responses = [
@@ -198,6 +203,7 @@ class NetworkProbeTests(unittest.TestCase):
             ("NoAddress", lambda conn, query: self.write_frame(conn, dns_reply(query))),
             ("ResponseError", lambda conn, query: self.write_frame(conn, dns_reply(query, flags=0x8183))),
             ("TimedOut", stall),
+            ("TimedOut", truncated_stream),
         ]
         for status, handler in responses:
             with self.subTest(status=status):
@@ -208,7 +214,7 @@ class NetworkProbeTests(unittest.TestCase):
                 self.assertEqual(result["tcp"], dict(status="Skipped", reason="DnsUnverified"))
                 self.assertNotEqual(result["status"], "Connected")
                 if status == "TimedOut":
-                    self.assertGreaterEqual(result["elapsed_ms"], 350)
+                    self.assertGreaterEqual(result["elapsed_ms"], 400)
                     self.assertLess(result["elapsed_ms"], 5000)
         self.no_connection(service)
         self.no_connection(alternate)

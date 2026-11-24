@@ -1,7 +1,7 @@
-use crate::{Config, Result, err, now};
-use rustix::fs::{StatVfs, statvfs};
+use crate::{Config, Result, err, now, require};
+use rustix::fs::{StatVfs, fstatvfs, statvfs};
 use serde_json::{Value, json};
-use std::{io, path::Path};
+use std::{fs::File, io, os::unix::fs::MetadataExt, path::Path};
 
 fn sample(path: &Path) -> Result<StatVfs> {
     Ok(statvfs(path).map_err(io::Error::from)?)
@@ -52,5 +52,38 @@ impl Config {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn check_restore_space(
+        &self,
+        destination: &File,
+        file_sizes: impl Iterator<Item = u64>,
+        entries: u64,
+    ) -> Result<()> {
+        let fs = fstatvfs(destination).map_err(io::Error::from)?;
+        let device = destination.metadata()?.dev();
+        let mut reserve = 0;
+        for (path, floor) in [
+            (&self.state_dir, self.authority_reserve.state_bytes),
+            (&self.witness_dir, self.authority_reserve.witness_bytes),
+        ] {
+            if floor > reserve && path.metadata()?.dev() == device {
+                reserve = floor;
+            }
+        }
+        let block = fs.f_frsize.max(1);
+        let bytes = file_sizes
+            .map(|len| len.div_ceil(block).saturating_mul(block))
+            .fold(0u64, u64::saturating_add);
+        require(
+            available(&fs) >= reserve.saturating_add(bytes),
+            "QuotaExceeded",
+            "insufficient destination blocks for backup restore and authority reserve",
+        )?;
+        require(
+            fs.f_files == 0 || entries <= fs.f_favail,
+            "QuotaExceeded",
+            "insufficient destination inodes for backup restore",
+        )
     }
 }

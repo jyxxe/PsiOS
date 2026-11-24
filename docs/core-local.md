@@ -115,6 +115,8 @@ volume.write、volume.delete、volume.activate、backup.delete、application.ins
 
 ### 原地核验一份备份
 
+`backup.restore` 先按清单的逐文件长度估算目标文件系统所需数据块及 inode。目标与 state 或 witness 共享文件系统时扣除配置中相应的容量余量，发布前再检查余量。容量不足时以 `QuotaExceeded` 结束并清理暂存，原备份可在释放空间后重新提交恢复。统计基于实际目标，后续并发写入仍会改变可用空间。[恢复容量验收](../tests/test_backup.py)
+
 停用新卷分配时也能用 `backup.verify` 检查已存备份。给实际备份所有者签发含 `task.submit`、`task.read`、`backup.verify` 且 `tool_targets` 指向该 Backup ID 的 Grant，使用它的 delegation 提交 Task。输入与恢复一样要求备份 ID 和预期修订。核验与还原共用清单摘要和逐文件流式内容检查。核验期间占用该备份，阻止其他 Task 同时删除或恢复它。成功结果记录 `backup_ref`、`manifest_digest`、`entries`、`bytes` 和 `verified_at`，不会分配新卷。启动应用及验证其中数据库的可读性仍需实际恢复演练。
 
 ## 持久状态与恢复

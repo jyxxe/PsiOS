@@ -31,6 +31,18 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 
 每次开机在 `/tmp` 创建独立的 tmpfs，最多使用 32 MiB 数据空间和 4096 个 inode。普通账户可以创建临时文件，目录的 sticky bit 保护其他账户的条目，挂载启用 `nodev` 与 `nosuid`。达到任一上限时，内核拒绝继续分配。重启后临时文件消失。可将需要保留的用户文件放在持久主目录。
 
+## Core 资源限额
+
+生成新盘时，可同时传入以下三个参数，让内核强制限制守护进程及其子进程。
+
+```sh
+--core-cpu-millicores 500 --core-memory-mib 128 --core-pids-max 48
+```
+
+此配置给 `psiosd` 分配一个专用 cgroup v2。500 millicores 对应每 100 毫秒最多 50 毫秒的 CPU 时间。内核执行内存硬上限、零 swap 和线程数上限。PID 1、负责重启服务的进程及串口会话位于该 cgroup 之外。只有 root 可以修改控制值。启用此配置后，启动会先检查控制器与写入后的配置，缺少控制器时在挂载持久分区前停机。Core 遭遇 OOM 或退出后，监督进程清理上一实例残留的进程，复核内核限额并重新启动服务。[Linux cgroup v2](https://docs.kernel.org/admin-guide/cgroup-v2.html)
+
+构建回执格式 6 与启动清单记录 `core_limits`。停机升级沿用可信回执中的限额及原节点身份。来宾可以经独立授权运行 `node.pressure`，核对同一 cgroup 的限额、节流、OOM 和 PID 事件。[资源压力接口](core-runtime.md#linux-资源压力与守护进程-cgroup) · [内核限额与升级验收](../tests/native_core_limits.py)
+
 ## 可选有线接入
 
 新盘可用 `--dhcp-mac 52:54:00:51:6f:20` 启用单个 virtio 网口的 IPv4 DHCP。为虚机配置同一个 MAC。下面的 QEMU 参数可用于只验证租约的隔离网络。
@@ -60,7 +72,7 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 
 启动时读入 root 私有的 `/etc/psios/static-ipv4` 或 `/etc/psios/static-ipv6`，按 MAC 匹配唯一的 virtio 网口。静态 IPv6 网口关闭路由器通告、自动配置和重定向，等待 Linux 重复地址检测通过后才发布 IPv6 默认路由。静态路由使用 metric 30320。地址或路由配置失败时清理本次添加的地址和路由，保留已有条目与解析器配置。两种地址族都配置成功后一次性更新双栈 DNS。可查看 `/run/psios-network/status` 和 `busybox ip -6 route show`。多网口、无线、DHCPv6、SLAAC 和远程确认回退事务仍待开发。[静态 IPv4 验收](../tests/native_static_ipv4.py) · [静态 IPv6 和双栈验收](../tests/native_static_ipv6.py)
 
-仅启用静态 IPv4 的盘使用格式 4 回执。静态 IPv6 和双栈使用格式 5。停机升级会检查保存的配置内容和权限。双栈还会核对两个配置的 MAC 和合计 DNS 数量。配置损坏时保留源盘并拒绝发布候选盘。
+静态 IPv4 的网络配置对应格式 4 回执，静态 IPv6 和双栈对应格式 5。配有 Core 资源限额的盘在格式 6 中记录同一个 `network_profile`。停机升级会检查保存的配置内容和权限。双栈还会核对两个配置的 MAC 和合计 DNS 数量。配置损坏时保留源盘并拒绝发布候选盘。
 
 ## 核对安装与运行的制品
 
@@ -82,7 +94,7 @@ sha256sum boot.efi
 --efi-stub /usr/lib/systemd/boot/efi/linuxx64.efi.stub --efi-stub-sha256 "$VERIFIED_STUB_SHA256"
 ```
 
-构建器将内核、initramfs、内置命令行和部署清单组装进同一个 UKI，并在发布前核验签名。回执格式 3 记录证书 DER 和 EFI stub 的 SHA-256，可用 `sbverify --cert signing.pem boot.efi` 检查 EFI 制品。升级已签名的开发盘须提供相同证书，并同时核对旧 EFI 摘要和签名。升级保留原盘和节点身份，旧版安装器会拒绝格式 3 回执。[systemd-stub 255](https://www.freedesktop.org/software/systemd/man/255/systemd-stub.html) · [Secure Boot 和升级验收](../tests/native_secure_boot.py)
+构建器将内核、initramfs、内置命令行和部署清单组装进同一个 UKI，并在发布前核验签名。`secure_boot` 回执字段记录证书 DER 和 EFI stub 的 SHA-256，可用 `sbverify --cert signing.pem boot.efi` 检查 EFI 制品。升级已签名的开发盘须提供相同证书，并同时核对旧 EFI 摘要和签名。升级保留原盘和节点身份。[systemd-stub 255](https://www.freedesktop.org/software/systemd/man/255/systemd-stub.html) · [Secure Boot 和升级验收](../tests/native_secure_boot.py)
 
 当前验收环境为使用自建登记证书的 amd64 OVMF。需要在相同固件信任配置下核验时，可使用签名的独立只读救援光盘。真实硬件固件、证书轮替和 TPM 解锁仍需对应的产品验收。[签名救援](offline-rescue.md#在-secure-boot-下核验)
 

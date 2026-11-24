@@ -22,6 +22,12 @@ VERIFIED_CORE_SHA256 是上述完整归档核验后记录的 SHA-256。
 默认及最小容量为 192 MiB 和 64 MiB，整盘上限为 8192 MiB。
 构建回执和来宾部署清单记录 geometry_mib。
 
+生成新盘时同时传入 --core-cpu-millicores、--core-memory-mib 和
+--core-pids-max 可为 psiosd 及其子进程配置 cgroup v2 硬限额。
+来宾分别强制 CPU、内存及线程数限额，Core 的 swap 上限为零。
+监督进程与串口登录会话在该 cgroup 之外。构建回执格式 6 记录
+core_limits，停机升级继承这些限额。
+
 构建器以当前用户创建全新的 GPT raw 文件。其内核和早期用户空间来自
 核验过的 ISO。每个节点分别生成新盘并设置自己的凭据。需要本机 root
 管理时可另用 openssl passwd -6 创建私有摘要文件，通过
@@ -39,7 +45,7 @@ VERIFIED_CORE_SHA256 是上述完整归档核验后记录的 SHA-256。
 
 登录后可执行 psiosctl whoami。外部只读核验使用同一归档的
 rescue/inspect.py，选择 --partition 2 --state /psios --uid 1000。
-可用 --secure-boot-key、--secure-boot-cert、--efi-stub 和 --efi-stub-sha256 构建由目标 UEFI 已登记证书签名的统一内核镜像。需要 ukify、sbsign、sbverify 和 OpenSSL。密钥文件须为构建者私有文件。签名盘回执为格式 3，离线升级沿用同一证书。
+可用 --secure-boot-key、--secure-boot-cert、--efi-stub 和 --efi-stub-sha256 构建由目标 UEFI 已登记证书签名的统一内核镜像。需要 ukify、sbsign、sbverify 和 OpenSSL。密钥文件须为构建者私有文件。签名证据位于回执的 secure_boot 字段，离线升级沿用同一证书。
 
 救援参数见 rescue/README.txt。本开发盘的验收范围是 amd64 UEFI 虚机。
 每次开机从空的 /tmp 开始，供普通账户写入，容量为 32 MiB 和 4096 个

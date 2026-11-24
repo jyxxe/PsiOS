@@ -24,6 +24,10 @@ stage=deployment-payload
 "$bb" sha256sum -c /psios-payload.sha256 >/dev/null
 payload_verified=yes
 "$bb" hostname psios
+if [ -f /psios-core-limits ]; then
+    stage=core-resource-limits
+    /bin/sh /psios-core-cgroup setup
+fi
 stage=temporary-storage
 mkdir -p /tmp
 [ -d /tmp ] && [ ! -L /tmp ] || exit 1
@@ -47,6 +51,15 @@ stage=host-config
 [ "$(stat -c '%u:%g:%a' /var/lib/etc)" = 0:0:755 ]
 [ "$(stat -c '%u:%g:%a' /var/lib/etc/shadow)" = 0:0:600 ]
 mount -o bind /var/lib/etc /etc
+if [ -f /psios-core-limits ]; then
+    stage=core-service-config
+    [ -f /etc/inittab ] && [ ! -L /etc/inittab ] || exit 1
+    case "$(stat -c '%u:%g:%a:%h' /etc/inittab)" in
+        0:0:600:1|0:0:644:1) ;;
+        *) exit 1 ;;
+    esac
+    [ "$(grep -Fxc '::respawn:/bin/sh /psios-core-cgroup serve' /etc/inittab)" = 1 ]
+fi
 chmod 0700 /run/psios
 chown 1000:1000 /run/psios
 stage=home-mount

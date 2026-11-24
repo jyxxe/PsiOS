@@ -177,18 +177,18 @@ impl Series {
         db: &Db<'_>,
         schedule: &Doc,
         now_ms: i64,
-        expiry_only: bool,
+        expired_through: Option<i64>,
     ) -> Result<bool> {
         let expired = self
             .upcoming
             .iter()
-            .take_while(|window| due_ms(window.deadline_at) <= now_ms)
+            .take_while(|window| due_ms(window.deadline_at) <= expired_through.unwrap_or(now_ms))
             .count();
         let (keep, reason) = match self.missed {
             Missed::Skip => (1, "MissedTrigger"),
             Missed::BoundedCatchUp { limit } => (limit as usize, "CatchUpLimit"),
         };
-        let superseded = if expiry_only {
+        let superseded = if expired_through.is_some() {
             0
         } else {
             self.upcoming
@@ -200,7 +200,7 @@ impl Series {
         let count = expired.max(superseded);
         if count == 0 {
             require(
-                !expiry_only,
+                expired_through.is_none(),
                 "RecoveryRequired",
                 "schedule deadline index mismatch",
             )?;
@@ -278,6 +278,12 @@ impl Series {
                 )? == 1,
                 "RecoveryRequired",
                 "schedule index disagrees with trigger",
+            )?;
+            let delta_ms = due_ms(next.deadline_at) - due_ms(current.deadline_at);
+            // Move the stored cutoff by the original interval between windows.
+            db.c.execute(
+                "UPDATE authorization_deadlines SET deadline_boot_ms=deadline_boot_ms+?2 WHERE resource=?1",
+                params![schedule.id, delta_ms],
             )?;
             body["next"] = json!(self.occurrence(&schedule.id, count, next));
         } else {

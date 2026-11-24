@@ -292,7 +292,8 @@ fn submit_with_origin(
     let task = id("task");
     let deadline_source = match source {
         LocalOrigin::Workflow { run, .. } => Some(run),
-        _ => retry,
+        LocalOrigin::Schedule(schedule) => Some(schedule),
+        LocalOrigin::Direct => retry,
     };
     policy::deadline::Clock::sample()?.register_until(
         db,

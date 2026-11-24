@@ -208,6 +208,12 @@ pub fn create(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     spec["creation_digest"] = json!(creation);
     spec["request"] = request;
     let schedule = db.create("Schedule", &id, actor, spec, body)?;
+    policy::deadline::Clock::sample()?.register_until(
+        db,
+        &id,
+        &timestamp(first.deadline_at),
+        None,
+    )?;
     db.c.execute(
         "INSERT INTO pending_schedules(schedule,run_ms,deadline_ms) VALUES(?1,?2,?3)",
         params![id, due_ms(first.run_at), due_ms(first.deadline_at)],
@@ -307,13 +313,31 @@ pub fn tick(store: &mut Store) -> Result<()> {
 }
 
 fn fire(db: &Db<'_>, rejection: &mut Option<Rejection>) -> Result<()> {
+    let pending: bool = db.c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pending_schedules)",
+        [],
+        |row| row.get(0),
+    )?;
+    if !pending {
+        return Ok(());
+    }
+    let clock = policy::deadline::Clock::sample()?;
     let at = Utc::now().timestamp_millis();
-    let expired: Option<String> = db.c.query_row(
-        "SELECT schedule FROM pending_schedules WHERE deadline_ms<=?1 ORDER BY deadline_ms,schedule LIMIT 1",
-        [at], |r| r.get(0),
+    let expired: Option<(String, i64)> = db.c.query_row(
+        "WITH checked AS (
+            SELECT p.schedule,p.deadline_ms,
+                CASE WHEN elapsed.resource IS NULL THEN ?1
+                     WHEN elapsed.time_ns!=?3 THEN 9223372036854775807
+                     ELSE max(?1,p.deadline_ms+(?4-elapsed.deadline_boot_ms))
+                END AS through
+            FROM pending_schedules p LEFT JOIN authorization_deadlines elapsed
+                 ON elapsed.resource=p.schedule AND elapsed.boot_id=?2
+        )
+        SELECT schedule,through FROM checked WHERE deadline_ms<=through ORDER BY deadline_ms,schedule LIMIT 1",
+        params![at,clock.boot.boot_id,clock.time_ns,clock.boot.millis], |r| Ok((r.get(0)?,r.get(1)?)),
     ).optional()?;
-    let (id, expired) = if let Some(id) = expired {
-        (id, true)
+    let (id, expired_through) = if let Some((id, through)) = expired {
+        (id, Some(through))
     } else {
         let due: Option<String> = db.c.query_row(
             "SELECT schedule FROM pending_schedules WHERE run_ms<=?1 ORDER BY run_ms,schedule LIMIT 1",
@@ -323,19 +347,19 @@ fn fire(db: &Db<'_>, rejection: &mut Option<Rejection>) -> Result<()> {
         if !node::enabled(db)? {
             return Ok(());
         }
-        (id, false)
+        (id, None)
     };
     db.cfg.check_admission_space()?;
     let schedule = db.of(&id, "Schedule")?;
     let series = repeat::Series::load(&schedule)?;
     if let Some(series) = &series {
-        if series.skip_outdated(db, &schedule, at, expired)? {
+        if series.skip_outdated(db, &schedule, at, expired_through)? {
             return Ok(());
         }
         if series.overlapping(db, &schedule)? {
             return series.settle(db, &schedule, "Skipped", Some("PreviousTaskActive"), None);
         }
-    } else if expired {
+    } else if expired_through.is_some() {
         settle(db, &schedule, "Expired", Some("DeadlineExceeded"), None)?;
         return Ok(());
     }

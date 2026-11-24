@@ -299,6 +299,68 @@ fn kill_after_host_write_requires_observed_postcondition() {
 }
 
 #[test]
+fn interval_schedule_moves_elapsed_cutoff_by_the_original_windows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, mut store) = initialized(tmp.path());
+    let grant = call(
+        &mut store,
+        "Grant.Issue",
+        json!({"principal_id":policy::OWNER,"actions":[schedule::ACTION,"task.submit","task.read","system.status"],
+               "tool_targets":["profile-local"],"units":3,"ttl_seconds":180}),
+    )
+    .unwrap();
+    let schedule = call(
+        &mut store,
+        "Schedule.Create",
+        json!({"key":"elapsed-series","tool":"system.status","input":{},
+               "delegation_id":grant["delegation_ref"]["resource_id"],
+               "run_at":after(45),"deadline_at":after(60),
+               "repeat":{"interval_seconds":30,"count":3,"missed":{"mode":"BoundedCatchUp","limit":2},"overlap":"Allow"}}),
+    )
+    .unwrap();
+    let id = schedule["reference"]["resource_id"].as_str().unwrap();
+    let original = store
+        .transaction("cross-two-windows", |db| {
+            let cutoff = policy::deadline::Clock::sample()?.boot.millis - 45_000;
+            assert_eq!(
+                db.c.execute(
+                    "UPDATE authorization_deadlines SET deadline_boot_ms=?2 WHERE resource=?1",
+                    rusqlite::params![id, cutoff],
+                )?,
+                1
+            );
+            Ok(cutoff)
+        })
+        .unwrap();
+    schedule::tick(&mut store).unwrap();
+    let state = call(&mut store, "Schedule.Get", json!({"id":id})).unwrap();
+    assert_eq!(state["state"]["lifecycle"], "Pending");
+    assert_eq!(state["state"]["next"]["ordinal"], 3);
+    let references = state["state"]["trigger_refs"].as_array().unwrap();
+    assert_eq!(references.len(), 2);
+    for reference in references {
+        let record = call(
+            &mut store,
+            "Schedule.TriggerGet",
+            json!({"id":reference["resource_id"]}),
+        )
+        .unwrap();
+        assert_eq!(record["state"]["lifecycle"], "Expired");
+        assert!(record["state"]["task_receipt"].is_null());
+    }
+    let stored: i64 = store
+        .transaction("next-cutoff", |db| {
+            Ok(db.c.query_row(
+                "SELECT deadline_boot_ms FROM authorization_deadlines WHERE resource=?1",
+                [id],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(stored, original + 60_000);
+}
+
+#[test]
 fn workflow_step_inherits_the_runs_elapsed_deadline() {
     let tmp = tempfile::tempdir().unwrap();
     let (_, mut store) = initialized(tmp.path());

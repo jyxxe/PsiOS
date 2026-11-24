@@ -43,6 +43,7 @@ pub const TOOLS: &[&str] = &[
     "volume.write",
     "volume.delete",
     "backup.create",
+    storage::publication::INSPECT,
     "backup.verify",
     "backup.delete",
     "backup.restore",
@@ -88,6 +89,7 @@ pub fn readonly(tool: &str) -> bool {
             | "application.refresh"
             | "secret.mac"
             | "backup.verify"
+            | storage::publication::INSPECT
             | "volume.read"
             | "application.health"
             | "application.logs"
@@ -127,6 +129,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | "node.routing_rules"
                     | "node.mounts"
                     | "backup.verify"
+                    | storage::publication::INSPECT
                     | schedule::ACTION
                     | workflow::ACTION
                     | chat::INVITE

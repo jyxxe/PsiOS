@@ -112,8 +112,8 @@ fn worker(s: Shared, stop: Arc<AtomicBool>, tick: Duration) -> Result<()> {
             }
         };
         // SQLite and the socket remain available while an issued host operation is in flight.
-        let receipt = work.perform(|engine, cid| {
-            state(&s)?.transaction(&correlation, |db| work.checkpoint_start(db, engine, cid))
+        let receipt = work.perform(|checkpoint| {
+            state(&s)?.transaction(&correlation, |db| work.checkpoint(db, checkpoint))
         });
         let done = state(&s)?.transaction(&correlation, |db| broker::finish(db, &work, receipt));
         if let Err(e) = done {

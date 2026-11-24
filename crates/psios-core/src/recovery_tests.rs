@@ -53,7 +53,7 @@ fn dispatch(s: &mut Store, id: &str) -> Work {
 fn execute(s: &mut Store, task: &str) -> Value {
     assert_eq!(claim(s), task);
     let w = dispatch(s, task);
-    let r = w.perform(|_, _| unreachable!("not an OCI start"));
+    let r = w.perform(|event| s.transaction("checkpoint", |db| w.checkpoint(db, event)));
     s.transaction("finish", |db| broker::finish(db, &w, r))
         .unwrap();
     let t = call(s, "Task.Get", json!({"id": task})).unwrap();
@@ -123,7 +123,8 @@ fn kill_after_host_write_requires_observed_postcondition() {
         let mut s = Store::open(cfg.clone()).unwrap();
         let task = claim(&mut s);
         let w = dispatch(&mut s, &task);
-        w.perform(|_, _| unreachable!("not an OCI start")).unwrap();
+        w.perform(|event| s.transaction("checkpoint", |db| w.checkpoint(db, event)))
+            .unwrap();
         fs::write(
             cfg.state_dir.join("test-at-barrier"),
             "effect issued, receipt withheld",
@@ -297,7 +298,7 @@ fn lost_read_gets_new_claim_and_late_receipt_is_fenced() {
     let task = submit(&mut s, "system.status", json!({}));
     assert_eq!(claim(&mut s), task);
     let old = dispatch(&mut s, &task);
-    let receipt = old.perform(|_, _| unreachable!("not an OCI start"));
+    let receipt = old.perform(|_| unreachable!("read has no host checkpoint"));
     drop(s);
     let mut s = Store::open(c).unwrap();
     s.transaction("recover", broker::recover).unwrap();
@@ -335,7 +336,7 @@ fn cancellation_after_dispatch_preserves_successful_effect() {
     )
     .unwrap();
     assert_eq!(pending["lifecycle"], "Cancelling");
-    let receipt = w.perform(|_, _| unreachable!("not an OCI start"));
+    let receipt = w.perform(|_| unreachable!("write has no host checkpoint"));
     s.transaction("finish", |db| broker::finish(db, &w, receipt))
         .unwrap();
     let done = call(&mut s, "Task.Get", json!({"id": task})).unwrap();
@@ -521,7 +522,7 @@ fn chunk_receipt_loss_requires_exact_range_and_retains_exclusive_hold() {
     approve(&mut s, &next);
     assert_eq!(claim(&mut s), next);
     let work = dispatch(&mut s, &next);
-    work.perform(|_, _| unreachable!("not an OCI start"))
+    work.perform(|_| unreachable!("write has no host checkpoint"))
         .unwrap();
     drop(s);
     let mut restarted = Store::open(c.clone()).unwrap();
@@ -627,7 +628,7 @@ fn backup_check_excludes_restore_and_retries_after_lost_receipt() {
         .to_owned();
     assert_eq!(claim(&mut s), task);
     let worker = dispatch(&mut s, &task);
-    let reading = worker.perform(|_, _| unreachable!()).unwrap();
+    let reading = worker.perform(|_| unreachable!()).unwrap();
     let competing = submit(&mut s, "backup.restore", target.clone());
     assert_eq!(claim(&mut s), competing);
     let conflict = s
@@ -678,7 +679,7 @@ fn activation_requires_a_completed_authority_commit() {
     approve(&mut s, &first);
     assert_eq!(claim(&mut s), first);
     let worker = dispatch(&mut s, &first);
-    let receipt = worker.perform(|_, _| unreachable!()).unwrap();
+    let receipt = worker.perform(|_| unreachable!()).unwrap();
     assert!(receipt["verified_at"].is_string());
     drop(s);
 
@@ -706,7 +707,7 @@ fn activation_requires_a_completed_authority_commit() {
         json!({"id":second,"expected_resource_version":running["task_revision"]}),
     )
     .unwrap();
-    let receipt = worker.perform(|_, _| unreachable!());
+    let receipt = worker.perform(|_| unreachable!());
     s.transaction("finish", |db| broker::finish(db, &worker, receipt))
         .unwrap();
     let canceled = call(&mut s, "Task.Get", json!({"id":second})).unwrap();
@@ -720,4 +721,219 @@ fn activation_requires_a_completed_authority_commit() {
     approve(&mut s, &third);
     let activated = execute(&mut s, &third);
     assert_ne!(activated["version"], clone["version"]);
+}
+
+#[test]
+fn interrupted_backup_requires_verified_original_publication() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, mut s) = initialized(tmp.path());
+    let created = submit(
+        &mut s,
+        "volume.create",
+        json!({"name":"backup-after-crash"}),
+    );
+    let source = execute(&mut s, &created);
+    let write = submit(
+        &mut s,
+        "volume.write",
+        json!({
+            "id":source["resource_id"], "expected_resource_version":source["version"],
+            "name":"record", "content":"reserved-data"
+        }),
+    );
+    approve(&mut s, &write);
+    let source = execute(&mut s, &write)["volume_ref"].clone();
+    let backup = submit(
+        &mut s,
+        "backup.create",
+        json!({
+            "id":source["resource_id"], "expected_resource_version":source["version"]
+        }),
+    );
+    drop(s);
+    cut_after_host_write(&cfg);
+
+    let mut s = Store::open(cfg.clone()).unwrap();
+    s.transaction("restart", broker::recover).unwrap();
+    let lost = call(&mut s, "Task.Get", json!({"id":backup})).unwrap();
+    assert_eq!(lost["outcome_knowledge"], "Unknown");
+    let op = &lost["operation_refs"][0];
+    let target = json!({"id":op["resource_id"],"expected_resource_version":op["version"]});
+    let backup_id = format!("backup-{}", op["resource_id"].as_str().unwrap());
+    let directory = cfg.state_dir.join("backups").join(&backup_id);
+    let blob = directory.join("blob-0");
+    assert_eq!(fs::read(&blob).unwrap(), b"reserved-data");
+    assert_eq!(
+        call(&mut s, "Resource.Get", json!({"id":backup_id}))
+            .unwrap_err()
+            .0
+            .code,
+        "NotFound"
+    );
+    assert_eq!(call(&mut s, "Task.Retry", json!({
+        "id":backup, "key":"no-second-backup","expected_resource_version":lost["task_revision"]
+    })).unwrap_err().0.code, "OutcomeUnknown");
+
+    let tool = storage::publication::INSPECT;
+    let prepare = |s: &mut Store, delegation: &str| {
+        call(
+            s,
+            "Task.Prepare",
+            json!({
+                "tool":tool,"input":target,"delegation_id":delegation,"key":id("inspection")
+            }),
+        )
+    };
+    assert_eq!(
+        prepare(&mut s, "owner-delegation").unwrap_err().0.code,
+        "PermissionDenied"
+    );
+    let grant = call(
+        &mut s,
+        "Grant.Issue",
+        json!({
+            "principal_id":"local-owner","actions":[tool,"task.submit","task.read"],
+            "tool_targets":[op["resource_id"]],"units":4,"ttl_seconds":120
+        }),
+    )
+    .unwrap();
+    let delegation = grant["delegation_ref"]["resource_id"].as_str().unwrap();
+    let inspect = |s: &mut Store| {
+        let req = prepare(s, delegation).unwrap();
+        call(s, "Task.Submit", req).unwrap()["task_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+
+    fs::write(&blob, b"changed-bytes").unwrap();
+    let corrupt = inspect(&mut s);
+    assert_eq!(claim(&mut s), corrupt);
+    let job = dispatch(&mut s, &corrupt);
+    let refused = job.perform(|_| unreachable!());
+    assert_eq!(refused.as_ref().unwrap_err().0.code, "PreconditionFailed");
+    s.transaction("finish", |db| broker::finish(db, &job, refused))
+        .unwrap();
+    fs::write(&blob, b"reserved-data").unwrap();
+
+    let inspection = inspect(&mut s);
+    execute(&mut s, &inspection);
+    let evidence =
+        call(&mut s, "Task.Get", json!({"id":inspection})).unwrap()["result"]["artifact_refs"][0]
+            .clone();
+    let mut reconcile = target.clone();
+    reconcile["evidence_ref"] = evidence;
+    let moved = directory.with_extension("moved");
+    fs::rename(&directory, &moved).unwrap();
+    fs::create_dir(&directory).unwrap();
+    assert_eq!(
+        call(&mut s, "Operation.Reconcile", reconcile.clone())
+            .unwrap_err()
+            .0
+            .code,
+        "PreconditionFailed"
+    );
+    fs::remove_dir(&directory).unwrap();
+    fs::rename(&moved, &directory).unwrap();
+
+    fs::write(&blob, b"changed-bytes").unwrap();
+    assert_eq!(
+        call(&mut s, "Operation.Reconcile", reconcile.clone())
+            .unwrap_err()
+            .0
+            .code,
+        "OutcomeUnknown"
+    );
+    fs::write(&blob, b"reserved-data").unwrap();
+    let refreshed = inspect(&mut s);
+    execute(&mut s, &refreshed);
+    reconcile["evidence_ref"] =
+        call(&mut s, "Task.Get", json!({"id":refreshed})).unwrap()["result"]["artifact_refs"][0]
+            .clone();
+
+    let settled = call(&mut s, "Operation.Reconcile", reconcile).unwrap();
+    assert_eq!(settled["outcome_knowledge"], "Known");
+    let task = call(&mut s, "Task.Get", json!({"id":backup})).unwrap();
+    assert_eq!(task["lifecycle"], "Succeeded");
+    let original = call(
+        &mut s,
+        "Artifact.Read",
+        json!({
+            "reference":task["result"]["artifact_refs"][0]
+        }),
+    )
+    .unwrap();
+    assert_eq!(original["resource_id"], backup_id);
+    assert_eq!(
+        fs::read_dir(cfg.state_dir.join("backups")).unwrap().count(),
+        1
+    );
+    let restore = submit(
+        &mut s,
+        "backup.restore",
+        json!({
+            "id":original["resource_id"],"expected_resource_version":original["version"]
+        }),
+    );
+    let restored = execute(&mut s, &restore);
+    let read = submit(
+        &mut s,
+        "volume.read",
+        json!({
+            "id":restored["resource_id"],"expected_resource_version":restored["version"],"name":"record"
+        }),
+    );
+    assert_eq!(execute(&mut s, &read)["content"], "reserved-data");
+    assert!(
+        s.transaction("holds", |db| {
+            Ok(db.c.query_row(
+                "SELECT count(*) FROM holds WHERE holder=?1",
+                [op["resource_id"].as_str().unwrap()],
+                |r| r.get::<_, u32>(0),
+            )? == 0)
+        })
+        .unwrap()
+    );
+}
+
+#[test]
+fn cancelling_a_backup_before_rename_discards_the_staged_set() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, mut s) = initialized(tmp.path());
+    let created = submit(
+        &mut s,
+        "volume.create",
+        json!({"name":"cancel-before-publish"}),
+    );
+    let source = execute(&mut s, &created);
+    let backup = submit(
+        &mut s,
+        "backup.create",
+        json!({
+            "id":source["resource_id"], "expected_resource_version":source["version"]
+        }),
+    );
+    assert_eq!(claim(&mut s), backup);
+    let job = dispatch(&mut s, &backup);
+    let receipt = job.perform(|event| {
+        let t = call(&mut s, "Task.Get", json!({"id":backup}))?;
+        call(
+            &mut s,
+            "Task.Cancel",
+            json!({"id":backup,"expected_resource_version":t["task_revision"]}),
+        )?;
+        s.transaction("checkpoint", |db| job.checkpoint(db, event))
+    });
+    assert_eq!(receipt.as_ref().unwrap_err().0.code, "Fenced");
+    s.transaction("finish", |db| broker::finish(db, &job, receipt))
+        .unwrap();
+    let t = call(&mut s, "Task.Get", json!({"id":backup})).unwrap();
+    assert_eq!(
+        (t["lifecycle"].as_str(), t["outcome_knowledge"].as_str()),
+        (Some("Cancelled"), Some("Known"))
+    );
+    assert_eq!(
+        fs::read_dir(cfg.state_dir.join("backups")).unwrap().count(),
+        0
+    );
 }

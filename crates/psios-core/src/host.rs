@@ -100,6 +100,8 @@ pub enum Action {
     Delete(Target),
     #[serde(rename = "backup.create")]
     Backup(Target),
+    #[serde(rename = "backup.inspect_publication")]
+    InspectBackupPublication(Target),
     #[serde(rename = "backup.verify")]
     VerifyBackup(Target),
     #[serde(rename = "backup.delete")]
@@ -253,6 +255,9 @@ impl Action {
             Self::Restore(t) | Self::VerifyBackup(t) | Self::DeleteBackup(t) => {
                 (&t.id, Some(&t.expected_resource_version), "Backup")
             }
+            Self::InspectBackupPublication(t) => {
+                (&t.id, Some(&t.expected_resource_version), "Operation")
+            }
             Self::Install(s) => match &s.volume {
                 Some(t) => (&t.id, Some(&t.expected_resource_version), "Volume"),
                 None => return db.get(policy::PROFILE),
@@ -302,36 +307,65 @@ pub struct Work {
     pub inline: Option<Value>,
     pub launch: Option<Install>,
     pub start_checkpoint: Option<Doc>,
+    pub publication_checkpoint: Option<Doc>,
     pub volume: Option<Doc>,
 }
+pub(crate) enum Checkpoint<'a> {
+    OciStart {
+        engine: &'a str,
+        container: &'a str,
+    },
+    BackupPublication {
+        receipt: &'a Value,
+        device: u64,
+        inode: u64,
+    },
+}
+
 impl Work {
-    pub fn checkpoint_start(&self, db: &Db<'_>, engine: &str, container: &str) -> Result<()> {
+    pub(crate) fn checkpoint(&self, db: &Db<'_>, event: Checkpoint<'_>) -> Result<()> {
         let t = db.of(&self.task.id, "Task")?;
         require(
             t.body["current_run_id"] == self.run.id
                 && t.body["lifecycle"] == "Running"
                 && t.body["outcome_knowledge"] == "InFlight",
             "Fenced",
-            "OCI start is no longer current",
+            "host effect is no longer current",
         )?;
         let target = self.action.target(db, &t.owner)?;
         let audience = self
             .action
             .audience(db, &t.owner, &t.spec["delegation_ref"], &target)?;
         permit(db, &t, &self.run, &self.op, &self.effect, &audience)?;
-        let evidence = json!({"start_operation_id":self.op.id, "effect_ref":self.effect.reference(),
-            "application_ref":target.reference(),"volume_ref":self.volume.as_ref().map(Doc::reference),
-            "engine_id":engine, "container_id":container});
-        db.create(
-            "OCIStartCheckpoint",
-            &format!("oci-start-{}", self.op.id),
-            &t.owner,
-            json!({}),
-            evidence,
-        )?;
-        Ok(())
+        match (&self.action, event) {
+            (Action::Start(_), Checkpoint::OciStart { engine, container }) => {
+                let evidence = json!({"start_operation_id":self.op.id, "effect_ref":self.effect.reference(),
+                    "application_ref":target.reference(),"volume_ref":self.volume.as_ref().map(Doc::reference),
+                    "engine_id":engine, "container_id":container});
+                db.create(
+                    "OCIStartCheckpoint",
+                    &format!("oci-start-{}", self.op.id),
+                    &t.owner,
+                    json!({}),
+                    evidence,
+                )?;
+                Ok(())
+            }
+            (
+                Action::Backup(_),
+                Checkpoint::BackupPublication {
+                    receipt,
+                    device,
+                    inode,
+                },
+            ) => storage::publication::record(db, self, receipt, device, inode),
+            _ => Err(err("Fenced", "checkpoint does not match effect")),
+        }
     }
-    pub fn perform(&self, checkpoint: impl FnOnce(&str, &str) -> Result<()>) -> Result<Value> {
+    pub(crate) fn perform(
+        &self,
+        checkpoint: impl FnOnce(Checkpoint<'_>) -> Result<()>,
+    ) -> Result<Value> {
         if let Some(v) = &self.inline {
             return Ok(v.clone());
         }
@@ -347,7 +381,16 @@ impl Work {
             | Action::RoutingRules(_)
             | Action::Mounts {}
             | Action::Devices {} => node::perform(self),
-            Action::Start(_) => apps::start(self, checkpoint),
+            Action::Start(_) => apps::start(self, |engine, container| {
+                checkpoint(Checkpoint::OciStart { engine, container })
+            }),
+            Action::Backup(_) => storage::backup(self, |receipt, device, inode| {
+                checkpoint(Checkpoint::BackupPublication {
+                    receipt,
+                    device,
+                    inode,
+                })
+            }),
             Action::Stage { .. }
             | Action::Select { .. }
             | Action::Refresh(_)
@@ -443,6 +486,11 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
         } else {
             None
         };
+    let publication_checkpoint = if matches!(a, Action::InspectBackupPublication(_)) {
+        Some(storage::publication::pending(db, &target)?)
+    } else {
+        None
+    };
     let data = if let Some(v) = &volume
         && (start_checkpoint.is_some()
             || !matches!(
@@ -461,6 +509,7 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     };
     let w = Work {
         start_checkpoint,
+        publication_checkpoint,
         launch,
         task,
         run,
@@ -475,6 +524,9 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     };
     node::reserve(db, &w)?;
     storage::reserve(db, &w)?;
+    if matches!(w.action, Action::Backup(_)) {
+        storage::publication::begin(db, &w)?;
+    }
     apps::preflight(db, &w)?;
     Ok(w)
 }

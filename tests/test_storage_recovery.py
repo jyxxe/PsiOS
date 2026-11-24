@@ -61,7 +61,11 @@ class StorageRecoveryTests(unittest.TestCase):
         self.assertEqual(checked["lifecycle"], "Succeeded", checked)
         artifact = self.n.call("Artifact.Read", {"reference": checked["result"]["artifact_refs"][0]})
         self.assertEqual(artifact["bytes"], str(self.source.stat().st_size))
-        self.assert_unknown(task)
+        interrupted = self.n.call("Task.Get", {"id": task})
+        self.assertEqual((interrupted["lifecycle"], interrupted["outcome_knowledge"]), ("Failed", "Known"))
+        self.assertEqual(interrupted["conditions"][0]["type"], "LeaseLost")
+        self.assertEqual(interrupted["result"]["artifact_refs"], [])
+        self.assertNotEqual(self.n.perform("backup.create", target(self.volume)), self.backup)
 
     def test_restart_reclaims_interrupted_restore_and_readonly_nested_stage(self):
         backup = self.backups / self.backup["resource_id"]

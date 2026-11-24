@@ -44,6 +44,11 @@ impl Stage {
         &self.path
     }
 
+    pub(super) fn identity(&self) -> Result<(u64, u64)> {
+        let metadata = self.dir.metadata()?;
+        Ok((metadata.dev(), metadata.ino()))
+    }
+
     pub(super) fn publish(mut self, name: &str) -> Result<()> {
         filename(name)?;
         let staged = self.path.file_name().unwrap();

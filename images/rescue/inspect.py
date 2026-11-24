@@ -27,7 +27,7 @@ def guest_path(value):
     return value
 
 
-def prepare(work, args):
+def prepare(work, args, require_secure_boot):
     boot_media.prepare_kernel(work, args.iso)
     pinned_copy(args.core, work / "psiosd", args.core_sha256, 64 * 1024 * 1024)
     shutil.copyfile(HERE / "init", work / "psios-rescue")
@@ -36,7 +36,7 @@ def prepare(work, args):
     # Keep input paths in JSON. The init script sources only these numeric settings.
     settings = (f"PARTITION={args.partition}\nSERVICE_UID={args.uid}\n"
                 f"SERVICE_GID={args.gid if args.gid is not None else args.uid}\nCOPY_MIB={args.max_copy_mib}\n"
-                f"OVERLAY={int(args.journal_overlay_mib is not None)}\n")
+                f"OVERLAY={int(args.journal_overlay_mib is not None)}\nSECURE_BOOT={int(require_secure_boot)}\n")
     (work / "rescue-settings").write_text(settings)
     (work / "rescue-settings").chmod(0o600)
     config = {"state_dir": "/source" + args.state, "witness_dir": "/source" + (args.witness or args.state + ".witness"),
@@ -55,16 +55,20 @@ def prepare(work, args):
 def inspect(args):
     with regular_file(args.image) as disk, tempfile.TemporaryDirectory(prefix="psios-rescue-") as tmp:
         work = Path(tmp)
-        prepare(work, args)
+        signing = None
+        if args.secure_boot_key:
+            signing = boot_media.prepare_secure_boot(work, args.secure_boot_key, args.secure_boot_cert,
+                                                    args.efi_stub, args.efi_stub_sha256)
+        prepare(work, args, signing is not None)
         # Hand QEMU the exact already-open read-only file. Raw format disables
         # backing-file discovery and the guest gets no interface to the network.
         fd = disk.fileno()
-        kvm = os.access("/dev/kvm", os.R_OK | os.W_OK)
+        kvm = signing is None and os.access("/dev/kvm", os.R_OK | os.W_OK)
         if args.firmware == "direct":
             boot = ["-machine", "pc", "-kernel", "kernel", "-initrd", "initrd", "-append", boot_media.CMDLINE]
         else:
-            boot_media.build(work)
-            boot = boot_media.firmware_args(args.firmware, work, args.ovmf_dir)
+            boot_media.build(work, signing)
+            boot = boot_media.firmware_args(args.firmware, work, args.ovmf_dir, args.ovmf_vars)
             boot += ["-cdrom", "rescue.iso", "-boot", "order=d,strict=on"]
         command = ["qemu-system-x86_64", "-nodefaults", "-no-user-config", "-no-reboot",
                    *boot, "-accel", "kvm" if kvm else "tcg", "-m", "768", "-smp", "2",
@@ -108,6 +112,10 @@ def inspect(args):
         report = json.loads(body)
         if report["sqlite_integrity"] != "Verified" or report["foreign_keys"] != "Verified":
             raise ValueError("incomplete authority verification")
+        if signing:
+            if output.count(b"\nPSIOS-SECURE-BOOT/1\nEnforced\n") != 1:
+                raise ValueError("rescue guest did not confirm Secure Boot")
+            report["secure_boot"] = {"status": "Enforced", **signing.receipt()}
         if args.journal_overlay_mib is not None:
             report["ext4_journal"] = success[status.strip()]
         if args.save_rescue_iso is not None:
@@ -132,9 +140,14 @@ def main():
     parser.add_argument("--firmware", choices=["direct", "bios", "uefi"], default="direct",
                         help="direct kernel boot or boot an independently built El Torito rescue CD")
     parser.add_argument("--ovmf-dir", type=Path, default=Path("/usr/share/OVMF"), help="trusted 4 MiB OVMF pair for UEFI")
+    parser.add_argument("--ovmf-vars", type=Path, help="pre-enrolled 4 MiB OVMF variable store for signed UEFI rescue")
+    boot_media.add_signing_arguments(parser)
     parser.add_argument("--save-rescue-iso", type=Path, metavar="NEW_FILE",
                         help="publish the tested optical medium after successful firmware inspection")
     args = parser.parse_args()
+    signing = boot_media.signing_requested(args, parser)
+    if signing != (args.ovmf_vars is not None) or (signing and args.firmware != "uefi"):
+        parser.error("signed rescue requires --firmware uefi and a pre-enrolled --ovmf-vars store")
     if not re.fullmatch("[0-9a-f]{64}", args.core_sha256):
         parser.error("invalid expected SHA-256")
     if not 1 <= args.uid < 2**32 - 1 or args.gid is not None and not 0 <= args.gid < 2**32 - 1:

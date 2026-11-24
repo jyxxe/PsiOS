@@ -66,7 +66,7 @@ sha256sum boot.efi
 
 构建器将内核、initramfs、内置命令行和部署清单组装进同一个 UKI，并在发布前核验签名。回执格式 3 记录证书 DER 和 EFI stub 的 SHA-256，可用 `sbverify --cert signing.pem boot.efi` 检查 EFI 制品。升级已签名的开发盘须提供相同证书，并同时核对旧 EFI 摘要和签名。升级保留原盘和节点身份，旧版安装器会拒绝格式 3 回执。[systemd-stub 255](https://www.freedesktop.org/software/systemd/man/255/systemd-stub.html) · [Secure Boot 和升级验收](../tests/native_secure_boot.py)
 
-当前验收环境为使用自建登记证书的 amd64 OVMF。救援使用独立的受信维护环境。真实硬件固件、证书轮替、可信救援启动和 TPM 解锁仍需对应的产品验收。
+当前验收环境为使用自建登记证书的 amd64 OVMF。需要在相同固件信任配置下核验时，可使用签名的独立只读救援光盘。真实硬件固件、证书轮替和 TPM 解锁仍需对应的产品验收。[签名救援](offline-rescue.md#在-secure-boot-下核验)
 
 ## 持久性与救援
 

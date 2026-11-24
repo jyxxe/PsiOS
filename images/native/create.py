@@ -471,20 +471,14 @@ def main():
     mode.add_argument("--upgrade-from", type=Path, help="stopped native development disk to copy without changes")
     parser.add_argument("--previous-receipt", type=Path, help="trusted build receipt for the stopped disk")
     parser.add_argument("--root-console-hash", type=Path, help="optional private hash for local system administration; default locks root")
-    parser.add_argument("--secure-boot-key", type=Path, help="private local PEM key for an enrolled UEFI signing certificate")
-    parser.add_argument("--secure-boot-cert", type=Path, help="PEM signing certificate trusted by the target UEFI firmware")
-    parser.add_argument("--efi-stub", type=Path, help="trusted systemd linuxx64.efi.stub input for a signed Unified Kernel Image")
-    parser.add_argument("--efi-stub-sha256", help="SHA-256 of the exact trusted EFI stub input")
+    boot_media.add_signing_arguments(parser)
     parser.add_argument("--dhcp-mac", type=unicast_mac, help="enable IPv4 DHCP on the matching virtio NIC of a new disk")
     parser.add_argument("--state-mib", type=int, help=f"state partition size of a new disk (default {MIN_STATE_MIB} MiB)")
     parser.add_argument("--home-mib", type=int, help=f"home partition size of a new disk (default {MIN_HOME_MIB} MiB)")
     args = parser.parse_args()
     if not re.fullmatch(r"[0-9a-f]{64}", args.core_sha256):
         parser.error("invalid Core archive SHA-256")
-    secure = (args.secure_boot_key, args.secure_boot_cert, args.efi_stub, args.efi_stub_sha256)
-    if any(value is not None for value in secure) and (
-            not all(secure) or not re.fullmatch(r"[0-9a-f]{64}", args.efi_stub_sha256)):
-        parser.error("Secure Boot requires the key, certificate, EFI stub and its lowercase SHA-256")
+    boot_media.signing_requested(args, parser)
     if args.upgrade_from and (not args.previous_receipt or args.root_console_hash or args.dhcp_mac):
         parser.error("upgrade requires --previous-receipt and preserves console credentials and network configuration")
     if args.upgrade_from and (args.state_mib is not None or args.home_mib is not None):

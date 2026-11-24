@@ -1,5 +1,6 @@
 //! Single-node directory volumes. A writer or an uncertain operation retains the volume hold.
 pub mod files;
+mod staging;
 use crate::{
     config::{Config, new_file, private_dir, replace},
     db::{Db, Doc},
@@ -12,6 +13,7 @@ use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, ResolveFlags, openat2, st
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+pub(crate) use staging::reclaim_on_startup;
 use std::{
     fs::{self, File, Permissions},
     io::{Read, Write},
@@ -171,10 +173,7 @@ fn create_volume(w: &Work, restore: Option<&Doc>) -> Result<Value> {
         "Conflict",
         "volume operation identity already present",
     )?;
-    let stage = tempfile::Builder::new()
-        .permissions(Permissions::from_mode(0o700))
-        .prefix(".stage-")
-        .tempdir_in(&parent)?;
+    let stage = staging::create(&parent)?;
     let data = stage.path().join("data");
     private_dir(&data, true)?;
     if let Some(backup) = restore {
@@ -199,7 +198,7 @@ fn create_volume(w: &Work, restore: Option<&Doc>) -> Result<Value> {
         "capacity": capacity.to_string()
     }))
 }
-fn child(dir: &File, name: &str, flags: OFlags) -> Result<File> {
+fn child(dir: &File, name: impl rustix::path::Arg, flags: OFlags) -> Result<File> {
     // Linux openat2 rejects NONBLOCK on O_PATH descriptors.
     let flags = if flags.contains(OFlags::PATH) {
         flags
@@ -443,9 +442,7 @@ fn capture_root(w: &Work) -> Result<File> {
 fn backup(w: &Work) -> Result<Value> {
     let parent = w.cfg.state_dir.join("backups");
     let bid = format!("backup-{}", w.op.id);
-    let stage = tempfile::Builder::new()
-        .permissions(Permissions::from_mode(0o700))
-        .tempdir_in(&parent)?;
+    let stage = staging::create(&parent)?;
     let started = now();
     let mut capture = Capture {
         out: stage.path(),
@@ -589,7 +586,7 @@ fn inspect_backup(cfg: &Config, b: &Doc, destination: Option<&Path>) -> Result<V
             .map(|dir| entry_parent(dir, &e.path))
             .transpose()?;
         if let Some(expected) = &e.digest {
-            let mut original = child(&root, &format!("blob-{i}"), OFlags::RDONLY)?;
+            let mut original = child(&root, format!("blob-{i}"), OFlags::RDONLY)?;
             let meta = original.metadata()?;
             regular(&meta)?;
             require(
@@ -662,8 +659,20 @@ fn inspect_backup(cfg: &Config, b: &Doc, destination: Option<&Path>) -> Result<V
     )
 }
 // Names are resolved beneath a pinned directory. A nested mount is never traversed.
-fn remove_contents(dir: &File, depth: usize) -> Result<()> {
+fn remove_contents(dir: &File, depth: usize, staging: bool) -> Result<()> {
     require(depth < 128, "QuotaExceeded", "delete depth limit")?;
+    if staging {
+        let meta = dir.metadata()?;
+        require(
+            meta.uid() == rustix::process::geteuid().as_raw(),
+            "PermissionDenied",
+            "staged directory ownership changed",
+        )?;
+        // A restore can have applied a captured read-only mode before it stopped.
+        if meta.mode() & 0o700 != 0o700 {
+            dir.set_permissions(Permissions::from_mode(0o700))?;
+        }
+    }
     for entry in Dir::read_from(dir).map_err(std::io::Error::from)? {
         let entry = entry.map_err(std::io::Error::from)?;
         let name = entry.file_name();
@@ -672,15 +681,8 @@ fn remove_contents(dir: &File, depth: usize) -> Result<()> {
         }
         let st = statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).map_err(std::io::Error::from)?;
         let flags = if FileType::from_raw_mode(st.st_mode) == FileType::Directory {
-            let fd = openat2(
-                dir,
-                name,
-                OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::RDONLY,
-                Mode::empty(),
-                ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
-            )
-            .map_err(std::io::Error::from)?;
-            remove_contents(&File::from(fd), depth + 1)?;
+            let subdir = child(dir, name, OFlags::DIRECTORY | OFlags::RDONLY)?;
+            remove_contents(&subdir, depth + 1, staging)?;
             AtFlags::REMOVEDIR
         } else {
             AtFlags::empty()
@@ -718,7 +720,7 @@ pub fn perform(w: &Work) -> Result<Value> {
         Action::DeleteBackup(_) => {
             let root = w.cfg.state_dir.join("backups").join(&w.target.id);
             let (dir, _) = backup_files(&w.cfg, &w.target)?;
-            remove_contents(&dir, 0).map_err(unknown)?;
+            remove_contents(&dir, 0, false).map_err(unknown)?;
             fs::remove_dir(&root).map_err(unknown)?;
             File::open(root.parent().unwrap())?
                 .sync_all()
@@ -752,7 +754,7 @@ pub fn perform(w: &Work) -> Result<Value> {
         }
         Action::Delete(_) => {
             let root = w.data.as_ref().unwrap().parent().unwrap();
-            remove_contents(&File::open(root)?, 0).map_err(unknown)?;
+            remove_contents(&File::open(root)?, 0, false).map_err(unknown)?;
             fs::remove_dir(root).map_err(unknown)?;
             File::open(root.parent().unwrap())?
                 .sync_all()

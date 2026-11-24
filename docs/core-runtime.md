@@ -175,7 +175,9 @@ jq -n --argjson definition "$definition" --arg grant "$grant" --arg until "$(dat
 
 `Workflow.Get` 返回运行修订、定义引用、截止时间，以及各步骤的 Task 回执和已观察修订。后继步骤只在全部前驱已知成功时进入准入。前驱出现未知效果时保留 `Blocked/Unknown`，原 Operation 完成对账后继续。用 `Workflow.Cancel` 提交 ID 和当前修订可关闭派发并取消在途 Task，已经发生的效果仍可从原 Task 和 Operation 查阅。[审批、撤权和队列验收](../tests/test_workflow.py) · [升级验收](../tests/workflow_upgrade.py)
 
-## 本机私聊
+## 本机会话
+
+### 私聊
 
 通过 `Conversation.OpenDirect` 提交 `key`、`name`、`recipient_principal_id` 和邀请 `ttl_seconds`。发起者需要 `chat.invite` 与 `chat.read`，受邀主体可用 `Conversation.List` 查找邀请，再以 `Conversation.Respond` 提交会话 ID、`expected_resource_version` 和 `accept`。一份会话固定两位主体，同一主体对可创建不同名称的多个会话。
 
@@ -184,6 +186,16 @@ jq -n --argjson definition "$definition" --arg grant "$grant" --arg until "$(dat
 `Message.List` 的 cursor 绑定当前主体、会话、成员修订和授权代次。客户端可用 `Message.AckRead` 单调确认该游标处的已读位点。`Message.Get` 以 `conversation_id`、`message_id` 和可选 `content_ref` 查询固定正文。对邀请、正文或历史的读取均按两位成员和实际 `chat.read` 裁决。成员会话记录使用独立的有序拉取接口。会话所有者可按当前修订归档，双方保留有权读取的历史。
 
 当前每条消息包含至多 4096 个 UTF-8 字节，每页最多 32 条。会话最多保留 1024 条消息，节点最多保留 16384 条。权威容量闸门仍保护状态盘的提交余量。回执的持久性范围为本机进程故障。[私聊规范](v1/docs/10-conversations.md) · [成员、重发和故障验收](../tests/test_chat.py) · [格式 12 升级](../tests/chat_upgrade.py)
+
+### 本机多人房间
+
+`Conversation.OpenRoom` 用 `key`、`name`、`capacity` 和 `ttl_seconds` 创建 `AdHocRoom`。容量含拥有者，范围为 2 至 16。拥有者提交 `Conversation.Invite`，参数为会话 ID、`expected_resource_version`、`principal_id` 和邀请 `ttl_seconds`。响应包含更新后的 `conversation` 和本次 `membership_id`。受邀者用 `Conversation.Respond` 条件提交会话 ID、成员 ID、当前会话修订与 `accept`。邀请需要主动接受。私聊的两位主体保持固定。
+
+拥有者可用 `Conversation.RemoveMember` 提交会话 ID、当前修订和成员 ID。其他活跃成员可用 `Conversation.Leave` 主动退出。移除、退出或主体撤销立即阻断后续读取和发送。拥有者撤销会归档其房间。到期或归档后停止写入，活跃成员仍可读取被授予的历史。再次邀请会签发新成员 ID。
+
+房间使用与私聊相同的 `Message.Prepare`、`Message.Send`、读取与已读确认接口。历史政策固定为 `FromJoin`。接受邀请时记录当时的消息序号。之后仅能读取加入后的消息，指向此前正文的回复链接对该成员省略。发送窗口、历史游标和已读位点绑定成员实例。消息提交、成员变化和撤权都由同一个 Core 写事务裁决，消息回执记录提交时的成员修订和写者代次。
+
+房间容量计算包括未到期的待接受邀请。节点限制会话总量、成员记录和保留正文。群聊当前提供本机持久文本、明确邀请和拉取，后续接入线程、订阅投递、附件与 Agent 唤醒。[群聊权限、并发与恢复](../tests/test_chat_rooms.py) · [格式 19 原地升级](../tests/rooms_upgrade.py)
 
 ## 运行一个持久的 Agent 会话
 

@@ -211,6 +211,12 @@ jobs:
           git archive 588cb54ddde884db6350d989db87f58fc4b88a93 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format15"
           CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format15/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format15/target"
           python3 tests/mounts_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format15/target/debug"
+      - name: Preserve format 19 private messages, send windows and read positions
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format19"
+          git archive d46adb502897e915b24abd78148c2b8287cb1713 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format19"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format19/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format19/target"
+          python3 tests/rooms_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format19/target/debug"
       - name: Verify real systemd service control and crash reconciliation
         run: |
           sudo loginctl enable-linger "$(id -un)"

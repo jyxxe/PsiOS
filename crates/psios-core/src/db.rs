@@ -158,7 +158,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = 19;
+pub(super) const CURRENT_FORMAT: u32 = 20;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -330,6 +330,9 @@ impl Store {
                 if ver < 17 {
                     db.c.execute_batch(include_str!("agent/queue.sql"))?;
                 }
+                if ver < 20 {
+                    db.c.execute_batch(include_str!("chat/rooms.sql"))?;
+                }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;
         }
@@ -356,7 +359,7 @@ impl Store {
                 [],
             )?;
             db.c.execute(
-                "DELETE FROM chat_send_windows WHERE conversation IN
+                "DELETE FROM chat_send_windows WHERE sender=?1 OR conversation IN
                     (SELECT id FROM direct_chats WHERE inviter=?1 OR invitee=?1)",
                 [policy::OWNER],
             )?;

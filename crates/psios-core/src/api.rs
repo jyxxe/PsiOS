@@ -170,10 +170,14 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Workflow.Get" => workflow::get(db, actor, p, "WorkflowRun"),
         "Workflow.Cancel" => workflow::cancel(db, actor, p),
         "Conversation.OpenDirect" => chat::open(db, actor, p),
+        "Conversation.OpenRoom" => chat::open_room(db, actor, p),
         "Conversation.List" => chat::list(db, actor, p),
         "Conversation.Get" => chat::get(db, actor, p),
         "Conversation.Respond" => chat::respond(db, actor, p),
         "Conversation.Archive" => chat::archive(db, actor, p),
+        "Conversation.Invite" => chat::invite(db, actor, p),
+        "Conversation.RemoveMember" => chat::remove(db, actor, p),
+        "Conversation.Leave" => chat::leave(db, actor, p),
         "Message.OpenSendWindow" => chat::open_window(db, actor, p),
         "Message.Prepare" => chat::prepare(db, actor, p),
         "Message.Send" => chat::send(db, actor, p),
@@ -273,13 +277,25 @@ impl Store {
                     | "Workflow.Define"
                     | "Workflow.Start"
                     | "Workflow.Cancel"
+                    | "Conversation.OpenDirect"
+                    | "Conversation.OpenRoom"
+                    | "Conversation.Invite"
+                    | "Conversation.Respond"
+                    | "Conversation.RemoveMember"
+                    | "Conversation.Leave"
+                    | "Conversation.Archive"
                     | "Task.Cancel"
                     | "Task.CancelOrigin"
                     | "Task.Archive"
                     | "Task.Retry"
                     | "Event.Ack"
             ) {
-                db.audit(&actor, method, None, "Allowed")?;
+                let target = if method.starts_with("Conversation.") {
+                    r.params["id"].as_str().or_else(|| out["id"].as_str())
+                } else {
+                    None
+                };
+                db.audit(&actor, method, target, "Allowed")?;
             }
             Ok(out)
         });

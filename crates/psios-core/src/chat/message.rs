@@ -1,4 +1,4 @@
-use super::{Chat, READ, SEND, active_member, chat_id, timestamp};
+use super::{Access, READ, SEND, access, chat_id, timestamp};
 use crate::{Result, db::Db, decode, err, events, label, now, policy, require};
 use chrono::Utc;
 use psios_api::{VERSION, canonical, contract, digest, id, sha256};
@@ -7,19 +7,21 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 const TEXT_BYTES: usize = 4096;
-const MESSAGE_SELECT: &str = "SELECT receipt,sender,content,reply_to FROM chat_messages";
+const MESSAGE_SELECT: &str = "SELECT m.receipt,m.sender,m.content,reply.id FROM chat_messages m
+    LEFT JOIN chat_messages reply ON reply.id=m.reply_to AND reply.conversation=m.conversation AND reply.seq>?2";
 
-fn writable(db: &Db<'_>, actor: &str, id: &str) -> Result<Chat> {
-    policy::can(db, actor, SEND)?;
-    let chat = active_member(db, actor, id)?;
+fn writable(db: &Db<'_>, actor: &str, id: &str) -> Result<Access> {
+    policy::can_target(db, actor, SEND, id)?;
+    let chat = access(db, actor, id)?;
     require(
-        chat.phase == "Active",
+        chat.writable,
         "PreconditionFailed",
-        "direct conversation is archived",
+        "conversation is archived or expired",
     )?;
-    let peer = chat.peer(actor);
-    policy::active(db, peer)?;
-    policy::can(db, peer, READ)?;
+    if let Some(peer) = &chat.peer {
+        policy::active(db, peer)?;
+        policy::can_target(db, peer, READ, id)?;
+    }
     Ok(chat)
 }
 
@@ -35,25 +37,40 @@ struct SendWindow {
     valid_until: i64,
     sender_read: String,
     sender_send: String,
-    peer_read: String,
+    peer_read: Option<String>,
 }
 
-fn current_window(db: &Db<'_>, chat: &Chat, actor: &str, stamp: i64) -> Result<Option<SendWindow>> {
+fn current_window(
+    db: &Db<'_>,
+    chat: &Access,
+    actor: &str,
+    stamp: i64,
+) -> Result<Option<SendWindow>> {
     let Some(window) = db.c.query_row(
         "SELECT namespace,valid_until,sender_read_delegation,sender_send_delegation,peer_read_delegation
-         FROM chat_send_windows WHERE conversation=?1 AND sender=?2 AND incarnation=?3 AND valid_until>?4",
-        params![chat.id, actor, db.incarnation, stamp],
+         FROM chat_send_windows WHERE conversation=?1 AND sender=?2 AND incarnation=?3 AND valid_until>?4 AND membership=?5",
+        params![chat.id, actor, db.incarnation, stamp, chat.membership],
         |row| Ok(SendWindow { namespace: row.get(0)?, valid_until: row.get(1)?,
             sender_read: row.get(2)?, sender_send: row.get(3)?, peer_read: row.get(4)? }),
     ).optional()? else {
         return Ok(None);
     };
-    for (principal, action, delegation) in [
-        (actor, READ, &window.sender_read),
-        (actor, SEND, &window.sender_send),
-        (chat.peer(actor), READ, &window.peer_read),
-    ] {
-        match policy::delegation(db, principal, delegation, action) {
+    if chat.peer.is_some() != window.peer_read.is_some() {
+        return Ok(None);
+    }
+    let peer = chat
+        .peer
+        .as_deref()
+        .zip(window.peer_read.as_deref())
+        .map(|(principal, delegation)| (principal, READ, delegation));
+    let sender = [
+        (actor, READ, window.sender_read.as_str()),
+        (actor, SEND, window.sender_send.as_str()),
+    ];
+    for (principal, action, delegation) in sender.into_iter().chain(peer) {
+        match policy::delegation(db, principal, delegation, action)
+            .and_then(|grant| policy::tool_scope(db, &grant.reference(), &chat.id))
+        {
             Ok(_) => {}
             Err(error) if error.0.code == "PermissionDenied" => return Ok(None),
             Err(error) => return Err(error),
@@ -79,22 +96,29 @@ pub fn open_window(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
     db.cfg.check_admission_space()?;
     let namespace = id("send");
     let until = stamp + i64::from(p.ttl_seconds);
-    let sender_read = policy::authorized_delegation(db, actor, READ, None)?;
-    let sender_send = policy::authorized_delegation(db, actor, SEND, None)?;
-    let peer_read = policy::authorized_delegation(db, chat.peer(actor), READ, None)?;
+    let sender_read = policy::authorized_delegation(db, actor, READ, Some(&chat.id))?;
+    let sender_send = policy::authorized_delegation(db, actor, SEND, Some(&chat.id))?;
+    let peer_read = chat
+        .peer
+        .as_deref()
+        .map(|peer| {
+            policy::authorized_delegation(db, peer, READ, Some(&chat.id)).map(|grant| grant.id)
+        })
+        .transpose()?;
     db.c.execute(
-        "INSERT INTO chat_send_windows(conversation,sender,namespace,incarnation,valid_until,
-             sender_read_delegation,sender_send_delegation,peer_read_delegation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+        "INSERT INTO chat_send_windows(conversation,sender,membership,namespace,incarnation,valid_until,
+             sender_read_delegation,sender_send_delegation,peer_read_delegation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
          ON CONFLICT(conversation,sender) DO UPDATE SET namespace=excluded.namespace,
              incarnation=excluded.incarnation,valid_until=excluded.valid_until,
+             membership=excluded.membership,
              sender_read_delegation=excluded.sender_read_delegation,sender_send_delegation=excluded.sender_send_delegation,
              peer_read_delegation=excluded.peer_read_delegation",
-        params![chat.id, actor, namespace, db.incarnation, until, sender_read.id, sender_send.id, peer_read.id],
+        params![chat.id, actor, chat.membership, namespace, db.incarnation, until, sender_read.id, sender_send.id, peer_read],
     )?;
     Ok(json!({"namespace": namespace, "valid_until": timestamp(until)}))
 }
 
-fn require_key(db: &Db<'_>, chat: &Chat, actor: &str, key: &str) -> Result<()> {
+fn require_key(db: &Db<'_>, chat: &Access, actor: &str, key: &str) -> Result<()> {
     let bad = || {
         err(
             "IdempotencyKeyExpired",
@@ -132,15 +156,15 @@ fn validate_text(text: &str) -> Result<()> {
                 .chars()
                 .any(|ch| ch.is_control() && !matches!(ch, '\t' | '\n' | '\r')),
         "InvalidArgument",
-        "direct message must contain 1 to 4096 UTF-8 bytes of plain text",
+        "message must contain 1 to 4096 UTF-8 bytes of plain text",
     )
 }
 
-fn verify_reply(db: &Db<'_>, chat: &Chat, reply: Option<&str>) -> Result<()> {
+fn verify_reply(db: &Db<'_>, chat: &Access, reply: Option<&str>) -> Result<()> {
     if let Some(reply) = reply {
         let exists: bool = db.c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM chat_messages WHERE conversation=?1 AND id=?2)",
-            params![chat.id, reply],
+            "SELECT EXISTS(SELECT 1 FROM chat_messages WHERE conversation=?1 AND id=?2 AND seq>?3)",
+            params![chat.id, reply, chat.read_after],
             |row| row.get(0),
         )?;
         require(
@@ -182,7 +206,7 @@ fn verify_send(p: &Value) -> Result<()> {
                 .iter()
                 .all(|key| p.get(*key).is_none()),
         "UnsupportedCapability",
-        "direct conversations accept one text part and an optional same-room reply",
+        "local conversations accept one text part and an optional same-room reply",
     )?;
     validate_text(parts[0]["text"].as_str().unwrap())?;
     require(
@@ -221,13 +245,13 @@ pub fn send(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     require(
         chat.last_seq < 1024 && total < 16384,
         "QueueFull",
-        "direct message retention capacity reached",
+        "message retention capacity reached",
     )?;
     let sequence = chat.last_seq + 1;
     let message = chat_id("message", json!([chat.id, actor, send_key]));
     let receipt = json!({"schema_version": VERSION, "message_id": message, "conversation_id": chat.id,
-        "client_send_id": send_key, "conversation_seq": sequence.to_string(), "writer_epoch": "1",
-        "membership_revision": chat.membership_revision().to_string(), "recovery_incarnation": db.incarnation,
+        "client_send_id": send_key, "conversation_seq": sequence.to_string(), "writer_epoch": chat.writer_epoch.to_string(),
+        "membership_revision": chat.membership_revision.to_string(), "recovery_incarnation": db.incarnation,
         "accepted_at": now(), "content_digest": p["content_digest"], "deduplicated": false,
         "durability_profile": {"profile_ref": db.get(policy::RUNTIME_PROFILE)?.reference(), "ack_level": "Durable",
                                "fault_scope": ["ProcessCrash"], "rpo_seconds": "0"}});
@@ -246,9 +270,14 @@ pub fn send(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             reply
         ],
     )?;
-    db.c.execute(
-        "UPDATE direct_chats SET last_seq=?2 WHERE id=?1",
-        params![chat.id, sequence],
+    let advanced = db.c.execute(
+        "UPDATE chat_logs SET last_seq=?2 WHERE id=?1 AND last_seq=?3 AND writer_epoch=?4",
+        params![chat.id, sequence, chat.last_seq, chat.writer_epoch],
+    )?;
+    require(
+        advanced == 1,
+        "RecoveryRequired",
+        "conversation writer or commit boundary changed",
     )?;
     Ok(receipt)
 }
@@ -304,11 +333,11 @@ struct Lookup {
 
 pub fn get_message(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
     let p: Lookup = decode(request)?;
-    let chat = active_member(db, actor, &p.conversation_id)?;
+    let chat = access(db, actor, &p.conversation_id)?;
     let view =
         db.c.query_row(
-            &format!("{MESSAGE_SELECT} WHERE conversation=?1 AND id=?2"),
-            params![chat.id, p.message_id],
+            &format!("{MESSAGE_SELECT} WHERE m.conversation=?1 AND m.seq>?2 AND m.id=?3"),
+            params![chat.id, chat.read_after, p.message_id],
             Stored::from_row,
         )
         .optional()?
@@ -318,7 +347,7 @@ pub fn get_message(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
         require(
             reference == view["message"]["current_content_ref"],
             "PreconditionFailed",
-            "direct message content reference changed",
+            "message content reference changed",
         )?;
     }
     Ok(view)
@@ -332,16 +361,30 @@ struct Page {
     limit: Option<u32>,
 }
 
-fn cursor_scope(chat: &Chat) -> String {
-    format!("{}:{}", chat.id, chat.membership_revision())
+fn cursor_scope(chat: &Access) -> String {
+    if chat.membership.is_empty() {
+        format!("{}:{}", chat.id, chat.membership_revision)
+    } else {
+        format!("{}:{}", chat.id, chat.membership)
+    }
 }
 
-fn read_sequence(db: &Db<'_>, chat: &Chat, actor: &str) -> Result<i64> {
+fn cursor_position(db: &Db<'_>, chat: &Access, actor: &str, token: &str) -> Result<i64> {
+    let offset = events::read_position(db, actor, &cursor_scope(chat), token)?;
+    require(
+        (0..=chat.last_seq - chat.read_after).contains(&offset),
+        "CursorExpired",
+        "conversation history changed",
+    )?;
+    Ok(chat.read_after + offset)
+}
+
+fn read_sequence(db: &Db<'_>, chat: &Access, actor: &str) -> Result<i64> {
     Ok(db
         .c
         .query_row(
-            "SELECT seq FROM chat_read_offsets WHERE conversation=?1 AND principal=?2",
-            params![chat.id, actor],
+            "SELECT seq FROM chat_read_offsets WHERE conversation=?1 AND principal=?2 AND membership=?3",
+            params![chat.id, actor, chat.membership],
             |row| row.get(0),
         )
         .optional()?
@@ -350,30 +393,27 @@ fn read_sequence(db: &Db<'_>, chat: &Chat, actor: &str) -> Result<i64> {
 
 pub fn list_messages(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
     let p: Page = decode(request)?;
-    let chat = active_member(db, actor, &p.id)?;
-    let scope = cursor_scope(&chat);
+    let chat = access(db, actor, &p.id)?;
     let mut after = p
         .cursor
         .as_deref()
-        .map(|token| events::read_position(db, actor, &scope, token))
+        .map(|token| cursor_position(db, &chat, actor, token))
         .transpose()?
-        .unwrap_or(0);
-    require(
-        (0..=chat.last_seq).contains(&after),
-        "CursorExpired",
-        "conversation history changed",
-    )?;
+        .unwrap_or(chat.read_after);
     let limit = p.limit.unwrap_or(16);
     require(
         (1..=32).contains(&limit),
         "InvalidArgument",
-        "direct message page limit must be 1 to 32",
+        "message page limit must be 1 to 32",
     )?;
     let mut stmt = db.c.prepare(&format!(
-        "{MESSAGE_SELECT} WHERE conversation=?1 AND seq>?2 ORDER BY seq LIMIT ?3"
+        "{MESSAGE_SELECT} WHERE m.conversation=?1 AND m.seq>?3 ORDER BY m.seq LIMIT ?4"
     ))?;
     let rows = stmt
-        .query_map(params![chat.id, after, limit + 1], Stored::from_row)?
+        .query_map(
+            params![chat.id, chat.read_after, after, limit + 1],
+            Stored::from_row,
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let has_more = rows.len() > limit as usize;
     let mut items = Vec::with_capacity(rows.len().min(limit as usize));
@@ -385,14 +425,13 @@ pub fn list_messages(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value>
                 .and_then(|value| value.parse::<i64>().ok())
                 == Some(after),
             "RecoveryRequired",
-            "gap in direct message log",
+            "gap in conversation message log",
         )?;
         items.push(row.view()?);
     }
-    Ok(
-        json!({"items": items, "has_more": has_more, "cursor": events::sign_position(db, actor, &scope, after)?,
-              "read_sequence": read_sequence(db, &chat, actor)?.to_string()}),
-    )
+    Ok(json!({"items": items, "has_more": has_more,
+              "cursor": events::sign_position(db, actor, &cursor_scope(&chat), after - chat.read_after)?,
+              "read_sequence": read_sequence(db, &chat, actor)?.to_string()}))
 }
 
 #[derive(Deserialize)]
@@ -404,14 +443,12 @@ struct Ack {
 
 pub fn ack(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
     let p: Ack = decode(request)?;
-    let chat = active_member(db, actor, &p.id)?;
-    let next = events::read_position(db, actor, &cursor_scope(&chat), &p.cursor)?;
-    require(
-        (0..=chat.last_seq).contains(&next),
-        "CursorExpired",
-        "conversation history changed",
-    )?;
+    let chat = access(db, actor, &p.id)?;
+    let next = cursor_position(db, &chat, actor, &p.cursor)?;
     let old = read_sequence(db, &chat, actor)?;
+    if next == chat.read_after && old == 0 {
+        return Ok(json!({"read_sequence": "0"}));
+    }
     require(
         next >= old,
         "Conflict",
@@ -419,8 +456,9 @@ pub fn ack(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
     )?;
     if next > old {
         db.c.execute(
-            "INSERT INTO chat_read_offsets VALUES(?1,?2,?3) ON CONFLICT(conversation,principal) DO UPDATE SET seq=excluded.seq",
-            params![chat.id, actor, next],
+            "INSERT INTO chat_read_offsets VALUES(?1,?2,?3,?4)
+             ON CONFLICT(conversation,principal,membership) DO UPDATE SET seq=excluded.seq",
+            params![chat.id, actor, chat.membership, next],
         )?;
     }
     Ok(json!({"read_sequence": next.to_string()}))

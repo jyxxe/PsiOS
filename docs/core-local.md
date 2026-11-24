@@ -62,7 +62,7 @@ jq -e '.result.artifact_refs[0]' "$workdir/task.json" | ctl artifact > "$workdir
 
 启动 Core 后，在终端执行 `ctl shell`（沿用上面的 `ctl` 函数）。也可使用同一个 `psiosctl` 的 `--config` 或 `--socket`、`--token-file` 和 `--service-uid`。在同一台机器的浏览器打开终端第一行给出的地址，输入第二行的一次性配对码。
 
-Shell 可以查看节点状态、调度开关、执行队列和权威存储余量，以及分页浏览当前主体可见的任务和最新状态。节点面板要求 `node.inventory`。列表要求 `resource.read` 和 `task.read`，详情按 `task.read` 及任务归属检查。任务列表使用 Core 签发的快照游标。返回首页或快照过期后重新刷新会读取新快照。Core 暂停服务后可在同一会话刷新。
+Shell 可以查看节点状态、调度开关、执行队列和权威存储余量，以及分页浏览当前主体可见的任务和最新状态。节点面板要求 `node.inventory`。列表要求 `resource.read` 和 `task.read`，详情按 `task.read` 及任务归属检查。任务列表使用 Core 签发的快照游标。返回首页或快照过期后重新刷新会读取新快照。Core 暂停服务后可在同一会话刷新。 任务详情可按固定引用预览不超过 64 KiB 的结果制品。Shell 在展示前向 Core 核对任务归属和制品权限，再校验完整 SHA-256。更大的制品可把界面中的固定引用交给 `psiosctl artifact` 导出。
 
 页面和脚本随 CLI 提供，监听随机的 IPv4 回环端口。终端应仅供当前操作者使用。Core 凭据保留在 CLI 进程，浏览器令牌保留在页面内存，重新加载整页后需重新启动 Shell。配对窗口为两分钟，仅允许成功配对一次。服务器执行五分钟空闲和一小时绝对期限。断开会话、Core 拒绝当前主体身份或终端收到退出信号会关闭监听。此入口为本机只读观察界面，远程管理和桌面会话仍待实现。[进程级验收](../tests/test_shell.py)
 

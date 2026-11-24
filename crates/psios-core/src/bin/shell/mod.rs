@@ -11,7 +11,7 @@ use hyper::{
     service::service_fn,
 };
 use hyper_util::rt::{TokioIo, TokioTimer};
-use psios_api::{Client, parse};
+use psios_api::{ApiError, ApiResult, Client, ResourceRef, parse};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use session::{Session, now};
@@ -37,6 +37,8 @@ const CORE_CALLS: usize = 4;
 const BODY_LIMIT: usize = 4 * 1024;
 const HEADER_WAIT: Duration = Duration::from_secs(3);
 const BODY_WAIT: Duration = Duration::from_secs(2);
+const CORE_WAIT: Duration = Duration::from_secs(16);
+const ARTIFACT_LIMIT: usize = 64 * 1024;
 
 type HttpResponse = Response<Full<Bytes>>;
 
@@ -76,6 +78,7 @@ enum Endpoint {
     Node,
     Tasks,
     Task,
+    TaskArtifact,
 }
 
 #[derive(Deserialize)]
@@ -98,6 +101,45 @@ struct Page {
 #[serde(deny_unknown_fields)]
 struct Task {
     id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskArtifact {
+    task_id: String,
+    reference: ResourceRef,
+}
+
+enum Read {
+    Call(&'static str, Value),
+    Artifact(TaskArtifact),
+}
+
+impl Read {
+    fn execute(self, client: &Client) -> ApiResult<Value> {
+        match self {
+            Self::Call(method, params) => client.call(method, params),
+            Self::Artifact(artifact) => {
+                let task = client.call("Task.Get", json!({"id":artifact.task_id}))?;
+                let reference = json!(artifact.reference);
+                if !task["result"]["artifact_refs"]
+                    .as_array()
+                    .is_some_and(|items| items.contains(&reference))
+                {
+                    return Err(ApiError::new(
+                        "NotFound",
+                        "artifact unavailable in this Task result",
+                    )
+                    .into());
+                }
+                let bytes = client.artifact_bytes(&artifact.reference, ARTIFACT_LIMIT)?;
+                let content = String::from_utf8(bytes).map_err(|_| {
+                    ApiError::new("RecoveryRequired", "verified artifact is not UTF-8")
+                })?;
+                Ok(json!({"reference":reference,"content_json":content}))
+            }
+        }
+    }
 }
 
 fn response(status: StatusCode, content_type: &'static str, body: Bytes) -> HttpResponse {
@@ -189,23 +231,26 @@ async fn body(request: Request<Incoming>) -> Result<Value, Fault> {
     parse(&bytes).map_err(|_| INVALID)
 }
 
-fn rpc(endpoint: Endpoint, data: Value) -> Result<(&'static str, Value), Fault> {
+fn rpc(endpoint: Endpoint, data: Value) -> Result<Read, Fault> {
     match endpoint {
         Endpoint::Node => {
             let _: Empty = serde_json::from_value(data).map_err(|_| INVALID)?;
-            Ok(("Node.Get", json!({})))
+            Ok(Read::Call("Node.Get", json!({})))
         }
         Endpoint::Tasks => {
             let page: Page = serde_json::from_value(data).map_err(|_| INVALID)?;
-            Ok((
+            Ok(Read::Call(
                 "Resource.List",
                 json!({"kind":"Task","limit":20,"cursor":page.cursor}),
             ))
         }
         Endpoint::Task => {
             let task: Task = serde_json::from_value(data).map_err(|_| INVALID)?;
-            Ok(("Task.Get", json!({"id":task.id})))
+            Ok(Read::Call("Task.Get", json!({"id":task.id})))
         }
+        Endpoint::TaskArtifact => Ok(Read::Artifact(
+            serde_json::from_value(data).map_err(|_| INVALID)?,
+        )),
         _ => Err(INVALID),
     }
 }
@@ -217,6 +262,7 @@ fn core_error(error: &psios_api::ApiError) -> HttpResponse {
         "NotFound" => StatusCode::NOT_FOUND,
         "CursorExpired" | "Conflict" => StatusCode::CONFLICT,
         "InvalidArgument" => StatusCode::BAD_REQUEST,
+        "QuotaExceeded" => StatusCode::PAYLOAD_TOO_LARGE,
         _ => StatusCode::SERVICE_UNAVAILABLE,
     };
     json_response(status, json!({"error":error}))
@@ -274,6 +320,7 @@ impl Shell {
             "/api/node" => Endpoint::Node,
             "/api/tasks" => Endpoint::Tasks,
             "/api/task" => Endpoint::Task,
+            "/api/task-artifact" => Endpoint::TaskArtifact,
             _ => return Err(Fault(StatusCode::NOT_FOUND, "NotFound", "操作不存在")),
         };
         if endpoint == Endpoint::Pair {
@@ -304,7 +351,7 @@ impl Shell {
             session.close();
             return Ok(json_response(StatusCode::OK, json!({})));
         }
-        let (method, params) = rpc(endpoint, data)?;
+        let read = rpc(endpoint, data)?;
         let slot = self.rpc_slots.clone().try_acquire_owned().map_err(|_| {
             Fault(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -313,12 +360,14 @@ impl Shell {
             )
         })?;
         let context = self.clone();
-        let result = spawn_blocking(move || {
+        let work = spawn_blocking(move || {
             let _slot = slot;
-            context.client.call(method, params)
-        })
-        .await
-        .map_err(|_| UNAVAILABLE)?;
+            read.execute(&context.client)
+        });
+        let result = timeout(CORE_WAIT, work)
+            .await
+            .map_err(|_| UNAVAILABLE)?
+            .map_err(|_| UNAVAILABLE)?;
         if !self.authorized(&token) {
             return Err(UNAUTHENTICATED);
         }
@@ -404,7 +453,7 @@ async fn serve(client: Client, principal: String, stop: Arc<AtomicBool>) -> io::
                 .timer(TokioTimer::new())
                 .header_read_timeout(HEADER_WAIT);
             let _ = timeout(
-                Duration::from_secs(20),
+                Duration::from_secs(24),
                 protocol.serve_connection(TokioIo::new(stream), service),
             )
             .await;

@@ -124,6 +124,10 @@ async function test() {
     'document.getElementById("task-detail").getBoundingClientRect().bottom > 0 && ' +
     'document.getElementById("task-detail").getBoundingClientRect().top < window.innerHeight'));
   assert.equal(await evaluate("document.documentElement.scrollWidth"), 360);
+  await click("#preview-artifact");
+  await waitFor("verified artifact preview", 'document.getElementById("artifact-json")?.textContent.includes(' +
+    JSON.stringify(input.node) + ')');
+  assert.ok(await evaluate('document.activeElement.id === "artifact-json"'));
   await click("#close-task");
   assert.ok(await evaluate('document.getElementById("task-detail").hidden && ' +
     'document.activeElement.dataset.taskId === ' + JSON.stringify(input.task)));

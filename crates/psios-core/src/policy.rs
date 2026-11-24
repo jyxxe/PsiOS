@@ -5,6 +5,7 @@ use crate::{
 use psios_api::{VERSION, canonical, id, sha256};
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
+pub(crate) mod deadline;
 mod delegations;
 mod secrets;
 pub use delegations::{delegate, delegation, revoke_delegation, tool_scope};
@@ -191,7 +192,7 @@ pub fn bootstrap(db: &Db<'_>, token: &str) -> Result<()> {
         "owner-delegation",
         bootstrap_actions(),
         1_000_000,
-        after(86400 * 3650),
+        86400 * 3650,
         true,
     )?;
     db.audit(OWNER, "Core.Init", None, "Allowed")
@@ -346,9 +347,11 @@ fn issue(
     delegation_id: &str,
     actions: Vec<String>,
     units: u32,
-    until: String,
+    ttl_seconds: u32,
     allow_delegation: bool,
 ) -> Result<Value> {
+    let clock = deadline::Clock::sample()?;
+    let until = after(ttl_seconds.into());
     let budget = db.record(
         "Budget",
         subject,
@@ -371,6 +374,7 @@ fn issue(
             "budget_ref": budget.reference()
         }),
     )?;
+    clock.register(db, &grant.id, ttl_seconds)?;
     let body = json!({
         "grant_id": grant.id,
         "issuer": OWNER,
@@ -382,6 +386,7 @@ fn issue(
         "lifecycle": "Active"
     });
     let d = db.create("Delegation", delegation_id, subject, body.clone(), body)?;
+    clock.register(db, &d.id, ttl_seconds)?;
     epoch(db)?;
     Ok(json!({
         "grant_ref": grant.reference(),
@@ -483,7 +488,7 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         &id("delegation"),
         p.actions,
         p.units,
-        after(p.ttl_seconds.into()),
+        p.ttl_seconds,
         p.allow_delegation,
     )?;
     db.c.execute(

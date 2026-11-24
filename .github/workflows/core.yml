@@ -273,6 +273,13 @@ jobs:
           git archive 0f7b52c1ffea0621a0685dc6ebf09e6bdcec57de Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format23"
           CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format23/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format23/target"
           python3 -B tests/workflow_conditions_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format23/target/debug"
+      - name: Keep format 24 grants and enforce new deadlines across time namespaces
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format24"
+          git archive 14ef93d0c1c1d75dbf847d51942b832596ec4c70 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format24"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format24/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format24/target"
+          python3 -B tests/grant_deadline_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format24/target/debug"
+          sudo python3 -B tests/grant_time_namespace.py
       - name: Verify real systemd service control and crash reconciliation
         run: |
           sudo loginctl enable-linger "$(id -un)"

@@ -35,15 +35,27 @@ pub fn claim(db: &Db<'_>) -> Result<Option<String>> {
     if !pending {
         return Ok(None);
     }
+    let clock = policy::deadline::Clock::sample()?;
     let invalid:Option<(String,bool)>=db.c.query_row("WITH RECURSIVE lineage(task,did,depth) AS (
         SELECT q.task,t.spec->'delegation_ref'->>'resource_id',0 FROM queue q JOIN current t ON t.id=q.task
         WHERE q.phase IN ('Queued','WaitingApproval') UNION ALL
         SELECT l.task,d.body->'parent_ref'->>'resource_id',l.depth+1 FROM lineage l JOIN current d ON d.id=l.did
-        WHERE l.depth<4 AND d.body->'parent_ref' IS NOT NULL)
-        SELECT q.task,julianday(q.valid_until)<=julianday('now') FROM lineage l
-        JOIN queue q ON q.task=l.task JOIN current d ON d.id=l.did JOIN current p ON p.id=d.owner JOIN current g ON g.id=q.grant_id
-        WHERE julianday(q.valid_until)<=julianday('now') OR g.body->>'lifecycle'!='Active' OR d.body->>'lifecycle'!='Active'
-        OR p.body->>'lifecycle'!='Active' LIMIT 1",[],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        WHERE l.depth<4 AND d.body->'parent_ref' IS NOT NULL),
+        checked AS (
+          SELECT q.task,
+            julianday(q.valid_until)<=julianday('now') OR EXISTS(
+              SELECT 1 FROM authorization_deadlines elapsed
+              WHERE elapsed.resource IN (q.grant_id,l.did) AND elapsed.boot_id=?1
+                AND (elapsed.time_ns!=?2 OR elapsed.deadline_boot_ms<=?3)
+            ) AS expired,
+            g.body->>'lifecycle'!='Active' OR d.body->>'lifecycle'!='Active'
+              OR p.body->>'lifecycle'!='Active' AS revoked
+          FROM lineage l JOIN queue q ON q.task=l.task JOIN current d ON d.id=l.did
+            JOIN current p ON p.id=d.owner JOIN current g ON g.id=q.grant_id
+        )
+        SELECT task,expired FROM checked WHERE expired OR revoked LIMIT 1",
+        params![clock.boot.boot_id,clock.time_ns,clock.boot.millis],
+        |r|Ok((r.get(0)?,r.get(1)?))).optional()?;
     if let Some((id, expired)) = invalid {
         close(
             db,

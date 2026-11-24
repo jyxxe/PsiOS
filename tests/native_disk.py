@@ -208,9 +208,9 @@ def extract_partition(image, output, offset_mib, size_mib):
             dst.write(chunk)
 
 
-def check_clean_shutdown(image):
+def check_clean_shutdown(image, starts=(65, 257)):
     with image.open("rb") as disk:
-        for start in (65, 257):
+        for start in starts:
             disk.seek(start * 1024 * 1024 + 1024)
             superblock = disk.read(1024)
             magic, state = struct.unpack_from("<HH", superblock, 56)

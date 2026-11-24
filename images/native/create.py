@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build a new PsiOS UEFI disk or prepare an offline upgrade of a stopped node."""
 import argparse
+from dataclasses import dataclass
 from functools import partial
 import hashlib
 import json
@@ -22,13 +23,38 @@ import boot_media
 
 MIB = 1024 * 1024
 CMDLINE = "console=ttyS0,115200 quiet panic=1 rdinit=/psios-init"
-DISK_SIZE = 323 * MIB
-PARTITIONS = (
-    (1, 64, "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"),
-    (65, 192, "0FC63DAF-8483-4772-8E79-3D69D8477DE4"),
-    (257, 64, "0FC63DAF-8483-4772-8E79-3D69D8477DE4"),
-)
+ESP = (1, 64, "C12A7328-F81F-11D2-BA4B-00A0C93EC93B")
+LINUX_PARTITION = "0FC63DAF-8483-4772-8E79-3D69D8477DE4"
+MIN_STATE_MIB = 192
+MIN_HOME_MIB = 64
+MAX_IMAGE_MIB = 8192
 EFI_PATH = "::/EFI/BOOT/BOOTX64.EFI"
+
+
+@dataclass(frozen=True)
+class Layout:
+    state_mib: int = MIN_STATE_MIB
+    home_mib: int = MIN_HOME_MIB
+
+    def __post_init__(self):
+        if (type(self.state_mib) is not int or type(self.home_mib) is not int
+                or self.state_mib < MIN_STATE_MIB or self.home_mib < MIN_HOME_MIB
+                or self.image_mib > MAX_IMAGE_MIB):
+            raise ValueError(f"expected at least {MIN_STATE_MIB} MiB of state and {MIN_HOME_MIB} MiB of home "
+                             f"within a {MAX_IMAGE_MIB} MiB raw image")
+
+    @property
+    def image_mib(self):
+        return ESP[0] + ESP[1] + self.state_mib + self.home_mib + 2
+
+    @property
+    def partitions(self):
+        state_start = ESP[0] + ESP[1]
+        return (ESP, (state_start, self.state_mib, LINUX_PARTITION),
+                (state_start + self.state_mib, self.home_mib, LINUX_PARTITION))
+
+    def receipt(self):
+        return {"state_mib": self.state_mib, "home_mib": self.home_mib, "image_mib": self.image_mib}
 
 
 def sha256(path):
@@ -105,13 +131,13 @@ def host_config(seed, args):
     (seed / "etc").chmod(0o755)
 
 
-def ramfs(work, args, instance, home_id):
+def ramfs(work, args, instance, home_id, layout=Layout()):
     base = boot_media.prepare_kernel(work, args.kernel_iso)
     (work / "bin").mkdir()
     install_core(work, args.core_archive, args.core_sha256)
     (work / "psios-disk-uuid").write_text(str(instance) + "\n")
     (work / "psios-home-uuid").write_text(str(home_id) + "\n")
-    sectors = [str(mib * 2048) for start, size, _ in PARTITIONS[1:] for mib in (start, size)]
+    sectors = [str(mib * 2048) for start, size, _ in layout.partitions[1:] for mib in (start, size)]
     (work / "psios-storage-layout").write_text(" ".join(sectors) + "\n")
     boot_scripts = ["init", "shutdown", "dhcp", "dhcp-event", "storage", "enroll"]
     for script in boot_scripts:
@@ -123,6 +149,7 @@ def ramfs(work, args, instance, home_id):
         "format": 1, "architecture": "x86_64", "firmware": "UEFI",
         "core_source_commit": (work / "psios-source").read_text().strip(), "core_archive_sha256": args.core_sha256,
         "kernel_input": {name: base[name] for name in ("release", "sha256", "kernel_sha256", "initramfs_sha256")},
+        "geometry_mib": layout.receipt(),
         "required_filesystems": {"state": str(instance), "home": str(home_id)},
         "payload_sha256": payload,
     }
@@ -159,7 +186,7 @@ def seeded_ext4(work, name, label, identity, size_mib, seed, owners):
     return image
 
 
-def new_disk(work, disk, args, instance, home_id):
+def new_disk(work, disk, args, instance, home_id, layout):
     seed = work / "seed"
     seed.mkdir()
     seed.chmod(0o755)
@@ -168,31 +195,52 @@ def new_disk(work, disk, args, instance, home_id):
     for name in ("initialize-once", "deployment-uuid"):
         (seed / name).chmod(0o444)
     host_config(seed, args)
-    state = seeded_ext4(work, "state.ext4", "PSIOSSTATE", instance, PARTITIONS[1][1], seed, {})
+    state = seeded_ext4(work, "state.ext4", "PSIOSSTATE", instance, layout.state_mib, seed, {})
     homes = work / "home-seed"
     homes.mkdir()
     homes.chmod(0o755)
     for name in ("root", "psios"):
         (homes / name).mkdir()
         (homes / name).chmod(0o700)
-    home = seeded_ext4(work, "home.ext4", "PSIOSHOME", home_id, PARTITIONS[2][1], homes, {"psios": 1000})
+    home = seeded_ext4(work, "home.ext4", "PSIOSHOME", home_id, layout.home_mib, homes, {"psios": 1000})
     with disk.open("xb") as f:
-        f.truncate(DISK_SIZE)
-    layout = "label: gpt\nunit: sectors\n" + "".join(
-        f"start={start * 2048},size={size * 2048},type={kind}\n" for start, size, kind in PARTITIONS)
-    subprocess.run(["sfdisk", "--quiet", disk], input=layout, text=True, check=True, timeout=30)
-    boot_media.run(work, ["sfdisk", "--verify", disk])
+        f.truncate(layout.image_mib * MIB)
+    gpt = "label: gpt\nunit: sectors\n" + "".join(
+        f"start={start * 2048},size={size * 2048},type={kind}\n" for start, size, kind in layout.partitions)
+    subprocess.run(["sfdisk", "--quiet", disk], input=gpt, text=True, check=True, timeout=30)
+    validate_layout(work, disk, layout)
     for index, partition in ((1, state), (2, home)):
-        write_partition(disk, index, partition)
+        write_partition(disk, layout.partitions[index], partition, replace=False)
 
 
-def write_partition(disk, index, source):
-    start, size, _ = PARTITIONS[index]
+def copy_mib(src, dst, count, *, replace):
+    # New regions are already zero. During journal replay and EFI replacement,
+    # omit a zero block only if the destination still contains those same bytes.
+    zero = bytes(MIB)
+    for _ in range(count):
+        chunk = src.read(MIB)
+        if len(chunk) != MIB:
+            raise ValueError("incomplete partition data")
+        if chunk == zero:
+            if not replace:
+                dst.seek(MIB, os.SEEK_CUR)
+                continue
+            previous = dst.read(MIB)
+            if len(previous) != MIB:
+                raise ValueError("incomplete destination partition data")
+            if previous == zero:
+                continue
+            dst.seek(-MIB, os.SEEK_CUR)
+        dst.write(chunk)
+
+
+def write_partition(disk, partition, source, *, replace):
+    start, size, _ = partition
     if source.stat().st_size != size * MIB:
         raise ValueError("partition image has unexpected size")
     with disk.open("r+b") as dst, source.open("rb") as src:
         dst.seek(start * MIB)
-        shutil.copyfileobj(src, dst)
+        copy_mib(src, dst, size, replace=replace)
 
 
 def read_receipt(path):
@@ -201,7 +249,7 @@ def read_receipt(path):
     if len(raw) > 16 * 1024:
         raise ValueError("previous build receipt exceeds size limit")
     prior = json.loads(raw)
-    if not isinstance(prior, dict) or type(prior.get("format")) is not int or prior["format"] != 1:
+    if not isinstance(prior, dict) or type(prior.get("format")) is not int or prior["format"] not in (1, 2):
         raise ValueError("unsupported previous build receipt format")
     for name, pattern in (("source_commit", r"[0-9a-f]{40}"), ("efi_application_sha256", r"[0-9a-f]{64}")):
         if not isinstance(prior.get(name), str) or not re.fullmatch(pattern, prior[name]):
@@ -212,13 +260,21 @@ def read_receipt(path):
             raise ValueError(f"invalid previous build receipt field {name}")
     if prior["state_uuid"] == prior["home_uuid"]:
         raise ValueError("previous deployment filesystems have identical UUIDs")
-    return prior
+    layout = Layout()
+    if prior["format"] == 2:
+        geometry = prior.get("geometry_mib")
+        if not isinstance(geometry, dict) or set(geometry) != {"state_mib", "home_mib", "image_mib"}:
+            raise ValueError("invalid previous build receipt geometry")
+        layout = Layout(geometry["state_mib"], geometry["home_mib"])
+        if type(geometry["image_mib"]) is not int or geometry != layout.receipt():
+            raise ValueError("invalid previous build receipt image size")
+    return prior, layout
 
 
-def validate_layout(work, disk):
+def validate_layout(work, disk, layout):
     boot_media.run(work, ["sfdisk", "--verify", disk])
     gpt = json.loads(subprocess.check_output(["sfdisk", "--json", disk], timeout=30))["partitiontable"]
-    expected = [(start * 2048, size * 2048, kind) for start, size, kind in PARTITIONS]
+    expected = [(start * 2048, size * 2048, kind) for start, size, kind in layout.partitions]
     if (gpt["label"], gpt["unit"], gpt["sectorsize"]) != ("gpt", "sectors", 512) or [
             (p["start"], p["size"], p["type"]) for p in gpt["partitions"]] != expected:
         raise ValueError("unsupported previous PsiOS GPT layout")
@@ -245,16 +301,14 @@ def filesystem_state(path, expected_uuid):
     return state, bool(incompat & 4 or ro_compat & 0x10000)
 
 
-def check_filesystem(work, disk, index, expected_uuid):
-    start, size, _ = PARTITIONS[index]
+def check_filesystem(work, disk, index, expected_uuid, layout):
+    partition = layout.partitions[index]
+    start, size, _ = partition
     fs = work / f"previous-partition-{index + 1}.ext4"
     with disk.open("rb") as source, fs.open("xb") as out:
         source.seek(start * MIB)
-        for _ in range(size):
-            chunk = source.read(MIB)
-            if len(chunk) != MIB:
-                raise ValueError("incomplete filesystem in previous disk")
-            out.write(chunk)
+        copy_mib(source, out, size, replace=False)
+        out.truncate(size * MIB)
     state, pending = filesystem_state(fs, expected_uuid)
     if pending and (state & ~1) == 0:
         replay = subprocess.run(["e2fsck", "-p", "-E", "journal_only", fs], stdin=subprocess.DEVNULL,
@@ -268,7 +322,7 @@ def check_filesystem(work, disk, index, expected_uuid):
         raise ValueError(f"partition {index + 1} requires filesystem repair before upgrade")
     boot_media.run(work, ["e2fsck", "-f", "-n", fs])
     if pending:
-        write_partition(disk, index, fs)
+        write_partition(disk, partition, fs, replace=True)
     return fs, pending
 
 
@@ -284,29 +338,30 @@ def read_partition_file(work, fs, member, limit):
     return data
 
 
-def source_snapshot(work, disk, args, prior):
+def source_snapshot(work, disk, args, prior, layout):
+    disk_size = layout.image_mib * MIB
     with boot_media.regular_file(args.upgrade_from) as source:
         fd = source.fileno()
         before = os.fstat(fd)
-        if before.st_size != DISK_SIZE:
+        if before.st_size != disk_size:
             raise ValueError("unsupported previous PsiOS disk size")
         options = f"driver=raw,file.driver=file,file.filename=/proc/self/fd/{fd},file.locking=on"
         subprocess.run(["qemu-img", "convert", "--image-opts", "-m", "1", "-O", "raw", options, disk],
                        pass_fds=(fd,), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, check=True,
-                       timeout=90, preexec_fn=file_limit(DISK_SIZE))
+                       timeout=90, preexec_fn=file_limit(disk_size))
         after = os.fstat(fd)
         if (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (before.st_size, before.st_mtime_ns, before.st_ctime_ns):
             raise ValueError("previous disk changed during capture")
-    if disk.stat().st_size != DISK_SIZE:
+    if disk.stat().st_size != disk_size:
         raise ValueError("incomplete previous disk capture")
     digest = sha256(disk)
-    validate_layout(work, disk)
+    validate_layout(work, disk, layout)
     old_efi = work / "previous.efi"
-    boot_media.run(work, ["mcopy", "-i", f"{disk.name}@@{MIB}", EFI_PATH, old_efi])
+    boot_media.run(work, ["mcopy", "-i", f"{disk.name}@@{ESP[0] * MIB}", EFI_PATH, old_efi])
     if sha256(old_efi) != prior["efi_application_sha256"]:
         raise ValueError("previous EFI application does not match the trusted build receipt")
-    state, replayed_state = check_filesystem(work, disk, 1, prior["state_uuid"])
-    homes, replayed_home = check_filesystem(work, disk, 2, prior["home_uuid"])
+    state, replayed_state = check_filesystem(work, disk, 1, prior["state_uuid"], layout)
+    homes, replayed_home = check_filesystem(work, disk, 2, prior["home_uuid"], layout)
     homes.unlink()
     marker = read_partition_file(work, state, "/deployment-uuid", 64)
     if marker != (prior["state_uuid"] + "\n").encode():
@@ -335,29 +390,32 @@ def build(args):
     with tempfile.TemporaryDirectory(dir=output.parent, prefix=".psios-disk-") as tmp:
         work = Path(tmp)
         disk = work / "installed.raw"
-        prior = read_receipt(args.previous_receipt) if args.upgrade_from else None
-        if prior:
+        prior = None
+        if args.upgrade_from:
+            prior, layout = read_receipt(args.previous_receipt)
             instance, home_id = prior["state_uuid"], prior["home_uuid"]
-            source_digest, replayed = source_snapshot(work, disk, args, prior)
+            source_digest, replayed = source_snapshot(work, disk, args, prior, layout)
         else:
+            layout = Layout(MIN_STATE_MIB if args.state_mib is None else args.state_mib,
+                            MIN_HOME_MIB if args.home_mib is None else args.home_mib)
             instance, home_id = str(uuid.uuid4()), str(uuid.uuid4())
-            new_disk(work, disk, args, instance, home_id)
+            new_disk(work, disk, args, instance, home_id, layout)
         disk.chmod(0o600)
-        ramfs(work, args, instance, home_id)
+        ramfs(work, args, instance, home_id, layout)
         source_commit = (work / "psios-source").read_text().strip()
         authority = verify_authority(work, disk) if prior else None
         efi = boot_media.efi_application(work, CMDLINE)
         esp = work / "esp.fat"
         with esp.open("xb") as f:
-            f.truncate(PARTITIONS[0][1] * MIB)
+            f.truncate(ESP[1] * MIB)
         boot_media.run(work, ["mkfs.fat", "-F", "32", "--invariant", "-n", "PSIOSBOOT", esp])
         boot_media.run(work, ["mmd", "-i", esp, "::/EFI", "::/EFI/BOOT"])
         boot_media.run(work, ["mcopy", "-i", esp, efi, EFI_PATH])
-        write_partition(disk, 0, esp)
+        write_partition(disk, ESP, esp, replace=prior is not None)
         with disk.open("rb") as completed:
             os.fsync(completed.fileno())
         receipt = {
-            "format": 1, "image": str(output), "source_commit": source_commit,
+            "format": 2, "image": str(output), "source_commit": source_commit, "geometry_mib": layout.receipt(),
             "state_uuid": instance, "home_uuid": home_id,
             "deployment_manifest_sha256": sha256(work / "psios-deployment.json"),
             "efi_application_sha256": sha256(efi), "installed_initramfs_sha256": sha256(work / "initrd"),
@@ -392,11 +450,15 @@ def main():
     parser.add_argument("--previous-receipt", type=Path, help="trusted build receipt for the stopped disk")
     parser.add_argument("--root-console-hash", type=Path, help="optional private hash for local system administration; default locks root")
     parser.add_argument("--dhcp-mac", type=unicast_mac, help="enable IPv4 DHCP on the matching virtio NIC of a new disk")
+    parser.add_argument("--state-mib", type=int, help=f"state partition size of a new disk (default {MIN_STATE_MIB} MiB)")
+    parser.add_argument("--home-mib", type=int, help=f"home partition size of a new disk (default {MIN_HOME_MIB} MiB)")
     args = parser.parse_args()
     if not re.fullmatch(r"[0-9a-f]{64}", args.core_sha256):
         parser.error("invalid Core archive SHA-256")
     if args.upgrade_from and (not args.previous_receipt or args.root_console_hash or args.dhcp_mac):
         parser.error("upgrade requires --previous-receipt and preserves console credentials and network configuration")
+    if args.upgrade_from and (args.state_mib is not None or args.home_mib is not None):
+        parser.error("upgrade preserves the partition sizes from its previous build receipt")
     if args.console_hash and args.previous_receipt:
         parser.error("--previous-receipt requires --upgrade-from")
     build(args)

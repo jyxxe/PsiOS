@@ -64,6 +64,8 @@ pub enum Action {
     RouteLookup(node::network::LookupQuery),
     #[serde(rename = "node.routing_rules")]
     RoutingRules(node::network::RuleQuery),
+    #[serde(rename = "node.network_probe")]
+    NetworkProbe(Target),
     #[serde(rename = "node.devices")]
     Devices {},
     #[serde(rename = "node.mounts")]
@@ -205,6 +207,7 @@ impl Action {
         let (id, version, kind) = match self {
             Self::Status {} => return db.get(policy::PROFILE),
             Self::StartAgentSession(blueprint) => return blueprint.model(db),
+            Self::NetworkProbe(target) => return node::network::probe::target(db, target),
             Self::Processes(_)
             | Self::Interfaces(_)
             | Self::Routes(_)
@@ -384,6 +387,7 @@ impl Work {
             | Action::Routes(_)
             | Action::RouteLookup(_)
             | Action::RoutingRules(_)
+            | Action::NetworkProbe(_)
             | Action::Mounts {}
             | Action::Devices {} => node::perform(self),
             Action::Start(_) => apps::start(self, |engine, container| {

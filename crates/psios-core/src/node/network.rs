@@ -1,6 +1,7 @@
 //! Bounded, read-only observations in the daemon's network namespace.
 mod kernel;
 mod lookup;
+pub(crate) mod probe;
 mod routes;
 mod rules;
 mod snapshot;

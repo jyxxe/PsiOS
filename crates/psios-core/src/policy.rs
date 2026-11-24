@@ -23,6 +23,7 @@ pub const TOOLS: &[&str] = &[
     "node.routing_rules",
     "node.processes",
     "node.devices",
+    "node.mounts",
     "service.inspect",
     "service.start",
     "service.stop",
@@ -79,6 +80,7 @@ pub fn readonly(tool: &str) -> bool {
             | "node.routing_rules"
             | "node.processes"
             | "node.devices"
+            | "node.mounts"
             | "service.inspect"
             | "volume.files"
             | "volume.usage"
@@ -123,6 +125,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | "node.routes"
                     | "node.route_lookup"
                     | "node.routing_rules"
+                    | "node.mounts"
                     | "backup.verify"
                     | schedule::ACTION
                     | workflow::ACTION

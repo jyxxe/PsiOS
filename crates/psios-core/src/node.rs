@@ -1,4 +1,5 @@
 //! Linux observation and the operator's explicit systemd allowlist.
+mod mounts;
 pub mod network;
 use crate::{
     config::Manager,
@@ -323,6 +324,7 @@ pub fn perform(w: &Work) -> Result<Value> {
         Action::RoutingRules(q) => network::observe_rules(q, w),
         Action::Processes(p) => processes(p),
         Action::Devices {} => devices(),
+        Action::Mounts {} => mounts::observe(),
         _ => service(w),
     }
 }

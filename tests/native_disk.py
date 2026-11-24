@@ -290,6 +290,26 @@ def check_native_volume_usage(c):
     assert report["allocated_directory_bytes"] == str(int(c.run(f"stat -c %b {root}")) * 512), report
 
 
+def check_native_mount_topology(c):
+    node = json.loads(c.run("psiosctl node"))["reference"]["resource_id"]
+    grant = call(c, "Grant.Issue", {"principal_id": "local-owner", "tool_targets": [node],
+                 "actions": ["task.submit", "task.read", "node.mounts"], "units": 1, "ttl_seconds": 120})
+    delegation = shlex.quote(grant["delegation_ref"]["resource_id"])
+    receipt = json.loads(c.run(f"printf '{{}}' | psiosctl submit node.mounts --delegation {delegation} --key native-mounts"))
+    task = json.loads(c.run("psiosctl wait " + shlex.quote(receipt["task_id"])))
+    assert task["lifecycle"] == "Succeeded", task
+    report = call(c, "Artifact.Read", {"reference": task["result"]["artifact_refs"][0]})
+    assert report["mount_namespace_inode"] == c.run("stat -Lc %i /proc/self/ns/mnt")
+    mounts = {mount["mount_point"]: mount for mount in report["mounts"] if isinstance(mount["mount_point"], str)}
+    state, settings, homes, local_home, scratch = [mounts[path] for path in
+        ("/var/lib", "/etc", "/mnt/psios-homes", "/home/psios", "/tmp")]
+    assert state["filesystem_type"] == "ext4" and {"nodev", "nosuid", "noexec"}.issubset(state["flags"]), state
+    assert settings["device"] == state["device"] and settings["filesystem_root"] == "/etc", settings
+    assert homes["filesystem_type"] == "ext4" and homes["device"] != state["device"], homes
+    assert local_home["device"] == homes["device"] and local_home["filesystem_root"] == "/psios", local_home
+    assert scratch["filesystem_type"] == "tmpfs" and {"nodev", "nosuid"}.issubset(scratch["flags"]), scratch
+
+
 def check_native_network(c):
     node = json.loads(c.run("psiosctl node"))["reference"]["resource_id"]
     grant = call(c, "Grant.Issue", dict(principal_id="local-owner", tool_targets=[node],
@@ -459,6 +479,7 @@ def exercise(args, work):
         assert "No space left on device" in failure, failure
         assert int(c.run("stat -c %s ./full")) >= 40 * 1024 * 1024
         check_native_volume_usage(c)
+        check_native_mount_topology(c)
         check_native_network(c)
         workflow = check_native_workflow(c)
         # Unrelated tool grants issued by the checks above must preserve chat sends.

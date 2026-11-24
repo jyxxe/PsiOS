@@ -119,6 +119,10 @@ jobs:
         run: |
           sudo unshare --mount --propagation private env PSIOS_TEST_VOLUME_BIND=1 \
             python3 -B -m unittest discover -s tests -p test_volume_usage.py -k test_mount_boundary -v
+      - name: Observe real tmpfs, bind, mount flags and path bytes in a private namespace
+        run: |
+          sudo unshare --mount --propagation private env PSIOS_TEST_MOUNT_TOPOLOGY=1 \
+            python3 -B -m unittest discover -s tests -p test_mounts.py -k test_private_tmpfs -v
       - name: Exercise authority backpressure on a bounded Linux filesystem
         run: |
           scratch=$(mktemp -d)
@@ -201,6 +205,12 @@ jobs:
           git archive 9d40b0a24e2b93bed7615739c9f8f5bbc63a13c8 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format14"
           CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format14/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format14/target"
           python3 tests/volume_usage_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format14/target/debug"
+      - name: Publish mount topology without widening format 15 inventory grants
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format15"
+          git archive 588cb54ddde884db6350d989db87f58fc4b88a93 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format15"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format15/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format15/target"
+          python3 tests/mounts_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format15/target/debug"
       - name: Verify real systemd service control and crash reconciliation
         run: |
           sudo loginctl enable-linger "$(id -un)"

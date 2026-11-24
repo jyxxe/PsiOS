@@ -14,8 +14,11 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for (task, phase, attempt) in active {
         let t = db.get(&task)?;
-        let read = policy::readonly(field(&t.spec, "task_type"));
-        if phase == "Dispatched" && !read {
+        let tool = field(&t.spec, "task_type");
+        let read = policy::readonly(tool);
+        // Activation verifies the filesystem and changes the volume only in the finish transaction.
+        let activation_uncommitted = phase == "Dispatched" && tool == "volume.activate";
+        if phase == "Dispatched" && !read && !activation_uncommitted {
             close(
                 db,
                 &t,
@@ -33,7 +36,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             )?;
             continue;
         }
-        if t.body["lifecycle"] == "Cancelling" || attempt >= 3 {
+        if t.body["lifecycle"] == "Cancelling" || attempt >= 3 || activation_uncommitted {
             close(
                 db,
                 &t,
@@ -43,7 +46,14 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                     "Failed"
                 },
                 "Known",
-                Some(&err("LeaseLost", "run interrupted")),
+                Some(&err(
+                    "LeaseLost",
+                    if activation_uncommitted {
+                        "activation had not committed at restart"
+                    } else {
+                        "run interrupted"
+                    },
+                )),
                 None,
             )?;
             continue;

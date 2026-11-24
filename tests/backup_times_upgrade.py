@@ -23,7 +23,7 @@ def exercise(previous, format5_writer, current):
             path = node.state / "backups" / ref["resource_id"] / "manifest.json"
             return json.loads(path.read_bytes())
         assert "mtime_unix_v1" not in manifest(older)
-        def check_restore(ref):
+        def check_restore(ref, verify_activation=False):
             grant = node.call("Grant.Issue", dict(principal_id="local-owner", tool_targets=[ref["resource_id"]],
                 actions=["task.submit", "task.read", "backup.verify"], units=1, ttl_seconds=120))
             request = node.prepare("backup.verify", target(ref), delegation=grant["delegation_ref"]["resource_id"])
@@ -32,6 +32,11 @@ def exercise(previous, format5_writer, current):
             restored = node.perform("backup.restore", target(ref))
             data = node.state / "volumes" / restored["resource_id"] / "data"
             assert (data / "entry").read_bytes() == b"previous volume"
+            if verify_activation:
+                active = node.perform("volume.activate", target(restored))
+                spec = node.get(active["resource_id"])["resource"]["spec"]
+                assert spec["restore_proof"]["includes_mtime"] == ("mtime_unix_v1" in manifest(ref))
+                assert spec["restore_verification_ref"]["resource_id"]
             return data
         switch(node, format5_writer)
         check_restore(older)
@@ -42,10 +47,10 @@ def exercise(previous, format5_writer, current):
         switch(node, previous)
         check_restore(newer)
         switch(node, current)
-        check_restore(older)
-        data = check_restore(newer)
+        check_restore(older, verify_activation=True)
+        data = check_restore(newer, verify_activation=True)
         assert (data / "entry").stat().st_mtime_ns == (folder / "entry").stat().st_mtime_ns
-        print("PASS both format 5 backup-manifest directions and recovery of both manifests after upgrade")
+        print("PASS both format 5 backup-manifest directions, restore and verified activation after upgrade")
     finally:
         node.close()
 

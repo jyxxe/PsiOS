@@ -158,7 +158,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = 6;
+pub(super) const CURRENT_FORMAT: u32 = 7;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -305,7 +305,7 @@ impl Store {
             changes: Default::default(),
         };
         if ver < CURRENT_FORMAT {
-            store.transaction("core-upgrade-v6", |db| {
+            store.transaction(&format!("core-upgrade-v{CURRENT_FORMAT}"), |db| {
                 if ver == 1 {
                     db.c.execute_batch(include_str!("upgrade.sql"))?;
                     policy::upgrade(db)?;

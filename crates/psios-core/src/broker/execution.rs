@@ -298,6 +298,10 @@ pub fn finish(db: &Db<'_>, w: &Work, result: Result<Value>) -> Result<()> {
         return Ok(());
     }
     let cancelled = t.body["lifecycle"] == "Cancelling";
+    if cancelled && matches!(w.action, Action::Activate(_)) {
+        close(db, &t, "Cancelled", "Known", None, None)?;
+        return Ok(());
+    }
     match result {
         Ok(receipt) => {
             let body = host::apply(db, w, &receipt)?;

@@ -562,3 +562,70 @@ fn backup_check_excludes_restore_and_retries_after_lost_receipt() {
             .starts_with("volume-")
     );
 }
+
+#[test]
+fn activation_requires_a_completed_authority_commit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, mut s) = initialized(tmp.path());
+    let create = submit(&mut s, "volume.create", json!({"name":"restore-source"}));
+    let source = execute(&mut s, &create);
+    let backup = submit(
+        &mut s,
+        "backup.create",
+        json!({"id":source["resource_id"],"expected_resource_version":source["version"]}),
+    );
+    let backup = execute(&mut s, &backup);
+    let restore = submit(
+        &mut s,
+        "backup.restore",
+        json!({"id":backup["resource_id"],"expected_resource_version":backup["version"]}),
+    );
+    let clone = execute(&mut s, &restore);
+    let target = json!({"id":clone["resource_id"],"expected_resource_version":clone["version"]});
+    let first = submit(&mut s, "volume.activate", target.clone());
+    approve(&mut s, &first);
+    assert_eq!(claim(&mut s), first);
+    let worker = dispatch(&mut s, &first);
+    let receipt = worker.perform(|_, _| unreachable!()).unwrap();
+    assert!(receipt["verified_at"].is_string());
+    drop(s);
+
+    let mut s = Store::open(cfg).unwrap();
+    s.transaction("restart", broker::recover).unwrap();
+    let interrupted = call(&mut s, "Task.Get", json!({"id":first})).unwrap();
+    assert_eq!(interrupted["lifecycle"], "Failed");
+    assert_eq!(interrupted["outcome_knowledge"], "Known");
+    assert_eq!(interrupted["conditions"][0]["type"], "LeaseLost");
+    let pending = call(&mut s, "Resource.Get", json!({"id":clone["resource_id"]})).unwrap();
+    assert_eq!(pending["reference"], clone);
+    assert_eq!(
+        pending["resource"]["spec"]["storage_restore_phase"],
+        "AwaitingActivation"
+    );
+
+    let second = submit(&mut s, "volume.activate", target.clone());
+    approve(&mut s, &second);
+    assert_eq!(claim(&mut s), second);
+    let worker = dispatch(&mut s, &second);
+    let running = call(&mut s, "Task.Get", json!({"id":second})).unwrap();
+    call(
+        &mut s,
+        "Task.Cancel",
+        json!({"id":second,"expected_resource_version":running["task_revision"]}),
+    )
+    .unwrap();
+    let receipt = worker.perform(|_, _| unreachable!());
+    s.transaction("finish", |db| broker::finish(db, &worker, receipt))
+        .unwrap();
+    let canceled = call(&mut s, "Task.Get", json!({"id":second})).unwrap();
+    assert_eq!(canceled["lifecycle"], "Cancelled");
+    assert_eq!(canceled["outcome_knowledge"], "Known");
+    assert_eq!(canceled["result"]["artifact_refs"], json!([]));
+    let pending = call(&mut s, "Resource.Get", json!({"id":clone["resource_id"]})).unwrap();
+    assert_eq!(pending["reference"], clone);
+
+    let third = submit(&mut s, "volume.activate", target);
+    approve(&mut s, &third);
+    let activated = execute(&mut s, &third);
+    assert_ne!(activated["version"], clone["version"]);
+}

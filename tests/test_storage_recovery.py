@@ -124,6 +124,46 @@ class StorageRecoveryTests(unittest.TestCase):
         self.assertEqual(data.stat().st_mode & 0o777, 0o555)
         self.assertEqual((data / "large").stat().st_size, 32 * 1024 * 1024)
 
+    def test_activation_verifies_restored_tree_after_restart_and_backup_deletion(self):
+        clone = self.n.perform("backup.restore", target(self.backup))
+        data = self.volumes / clone["resource_id"] / "data"
+        record = data / "record"
+        original = record.read_bytes()
+        stamp = record.stat()
+        root_stamp = data.stat()
+        self.n.perform("backup.delete", target(self.backup))
+        self.n.stop()
+        record.write_bytes(b"P" + original[1:])
+        os.utime(record, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        self.n.start()
+
+        def refuses_activation():
+            task = self.n.wait(self.n.submit("volume.activate", target(clone)), autoapprove=True)
+            self.assertEqual((task["lifecycle"], task["outcome_knowledge"]), ("Failed", "Known"))
+            self.assertEqual(task["conditions"][0]["type"], "PreconditionFailed", task)
+            pending = self.n.get(clone["resource_id"])
+            self.assertEqual(pending["reference"], clone)
+            self.assertEqual(pending["resource"]["spec"]["storage_restore_phase"], "AwaitingActivation")
+
+        refuses_activation()
+        record.write_bytes(original)
+        os.utime(record, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        extra = data / "unexpected"
+        extra.touch()
+        os.utime(data, ns=(root_stamp.st_atime_ns, root_stamp.st_mtime_ns))
+        refuses_activation()
+        extra.unlink()
+        os.utime(data, ns=(root_stamp.st_atime_ns, root_stamp.st_mtime_ns))
+
+        activated = self.n.perform("volume.activate", target(clone))
+        spec = self.n.get(activated["resource_id"])["resource"]["spec"]
+        self.assertEqual(spec["storage_restore_phase"], "Activated")
+        evidence = self.n.get(spec["restore_verification_ref"]["resource_id"])
+        self.assertEqual(evidence["reference"], spec["restore_verification_ref"])
+        self.assertEqual(evidence["value"]["tree_digest"], spec["restore_proof"]["tree_digest"])
+        self.assertEqual(evidence["value"]["volume_ref"], clone)
+        self.assertEqual(evidence["value"]["backup_ref"], self.backup)
+
 
 if __name__ == "__main__":
     unittest.main()

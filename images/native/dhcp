@@ -4,9 +4,11 @@ set -eu
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 config=/etc/psios/dhcp-mac
 run=/run/psios-network
+umask 022
+mkdir -p -m 0755 "$run"
 
 retry() {
-    printf 'PsiOS DHCP: %s\n' "$1" >&2
+    printf '%s\n' "$1" > "$run/status"
     sleep 15
     exit 1
 }
@@ -29,10 +31,10 @@ done
 [ -n "$link" ] || retry 'configured virtio interface is absent'
 case "$link" in *[!a-zA-Z0-9_.-]*) retry 'unsupported interface name' ;; esac
 
-mkdir -p -m 0755 "$run"
 export PSIOS_DHCP_INTERFACE="$link" PSIOS_DHCP_MAC="$mac"
 PSIOS_DHCP_IFINDEX=$(cat "/sys/class/net/$link/ifindex")
 export PSIOS_DHCP_IFINDEX
 printf '1\n' > "/proc/sys/net/ipv6/conf/$link/disable_ipv6" || retry 'could not apply the IPv4-only profile'
 ip link set dev "$link" up || retry 'could not bring up the interface'
-exec udhcpc -f -R -i "$link" -s /psios-dhcp-event -t 3 -T 3 -A 15 -o -O subnet -O router -O dns
+printf 'Waiting for a lease on %s\n' "$link" > "$run/status"
+exec udhcpc -f -R -i "$link" -s /psios-dhcp-event -t 3 -T 3 -A 15 -o -O subnet -O router -O dns >/dev/null 2>&1

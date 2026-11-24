@@ -21,7 +21,8 @@ def check_lease(c):
     try:
         wait_for(c, "busybox ip -4 addr show dev eth0 | grep -Fq '192.0.2.20/24' && "
                     "busybox ip -4 route show default | grep -Eq '^default via 192[.]0[.]2[.]2 dev eth0 +metric 30310 *$' && "
-                    "grep -qx 'nameserver 192.0.2.3' /etc/resolv.conf")
+                    "grep -qx 'nameserver 192.0.2.3' /etc/resolv.conf && "
+                    "grep -Fxq 'Bound 192.0.2.20/24 on eth0' /run/psios-network/status")
     except AssertionError as failure:
         observed = c.run("busybox ip -4 addr show dev eth0; busybox ip -4 route show; cat /etc/resolv.conf; true")
         raise AssertionError(observed) from failure
@@ -54,7 +55,8 @@ def exercise(args, work):
         check_lease(c)
         c.run("kill -USR2 $(pidof udhcpc)")
         wait_for(c, "! busybox ip -4 addr show dev eth0 | grep -q 'inet ' && "
-                    "test -z \"$(busybox ip -4 route show default)\" && test ! -s /etc/resolv.conf")
+                    "test -z \"$(busybox ip -4 route show default)\" && test ! -s /etc/resolv.conf && "
+                    "grep -Fxq 'No active lease on eth0' /run/psios-network/status")
         c.run("kill -USR1 $(pidof udhcpc)")
         check_lease(c)
         c.send("poweroff")
@@ -65,6 +67,7 @@ def exercise(args, work):
         c.login("psios", user_secret)
         assert json.loads(c.run("psiosctl whoami"))["authority_id"] == identity
         wait_for(c, f"test \"$(cat /sys/class/net/eth0/address 2>/dev/null)\" = {OTHER}")
+        wait_for(c, "grep -Fxq 'configured virtio interface is absent' /run/psios-network/status")
         c.run("test ! -s /etc/resolv.conf && ! busybox ip -4 addr show dev eth0 | grep -q 'inet '")
         c.run("test -z \"$(busybox ip -4 route show default)\"")
         c.send("exit")

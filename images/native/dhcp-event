@@ -57,13 +57,20 @@ apply_lease() {
 }
 
 case "${1-}" in
-    deconfig|leasefail|nak) forget_lease ;;
-    bound|renew)
-        if ! apply_lease; then
-            printf 'PsiOS DHCP: could not apply the lease on %s\n' "$interface" >&2
-            forget_lease || :
+    deconfig|leasefail|nak)
+        if ! forget_lease; then
+            printf 'Could not clear the lease on %s\n' "$interface" > "$run/status"
             exit 1
         fi
+        printf 'No active lease on %s\n' "$interface" > "$run/status"
+        ;;
+    bound|renew)
+        if ! apply_lease; then
+            forget_lease || :
+            printf 'Could not apply the lease on %s\n' "$interface" > "$run/status"
+            exit 1
+        fi
+        printf 'Bound %s/%s on %s\n' "$ip" "$mask" "$interface" > "$run/status"
         ;;
     *) exit 1 ;;
 esac

@@ -36,7 +36,7 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 -device virtio-net-pci,netdev=lan,mac=52:54:00:51:6f:20,romfile=
 ```
 
-该配置独占匹配网口的 IPv4 地址、DHCP 默认路由和 `/etc/resolv.conf`。DHCP 提供地址后，默认路由和最多三个 DNS 服务器按租约配置，释放租约时清理。普通账户可用 `busybox ip -4 addr show`、`busybox ip -4 route show` 和 `cat /etc/resolv.conf` 检查。配置的网口缺失时，串口账户与 Core 可照常使用。静态网络配置、无线、IPv6 管理和远程配置事务仍待开发。[隔离网络中的真实续租和释放验收](../tests/native_dhcp.py)
+该配置独占匹配网口的 IPv4 地址、DHCP 默认路由和 `/etc/resolv.conf`。DHCP 提供地址后，默认路由和最多三个 DNS 服务器按租约配置，释放租约时清理。普通账户可用 `busybox ip -4 addr show`、`busybox ip -4 route show` 和 `cat /etc/resolv.conf` 检查。最新租约或故障信息在 `/run/psios-network/status`。配置的网口缺失时，串口账户与 Core 可照常使用。静态网络配置、无线、IPv6 管理和远程配置事务仍待开发。[隔离网络中的真实续租和释放验收](../tests/native_dhcp.py)
 
 ## 核对安装与运行的制品
 

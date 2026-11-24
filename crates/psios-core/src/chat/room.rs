@@ -177,7 +177,7 @@ fn owned(db: &Db<'_>, actor: &str, id: &str) -> Result<(Room, Member)> {
     policy::can_target(db, actor, INVITE, id)?;
     let (room, member) = visible(db, actor, id)?;
     require(
-        room.owner == actor && member.phase == "Active",
+        room.owner == actor && member.phase == "Active" && member.role == "Owner",
         "PermissionDenied",
         "room owner required",
     )?;
@@ -378,9 +378,60 @@ pub(super) fn archive(db: &Db<'_>, actor: &str, p: Conditional) -> Result<Value>
         "PreconditionFailed",
         "room already archived",
     )?;
+    archive_room(db, &room.id)?;
+    find(db, &room.id)?
+        .ok_or_else(unavailable)?
+        .view(db, &owner)
+}
+
+fn retire_admissions(db: &Db<'_>, id: &str) -> Result<bool> {
+    let invitations = db.c.execute(
+        "UPDATE room_memberships
+         SET phase=CASE WHEN invitation_until<=?2 THEN 'Expired' ELSE 'Removed' END,
+             reason=CASE WHEN invitation_until<=?2 THEN 'InvitationExpired' ELSE 'RoomArchived' END
+         WHERE conversation=?1 AND phase='Invited'",
+        params![id, Utc::now().timestamp()],
+    )?;
+    db.c.execute("DELETE FROM chat_send_windows WHERE conversation=?1", [id])?;
+    Ok(invitations != 0)
+}
+
+fn archive_room(db: &Db<'_>, id: &str) -> Result<()> {
+    let invitations_changed = retire_admissions(db, id)?;
     db.c.execute(
-        "UPDATE chat_rooms SET phase='Archived',revision=revision+1 WHERE id=?1",
-        [&room.id],
+        "UPDATE chat_rooms SET phase='Archived',revision=revision+1,
+             membership_revision=membership_revision+?2 WHERE id=?1",
+        params![id, invitations_changed],
+    )?;
+    Ok(())
+}
+
+pub(super) fn archive_owned(db: &Db<'_>, principal: &str) -> Result<()> {
+    let rooms =
+        db.c.prepare("SELECT id FROM chat_rooms WHERE owner=?1 AND phase='Active'")?
+            .query_map([principal], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+    for id in rooms {
+        archive_room(db, &id)?;
+    }
+    Ok(())
+}
+
+pub fn reopen(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
+    let p: Conditional = decode(request)?;
+    let (room, owner) = owned(db, actor, &p.id)?;
+    room.cas(&p.expected_resource_version)?;
+    require(
+        room.phase == "Archived" && Utc::now().timestamp() < room.expires,
+        "PreconditionFailed",
+        "only archived, unexpired rooms can be reopened",
+    )?;
+    db.cfg.check_admission_space()?;
+    let invitations_changed = retire_admissions(db, &room.id)?;
+    db.c.execute(
+        "UPDATE chat_rooms SET phase='Active',revision=revision+1,
+             membership_revision=membership_revision+?2 WHERE id=?1",
+        params![room.id, invitations_changed],
     )?;
     find(db, &room.id)?
         .ok_or_else(unavailable)?
@@ -389,14 +440,14 @@ pub(super) fn archive(db: &Db<'_>, actor: &str, p: Conditional) -> Result<Value>
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Remove {
+struct MemberChange {
     id: String,
     expected_resource_version: String,
     membership_id: String,
 }
 
 pub fn remove(db: &Db<'_>, actor: &str, value: &Value) -> Result<Value> {
-    let p: Remove = decode(value)?;
+    let p: MemberChange = decode(value)?;
     let (room, owner) = owned(db, actor, &p.id)?;
     room.cas(&p.expected_resource_version)?;
     let member = membership(db, &room.id, &p.membership_id)?;
@@ -415,6 +466,36 @@ pub fn remove(db: &Db<'_>, actor: &str, value: &Value) -> Result<Value> {
         [&member.id],
     )?;
     changed(db, &room)?.view(db, &owner)
+}
+
+pub fn transfer_owner(db: &Db<'_>, actor: &str, value: &Value) -> Result<Value> {
+    let p: MemberChange = decode(value)?;
+    let (room, owner) = owned(db, actor, &p.id)?;
+    room.cas(&p.expected_resource_version)?;
+    require(
+        room.active(Utc::now().timestamp()),
+        "PreconditionFailed",
+        "room archived or expired",
+    )?;
+    let successor = membership(db, &room.id, &p.membership_id)?;
+    require(
+        successor.role == "Member" && successor.phase == "Active",
+        "PreconditionFailed",
+        "room ownership requires another active member",
+    )?;
+    policy::active(db, &successor.principal)?;
+    policy::can_target(db, &successor.principal, INVITE, &room.id)?;
+    policy::can_target(db, &successor.principal, READ, &room.id)?;
+    db.c.execute(
+        "UPDATE room_memberships SET role=CASE id WHEN ?2 THEN 'Owner' ELSE 'Member' END
+         WHERE conversation=?1 AND id IN(?2,?3)",
+        params![room.id, successor.id, owner.id],
+    )?;
+    db.c.execute(
+        "UPDATE chat_rooms SET owner=?2 WHERE id=?1",
+        params![room.id, successor.principal],
+    )?;
+    changed(db, &room)?.view(db, &membership(db, &room.id, &owner.id)?)
 }
 
 pub fn leave(db: &Db<'_>, actor: &str, value: &Value) -> Result<Value> {

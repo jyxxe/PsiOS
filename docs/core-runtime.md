@@ -193,6 +193,8 @@ jq -n --argjson definition "$definition" --arg grant "$grant" --arg until "$(dat
 
 拥有者可用 `Conversation.RemoveMember` 提交会话 ID、当前修订和成员 ID。其他活跃成员可用 `Conversation.Leave` 主动退出。移除、退出或主体撤销立即阻断后续读取和发送。拥有者撤销会归档其房间。到期或归档后停止写入，活跃成员仍可读取被授予的历史。再次邀请会签发新成员 ID。
 
+`Conversation.TransferOwner` 接受会话 ID、当前修订和接任者的活跃成员 ID。接任者须持有该房间的 `chat.invite` 和 `chat.read`。交接只变更管理角色，保留每位成员各自的历史起点。原拥有者成为普通成员，可主动退出。手动归档会注销尚未接受的邀请和发送窗口。拥有者使用 `Conversation.Reopen` 及当前会话修订可恢复尚未到期的房间，后续发送使用新窗口。已接受的历史及可用的读位点继续保留。
+
 房间使用与私聊相同的 `Message.Prepare`、`Message.Send`、读取与已读确认接口。历史政策固定为 `FromJoin`。接受邀请时记录当时的消息序号。之后仅能读取加入后的消息，指向此前正文的回复链接对该成员省略。发送窗口、历史游标和已读位点绑定成员实例。消息提交、成员变化和撤权都由同一个 Core 写事务裁决，消息回执记录提交时的成员修订和写者代次。
 
 房间容量计算包括未到期的待接受邀请。节点限制会话总量、成员记录和保留正文。群聊当前提供本机持久文本、明确邀请和拉取，后续接入线程、订阅投递、附件与 Agent 唤醒。[群聊权限、并发与恢复](../tests/test_chat_rooms.py) · [格式 19 原地升级](../tests/rooms_upgrade.py)

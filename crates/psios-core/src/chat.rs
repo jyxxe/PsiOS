@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 pub use message::{ack, get_message, list_messages, open_window, prepare, send};
-pub use room::{invite, leave, open as open_room, remove};
+pub use room::{invite, leave, open as open_room, remove, reopen, transfer_owner};
 pub const INVITE: &str = "chat.invite";
 pub const READ: &str = "chat.read";
 pub const SEND: &str = "chat.send";
@@ -336,10 +336,7 @@ pub fn archive(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
 }
 
 pub(crate) fn principal_revoked(db: &Db<'_>, principal: &str) -> Result<()> {
-    db.c.execute(
-        "UPDATE chat_rooms SET phase='Archived',revision=revision+1 WHERE owner=?1 AND phase='Active'",
-        [principal],
-    )?;
+    room::archive_owned(db, principal)?;
     db.c.execute(
         "UPDATE chat_rooms SET revision=revision+1,membership_revision=membership_revision+1
          WHERE id IN (SELECT conversation FROM room_memberships WHERE principal=?1

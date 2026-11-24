@@ -175,8 +175,10 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Conversation.Get" => chat::get(db, actor, p),
         "Conversation.Respond" => chat::respond(db, actor, p),
         "Conversation.Archive" => chat::archive(db, actor, p),
+        "Conversation.Reopen" => chat::reopen(db, actor, p),
         "Conversation.Invite" => chat::invite(db, actor, p),
         "Conversation.RemoveMember" => chat::remove(db, actor, p),
+        "Conversation.TransferOwner" => chat::transfer_owner(db, actor, p),
         "Conversation.Leave" => chat::leave(db, actor, p),
         "Message.OpenSendWindow" => chat::open_window(db, actor, p),
         "Message.Prepare" => chat::prepare(db, actor, p),
@@ -282,8 +284,10 @@ impl Store {
                     | "Conversation.Invite"
                     | "Conversation.Respond"
                     | "Conversation.RemoveMember"
+                    | "Conversation.TransferOwner"
                     | "Conversation.Leave"
                     | "Conversation.Archive"
+                    | "Conversation.Reopen"
                     | "Task.Cancel"
                     | "Task.CancelOrigin"
                     | "Task.Archive"

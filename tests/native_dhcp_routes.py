@@ -1,6 +1,6 @@
 """Serve actual DHCPv4 classless routes to an installed PsiOS on an isolated TAP."""
 import argparse
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import json
 import os
 from pathlib import Path
@@ -92,8 +92,9 @@ def exercise(args, work):
     local_link()
     image, user_secret, root_secret = prepare(args, work)
     initial = "198.51.100.0/24,192.0.2.2,203.0.113.5/25,0.0.0.0,0.0.0.0/0,192.0.2.2"
-    with boot(work, image, network_mac=MAC, tap=TAP) as c:
+    with ExitStack() as guest:
         with server(work, "initial", initial, "192.0.2.2") as log:
+            c = guest.enter_context(boot(work, image, network_mac=MAC, tap=TAP))
             c.login("psios", user_secret)
             identity = json.loads(c.run("psiosctl whoami"))["authority_id"]
             wait_for(c, "grep -Fxq 'nameserver 192.0.2.2' /etc/resolv.conf")

@@ -247,7 +247,6 @@ jq -n --argjson definition "$definition" --arg grant "$grant" --arg until "$(dat
 
 目前可映射 `volume.write.content` 和 `secret.mac.message`。Core 要求委托具备 `task.read`，从同一实例已确认成功的 Task 锁定制品修订。派发前保存来源 Task 与制品引用、值摘要、最终 Input 和请求摘要。恢复时沿用原输入。目标、参数上限、审批和预算均由普通 Task 约束，审批计划绑定最终 Input。路径不存在或值类型错误时，步骤带 `PreconditionFailed` 结算。[权限与输入验收](../tests/test_workflow.py) · [格式 28 升级](../tests/workflow_input_upgrade.py)
 
-
 `Workflow.Get` 返回运行修订、定义引用、截止时间、分支判定以及各步骤的 Task 回执和已观察修订。可执行的后继在全部必需前驱已知成功后进入准入。前驱出现未知效果时保留 `Blocked/Unknown`，原 Operation 完成对账后继续。用 `Workflow.Cancel` 提交 ID 和当前修订可关闭派发并取消在途 Task，已经发生的效果仍可从原 Task 和 Operation 查阅。[审批、撤权和队列验收](../tests/test_workflow.py) · [早期 DAG 升级验收](../tests/workflow_upgrade.py)
 
 ## 本机会话

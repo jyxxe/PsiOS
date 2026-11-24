@@ -178,7 +178,9 @@ class BlockLayoutTests(unittest.TestCase):
         with attached(second, name) as (_, sysfs):
             self.assertEqual((sysfs / "dev").read_text().strip(), device)
             new = receipt(node, submit(node, self.grant, device))
-            self.assertEqual(new["layout"]["partitions"], disk["partitions"])
+            new_partition, = new["layout"]["partitions"]
+            partition_device = (sysfs / (name + "p1") / "dev").read_text().strip()
+            self.assertEqual(new_partition, dict(part, major_minor=partition_device))
             self.assertNotEqual(new["fence"]["disk_sequence"], observed["fence"]["disk_sequence"])
             stale = node.wait(submit(node, self.grant, device, expected=observed["fence"]))
             self.assertEqual(stale["conditions"][0]["type"], "PreconditionFailed", stale)

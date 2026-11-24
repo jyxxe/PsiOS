@@ -349,7 +349,6 @@ fn fire(db: &Db<'_>, rejection: &mut Option<Rejection>) -> Result<()> {
         }
         (id, None)
     };
-    db.cfg.check_admission_space()?;
     let schedule = db.of(&id, "Schedule")?;
     let series = repeat::Series::load(&schedule)?;
     if let Some(series) = &series {

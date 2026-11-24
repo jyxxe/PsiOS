@@ -390,6 +390,35 @@ class ScheduleTests(unittest.TestCase):
             self.assertEqual(n.wait(report["task_receipt"]["task_id"])["lifecycle"], "Succeeded")
         self.assertEqual(self.budget(grant), (0, 2))
 
+    def test_admitted_schedule_expiry_settles_while_capacity_blocks_new_tasks(self):
+        n = self.node
+        grant = self.grant(units=3)
+        view = n.call("Node.Get", {})["authority_storage"]["state"]
+        reserve = int(view["capacity_bytes"]) + 4096
+        admission = n.prepare("system.status", {})
+        once_request = self.request(grant, run=1.5, deadline=3)
+        timer = n.call("Schedule.Create", once_request)
+        interval_request = self.interval(grant, count=2, every=1, run=1.5, deadline=2.8)
+        series = n.call("Schedule.Create", interval_request)
+        n.stop()
+        n.config.write_text(json.dumps(dict(json.loads(n.config.read_text()), authority_reserve={"state_bytes": reserve})))
+        n.start()
+        self.assertTrue(n.call("Node.Get", {})["authority_storage"]["state"]["below_reserve"])
+        self.rejected("QuotaExceeded", "Task.Submit", admission)
+        complete_once = self.wait(timer, "Expired")
+        self.assertEqual(complete_once["state"]["reason"], "DeadlineExceeded")
+        self.assertIsNone(complete_once["state"]["task_receipt"])
+        complete_series = self.wait(series, "Completed")
+        reports = self.triggers(complete_series)
+        self.assertEqual([r["ordinal"] for r in reports], [1, 2])
+        self.assertTrue(all(r["lifecycle"] == "Expired" and r["task_receipt"] is None for r in reports))
+        self.assertEqual(self.budget(grant), (0, 0))
+        self.assertEqual(n.call("Resource.List", {"kind": "Task"})["items"], [])
+        n.stop()
+        n.start()
+        self.assertEqual(n.call("Schedule.Create", once_request), complete_once)
+        self.assertEqual(n.call("Schedule.Create", interval_request), complete_series)
+
     @unittest.skipUnless(os.getenv("PSIOS_TEST_CAPACITY_ALLOCATION"), "requires a bounded filesystem")
     def test_waits_for_authority_filesystem_headroom(self):
         n = self.node

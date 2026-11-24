@@ -115,6 +115,10 @@ jobs:
           git archive 26b66ffe7df09525969679b65860f66b00c2698b Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-previous"
           cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-previous/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-previous/target"
           python3 tests/upgrade.py --previous-bin "$RUNNER_TEMP/psios-previous/target/debug"
+      - name: Refuse crossing a real bind mount during volume capacity accounting
+        run: |
+          sudo unshare --mount --propagation private env PSIOS_TEST_VOLUME_BIND=1 \
+            python3 -B -m unittest discover -s tests -p test_volume_usage.py -k test_mount_boundary -v
       - name: Exercise authority backpressure on a bounded Linux filesystem
         run: |
           scratch=$(mktemp -d)
@@ -191,6 +195,12 @@ jobs:
           git archive 6735900e933346ec944fea285cf3358495e8ea62 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format13"
           CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format13/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format13/target"
           python3 tests/calendar_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format13/target/debug"
+      - name: Upgrade the volume usage catalog without widening existing grants
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format14"
+          git archive 9d40b0a24e2b93bed7615739c9f8f5bbc63a13c8 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format14"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format14/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format14/target"
+          python3 tests/volume_usage_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format14/target/debug"
       - name: Verify real systemd service control and crash reconciliation
         run: |
           sudo loginctl enable-linger "$(id -un)"

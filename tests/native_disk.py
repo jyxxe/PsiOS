@@ -248,6 +248,27 @@ def check_temporary_storage(c):
     c.run("rm -rf /tmp/psios-inodes && printf 'volatile\\n' > /tmp/psios-scratch-marker")
 
 
+def check_native_volume_usage(c):
+    receipt = json.loads(c.run("printf '{\"name\":\"native-usage\"}' | psiosctl submit volume.create --key native-usage-volume"))
+    task = json.loads(c.run("psiosctl wait " + shlex.quote(receipt["task_id"])))
+    assert task["lifecycle"] == "Succeeded", task
+    volume = call(c, "Artifact.Read", {"reference": task["result"]["artifact_refs"][0]})
+    root = shlex.quote("/var/lib/psios/volumes/" + volume["resource_id"] + "/data")
+    c.run(f"cd {root} && dd if=/dev/zero of=sparse bs=1 count=1 seek=8388607 && "
+          "dd if=/dev/zero of=allocated bs=4096 count=32 && sync -f .")
+    a, b = [tuple(map(int, line.split())) for line in c.run(f"cd {root} && stat -c '%s %b' sparse allocated").splitlines()]
+    assert a[0] == 8 * 1024 * 1024 and b[0] == 128 * 1024 and a[1] < b[1], (a, b)
+    params = shlex.quote(json.dumps({"target": {"id": volume["resource_id"], "expected_resource_version": volume["version"]}}))
+    receipt = json.loads(c.run(f"printf '%s' {params} | psiosctl submit volume.usage --key native-usage-report"))
+    task = json.loads(c.run("psiosctl wait " + shlex.quote(receipt["task_id"])))
+    assert task["lifecycle"] == "Succeeded", task
+    report = call(c, "Artifact.Read", {"reference": task["result"]["artifact_refs"][0]})
+    assert report["volume_ref"] == volume and (report["files"], report["directories"]) == (2, 1), report
+    assert report["logical_file_bytes"] == str(a[0] + b[0]), report
+    assert report["allocated_file_bytes"] == str((a[1] + b[1]) * 512), report
+    assert report["allocated_directory_bytes"] == str(int(c.run(f"stat -c %b {root}")) * 512), report
+
+
 def check_native_network(c):
     node = json.loads(c.run("psiosctl node"))["reference"]["resource_id"]
     grant = call(c, "Grant.Issue", dict(principal_id="local-owner", tool_targets=[node],
@@ -416,6 +437,7 @@ def exercise(args, work):
         failure = c.run("dd if=/dev/zero of=./full bs=64K 2>&1; test $? -ne 0")
         assert "No space left on device" in failure, failure
         assert int(c.run("stat -c %s ./full")) >= 40 * 1024 * 1024
+        check_native_volume_usage(c)
         check_native_network(c)
         workflow = check_native_workflow(c)
         # Unrelated tool grants issued by the checks above must preserve chat sends.

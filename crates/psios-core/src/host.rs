@@ -76,6 +76,8 @@ pub enum Action {
     Mac { secret_id: String, message: String },
     #[serde(rename = "volume.files")]
     Files(storage::files::Page),
+    #[serde(rename = "volume.usage")]
+    VolumeUsage(storage::usage::Query),
     #[serde(rename = "volume.read_chunk")]
     Chunk(storage::files::ReadChunk),
     #[serde(rename = "volume.append")]
@@ -137,6 +139,7 @@ impl Action {
             Self::RoutingRules(q) => q.validate()?,
             Self::Create { name } => label(name)?,
             Self::Read(f) => storage::filename(&f.name)?,
+            Self::VolumeUsage(query) => query.validate()?,
             Self::Write(f) => {
                 storage::filename(&f.name)?;
                 require(
@@ -215,6 +218,11 @@ impl Action {
             Self::Create { .. } => return db.get("local"),
             Self::Mac { secret_id, .. } => (secret_id, None, "Secret"),
             Self::Files(p) => (
+                &p.target.id,
+                Some(&p.target.expected_resource_version),
+                "Volume",
+            ),
+            Self::VolumeUsage(p) => (
                 &p.target.id,
                 Some(&p.target.expected_resource_version),
                 "Volume",

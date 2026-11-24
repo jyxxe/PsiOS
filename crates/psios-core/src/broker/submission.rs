@@ -10,22 +10,31 @@ struct Prepare {
     deadline_at: Option<String>,
 }
 pub fn prepare(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
-    let p: Prepare = decode(p)?;
+    prepare_with_origin(db, actor, decode(p)?, None)
+}
+pub fn prepare_scheduled(db: &Db<'_>, actor: &str, p: &Value, schedule: &str) -> Result<Value> {
+    prepare_with_origin(db, actor, decode(p)?, Some(schedule))
+}
+fn prepare_with_origin(
+    db: &Db<'_>,
+    actor: &str,
+    p: Prepare,
+    schedule: Option<&str>,
+) -> Result<Value> {
     label(&p.key)?;
     Action::parse(&p.tool, &p.input)?;
     let d = policy::delegation(db, actor, &p.delegation_id, "task.submit")?;
     policy::delegation(db, actor, &d.id, &p.tool)?;
     let input = policy::intern_input(db, actor, &p.input)?;
+    let origin_id = schedule.unwrap_or(&p.key);
+    let scheduled = schedule.is_some();
+    let authority = origin_authority(db, actor, scheduled)?;
     let mut s = json!({
         "schema_version": VERSION,
         "task_type": p.tool,
-        "origin_ref": {
-            "authority_id": actor,
-            "origin_type": if actor==policy::OWNER{"HumanRequest"}else{"Service"},
-            "origin_id": p.key
-        },
+        "origin_ref": origin_ref(&authority, origin_type(actor, scheduled), origin_id),
         "idempotency_key": p.key,
-        "cancel_scope_id": p.key,
+        "cancel_scope_id": origin_id,
         "input_ref": input.reference(),
         "delegation_ref": d.reference(),
         "budget_ref": d.body["budget_ref"]
@@ -37,16 +46,33 @@ pub fn prepare(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     contract("task-submit", &s)?;
     Ok(s)
 }
-fn origin(actor: &str, s: &Value) -> Result<String> {
+fn origin_type(actor: &str, scheduled: bool) -> &'static str {
+    if scheduled {
+        "Schedule"
+    } else if actor == policy::OWNER {
+        "HumanRequest"
+    } else {
+        "Service"
+    }
+}
+fn origin_authority(db: &Db<'_>, actor: &str, scheduled: bool) -> Result<String> {
+    if scheduled {
+        db.meta("authority")
+    } else {
+        Ok(actor.to_owned())
+    }
+}
+
+fn origin_ref(authority: &str, kind: &str, id: &str) -> Value {
+    json!({"authority_id": authority, "origin_type": kind, "origin_id": id})
+}
+
+fn origin(authority: &str, kind: &str, s: &Value, schedule: Option<&str>) -> Result<String> {
     let o = &s["origin_ref"];
     require(
-        o["authority_id"] == actor
-            && o["origin_type"]
-                == if actor == policy::OWNER {
-                    "HumanRequest"
-                } else {
-                    "Service"
-                },
+        o["authority_id"] == authority
+            && o["origin_type"] == kind
+            && schedule.is_none_or(|schedule| o["origin_id"] == schedule),
         "PermissionDenied",
         "caller cannot represent this origin",
     )?;
@@ -81,9 +107,11 @@ pub(super) fn deadline(s: &Value) -> Result<()> {
     }
     Ok(())
 }
-fn validate_submit(actor: &str, s: &Value) -> Result<String> {
+fn validate_submit(db: &Db<'_>, actor: &str, s: &Value, schedule: Option<&str>) -> Result<String> {
     contract("task-submit", s)?;
-    origin(actor, s)
+    let scheduled = schedule.is_some();
+    let authority = origin_authority(db, actor, scheduled)?;
+    origin(&authority, origin_type(actor, scheduled), s, schedule)
 }
 struct Submission {
     digest: String,
@@ -145,7 +173,19 @@ fn plan(db: &Db<'_>, actor: &str, s: &Value, audience: &[Value]) -> Result<Doc> 
     db.create("OperationPlan", &pid, actor, json!({"action": tool}), p)
 }
 pub fn submit(db: &Db<'_>, actor: &str, s: &Value, retry: Option<&str>) -> Result<Value> {
-    let origin = validate_submit(actor, s)?;
+    submit_with_origin(db, actor, s, retry, None)
+}
+pub fn submit_scheduled(db: &Db<'_>, actor: &str, s: &Value, schedule: &str) -> Result<Value> {
+    submit_with_origin(db, actor, s, None, Some(schedule))
+}
+fn submit_with_origin(
+    db: &Db<'_>,
+    actor: &str,
+    s: &Value,
+    retry: Option<&str>,
+    schedule: Option<&str>,
+) -> Result<Value> {
+    let origin = validate_submit(db, actor, s, schedule)?;
     let (d, input) = authority(db, actor, s)?;
     let tool = field(s, "task_type");
     let key = field(s, "idempotency_key");
@@ -279,7 +319,7 @@ pub fn submit(db: &Db<'_>, actor: &str, s: &Value, retry: Option<&str>) -> Resul
     Ok(receipt)
 }
 pub fn lookup(db: &Db<'_>, actor: &str, s: &Value) -> Result<Value> {
-    let origin = validate_submit(actor, s)?;
+    let origin = validate_submit(db, actor, s, None)?;
     policy::can(db, actor, "task.read")?;
     let d = db.resolve(&s["delegation_ref"])?;
     require(
@@ -326,7 +366,7 @@ pub fn lookup(db: &Db<'_>, actor: &str, s: &Value) -> Result<Value> {
 pub fn cancel_origin(db: &Db<'_>, actor: &str, s: &Value) -> Result<Value> {
     contract("cancel-origin", s)?;
     policy::can(db, actor, "task.submit")?;
-    let o = origin(actor, s)?;
+    let o = origin(actor, origin_type(actor, false), s, None)?;
     let key = field(s, "idempotency_key");
     let digest = sha256(&canonical(&json!([actor, s["cancel_request_id"]])));
     let record_id = format!("cancellation-{}", &digest[7..]);
@@ -404,6 +444,10 @@ pub fn retry_in_session(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "InvalidArgument",
         "retry requires new key",
     )?;
+    if s["origin_ref"]["origin_type"] == "Schedule" {
+        s["origin_ref"] = origin_ref(actor, origin_type(actor, false), &p.key);
+        s["cancel_scope_id"] = json!(p.key);
+    }
     s["idempotency_key"] = json!(p.key);
     s["request_digest"] = json!(digest("task-submit", "request_digest", &s)?);
     submit(db, actor, &s, Some(&t.id))

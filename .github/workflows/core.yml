@@ -108,6 +108,8 @@ jobs:
               python3 -B -m unittest discover -s tests -p test_platform.py -k test_pauses_new_work -v
             TMPDIR="$1" PSIOS_TEST_CAPACITY_ALLOCATION=1 runuser -u "$2" -- \
               python3 -B -m unittest discover -s tests -p test_backup.py -k test_restore_preflights -v
+            TMPDIR="$1" PSIOS_TEST_CAPACITY_ALLOCATION=1 runuser -u "$2" -- \
+              python3 -B -m unittest discover -s tests -p test_schedule.py -k test_waits_for_authority -v
           ' psios-headroom "$scratch" "$(id -un)"
       - name: Migrate active and completed model calls from format 4
         run: |
@@ -134,6 +136,12 @@ jobs:
           git archive 412eb56ea36930f75e713288d8833deabf92343e Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format7"
           CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format7/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format7/target"
           python3 tests/network_rules_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format7/target/debug"
+      - name: Migrate format 8 state and dispatch a scheduled Task
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format8"
+          git archive c43ac95ae95b7918f79e8e352deeef5c57ba684c Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format8"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format8/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format8/target"
+          python3 tests/schedule_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format8/target/debug"
       - name: Verify real systemd service control and crash reconciliation
         run: |
           sudo loginctl enable-linger "$(id -un)"

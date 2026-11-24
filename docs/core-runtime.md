@@ -98,6 +98,23 @@ ctl wait "$task" | jq '{reference:.result.artifact_refs[0]}' | ctl call Artifact
 
 `Secret.Rotate` 接受秘密 ID、预期修订和新值。新密文使用新随机 nonce，并将秘密身份及密钥版本纳入认证数据。轮换前接受且尚未派发的旧计划会失效。旧库中的密文可以继续使用并原地轮换。撤销的秘密不能通过轮换重新激活。
 
+## 一次性任务调度
+
+`Schedule.Create` 为本机 Task 保存一个未来触发时间和截止时间。两者接受带时区偏移的 RFC 3339 时间并转为 UTC，触发依据节点墙钟。授予 `schedule.manage`、`task.submit`、`task.read` 及选定工具，并将权限限制在该工具的目标资源。截止时间须在委托有效期内。同一主体以相同 `key` 重发等价请求会取回原调度状态。输入、授权或时间改变时需要新键。
+
+```bash
+grant=$(printf '%s' '{"principal_id":"local-owner","actions":["schedule.manage","task.submit","task.read","system.status"],
+  "tool_targets":["profile-local"],"ttl_seconds":900,"units":1}' | ctl call Grant.Issue | jq -er .delegation_ref.resource_id)
+run_at=$(date -u -d '+1 minute' +'%Y-%m-%dT%H:%M:%SZ')
+deadline_at=$(date -u -d '+10 minutes' +'%Y-%m-%dT%H:%M:%SZ')
+schedule=$(jq -n --arg grant "$grant" --arg at "$run_at" --arg until "$deadline_at" \
+  '{key:"check-once",tool:"system.status",input:{},delegation_id:$grant,run_at:$at,deadline_at:$until}' \
+  | ctl call Schedule.Create | jq -er .reference.resource_id)
+jq -n --arg id "$schedule" '{id:$id}' | ctl call Schedule.Get
+```
+
+在截止前重启、解除封锁或腾出队列空间时，Core 会用原 `trigger_id` 提交一次 Task。Task、预算预留和触发回执原子提交。派发仍按照普通 Task 重新授权和审批。队列满或权威存储低于预留空间时，触发继续等待。截止后记录 `Expired`，撤权或目标修订失效时记录 `Rejected`。`Schedule.Cancel` 接受 ID 和 `expected_resource_version`，用于取消待触发的调度。`Triggered` 包含可用 `Task.Get` 或 `ctl wait` 跟踪的 Task 回执，已经触发的 Task 使用原有取消入口。[调度故障与权限验收](../tests/test_schedule.py)
+
 ## 运行一个持久的 Agent 会话
 
 以下示例接续启动指南中的 `ctl` 函数和 `workdir`。模型提供者和 Agent 是两个独立凭据。模型提供者只获得处理模型步骤的权限。

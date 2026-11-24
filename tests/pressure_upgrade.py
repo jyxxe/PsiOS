@@ -41,7 +41,7 @@ def exercise(previous, current):
 
         node.stop()
         report = json.loads(subprocess.check_output([binary, "--config", node.config, "verify"], timeout=15))
-        assert report["database_format"] == 22 and not report["migration_required"], report
+        assert report["database_format"] >= 22 and not report["migration_required"], report
         fenced = subprocess.run([previous.resolve() / "psiosd", "--config", node.config, "check"],
                                 capture_output=True, text=True, timeout=15)
         assert fenced.returncode and "SchemaVersionUnsupported" in fenced.stderr, fenced

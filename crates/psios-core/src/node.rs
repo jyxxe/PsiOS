@@ -1,4 +1,5 @@
 //! Linux observation and the operator's explicit systemd allowlist.
+pub mod block;
 mod mounts;
 pub mod network;
 pub mod pressure;
@@ -327,6 +328,7 @@ pub fn perform(w: &Work) -> Result<Value> {
         Action::NetworkProbe(_) => network::probe::perform(w),
         Action::Processes(p) => processes(p),
         Action::Devices {} => devices(),
+        Action::BlockLayout(query) => block::observe(w, query),
         Action::Mounts {} => mounts::observe(),
         _ => service(w),
     }

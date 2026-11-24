@@ -88,6 +88,53 @@ fn approve(s: &mut Store, task: &str) {
 
 const HOST_WRITE_BARRIER: &str = "PSIOS_TEST_CRASH_STATE";
 
+#[test]
+fn backup_export_rechecks_revocation_before_disclosing_a_prepared_read() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, mut store) = initialized(tmp.path());
+    let creation = submit(&mut store, "volume.create", json!({"name":"export-race"}));
+    let source = execute(&mut store, &creation);
+    let capture = submit(
+        &mut store,
+        "backup.create",
+        json!({"id":source["resource_id"],"expected_resource_version":source["version"]}),
+    );
+    let backup = execute(&mut store, &capture);
+    let grant = call(
+        &mut store,
+        "Grant.Issue",
+        json!({"principal_id":"local-owner","tool_targets":[backup["resource_id"]],
+            "actions":[storage::export::ACTION],"units":1,"ttl_seconds":60}),
+    )
+    .unwrap();
+    let caller = rustix::process::geteuid().as_raw();
+    let request = Request {
+        schema_version: VERSION.into(),
+        request_id: id("export-race"),
+        token: fs::read_to_string(cfg.witness_dir.join("owner.token")).unwrap(),
+        method: storage::export::METHOD.into(),
+        params: json!({"reference":backup,"member":{"kind":"Manifest"},"offset":0,"length":64}),
+    };
+    let job = store.prepare_export(caller, &request).unwrap();
+    let read = job.read().unwrap();
+    assert_eq!(read.next_offset, Some(64));
+    call(
+        &mut store,
+        "Grant.Revoke",
+        json!({"id":grant["grant_ref"]["resource_id"],
+            "expected_resource_version":grant["grant_ref"]["version"]}),
+    )
+    .unwrap();
+    assert_eq!(
+        store
+            .finish_export(caller, &request, Ok(read))
+            .unwrap_err()
+            .0
+            .code,
+        "PermissionDenied"
+    );
+}
+
 fn cut_after_host_write(c: &Config) {
     let mut child = Command::new(std::env::current_exe().unwrap())
         .args([

@@ -23,30 +23,30 @@ fn expected_digest(value: &str) -> bool {
     })
 }
 
-fn output_parent<'a>(source: &File, output: &'a Path) -> Result<(std::path::PathBuf, &'a str)> {
+pub(super) fn output_parent<'a>(
+    source: Option<&File>,
+    output: &'a Path,
+) -> Result<(std::path::PathBuf, &'a str)> {
     let name = output
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            err(
-                "InvalidArgument",
-                "a new restore directory name is required",
-            )
-        })?;
+        .ok_or_else(|| err("InvalidArgument", "a new output directory name is required"))?;
     filename(name)?;
     let parent = output
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     let parent = fs::canonicalize(parent)?;
-    let (source, target) = (source.metadata()?, parent.metadata()?);
-    require(
-        source.dev() != target.dev() || source.ino() != target.ino(),
-        "InvalidArgument",
-        "restore output must be outside the backup directory",
-    )?;
+    if let Some(source) = source {
+        let (source, target) = (source.metadata()?, parent.metadata()?);
+        require(
+            source.dev() != target.dev() || source.ino() != target.ino(),
+            "InvalidArgument",
+            "restore output must be outside the backup directory",
+        )?;
+    }
     match fs::symlink_metadata(parent.join(name)) {
-        Ok(_) => return Err(err("Conflict", "restore output already exists")),
+        Ok(_) => return Err(err("Conflict", "output already exists")),
         Err(error) if error.kind() == io::ErrorKind::NotFound => (),
         Err(error) => return Err(error.into()),
     }
@@ -89,7 +89,9 @@ pub fn inspect_detached_backup(
         "PreconditionFailed",
         "backup file set does not match the manifest",
     )?;
-    let destination = output.map(|path| output_parent(&root, path)).transpose()?;
+    let destination = output
+        .map(|path| output_parent(Some(&root), path))
+        .transpose()?;
     let stage = destination
         .as_ref()
         .map(|(parent, _)| staging::create(parent))

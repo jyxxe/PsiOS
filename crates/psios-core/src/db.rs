@@ -24,6 +24,7 @@ pub struct Store {
     keys: Zeroizing<Vec<u8>>,
     sealed: bool,
     pub(crate) changes: std::sync::Arc<watch::Changes>,
+    pub(crate) export_cache: std::sync::Arc<std::sync::Mutex<storage::export::Cache>>,
 }
 pub(crate) struct Db<'a> {
     pub c: &'a Connection,
@@ -306,6 +307,7 @@ impl Store {
             keys,
             sealed: false,
             changes: Default::default(),
+            export_cache: Default::default(),
         };
         if ver < CURRENT_FORMAT {
             store.transaction(&format!("core-upgrade-v{CURRENT_FORMAT}"), |db| {

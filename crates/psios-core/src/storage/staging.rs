@@ -1,22 +1,96 @@
-use super::{child, remove_contents};
-use crate::{Config, Result, config::private_dir, require};
-use rustix::fs::{AtFlags, Dir, OFlags, unlinkat};
+use super::{child, filename, remove_contents, unknown};
+use crate::{Config, Result, config::private_dir, err, require};
+use rustix::fs::{AtFlags, Dir, OFlags, RenameFlags, renameat_with, statat, unlinkat};
 use std::{
     fs::{File, Permissions},
     os::unix::fs::{MetadataExt, PermissionsExt},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 const PREFIX: &str = ".stage-";
 const SUFFIX_LEN: usize = 6;
 
-pub(super) fn create(parent: &Path) -> Result<tempfile::TempDir> {
+pub(super) struct Stage {
+    root: File,
+    dir: File,
+    path: PathBuf,
+    published: bool,
+}
+
+pub(super) fn create(parent: &Path) -> Result<Stage> {
     private_dir(parent, false)?;
-    Ok(tempfile::Builder::new()
+    let root = File::open(parent)?;
+    let path = tempfile::Builder::new()
         .permissions(Permissions::from_mode(0o700))
         .prefix(PREFIX)
         .rand_bytes(SUFFIX_LEN)
-        .tempdir_in(parent)?)
+        .tempdir_in(parent)?
+        .keep();
+    let dir = child(
+        &root,
+        path.file_name().unwrap(),
+        OFlags::RDONLY | OFlags::DIRECTORY,
+    )?;
+    Ok(Stage {
+        root,
+        dir,
+        path,
+        published: false,
+    })
+}
+
+impl Stage {
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(super) fn publish(mut self, name: &str) -> Result<()> {
+        filename(name)?;
+        let staged = self.path.file_name().unwrap();
+        check_entry(&self.root, staged, &self.dir)?;
+        self.dir.sync_all()?;
+        renameat_with(&self.root, staged, &self.root, name, RenameFlags::NOREPLACE).map_err(
+            |e| {
+                if e == rustix::io::Errno::EXIST {
+                    err("Conflict", "storage operation identity already present")
+                } else {
+                    std::io::Error::from(e).into()
+                }
+            },
+        )?;
+        self.published = true;
+        self.root.sync_all().map_err(unknown)
+    }
+}
+
+impl Drop for Stage {
+    fn drop(&mut self) {
+        if !self.published {
+            let name = self.path.file_name().unwrap();
+            let removed = discard(&self.root, name, &self.dir)
+                .and_then(|()| self.root.sync_all().map_err(Into::into));
+            if let Err(e) = removed {
+                eprintln!("psiosd storage staging {name:?}: {}", e.0.message);
+            }
+        }
+    }
+}
+
+fn check_entry(root: &File, name: impl rustix::path::Arg, dir: &File) -> Result<()> {
+    let entry = statat(root, name, AtFlags::SYMLINK_NOFOLLOW).map_err(std::io::Error::from)?;
+    let pinned = dir.metadata()?;
+    require(
+        entry.st_dev == pinned.dev() && entry.st_ino == pinned.ino(),
+        "PreconditionFailed",
+        "storage stage identity changed",
+    )
+}
+
+fn discard(root: &File, name: impl rustix::path::Arg + Copy, dir: &File) -> Result<()> {
+    check_entry(root, name, dir)?;
+    remove_contents(dir, 0, true)?;
+    unlinkat(root, name, AtFlags::REMOVEDIR).map_err(std::io::Error::from)?;
+    Ok(())
 }
 
 fn matches_prefix(name: &[u8], prefix: &[u8]) -> bool {
@@ -45,9 +119,7 @@ fn reclaim(parent: &Path, legacy_backup: bool) -> Result<()> {
                 "PermissionDenied",
                 "staged directory is accessible to other accounts",
             )?;
-            remove_contents(&dir, 0, true)?;
-            unlinkat(&root, name, AtFlags::REMOVEDIR).map_err(std::io::Error::from)?;
-            Ok(())
+            discard(&root, name, &dir)
         })();
         match result {
             Ok(()) => removed += 1,
@@ -71,5 +143,30 @@ pub(crate) fn reclaim_on_startup(cfg: &Config) {
         if let Err(e) = reclaim(&cfg.state_dir.join(dir), legacy_backup) {
             eprintln!("psiosd could not reclaim {dir} staging: {}", e.0.message);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn publishing_does_not_replace_an_existing_empty_directory() {
+        let scratch_dir = tempfile::tempdir().unwrap();
+        let parent = scratch_dir.path().canonicalize().unwrap().join("pool");
+        private_dir(&parent, true).unwrap();
+        let existing = parent.join("volume-existing");
+        fs::create_dir(&existing).unwrap();
+        let inode = existing.metadata().unwrap().ino();
+        let stage = create(&parent).unwrap();
+        let scratch = stage.path().to_path_buf();
+        fs::write(scratch.join("record"), b"proposed data").unwrap();
+
+        let error = stage.publish("volume-existing").unwrap_err();
+        assert_eq!(error.0.code, "Conflict");
+        assert_eq!(existing.metadata().unwrap().ino(), inode);
+        assert!(fs::read_dir(existing).unwrap().next().is_none());
+        assert!(!scratch.exists());
     }
 }

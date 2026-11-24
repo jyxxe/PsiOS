@@ -1,8 +1,10 @@
 """Process loss during real disk copies, before a new resource can be published."""
 import hashlib
+import os
 import resource
 import signal
 import subprocess
+import time
 import unittest
 
 from support import Node, target
@@ -85,6 +87,42 @@ class StorageRecoveryTests(unittest.TestCase):
         self.n.start()
         self.assertFalse(stage.exists())
         self.assert_unknown(task)
+
+    def test_restore_write_failure_reclaims_readonly_stage_without_restart(self):
+        nested = self.source.parent / "readonly"
+        nested.mkdir(mode=0o700)
+        with (nested / "large").open("wb") as file:
+            file.truncate(32 * 1024 * 1024)
+        nested.chmod(0o555)
+        backup = self.n.perform("backup.create", target(self.volume))
+        task_id = self.n.submit("backup.restore", target(backup))
+        stop_at = time.monotonic() + 15
+        while True:
+            partial = next(self.volumes.glob(".stage-*/data/readonly/large"), None)
+            if partial is not None:
+                break
+            self.assertLess(time.monotonic(), stop_at, "restore stage did not appear")
+            time.sleep(0.001)
+
+        self.n.process.send_signal(signal.SIGSTOP)
+        try:
+            _, stopped = os.waitpid(self.n.process.pid, os.WUNTRACED)
+            self.assertTrue(os.WIFSTOPPED(stopped))
+            stage = partial.parents[2]
+            self.assertTrue(partial.exists())
+            # The real new-file write after copying and applying restored modes must fail.
+            (stage / "identity").touch(exist_ok=False)
+        finally:
+            self.n.process.send_signal(signal.SIGCONT)
+        failed = self.n.wait(task_id)
+        self.assertEqual((failed["lifecycle"], failed["outcome_knowledge"]), ("Failed", "Known"))
+        self.assertEqual(failed["conditions"][0]["type"], "StorageUnavailable", failed)
+        self.assertEqual(list(self.volumes.glob(".stage-*")), [])
+        self.assertIsNone(self.n.process.poll())
+        restored = self.n.perform("backup.restore", target(backup))
+        data = self.volumes / restored["resource_id"] / "data" / "readonly"
+        self.assertEqual(data.stat().st_mode & 0o777, 0o555)
+        self.assertEqual((data / "large").stat().st_size, 32 * 1024 * 1024)
 
 
 if __name__ == "__main__":

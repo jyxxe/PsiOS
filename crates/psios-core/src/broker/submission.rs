@@ -42,6 +42,15 @@ fn prepare_with_origin(
     if let Some(t) = p.deadline_at {
         s["deadline_at"] = json!(t)
     }
+    seal_request(s)
+}
+pub fn retime_scheduled(template: &Value, trigger_id: &str, deadline_at: &str) -> Result<Value> {
+    let mut s = template.clone();
+    s["idempotency_key"] = json!(trigger_id);
+    s["deadline_at"] = json!(deadline_at);
+    seal_request(s)
+}
+fn seal_request(mut s: Value) -> Result<Value> {
     s["request_digest"] = json!(digest("task-submit", "request_digest", &s)?);
     contract("task-submit", &s)?;
     Ok(s)

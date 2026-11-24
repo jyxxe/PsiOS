@@ -25,10 +25,10 @@ class ScheduleTests(unittest.TestCase):
         self.node = Node("target/debug")
         self.addCleanup(self.node.close)
 
-    def grant(self, tool="system.status", resource="profile-local", principal="local-owner"):
+    def grant(self, tool="system.status", resource="profile-local", principal="local-owner", units=1):
         return self.node.call("Grant.Issue", dict(principal_id=principal, tool_targets=[resource],
                               actions=["schedule.manage", "task.submit", "task.read", tool],
-                              units=1, ttl_seconds=60))
+                              units=units, ttl_seconds=60))
 
     def request(self, grant, tool="system.status", input=None, run=1.5, deadline=15):
         return dict(key=key(), tool=tool, input={} if input is None else input,
@@ -55,6 +55,28 @@ class ScheduleTests(unittest.TestCase):
     def budget(self, grant):
         result = self.node.call("Budget.Get", {"id": grant["budget_ref"]["resource_id"]})
         return result["reserved"], result["spent"]
+
+    def interval(self, grant, *, count=3, every=1, catch_up=None, overlap="Allow", **request):
+        missed = {"mode": "Skip"} if catch_up is None else {"mode": "BoundedCatchUp", "limit": catch_up}
+        return dict(self.request(grant, **request),
+                    repeat=dict(interval_seconds=every, count=count, missed=missed, overlap=overlap))
+
+    def triggers(self, schedule, token=None):
+        reports = []
+        for reference in schedule["state"]["trigger_refs"]:
+            report = self.node.call("Schedule.TriggerGet", {"id": reference["resource_id"]}, token)
+            self.assertEqual(report["reference"], reference)
+            reports.append(report["state"])
+        return reports
+
+    def interval_progress(self, schedule, count):
+        deadline = time.monotonic() + 8
+        while True:
+            result = self.state(schedule)
+            if len(result["state"]["trigger_refs"]) >= count:
+                return result
+            self.assertLess(time.monotonic(), deadline, result)
+            time.sleep(0.05)
 
     def test_restart_recovers_one_trigger_and_preserves_real_approval(self):
         n = self.node
@@ -186,6 +208,146 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual((child["lifecycle"], child["retry_of_task_id"]), ("Succeeded", task))
         self.assertEqual(self.state(scheduled), original)
         self.assertEqual(self.budget(grant), (0, 1))
+
+    def test_interval_recovers_only_the_bounded_tail_and_persists_distinct_receipts(self):
+        n = self.node
+        grant = self.grant(units=2)
+        request = self.interval(grant, count=5, catch_up=2, run=1.2, deadline=15)
+        schedule = n.call("Schedule.Create", request)
+        self.assertEqual(schedule["state"]["next"]["ordinal"], 1)
+        self.assertEqual(self.triggers(schedule), [])
+        self.assertEqual(self.budget(grant), (0, 0))
+        self.rejected("IdempotencyConflict", "Schedule.Create",
+                      dict(request, repeat=dict(request["repeat"], count=4)))
+        n.stop(signal.SIGKILL)
+        after(request["run_at"], 4.15)
+        n.start()
+        settled = self.wait(schedule, "Completed")
+        self.assertIsNone(settled["state"]["next"])
+        reports = self.triggers(settled)
+        self.assertEqual([r["ordinal"] for r in reports], list(range(1, 6)))
+        self.assertEqual([r["lifecycle"] for r in reports], ["Skipped"] * 3 + ["Triggered"] * 2)
+        self.assertEqual([r["reason"] for r in reports], ["CatchUpLimit"] * 3 + [None, None])
+        start = datetime.fromisoformat(request["run_at"])
+        end = datetime.fromisoformat(request["deadline_at"])
+        for index, report in enumerate(reports):
+            offset = timedelta(seconds=index)
+            self.assertEqual(datetime.fromisoformat(report["run_at"]), start + offset)
+            self.assertEqual(datetime.fromisoformat(report["deadline_at"]), end + offset)
+            self.assertEqual(report["schedule_id"], schedule["reference"]["resource_id"])
+            if index < 3:
+                self.assertIsNone(report["task_receipt"])
+        references = settled["state"]["trigger_refs"]
+        self.assertEqual(len({r["resource_id"] for r in references}), 5)
+        self.assertEqual(references[0]["resource_id"], schedule["state"]["next"]["trigger_id"])
+        tasks = []
+        for reference, report in zip(references[3:], reports[3:], strict=True):
+            receipt = report["task_receipt"]
+            self.assertEqual(receipt["origin_ref"]["origin_type"], "Schedule")
+            self.assertEqual(receipt["origin_ref"]["origin_id"], schedule["reference"]["resource_id"])
+            self.assertEqual(receipt["idempotency_key"], reference["resource_id"])
+            self.assertEqual(n.wait(receipt["task_id"])["lifecycle"], "Succeeded")
+            tasks.append(receipt["task_id"])
+        self.assertEqual(len(set(tasks)), 2)
+        self.assertEqual(self.budget(grant), (0, 2))
+        n.stop(signal.SIGKILL)
+        n.start()
+        self.assertEqual(n.call("Schedule.Create", request), settled)
+        self.assertEqual(self.triggers(settled), reports)
+        self.assertEqual(len(n.call("Resource.List", {"kind": "Task"})["items"]), 2)
+
+    def test_interval_skips_overlap_and_cancels_only_future_triggers(self):
+        n = self.node
+        volume = n.perform("volume.create", {"name": "no-schedule-overlap"})
+        grant = self.grant("volume.write", volume["resource_id"], units=3)
+        request = self.interval(grant, every=2, overlap="Skip", run=1.2, tool="volume.write",
+                                input=dict(**target(volume), name="first", content="once"))
+        schedule = n.call("Schedule.Create", request)
+        first, = self.triggers(self.interval_progress(schedule, 1))
+        task = first["task_receipt"]["task_id"]
+        self.assertEqual(n.wait(task)["lifecycle"], "WaitingApproval")
+        current = self.interval_progress(schedule, 2)
+        first, second = self.triggers(current)
+        self.assertEqual((second["lifecycle"], second["reason"]), ("Skipped", "PreviousTaskActive"))
+        self.assertEqual(self.budget(grant), (1, 0))
+        self.rejected("Conflict", "Schedule.Cancel", target(schedule["reference"]))
+        cancelled = n.call("Schedule.Cancel", target(current["reference"]))
+        self.assertEqual(cancelled["state"]["lifecycle"], "Cancelled")
+        self.assertIsNone(cancelled["state"]["next"])
+        n.approve(task)
+        self.assertEqual(n.wait(task)["lifecycle"], "Succeeded")
+        after(request["run_at"], 4.4)
+        self.assertEqual(self.state(schedule), cancelled)
+        self.assertEqual(self.triggers(cancelled), [first, second])
+        self.assertEqual(self.budget(grant), (0, 1))
+
+    def test_interval_expires_missed_windows_and_keeps_agent_receipts_scoped(self):
+        n = self.node
+        agent = n.call("Agent.Register", {"name": "recurring-agent"})
+        observer, _ = n.agent(["task.read"])
+        node = n.call("Node.Get", {})["reference"]["resource_id"]
+        grant = self.grant("node.inventory", node, principal=agent["principal_id"], units=3)
+        request = self.interval(grant, count=4, run=1.2, deadline=4, tool="node.inventory")
+        for invalid in [{"count": 33}, {"interval_seconds": 0}, {"interval_seconds": 60},
+                        {"missed": {"mode": "BoundedCatchUp", "limit": 9}}]:
+            self.rejected("InvalidArgument", "Schedule.Create",
+                          dict(request, repeat=dict(request["repeat"], **invalid)), agent["token"])
+        schedule = n.call("Schedule.Create", request, agent["token"])
+        n.stop(signal.SIGKILL)
+        after(request["run_at"], 3.25)
+        n.start()
+        settled = self.wait(schedule, "Completed")
+        reports = self.triggers(settled, agent["token"])
+        self.assertEqual((reports[0]["lifecycle"], reports[0]["reason"]), ("Expired", "DeadlineExceeded"))
+        self.assertEqual([r["reason"] for r in reports[1:3]], ["MissedTrigger", "MissedTrigger"])
+        self.assertEqual(reports[3]["lifecycle"], "Triggered")
+        trigger = settled["state"]["trigger_refs"][-1]["resource_id"]
+        self.rejected("PermissionDenied", "Schedule.TriggerGet", {"id": trigger}, observer["token"])
+        self.rejected("PermissionDenied", "Resource.Get", {"id": trigger}, agent["token"])
+        task = n.wait(reports[3]["task_receipt"]["task_id"])
+        self.assertEqual(task["lifecycle"], "Succeeded")
+        self.assertEqual(self.budget(grant), (0, 1))
+
+    def test_interval_revocation_settles_one_rejection_and_closes_future_work(self):
+        n = self.node
+        grant = self.grant(units=3)
+        request = self.interval(grant, run=1.2, every=2)
+        schedule = n.call("Schedule.Create", request)
+        n.call("Grant.Revoke", target(grant["grant_ref"]))
+        rejected = self.wait(schedule, "Rejected")
+        self.assertIsNone(rejected["state"]["next"])
+        trigger, = self.triggers(rejected)
+        self.assertEqual((trigger["lifecycle"], trigger["reason"], trigger["task_receipt"]),
+                         ("Rejected", "PermissionDenied", None))
+        after(request["run_at"], 2.4)
+        self.assertEqual(self.state(schedule), rejected)
+        self.assertEqual(self.budget(grant), (0, 0))
+        self.assertEqual(n.call("Resource.List", {"kind": "Task"})["items"], [])
+
+    def test_interval_retries_queue_admission_using_the_next_trigger_identity(self):
+        n = self.node
+        n.stop()
+        n.config.write_text(json.dumps(dict(json.loads(n.config.read_text()), queue_limit=1)))
+        n.start()
+        volume = n.perform("volume.create", {"name": "interval-queue-gate"})
+        filler = n.submit("volume.write", dict(**target(volume), name="held", content="hold"))
+        self.assertEqual(n.wait(filler)["lifecycle"], "WaitingApproval")
+        grant = self.grant(units=2)
+        request = self.interval(grant, every=2, catch_up=1, run=1.2)
+        schedule = n.call("Schedule.Create", request)
+        current = self.interval_progress(schedule, 1)
+        self.assertEqual(current["state"]["next"]["ordinal"], 2)
+        dropped, = self.triggers(current)
+        self.assertEqual((dropped["lifecycle"], dropped["reason"]), ("Skipped", "CatchUpLimit"))
+        self.assertEqual(self.budget(grant), (0, 0))
+        through_queue = current["state"]["next"]["trigger_id"]
+        n.call("Task.Cancel", target(n.get(filler)["reference"]))
+        final = self.wait(schedule, "Completed")
+        second, third = self.triggers(final)[1:]
+        self.assertEqual(second["task_receipt"]["idempotency_key"], through_queue)
+        for report in [second, third]:
+            self.assertEqual(n.wait(report["task_receipt"]["task_id"])["lifecycle"], "Succeeded")
+        self.assertEqual(self.budget(grant), (0, 2))
 
     @unittest.skipUnless(os.getenv("PSIOS_TEST_CAPACITY_ALLOCATION"), "requires a bounded filesystem")
     def test_waits_for_authority_filesystem_headroom(self):

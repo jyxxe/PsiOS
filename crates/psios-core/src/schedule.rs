@@ -1,4 +1,6 @@
-//! Durable one-shot admission into the ordinary Task broker.
+//! Durable admission into the ordinary Task broker.
+mod repeat;
+
 use crate::{
     ById, Conditional, Error, Result, Store, broker,
     db::{Db, Doc},
@@ -23,6 +25,7 @@ struct Create {
     delegation_id: String,
     run_at: String,
     deadline_at: String,
+    repeat: Option<repeat::Repeat>,
 }
 
 fn instant(value: &str) -> Result<DateTime<Utc>> {
@@ -45,6 +48,20 @@ fn due_ms(at: DateTime<Utc>) -> i64 {
     at.timestamp_millis() + i64::from(!at.timestamp_subsec_nanos().is_multiple_of(1_000_000))
 }
 
+fn timestamp(at: DateTime<Utc>) -> String {
+    at.to_rfc3339_opts(SecondsFormat::AutoSi, true)
+}
+
+fn trigger_id(schedule: &str, run_at: &str) -> String {
+    let digest = sha256(&canonical(&json!([
+        "psios/schedule/trigger/1",
+        schedule,
+        "r1",
+        run_at
+    ])));
+    format!("trigger-{}", &digest[7..])
+}
+
 fn reference(d: &Doc) -> Value {
     json!({"reference": d.reference(), "state": d.body})
 }
@@ -55,9 +72,16 @@ pub fn create(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     policy::active(db, actor)?;
     let run = instant(&p.run_at)?;
     let deadline = instant(&p.deadline_at)?;
-    let run_at = run.to_rfc3339_opts(SecondsFormat::AutoSi, true);
-    let deadline_at = deadline.to_rfc3339_opts(SecondsFormat::AutoSi, true);
+    let run_at = timestamp(run);
+    let deadline_at = timestamp(deadline);
+    let last_deadline = p
+        .repeat
+        .as_ref()
+        .map(|r| r.validate(deadline))
+        .transpose()?
+        .unwrap_or(deadline);
     let authority = db.meta("authority")?;
+    // Keep one idempotency namespace for existing one-shot and interval schedules.
     let identity = sha256(&canonical(&json!([
         "psios/schedule/once/1",
         authority,
@@ -65,13 +89,17 @@ pub fn create(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         p.key
     ])));
     let id = format!("schedule-{}", &identity[7..]);
-    let creation = sha256(&canonical(&json!([
-        &p.tool,
-        &p.input,
-        &p.delegation_id,
-        &run_at,
-        &deadline_at,
-    ])));
+    let mut definition = vec![
+        json!(p.tool),
+        p.input.clone(),
+        json!(p.delegation_id),
+        json!(run_at),
+        json!(deadline_at),
+    ];
+    if let Some(repeat) = &p.repeat {
+        definition.push(json!(repeat));
+    }
+    let creation = sha256(&canonical(&Value::Array(definition)));
     if let Some(existing) = db.find(&id)? {
         policy::can(db, actor, "task.read")?;
         require(
@@ -88,7 +116,7 @@ pub fn create(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     let scope_end = instant(d.body["valid_until"].as_str().unwrap())?
         .min(instant(g.spec["valid_until"].as_str().unwrap())?);
     require(
-        Utc::now() < run && run < deadline && deadline <= scope_end,
+        Utc::now() < run && run < deadline && last_deadline <= scope_end,
         "InvalidArgument",
         "schedule requires a future run and deadline within its authorization lifetime",
     )?;
@@ -103,13 +131,7 @@ pub fn create(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         "QueueFull",
         "pending schedule capacity reached",
     )?;
-    let trigger = sha256(&canonical(&json!([
-        "psios/schedule/trigger/1",
-        &id,
-        "r1",
-        &run_at
-    ])));
-    let trigger_id = format!("trigger-{}", &trigger[7..]);
+    let trigger_id = trigger_id(&id, &run_at);
     let request = broker::prepare_scheduled(
         db,
         actor,
@@ -117,12 +139,15 @@ pub fn create(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
                 "delegation_id": p.delegation_id, "deadline_at": deadline_at}),
         &id,
     )?;
-    let schedule = db.create(
-        "Schedule", &id, actor,
-        json!({"creation_digest": creation, "request": request}),
+    let mut spec = json!({"creation_digest": creation, "request": request});
+    let body = if let Some(repeat) = &p.repeat {
+        spec["repeat"] = json!(repeat);
+        repeat.initial_state(&id, run, deadline)
+    } else {
         json!({"lifecycle": "Pending", "timezone": "UTC", "run_at": run_at, "deadline_at": deadline_at,
-               "trigger_id": trigger_id, "task_receipt": null, "reason": null}),
-    )?;
+               "trigger_id": trigger_id, "task_receipt": null, "reason": null})
+    };
+    let schedule = db.create("Schedule", &id, actor, spec, body)?;
     db.c.execute(
         "INSERT INTO pending_schedules(schedule,run_ms,deadline_ms) VALUES(?1,?2,?3)",
         params![id, due_ms(run), due_ms(deadline)],
@@ -130,10 +155,10 @@ pub fn create(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     Ok(reference(&schedule))
 }
 
-pub fn get(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
+pub fn get(db: &Db<'_>, actor: &str, p: &Value, kind: &str) -> Result<Value> {
     let p: ById = decode(p)?;
     policy::can(db, actor, "task.read")?;
-    let schedule = db.of(&p.id, "Schedule")?;
+    let schedule = db.of(&p.id, kind)?;
     policy::owned(actor, &schedule)?;
     Ok(reference(&schedule))
 }
@@ -159,21 +184,29 @@ fn settle(
     reason: Option<&str>,
     receipt: Option<Value>,
 ) -> Result<Doc> {
-    require(
-        db.c.execute(
-            "DELETE FROM pending_schedules WHERE schedule=?1",
-            [&schedule.id],
-        )? == 1
-            && schedule.body["lifecycle"] == "Pending",
-        "RecoveryRequired",
-        "schedule state disagrees with its pending entry",
-    )?;
+    remove_pending(db, schedule)?;
     let mut body = schedule.body.clone();
     body["lifecycle"] = json!(phase);
     body["settled_at"] = json!(now());
     body["reason"] = json!(reason);
-    body["task_receipt"] = receipt.unwrap_or(Value::Null);
+    if body.get("next").is_some() {
+        body["next"] = Value::Null;
+    } else {
+        body["task_receipt"] = receipt.unwrap_or(Value::Null);
+    }
     db.status(schedule, body)
+}
+
+fn remove_pending(db: &Db<'_>, schedule: &Doc) -> Result<()> {
+    require(
+        schedule.body["lifecycle"] == "Pending"
+            && db.c.execute(
+                "DELETE FROM pending_schedules WHERE schedule=?1",
+                [&schedule.id],
+            )? == 1,
+        "RecoveryRequired",
+        "schedule state disagrees with its pending entry",
+    )
 }
 
 fn deferred(error: &Error) -> bool {
@@ -202,7 +235,11 @@ pub fn tick(store: &mut Store) -> Result<()> {
             store.transaction(&correlation, |db| {
                 let schedule = db.of(&rejection.id, "Schedule")?;
                 schedule.cas(&rejection.version)?;
-                settle(db, &schedule, rejection.phase, Some(&error.0.code), None)?;
+                if let Some(series) = repeat::Series::load(&schedule)? {
+                    series.settle(db, &schedule, rejection.phase, Some(&error.0.code), None)?;
+                } else {
+                    settle(db, &schedule, rejection.phase, Some(&error.0.code), None)?;
+                }
                 Ok(())
             })
         }
@@ -230,11 +267,26 @@ fn fire(db: &Db<'_>, rejection: &mut Option<Rejection>) -> Result<()> {
     };
     db.cfg.check_admission_space()?;
     let schedule = db.of(&id, "Schedule")?;
-    if expired {
+    let series = repeat::Series::load(&schedule)?;
+    if let Some(series) = &series {
+        if series.skip_outdated(db, &schedule, at, expired)? {
+            return Ok(());
+        }
+        if series.overlapping(db, &schedule)? {
+            return series.settle(db, &schedule, "Skipped", Some("PreviousTaskActive"), None);
+        }
+    } else if expired {
         settle(db, &schedule, "Expired", Some("DeadlineExceeded"), None)?;
         return Ok(());
     }
-    let request = &schedule.spec["request"];
+    let template = &schedule.spec["request"];
+    let timed_request;
+    let request = if let Some(series) = &series {
+        timed_request = series.prepare(template)?;
+        &timed_request
+    } else {
+        template
+    };
     let delegation = request["delegation_ref"]["resource_id"]
         .as_str()
         .ok_or_else(|| err("RecoveryRequired", "schedule delegation reference missing"))?;
@@ -261,6 +313,9 @@ fn fire(db: &Db<'_>, rejection: &mut Option<Rejection>) -> Result<()> {
             phase,
         });
     })?;
-    settle(db, &schedule, "Triggered", None, Some(receipt))?;
-    Ok(())
+    if let Some(series) = series {
+        series.settle(db, &schedule, "Triggered", None, Some(receipt))
+    } else {
+        settle(db, &schedule, "Triggered", None, Some(receipt)).map(|_| ())
+    }
 }

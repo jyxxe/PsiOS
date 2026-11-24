@@ -10,15 +10,7 @@ device=/sys/class/net/${interface-}
 [ -n "${PSIOS_DHCP_INTERFACE-}" ] && [ "${interface-}" = "$PSIOS_DHCP_INTERFACE" ] || exit 1
 [ "$(cat "$device/ifindex")" = "$PSIOS_DHCP_IFINDEX" ] && [ "$(cat "$device/address")" = "$PSIOS_DHCP_MAC" ] || exit 1
 
-ipv4() {
-    local value="$1" IFS=. octet
-    set -- $value
-    [ "$#" -eq 4 ] && [ "$value" = "$1.$2.$3.$4" ] || return 1
-    for octet do
-        case "$octet" in ''|*[!0-9]*|0[0-9]*|????*) return 1 ;; esac
-        [ "$octet" -le 255 ] || return 1
-    done
-}
+. /psios-ipv4
 
 network_prefix() {
     local prefix="${1%/*}" bits="${1##*/}" IFS=. value

@@ -42,7 +42,16 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 
 该配置管理匹配网口的 IPv4 地址、租约路由和 `/etc/resolv.conf`。收到选项 121 时，最多安装 32 个不同前缀，支持直连、经网关和默认路由。同一租约中的选项 3 仅在缺少选项 121 时提供默认网关。续租与释放按已记录的前缀、网关、接口、协议和 metric 逐条替换或删除租约路由。应用租约失败时清理已配置部分并报告失败。
 
-最多三个 DNS 服务器按租约配置。普通账户可用 `busybox ip -4 addr show`、`busybox ip -4 route show` 和 `cat /etc/resolv.conf` 检查。最新租约或故障信息在 `/run/psios-network/status`。配置的网口缺失时，串口账户与 Core 可照常使用。静态网络配置、无线、IPv6 管理和远程配置事务仍待开发。[RFC 3442](https://datatracker.ietf.org/doc/html/rfc3442) · [租约续租和释放验收](../tests/native_dhcp.py) · [无类别路由验收](../tests/native_dhcp_routes.py)
+最多三个 DNS 服务器按租约配置。普通账户可用 `busybox ip -4 addr show`、`busybox ip -4 route show` 和 `cat /etc/resolv.conf` 检查。最新租约或故障信息在 `/run/psios-network/status`。配置的网口缺失时，串口账户与 Core 可照常使用。[RFC 3442](https://datatracker.ietf.org/doc/html/rfc3442) · [租约续租和释放验收](../tests/native_dhcp.py) · [无类别路由验收](../tests/native_dhcp_routes.py)
+
+对于无 DHCP 的局域网，构建新盘时可使用以下参数绑定一个 virtio 网口。可省略网关和 DNS。网关必须是同子网的另一个主机地址。DNS 参数最多提供三次。
+
+```sh
+--static-mac 52:54:00:51:6f:20 --static-address 192.0.2.20/24 \
+--static-gateway 192.0.2.2 --static-dns 192.0.2.53
+```
+
+系统从根用户拥有的 `/etc/psios/static-ipv4` 读取并验证配置，启用匹配网口的静态地址和可选默认路由。默认路由使用 metric 30320。路由冲突时移除本次添加的地址，保留原路线和 resolver。启动状态仍写入 `/run/psios-network/status`。格式 4 的构建回执标识静态配置，停机升级会检查保存的配置内容和权限，保留有效的本机设置，拒绝发布配置损坏的候选盘。多网口、无线、IPv6 管理和远程确认回退事务仍待开发。[静态 IPv4 验收](../tests/native_static_ipv4.py)
 
 ## 核对安装与运行的制品
 

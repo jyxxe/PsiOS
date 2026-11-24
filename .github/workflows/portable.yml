@@ -136,6 +136,18 @@ jobs:
             --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
             --installer "$RUNNER_TEMP/rescue-core/native/create.py"
 
+      - name: Configure static IPv4, preserve healthy settings and refuse an invalid offline upgrade
+        run: |
+          previous="$RUNNER_TEMP/native-pre-static-installer"
+          mkdir "$previous"
+          git archive a7e20f07b9b59a7d0f745248ac65749dfb50a39a images/native images/rescue | tar -x -C "$previous"
+          sudo unshare --net --propagation private \
+            python3 -B tests/native_static_ipv4.py --kernel-iso "$RUNNER_TEMP/rescue.iso" \
+            --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
+            --previous-installer "$previous/images/native/create.py" \
+            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
+            --installer "$RUNNER_TEMP/rescue-core/native/create.py"
+
       - name: Verify native Secure Boot, firmware rejection and a signed offline upgrade
         run: |
           secure_tools="$RUNNER_TEMP/psios-secure-boot-tools"

@@ -47,6 +47,9 @@ if git -C "$repo" cat-file -e "$sha:images/native/README.txt" 2>/dev/null; then
     if git -C "$repo" cat-file -e "$sha:images/native/dhcp" 2>/dev/null; then
         native_files+=(dhcp dhcp-event)
     fi
+    if git -C "$repo" cat-file -e "$sha:images/native/ipv4" 2>/dev/null; then
+        native_files+=(ipv4)
+    fi
     if git -C "$repo" cat-file -e "$sha:images/native/storage" 2>/dev/null; then
         native_files+=(storage)
     fi

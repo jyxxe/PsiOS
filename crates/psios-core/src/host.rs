@@ -70,6 +70,8 @@ pub enum Action {
     NetworkProbe(Target),
     #[serde(rename = "node.devices")]
     Devices {},
+    #[serde(rename = "node.block_layout")]
+    BlockLayout(node::block::Query),
     #[serde(rename = "node.mounts")]
     Mounts {},
     #[serde(rename = "node.processes")]
@@ -148,6 +150,7 @@ impl Action {
             Self::Routes(q) => q.validate()?,
             Self::RouteLookup(q) => q.validate()?,
             Self::RoutingRules(q) => q.validate()?,
+            Self::BlockLayout(q) => q.validate()?,
             Self::Create { name } => label(name)?,
             Self::Read(f) => storage::filename(&f.name)?,
             Self::VolumeUsage(query) => query.validate()?,
@@ -218,6 +221,7 @@ impl Action {
             | Self::Inventory {}
             | Self::Pressure {}
             | Self::Mounts {}
+            | Self::BlockLayout(_)
             | Self::Devices {} => {
                 return db.of(&db.meta("authority")?, "Node");
             }
@@ -393,6 +397,7 @@ impl Work {
             | Action::RoutingRules(_)
             | Action::NetworkProbe(_)
             | Action::Mounts {}
+            | Action::BlockLayout(_)
             | Action::Devices {} => node::perform(self),
             Action::Start(_) => apps::start(self, |engine, container| {
                 checkpoint(Checkpoint::OciStart { engine, container })

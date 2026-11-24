@@ -34,7 +34,8 @@ jobs:
             sh -ec 'python3 -B /tests/system.py --bin-dir /core &&
               python3 -B -m unittest discover -s /tests -p test_shell.py -v &&
               python3 -B -m unittest discover -s /tests -p test_network_probe.py -k test_dns_mismatch -v &&
-              python3 -B -m unittest discover -s /tests -p test_pressure.py -v'
+              python3 -B -m unittest discover -s /tests -p test_pressure.py -v &&
+              python3 -B -m unittest discover -s /tests -p test_block_layout.py -v'
       - name: Recover a durable Task in an empty Linux userspace
         run: |
           python3 tests/portable_recovery.py "$RUNNER_TEMP/psios-core-linux-amd64.tar.gz" \

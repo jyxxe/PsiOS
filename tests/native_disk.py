@@ -76,7 +76,7 @@ class Console:
 
 
 @contextmanager
-def boot(work, image, network_mac=None, extra_disk=None):
+def boot(work, image, network_mac=None, extra_disk=None, tap=None):
     accel = "kvm" if os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
     cmd = ["qemu-system-x86_64", "-nodefaults", "-no-user-config", "-no-reboot", "-machine", "q35",
            "-accel", accel, "-m", "768", "-smp", "2", "-display", "none",
@@ -92,7 +92,9 @@ def boot(work, image, network_mac=None, extra_disk=None):
     else:
         cmd += ["-boot", "order=c,strict=on", "-drive", f"if=virtio,format=raw,file={image.name}"]
     if network_mac:
-        cmd += ["-netdev", "user,id=network,net=192.0.2.0/24,dhcpstart=192.0.2.20",
+        network = (f"tap,id=network,ifname={tap},script=no,downscript=no" if tap
+                   else "user,id=network,net=192.0.2.0/24,dhcpstart=192.0.2.20")
+        cmd += ["-netdev", network,
                 "-device", f"virtio-net-pci,netdev=network,mac={network_mac},romfile="]
     else:
         cmd += ["-nic", "none"]

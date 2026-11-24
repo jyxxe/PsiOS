@@ -145,8 +145,10 @@ fn dispatch(
         .map(PreparedStep::dsl_version)
         .max()
         .unwrap_or(1);
+    // Early DSL 1 definitions declared their version, while their runs omitted it.
+    let stored_version = run.spec.get("dsl_version").map_or(Some(1), Value::as_u64);
     require(
-        run.spec["dsl_version"] == version,
+        stored_version == Some(u64::from(version)),
         "RecoveryRequired",
         "workflow run version disagrees with its steps",
     )?;

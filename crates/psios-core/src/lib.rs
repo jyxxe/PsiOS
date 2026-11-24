@@ -8,6 +8,7 @@ mod config;
 mod db;
 mod events;
 mod host;
+mod linux_cgroup;
 mod node;
 mod policy;
 mod schedule;

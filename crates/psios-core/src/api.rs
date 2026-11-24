@@ -220,32 +220,13 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
 }
 impl Store {
     pub fn request(&mut self, peer: u32, r: Request) -> Result<Value> {
-        require(
-            r.schema_version == VERSION,
-            "SchemaVersionUnsupported",
-            "unsupported system API version",
-        )?;
-        label(&r.request_id)?;
-        label(&r.method)?;
-        let method = r.method.as_str();
-        let mut audit_actor = format!("uid-{peer}");
-        let result = self.transaction(&r.request_id, |db| {
-            let actor = policy::authenticate(db, &r.token)?;
-            audit_actor = actor.clone();
-            let subject = db.of(&actor, "Principal")?;
-            require(
-                subject.spec["peer_uid"]
-                    .as_u64()
-                    .is_none_or(|uid| uid == u64::from(peer)),
-                "PermissionDenied",
-                "credential UID mismatch",
-            )?;
-            require(
-                actor != policy::OWNER || peer == rustix::process::geteuid().as_raw(),
-                "PermissionDenied",
-                "owner credential requires service UID",
-            )?;
-            let out = invoke(db, &actor, method, &r.params)?;
+        if r.method == storage::export::METHOD {
+            let job = self.prepare_export(peer, &r)?;
+            return self.finish_export(peer, &r, job.read());
+        }
+        self.authorized_request(peer, &r, |db, actor| {
+            let method = r.method.as_str();
+            let out = invoke(db, actor, method, &r.params)?;
             if matches!(
                 method,
                 "Agent.Register"
@@ -300,9 +281,66 @@ impl Store {
                 } else {
                     None
                 };
-                db.audit(&actor, method, target, "Allowed")?;
+                db.audit(actor, method, target, "Allowed")?;
             }
             Ok(out)
+        })
+    }
+
+    pub(crate) fn prepare_export(
+        &mut self,
+        peer: u32,
+        r: &Request,
+    ) -> Result<storage::export::Job> {
+        let cache = self.export_cache.clone();
+        self.authorized_request(peer, r, |db, actor| {
+            storage::export::prepare(db, actor, &r.params, cache)
+        })
+    }
+
+    pub(crate) fn finish_export(
+        &mut self,
+        peer: u32,
+        r: &Request,
+        read: Result<psios_api::BackupChunk>,
+    ) -> Result<Value> {
+        self.authorized_request(peer, r, |db, actor| {
+            storage::export::finish(db, actor, &r.params, read)
+        })
+    }
+
+    fn authorized_request<T>(
+        &mut self,
+        peer: u32,
+        r: &Request,
+        execute: impl FnOnce(&Db<'_>, &str) -> Result<T>,
+    ) -> Result<T> {
+        require(
+            r.schema_version == VERSION,
+            "SchemaVersionUnsupported",
+            "unsupported system API version",
+        )?;
+        label(&r.request_id)?;
+        label(&r.method)?;
+        let method = r.method.as_str();
+        let mut audit_actor = format!("uid-{peer}");
+        let result = self.transaction(&r.request_id, |db| {
+            let actor = policy::authenticate(db, &r.token)?;
+            audit_actor = actor.clone();
+            let subject = db.of(&actor, "Principal")?;
+            require(
+                subject.spec["peer_uid"]
+                    .as_u64()
+                    .is_none_or(|uid| uid == u64::from(peer)),
+                "PermissionDenied",
+                "credential UID mismatch",
+            )?;
+            require(
+                actor != policy::OWNER || peer == rustix::process::geteuid().as_raw(),
+                "PermissionDenied",
+                "owner credential requires service UID",
+            )?;
+            execute(db, &actor)
         });
         // Repeated headroom refusals must leave space for in-flight work and security records.
         if let Err(e) = &result

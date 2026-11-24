@@ -29,6 +29,14 @@ struct Chat {
 }
 
 impl Chat {
+    fn peer(&self, actor: &str) -> &str {
+        if actor == self.inviter {
+            &self.invitee
+        } else {
+            &self.inviter
+        }
+    }
+
     fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
             id: row.get(0)?,

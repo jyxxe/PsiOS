@@ -188,7 +188,7 @@ jobs:
       - name: Retain pending timers and direct chat when migrating format 13
         run: |
           mkdir "$RUNNER_TEMP/psios-format13"
-          git archive 571580d09fac752e912edcd34bbc32ae23d92374 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format13"
+          git archive 6735900e933346ec944fea285cf3358495e8ea62 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format13"
           CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format13/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format13/target"
           python3 tests/calendar_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format13/target/debug"
       - name: Verify real systemd service control and crash reconciliation

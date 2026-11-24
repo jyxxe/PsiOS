@@ -17,11 +17,8 @@ fn writable(db: &Db<'_>, actor: &str, id: &str) -> Result<Chat> {
         "PreconditionFailed",
         "direct conversation is archived",
     )?;
-    let peer = if actor == chat.inviter {
-        &chat.invitee
-    } else {
-        &chat.inviter
-    };
+    let peer = chat.peer(actor);
+    policy::active(db, peer)?;
     policy::can(db, peer, READ)?;
     Ok(chat)
 }
@@ -36,15 +33,33 @@ struct Window {
 struct SendWindow {
     namespace: String,
     valid_until: i64,
+    sender_read: String,
+    sender_send: String,
+    peer_read: String,
 }
 
 fn current_window(db: &Db<'_>, chat: &Chat, actor: &str, stamp: i64) -> Result<Option<SendWindow>> {
-    Ok(db.c.query_row(
-        "SELECT namespace,valid_until FROM chat_send_windows WHERE conversation=?1 AND sender=?2
-         AND auth_epoch=?3 AND incarnation=?4 AND valid_until>?5",
-        params![chat.id, actor, db.meta("epoch")?, db.incarnation, stamp],
-        |row| Ok(SendWindow { namespace: row.get(0)?, valid_until: row.get(1)? }),
-    ).optional()?)
+    let Some(window) = db.c.query_row(
+        "SELECT namespace,valid_until,sender_read_delegation,sender_send_delegation,peer_read_delegation
+         FROM chat_send_windows WHERE conversation=?1 AND sender=?2 AND incarnation=?3 AND valid_until>?4",
+        params![chat.id, actor, db.incarnation, stamp],
+        |row| Ok(SendWindow { namespace: row.get(0)?, valid_until: row.get(1)?,
+            sender_read: row.get(2)?, sender_send: row.get(3)?, peer_read: row.get(4)? }),
+    ).optional()? else {
+        return Ok(None);
+    };
+    for (principal, action, delegation) in [
+        (actor, READ, &window.sender_read),
+        (actor, SEND, &window.sender_send),
+        (chat.peer(actor), READ, &window.peer_read),
+    ] {
+        match policy::delegation(db, principal, delegation, action) {
+            Ok(_) => {}
+            Err(error) if error.0.code == "PermissionDenied" => return Ok(None),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(Some(window))
 }
 
 pub fn open_window(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
@@ -64,12 +79,17 @@ pub fn open_window(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
     db.cfg.check_admission_space()?;
     let namespace = id("send");
     let until = stamp + i64::from(p.ttl_seconds);
+    let sender_read = policy::authorized_delegation(db, actor, READ, None)?;
+    let sender_send = policy::authorized_delegation(db, actor, SEND, None)?;
+    let peer_read = policy::authorized_delegation(db, chat.peer(actor), READ, None)?;
     db.c.execute(
-        "INSERT INTO chat_send_windows(conversation,sender,namespace,auth_epoch,incarnation,valid_until)
-         VALUES(?1,?2,?3,?4,?5,?6)
-         ON CONFLICT(conversation,sender) DO UPDATE SET namespace=excluded.namespace,auth_epoch=excluded.auth_epoch,
-            incarnation=excluded.incarnation,valid_until=excluded.valid_until",
-        params![chat.id, actor, namespace, db.meta("epoch")?, db.incarnation, until],
+        "INSERT INTO chat_send_windows(conversation,sender,namespace,incarnation,valid_until,
+             sender_read_delegation,sender_send_delegation,peer_read_delegation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+         ON CONFLICT(conversation,sender) DO UPDATE SET namespace=excluded.namespace,
+             incarnation=excluded.incarnation,valid_until=excluded.valid_until,
+             sender_read_delegation=excluded.sender_read_delegation,sender_send_delegation=excluded.sender_send_delegation,
+             peer_read_delegation=excluded.peer_read_delegation",
+        params![chat.id, actor, namespace, db.incarnation, until, sender_read.id, sender_send.id, peer_read.id],
     )?;
     Ok(json!({"namespace": namespace, "valid_until": timestamp(until)}))
 }

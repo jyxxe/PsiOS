@@ -9,7 +9,8 @@ CREATE INDEX chat_inviter ON direct_chats(inviter,id);
 CREATE INDEX chat_invitee ON direct_chats(invitee,id);
 CREATE TABLE chat_send_windows(
  conversation TEXT NOT NULL REFERENCES direct_chats(id), sender TEXT NOT NULL,
- namespace TEXT NOT NULL, auth_epoch TEXT NOT NULL, incarnation TEXT NOT NULL, valid_until INTEGER NOT NULL,
+ namespace TEXT NOT NULL, incarnation TEXT NOT NULL, valid_until INTEGER NOT NULL,
+ sender_read_delegation TEXT NOT NULL, sender_send_delegation TEXT NOT NULL, peer_read_delegation TEXT NOT NULL,
  PRIMARY KEY(conversation,sender)
 ) STRICT;
 CREATE TABLE chat_messages(

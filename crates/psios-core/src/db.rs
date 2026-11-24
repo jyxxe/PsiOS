@@ -352,6 +352,11 @@ impl Store {
                 "UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='epoch'",
                 [],
             )?;
+            db.c.execute(
+                "DELETE FROM chat_send_windows WHERE conversation IN
+                    (SELECT id FROM direct_chats WHERE inviter=?1 OR invitee=?1)",
+                [policy::OWNER],
+            )?;
             db.audit(
                 policy::OWNER,
                 "Principal.RecoverOwner",

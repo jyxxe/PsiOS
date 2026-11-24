@@ -1,21 +1,30 @@
 #!/bin/sh
-# BusyBox init has already ceased respawning services when this action runs.
+# PID 1 invokes this hook after stopping respawn or during verified early boot.
 [ "$PPID" -eq 1 ] && [ "$(id -u)" -eq 0 ] || exit 1
-pids=$(pidof psiosd) || pids=
-if [ -n "$pids" ]; then
-    kill -TERM $pids
-    i=0
-    while pidof psiosd >/dev/null && [ "$i" -lt 150 ]; do sleep 0.1; i=$((i+1)); done
+if [ "$#" -eq 0 ]; then
+    pids=$(pidof psiosd) || pids=
+    if [ -n "$pids" ]; then
+        kill -TERM $pids
+        i=0
+        while pidof psiosd >/dev/null && [ "$i" -lt 150 ]; do sleep 0.1; i=$((i+1)); done
+    fi
+    # The shutdown hook runs before BusyBox signals login sessions. A console
+    # shell can still hold /root or /home/psios as its working directory.
+    kill -TERM -1 2>/dev/null || :
+    sleep 1
+    kill -KILL -1 2>/dev/null || :
+elif [ "$#" -ne 1 ] || [ "$1" != --mounts-only ]; then
+    exit 1
 fi
-# The init shutdown hook runs before BusyBox signals login sessions. A console
-# shell can still hold /root or /home/psios as its working directory.
-kill -TERM -1 2>/dev/null || :
-sleep 1
-kill -KILL -1 2>/dev/null || :
-sync -f /mnt/psios-homes
-sync -f /var/lib
+
+mounted() {
+    awk -v path="$1" '$5 == path { found=1; exit } END { exit !found }' /proc/self/mountinfo
+}
+if mounted /mnt/psios-homes; then sync -f /mnt/psios-homes; fi
+if mounted /var/lib; then sync -f /var/lib; fi
 
 close_mount() {
+    mounted "$1" || return 0
     if ! umount "$1" 2>/dev/null && ! mount -o "$2" "$1"; then
         printf 'PsiOS shutdown could not close %s cleanly\n' "$1" >/dev/console
     fi

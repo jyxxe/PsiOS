@@ -13,7 +13,7 @@ def main(binaries):
     node = Node(binaries)
     tag = "psios-acceptance:" + key()
     upgraded_tag = tag + "-upgrade"
-    app_id = None
+    app_ids = []
     docker = ["docker", "--host", "unix:///var/run/docker.sock"]
     try:
         c = node.base / "probe.c"
@@ -21,7 +21,8 @@ def main(binaries):
 #include <stdlib.h>
 #include <unistd.h>
 int main(void) {
-    FILE *f=fopen("/data/starts", "a");
+    const char *path=getenv("EPHEMERAL_ONLY") ? "/tmp/starts" : "/data/starts";
+    FILE *f=fopen(path, "a");
     if (!f) return 2;
     fprintf(f,"%s\\n",getenv("TEST_NAME"));
     if (fclose(f)) return 3;
@@ -41,6 +42,7 @@ int main(void) {
                     cpu_millicores=200, memory_max_bytes=33554432, pids_max=16, ephemeral_max_bytes=1048576)
         app = node.perform("application.install", spec)
         app_id = app["resource_id"]
+        app_ids.append(app_id)
         data = node.state / "volumes" / volume["resource_id"] / "data"
         detached = data.with_name("test-unavailable")
         data.rename(detached)
@@ -65,6 +67,7 @@ int main(void) {
         assert inspected["HostConfig"]["NetworkMode"] == "none"
         assert inspected["HostConfig"]["ReadonlyRootfs"]
         assert inspected["HostConfig"]["Memory"] == spec["memory_max_bytes"]
+        assert inspected["HostConfig"]["MemorySwap"] == spec["memory_max_bytes"]
         assert inspected["HostConfig"]["PidsLimit"] == 16
         volume = node.get(volume["resource_id"])["reference"]
         busy = node.wait(node.submit("backup.create", target(volume)))
@@ -87,11 +90,13 @@ int main(void) {
         agent = node.call("Agent.Register", {"name": "installer"})
         grant = node.call("Grant.Issue", dict(principal_id=agent["principal_id"], actions=["task.submit","task.read","application.install"],
             ttl_seconds=180, units=2, tool_targets=["profile-local"]))
-        request = node.prepare("application.install", dict(release, name="isolated"), key(), agent["token"], grant["delegation_ref"]["resource_id"])
+        isolated = dict(release, name="isolated", environment={"TEST_NAME": "isolated", "EPHEMERAL_ONLY": "1"})
+        request = node.prepare("application.install", isolated, key(), agent["token"], grant["delegation_ref"]["resource_id"])
         accepted = node.call("Task.Submit", request, agent["token"])
         installed = node.wait(accepted["task_id"], autoapprove=True)
         assert installed["lifecycle"] == "Succeeded", installed
         other = node.call("Artifact.Read", {"reference": installed["result"]["artifact_refs"][0]}, agent["token"])
+        app_ids.append(other["resource_id"])
         try:
             node.call("Application.Configure", dict(**target(other), environment={"TEST_NAME":"outside-scope"}), agent["token"])
         except Failure as e:
@@ -100,6 +105,12 @@ int main(void) {
             raise AssertionError("configuration bypassed the install grant target")
         foreign = node.wait(node.submit("application.select_release", dict(target=target(other), release_ref=staged)), autoapprove=True)
         assert foreign["conditions"][0]["type"] == "PreconditionFailed", foreign
+        other = node.perform("application.start", target(other))
+        ephemeral_cid = node.perform("application.health", target(other))["container_id"]
+        assert "probe ready" in node.perform("application.logs", target(other))["stdout"]
+        ephemeral = json.loads(subprocess.check_output(docker + ["inspect", ephemeral_cid]))[0]
+        assert ephemeral["Mounts"] == [], ephemeral["Mounts"]
+        other = node.perform("application.stop", target(other))
         node.perform("application.uninstall", target(other))
         app = node.perform("application.select_release", dict(target=target(app), release_ref=staged))
         app = node.perform("application.start", target(app))
@@ -127,9 +138,9 @@ int main(void) {
         assert restored["resource_id"] != volume["resource_id"]
         assert node.perform("volume.read", dict(**target(restored), name="starts"))["content"] == "first\nsecond\nupgraded\nfirst\n"
         node.perform("volume.activate", target(restored))
-        print("PASS live OCI lifecycle, two image digests, release staging, external exit, rollback, SIGKILL after engine start and removal, fenced volume and verified backup restore")
+        print("PASS live OCI lifecycle, bind and ephemeral-only isolation, release rollback, external exit, recovery rejects swap drift, SIGKILL after engine start and removal, fenced volume and verified backup restore")
     finally:
-        if app_id:
+        for app_id in app_ids:
             ids = subprocess.check_output(docker + ["ps", "-aq", "--filter", "label=io.psios.application=" + app_id], text=True).split()
             for cid in ids:
                 subprocess.run(docker + ["rm", "-f", cid], check=True, stdout=subprocess.DEVNULL)

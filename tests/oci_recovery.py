@@ -94,6 +94,17 @@ def lose_receipt(n, app, volume, tool, match_request):
         docker = ["docker", "--host", "unix://" + real_socket]
         cid = subprocess.check_output(docker + ["ps", "-q", "--no-trunc", "--filter",
             "label=io.psios.operation=" + op["resource_id"]], text=True).strip()
+        limits = json.loads(subprocess.check_output(docker + ["inspect", "--format", "{{json .HostConfig}}", cid]))
+        budget = ["update", f"--memory={limits['Memory']}"]
+        changed_swap = limits["MemorySwap"] + 16 * 1024 * 1024
+        subprocess.run(docker + budget + [f"--memory-swap={changed_swap}", cid], check=True, stdout=subprocess.DEVNULL)
+        try:
+            mismatch = n.wait(n.submit("application.health", target(app)))
+            assert mismatch["lifecycle"] == "Failed" and mismatch["conditions"][0]["type"] == "PreconditionFailed", mismatch
+            assert mismatch["result"]["artifact_refs"] == [], mismatch
+        finally:
+            subprocess.run(docker + budget + [f"--memory-swap={limits['MemorySwap']}", cid], check=True,
+                           stdout=subprocess.DEVNULL)
         subprocess.run(docker + ["pause", cid], check=True, stdout=subprocess.DEVNULL)
         try:
             paused = n.wait(n.submit("application.health", target(app)))

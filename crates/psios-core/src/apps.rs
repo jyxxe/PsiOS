@@ -277,6 +277,7 @@ impl Engine<'_> {
             .map_err(|_| err("DependencyUnavailable", "cannot inspect engine limits"))?;
         require(
             v["MemoryLimit"] == true
+                && v["SwapLimit"] == true
                 && v["CpuCfsQuota"] == true
                 && v["PidsLimit"] == true
                 && v["SecurityOptions"].as_array().is_some_and(|a| {
@@ -438,10 +439,7 @@ pub fn start(w: &Work, checkpoint: impl FnOnce(&str, &str) -> Result<()>) -> Res
             s.cpu_millicores / 1000,
             s.cpu_millicores % 1000
         ),
-        format!(
-            "--tmpfs=/tmp:rw,noexec,nosuid,nodev,size={}",
-            s.ephemeral_max_bytes
-        ),
+        format!("--tmpfs=/tmp:{}", tmpfs_options(s.ephemeral_max_bytes)),
     ]);
     if let Some(data) = &w.data {
         let path = data
@@ -472,7 +470,7 @@ pub fn start(w: &Work, checkpoint: impl FnOnce(&str, &str) -> Result<()>) -> Res
             "created instance identity requires reconciliation",
         )
     })?;
-    verify_created(w, &v, s, &user)?;
+    verify_isolation(w, &v, s, &user)?;
     require(
         e.identity().is_ok_and(|id| id == engine_id),
         "OutcomeUnknown",
@@ -489,6 +487,7 @@ pub fn start(w: &Work, checkpoint: impl FnOnce(&str, &str) -> Result<()>) -> Res
     let observed = e
         .managed(w, &cid, &w.op.id)
         .map_err(|_| err("OutcomeUnknown", "start receipt requires reconciliation"))?;
+    verify_isolation(w, &observed, s, &user)?;
     require(
         e.identity().is_ok_and(|id| id == engine_id),
         "OutcomeUnknown",
@@ -501,38 +500,85 @@ pub fn start(w: &Work, checkpoint: impl FnOnce(&str, &str) -> Result<()>) -> Res
         "observed_at": now()
     }))
 }
-fn verify_created(w: &Work, v: &Value, s: &Install, user: &str) -> Result<()> {
+fn tmpfs_options(bytes: u64) -> String {
+    format!("rw,noexec,nosuid,nodev,size={bytes}")
+}
+
+fn no_entries(value: &Value) -> bool {
+    value.is_null() || value.as_array().is_some_and(Vec::is_empty)
+}
+
+fn approved_mounts(w: &Work, v: &Value) -> bool {
     let h = &v["HostConfig"];
-    let valid_mount = match &w.data {
-        Some(data) => v["Mounts"].as_array().is_some_and(|a| {
-            a.iter().any(|m| {
-                m["Destination"] == "/data"
-                    && m["Source"] == data.to_string_lossy().as_ref()
-                    && m["RW"] == true
-            })
-        }),
-        None => true,
+    let mounts = &v["Mounts"];
+    let declarations = &h["Mounts"];
+    let Some(data) = &w.data else {
+        return no_entries(mounts) && no_entries(declarations);
     };
+    let Some(source) = data.to_str() else {
+        return false;
+    };
+    match (
+        mounts.as_array().map(Vec::as_slice),
+        declarations.as_array().map(Vec::as_slice),
+    ) {
+        (Some([mounted]), Some([declared])) => {
+            mounted["Type"] == "bind"
+                && mounted["Destination"] == "/data"
+                && mounted["Source"] == source
+                && mounted["RW"] == true
+                && mounted["Propagation"] == "rprivate"
+                && declared["Type"] == "bind"
+                && declared["Target"] == "/data"
+                && declared["Source"] == source
+                && declared["BindOptions"]["Propagation"] == "rprivate"
+                && declared["BindOptions"]["NonRecursive"] == true
+        }
+        _ => false,
+    }
+}
+
+fn verify_isolation(w: &Work, v: &Value, s: &Install, user: &str) -> Result<()> {
+    let h = &v["HostConfig"];
+    let no_extra_access = [
+        "Binds",
+        "VolumesFrom",
+        "CapAdd",
+        "GroupAdd",
+        "Devices",
+        "DeviceRequests",
+        "DeviceCgroupRules",
+    ]
+    .into_iter()
+    .all(|name| no_entries(&h[name]));
+    let no_new_privileges = h["SecurityOpt"].as_array().is_some_and(|options| {
+        matches!(options.as_slice(), [option]
+            if matches!(option.as_str(), Some("no-new-privileges" | "no-new-privileges:true")))
+    });
     require(
-        valid_mount
+        approved_mounts(w, v)
+            && h["Tmpfs"] == json!({"/tmp":tmpfs_options(s.ephemeral_max_bytes)})
             && v["Config"]["User"] == user
             && h["NetworkMode"] == "none"
+            && h["IpcMode"] == "none"
+            && matches!(h["PidMode"].as_str(), Some("" | "private"))
             && h["ReadonlyRootfs"] == true
             && h["Privileged"] == false
             && h["Memory"] == s.memory_max_bytes
+            && h["MemorySwap"] == s.memory_max_bytes
             && h["PidsLimit"] == s.pids_max
             && h["NanoCpus"] == u64::from(s.cpu_millicores) * 1_000_000
+            && no_extra_access
             && h["CapDrop"]
                 .as_array()
                 .is_some_and(|a| a.iter().any(|v| v == "ALL" || v == "CAP_ALL"))
-            && h["SecurityOpt"].as_array().is_some_and(|a| {
-                a.iter().any(|v| {
-                    v.as_str()
-                        .is_some_and(|s| s.starts_with("no-new-privileges"))
-                })
-            }),
+            && no_new_privileges
+            && h["RestartPolicy"]["Name"] == "no"
+            && h["LogConfig"]["Type"] == "local"
+            && h["LogConfig"]["Config"]["max-size"] == "1m"
+            && h["LogConfig"]["Config"]["max-file"] == "1",
         "OutcomeUnknown",
-        "created instance failed isolation verification; start withheld",
+        "OCI instance configuration differs from the approved isolation profile",
     )
 }
 
@@ -560,7 +606,7 @@ fn observe_start(w: &Work, e: &Engine<'_>, checkpoint: &Doc) -> Result<Value> {
         .launch
         .as_ref()
         .ok_or_else(|| err("RecoveryRequired", "checkpoint release unavailable"))?;
-    verify_created(w, &v, launch, &user).map_err(|_| {
+    verify_isolation(w, &v, launch, &user).map_err(|_| {
         err(
             "PreconditionFailed",
             "checkpointed runtime configuration differs from its release",

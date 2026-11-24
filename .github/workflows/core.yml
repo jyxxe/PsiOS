@@ -165,6 +165,12 @@ jobs:
           git archive 121a8c1e11e0f34bcfec4a356a0a36f511731db1 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format9"
           CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format9/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format9/target"
           python3 tests/route_lookup_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format9/target/debug"
+      - name: Migrate a format 10 timer and exercise interval trigger history
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format10"
+          git archive 918d80c9be636fe7a6eab287939cf8bc7df86c23 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format10"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format10/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format10/target"
+          python3 tests/schedule_repeat_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format10/target/debug"
       - name: Verify real systemd service control and crash reconciliation
         run: |
           sudo loginctl enable-linger "$(id -un)"

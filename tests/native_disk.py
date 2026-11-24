@@ -95,7 +95,7 @@ class Console:
 
 
 @contextmanager
-def boot(work, image, network_mac=None, extra_disk=None, tap=None):
+def boot(work, image, network_mac=None, extra_disk=None, tap=None, *, rtc_base=None):
     # The privileged TAP fixture has a reproducible serial stall on hosted KVM.
     # Use a portable CPU emulator for that fixture; keep its real virtio and TAP.
     accel = "kvm" if tap is None and os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
@@ -104,6 +104,8 @@ def boot(work, image, network_mac=None, extra_disk=None, tap=None):
            "-monitor", "none", "-serial", "stdio",
            "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=code.fd",
            "-drive", "if=pflash,format=raw,unit=1,file=vars.fd"]
+    if rtc_base is not None:
+        cmd += ["-rtc", f"base={rtc_base},clock=vm"]
     if extra_disk is not None:
         cmd += ["-boot", "strict=on",
                 "-drive", f"if=none,format=raw,id=additional,file={extra_disk.name}",

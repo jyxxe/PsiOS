@@ -1,4 +1,5 @@
 //! Single-node directory volumes. A writer or an uncertain operation retains the volume hold.
+mod detached;
 pub mod files;
 pub(crate) mod publication;
 mod restore_proof;
@@ -10,6 +11,7 @@ use crate::{
     host::{Action, Work},
     policy, *,
 };
+pub use detached::inspect_detached_backup;
 use psios_api::{VERSION, canonical, sha256};
 use rusqlite::{OptionalExtension, params};
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, ResolveFlags, openat2, statat};
@@ -18,6 +20,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 pub(crate) use staging::reclaim_on_startup;
 use std::{
+    collections::BTreeMap,
     fs::{self, File, Permissions},
     io::{Read, Write},
     os::unix::fs::{MetadataExt, PermissionsExt},
@@ -559,38 +562,69 @@ fn entry_parent<'a>(root: &File, relative: &'a str) -> Result<(File, &'a str)> {
 // Verification and restore read exactly the same authority-bound recovery set.
 fn inspect_backup(cfg: &Config, b: &Doc, destination: Option<&Path>) -> Result<Value> {
     let (_, root) = open_backup(cfg, &b.id)?;
-    let mut report = inspect_members(
-        cfg,
-        &root,
+    let manifest = authority_manifest(
         &open_manifest(&root)?,
         &b.id,
         &b.spec["source_ref"],
         &b.body,
-        destination,
+    )?;
+    let destination = destination.map(File::open).transpose()?;
+    let mut report = inspect_members(
+        &root,
+        &manifest,
+        &b.body["manifest_digest"],
+        destination.as_ref().map(|directory| RestoreDestination {
+            directory,
+            authority: Some(cfg),
+        }),
     )?;
     report["backup_ref"] = b.reference();
     Ok(report)
 }
 
-fn inspect_members(
-    cfg: &Config,
-    root: &File,
+fn authority_manifest(
     manifest: &File,
     id: &str,
     source_ref: &Value,
     expected: &Value,
-    destination: Option<&Path>,
-) -> Result<Value> {
+) -> Result<BackupManifest> {
     let bytes = read_manifest(manifest, &expected["manifest_digest"])?;
     let m: BackupManifest = serde_json::from_slice(&bytes)?;
     require(
         m.backup_id == id
             && m.source == *source_ref
-            && m.entries.len() <= MAX_ENTRIES
             && expected["entries"] == m.entries.len()
             && expected["bytes"] == m.total_bytes,
         "PreconditionFailed",
         "backup manifest disagrees with authority",
+    )?;
+    Ok(m)
+}
+
+struct RestoreDestination<'a> {
+    directory: &'a File,
+    authority: Option<&'a Config>,
+}
+
+impl RestoreDestination<'_> {
+    fn check_space(&self, file_sizes: impl Iterator<Item = u64>, entries: u64) -> Result<()> {
+        match self.authority {
+            Some(config) => config.check_restore_space(self.directory, file_sizes, entries),
+            None => db::check_restore_capacity(self.directory, file_sizes, entries, 0),
+        }
+    }
+}
+
+fn inspect_members(
+    root: &File,
+    m: &BackupManifest,
+    digest: &Value,
+    destination: Option<RestoreDestination<'_>>,
+) -> Result<Value> {
+    require(
+        m.entries.len() <= MAX_ENTRIES,
+        "QuotaExceeded",
+        "backup entry limit",
     )?;
     if let Some(times) = &m.mtime_unix_v1 {
         require(
@@ -618,20 +652,37 @@ fn inspect_members(
         "PreconditionFailed",
         "backup length mismatch",
     )?;
-    let destination = destination.map(File::open).transpose()?;
-    if let Some(dir) = &destination {
-        cfg.check_restore_space(dir, file_sizes, m.entries.len() as u64)?;
+    let mut kinds = BTreeMap::new();
+    for entry in &m.entries {
+        let mut depth = 0;
+        for part in entry.path.split('/') {
+            filename(part)?;
+            depth += 1;
+        }
+        let directory = entry.digest.is_none();
+        require(
+            depth <= 33
+                && entry.mode <= 0o777
+                && (!directory || entry.bytes == 0)
+                && entry
+                    .path
+                    .rsplit_once('/')
+                    .is_none_or(|(parent, _)| kinds.get(parent) == Some(&true))
+                && kinds.insert(entry.path.as_str(), directory).is_none(),
+            "PreconditionFailed",
+            "invalid backup entry tree",
+        )?;
+    }
+    if let Some(destination) = &destination {
+        destination.check_space(file_sizes, m.entries.len() as u64)?;
     }
     let mut dirs = vec![];
     let mut total = 0;
     for (i, e) in m.entries.iter().enumerate() {
         let mtime = m.mtime_unix_v1.as_ref().map(|times| times.entries[i]);
-        for part in e.path.split('/') {
-            filename(part)?
-        }
         let target = destination
             .as_ref()
-            .map(|dir| entry_parent(dir, &e.path))
+            .map(|destination| entry_parent(destination.directory, &e.path))
             .transpose()?;
         if let Some(expected) = &e.digest {
             let mut original = child(root, format!("blob-{i}"), OFlags::RDONLY)?;
@@ -685,11 +736,12 @@ fn inspect_members(
         "PreconditionFailed",
         "backup length mismatch",
     )?;
-    let mut report = json!({"manifest_digest":expected["manifest_digest"],
+    let mut report = json!({"manifest_digest":digest,
                             "verified_at":now(), "entries":m.entries.len(), "bytes":m.total_bytes});
-    if let Some(root) = destination {
+    if let Some(destination) = destination {
+        let root = destination.directory;
         for (path, mode, mtime) in dirs.into_iter().rev() {
-            let (parent, name) = entry_parent(&root, path)?;
+            let (parent, name) = entry_parent(root, path)?;
             let dir = child(&parent, name, OFlags::RDONLY | OFlags::DIRECTORY)?;
             dir.set_permissions(Permissions::from_mode(mode))?;
             if let Some(time) = mtime {
@@ -698,11 +750,11 @@ fn inspect_members(
             dir.sync_all()?;
         }
         if let Some(times) = &m.mtime_unix_v1 {
-            times.root.restore(&root)?;
+            times.root.restore(root)?;
             root.sync_all()?;
         }
-        cfg.check_restore_space(&root, std::iter::empty(), 0)?;
-        report["restore_proof"] = serde_json::to_value(restore_proof::from_manifest(&m)?)?;
+        destination.check_space(std::iter::empty(), 0)?;
+        report["restore_proof"] = serde_json::to_value(restore_proof::from_manifest(m)?)?;
     }
     Ok(report)
 }

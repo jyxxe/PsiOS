@@ -22,6 +22,7 @@ use psios_api::ApiError;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::fmt;
+pub use storage::inspect_detached_backup;
 
 #[derive(Debug)]
 pub struct Error(pub Box<ApiError>);

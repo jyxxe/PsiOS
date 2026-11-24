@@ -134,7 +134,7 @@ fn open_candidate(cfg: &Config, c: &Doc) -> Result<(File, File)> {
     Ok((parent, root))
 }
 
-fn file_set_digest(root: &File) -> Result<String> {
+pub(super) fn file_set(root: &File) -> Result<(String, usize)> {
     let device = root.metadata()?.dev();
     let mut members = std::collections::BTreeMap::new();
     for entry in Dir::read_from(root).map_err(std::io::Error::from)? {
@@ -175,7 +175,8 @@ fn file_set_digest(root: &File) -> Result<String> {
             ]),
         );
     }
-    Ok(sha256(&canonical(&json!(members))))
+    let count = members.len();
+    Ok((sha256(&canonical(&json!(members))), count))
 }
 
 pub(super) fn observe(work: &Work) -> Result<Value> {
@@ -184,20 +185,17 @@ pub(super) fn observe(work: &Work) -> Result<Value> {
         .as_ref()
         .ok_or_else(|| err("RecoveryRequired", "inspection lacks its backup checkpoint"))?;
     let (parent, root) = open_candidate(&work.cfg, c)?;
-    let manifest = open_manifest(&root)?;
-    let before = file_set_digest(&root)?;
+    let before = file_set(&root)?.0;
     let receipt = &c.body["receipt"];
-    let mut report = inspect_members(
-        &work.cfg,
-        &root,
-        &manifest,
+    let manifest = authority_manifest(
+        &open_manifest(&root)?,
         receipt["id"].as_str().unwrap(),
         &c.body["source_ref"],
         receipt,
-        None,
     )?;
+    let mut report = inspect_members(&root, &manifest, &receipt["manifest_digest"], None)?;
     require(
-        before == file_set_digest(&root)?,
+        before == file_set(&root)?.0,
         "PreconditionFailed",
         "backup file set changed during inspection",
     )?;
@@ -231,7 +229,7 @@ pub(crate) fn reconcile(
     )?;
     let (_, root) = open_candidate(db.cfg, &c)?;
     require(
-        proof["file_set_digest"] == file_set_digest(&root)?,
+        proof["file_set_digest"] == file_set(&root)?.0,
         "OutcomeUnknown",
         "backup file set changed after inspection",
     )?;

@@ -228,7 +228,8 @@ fn workflow_keeps_dependents_blocked_until_real_effect_reconciliation() {
           {"id":"write","tool":"volume.write","after":[],
            "input":{"id":volume["resource_id"],"expected_resource_version":volume["version"],
                     "name":"once","content":"verified"}},
-          {"id":"read","tool":"system.status","after":["write"],"input":{}}
+          {"id":"read","tool":"system.status","after":["write"],"input":{},
+           "when":{"step":"write","pointer":"/receipt/name","equals":"once"}}
         ]}),
     )
     .unwrap();
@@ -260,6 +261,7 @@ fn workflow_keeps_dependents_blocked_until_real_effect_reconciliation() {
         awaiting["state"]["steps"][0]["task_receipt"]
     );
     assert_eq!(blocked["state"]["steps"][1]["lifecycle"], "Pending");
+    assert!(blocked["state"]["steps"][1]["condition"].is_null());
     assert!(s.transaction("claim", broker::claim).unwrap().is_none());
     let task = call(&mut s, "Task.Get", json!({"id": first})).unwrap();
     let op = &task["operation_refs"][0];
@@ -277,7 +279,15 @@ fn workflow_keeps_dependents_blocked_until_real_effect_reconciliation() {
     .unwrap();
     workflow::tick(&mut s).unwrap();
     workflow::tick(&mut s).unwrap();
+    let selected = call(&mut s, "Workflow.Get", lookup.clone()).unwrap();
+    let evidence = selected["state"]["steps"][1]["condition"].clone();
+    assert_eq!(evidence["selected"], true);
+    assert!(selected["state"]["steps"][1]["task_receipt"].is_null());
+    drop(s);
+    let mut s = Store::open(c).unwrap();
+    workflow::tick(&mut s).unwrap();
     let active = call(&mut s, "Workflow.Get", lookup.clone()).unwrap();
+    assert_eq!(active["state"]["steps"][1]["condition"], evidence);
     let next = active["state"]["steps"][1]["task_receipt"]["task_id"]
         .as_str()
         .unwrap();

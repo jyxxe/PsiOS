@@ -213,7 +213,15 @@ jq -n --argjson definition "$definition" --arg grant "$grant" --arg until "$(dat
   '{key:"inventory-run-1",definition_ref:$definition,delegation_id:$grant,deadline_at:$until}' | ctl call Workflow.Start
 ```
 
-`Workflow.Get` 返回运行修订、定义引用、截止时间，以及各步骤的 Task 回执和已观察修订。后继步骤只在全部前驱已知成功时进入准入。前驱出现未知效果时保留 `Blocked/Unknown`，原 Operation 完成对账后继续。用 `Workflow.Cancel` 提交 ID 和当前修订可关闭派发并取消在途 Task，已经发生的效果仍可从原 Task 和 Operation 查阅。[审批、撤权和队列验收](../tests/test_workflow.py) · [升级验收](../tests/workflow_upgrade.py)
+步骤可以用 `when` 对一个直接前驱已结算的结果执行布尔值或字符串比较。下面的例子选择 `status` 结果中带有给定节点身份的分支。
+
+```json
+{"step":"status","pointer":"/authority_id","equals":"node-example"}
+```
+
+将此对象填入相应步骤的 `when`，并在该步骤的 `after` 列出 `status`。Core 从前驱 Task 的固定修订取得唯一结果制品，在派发前持久提交所选结果、谓词摘要、Task 和制品引用及值摘要。条件为假时记录 `Skipped`，依赖被跳过步骤的后继也跳过。缺少字段或字段类型不符时以 `PreconditionFailed` 结算。跳过的步骤不申请 Task、审批或派发预算。条件定义使用 DSL 2。数据库格式 24 拒绝使用早期写入者打开带条件的权威。[分支、重启和权限验收](../tests/test_workflow.py) · [格式 23 升级](../tests/workflow_conditions_upgrade.py)
+
+`Workflow.Get` 返回运行修订、定义引用、截止时间、分支判定以及各步骤的 Task 回执和已观察修订。可执行的后继在全部必需前驱已知成功后进入准入。前驱出现未知效果时保留 `Blocked/Unknown`，原 Operation 完成对账后继续。用 `Workflow.Cancel` 提交 ID 和当前修订可关闭派发并取消在途 Task，已经发生的效果仍可从原 Task 和 Operation 查阅。[审批、撤权和队列验收](../tests/test_workflow.py) · [早期 DAG 升级验收](../tests/workflow_upgrade.py)
 
 ## 本机会话
 

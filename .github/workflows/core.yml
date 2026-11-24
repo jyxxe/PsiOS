@@ -265,6 +265,12 @@ jobs:
           git archive 0e1c6be464906583f79c4c709209610a2e78f2a4 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format22"
           CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format22/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format22/target"
           python3 -B tests/block_layout_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format22/target/debug"
+      - name: Preserve a pending format 23 workflow and fence old writers before conditional execution
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format23"
+          git archive 0f7b52c1ffea0621a0685dc6ebf09e6bdcec57de Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format23"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format23/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format23/target"
+          python3 -B tests/workflow_conditions_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format23/target/debug"
       - name: Verify real systemd service control and crash reconciliation
         run: |
           sudo loginctl enable-linger "$(id -un)"

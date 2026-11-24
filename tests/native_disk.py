@@ -204,14 +204,17 @@ def check_recovered_chat(c, observed):
 def check_native_workflow(c):
     node = json.loads(c.run("psiosctl node"))["reference"]["resource_id"]
     grant = call(c, "Grant.Issue", {
-        "principal_id": "local-owner", "tool_targets": ["profile-local", node], "units": 2, "ttl_seconds": 120,
+        "principal_id": "local-owner", "tool_targets": ["profile-local", node], "units": 3, "ttl_seconds": 120,
         "actions": ["workflow.manage", "task.submit", "task.read", "system.status", "node.inventory"],
     })
     definition = call(c, "Workflow.Define", {
         "key": "native-offline-workflow",
         "steps": [
-            {"id": "inventory", "tool": "node.inventory", "after": ["status"], "input": {}},
+            {"id": "inventory", "tool": "node.inventory", "after": ["status"], "input": {},
+             "when": {"step": "status", "pointer": "/authority_id", "equals": node}},
             {"id": "status", "tool": "system.status", "after": [], "input": {}},
+            {"id": "unselected", "tool": "node.inventory", "after": ["status"], "input": {},
+             "when": {"step": "status", "pointer": "/authority_id", "equals": "other-node"}},
         ],
     })
     stamp = int(c.run("date -u +%s"))
@@ -230,8 +233,10 @@ def check_native_workflow(c):
         assert time.monotonic() < deadline, observed
         time.sleep(0.15)
     assert (phase, observed["state"]["outcome_knowledge"]) == ("Succeeded", "Known"), observed
-    inventory, status = observed["state"]["steps"]
+    inventory, status, unselected = observed["state"]["steps"]
     assert (inventory["lifecycle"], status["lifecycle"]) == ("Succeeded", "Succeeded")
+    assert inventory["condition"]["selected"] is True and inventory["condition"]["source_task_ref"] == status["task_ref"]
+    assert unselected["lifecycle"] == "Skipped" and unselected["task_receipt"] is None
     receipt = inventory["task_receipt"]
     assert receipt["origin_ref"]["origin_id"] == identity["id"]
     task = call(c, "Task.Get", {"id": receipt["task_id"]})

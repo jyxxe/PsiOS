@@ -290,11 +290,15 @@ fn submit_with_origin(
     )?;
     let plan = plan(db, actor, s, &audience)?;
     let task = id("task");
+    let deadline_source = match source {
+        LocalOrigin::Workflow { run, .. } => Some(run),
+        _ => retry,
+    };
     policy::deadline::Clock::sample()?.register_until(
         db,
         &task,
         field(&plan.body, "deadline_at"),
-        retry,
+        deadline_source,
     )?;
     let op = id("op");
     let at = now();

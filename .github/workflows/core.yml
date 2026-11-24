@@ -286,6 +286,12 @@ jobs:
           git archive 01d34aef4d45048f87bbc8a36f2fe84f74f3c910 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format25"
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format25" "$RUNNER_TEMP/psios-compatibility-target"
           python3 -B tests/task_deadline_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
+      - name: Resume a format 26 WorkflowRun and fence writers without elapsed run deadlines
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format26"
+          git archive 465f1a0a8a1bcafcd8b7d4a0db35def0e9aa75af Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format26"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format26" "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/workflow_deadline_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Verify real systemd service control and crash reconciliation
         run: |
           sudo loginctl enable-linger "$(id -un)"

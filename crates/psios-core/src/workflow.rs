@@ -337,6 +337,12 @@ pub fn start(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         json!({"lifecycle": "Ready", "outcome_knowledge": "NotStarted", "reason": null,
                "active_step": null, "stop_reason": null, "steps": projections}),
     )?;
+    policy::deadline::Clock::sample()?.register_until(
+        db,
+        &id,
+        &deadline_at,
+        Some(&delegation.id),
+    )?;
     let deadline_ms = deadline.timestamp_millis()
         + i64::from(!deadline.timestamp_subsec_nanos().is_multiple_of(1_000_000));
     db.c.execute(

@@ -41,7 +41,7 @@ def exercise(previous, current):
         node.stop()
 
         after = json.loads(subprocess.check_output(verify, timeout=15))
-        assert (after["node_id"], after["database_format"], after["migration_required"]) == (identity, 26, False), after
+        assert after["node_id"] == identity and after["database_format"] >= 26 and not after["migration_required"], after
         with sqlite3.connect(f"file:{node.state / 'state.db'}?mode=ro", uri=True) as db:
             tasks = db.execute("SELECT resource FROM authorization_deadlines JOIN current ON id=resource WHERE kind='Task'").fetchall()
             permits = db.execute("SELECT count(*) FROM authorization_deadlines JOIN current ON id=resource WHERE kind='ExecutionPermit'").fetchone()

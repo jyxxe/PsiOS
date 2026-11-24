@@ -36,6 +36,8 @@ jobs:
         run: |
           python3 tests/system.py
           python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Pair and inspect real Tasks in headless Chrome
+        run: PSIOS_TEST_SHELL_BROWSER=1 python3 -B -m unittest discover -s tests -p test_shell.py -k test_browser -v
       - name: Verify scoped addresses, routes and rules in a private Linux network namespace
         run: |
           sudo unshare --net sh -ec '

@@ -20,5 +20,9 @@ rustix = { version = "1", features = ["event", "fs", "net", "process", "time"] }
 signal-hook = "0.3"
 tempfile = "3"
 zeroize = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tokio = { version = "1", features = ["rt", "net", "sync", "time"] }
 netlink-packet-core = "0.9"
 netlink-packet-route = "0.34"

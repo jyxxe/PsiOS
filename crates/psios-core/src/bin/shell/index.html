@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PsiOS Shell</title>
+  <link rel="stylesheet" href="/shell.css">
+  <script defer src="/shell.js"></script>
+</head>
+<body>
+  <main id="pairing" class="pairing">
+    <section class="login" aria-labelledby="login-title">
+      <p class="brand"><span aria-hidden="true">Ψ</span> PsiOS Shell</p>
+      <h1 id="login-title">连接本机</h1>
+      <form id="pair-form">
+        <label for="code">终端中的一次性配对码</label>
+        <input id="code" type="password" autocomplete="one-time-code" spellcheck="false" required maxlength="32">
+        <button id="connect" class="primary" type="submit">连接</button>
+      </form>
+      <p id="pair-message" class="message" role="status"></p>
+      <noscript>使用 Shell 需要启用 JavaScript。</noscript>
+    </section>
+  </main>
+  <div id="workspace" class="workspace" hidden>
+    <aside class="side">
+      <p class="brand"><span aria-hidden="true">Ψ</span> PsiOS Shell</p>
+      <nav aria-label="管理界面">
+        <button id="nav-node" type="button" aria-current="page">节点概览</button>
+        <button id="nav-tasks" type="button">任务</button>
+      </nav>
+      <div class="identity">
+        <span>已连接的主体</span>
+        <strong id="principal"></strong>
+        <button id="logout" type="button">断开会话</button>
+      </div>
+    </aside>
+    <main class="content">
+      <header class="view-header">
+        <h1 id="view-title" tabindex="-1">节点概览</h1>
+        <button id="refresh" type="button">刷新</button>
+      </header>
+      <p id="status" class="message" role="status"></p>
+      <section id="node-view" aria-labelledby="view-title"></section>
+      <section id="task-view" aria-labelledby="view-title" hidden>
+        <div class="columns">
+          <div class="table-panel">
+            <table>
+              <thead><tr><th scope="col">任务 ID</th><th scope="col">快照修订</th></tr></thead>
+              <tbody id="task-rows"></tbody>
+            </table>
+            <p id="tasks-empty" class="empty" hidden>当前没有可见任务。</p>
+            <div class="pagination">
+              <button id="previous" type="button">上一页</button>
+              <button id="next" type="button">下一页</button>
+            </div>
+          </div>
+          <section id="task-detail" class="card" aria-labelledby="detail-title" tabindex="-1" hidden>
+            <header class="detail-header">
+              <h2 id="detail-title">任务详情</h2>
+              <button id="close-task" type="button">返回列表</button>
+            </header>
+            <div id="task-content" aria-live="polite"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

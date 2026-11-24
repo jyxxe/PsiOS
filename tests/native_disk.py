@@ -75,14 +75,19 @@ class Console:
 
 
 @contextmanager
-def boot(work, image):
+def boot(work, image, network_mac=None):
     accel = "kvm" if os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
     cmd = ["qemu-system-x86_64", "-nodefaults", "-no-user-config", "-no-reboot", "-machine", "q35",
-           "-accel", accel, "-m", "768", "-smp", "2", "-display", "none", "-nic", "none",
+           "-accel", accel, "-m", "768", "-smp", "2", "-display", "none",
            "-monitor", "none", "-serial", "stdio", "-boot", "order=c,strict=on",
            "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=code.fd",
            "-drive", "if=pflash,format=raw,unit=1,file=vars.fd",
            "-drive", "if=virtio,format=raw,file=" + image.name]
+    if network_mac:
+        cmd += ["-netdev", "user,id=network,net=192.0.2.0/24,dhcpstart=192.0.2.20",
+                "-device", f"virtio-net-pci,netdev=network,mac={network_mac},romfile="]
+    else:
+        cmd += ["-nic", "none"]
     with subprocess.Popen(cmd, cwd=work, stdin=subprocess.PIPE, stdout=subprocess.PIPE) as vm:
         try:
             yield Console(vm)
@@ -223,12 +228,13 @@ def exercise(args, work):
         assert manifest["required_filesystems"] == {"state": deployment["state_uuid"], "home": deployment["home_uuid"]}
         assert c.run("sha256sum /psios-deployment.json").split()[0] == deployment["deployment_manifest_sha256"]
         payload = ("/bin/psiosd", "/bin/psiosctl", "/psios-source", "/psios-init",
-                   "/psios-disk-uuid", "/psios-home-uuid", "/psios-shutdown")
+                   "/psios-disk-uuid", "/psios-home-uuid", "/psios-shutdown", "/psios-dhcp", "/psios-dhcp-event")
         assert set(manifest["payload_sha256"]) == set(payload)
         for name in payload:
             assert c.run(f"sha256sum {name}").split()[0] == manifest["payload_sha256"][name]
         assert c.run("pwd") == "/home/psios"
         assert c.run("stat -c '%u:%g:%a' .") == "1000:1000:700"
+        c.run("test ! -e /etc/psios/dhcp-mac && ! pidof udhcpc")
         c.run("test ! -r /root && test ! -w /mnt/psios-homes")
         c.run("printf '#!/bin/sh\\necho persisted\\n' > ./observe && chmod 700 ./observe && sync -f .")
         assert c.run("./observe") == "persisted"

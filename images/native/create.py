@@ -70,6 +70,13 @@ def password_hash(path):
     return password.strip()
 
 
+def unicast_mac(value):
+    value = value.lower()
+    if not re.fullmatch(r"[0-9a-f][02468ace](?::[0-9a-f]{2}){5}", value) or value == "00:00:00:00:00:00":
+        raise argparse.ArgumentTypeError("expected a nonzero unicast MAC address")
+    return value
+
+
 def host_config(seed, args):
     (seed / "etc/psios").mkdir(parents=True)
     operator = password_hash(args.console_hash)
@@ -83,12 +90,18 @@ def host_config(seed, args):
     (seed / "etc/issue").write_text("PsiOS amd64 development console\n")
     (seed / "etc/psios/core.json").write_text(json.dumps({
         "state_dir": "/var/lib/psios", "witness_dir": "/var/lib/psios.witness", "socket": "/run/psios/api.sock"}))
-    (seed / "etc/inittab").write_text("::respawn:/bin/su -s /bin/sh psios -c 'exec /bin/psiosd serve'\n"
-                                      "ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100\n"
-                                      "::shutdown:/bin/sh /psios-shutdown\n")
+    inittab = ("::respawn:/bin/su -s /bin/sh psios -c 'exec /bin/psiosd serve'\n"
+               "ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100\n"
+               "::shutdown:/bin/sh /psios-shutdown\n")
+    if args.dhcp_mac:
+        (seed / "etc/psios/dhcp-mac").write_text(args.dhcp_mac + "\n")
+        (seed / "etc/resolv.conf").symlink_to("/run/psios-network/resolv.conf")
+        inittab += "::respawn:/bin/sh /psios-dhcp\n"
+    (seed / "etc/inittab").write_text(inittab)
     # Target permissions are independent of the builder's umask.
     for path in (seed / "etc").rglob("*"):
-        path.chmod(0o755 if path.is_dir() else (0o600 if path.name == "shadow" else 0o644))
+        if not path.is_symlink():
+            path.chmod(0o755 if path.is_dir() else (0o600 if path.name in ("shadow", "dhcp-mac") else 0o644))
     (seed / "etc").chmod(0o755)
 
 
@@ -98,9 +111,11 @@ def ramfs(work, args, instance, home_id):
     install_core(work, args.core_archive, args.core_sha256)
     (work / "psios-disk-uuid").write_text(str(instance) + "\n")
     (work / "psios-home-uuid").write_text(str(home_id) + "\n")
-    shutil.copyfile(HERE / "init", work / "psios-init")
-    shutil.copyfile(HERE / "shutdown", work / "psios-shutdown")
-    files = ["bin/psiosd", "bin/psiosctl", "psios-source", "psios-init", "psios-disk-uuid", "psios-home-uuid", "psios-shutdown"]
+    boot_scripts = ["init", "shutdown", "dhcp", "dhcp-event"]
+    for script in boot_scripts:
+        shutil.copyfile(HERE / script, work / f"psios-{script}")
+    files = ["bin/psiosd", "bin/psiosctl", "psios-source", "psios-disk-uuid", "psios-home-uuid"]
+    files.extend(f"psios-{script}" for script in boot_scripts)
     payload = {"/" + name: sha256(work / name) for name in files}
     inputs = {
         "format": 1, "architecture": "x86_64", "firmware": "UEFI",
@@ -116,7 +131,7 @@ def ramfs(work, args, instance, home_id):
     (work / "psios-payload.sha256").write_text("".join(f"{digest}  {name}\n" for name, digest in checks.items()))
     files.extend(["psios-deployment.json", "psios-payload.sha256"])
     for name in files:
-        (work / name).chmod(0o755 if name.startswith("bin/") or name == "psios-init" else 0o644)
+        (work / name).chmod(0o755 if name.startswith("bin/") or name in ("psios-init", "psios-dhcp-event") else 0o644)
     with (work / "initrd").open("ab") as out:
         out.write(b"\0" * (-out.tell() % 4))
         out.flush()
@@ -374,11 +389,12 @@ def main():
     mode.add_argument("--upgrade-from", type=Path, help="stopped native development disk to copy without changes")
     parser.add_argument("--previous-receipt", type=Path, help="trusted build receipt for the stopped disk")
     parser.add_argument("--root-console-hash", type=Path, help="optional private hash for local system administration; default locks root")
+    parser.add_argument("--dhcp-mac", type=unicast_mac, help="enable IPv4 DHCP on the matching virtio NIC of a new disk")
     args = parser.parse_args()
     if not re.fullmatch(r"[0-9a-f]{64}", args.core_sha256):
         parser.error("invalid Core archive SHA-256")
-    if args.upgrade_from and (not args.previous_receipt or args.root_console_hash):
-        parser.error("upgrade requires --previous-receipt and preserves the previous console credentials")
+    if args.upgrade_from and (not args.previous_receipt or args.root_console_hash or args.dhcp_mac):
+        parser.error("upgrade requires --previous-receipt and preserves console credentials and network configuration")
     if args.console_hash and args.previous_receipt:
         parser.error("--previous-receipt requires --upgrade-from")
     build(args)

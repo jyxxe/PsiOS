@@ -38,6 +38,11 @@ VERIFIED_CORE_SHA256 是上述完整归档核验后记录的 SHA-256。
 rescue/inspect.py，选择 --partition 2 --state /psios --uid 1000。
 救援参数见 rescue/README.txt。本开发盘的验收范围是 amd64 UEFI 虚机。
 
+生成新盘时可用 --dhcp-mac 指定一个 virtio 网口并启用 IPv4 DHCP。
+为虚机提供同一 MAC 的网口。该配置管理此网口的 IPv4 地址、DHCP
+默认路由和运行时 DNS。普通账户可使用 busybox ip -4 addr show、
+busybox ip -4 route show 和 cat /etc/resolv.conf 查看。
+
 升级已初始化的三分区开发盘时，先停止虚机，保留原 raw 磁盘、EFI
 变量文件和可信的构建回执。使用目标版本的归档和安装器，另需 qemu-img
 及 qemu-system-x86_64。准备一份新的候选盘。

@@ -67,6 +67,7 @@ pub const COMMON: &[&str] = &[
     chat::READ,
     chat::SEND,
     "resource.read",
+    storage::export::ACTION,
     "event.read",
     "secret.manage",
     "session.run",
@@ -139,6 +140,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | node::pressure::TOOL
                     | node::block::TOOL
                     | "backup.verify"
+                    | storage::export::ACTION
                     | storage::publication::INSPECT
                     | agent::START_SESSION
                     | schedule::ACTION
@@ -450,6 +452,14 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             && (1..=86400 * 30).contains(&p.ttl_seconds),
         "InvalidArgument",
         "invalid budget or TTL",
+    )?;
+    require(
+        !p.actions
+            .iter()
+            .any(|action| action == storage::export::ACTION)
+            || p.tool_targets.is_some(),
+        "InvalidArgument",
+        "backup export grants require an explicit target scope",
     )?;
     if let Some(ids) = &p.tool_targets {
         require(

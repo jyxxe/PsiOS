@@ -20,7 +20,14 @@ core_sha=$(awk '$2=="psiosd" {print $1}' rescue-core/SHA256SUMS)
 
 ## 验证和恢复独立的卷备份
 
-创建卷备份后，将该备份目录作为完整副本存入独立介质。在原权威可用时，从 `psiosctl get BACKUP_ID` 的 `.value.manifest_digest` 取得摘要，把它保存到与副本独立的可信记录。恢复时的 `MANIFEST_DIGEST` 来自该记录。使用独立归档中的 `psiosd`，在 Linux 上直接检查副本。
+原权威在线时，可授予操作者目标 Backup 上的 `backup.export`，再用当前 Backup 的 `ResourceRef` 导出经过核验的完整副本。导出命令接受 JSON 引用文件或标准输入，目标必须是私有父目录下的新目录。将导出回执中的 `manifest_digest` 保存到与副本独立的可信记录。手工转存既有副本时，也可以用 `psiosctl get BACKUP_ID` 读取同一摘要。[权限与分页](core-runtime.md#导出备份) · [在线导出与脱机恢复验收](../tests/test_backup_export.py)
+
+```bash
+mkdir -m 700 exports
+psiosctl backup-export --output exports/backup-id backup-ref.json
+```
+
+恢复时的 `MANIFEST_DIGEST` 来自独立记录。使用独立归档中的 `psiosd`，在 Linux 上直接检查副本。
 
 ```bash
 rescue-core/psiosd verify-backup --directory /media/backup/backup-id \

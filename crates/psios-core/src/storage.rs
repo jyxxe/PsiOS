@@ -1,5 +1,6 @@
 //! Single-node directory volumes. A writer or an uncertain operation retains the volume hold.
 mod detached;
+pub(crate) mod export;
 pub mod files;
 pub(crate) mod publication;
 mod restore_proof;

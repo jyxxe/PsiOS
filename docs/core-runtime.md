@@ -144,6 +144,14 @@ Core 可选地先向该目标指定的解析器发出 TCP DNS 请求。按端点
 
 给恢复主体授予限定到原 Operation 的 `backup.inspect_publication`、`task.submit` 和 `task.read`。对未知 Operation 的当前修订运行该观测 Task。它核实最终目录与原暂存目录同一身份，检查清单及全部数据摘要，并同步备份所在目录。管理员将新制品的引用作为 `evidence_ref` 提交给 `Operation.Reconcile`。Core 复核证据与当前目录身份，在一个事务中登记原 Backup，保存原 Task 回执并释放卷。缺少检查点、最终目录不可达或数据校验失败时仍保留未知结果。[强杀测试](../crates/psios-core/src/recovery_tests.rs) · [截断复制测试](../tests/test_storage_recovery.py)
 
+### 导出备份
+
+通过 `Grant.Issue` 把 `backup.export` 授予指定主体，并在 `tool_targets` 中列出获准访问的 Backup ID。主体可使用该 Backup 当前修订的 `ResourceRef` 调用 `Backup.Export`。权限包含清单和备份数据。通用资源查询与卷访问仍按各自权限裁决。
+
+每次请求传入 `reference`、`member`、`offset` 和 `length`。`member` 取 `{"kind":"Manifest"}` 或 `{"kind":"Blob","index":0}`，`index` 对应清单中的零基条目位置，目录没有 blob。每块最多 131072 字节。响应包含成员完整摘要、总字节数、当前与后续偏移，以及 Base64 编码的块数据。Core 核验每个文件的内容，并在回传每一块之前重新核对授权、修订及占用状态和提交审计。[接口与故障验收](../tests/test_backup_export.py)
+
+Rust SDK 的 `Client::download_backup_member` 从头流式核验单个成员。`psiosctl backup-export` 校验完整副本并发布到私有父目录下的新路径。将回执清单摘要保存到独立介质，可用 `psiosd verify-backup` 在原服务离线时校验或恢复副本。[命令与脱机恢复](offline-rescue.md#验证和恢复独立的卷备份)
+
 ## 身份与权限
 
 `Grant.Issue` 可提供 `tool_targets`，把工具限制在明确的资源 ID 集合中。对已绑定卷的应用启停，授权需覆盖应用和卷。通用资源读取仍按独立权限和资源所有者裁决。设置 `allow_delegation=true` 和 `max_delegation_depth` 可启用最多 4 层转授。子委托可以收窄动作、目标、期限和剩余层数，共享根预算。沿用旧配置的 Grant 保持原有的单层状态委托范围。每次派发检查完整祖先链及其主体。

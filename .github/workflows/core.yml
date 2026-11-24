@@ -171,6 +171,12 @@ jobs:
           git archive 918d80c9be636fe7a6eab287939cf8bc7df86c23 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format10"
           CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format10/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format10/target"
           python3 tests/schedule_repeat_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format10/target/debug"
+      - name: Migrate format 11 and execute an authorized local workflow
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format11"
+          git archive ad512d24f0f6dfbbd69c6e68b3c29de3efa1798e Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format11"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format11/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format11/target"
+          python3 tests/workflow_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format11/target/debug"
       - name: Verify real systemd service control and crash reconciliation
         run: |
           sudo loginctl enable-linger "$(id -un)"

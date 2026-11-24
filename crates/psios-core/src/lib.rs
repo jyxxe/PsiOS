@@ -13,6 +13,7 @@ mod schedule;
 pub mod server;
 mod storage;
 mod watch;
+mod workflow;
 
 pub use config::{AuthorityReserve, Config};
 pub use db::Store;

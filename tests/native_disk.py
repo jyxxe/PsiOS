@@ -136,6 +136,46 @@ def call(c, method, params):
     return json.loads(c.run(f"printf '%s' {body} | psiosctl call {method}"))
 
 
+def check_native_workflow(c):
+    node = json.loads(c.run("psiosctl node"))["reference"]["resource_id"]
+    grant = call(c, "Grant.Issue", {
+        "principal_id": "local-owner", "tool_targets": ["profile-local", node], "units": 2, "ttl_seconds": 120,
+        "actions": ["workflow.manage", "task.submit", "task.read", "system.status", "node.inventory"],
+    })
+    definition = call(c, "Workflow.Define", {
+        "key": "native-offline-workflow",
+        "steps": [
+            {"id": "inventory", "tool": "node.inventory", "after": ["status"], "input": {}},
+            {"id": "status", "tool": "system.status", "after": [], "input": {}},
+        ],
+    })
+    stamp = int(c.run("date -u +%s"))
+    run = call(c, "Workflow.Start", {
+        "key": "native-offline-workflow-run", "definition_ref": definition["reference"],
+        "delegation_id": grant["delegation_ref"]["resource_id"],
+        "deadline_at": datetime.fromtimestamp(stamp + 60, timezone.utc).isoformat(),
+    })
+    identity = {"id": run["reference"]["resource_id"]}
+    deadline = time.monotonic() + 15
+    while True:
+        observed = call(c, "Workflow.Get", identity)
+        phase = observed["state"]["lifecycle"]
+        if phase in {"Succeeded", "Failed", "Cancelled"}:
+            break
+        assert time.monotonic() < deadline, observed
+        time.sleep(0.15)
+    assert (phase, observed["state"]["outcome_knowledge"]) == ("Succeeded", "Known"), observed
+    inventory, status = observed["state"]["steps"]
+    assert (inventory["lifecycle"], status["lifecycle"]) == ("Succeeded", "Succeeded")
+    receipt = inventory["task_receipt"]
+    assert receipt["origin_ref"]["origin_id"] == identity["id"]
+    task = call(c, "Task.Get", {"id": receipt["task_id"]})
+    artifact, = task["result"]["artifact_refs"]
+    report = call(c, "Artifact.Read", {"reference": artifact})
+    assert report["memory_bytes"]["MemTotal"] > 0, report
+    return observed
+
+
 def check_temporary_storage(c):
     assert c.run("stat -c '%u:%g:%a' /tmp") == "0:0:1777"
     mount = c.run("awk '$5 == \"/tmp\" {for (i=7; i<NF; i++) "
@@ -245,9 +285,9 @@ def extract_partition(image, output, offset_mib, size_mib):
             dst.write(chunk)
 
 
-def check_clean_shutdown(image):
+def check_clean_shutdown(image, starts=(65, 257)):
     with image.open("rb") as disk:
-        for start in (65, 257):
+        for start in starts:
             disk.seek(start * 1024 * 1024 + 1024)
             superblock = disk.read(1024)
             magic, state = struct.unpack_from("<HH", superblock, 56)
@@ -332,6 +372,7 @@ def exercise(args, work):
         assert "No space left on device" in failure, failure
         assert int(c.run("stat -c %s ./full")) >= 40 * 1024 * 1024
         check_native_network(c)
+        workflow = check_native_workflow(c)
         first = check_state(c)
         assert not first[1]["deduplicated"]
         pending_schedule = schedule_across_power_cut(c)
@@ -349,6 +390,7 @@ def exercise(args, work):
         second = check_state(c)
         assert first[0] == second[0] and second[1]["deduplicated"]
         assert first[1]["task_id"] == second[1]["task_id"] and first[2] == second[2] and first[3] != second[3]
+        assert call(c, "Workflow.Get", {"id": workflow["reference"]["resource_id"]}) == workflow
         check_recovered_schedule(c, pending_schedule)
         c.send("exit")
         c.login("root", admin)
@@ -446,7 +488,7 @@ def exercise(args, work):
     assert sha(image) == pre_reject
     print(f"Verified source {deployment['source_commit']}, node {first[0]}, task {first[1]['task_id']}, "
           "matched deployment receipt, authenticated UEFI console, private persistent homes, full-home isolation, "
-          "bounded volatile /tmp, offline management, Task and schedule recovery after power loss, "
+          "bounded volatile /tmp, offline management, Task, schedule and workflow recovery after power loss, "
           "clean shutdown with active home and /tmp readers, external rescue, clean ext4 "
           "after authority refusal, consumed enrollment and damaged payload and mismatched state/home refusal.")
 

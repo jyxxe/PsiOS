@@ -62,7 +62,7 @@ def upgrade(previous, current):
             assert node.wait(task)["lifecycle"] == "Succeeded", task
         node.stop()
         verified = json.loads(subprocess.check_output([binary, "--config", node.config, "verify"]))
-        assert verified["database_format"] == 11 and not verified["migration_required"], verified
+        assert verified["database_format"] >= 11 and not verified["migration_required"], verified
         old = subprocess.run([previous.resolve() / "psiosd", "--config", node.config, "check"],
                              capture_output=True, text=True, timeout=15)
         assert old.returncode != 0 and "SchemaVersionUnsupported" in old.stderr, old

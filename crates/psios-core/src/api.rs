@@ -162,6 +162,11 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Schedule.Get" => schedule::get(db, actor, p, "Schedule"),
         "Schedule.TriggerGet" => schedule::get(db, actor, p, "ScheduleTrigger"),
         "Schedule.Cancel" => schedule::cancel(db, actor, p),
+        "Workflow.Define" => workflow::define(db, actor, p),
+        "Workflow.DefinitionGet" => workflow::get(db, actor, p, "WorkflowDefinition"),
+        "Workflow.Start" => workflow::start(db, actor, p),
+        "Workflow.Get" => workflow::get(db, actor, p, "WorkflowRun"),
+        "Workflow.Cancel" => workflow::cancel(db, actor, p),
         "Task.Prepare" => broker::prepare(db, actor, p),
         "Task.Submit" => broker::submit(db, actor, p, None),
         "Task.LookupSubmission" => broker::lookup(db, actor, p),
@@ -252,6 +257,9 @@ impl Store {
                     | "Application.Configure"
                     | "Schedule.Create"
                     | "Schedule.Cancel"
+                    | "Workflow.Define"
+                    | "Workflow.Start"
+                    | "Workflow.Cancel"
                     | "Task.Cancel"
                     | "Task.CancelOrigin"
                     | "Task.Archive"

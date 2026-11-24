@@ -113,6 +113,24 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(base64.b64decode(tag), hmac.digest(key_bytes, authority.encode(), "sha256"))
         self.assertEqual(self.budget(scope), (0, 2))
 
+    def test_artifact_mapping_enforces_the_destination_tool_size_limit(self):
+        n = self.node
+        volume = n.perform("volume.create", {"name": "oversize-binding"})
+        n.perform("volume.write", dict(**target(volume), name="long", content="x" * 8193))
+        fresh = n.get(volume["resource_id"])["reference"]
+        secret = n.call("Secret.Put", {"name": "fixture", "value": "local-only"})
+        scope = self.grant(["volume.read", "secret.mac"], [fresh["resource_id"], secret["resource_id"]], units=2)
+        read = step("read", "volume.read", dict(**target(fresh), name="long"))
+        mac = step("seal", "secret.mac", {"secret_id": secret["resource_id"], "message": ""}, after=["read"])
+        mac["inputs_from"] = {"message": {"step": "read", "pointer": "/content"}}
+        definition = self.define([read, mac])
+        run = n.call("Workflow.Start", self.request(definition, scope))
+        failed = self.wait(run, "Failed")
+        blocked = self.phases(failed)["seal"]
+        self.assertEqual(blocked["reason"], "QuotaExceeded")
+        self.assertIsNone(blocked["task_receipt"])
+        self.assertEqual(self.budget(scope), (0, 1))
+
     def test_join_resumes_original_approval_and_executes_each_step_once(self):
         n = self.node
         volume = n.perform("volume.create", {"name": "workflow-join"})

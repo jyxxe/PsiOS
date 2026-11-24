@@ -86,10 +86,39 @@ fn approve(s: &mut Store, task: &str) {
     .unwrap();
 }
 
+const HOST_WRITE_BARRIER: &str = "PSIOS_TEST_CRASH_STATE";
+
+fn cut_after_host_write(c: &Config) {
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "recovery_tests::kill_after_host_write_requires_observed_postcondition",
+            "--nocapture",
+        ])
+        .env(HOST_WRITE_BARRIER, &c.state_dir)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let limit = Instant::now() + Duration::from_secs(20);
+    while !c.state_dir.join("test-at-barrier").exists() {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "crash worker exited early"
+        );
+        if Instant::now() > limit {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("crash worker timeout")
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
 #[test]
 fn kill_after_host_write_requires_observed_postcondition() {
-    const FLAG: &str = "PSIOS_TEST_CRASH_STATE";
-    if let Some(path) = std::env::var_os(FLAG) {
+    if let Some(path) = std::env::var_os(HOST_WRITE_BARRIER) {
         let cfg = Config::local(Path::new(&path));
         let mut s = Store::open(cfg.clone()).unwrap();
         let task = claim(&mut s);
@@ -120,31 +149,7 @@ fn kill_after_host_write_requires_observed_postcondition() {
     );
     approve(&mut s, &task);
     drop(s);
-    let mut child = Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "recovery_tests::kill_after_host_write_requires_observed_postcondition",
-            "--nocapture",
-        ])
-        .env(FLAG, &c.state_dir)
-        .stdin(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let limit = Instant::now() + Duration::from_secs(20);
-    while !c.state_dir.join("test-at-barrier").exists() {
-        assert!(
-            child.try_wait().unwrap().is_none(),
-            "crash worker exited early"
-        );
-        if Instant::now() > limit {
-            child.kill().unwrap();
-            child.wait().unwrap();
-            panic!("crash worker timeout")
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    child.kill().unwrap();
-    child.wait().unwrap();
+    cut_after_host_write(&c);
     let mut s = Store::open(c.clone()).unwrap();
     s.transaction("restart", broker::recover).unwrap();
     let t = call(&mut s, "Task.Get", json!({"id": task})).unwrap();
@@ -198,6 +203,93 @@ fn kill_after_host_write_requires_observed_postcondition() {
         psios_api::sha256(b"verified")
     );
 }
+
+#[test]
+fn workflow_keeps_dependents_blocked_until_real_effect_reconciliation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (c, mut s) = initialized(tmp.path());
+    let create = submit(
+        &mut s,
+        "volume.create",
+        json!({"name": "workflow-recovery"}),
+    );
+    let volume = execute(&mut s, &create);
+    let grant = call(
+        &mut s, "Grant.Issue",
+        json!({"principal_id": policy::OWNER,
+               "actions": [workflow::ACTION, "task.submit", "task.read", "volume.write", "system.status"],
+               "tool_targets": [volume["resource_id"], "profile-local"], "units": 2, "ttl_seconds": 120}),
+    ).unwrap();
+    let definition = call(
+        &mut s,
+        "Workflow.Define",
+        json!({"key":"real-write-then-read","steps":[
+          {"id":"write","tool":"volume.write","after":[],
+           "input":{"id":volume["resource_id"],"expected_resource_version":volume["version"],
+                    "name":"once","content":"verified"}},
+          {"id":"read","tool":"system.status","after":["write"],"input":{}}
+        ]}),
+    )
+    .unwrap();
+    let run = call(
+        &mut s,
+        "Workflow.Start",
+        json!({"key":"run","definition_ref":definition["reference"],
+               "delegation_id":grant["delegation_ref"]["resource_id"],"deadline_at":after(60)}),
+    )
+    .unwrap();
+    let lookup = json!({"id":run["reference"]["resource_id"]});
+    workflow::tick(&mut s).unwrap();
+    let awaiting = call(&mut s, "Workflow.Get", lookup.clone()).unwrap();
+    let first = awaiting["state"]["steps"][0]["task_receipt"]["task_id"]
+        .as_str()
+        .unwrap();
+    approve(&mut s, first);
+    drop(s);
+    cut_after_host_write(&c);
+
+    let mut s = Store::open(c.clone()).unwrap();
+    s.transaction("restart", broker::recover).unwrap();
+    workflow::tick(&mut s).unwrap();
+    let blocked = call(&mut s, "Workflow.Get", lookup.clone()).unwrap();
+    assert_eq!(blocked["state"]["lifecycle"], "Blocked");
+    assert_eq!(blocked["state"]["outcome_knowledge"], "Unknown");
+    assert_eq!(
+        blocked["state"]["steps"][0]["task_receipt"],
+        awaiting["state"]["steps"][0]["task_receipt"]
+    );
+    assert_eq!(blocked["state"]["steps"][1]["lifecycle"], "Pending");
+    assert!(s.transaction("claim", broker::claim).unwrap().is_none());
+    let task = call(&mut s, "Task.Get", json!({"id": first})).unwrap();
+    let op = &task["operation_refs"][0];
+    let path = c
+        .state_dir
+        .join("volumes")
+        .join(volume["resource_id"].as_str().unwrap())
+        .join("data/once");
+    assert_eq!(fs::read_to_string(&path).unwrap(), "verified");
+    call(
+        &mut s,
+        "Operation.Reconcile",
+        json!({"id":op["resource_id"],"expected_resource_version":op["version"]}),
+    )
+    .unwrap();
+    workflow::tick(&mut s).unwrap();
+    workflow::tick(&mut s).unwrap();
+    let active = call(&mut s, "Workflow.Get", lookup.clone()).unwrap();
+    let next = active["state"]["steps"][1]["task_receipt"]["task_id"]
+        .as_str()
+        .unwrap();
+    let report = execute(&mut s, next);
+    assert!(report["kernel_release"].is_string());
+    workflow::tick(&mut s).unwrap();
+    let final_run = call(&mut s, "Workflow.Get", lookup).unwrap();
+    assert_eq!(final_run["state"]["lifecycle"], "Succeeded");
+    assert_eq!(final_run["state"]["outcome_knowledge"], "Known");
+    assert_eq!(fs::read_to_string(path).unwrap(), "verified");
+    assert!(s.transaction("claim", broker::claim).unwrap().is_none());
+}
+
 #[test]
 fn lost_read_gets_new_claim_and_late_receipt_is_fenced() {
     let tmp = tempfile::tempdir().unwrap();

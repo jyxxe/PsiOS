@@ -9,30 +9,81 @@ struct Prepare {
     delegation_id: String,
     deadline_at: Option<String>,
 }
+
+#[derive(Clone, Copy)]
+enum LocalOrigin<'a> {
+    Direct,
+    Schedule(&'a str),
+    Workflow { run: &'a str, step_key: &'a str },
+}
+
+impl<'a> LocalOrigin<'a> {
+    fn id(self) -> Option<&'a str> {
+        match self {
+            Self::Direct => None,
+            Self::Schedule(id) | Self::Workflow { run: id, .. } => Some(id),
+        }
+    }
+
+    fn kind(self, actor: &str) -> &'static str {
+        match self {
+            Self::Direct if actor == policy::OWNER => "HumanRequest",
+            Self::Direct => "Service",
+            Self::Schedule(_) => "Schedule",
+            Self::Workflow { .. } => "WorkflowRun",
+        }
+    }
+
+    fn authority(self, db: &Db<'_>, actor: &str) -> Result<String> {
+        match self {
+            Self::Direct => Ok(actor.to_owned()),
+            _ => db.meta("authority"),
+        }
+    }
+}
+
 pub fn prepare(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
-    prepare_with_origin(db, actor, decode(p)?, None)
+    prepare_with_origin(db, actor, decode(p)?, LocalOrigin::Direct)
 }
 pub fn prepare_scheduled(db: &Db<'_>, actor: &str, p: &Value, schedule: &str) -> Result<Value> {
-    prepare_with_origin(db, actor, decode(p)?, Some(schedule))
+    prepare_with_origin(db, actor, decode(p)?, LocalOrigin::Schedule(schedule))
+}
+pub fn prepare_workflow(
+    db: &Db<'_>,
+    actor: &str,
+    p: &Value,
+    run: &str,
+    step_key: &str,
+) -> Result<Value> {
+    prepare_with_origin(
+        db,
+        actor,
+        decode(p)?,
+        LocalOrigin::Workflow { run, step_key },
+    )
 }
 fn prepare_with_origin(
     db: &Db<'_>,
     actor: &str,
     p: Prepare,
-    schedule: Option<&str>,
+    origin: LocalOrigin<'_>,
 ) -> Result<Value> {
     label(&p.key)?;
     Action::parse(&p.tool, &p.input)?;
     let d = policy::delegation(db, actor, &p.delegation_id, "task.submit")?;
     policy::delegation(db, actor, &d.id, &p.tool)?;
     let input = policy::intern_input(db, actor, &p.input)?;
-    let origin_id = schedule.unwrap_or(&p.key);
-    let scheduled = schedule.is_some();
-    let authority = origin_authority(db, actor, scheduled)?;
+    let origin_id = origin.id().unwrap_or(&p.key);
+    let authority = origin.authority(db, actor)?;
+    let mut reference = origin_ref(&authority, origin.kind(actor), origin_id);
+    if let LocalOrigin::Workflow { step_key, .. } = origin {
+        reference["step_key"] = json!(step_key);
+        reference["attempt_generation"] = json!("1");
+    }
     let mut s = json!({
         "schema_version": VERSION,
         "task_type": p.tool,
-        "origin_ref": origin_ref(&authority, origin_type(actor, scheduled), origin_id),
+        "origin_ref": reference,
         "idempotency_key": p.key,
         "cancel_scope_id": origin_id,
         "input_ref": input.reference(),
@@ -55,33 +106,16 @@ fn seal_request(mut s: Value) -> Result<Value> {
     contract("task-submit", &s)?;
     Ok(s)
 }
-fn origin_type(actor: &str, scheduled: bool) -> &'static str {
-    if scheduled {
-        "Schedule"
-    } else if actor == policy::OWNER {
-        "HumanRequest"
-    } else {
-        "Service"
-    }
-}
-fn origin_authority(db: &Db<'_>, actor: &str, scheduled: bool) -> Result<String> {
-    if scheduled {
-        db.meta("authority")
-    } else {
-        Ok(actor.to_owned())
-    }
-}
-
 fn origin_ref(authority: &str, kind: &str, id: &str) -> Value {
     json!({"authority_id": authority, "origin_type": kind, "origin_id": id})
 }
 
-fn origin(authority: &str, kind: &str, s: &Value, schedule: Option<&str>) -> Result<String> {
+fn origin(authority: &str, kind: &str, s: &Value, expected_id: Option<&str>) -> Result<String> {
     let o = &s["origin_ref"];
     require(
         o["authority_id"] == authority
             && o["origin_type"] == kind
-            && schedule.is_none_or(|schedule| o["origin_id"] == schedule),
+            && expected_id.is_none_or(|id| o["origin_id"] == id),
         "PermissionDenied",
         "caller cannot represent this origin",
     )?;
@@ -116,11 +150,21 @@ pub(super) fn deadline(s: &Value) -> Result<()> {
     }
     Ok(())
 }
-fn validate_submit(db: &Db<'_>, actor: &str, s: &Value, schedule: Option<&str>) -> Result<String> {
+fn validate_submit(db: &Db<'_>, actor: &str, s: &Value, source: LocalOrigin<'_>) -> Result<String> {
     contract("task-submit", s)?;
-    let scheduled = schedule.is_some();
-    let authority = origin_authority(db, actor, scheduled)?;
-    origin(&authority, origin_type(actor, scheduled), s, schedule)
+    if let LocalOrigin::Workflow { step_key, .. } = source {
+        require(
+            s["origin_ref"]["step_key"] == step_key && s["origin_ref"]["attempt_generation"] == "1",
+            "PermissionDenied",
+            "workflow task origin does not match its admitted step",
+        )?;
+    }
+    origin(
+        &source.authority(db, actor)?,
+        source.kind(actor),
+        s,
+        source.id(),
+    )
 }
 struct Submission {
     digest: String,
@@ -182,19 +226,28 @@ fn plan(db: &Db<'_>, actor: &str, s: &Value, audience: &[Value]) -> Result<Doc> 
     db.create("OperationPlan", &pid, actor, json!({"action": tool}), p)
 }
 pub fn submit(db: &Db<'_>, actor: &str, s: &Value, retry: Option<&str>) -> Result<Value> {
-    submit_with_origin(db, actor, s, retry, None)
+    submit_with_origin(db, actor, s, retry, LocalOrigin::Direct)
 }
 pub fn submit_scheduled(db: &Db<'_>, actor: &str, s: &Value, schedule: &str) -> Result<Value> {
-    submit_with_origin(db, actor, s, None, Some(schedule))
+    submit_with_origin(db, actor, s, None, LocalOrigin::Schedule(schedule))
+}
+pub fn submit_workflow(
+    db: &Db<'_>,
+    actor: &str,
+    s: &Value,
+    run: &str,
+    step_key: &str,
+) -> Result<Value> {
+    submit_with_origin(db, actor, s, None, LocalOrigin::Workflow { run, step_key })
 }
 fn submit_with_origin(
     db: &Db<'_>,
     actor: &str,
     s: &Value,
     retry: Option<&str>,
-    schedule: Option<&str>,
+    source: LocalOrigin<'_>,
 ) -> Result<Value> {
-    let origin = validate_submit(db, actor, s, schedule)?;
+    let origin = validate_submit(db, actor, s, source)?;
     let (d, input) = authority(db, actor, s)?;
     let tool = field(s, "task_type");
     let key = field(s, "idempotency_key");
@@ -328,7 +381,7 @@ fn submit_with_origin(
     Ok(receipt)
 }
 pub fn lookup(db: &Db<'_>, actor: &str, s: &Value) -> Result<Value> {
-    let origin = validate_submit(db, actor, s, None)?;
+    let origin = validate_submit(db, actor, s, LocalOrigin::Direct)?;
     policy::can(db, actor, "task.read")?;
     let d = db.resolve(&s["delegation_ref"])?;
     require(
@@ -375,7 +428,7 @@ pub fn lookup(db: &Db<'_>, actor: &str, s: &Value) -> Result<Value> {
 pub fn cancel_origin(db: &Db<'_>, actor: &str, s: &Value) -> Result<Value> {
     contract("cancel-origin", s)?;
     policy::can(db, actor, "task.submit")?;
-    let o = origin(actor, origin_type(actor, false), s, None)?;
+    let o = origin(actor, LocalOrigin::Direct.kind(actor), s, None)?;
     let key = field(s, "idempotency_key");
     let digest = sha256(&canonical(&json!([actor, s["cancel_request_id"]])));
     let record_id = format!("cancellation-{}", &digest[7..]);
@@ -414,6 +467,11 @@ pub fn retry(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let req: Retry = decode(p)?;
     let t = db.of(&req.id, "Task")?;
     policy::owned(actor, &t)?;
+    require(
+        t.body["origin_ref"]["origin_type"] != "WorkflowRun",
+        "PreconditionFailed",
+        "workflow-owned tasks retain their original step attempt",
+    )?;
     require(
         agent::session_for_task(db, &t.id)?.is_none(),
         "PreconditionFailed",
@@ -454,7 +512,7 @@ pub fn retry_in_session(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "retry requires new key",
     )?;
     if s["origin_ref"]["origin_type"] == "Schedule" {
-        s["origin_ref"] = origin_ref(actor, origin_type(actor, false), &p.key);
+        s["origin_ref"] = origin_ref(actor, LocalOrigin::Direct.kind(actor), &p.key);
         s["cancel_scope_id"] = json!(p.key);
     }
     s["idempotency_key"] = json!(p.key);

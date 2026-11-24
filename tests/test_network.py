@@ -1,4 +1,4 @@
-"""Local link, address and route observations through scoped Tasks."""
+"""Local links, addresses, routes and policy rules through scoped Tasks."""
 from collections import Counter
 import hashlib
 import ipaddress
@@ -211,6 +211,113 @@ class NetworkTests(unittest.TestCase):
             finally:
                 subprocess.run(["/usr/sbin/ip", "-4", "route", "del", "blackhole", "198.19.0.0/16", "table", "1000"],
                                check=True)
+
+    def test_policy_rules_preserve_kernel_order_and_scope_continuations(self):
+        n = Node("target/debug")
+        self.addCleanup(n.close)
+        node = n.call("Node.Get", {})["reference"]["resource_id"]
+        tool = "node.routing_rules"
+        actions = ["task.submit", "task.read", tool]
+        route_token, route_grant = self.actor(n, ["task.submit", "task.read", "node.routes"], node)
+        for actor, grant in [(n.owner, "owner-delegation"), (route_token, route_grant)]:
+            with self.assertRaises(Failure) as denied:
+                n.prepare(tool, {}, token=actor, delegation=grant)
+            self.assertEqual(denied.exception.code, "PermissionDenied")
+        wrong, wrong_grant = self.actor(n, actions, "profile-local")
+        with self.assertRaises(Failure) as denied:
+            n.call("Task.Submit", n.prepare(tool, {}, token=wrong, delegation=wrong_grant), wrong)
+        self.assertEqual(denied.exception.code, "PermissionDenied")
+        token, grant = self.actor(n, actions, node)
+        principal = n.call("Principal.WhoAmI", {}, token)["principal_id"]
+        alternate = n.call("Grant.Issue", dict(principal_id=principal, actions=actions, tool_targets=[node],
+                                              ttl_seconds=120, units=5))["delegation_ref"]["resource_id"]
+
+        def submit(params, delegation=grant):
+            req = n.prepare(tool, params, token=token, delegation=delegation)
+            return n.wait(n.call("Task.Submit", req, token)["task_id"])
+
+        def read(task):
+            self.assertEqual(task["lifecycle"], "Succeeded", task)
+            return n.call("Artifact.Read", {"reference": task["result"]["artifact_refs"][0]}, token)
+
+        def rejected(params, code, delegation=grant):
+            task = submit(params, delegation)
+            self.assertEqual((task["lifecycle"], task["conditions"][0]["type"]), ("Failed", code), task)
+
+        for invalid in ({"limit": 0}, {"limit": 129}, {"family": "inet4"}, {"table": 0},
+                        {"cursor": {"offset": 0, "snapshot_digest": "sha256:" + "0" * 64}}):
+            with self.assertRaises(Failure) as error:
+                submit(invalid)
+            self.assertEqual(error.exception.code, "InvalidArgument")
+
+        original = submit({"limit": 1})
+        page = read(original)
+        cursor = page["next_cursor"]
+        self.assertIsNotNone(cursor)
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        namespace = str(os.stat("/proc/self/ns/net").st_ino)
+        user_namespace = str(os.stat("/proc/self/ns/user").st_ino)
+        n.stop()
+        n.start()
+        self.assertEqual(read(original), page)
+        digest = page["snapshot_digest"]
+        rules = []
+        while True:
+            self.assertEqual(page["snapshot_digest"], digest)
+            self.assertEqual((page["boot_id"], page["network_namespace_inode"], page["user_namespace_inode"]),
+                             (boot, namespace, user_namespace))
+            rules.extend(page["rules"])
+            next_cursor = page["next_cursor"]
+            if next_cursor is None:
+                break
+            self.assertEqual(next_cursor["offset"], len(rules))
+            page = read(submit({"cursor": next_cursor, "limit": 4}))
+        rejected({"cursor": cursor, "family": "inet"}, "ResyncRequired")
+        rejected({"cursor": cursor}, "ResyncRequired", alternate)
+        rejected({"cursor": dict(cursor, offset=len(rules))}, "InvalidArgument")
+
+        reference = os.getenv("PSIOS_TEST_RULE_REFERENCE")
+        if reference:
+            self.assertFalse(Path("/usr/sbin/ip").exists())
+            live = json.loads(Path(reference).read_bytes())
+        else:
+            live = [json.loads(subprocess.check_output(["/usr/sbin/ip", "-j", "-N", flag, "rule", "show"]))
+                    for flag in ("-4", "-6")]
+        for family, expected in zip(("inet", "inet6"), live):
+            observed = [r for r in rules if r["family"] == family]
+            self.assertEqual(read(submit({"family": family, "limit": 128}))["rules"], observed)
+            self.assertEqual([(r["order"], r["priority"], r["table"], r["action"], r["goto_priority"], bool(r["flags"] & 2))
+                              for r in observed],
+                             [(i, r["priority"], int(r.get("table", 0)), int(r.get("action", 2 if "goto" in r else 1)),
+                               r.get("goto"), "not" in r) for i, r in enumerate(expected)])
+
+        if reference or os.getenv("PSIOS_TEST_MUTATE_RULES"):
+            lookup, deny = sorted((r for r in rules if r["family"] == "inet" and r["priority"] == 100),
+                                  key=lambda r: r["action"])
+            address, rejected_ports = lookup["selectors"], deny["selectors"]
+            self.assertEqual(address["source"], {"address": "192.0.2.0", "length": 24})
+            self.assertEqual(address["destination"], {"address": "203.0.113.0", "length": 24})
+            self.assertEqual((address["fwmark"], address["fwmask"], lookup["table"]), (0, 255, 1000))
+            self.assertEqual((rejected_ports["input_interface"], rejected_ports["uid_range"], rejected_ports["ip_protocol"],
+                              rejected_ports["source_port_range"], rejected_ports["destination_port_range"]),
+                             ("lo", [1000, 1010], 6, [10000, 10020], [443, 443]))
+            dual, = [r for r in rules if r["family"] == "inet6" and r["priority"] == 120]
+            self.assertEqual(dual["selectors"]["source"], {"address": "2001:db8:1::", "length": 64})
+            self.assertEqual(dual["selectors"]["destination"], {"address": "2001:db8:2::", "length": 64})
+            by_priority = {r["priority"]: r for r in rules if r["family"] == "inet"}
+            self.assertEqual(by_priority[250]["selectors"]["tunnel_id"], "9007199254740993")
+            self.assertTrue(by_priority[270]["selectors"]["l3mdev"])
+            self.assertEqual((by_priority[300]["suppress_prefixlen"], by_priority[300]["suppress_ifgroup"],
+                              by_priority[300]["selectors"]["output_interface"]), (0, 5, "lo"))
+        if os.getenv("PSIOS_TEST_MUTATE_RULES"):
+            self.assertEqual([r["action"] for r in rules if r["family"] == "inet" and r["priority"] == 100], [1, 8])
+            args = ["priority", "100", "from", "192.0.2.0/24", "to", "203.0.113.0/24", "fwmark", "0/255", "lookup", "1000"]
+            subprocess.run(["/usr/sbin/ip", "-4", "rule", "del", *args], check=True)
+            subprocess.run(["/usr/sbin/ip", "-4", "rule", "add", *args], check=True)
+            rejected({"cursor": cursor}, "ResyncRequired")
+            fresh = read(submit({"family": "inet"}))
+            self.assertEqual([r["action"] for r in fresh["rules"] if r["priority"] == 100], [8, 1])
+            self.assertEqual(read(original)["snapshot_digest"], digest)
 
     def actor(self, n, actions, target):
         a = n.call("Agent.Register", {"name": "observer"})

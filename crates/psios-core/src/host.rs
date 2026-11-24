@@ -58,6 +58,8 @@ pub enum Action {
     Interfaces(node::network::Query),
     #[serde(rename = "node.routes")]
     Routes(node::network::RouteQuery),
+    #[serde(rename = "node.routing_rules")]
+    RoutingRules(node::network::RuleQuery),
     #[serde(rename = "node.devices")]
     Devices {},
     #[serde(rename = "node.processes")]
@@ -129,6 +131,7 @@ impl Action {
             Self::Processes(p) => p.validate()?,
             Self::Interfaces(q) => q.validate()?,
             Self::Routes(q) => q.validate()?,
+            Self::RoutingRules(q) => q.validate()?,
             Self::Create { name } => label(name)?,
             Self::Read(f) => storage::filename(&f.name)?,
             Self::Write(f) => {
@@ -190,6 +193,7 @@ impl Action {
             Self::Processes(_)
             | Self::Interfaces(_)
             | Self::Routes(_)
+            | Self::RoutingRules(_)
             | Self::Inventory {}
             | Self::Devices {} => {
                 return db.of(&db.meta("authority")?, "Node");
@@ -324,6 +328,7 @@ impl Work {
             | Action::Processes(_)
             | Action::Interfaces(_)
             | Action::Routes(_)
+            | Action::RoutingRules(_)
             | Action::Devices {} => node::perform(self),
             Action::Start(_) => apps::start(self, checkpoint),
             Action::Stage { .. }

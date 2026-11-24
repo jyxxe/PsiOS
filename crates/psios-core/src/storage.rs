@@ -1,5 +1,6 @@
 //! Single-node directory volumes. A writer or an uncertain operation retains the volume hold.
 pub mod files;
+pub(crate) mod publication;
 mod restore_proof;
 mod staging;
 pub(crate) mod usage;
@@ -450,7 +451,10 @@ fn capture_root(w: &Work) -> Result<File> {
     Ok(root)
 }
 
-fn backup(w: &Work) -> Result<Value> {
+pub(crate) fn backup(
+    w: &Work,
+    checkpoint: impl FnOnce(&Value, u64, u64) -> Result<()>,
+) -> Result<Value> {
     let parent = w.cfg.state_dir.join("backups");
     let bid = format!("backup-{}", w.op.id);
     let stage = staging::create(&parent)?;
@@ -486,15 +490,16 @@ fn backup(w: &Work) -> Result<Value> {
     new_file(&stage.path().join("manifest.json"), &bytes)?;
     let current = capture_root(w)?;
     capture.confirm_source(&current, &before)?;
-    let total = capture.total;
-    let entries = capture.entries.len();
-    stage.publish(&bid)?;
-    Ok(json!({
+    let receipt = json!({
         "id": bid,
         "manifest_digest": sha256(&bytes),
-        "bytes": total.to_string(),
-        "entries": entries
-    }))
+        "bytes": capture.total.to_string(),
+        "entries": capture.entries.len()
+    });
+    let (device, inode) = stage.identity()?;
+    checkpoint(&receipt, device, inode)?;
+    stage.publish(&bid)?;
+    Ok(receipt)
 }
 #[derive(Deserialize)]
 struct BackupManifest {
@@ -505,12 +510,16 @@ struct BackupManifest {
     mtime_unix_v1: Option<BackupTimes>,
 }
 
-fn backup_files(cfg: &Config, b: &Doc) -> Result<(File, Vec<u8>)> {
+fn open_backup(cfg: &Config, id: &str) -> Result<(File, File)> {
     let parent = cfg.state_dir.join("backups");
     private_dir(&parent, false)?;
     let parent = File::open(parent)?;
-    let root = child(&parent, &b.id, OFlags::RDONLY | OFlags::DIRECTORY)?;
-    let manifest = child(&root, "manifest.json", OFlags::RDONLY)?;
+    let root = child(&parent, id, OFlags::RDONLY | OFlags::DIRECTORY)?;
+    Ok((parent, root))
+}
+
+fn open_manifest(root: &File) -> Result<File> {
+    let manifest = child(root, "manifest.json", OFlags::RDONLY)?;
     let meta = manifest.metadata()?;
     regular(&meta)?;
     require(
@@ -518,6 +527,10 @@ fn backup_files(cfg: &Config, b: &Doc) -> Result<(File, Vec<u8>)> {
         "QuotaExceeded",
         "backup manifest size limit",
     )?;
+    Ok(manifest)
+}
+
+fn read_manifest(manifest: &File, digest: &Value) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     manifest.take(MAX_MANIFEST + 1).read_to_end(&mut bytes)?;
     require(
@@ -526,11 +539,11 @@ fn backup_files(cfg: &Config, b: &Doc) -> Result<(File, Vec<u8>)> {
         "backup manifest size limit",
     )?;
     require(
-        sha256(&bytes) == b.body["manifest_digest"],
+        sha256(&bytes) == *digest,
         "PreconditionFailed",
         "backup manifest integrity failed",
     )?;
-    Ok((root, bytes))
+    Ok(bytes)
 }
 
 // The workload may have created a valid hierarchy whose full name exceeds PATH_MAX.
@@ -545,14 +558,37 @@ fn entry_parent<'a>(root: &File, relative: &'a str) -> Result<(File, &'a str)> {
 }
 // Verification and restore read exactly the same authority-bound recovery set.
 fn inspect_backup(cfg: &Config, b: &Doc, destination: Option<&Path>) -> Result<Value> {
-    let (root, bytes) = backup_files(cfg, b)?;
+    let (_, root) = open_backup(cfg, &b.id)?;
+    let mut report = inspect_members(
+        cfg,
+        &root,
+        &open_manifest(&root)?,
+        &b.id,
+        &b.spec["source_ref"],
+        &b.body,
+        destination,
+    )?;
+    report["backup_ref"] = b.reference();
+    Ok(report)
+}
+
+fn inspect_members(
+    cfg: &Config,
+    root: &File,
+    manifest: &File,
+    id: &str,
+    source_ref: &Value,
+    expected: &Value,
+    destination: Option<&Path>,
+) -> Result<Value> {
+    let bytes = read_manifest(manifest, &expected["manifest_digest"])?;
     let m: BackupManifest = serde_json::from_slice(&bytes)?;
     require(
-        m.backup_id == b.id
-            && m.source == b.spec["source_ref"]
+        m.backup_id == id
+            && m.source == *source_ref
             && m.entries.len() <= MAX_ENTRIES
-            && b.body["entries"] == m.entries.len()
-            && b.body["bytes"] == m.total_bytes,
+            && expected["entries"] == m.entries.len()
+            && expected["bytes"] == m.total_bytes,
         "PreconditionFailed",
         "backup manifest disagrees with authority",
     )?;
@@ -598,7 +634,7 @@ fn inspect_backup(cfg: &Config, b: &Doc, destination: Option<&Path>) -> Result<V
             .map(|dir| entry_parent(dir, &e.path))
             .transpose()?;
         if let Some(expected) = &e.digest {
-            let mut original = child(&root, format!("blob-{i}"), OFlags::RDONLY)?;
+            let mut original = child(root, format!("blob-{i}"), OFlags::RDONLY)?;
             let meta = original.metadata()?;
             regular(&meta)?;
             require(
@@ -649,7 +685,7 @@ fn inspect_backup(cfg: &Config, b: &Doc, destination: Option<&Path>) -> Result<V
         "PreconditionFailed",
         "backup length mismatch",
     )?;
-    let mut report = json!({"backup_ref":b.reference(), "manifest_digest":b.body["manifest_digest"],
+    let mut report = json!({"manifest_digest":expected["manifest_digest"],
                             "verified_at":now(), "entries":m.entries.len(), "bytes":m.total_bytes});
     if let Some(root) = destination {
         for (path, mode, mtime) in dirs.into_iter().rev() {
@@ -728,16 +764,14 @@ pub fn perform(w: &Work) -> Result<Value> {
         Action::Activate(_) => restore_proof::verify(w),
         Action::Create { .. } => create_volume(w, None),
         Action::Restore(_) => create_volume(w, Some(&w.target)),
-        Action::Backup(_) => backup(w),
+        Action::InspectBackupPublication(_) => publication::observe(w),
         Action::VerifyBackup(_) => inspect_backup(&w.cfg, &w.target, None),
         Action::DeleteBackup(_) => {
-            let root = w.cfg.state_dir.join("backups").join(&w.target.id);
-            let (dir, _) = backup_files(&w.cfg, &w.target)?;
+            let (parent, dir) = open_backup(&w.cfg, &w.target.id)?;
+            read_manifest(&open_manifest(&dir)?, &w.target.body["manifest_digest"])?;
             remove_contents(&dir, 0, false).map_err(unknown)?;
-            fs::remove_dir(&root).map_err(unknown)?;
-            File::open(root.parent().unwrap())?
-                .sync_all()
-                .map_err(unknown)?;
+            rustix::fs::unlinkat(&parent, &w.target.id, AtFlags::REMOVEDIR).map_err(unknown)?;
+            parent.sync_all().map_err(unknown)?;
             Ok(json!({"removed": true}))
         }
         Action::Read(f) => {
@@ -810,26 +844,7 @@ pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
             });
             Ok(db.create("Volume", id, actor, spec, b)?.reference())
         }
-        Action::Backup(_) => {
-            let b = json!({
-                "lifecycle": "Stored",
-                "manifest_digest": r["manifest_digest"],
-                "entries": r["entries"],
-                "bytes": r["bytes"],
-                "consistency": "crash_consistent",
-                "failure_domain": "local-filesystem",
-                "coordination": "exclusive offline volume hold"
-            });
-            Ok(db
-                .create(
-                    "Backup",
-                    r["id"].as_str().unwrap(),
-                    actor,
-                    json!({"source_ref": w.target.reference(), "source_volume": w.target.id}),
-                    b,
-                )?
-                .reference())
-        }
+        Action::Backup(_) => publication::settle(db, &w.op, &w.target, r),
         Action::Activate(_) => {
             let mut spec = w.target.spec.clone();
             spec["storage_restore_phase"] = json!("Activated");

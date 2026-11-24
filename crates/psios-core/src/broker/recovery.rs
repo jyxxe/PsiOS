@@ -18,7 +18,10 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
         let read = policy::readonly(tool);
         // Activation verifies the filesystem and changes the volume only in the finish transaction.
         let activation_uncommitted = phase == "Dispatched" && tool == "volume.activate";
-        if phase == "Dispatched" && !read && !activation_uncommitted {
+        let backup_unpublished = phase == "Dispatched"
+            && tool == "backup.create"
+            && storage::publication::not_published(db, &operation(db, &t)?)?;
+        if phase == "Dispatched" && !read && !activation_uncommitted && !backup_unpublished {
             close(
                 db,
                 &t,
@@ -36,7 +39,11 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             )?;
             continue;
         }
-        if t.body["lifecycle"] == "Cancelling" || attempt >= 3 || activation_uncommitted {
+        if t.body["lifecycle"] == "Cancelling"
+            || attempt >= 3
+            || activation_uncommitted
+            || backup_unpublished
+        {
             close(
                 db,
                 &t,
@@ -48,7 +55,9 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                 "Known",
                 Some(&err(
                     "LeaseLost",
-                    if activation_uncommitted {
+                    if backup_unpublished {
+                        "backup interrupted before publication was authorized"
+                    } else if activation_uncommitted {
                         "activation had not committed at restart"
                     } else {
                         "run interrupted"
@@ -139,7 +148,7 @@ fn inspected(
     let rf = reference.ok_or_else(|| {
         err(
             "PreconditionFailed",
-            "a fresh runtime inspection artifact is required",
+            "a fresh inspection artifact is required",
         )
     })?;
     let proof = db.resolve(rf)?;
@@ -181,9 +190,11 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     let (target_id, expected) = match &action {
         Action::Write(p) => (&p.id, &p.expected_resource_version),
         Action::Append(p) => (&p.target.id, &p.target.expected_resource_version),
-        Action::Start(p) | Action::Stop(p) | Action::ServiceStart(p) | Action::ServiceStop(p) => {
-            (&p.id, &p.expected_resource_version)
-        }
+        Action::Start(p)
+        | Action::Stop(p)
+        | Action::ServiceStart(p)
+        | Action::ServiceStop(p)
+        | Action::Backup(p) => (&p.id, &p.expected_resource_version),
         _ => {
             return Err(err(
                 "UnsupportedCapability",
@@ -203,6 +214,16 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         "original exclusive hold or target revision unavailable",
     )?;
     let (result, proof_details) = match action {
+        Action::Backup(_) => {
+            let proof = inspected(
+                db,
+                req.evidence_ref.as_ref(),
+                &op,
+                &op,
+                storage::publication::INSPECT,
+            )?;
+            storage::publication::reconcile(db, &op, &target, &proof)?
+        }
         Action::ServiceStart(_) | Action::ServiceStop(_) => {
             let proof = inspected(
                 db,

@@ -1,5 +1,6 @@
 """Local link, address and route observations through scoped Tasks."""
 from collections import Counter
+import hashlib
 import ipaddress
 import json
 import os
@@ -11,6 +12,31 @@ from support import Failure, Node
 
 
 class NetworkTests(unittest.TestCase):
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_BULK_NETWORK"), "requires a network namespace with thousands of scoped addresses")
+    def test_large_real_interface_result_can_be_exported(self):
+        n = Node("target/debug")
+        self.addCleanup(n.close)
+        self.assertFalse(Path("/usr/sbin/ip").exists())
+        node = n.call("Node.Get", {})["reference"]["resource_id"]
+        grant = n.call("Grant.Issue", dict(principal_id="local-owner", units=1, ttl_seconds=120,
+                       actions=["task.submit", "task.read", "node.interfaces"], tool_targets=[node]))
+        request = n.prepare("node.interfaces", {}, delegation=grant["delegation_ref"]["resource_id"])
+        task = n.wait(n.call("Task.Submit", request)["task_id"])
+        self.assertEqual(task["lifecycle"], "Succeeded", task)
+        ref, = task["result"]["artifact_refs"]
+        with self.assertRaises(Failure) as limited:
+            n.call("Artifact.Read", {"reference": ref})
+        self.assertEqual(limited.exception.code, "QuotaExceeded")
+        n.stop()
+        n.start()
+        data = subprocess.check_output([n.binaries / "psiosctl", "--config", n.config, "artifact"],
+                                       input=json.dumps(ref).encode(), timeout=30)
+        self.assertGreater(len(data), 512 * 1024)
+        self.assertEqual("sha256:" + hashlib.sha256(data).hexdigest(), ref["digest"])
+        loopback, = json.loads(data)["interfaces"]
+        self.assertEqual(loopback["ifname"], "lo")
+        self.assertEqual(sum(a["local"].startswith("2001:db8:abcd:") for a in loopback["addr_info"]), 8000)
+
     def test_interface_task_matches_kernel_and_does_not_widen_existing_grants(self):
         n = Node("target/debug")
         self.addCleanup(n.close)

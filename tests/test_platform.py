@@ -1,10 +1,12 @@
 """Real procfs/sysfs, event consumers, concurrent submissions and multi-chunk file lifecycles."""
 import base64
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
 import os
 from pathlib import Path
 import signal
+import subprocess
 import time
 import unittest
 
@@ -45,6 +47,42 @@ class PlatformTests(unittest.TestCase):
         req = n.prepare("node.inventory", {}, key(), a["token"], d)
         self.assertEqual(n.wait(n.call("Task.Submit", req, a["token"])["task_id"])["lifecycle"], "Succeeded")
         self.denied("PermissionDenied", "Node.Configure", dict(scheduling="Cordoned", expected_resource_version="r1"), a["token"])
+
+    def test_artifact_ranges_pin_content_and_authorization(self):
+        n = self.n
+        task = n.wait(n.submit("node.inventory", {}))
+        self.assertEqual(task["lifecycle"], "Succeeded")
+        reference, = task["result"]["artifact_refs"]
+        params = {"reference": reference, "offset": 0, "length": 31}
+        page = n.call("Artifact.ReadChunk", params)
+        size = page["total_bytes"]
+        collected = bytearray()
+        while True:
+            self.assertEqual(page["total_bytes"], size)
+            self.assertEqual(page["offset"], len(collected))
+            collected.extend(base64.b64decode(page["data_base64"], validate=True))
+            if page["next_offset"] is None:
+                break
+            self.assertEqual(page["next_offset"], len(collected))
+            page = n.call("Artifact.ReadChunk", dict(params, offset=page["next_offset"]))
+        self.assertEqual(len(collected), size)
+        self.assertEqual("sha256:" + hashlib.sha256(collected).hexdigest(), reference["digest"])
+        self.assertEqual(json.loads(collected), n.call("Artifact.Read", {"reference": reference}))
+        self.assertEqual(n.call("Artifact.ReadChunk", dict(params, offset=size))["data_base64"], "")
+        self.denied("InvalidArgument", "Artifact.ReadChunk", dict(params, offset=size + 1))
+        self.denied("InvalidArgument", "Artifact.ReadChunk", dict(params, length=0))
+        self.denied("InvalidArgument", "Artifact.ReadChunk", dict(params, length=131073))
+        wrong = dict(reference, digest="sha256:" + "0" * 64)
+        self.denied("PreconditionFailed", "Artifact.ReadChunk", dict(params, reference=wrong))
+        other, _ = n.agent(["task.read"])
+        self.denied("PermissionDenied", "Artifact.ReadChunk", params, other["token"])
+        cli = [n.binaries / "psiosctl", "--config", n.config, "artifact"]
+        supplied = json.dumps(reference).encode()
+        self.assertEqual(subprocess.check_output(cli, input=supplied), collected)
+        refused = subprocess.run([*cli, "--max-bytes", "1"], input=supplied, capture_output=True)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn(b"QuotaExceeded", refused.stderr)
+        self.assertEqual(refused.stdout, b"")
 
     def test_pauses_new_work_below_authority_reserve_and_preserves_existing_tasks(self):
         n = self.n

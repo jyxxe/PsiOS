@@ -11,6 +11,7 @@ use std::fmt;
 
 pub const VERSION: &str = "1.0.0";
 pub const MAX_FRAME: usize = 512 * 1024;
+pub const MAX_ARTIFACT_CHUNK: usize = 128 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

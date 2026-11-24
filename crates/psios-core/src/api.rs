@@ -2,7 +2,8 @@ use crate::{
     db::{Db, Store},
     host, policy, *,
 };
-use psios_api::{Request, VERSION, contract};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use psios_api::{MAX_ARTIFACT_CHUNK, Request, VERSION, canonical, contract};
 use rusqlite::params;
 use serde_json::{Value, json};
 
@@ -10,6 +11,42 @@ use serde_json::{Value, json};
 #[serde(deny_unknown_fields)]
 struct Reference {
     reference: Value,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactPage {
+    reference: Value,
+    offset: usize,
+    length: usize,
+}
+
+fn artifact(db: &Db<'_>, actor: &str, reference: &Value) -> Result<Value> {
+    let d = db.resolve(reference)?;
+    require(
+        d.kind == "Artifact",
+        "InvalidArgument",
+        "expected result artifact",
+    )?;
+    policy::owned(actor, &d)?;
+    Ok(d.body)
+}
+
+fn artifact_page(db: &Db<'_>, actor: &str, page: ArtifactPage) -> Result<Value> {
+    require(
+        (1..=MAX_ARTIFACT_CHUNK).contains(&page.length),
+        "InvalidArgument",
+        "artifact chunk length must be 1 to 131072 bytes",
+    )?;
+    let bytes = canonical(&artifact(db, actor, &page.reference)?);
+    require(
+        page.offset <= bytes.len(),
+        "InvalidArgument",
+        "artifact offset beyond end",
+    )?;
+    let end = page.offset.saturating_add(page.length).min(bytes.len());
+    Ok(json!({"offset": page.offset, "total_bytes": bytes.len(),
+        "data_base64":STANDARD.encode(&bytes[page.offset..end]),
+        "next_offset":(end < bytes.len()).then_some(end)}))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -109,14 +146,11 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Artifact.Read" => {
             policy::can(db, actor, "task.read")?;
             let p: Reference = decode(p)?;
-            let d = db.resolve(&p.reference)?;
-            require(
-                d.kind == "Artifact",
-                "InvalidArgument",
-                "expected result artifact",
-            )?;
-            policy::owned(actor, &d)?;
-            Ok(d.body)
+            artifact(db, actor, &p.reference)
+        }
+        "Artifact.ReadChunk" => {
+            policy::can(db, actor, "task.read")?;
+            artifact_page(db, actor, decode(p)?)
         }
         "Secret.Rotate" => policy::secret_rotate(db, actor, p),
         "Secret.Put" => policy::secret_put(db, actor, p),

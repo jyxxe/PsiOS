@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build a new PsiOS UEFI disk or prepare an offline upgrade of a stopped node."""
 import argparse
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from functools import partial
 import hashlib
 import ipaddress
@@ -34,6 +34,7 @@ STATIC_IPV4 = "virtio-static-ipv4"
 STATIC_IPV6 = "virtio-static-ipv6"
 STATIC_DUAL = "virtio-static-dual-stack"
 STATIC_MODES = {STATIC_IPV4: "static", STATIC_IPV6: "static6", STATIC_DUAL: "dual"}
+LIMITED_SERVICE = "::respawn:/bin/sh /psios-core-cgroup serve"
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,31 @@ class Layout:
 
     def receipt(self):
         return {"state_mib": self.state_mib, "home_mib": self.home_mib, "image_mib": self.image_mib}
+
+
+@dataclass(frozen=True)
+class CoreLimits:
+    cpu_millicores: int
+    memory_mib: int
+    pids_max: int
+
+    def __post_init__(self):
+        # The 100 ms CFS period requires a quota of at least 1 ms.
+        if type(self.cpu_millicores) is not int or not 10 <= self.cpu_millicores < (1 << 31):
+            raise ValueError("Core CPU quota must be at least 10 millicores and fit in a signed 32-bit integer")
+        if type(self.memory_mib) is not int or not 1 <= self.memory_mib < (1 << 31):
+            raise ValueError("Core memory limit must be a positive signed 32-bit integer in MiB")
+        if type(self.pids_max) is not int or not 1 <= self.pids_max < (1 << 31):
+            raise ValueError("Core PID limit must be a positive signed 32-bit integer")
+
+    @classmethod
+    def from_receipt(cls, limits):
+        if not isinstance(limits, dict) or set(limits) != {"cpu_millicores", "memory_mib", "pids_max"}:
+            raise ValueError("previous build receipt must contain all Core resource limits")
+        return cls(**limits)
+
+    def kernel_values(self):
+        return f"{self.cpu_millicores * 100} {self.memory_mib * MIB} {self.pids_max}\n"
 
 
 def sha256(path):
@@ -174,13 +200,7 @@ def static_config(args, parser):
 def validate_persisted_static(work, state, version):
     path = f"/etc/psios/static-ipv{version}"
     try:
-        inode = subprocess.check_output(["debugfs", "-R", f"stat {path}", state], cwd=work,
-                                        stderr=subprocess.DEVNULL, text=True, timeout=20)
-        if (not re.search(r"\bType:\s+regular\s+Mode:\s+0600\b", inode)
-                or not re.search(r"\bUser:\s+0\s+Group:\s+0\b", inode)
-                or not re.search(r"^Links:\s+1\b", inode, re.MULTILINE)):
-            raise ValueError("expected a private root-owned file")
-        previous = read_partition_file(work, state, path, 128 if version == 4 else 256).decode("ascii")
+        previous = read_root_file(work, state, path, 128 if version == 4 else 256, "0600").decode("ascii")
         mac, address, gateway, *dns = previous.splitlines()
         interface, ip, profile = ((ipaddress.IPv4Interface, ipaddress.IPv4Address, static_profile) if version == 4 else
                                   (ipaddress.IPv6Interface, ipaddress.IPv6Address, static_ipv6_profile))
@@ -205,8 +225,8 @@ def host_config(seed, args):
     (seed / "etc/issue").write_text("PsiOS amd64 development console\n")
     (seed / "etc/psios/core.json").write_text(json.dumps({
         "state_dir": "/var/lib/psios", "witness_dir": "/var/lib/psios.witness", "socket": "/run/psios/api.sock"}))
-    inittab = ("::respawn:/bin/su -s /bin/sh psios -c 'exec /bin/psiosd serve'\n"
-               "ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100\n"
+    daemon = LIMITED_SERVICE if args.core_limits else "::respawn:/bin/su -s /bin/sh psios -c 'exec /bin/psiosd serve'"
+    inittab = (f"{daemon}\nttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100\n"
                "::shutdown:/bin/sh /psios-shutdown\n")
     if args.network_profile:
         for name, config in (("static-ipv4", args.static_network), ("static-ipv6", args.static_ipv6_network)):
@@ -227,7 +247,7 @@ def host_config(seed, args):
     (seed / "etc").chmod(0o755)
 
 
-def ramfs(work, args, instance, home_id, layout=Layout(), signing=None, network_profile=None):
+def ramfs(work, args, instance, home_id, layout=Layout(), signing=None, network_profile=None, *, core_limits=None):
     base = boot_media.prepare_kernel(work, args.kernel_iso)
     (work / "bin").mkdir()
     install_core(work, args.core_archive, args.core_sha256)
@@ -236,9 +256,13 @@ def ramfs(work, args, instance, home_id, layout=Layout(), signing=None, network_
     sectors = [str(mib * 2048) for start, size, _ in layout.partitions[1:] for mib in (start, size)]
     (work / "psios-storage-layout").write_text(" ".join(sectors) + "\n")
     boot_scripts = ["init", "shutdown", "dhcp", "dhcp-event", "ipv4", "ipv6", "static", "storage", "enroll"]
+    files = ["bin/psiosd", "bin/psiosctl", "psios-source", "psios-disk-uuid", "psios-home-uuid", "psios-storage-layout"]
+    if core_limits:
+        boot_scripts.append("core-cgroup")
+        (work / "psios-core-limits").write_text(core_limits.kernel_values())
+        files.append("psios-core-limits")
     for script in boot_scripts:
         shutil.copyfile(HERE / script, work / f"psios-{script}")
-    files = ["bin/psiosd", "bin/psiosctl", "psios-source", "psios-disk-uuid", "psios-home-uuid", "psios-storage-layout"]
     files.extend(f"psios-{script}" for script in boot_scripts)
     payload = {"/" + name: sha256(work / name) for name in files}
     inputs = {
@@ -253,6 +277,8 @@ def ramfs(work, args, instance, home_id, layout=Layout(), signing=None, network_
         inputs["secure_boot"] = signing.receipt()
     if network_profile:
         inputs["network_profile"] = network_profile
+    if core_limits:
+        inputs["core_limits"] = asdict(core_limits)
     manifest = work / "psios-deployment.json"
     manifest.write_text(json.dumps(inputs, sort_keys=True, separators=(",", ":")) + "\n")
     # BusyBox can verify the exact extracted bytes without a JSON interpreter.
@@ -349,7 +375,7 @@ def read_receipt(path):
     if len(raw) > 16 * 1024:
         raise ValueError("previous build receipt exceeds size limit")
     prior = json.loads(raw)
-    if not isinstance(prior, dict) or type(prior.get("format")) is not int or prior["format"] not in (1, 2, 3, 4, 5):
+    if not isinstance(prior, dict) or type(prior.get("format")) is not int or not 1 <= prior["format"] <= 6:
         raise ValueError("unsupported previous build receipt format")
     for name, pattern in (("source_commit", r"[0-9a-f]{40}"), ("efi_application_sha256", r"[0-9a-f]{64}")):
         if not isinstance(prior.get(name), str) or not re.fullmatch(pattern, prior[name]):
@@ -372,8 +398,13 @@ def read_receipt(path):
     if prior["format"] in profiles:
         if prior.get("network_profile") not in profiles[prior["format"]]:
             raise ValueError("invalid network profile in previous build receipt")
-    elif "network_profile" in prior:
-        raise ValueError("static networking requires build receipt format 4 or 5")
+    elif "network_profile" in prior and (prior["format"] != 6 or prior["network_profile"] not in tuple(STATIC_MODES)):
+        raise ValueError("invalid network profile in previous build receipt")
+    limits = None
+    if prior["format"] == 6:
+        limits = CoreLimits.from_receipt(prior.get("core_limits"))
+    elif "core_limits" in prior:
+        raise ValueError("Core resource limits require build receipt format 6")
     if prior["format"] == 3 or (prior["format"] >= 4 and "secure_boot" in prior):
         trust = prior.get("secure_boot")
         if (not isinstance(trust, dict) or set(trust) != {"scheme", "certificate_sha256", "efi_stub_sha256"}
@@ -383,7 +414,7 @@ def read_receipt(path):
             raise ValueError("invalid Secure Boot evidence in previous build receipt")
     elif "secure_boot" in prior:
         raise ValueError("Secure Boot evidence requires build receipt format 3 or later")
-    return prior, layout
+    return prior, layout, limits
 
 
 def validate_layout(work, disk, layout):
@@ -453,6 +484,16 @@ def read_partition_file(work, fs, member, limit):
     return data
 
 
+def read_root_file(work, fs, member, limit, modes):
+    inode = subprocess.check_output(["debugfs", "-R", f"stat {member}", fs], cwd=work,
+                                    stderr=subprocess.DEVNULL, text=True, timeout=20)
+    if (not re.search(rf"\bType:\s+regular\s+Mode:\s+{modes}\b", inode)
+            or not re.search(r"\bUser:\s+0\s+Group:\s+0\b", inode)
+            or not re.search(r"^Links:\s+1\b", inode, re.MULTILINE)):
+        raise ValueError(f"unsafe ownership, permissions or link count for {member}")
+    return read_partition_file(work, fs, member, limit)
+
+
 def source_snapshot(work, disk, args, prior, layout, signing):
     disk_size = layout.image_mib * MIB
     with boot_media.regular_file(args.upgrade_from) as source:
@@ -494,6 +535,10 @@ def source_snapshot(work, disk, args, prior, layout, signing):
         mac6, dns6 = validate_persisted_static(work, state, 6)
         if mac4 != mac6 or dns4 + dns6 > 3:
             raise ValueError("inconsistent persisted dual-stack profile")
+    if "core_limits" in prior:
+        inittab = read_root_file(work, state, "/etc/inittab", 16 * 1024, "0(?:600|644)").split(b"\n")
+        if inittab.count(LIMITED_SERVICE.encode()) != 1:
+            raise ValueError("invalid persisted Core service launcher for resource limits")
     state.unlink()
     if not isinstance(cfg, dict) or (cfg.get("state_dir"), cfg.get("witness_dir")) != ("/var/lib/psios", "/var/lib/psios.witness"):
         raise ValueError("offline upgrade requires the native state and witness locations")
@@ -519,12 +564,13 @@ def build(args):
         disk = work / "installed.raw"
         prior = None
         network_profile = args.network_profile
+        core_limits = args.core_limits
         signing = None
         if args.secure_boot_key:
             signing = boot_media.prepare_secure_boot(work, args.secure_boot_key, args.secure_boot_cert,
                                                     args.efi_stub, args.efi_stub_sha256)
         if args.upgrade_from:
-            prior, layout = read_receipt(args.previous_receipt)
+            prior, layout, core_limits = read_receipt(args.previous_receipt)
             network_profile = prior.get("network_profile")
             if prior.get("secure_boot") and (signing is None or
                     signing.certificate_sha256 != prior["secure_boot"]["certificate_sha256"]):
@@ -537,7 +583,7 @@ def build(args):
             instance, home_id = str(uuid.uuid4()), str(uuid.uuid4())
             new_disk(work, disk, args, instance, home_id, layout)
         disk.chmod(0o600)
-        ramfs(work, args, instance, home_id, layout, signing, network_profile)
+        ramfs(work, args, instance, home_id, layout, signing, network_profile, core_limits=core_limits)
         source_commit = (work / "psios-source").read_text().strip()
         authority = verify_authority(work, disk) if prior else None
         efi = boot_media.secure_efi_application(work, CMDLINE, signing) if signing else boot_media.efi_application(work, CMDLINE)
@@ -552,7 +598,7 @@ def build(args):
             os.fsync(completed.fileno())
         receipt_format = {STATIC_IPV4: 4, STATIC_IPV6: 5, STATIC_DUAL: 5}
         receipt = {
-            "format": receipt_format.get(network_profile, 3 if signing else 2),
+            "format": 6 if core_limits else receipt_format.get(network_profile, 3 if signing else 2),
             "image": str(output), "source_commit": source_commit, "geometry_mib": layout.receipt(),
             "state_uuid": instance, "home_uuid": home_id,
             "deployment_manifest_sha256": sha256(work / "psios-deployment.json"),
@@ -563,6 +609,8 @@ def build(args):
             receipt["secure_boot"] = signing.receipt()
         if network_profile:
             receipt["network_profile"] = network_profile
+        if core_limits:
+            receipt["core_limits"] = asdict(core_limits)
         if prior:
             receipt["upgrade"] = {
                 "previous_image_sha256": source_digest,
@@ -603,6 +651,10 @@ def main():
     parser.add_argument("--static-ipv6-dns", type=ipaddress.IPv6Address, action="append", default=[], help="optional unscoped IPv6 DNS server")
     parser.add_argument("--state-mib", type=int, help=f"state partition size of a new disk (default {MIN_STATE_MIB} MiB)")
     parser.add_argument("--home-mib", type=int, help=f"home partition size of a new disk (default {MIN_HOME_MIB} MiB)")
+    core_options = parser.add_argument_group("new disk Core cgroup limits (provide all three to enable)")
+    core_options.add_argument("--core-cpu-millicores", type=int, help="CPU quota of the Core daemon in millicores")
+    core_options.add_argument("--core-memory-mib", type=int, help="hard memory limit in MiB with swap disabled for Core")
+    core_options.add_argument("--core-pids-max", type=int, help="hard task count limit for Core and its descendants")
     args = parser.parse_args()
     if not re.fullmatch(r"[0-9a-f]{64}", args.core_sha256):
         parser.error("invalid Core archive SHA-256")
@@ -619,6 +671,14 @@ def main():
         parser.error("upgrade preserves the partition sizes from its previous build receipt")
     if args.console_hash and args.previous_receipt:
         parser.error("--previous-receipt requires --upgrade-from")
+    limits = (args.core_cpu_millicores, args.core_memory_mib, args.core_pids_max)
+    args.core_limits = None
+    if any(value is not None for value in limits):
+        if args.upgrade_from:
+            parser.error("upgrade preserves Core resource limits from its previous build receipt")
+        if any(value is None for value in limits):
+            parser.error("provide all three Core resource limits together")
+        args.core_limits = CoreLimits(*limits)
     build(args)
 
 

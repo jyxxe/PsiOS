@@ -101,6 +101,11 @@ jobs:
           python3 tests/native_calendar.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
             --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
 
+      - name: Enforce native Core cgroup quotas and retain them during upgrade
+        run: |
+          python3 -B tests/native_core_limits.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+
       - name: Acquire and release a real DHCP lease on the configured virtio NIC
         run: |
           sudo unshare --net --propagation private runuser -u "$(id -un)" -- \

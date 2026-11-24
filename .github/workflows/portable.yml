@@ -90,6 +90,11 @@ jobs:
             --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
             --psiosd "$RUNNER_TEMP/rescue-core/psiosd" --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py"
 
+      - name: Recover both DST fold occurrences on a UEFI disk after power cuts
+        run: |
+          python3 tests/native_calendar.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+
       - name: Acquire and release a real DHCP lease on the configured virtio NIC
         run: |
           sudo unshare --net --propagation private runuser -u "$(id -un)" -- \

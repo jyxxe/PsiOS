@@ -1,4 +1,5 @@
 //! Durable admission into the ordinary Task broker.
+mod calendar;
 mod repeat;
 
 use crate::{
@@ -11,7 +12,7 @@ use crate::{
 use chrono::{DateTime, SecondsFormat, Utc};
 use psios_api::{canonical, id, sha256};
 use rusqlite::{OptionalExtension, params};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub const ACTION: &str = "schedule.manage";
@@ -23,9 +24,25 @@ struct Create {
     tool: String,
     input: Value,
     delegation_id: String,
-    run_at: String,
-    deadline_at: String,
+    run_at: Option<String>,
+    deadline_at: Option<String>,
     repeat: Option<repeat::Repeat>,
+    calendar: Option<calendar::Calendar>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Window {
+    run_at: DateTime<Utc>,
+    deadline_at: DateTime<Utc>,
+}
+
+enum Timing<'a> {
+    Fixed {
+        first: Window,
+        last_deadline: DateTime<Utc>,
+    },
+    Calendar(&'a calendar::Calendar),
 }
 
 fn instant(value: &str) -> Result<DateTime<Utc>> {
@@ -70,18 +87,48 @@ pub fn create(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     let p: Create = decode(params)?;
     label(&p.key)?;
     policy::active(db, actor)?;
-    let run = instant(&p.run_at)?;
-    let deadline = instant(&p.deadline_at)?;
-    let run_at = timestamp(run);
-    let deadline_at = timestamp(deadline);
-    let last_deadline = p
-        .repeat
-        .as_ref()
-        .map(|r| r.validate(deadline))
-        .transpose()?
-        .unwrap_or(deadline);
+    let mut definition = vec![json!(p.tool), p.input.clone(), json!(p.delegation_id)];
+    let timing = match (
+        p.run_at.as_deref(),
+        p.deadline_at.as_deref(),
+        &p.repeat,
+        &p.calendar,
+    ) {
+        (Some(run), Some(deadline), repeat, None) => {
+            let first = Window {
+                run_at: instant(run)?,
+                deadline_at: instant(deadline)?,
+            };
+            let last_deadline = repeat
+                .as_ref()
+                .map(|rules| rules.validate(first.deadline_at))
+                .transpose()?
+                .unwrap_or(first.deadline_at);
+            // Keep the persisted digest of existing one-shot and interval requests.
+            definition.extend([
+                json!(timestamp(first.run_at)),
+                json!(timestamp(first.deadline_at)),
+            ]);
+            if let Some(repeat) = repeat {
+                definition.push(json!(repeat));
+            }
+            Timing::Fixed {
+                first,
+                last_deadline,
+            }
+        }
+        (None, None, None, Some(calendar)) => {
+            definition.push(json!({"calendar": calendar}));
+            Timing::Calendar(calendar)
+        }
+        _ => {
+            return Err(err(
+                "InvalidArgument",
+                "provide run_at and deadline_at with optional repeat, or a calendar",
+            ));
+        }
+    };
     let authority = db.meta("authority")?;
-    // Keep one idempotency namespace for existing one-shot and interval schedules.
     let identity = sha256(&canonical(&json!([
         "psios/schedule/once/1",
         authority,
@@ -89,16 +136,6 @@ pub fn create(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         p.key
     ])));
     let id = format!("schedule-{}", &identity[7..]);
-    let mut definition = vec![
-        json!(p.tool),
-        p.input.clone(),
-        json!(p.delegation_id),
-        json!(run_at),
-        json!(deadline_at),
-    ];
-    if let Some(repeat) = &p.repeat {
-        definition.push(json!(repeat));
-    }
     let creation = sha256(&canonical(&Value::Array(definition)));
     if let Some(existing) = db.find(&id)? {
         policy::can(db, actor, "task.read")?;
@@ -115,8 +152,37 @@ pub fn create(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     let g = db.of(d.body["grant_id"].as_str().unwrap(), "Grant")?;
     let scope_end = instant(d.body["valid_until"].as_str().unwrap())?
         .min(instant(g.spec["valid_until"].as_str().unwrap())?);
+    let (first, last_deadline, mut spec, body) = match timing {
+        Timing::Fixed {
+            first,
+            last_deadline,
+        } => {
+            let mut spec = json!({});
+            let body = if let Some(repeat) = &p.repeat {
+                spec["repeat"] = json!(repeat);
+                repeat.initial_state(&id, first)
+            } else {
+                let run_at = timestamp(first.run_at);
+                json!({"lifecycle": "Pending", "timezone": "UTC", "run_at": run_at,
+                       "deadline_at": timestamp(first.deadline_at), "trigger_id": trigger_id(&id, &run_at),
+                       "task_receipt": null, "reason": null})
+            };
+            (first, last_deadline, spec, body)
+        }
+        Timing::Calendar(calendar) => {
+            // Resolve local times once. Existing revisions retain these UTC instants
+            // across process restarts and changes to the bundled IANA database.
+            let plan = calendar.plan()?;
+            let first = plan.windows[0];
+            let last_deadline = plan.windows[plan.windows.len() - 1].deadline_at;
+            let mut body = repeat::initial_state(&id, &calendar.timezone, first);
+            body["calendar"] = json!(calendar);
+            body["calendar_plan"] = json!(plan);
+            (first, last_deadline, json!({"calendar": calendar}), body)
+        }
+    };
     require(
-        Utc::now() < run && run < deadline && last_deadline <= scope_end,
+        Utc::now() < first.run_at && first.run_at < first.deadline_at && last_deadline <= scope_end,
         "InvalidArgument",
         "schedule requires a future run and deadline within its authorization lifetime",
     )?;
@@ -131,26 +197,20 @@ pub fn create(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         "QueueFull",
         "pending schedule capacity reached",
     )?;
-    let trigger_id = trigger_id(&id, &run_at);
+    let trigger_id = trigger_id(&id, &timestamp(first.run_at));
     let request = broker::prepare_scheduled(
         db,
         actor,
         &json!({"tool": p.tool, "input": p.input, "key": trigger_id,
-                "delegation_id": p.delegation_id, "deadline_at": deadline_at}),
+                "delegation_id": p.delegation_id, "deadline_at": timestamp(first.deadline_at)}),
         &id,
     )?;
-    let mut spec = json!({"creation_digest": creation, "request": request});
-    let body = if let Some(repeat) = &p.repeat {
-        spec["repeat"] = json!(repeat);
-        repeat.initial_state(&id, run, deadline)
-    } else {
-        json!({"lifecycle": "Pending", "timezone": "UTC", "run_at": run_at, "deadline_at": deadline_at,
-               "trigger_id": trigger_id, "task_receipt": null, "reason": null})
-    };
+    spec["creation_digest"] = json!(creation);
+    spec["request"] = request;
     let schedule = db.create("Schedule", &id, actor, spec, body)?;
     db.c.execute(
         "INSERT INTO pending_schedules(schedule,run_ms,deadline_ms) VALUES(?1,?2,?3)",
-        params![id, due_ms(run), due_ms(deadline)],
+        params![id, due_ms(first.run_at), due_ms(first.deadline_at)],
     )?;
     Ok(reference(&schedule))
 }

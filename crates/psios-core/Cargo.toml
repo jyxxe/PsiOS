@@ -12,7 +12,8 @@ serde_json.workspace = true
 sha2.workspace = true
 uuid.workspace = true
 base64 = "0.22"
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10.4"
 clap = { version = "4", features = ["derive"] }
 ring = "0.17"
 rustix = { version = "1", features = ["event", "fs", "net", "process", "time"] }

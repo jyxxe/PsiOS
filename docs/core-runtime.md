@@ -131,6 +131,17 @@ jq -n --arg id "$schedule" '{id:$id}' | ctl call Schedule.Get
 
 进行中的调度通过 `Schedule.Get` 返回 `next` 和已结算的 `trigger_refs`。同一逻辑时刻的触发 ID 与调度定义绑定，重启后继续使用。对引用中的 ID 调用 `Schedule.TriggerGet` 可读取该轮的状态、原因及 Task 回执，读取权限限于调度所有者与本机管理员。序列用尽后返回 `Completed`。每轮分别记录已触发、已过期或已跳过。遇到永久的准入拒绝时记录该轮拒绝并结束序列。取消仍需当前修订，取消后的已提交任务可以继续用原入口管理。[格式 10 升级](../tests/schedule_repeat_upgrade.py)
 
+`Schedule.Create` 也可用 `calendar` 提交有限期的当地日历规则。日历请求省略 `run_at`、`deadline_at` 和 `repeat`。以下规则从 2027 年 11 月 7 日起每天当地 01:30 触发，持续两天。
+
+```json
+{"timezone":"America/New_York","start_date":"2027-11-07","local_time":"01:30:00","days":2,
+ "window_seconds":120,"fold":"Both","gap":"Skip","missed":{"mode":"BoundedCatchUp","limit":2},"overlap":"Skip"}
+```
+
+每份定义覆盖 1 至 30 个当地日期，最多产生 32 个 UTC 触发。`fold` 可取 `Earlier`、`Later` 或 `Both`，用于选择夏令时回拨时的一个或两个实际时刻。`gap` 可取 `Skip` 或 `Reject`，用于跳过缺失时刻或拒绝整份定义。`window_seconds` 以实际 UTC 时长计算，支持 1 至 86400 秒。委托及 Grant 都须覆盖最晚截止时间。
+
+Core 在创建时固定 IANA 数据版本、UTC 窗口和因 `gap` 跳过的当地日期。`Schedule.Get` 的 `calendar_plan` 可查询这些值。服务重启或更新时区数据库后，既有定义继续采用原窗口和触发 ID。更改规则时取消仍待触发的旧定义，并使用新键创建新定义。`missed`、`overlap`、重试和 Task 回执遵守上述序列规则。[夏令时 UTC 对照与断电验收](../tests/native_calendar.py) · [格式 13 升级](../tests/calendar_upgrade.py)
+
 ## 本机 PsiFlow
 
 `Workflow.Define` 登记一份不可变的本机 Task 依赖图。每步提供 `id`、`tool`、字面量 `input` 和所依赖的 `after` 步骤 ID。当前支持 1 至 16 步，定义体最多 128 KiB。Core 检查重复 ID、悬空引用与回环，并固定当时登记的工具引用。以同一键重发相同定义会得到原引用。修改定义时使用新键。

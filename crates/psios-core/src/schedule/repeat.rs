@@ -1,4 +1,8 @@
-use super::{due_ms, instant, remove_pending, timestamp, trigger_id};
+use super::{
+    Window,
+    calendar::{Calendar, CalendarPlan},
+    due_ms, instant, remove_pending, timestamp, trigger_id,
+};
 use crate::{
     Result,
     db::{Db, Doc},
@@ -9,15 +13,24 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(tag = "mode", deny_unknown_fields)]
-enum Missed {
+pub(super) enum Missed {
     Skip,
     BoundedCatchUp { limit: u32 },
 }
 
-#[derive(Deserialize, Serialize)]
-enum Overlap {
+impl Missed {
+    pub(super) fn valid(&self, count: u32) -> bool {
+        match self {
+            Self::Skip => true,
+            Self::BoundedCatchUp { limit } => (1..=8.min(count)).contains(limit),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+pub(super) enum Overlap {
     Allow,
     Skip,
 }
@@ -36,10 +49,7 @@ impl Repeat {
         require(
             (1..=86400).contains(&self.interval_seconds)
                 && (2..=32).contains(&self.count)
-                && match self.missed {
-                    Missed::Skip => true,
-                    Missed::BoundedCatchUp { limit } => (1..=8.min(self.count)).contains(&limit),
-                },
+                && self.missed.valid(self.count),
             "InvalidArgument",
             "invalid interval, occurrence count or catch-up limit",
         )?;
@@ -50,19 +60,19 @@ impl Repeat {
         TimeDelta::seconds(i64::from(self.interval_seconds) * i64::from(count))
     }
 
-    pub(super) fn initial_state(
-        &self,
-        schedule: &str,
-        run: DateTime<Utc>,
-        deadline: DateTime<Utc>,
-    ) -> Value {
-        json!({"lifecycle": "Pending", "timezone": "UTC", "repeat": self,
-               "next": Occurrence::new(schedule, 1, run, deadline),
-               "trigger_refs": [], "last_task_id": null, "reason": null})
+    pub(super) fn initial_state(&self, schedule: &str, first: Window) -> Value {
+        let mut state = initial_state(schedule, "UTC", first);
+        state["repeat"] = json!(self);
+        state
     }
 }
 
-#[derive(Deserialize, Serialize)]
+pub(super) fn initial_state(schedule: &str, timezone: &str, first: Window) -> Value {
+    json!({"lifecycle": "Pending", "timezone": timezone, "next": Occurrence::new(schedule, 1, first),
+           "trigger_refs": [], "last_task_id": null, "reason": null})
+}
+
+#[derive(Deserialize, Serialize, PartialEq, Eq)]
 struct Occurrence {
     ordinal: u32,
     run_at: String,
@@ -71,64 +81,91 @@ struct Occurrence {
 }
 
 impl Occurrence {
-    fn new(schedule: &str, ordinal: u32, run: DateTime<Utc>, deadline: DateTime<Utc>) -> Self {
-        let run_at = timestamp(run);
+    fn new(schedule: &str, ordinal: u32, window: Window) -> Self {
+        let run_at = timestamp(window.run_at);
         Self {
             trigger_id: trigger_id(schedule, &run_at),
             ordinal,
             run_at,
-            deadline_at: timestamp(deadline),
+            deadline_at: timestamp(window.deadline_at),
         }
     }
 }
 
 pub(super) struct Series {
-    settings: Repeat,
+    missed: Missed,
+    overlap: Overlap,
     next: Occurrence,
-    run: DateTime<Utc>,
-    deadline: DateTime<Utc>,
+    upcoming: Vec<Window>,
 }
 
 fn persisted<T: DeserializeOwned>(value: &Value) -> Result<T> {
-    T::deserialize(value).map_err(|_| err("RecoveryRequired", "invalid stored interval schedule"))
+    T::deserialize(value).map_err(|_| err("RecoveryRequired", "invalid stored schedule series"))
 }
 
 impl Series {
     pub(super) fn load(schedule: &Doc) -> Result<Option<Self>> {
-        let Some(settings) = schedule.spec.get("repeat") else {
+        let repeat = schedule.spec.get("repeat");
+        let calendar = schedule.spec.get("calendar");
+        if repeat.is_none() && calendar.is_none() {
             return Ok(None);
-        };
-        let settings: Repeat = persisted(settings)?;
+        }
         let next: Occurrence = persisted(&schedule.body["next"])?;
-        let run = instant(&next.run_at)
-            .map_err(|_| err("RecoveryRequired", "invalid stored trigger time"))?;
-        let deadline = instant(&next.deadline_at)
-            .map_err(|_| err("RecoveryRequired", "invalid stored trigger deadline"))?;
+        let (missed, overlap, upcoming) = match (repeat, calendar) {
+            (Some(repeat), None) => {
+                let rules: Repeat = persisted(repeat)?;
+                let run = instant(&next.run_at)
+                    .map_err(|_| err("RecoveryRequired", "invalid stored trigger time"))?;
+                let deadline = instant(&next.deadline_at)
+                    .map_err(|_| err("RecoveryRequired", "invalid stored trigger deadline"))?;
+                require(
+                    (1..=rules.count).contains(&next.ordinal)
+                        && rules.validate(deadline).is_ok()
+                        && run < deadline,
+                    "RecoveryRequired",
+                    "invalid pending interval schedule",
+                )?;
+                let windows = (0..=rules.count - next.ordinal)
+                    .map(|index| {
+                        let delta = rules.offset(index);
+                        Window {
+                            run_at: run + delta,
+                            deadline_at: deadline + delta,
+                        }
+                    })
+                    .collect();
+                (rules.missed, rules.overlap, windows)
+            }
+            (None, Some(calendar)) => {
+                let rules: Calendar = persisted(calendar)?;
+                let plan: CalendarPlan = persisted(&schedule.body["calendar_plan"])?;
+                rules.validate_plan(&plan)?;
+                require(
+                    (1..=plan.windows.len() as u32).contains(&next.ordinal),
+                    "RecoveryRequired",
+                    "calendar trigger ordinal is outside its pinned plan",
+                )?;
+                let windows = plan.windows[(next.ordinal as usize - 1)..].to_vec();
+                (rules.missed, rules.overlap, windows)
+            }
+            _ => return Err(err("RecoveryRequired", "ambiguous stored schedule series")),
+        };
         require(
             schedule.body["lifecycle"] == "Pending"
-                && (1..=settings.count).contains(&next.ordinal)
-                && next.trigger_id == trigger_id(&schedule.id, &next.run_at)
-                && settings.validate(deadline).is_ok()
-                && run < deadline,
+                && next == Occurrence::new(&schedule.id, next.ordinal, upcoming[0]),
             "RecoveryRequired",
-            "invalid pending interval schedule",
+            "pending schedule disagrees with its next trigger",
         )?;
         Ok(Some(Self {
-            settings,
+            missed,
+            overlap,
             next,
-            run,
-            deadline,
+            upcoming,
         }))
     }
 
-    fn at_offset(&self, schedule: &str, count: u32) -> Occurrence {
-        let offset = self.settings.offset(count);
-        Occurrence::new(
-            schedule,
-            self.next.ordinal + count,
-            self.run + offset,
-            self.deadline + offset,
-        )
+    fn occurrence(&self, schedule: &str, offset: usize, window: Window) -> Occurrence {
+        Occurrence::new(schedule, self.next.ordinal + offset as u32, window)
     }
 
     pub(super) fn prepare(&self, request: &Value) -> Result<Value> {
@@ -142,36 +179,35 @@ impl Series {
         now_ms: i64,
         expiry_only: bool,
     ) -> Result<bool> {
-        let remaining = self.settings.count - self.next.ordinal + 1;
-        let interval_ms = i64::from(self.settings.interval_seconds) * 1000;
-        let elapsed = |start| {
-            if now_ms < start {
-                0
-            } else {
-                (1 + (now_ms - start) / interval_ms).min(i64::from(remaining)) as u32
-            }
-        };
-        let expired = elapsed(due_ms(self.deadline));
-        let (keep, reason) = match self.settings.missed {
+        let expired = self
+            .upcoming
+            .iter()
+            .take_while(|window| due_ms(window.deadline_at) <= now_ms)
+            .count();
+        let (keep, reason) = match self.missed {
             Missed::Skip => (1, "MissedTrigger"),
-            Missed::BoundedCatchUp { limit } => (limit, "CatchUpLimit"),
+            Missed::BoundedCatchUp { limit } => (limit as usize, "CatchUpLimit"),
         };
         let superseded = if expiry_only {
             0
         } else {
-            elapsed(due_ms(self.run)).saturating_sub(keep)
+            self.upcoming
+                .iter()
+                .take_while(|window| due_ms(window.run_at) <= now_ms)
+                .count()
+                .saturating_sub(keep)
         };
         let count = expired.max(superseded);
         if count == 0 {
             require(
                 !expiry_only,
                 "RecoveryRequired",
-                "interval schedule deadline index mismatch",
+                "schedule deadline index mismatch",
             )?;
             return Ok(false);
         }
         let mut body = schedule.body.clone();
-        for offset in 0..count {
+        for (offset, window) in self.upcoming.iter().copied().take(count).enumerate() {
             let (phase, reason) = if offset < expired {
                 ("Expired", "DeadlineExceeded")
             } else {
@@ -181,7 +217,7 @@ impl Series {
                 db,
                 schedule,
                 &mut body,
-                &self.at_offset(&schedule.id, offset),
+                &self.occurrence(&schedule.id, offset, window),
                 phase,
                 Some(reason),
                 None,
@@ -192,7 +228,7 @@ impl Series {
     }
 
     pub(super) fn overlapping(&self, db: &Db<'_>, schedule: &Doc) -> Result<bool> {
-        if matches!(self.settings.overlap, Overlap::Allow) {
+        if matches!(self.overlap, Overlap::Allow) {
             return Ok(false);
         }
         let Some(id) = schedule.body["last_task_id"].as_str() else {
@@ -224,22 +260,26 @@ impl Series {
         db: &Db<'_>,
         schedule: &Doc,
         mut body: Value,
-        count: u32,
+        count: usize,
         rejection: Option<&str>,
     ) -> Result<()> {
-        if self.next.ordinal + count <= self.settings.count && rejection.is_none() {
-            let next = self.at_offset(&schedule.id, count);
-            let offset = self.settings.offset(count);
+        if let Some(next) = self
+            .upcoming
+            .get(count)
+            .copied()
+            .filter(|_| rejection.is_none())
+        {
+            let current = self.upcoming[0];
             require(
                 db.c.execute(
                     "UPDATE pending_schedules SET run_ms=?2,deadline_ms=?3 WHERE schedule=?1 AND run_ms=?4 AND deadline_ms=?5",
-                    params![schedule.id, due_ms(self.run + offset), due_ms(self.deadline + offset),
-                            due_ms(self.run), due_ms(self.deadline)],
+                    params![schedule.id, due_ms(next.run_at), due_ms(next.deadline_at),
+                            due_ms(current.run_at), due_ms(current.deadline_at)],
                 )? == 1,
                 "RecoveryRequired",
-                "interval schedule index disagrees with trigger",
+                "schedule index disagrees with trigger",
             )?;
-            body["next"] = json!(next);
+            body["next"] = json!(self.occurrence(&schedule.id, count, next));
         } else {
             remove_pending(db, schedule)?;
             body["lifecycle"] = json!(if rejection.is_some() {
@@ -279,12 +319,7 @@ fn record(
     )?;
     body["trigger_refs"]
         .as_array_mut()
-        .ok_or_else(|| {
-            err(
-                "RecoveryRequired",
-                "interval schedule trigger references missing",
-            )
-        })?
+        .ok_or_else(|| err("RecoveryRequired", "schedule trigger references missing"))?
         .push(trigger.reference());
     Ok(())
 }

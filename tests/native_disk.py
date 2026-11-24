@@ -76,13 +76,15 @@ class Console:
 
 
 @contextmanager
-def boot(work, image, network_mac=None, extra_disk=None):
+def boot(work, image, network_mac=None, extra_disk=None, *, rtc_base=None):
     accel = "kvm" if os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
     cmd = ["qemu-system-x86_64", "-nodefaults", "-no-user-config", "-no-reboot", "-machine", "q35",
            "-accel", accel, "-m", "768", "-smp", "2", "-display", "none",
            "-monitor", "none", "-serial", "stdio",
            "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=code.fd",
            "-drive", "if=pflash,format=raw,unit=1,file=vars.fd"]
+    if rtc_base is not None:
+        cmd += ["-rtc", f"base={rtc_base},clock=vm"]
     if extra_disk is not None:
         cmd += ["-boot", "strict=on",
                 "-drive", f"if=none,format=raw,id=additional,file={extra_disk.name}",

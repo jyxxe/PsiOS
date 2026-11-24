@@ -92,7 +92,7 @@ ctl wait "$task" | jq '{reference:.result.artifact_refs[0]}' | ctl call Artifact
 
 将 `node.network_probe`、`task.submit` 和 `task.read` 授给操作者，`tool_targets` 设为对应端点资源 ID。使用 `NetworkProbe.Get` 查询获准目标配置。通过 `Task.Prepare` 和 `Task.Submit` 提交 `node.network_probe`，输入仅含 `id` 和 `expected_resource_version`。结果随 Task 保存。注册配置最多 32 项，使用数字 IPv4 或 IPv6 端点。IPv6 链路本地地址须带该命名空间的数字 scope ID。
 
-Core 可选地先向该目标指定的解析器发出 TCP DNS 请求。按端点家族查询 A 或 AAAA，在回复内核对有界 CNAME 链，并要求最终地址集合与配置的单个地址一致。回复不匹配、不可解析或超限时，端点连接不会发出。TCP 使用固定地址和端口，仅建立连接。发给解析器的内容只有 DNS 查询。两步共享 50 至 5000 毫秒的期限，默认 2000 毫秒。
+Core 可选地先向该目标指定的解析器发出 TCP DNS 请求。按端点家族查询 A 或 AAAA，在回复内核对有界 CNAME 链，并要求最终地址集合与配置的单个地址一致。回复不匹配、不可解析或超限时，端点连接不会发出。TCP 使用固定地址和端口，仅建立连接。发给解析器的内容只有 DNS 查询。两步共享 50 至 5000 毫秒的期限，默认 2000 毫秒。期限使用 Linux `CLOCK_BOOTTIME`，计入系统挂起时间。到期时关闭等待中的套接字，后续阶段保持未执行。[Linux timerfd](https://man7.org/linux/man-pages/man2/timerfd_create.2.html)
 
 制品包含目标引用、启动 ID、网络命名空间和观测时间，并分别记录解析与连接结果。Connected 的范围是指定 TCP 端点。连接被拒绝或只有有效 DNS 回复时报告 Limited。没有这两类响应时报告 Offline。DNS 解析器的记录和 TCP 连通性证据不能证明应用层身份。改变端点、解析器或 DNS 名称会注销原资源并生成新授权目标。仅改超时保留身份并更新修订。队列中的旧目标请求按原引用复核。[TCP 与 DNS 进程验收](../tests/test_network_probe.py) · [格式 20 升级](../tests/network_probe_upgrade.py) · [Hickory DNS 协议库](https://docs.rs/hickory-proto/0.26.3/hickory_proto/)
 

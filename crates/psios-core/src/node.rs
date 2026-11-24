@@ -1,6 +1,7 @@
 //! Linux observation and the operator's explicit systemd allowlist.
 mod mounts;
 pub mod network;
+pub mod pressure;
 use crate::{
     config::Manager,
     db::{Db, Doc},
@@ -318,6 +319,7 @@ fn service(w: &Work) -> Result<Value> {
 pub fn perform(w: &Work) -> Result<Value> {
     match &w.action {
         Action::Inventory {} => inventory(),
+        Action::Pressure {} => pressure::observe(w),
         Action::Interfaces(q) => network::interfaces(q),
         Action::Routes(q) => network::observe_routes(q, w),
         Action::RouteLookup(q) => network::observe_lookup(q),

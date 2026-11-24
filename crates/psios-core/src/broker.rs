@@ -18,8 +18,8 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use submission::{authority, deadline};
 pub(crate) use submission::{
-    cancel_origin, lookup, prepare, prepare_scheduled, retime_scheduled, retry, retry_in_session,
-    submit, submit_scheduled,
+    cancel_origin, lookup, prepare, prepare_scheduled, prepare_workflow, retime_scheduled, retry,
+    retry_in_session, submit, submit_scheduled, submit_workflow,
 };
 
 fn field<'v>(v: &'v Value, k: &str) -> &'v str {

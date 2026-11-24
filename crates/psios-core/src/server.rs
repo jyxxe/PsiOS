@@ -1,4 +1,4 @@
-use crate::{Config, Result, Store, broker, err, schedule};
+use crate::{Config, Result, Store, broker, err, schedule, workflow};
 use psios_api::{ApiError, Request, id, parse, read_frame, write_frame};
 use serde_json::{Value, json};
 use std::{
@@ -110,6 +110,7 @@ fn timer(s: Shared, stop: Arc<AtomicBool>) -> Result<()> {
                 break;
             }
             schedule::tick(&mut store)?;
+            workflow::tick(&mut store)?;
         }
         thread::park_timeout(Duration::from_millis(250));
     }

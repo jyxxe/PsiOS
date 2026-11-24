@@ -178,7 +178,7 @@ jobs:
           export XDG_RUNTIME_DIR="/run/user/$(id -u)"
           python3 tests/services.py
       - name: Exercise a real OCI engine and persistent volume
-        run: python3 tests/oci.py
+        run: PSIOS_TEST_OCI_KERNEL_LIMITS=1 python3 tests/oci.py
 
   host-package:
     runs-on: ubuntu-24.04

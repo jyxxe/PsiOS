@@ -267,9 +267,13 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
                         && proof.body["engine_id"] == c.body["engine_id"]
                         && proof.body["container_id"] == c.body["container_id"]
                         && proof.body["start_operation_id"] == op.id
+                        && matches!(
+                            proof.body["effective_limits"]["source"].as_str(),
+                            Some("LinuxCgroupV2" | "DockerCgroupV1")
+                        )
                         && proof.body["process_running"] == true,
                     "OutcomeUnknown",
-                    "inspection does not confirm the checkpointed runtime is running",
+                    "inspection does not confirm the checkpointed runtime and resource limits",
                 )?;
                 (
                     apps::started(db, &target, &op.id, vol.as_ref(), &proof.body)?,

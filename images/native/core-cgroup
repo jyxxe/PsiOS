@@ -1,0 +1,55 @@
+#!/bin/sh
+# The supervisor stays outside the workload cgroup to recover after a limit is hit.
+set -eu
+[ "$PPID" -eq 1 ] && [ "$(id -u)" -eq 0 ] || exit 1
+root=/sys/fs/cgroup
+group=$root/psios-core
+read -r quota memory pids < /psios-core-limits
+
+verify_limits() {
+    [ "$(cat "$group/cgroup.type")" = domain ] &&
+        [ "$(cat "$group/cpu.max")" = "$quota 100000" ] &&
+        [ "$(cat "$group/cpu.max.burst")" = 0 ] &&
+        [ "$(cat "$group/memory.max")" = "$memory" ] &&
+        [ "$(cat "$group/memory.swap.max")" = 0 ] &&
+        [ "$(cat "$group/memory.oom.group")" = 1 ] &&
+        [ "$(cat "$group/pids.max")" = "$pids" ]
+}
+
+case "${1-}" in
+    setup)
+        mkdir -p "$root"
+        mount -t cgroup2 -o nodev,nosuid,noexec cgroup2 "$root"
+        printf '+cpu +memory +pids\n' > "$root/cgroup.subtree_control"
+        mkdir "$group"
+        printf '%s 100000\n' "$quota" > "$group/cpu.max"
+        printf '0\n' > "$group/cpu.max.burst"
+        printf '%s\n' "$memory" > "$group/memory.max"
+        printf '0\n' > "$group/memory.swap.max"
+        printf '1\n' > "$group/memory.oom.group"
+        printf '%s\n' "$pids" > "$group/pids.max"
+        printf '1\n' > "$group/cgroup.kill"
+        verify_limits
+        ;;
+    serve)
+        trap 'printf "PsiOS Core supervisor stopped; retrying\n" >/dev/console; sleep 2' EXIT
+        trap 'trap - EXIT; exit 0' TERM INT
+        # Fence surviving descendants from the previous daemon before respawn.
+        printf '1\n' > "$group/cgroup.kill"
+        tries=0
+        until grep -qx 'populated 0' "$group/cgroup.events"; do
+            [ "$tries" -lt 30 ] || exit 1
+            sleep 0.1
+            tries=$((tries + 1))
+        done
+        verify_limits
+        (
+            printf '0\n' > "$group/cgroup.procs"
+            IFS= read -r membership < /proc/self/cgroup
+            [ "$membership" = 0::/psios-core ] || exit 1
+            exec /bin/su -s /bin/sh psios -c 'exec /bin/psiosd serve'
+        ) &
+        wait "$!"
+        ;;
+    *) exit 1 ;;
+esac

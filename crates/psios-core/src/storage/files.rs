@@ -57,7 +57,7 @@ impl Append {
         Ok(bytes)
     }
 }
-fn path(s: &str, root: bool) -> Result<()> {
+pub(super) fn path(s: &str, root: bool) -> Result<()> {
     if root && s.is_empty() {
         return Ok(());
     }

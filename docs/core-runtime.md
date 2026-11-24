@@ -131,6 +131,17 @@ jq -n --arg id "$schedule" '{id:$id}' | ctl call Schedule.Get
 
 进行中的调度通过 `Schedule.Get` 返回 `next` 和已结算的 `trigger_refs`。同一逻辑时刻的触发 ID 与调度定义绑定，重启后继续使用。对引用中的 ID 调用 `Schedule.TriggerGet` 可读取该轮的状态、原因及 Task 回执，读取权限限于调度所有者与本机管理员。序列用尽后返回 `Completed`。每轮分别记录已触发、已过期或已跳过。遇到永久的准入拒绝时记录该轮拒绝并结束序列。取消仍需当前修订，取消后的已提交任务可以继续用原入口管理。[格式 10 升级](../tests/schedule_repeat_upgrade.py)
 
+`Schedule.Create` 也可用 `calendar` 提交有限期的当地日历规则。日历请求省略 `run_at`、`deadline_at` 和 `repeat`。以下规则从 2027 年 11 月 7 日起每天当地 01:30 触发，持续两天。
+
+```json
+{"timezone":"America/New_York","start_date":"2027-11-07","local_time":"01:30:00","days":2,
+ "window_seconds":120,"fold":"Both","gap":"Skip","missed":{"mode":"BoundedCatchUp","limit":2},"overlap":"Skip"}
+```
+
+每份定义覆盖 1 至 30 个当地日期，最多产生 32 个 UTC 触发。`fold` 可取 `Earlier`、`Later` 或 `Both`，用于选择夏令时回拨时的一个或两个实际时刻。`gap` 可取 `Skip` 或 `Reject`，用于跳过缺失时刻或拒绝整份定义。`window_seconds` 以实际 UTC 时长计算，支持 1 至 86400 秒。委托及 Grant 都须覆盖最晚截止时间。
+
+Core 在创建时固定 IANA 数据版本、UTC 窗口和因 `gap` 跳过的当地日期。`Schedule.Get` 的 `calendar_plan` 可查询这些值。服务重启或更新时区数据库后，既有定义继续采用原窗口和触发 ID。更改规则时取消仍待触发的旧定义，并使用新键创建新定义。`missed`、`overlap`、重试和 Task 回执遵守上述序列规则。[夏令时 UTC 对照与断电验收](../tests/native_calendar.py) · [格式 13 升级](../tests/calendar_upgrade.py)
+
 ## 本机 PsiFlow
 
 `Workflow.Define` 登记一份不可变的本机 Task 依赖图。每步提供 `id`、`tool`、字面量 `input` 和所依赖的 `after` 步骤 ID。当前支持 1 至 16 步，定义体最多 128 KiB。Core 检查重复 ID、悬空引用与回环，并固定当时登记的工具引用。以同一键重发相同定义会得到原引用。修改定义时使用新键。
@@ -151,6 +162,16 @@ jq -n --argjson definition "$definition" --arg grant "$grant" --arg until "$(dat
 ```
 
 `Workflow.Get` 返回运行修订、定义引用、截止时间，以及各步骤的 Task 回执和已观察修订。后继步骤只在全部前驱已知成功时进入准入。前驱出现未知效果时保留 `Blocked/Unknown`，原 Operation 完成对账后继续。用 `Workflow.Cancel` 提交 ID 和当前修订可关闭派发并取消在途 Task，已经发生的效果仍可从原 Task 和 Operation 查阅。[审批、撤权和队列验收](../tests/test_workflow.py) · [升级验收](../tests/workflow_upgrade.py)
+
+## 本机私聊
+
+通过 `Conversation.OpenDirect` 提交 `key`、`name`、`recipient_principal_id` 和邀请 `ttl_seconds`。发起者需要 `chat.invite` 与 `chat.read`，受邀主体可用 `Conversation.List` 查找邀请，再以 `Conversation.Respond` 提交会话 ID、`expected_resource_version` 和 `accept`。一份会话固定两位主体，同一主体对可创建不同名称的多个会话。
+
+双方加入后，发送者用 `Message.OpenSendWindow` 获取本会话和主体的 `namespace`。`Message.Prepare` 接受 `conversation_id`、形如 `namespace:client-key` 的 `client_send_id`、`text`，以及可选的同会话 `reply_to_message_id`。将生成的请求原样提交 `Message.Send`，Core 按 v1 摘要校验，在一个权威事务内提交消息及发送回执。有效窗口内，同键同请求重发返回原消息 ID 和序号。同键内容改变会冲突。窗口绑定实际授权发送者读写和接收者读取的委托。无关授权变化保留原窗口。窗口到期、相关委托失效，或恢复涉及会话成员的本机所有者凭据后，旧命名空间会被拒绝。
+
+`Message.List` 的 cursor 绑定当前主体、会话、成员修订和授权代次。客户端可用 `Message.AckRead` 单调确认该游标处的已读位点。`Message.Get` 以 `conversation_id`、`message_id` 和可选 `content_ref` 查询固定正文。对邀请、正文或历史的读取均按两位成员和实际 `chat.read` 裁决。成员会话记录使用独立的有序拉取接口。会话所有者可按当前修订归档，双方保留有权读取的历史。
+
+当前每条消息包含至多 4096 个 UTF-8 字节，每页最多 32 条。会话最多保留 1024 条消息，节点最多保留 16384 条。权威容量闸门仍保护状态盘的提交余量。回执的持久性范围为本机进程故障。[私聊规范](v1/docs/10-conversations.md) · [成员、重发和故障验收](../tests/test_chat.py) · [格式 12 升级](../tests/chat_upgrade.py)
 
 ## 运行一个持久的 Agent 会话
 

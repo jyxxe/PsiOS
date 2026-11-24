@@ -115,6 +115,14 @@ jobs:
           git archive 26b66ffe7df09525969679b65860f66b00c2698b Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-previous"
           cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-previous/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-previous/target"
           python3 tests/upgrade.py --previous-bin "$RUNNER_TEMP/psios-previous/target/debug"
+      - name: Refuse crossing a real bind mount during volume capacity accounting
+        run: |
+          sudo unshare --mount --propagation private env PSIOS_TEST_VOLUME_BIND=1 \
+            python3 -B -m unittest discover -s tests -p test_volume_usage.py -k test_mount_boundary -v
+      - name: Observe real tmpfs, bind, mount flags and path bytes in a private namespace
+        run: |
+          sudo unshare --mount --propagation private env PSIOS_TEST_MOUNT_TOPOLOGY=1 \
+            python3 -B -m unittest discover -s tests -p test_mounts.py -k test_private_tmpfs -v
       - name: Exercise authority backpressure on a bounded Linux filesystem
         run: |
           scratch=$(mktemp -d)
@@ -127,6 +135,8 @@ jobs:
               python3 -B -m unittest discover -s tests -p test_backup.py -k test_restore_preflights -v
             TMPDIR="$1" PSIOS_TEST_CAPACITY_ALLOCATION=1 runuser -u "$2" -- \
               python3 -B -m unittest discover -s tests -p test_schedule.py -k test_waits_for_authority -v
+            TMPDIR="$1" PSIOS_TEST_CAPACITY_ALLOCATION=1 runuser -u "$2" -- \
+              python3 -B -m unittest discover -s tests -p test_chat.py -k test_low_disk -v
           ' psios-headroom "$scratch" "$(id -un)"
       - name: Migrate active and completed model calls from format 4
         run: |
@@ -177,6 +187,30 @@ jobs:
           git archive ad512d24f0f6dfbbd69c6e68b3c29de3efa1798e Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format11"
           CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format11/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format11/target"
           python3 tests/workflow_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format11/target/debug"
+      - name: Migrate format 12 and exercise direct chat with a retained workflow
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format12"
+          git archive afb73c71ce7a75b3cc7fa89c7d41c8d52dc828c0 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format12"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format12/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format12/target"
+          python3 tests/chat_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format12/target/debug"
+      - name: Retain pending timers and direct chat when migrating format 13
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format13"
+          git archive 6735900e933346ec944fea285cf3358495e8ea62 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format13"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format13/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format13/target"
+          python3 tests/calendar_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format13/target/debug"
+      - name: Upgrade the volume usage catalog without widening existing grants
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format14"
+          git archive 9d40b0a24e2b93bed7615739c9f8f5bbc63a13c8 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format14"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format14/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format14/target"
+          python3 tests/volume_usage_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format14/target/debug"
+      - name: Publish mount topology without widening format 15 inventory grants
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format15"
+          git archive 588cb54ddde884db6350d989db87f58fc4b88a93 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format15"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format15/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format15/target"
+          python3 tests/mounts_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format15/target/debug"
       - name: Verify real systemd service control and crash reconciliation
         run: |
           sudo loginctl enable-linger "$(id -un)"

@@ -299,6 +299,61 @@ fn kill_after_host_write_requires_observed_postcondition() {
 }
 
 #[test]
+fn workflow_step_inherits_the_runs_elapsed_deadline() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, mut store) = initialized(tmp.path());
+    let grant = call(
+        &mut store,
+        "Grant.Issue",
+        json!({"principal_id":policy::OWNER, "actions":[workflow::ACTION,"task.submit","task.read","system.status"],
+               "tool_targets":["profile-local"],"units":1,"ttl_seconds":120}),
+    )
+    .unwrap();
+    let definition = call(
+        &mut store,
+        "Workflow.Define",
+        json!({"key":"elapsed-step", "steps":[{"id":"observe","tool":"system.status","input":{},"after":[]}]}),
+    )
+    .unwrap();
+    let run = call(
+        &mut store,
+        "Workflow.Start",
+        json!({"key":"elapsed-run","definition_ref":definition["reference"],
+               "delegation_id":grant["delegation_ref"]["resource_id"],"deadline_at":after(60)}),
+    )
+    .unwrap();
+    let id = run["reference"]["resource_id"].as_str().unwrap();
+    let cap = store
+        .transaction("narrow-deadline", |db| {
+            let cap = policy::deadline::Clock::sample()?.boot.millis + 25_000;
+            assert_eq!(
+                db.c.execute(
+                    "UPDATE authorization_deadlines SET deadline_boot_ms=?2 WHERE resource=?1",
+                    rusqlite::params![id, cap],
+                )?,
+                1
+            );
+            Ok(cap)
+        })
+        .unwrap();
+    workflow::tick(&mut store).unwrap();
+    let observed = call(&mut store, "Workflow.Get", json!({"id":id})).unwrap();
+    let task = observed["state"]["steps"][0]["task_receipt"]["task_id"]
+        .as_str()
+        .unwrap();
+    let stored: i64 = store
+        .transaction("observe-deadline", |db| {
+            Ok(db.c.query_row(
+                "SELECT deadline_boot_ms FROM authorization_deadlines WHERE resource=?1",
+                [task],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(stored, cap);
+}
+
+#[test]
 fn workflow_keeps_dependents_blocked_until_real_effect_reconciliation() {
     let tmp = tempfile::tempdir().unwrap();
     let (c, mut s) = initialized(tmp.path());

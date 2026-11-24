@@ -136,6 +136,33 @@ jobs:
             --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
             --installer "$RUNNER_TEMP/rescue-core/native/create.py"
 
+      - name: Verify native Secure Boot, firmware rejection and a signed offline upgrade
+        run: |
+          secure_tools="$RUNNER_TEMP/psios-secure-boot-tools"
+          mkdir "$secure_tools"
+          (
+            cd "$secure_tools"
+            apt_opts=(-o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=1)
+            packages=(systemd-boot-efi systemd-ukify python3-pefile python3-virt-firmware python3-cryptography python3-pkg-resources sbsigntool)
+            if ! timeout 180 apt-get "${apt_opts[@]}" download "${packages[@]}"; then
+              sudo timeout 180 apt-get "${apt_opts[@]}" update -q
+              timeout 180 apt-get "${apt_opts[@]}" download "${packages[@]}"
+            fi
+            for package in ./*.deb; do dpkg-deb -x "$package" "$secure_tools/root"; done
+          )
+          export PATH="$secure_tools/root/usr/bin:$PATH"
+          export PYTHONPATH="$secure_tools/root/usr/lib/python3/dist-packages"
+          mkdir "$secure_tools/previous-installer"
+          git archive def4f2a5551274b37dc5807bf081b666be26d3b5 images/native images/rescue \
+            | tar -x -C "$secure_tools/previous-installer"
+          /usr/bin/python3 -B tests/native_secure_boot.py \
+            --efi-stub "$secure_tools/root/usr/lib/systemd/boot/efi/linuxx64.efi.stub" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" \
+            --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
+            --previous-installer "$secure_tools/previous-installer/images/native/create.py" \
+            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
+            --installer "$RUNNER_TEMP/rescue-core/native/create.py"
+
   local-inference:
     needs: portable-core
     runs-on: ubuntu-24.04

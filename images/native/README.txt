@@ -39,6 +39,8 @@ VERIFIED_CORE_SHA256 是上述完整归档核验后记录的 SHA-256。
 
 登录后可执行 psiosctl whoami。外部只读核验使用同一归档的
 rescue/inspect.py，选择 --partition 2 --state /psios --uid 1000。
+可用 --secure-boot-key、--secure-boot-cert、--efi-stub 和 --efi-stub-sha256 构建由目标 UEFI 已登记证书签名的统一内核镜像。需要 ukify、sbsign、sbverify 和 OpenSSL。密钥文件须为构建者私有文件。签名盘回执为格式 3，离线升级沿用同一证书。
+
 救援参数见 rescue/README.txt。本开发盘的验收范围是 amd64 UEFI 虚机。
 每次开机从空的 /tmp 开始，供普通账户写入，容量为 32 MiB 和 4096 个
 inode。持久用户文件可放在主目录。

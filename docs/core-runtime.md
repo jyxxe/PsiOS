@@ -41,7 +41,7 @@ ctl wait "$task" | jq '{reference:.result.artifact_refs[0]}' | ctl call Artifact
 
 ### 路由表观测
 
-`node.routes` 在本机权威所在的网络命名空间直接读取 RTNETLINK。动态路由和管理员配置均由 Linux 路由表提供。可用 `family`（`inet` 或 `inet6`）和数字 `table` 过滤。省略两者时读取两种地址族的全部路由表。默认路由表示为 `0.0.0.0/0` 或 `::/0`。路由记录包含按 Linux 编号表示的 `kind`、`protocol` 和 `scope`，以及目标、源前缀、优先级 `metric`、首选源、网关、出口 ifindex、多下一跳及可选 `nexthop_id`。内核编号和 ifindex 适用于返回的 boot ID 和网络命名空间。下一跳对象细节、实际选路与可达性验证仍待开发。[Linux RTNETLINK](https://docs.kernel.org/userspace-api/netlink/intro.html)
+`node.routes` 在本机权威所在的网络命名空间直接读取 RTNETLINK。动态路由和管理员配置均由 Linux 路由表提供。可用 `family`（`inet` 或 `inet6`）和数字 `table` 过滤。省略两者时读取两种地址族的全部路由表。默认路由表示为 `0.0.0.0/0` 或 `::/0`。路由记录包含按 Linux 编号表示的 `kind`、`protocol` 和 `scope`，以及目标、源前缀、优先级 `metric`、首选源、网关、出口 ifindex、多下一跳及可选 `nexthop_id`。内核编号和 ifindex 适用于返回的 boot ID 和网络命名空间。下一跳对象细节与可达性验证仍待开发。[Linux RTNETLINK](https://docs.kernel.org/userspace-api/netlink/intro.html)
 
 ```bash
 node=$(ctl node | jq -er .reference.resource_id)
@@ -58,6 +58,12 @@ ctl wait "$task" | jq '{reference:.result.artifact_refs[0]}' | ctl call Artifact
 `node.routing_rules` 通过相同的 Task 和制品入口读取 Linux IPv4、IPv6 策略路由规则。向节点目标授予 `node.routing_rules`、`task.submit` 和 `task.read` 后，可用 `{"family":"inet","limit":32}` 提交查询。省略 `family` 时分别采样两个地址族，沿用路由表的分页、字节和时间限制。使用 `next_cursor` 读下一页，主体、委托、过滤条件、命名空间或规则变化时须从首页重查。[策略路由验收](../tests/test_network.py)
 
 `order` 在每个地址族内从零开始，保留内核对同优先级规则的匹配顺序。`action` 和 `flags` 使用 Linux 编号，`table` 为 0 表示未指定固定表，`goto_priority` 表示跳转目标。`selectors` 包含地址前缀、接口名、mark 和掩码、隧道 ID、VRF 选择、UID 和端口范围及 IP 协议。UID 与端口范围为包含两端的 `[start,end]`，UID 按结果中的用户命名空间解释。`suppress_prefixlen` 为 0 时表示抑制默认路由。未解析的内核属性以类型和摘要标记在 `unsupported_attributes`，相关规则的解读覆盖已解析的字段。[Linux FIB 规则协议](https://docs.kernel.org/next/networking/netlink_spec/rt_rule.html)
+
+### 实际选路查询
+
+`node.route_lookup` 通过 `RTM_GETROUTE` 观察一条本机流量的当前选路。将该动作单独授予目标节点后，使用 `{"destination":"127.0.0.1"}` 查询。接受 IPv4 或 IPv6 数字地址，以及可选的同族 `source`、`fwmark`、`output_ifindex` 和 `uid`。端口字段 `source_port`、`destination_port` 与 `transport`（`tcp` 或 `udp`）一起使用。`lookup_uid` 记录用于选路的 UID，省略 `uid` 时使用守护进程 UID。[Linux 路由查询协议](https://docs.kernel.org/next/networking/netlink_spec/rt_route.html)
+
+`Resolved` 返回 Linux 选中的路由表、出口 ifindex、网关和首选源。用 `route.kind` 识别本机目的，表编号保留内核回执。`KernelRejected` 保留内核 `errno`，例如没有可用路由或规则禁止本次查询。每次提交都会重新查内核，已结算结果可作为制品读取。查询在内核中完成，可达性需独立验证。[真实规则和路由变更验收](../tests/test_network.py)
 
 ### 受管 systemd 服务
 
@@ -88,7 +94,9 @@ ctl wait "$task" | jq '{reference:.result.artifact_refs[0]}' | ctl call Artifact
 新启动的容器会记录 Docker Engine ID。如果停止操作在引擎删除容器后丢失回执，应用和卷仍保留占用。运行新的 `application.health` Task，由同一引擎确认原容器及该应用的受管实例均已消失。把该检查的 ArtifactRef 作为 `evidence_ref` 提交至 `Operation.Reconcile`，服务才会一并结算停止操作、运行实例和卷解绑。引擎不可达、引擎身份变化、容器仍在或使用旧版缺少引擎身份的记录时，都无法用缺失观测释放卷。
 启动流程会在核验容器配置后、请求 Docker 启动前，将引擎 ID、容器 ID、原 Operation 和应用、卷修订存入带见证的检查点。Core 在派发前和收到启动回执后检查 Docker 报告的 CPU、内存、禁用 swap、PID 和临时目录限额，同时核对只读根、独立命名空间、无额外设备与特权，以及获准的卷绑定。原生临时目录 `/tmp` 带有 `noexec`、`nosuid` 和 `nodev`。
 
-若启动回执丢失，先运行新的 `application.health`，再向 `Operation.Reconcile` 提交该 ArtifactRef。只有同一引擎确认原容器正在运行、镜像与隔离配置匹配，才会一次性登记运行实例、挂载卷并结算原任务。此过程不会重复启动容器。容器只完成创建、已经退出、隔离配置发生变化、引擎不可达，或中断发生在检查点写入之前时，原操作继续保留占用。旧版产生的未知启动也需要另行核实。
+使用本机 cgroup v2 时，针对运行中的容器，Core 还会核对宿主 PID 所属的 Docker cgroup，从内核读取 CPU 配额与 burst、内存、swap 和进程数限额。`effective_limits.source` 为 `LinuxCgroupV2` 时，观测附带实际限额及 cgroup inode。旧 cgroup v1 配置沿用引擎检查，观测来源为 `DockerCgroupV1`。[Linux cgroup v2 控制项](https://docs.kernel.org/admin-guide/cgroup-v2.html)
+
+若启动回执丢失，先运行新的 `application.health`，再向 `Operation.Reconcile` 提交该 ArtifactRef。同一引擎须确认原容器仍在运行，镜像、隔离配置和限额观测符合获准范围，Core 才会登记运行实例、挂载卷并结算原任务。容器只完成创建、已经退出、配置或读出的限额不符、引擎不可达，或中断发生在检查点写入之前时，原操作继续保留占用。旧版生成的观测须用新检查刷新后再提交对账。[真实 Docker 对账验收](../tests/oci_recovery.py)
 
 ## 身份与权限
 

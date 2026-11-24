@@ -42,7 +42,7 @@ struct NextHop {
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Serialize)]
-struct Route {
+pub(super) struct Route {
     family: Family,
     table: u32,
     destination: Prefix,
@@ -100,7 +100,7 @@ fn next_hop(hop: RouteNextHop) -> Result<NextHop> {
     })
 }
 
-fn route(family: Family, table: u32, record: RouteMessage) -> Result<Route> {
+pub(super) fn route(family: Family, table: u32, record: RouteMessage) -> Result<Route> {
     let header = record.header;
     let (default, max_prefix, expected_family) = match family {
         Family::Inet => (Ipv4Addr::UNSPECIFIED.into(), 32, AddressFamily::Inet),
@@ -167,6 +167,17 @@ fn route(family: Family, table: u32, record: RouteMessage) -> Result<Route> {
     Ok(item)
 }
 
+pub(super) fn table(record: &RouteMessage) -> u32 {
+    record
+        .attributes
+        .iter()
+        .find_map(|attribute| match attribute {
+            RouteAttribute::Table(value) => Some(*value),
+            _ => None,
+        })
+        .unwrap_or_else(|| record.header.table.into())
+}
+
 fn collect(q: &RouteQuery) -> Result<Vec<Route>> {
     let mut observer = Observer::open()?;
     let mut routes = Vec::new();
@@ -186,14 +197,7 @@ fn collect(q: &RouteQuery) -> Result<Vec<Route>> {
             if record.header.flags.contains(RouteFlags::Cloned) {
                 return Ok(());
             }
-            let table = record
-                .attributes
-                .iter()
-                .find_map(|attr| match attr {
-                    RouteAttribute::Table(v) => Some(*v),
-                    _ => None,
-                })
-                .unwrap_or_else(|| record.header.table.into());
+            let table = table(&record);
             if q.table.is_none_or(|wanted| wanted == table) {
                 routes.push(route(family, table, record)?);
             }

@@ -2,14 +2,15 @@
 import argparse
 import io
 import json
+import os
 import subprocess
 import tarfile
 
 from support import Failure, Node, key, target
-from oci_recovery import lose_start_receipt, lose_stop_receipt
+from oci_recovery import check_kernel_limits, lose_start_receipt, lose_stop_receipt
 
 
-def main(binaries):
+def main(binaries, previous_binaries=None):
     node = Node(binaries)
     tag = "psios-acceptance:" + key()
     upgraded_tag = tag + "-upgrade"
@@ -69,6 +70,8 @@ int main(void) {
         assert inspected["HostConfig"]["Memory"] == spec["memory_max_bytes"]
         assert inspected["HostConfig"]["MemorySwap"] == spec["memory_max_bytes"]
         assert inspected["HostConfig"]["PidsLimit"] == 16
+        if os.getenv("PSIOS_TEST_OCI_KERNEL_LIMITS"):
+            check_kernel_limits(node.get(app_id)["value"]["last_observation"], docker, cid)
         volume = node.get(volume["resource_id"])["reference"]
         busy = node.wait(node.submit("backup.create", target(volume)))
         assert busy["lifecycle"] == "Failed" and busy["conditions"][0]["type"] == "Conflict", busy
@@ -126,7 +129,7 @@ int main(void) {
         assert node.get(app_id)["value"]["readiness"] == "NotReady"
         app = node.perform("application.stop", target(app))
         app = node.perform("application.select_release", dict(target=target(app), release_ref=previous_release))
-        app = lose_start_receipt(node, app, volume)
+        app = lose_start_receipt(node, app, volume, previous_binaries)
         reverted = node.perform("application.health", target(app))["container_id"]
         assert json.loads(subprocess.check_output(docker + ["inspect", reverted]))[0]["Image"] == image_id
         app = lose_stop_receipt(node, app, reverted, volume)
@@ -153,4 +156,6 @@ int main(void) {
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--bin-dir", default="target/debug")
-    main(parser.parse_args().bin_dir)
+    parser.add_argument("--previous-bin-dir", help="same database format, prior OCI evidence policy")
+    args = parser.parse_args()
+    main(args.bin_dir, args.previous_bin_dir)

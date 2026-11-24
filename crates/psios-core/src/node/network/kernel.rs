@@ -1,14 +1,15 @@
-//! Authenticated, bounded RTNETLINK dumps in the caller's network namespace.
+//! Authenticated, bounded RTNETLINK observations in the caller's network namespace.
 use super::{Address, Interface};
 use crate::{Result, err, require};
 use netlink_packet_core::{
-    NLM_F_DUMP, NLM_F_DUMP_INTR, NLM_F_REQUEST, NetlinkBuffer, NetlinkMessage, NetlinkPayload,
-    Parseable,
+    NLM_F_DUMP, NLM_F_DUMP_INTR, NLM_F_MULTIPART, NLM_F_REQUEST, NetlinkBuffer, NetlinkMessage,
+    NetlinkPayload, Parseable,
 };
 use netlink_packet_route::{
     AddressFamily, RouteNetlinkMessage,
     address::{AddressAttribute, AddressMessage, AddressScope},
     link::{LinkAttribute, LinkFlags, LinkLayerType, LinkMessage},
+    route::RouteMessage,
 };
 use rustix::{
     event::{PollFd, PollFlags, Timespec, poll},
@@ -27,6 +28,11 @@ pub(super) struct Observer {
     socket: OwnedFd,
     deadline: Instant,
     sequence: u32,
+}
+
+pub(super) enum RouteReply {
+    Resolved(RouteMessage),
+    Rejected(u32),
 }
 
 impl Observer {
@@ -90,15 +96,11 @@ impl Observer {
         }
     }
 
-    pub(super) fn dump(
-        &mut self,
-        query: RouteNetlinkMessage,
-        mut observe: impl FnMut(RouteNetlinkMessage) -> Result<()>,
-    ) -> Result<()> {
+    fn send(&mut self, query: RouteNetlinkMessage, flags: u16) -> Result<()> {
         self.sequence += 1;
         let mut request = NetlinkMessage::from(query);
         request.header.sequence_number = self.sequence;
-        request.header.flags = NLM_F_DUMP | NLM_F_REQUEST;
+        request.header.flags = flags | NLM_F_REQUEST;
         request.finalize();
         let mut encoded = vec![0; request.buffer_len()];
         request.serialize(&mut encoded);
@@ -107,8 +109,23 @@ impl Observer {
         require(
             size == encoded.len(),
             "DependencyUnavailable",
-            "incomplete network dump request",
-        )?;
+            "incomplete network query request",
+        )
+    }
+
+    pub(super) fn lookup(&mut self, request: RouteMessage) -> Result<RouteReply> {
+        self.send(RouteNetlinkMessage::GetRoute(request), 0)?;
+        let mut buf = vec![0; 128 * 1024];
+        let size = self.receive(&mut buf)?;
+        lookup_reply(&buf[..size], self.sequence)
+    }
+
+    pub(super) fn dump(
+        &mut self,
+        query: RouteNetlinkMessage,
+        mut observe: impl FnMut(RouteNetlinkMessage) -> Result<()>,
+    ) -> Result<()> {
+        self.send(query, NLM_F_DUMP)?;
         let mut buf = vec![0; 128 * 1024];
         let mut bytes = 0;
         loop {
@@ -126,27 +143,53 @@ impl Observer {
     }
 }
 
+fn message(bytes: &[u8], sequence: u32) -> Result<(NetlinkMessage<RouteNetlinkMessage>, &[u8])> {
+    let invalid = |_| err("DependencyUnavailable", "invalid kernel network message");
+    let buffer = NetlinkBuffer::new_checked(&bytes).map_err(invalid)?;
+    let reply = NetlinkMessage::parse(&buffer).map_err(invalid)?;
+    require(
+        reply.header.sequence_number == sequence,
+        "DependencyUnavailable",
+        "unexpected network reply sequence",
+    )?;
+    require(
+        reply.header.flags & NLM_F_DUMP_INTR == 0,
+        "Conflict",
+        "network dump interrupted by change",
+    )?;
+    let len = buffer.length() as usize;
+    Ok((reply, &bytes[len.next_multiple_of(4).min(bytes.len())..]))
+}
+
+fn lookup_reply(bytes: &[u8], sequence: u32) -> Result<RouteReply> {
+    let (reply, rest) = message(bytes, sequence)?;
+    require(
+        rest.is_empty() && reply.header.flags & NLM_F_MULTIPART == 0,
+        "DependencyUnavailable",
+        "unexpected multipart response to kernel route lookup",
+    )?;
+    match reply.payload {
+        NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewRoute(route)) => {
+            Ok(RouteReply::Resolved(route))
+        }
+        NetlinkPayload::Error(error) if error.raw_code() < 0 => {
+            Ok(RouteReply::Rejected(error.raw_code().unsigned_abs()))
+        }
+        _ => Err(err(
+            "DependencyUnavailable",
+            "unexpected kernel route lookup response",
+        )),
+    }
+}
+
 fn consume(
     mut messages: &[u8],
     sequence: u32,
     observe: &mut impl FnMut(RouteNetlinkMessage) -> Result<()>,
 ) -> Result<bool> {
     while !messages.is_empty() {
-        let invalid = |_| err("DependencyUnavailable", "invalid kernel network message");
-        let buffer = NetlinkBuffer::new_checked(&messages).map_err(invalid)?;
-        let reply = NetlinkMessage::<RouteNetlinkMessage>::parse(&buffer).map_err(invalid)?;
-        let len = buffer.length() as usize;
-        messages = &messages[len.next_multiple_of(4).min(messages.len())..];
-        require(
-            reply.header.sequence_number == sequence,
-            "DependencyUnavailable",
-            "unexpected network dump sequence",
-        )?;
-        require(
-            reply.header.flags & NLM_F_DUMP_INTR == 0,
-            "Conflict",
-            "network dump interrupted by change",
-        )?;
+        let (reply, rest) = message(messages, sequence)?;
+        messages = rest;
         match reply.payload {
             NetlinkPayload::InnerMessage(message) => observe(message)?,
             NetlinkPayload::Done(done) if done.code == 0 && messages.is_empty() => return Ok(true),
@@ -308,7 +351,8 @@ pub(super) fn observe_interfaces() -> Result<Vec<Interface>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use netlink_packet_core::{DoneMessage, NetlinkHeader};
+    use netlink_packet_core::{DoneMessage, ErrorMessage, NetlinkHeader};
+    use std::num::NonZeroI32;
 
     fn packet(mut reply: NetlinkMessage<RouteNetlinkMessage>, flags: u16) -> Vec<u8> {
         reply.header.sequence_number = 17;
@@ -352,5 +396,28 @@ mod tests {
         assert!(consume(&record[..record.len() - 1], 17, &mut observe).is_err());
         assert!(consume(&[done(0, 0), record].concat(), 17, &mut observe).is_err());
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn lookup_accepts_one_matching_route_or_kernel_error() {
+        let route = || RouteNetlinkMessage::NewRoute(RouteMessage::default()).into();
+        let record = packet(route(), 0);
+        let mut rejected = ErrorMessage::default();
+        rejected.code = NonZeroI32::new(-Errno::NETUNREACH.raw_os_error());
+        let failure = packet(
+            NetlinkMessage::new(NetlinkHeader::default(), NetlinkPayload::Error(rejected)),
+            0,
+        );
+        assert!(matches!(
+            lookup_reply(&record, 17),
+            Ok(RouteReply::Resolved(_))
+        ));
+        assert!(
+            matches!(lookup_reply(&failure, 17), Ok(RouteReply::Rejected(code))
+            if code == Errno::NETUNREACH.raw_os_error() as u32)
+        );
+        assert!(lookup_reply(&record, 18).is_err());
+        assert!(lookup_reply(&packet(route(), NLM_F_MULTIPART), 17).is_err());
+        assert!(lookup_reply(&[record.clone(), record].concat(), 17).is_err());
     }
 }

@@ -319,6 +319,7 @@ pub fn perform(w: &Work) -> Result<Value> {
         Action::Inventory {} => inventory(),
         Action::Interfaces(q) => network::interfaces(q),
         Action::Routes(q) => network::observe_routes(q, w),
+        Action::RouteLookup(q) => network::observe_lookup(q),
         Action::RoutingRules(q) => network::observe_rules(q, w),
         Action::Processes(p) => processes(p),
         Action::Devices {} => devices(),

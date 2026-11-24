@@ -58,16 +58,7 @@ mkdir -p /home/psios
 mount -o bind /mnt/psios-homes/psios /home/psios
 mount -o bind /mnt/psios-homes/root /root
 stage=authority
-if [ -f /var/lib/initialize-once ]; then
-    [ "$(stat -c '%u:%g:%a' /var/lib/initialize-once)" = 0:0:444 ]
-    [ ! -e /var/lib/initialization-issued ] && [ ! -e /var/lib/psios ] && [ ! -e /var/lib/psios.witness ] || exit 1
-    mv /var/lib/initialize-once /var/lib/initialization-issued
-    sync -f /var/lib
-    mkdir -m 0700 /var/lib/psios /var/lib/psios.witness
-    chown 1000:1000 /var/lib/psios /var/lib/psios.witness
-    su -s /bin/sh psios -c 'exec /bin/psiosd init'
-fi
-[ -f /var/lib/initialization-issued ]
-su -s /bin/sh psios -c 'exec /bin/psiosd check'
+. /psios-enroll
+enroll_authority
 trap - EXIT
 exec /bin/busybox init

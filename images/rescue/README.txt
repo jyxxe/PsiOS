@@ -27,3 +27,8 @@ SERVICE_UID 为原服务账户的数字 UID。独立 GID 可用 --gid 指定。�
 xorriso、含 x86_64-efi 模块的 GNU GRUB、mtools 和 mkfs.fat。UEFI
 测试还需要标准 4 MiB OVMF。光盘配置了本次检查所需的 UID 与路径，
 重新启动时须把源镜像作为第一个只读 virtio 块设备并读取第二串口。
+
+签名 UEFI 光盘使用 --firmware uefi、已登记证书的 --ovmf-vars、
+--secure-boot-key、--secure-boot-cert、--efi-stub 和 --efi-stub-sha256。
+需要 ukify、sbsign、sbverify 和 OpenSSL。来宾在访问源盘前确认
+Secure Boot，核验成功后方可发布签名 ISO。

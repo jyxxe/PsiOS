@@ -31,7 +31,7 @@ def exercise(binaries):
         pidfile = node.base / "namespace-pid"
         wrapper = subprocess.Popen(["unshare", "--time", "--fork", "--kill-child=TERM", "--boottime", "30",
             "/bin/sh", "-ec", 'printf "%s\\n" "$$" > "$1"; shift; exec "$@"',
-            "psios-time-fixture", pidfile, *node.daemon, "serve"])
+            "psios-time-fixture", pidfile, *node.daemon, "serve"], start_new_session=True)
         pid = None
         try:
             deadline = time.monotonic() + 12
@@ -63,7 +63,12 @@ def exercise(binaries):
                         pass
                 else:
                     wrapper.terminate()
-                wrapper.wait(20)
+                try:
+                    wrapper.wait(20)
+                except subprocess.TimeoutExpired:
+                    os.killpg(wrapper.pid, signal.SIGKILL)
+                    wrapper.wait(5)
+                    raise
         node.start()
         assert status(original) == identity
         print("PASS authority survives a namespace restart; only matching clock evidence authorizes the old grant")

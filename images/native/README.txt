@@ -37,3 +37,18 @@ VERIFIED_CORE_SHA256 是上述完整归档核验后记录的 SHA-256。
 登录后可执行 psiosctl whoami。外部只读核验使用同一归档的
 rescue/inspect.py，选择 --partition 2 --state /psios --uid 1000。
 救援参数见 rescue/README.txt。本开发盘的验收范围是 amd64 UEFI 虚机。
+
+升级已初始化的三分区开发盘时，先停止虚机，保留原 raw 磁盘、EFI
+变量文件和可信的构建回执。使用目标版本的归档和安装器，另需 qemu-img
+及 qemu-system-x86_64。准备一份新的候选盘。
+
+    python3 native/create.py next.raw --upgrade-from node.raw \
+      --previous-receipt node-build.json --kernel-iso "$KERNEL_ISO" \
+      --core-archive "$ARCHIVE" --core-sha256 "$VERIFIED_CORE_SHA256" > next-build.json
+
+构建器核验原启动文件、文件系统和 Core 权威，待重放的 ext4 内部
+日志在限额副本中处理。新盘沿用原节点身份、
+配置和账户。保留原盘及其 EFI 变量，使用变量文件的副本启动候选盘。
+核对候选盘的部署清单和节点身份后再恢复工作。原盘与候选盘只启动
+其中之一。验收失败可关闭候选盘并启动原盘。已有业务写入时，先处置
+候选盘内的新状态与外部效果。

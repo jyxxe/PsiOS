@@ -55,6 +55,11 @@ inode。持久用户文件可放在主目录。
 租约路由和运行时 DNS。支持选项 121 的直连和经网关路由。普通账户可使用 busybox ip -4 addr show、
 busybox ip -4 route show 和 cat /etc/resolv.conf 查看。
 
+新盘也可用 --static-mac 和 --static-address 配置没有 DHCP 的网口。
+--static-gateway 可指定同子网网关，--static-dns 可指定最多三个服务器。
+该配置写入 root 私有文件，网络状态保存在 /run/psios-network/status。
+静态 IPv4 盘使用格式 4 回执，签名盘的证书信息仍在 secure_boot 中。
+
 升级已初始化的三分区开发盘时，先停止虚机，保留原 raw 磁盘、EFI
 变量文件和可信的构建回执。使用目标版本的归档和安装器，另需 qemu-img
 及 qemu-system-x86_64。准备一份新的候选盘。

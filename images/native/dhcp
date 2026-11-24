@@ -1,24 +1,34 @@
 #!/bin/sh
-# BusyBox init supervises this optional, local-console development profile.
+# The legacy invocation starts DHCP. Static IPv4 shares the pinned adapter setup.
 set -eu
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
-config=/etc/psios/dhcp-mac
+profile=${1:-dhcp}
 run=/run/psios-network
 umask 022
 mkdir -p -m 0755 "$run"
 
 retry() {
     printf '%s\n' "$1" > "$run/status"
-    sleep 15
+    [ "$profile" != dhcp ] || sleep 15
     exit 1
 }
 
-[ -f "$config" ] && [ ! -L "$config" ] && [ "$(stat -c '%u:%g:%a:%s' "$config")" = 0:0:600:18 ] || retry 'invalid profile file'
-[ "$(readlink /etc/resolv.conf)" = "$run/resolv.conf" ] || retry 'resolver link does not belong to the DHCP profile'
-mac=$(head -c 19 "$config")
+case "$profile" in
+    dhcp)
+        config=/etc/psios/dhcp-mac
+        [ -f "$config" ] && [ ! -L "$config" ] && [ "$(stat -c '%u:%g:%a:%s' "$config")" = 0:0:600:18 ] || retry 'invalid profile file'
+        mac=$(head -c 19 "$config")
+        ;;
+    static)
+        . /psios-ipv4
+        load_static_ipv4 /etc/psios/static-ipv4 || retry 'invalid static IPv4 profile'
+        ;;
+    *) retry 'unsupported IPv4 profile' ;;
+esac
+[ "$(readlink /etc/resolv.conf)" = "$run/resolv.conf" ] || retry 'resolver link does not belong to the IPv4 profile'
 printf '%s\n' "$mac" | grep -Eq '^[0-9a-f][02468ace](:[0-9a-f]{2}){5}$' || retry 'invalid MAC address'
 [ "${#mac}" -eq 17 ] && [ "$mac" != 00:00:00:00:00:00 ] || retry 'invalid MAC address'
-modprobe virtio_net && modprobe af_packet || retry 'could not load the virtio network driver'
+modprobe virtio_net || retry 'could not load the virtio network driver'
 
 link=
 for device in /sys/class/net/*; do
@@ -31,10 +41,16 @@ done
 [ -n "$link" ] || retry 'configured virtio interface is absent'
 case "$link" in *[!a-zA-Z0-9_.-]*) retry 'unsupported interface name' ;; esac
 
+printf '1\n' > "/proc/sys/net/ipv6/conf/$link/disable_ipv6" || retry 'could not apply the IPv4-only profile'
+ip link set dev "$link" up || retry 'could not bring up the interface'
+if [ "$profile" = static ]; then
+    apply_static_ipv4 || retry "Could not apply static IPv4 on $link"
+    printf 'Static %s on %s\n' "$static_address" "$link" > "$run/status"
+    exit 0
+fi
+modprobe af_packet || retry 'could not load the DHCP packet driver'
 export PSIOS_DHCP_INTERFACE="$link" PSIOS_DHCP_MAC="$mac"
 PSIOS_DHCP_IFINDEX=$(cat "/sys/class/net/$link/ifindex")
 export PSIOS_DHCP_IFINDEX
-printf '1\n' > "/proc/sys/net/ipv6/conf/$link/disable_ipv6" || retry 'could not apply the IPv4-only profile'
-ip link set dev "$link" up || retry 'could not bring up the interface'
 printf 'Waiting for a lease on %s\n' "$link" > "$run/status"
 exec udhcpc -f -R -i "$link" -s /psios-dhcp-event -t 3 -T 3 -A 15 -o -O staticroutes -O subnet -O router -O dns >/dev/null 2>&1

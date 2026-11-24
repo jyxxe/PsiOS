@@ -1,0 +1,83 @@
+# Shared by the MAC-bound DHCP and static IPv4 launch entries.
+ipv4() {
+    local value="$1" IFS=. octet
+    case "$value" in ''|*[!0-9.]*) return 1 ;; esac
+    set -- $value
+    [ "$#" -eq 4 ] && [ "$value" = "$1.$2.$3.$4" ] || return 1
+    for octet do
+        case "$octet" in ''|*[!0-9]*|0[0-9]*|????*) return 1 ;; esac
+        [ "$octet" -le 255 ] || return 1
+    done
+}
+
+unicast_ipv4() {
+    local first=${1%%.*}
+    ipv4 "$1" && [ "$1" != 0.0.0.0 ] && [ "$1" != 255.255.255.255 ] &&
+        { [ "$first" -lt 224 ] || [ "$first" -gt 239 ]; }
+}
+
+ipv4_number() {
+    local IFS=.
+    set -- $1
+    printf '%s\n' "$(( ($1 << 24) | ($2 << 16) | ($3 << 8) | $4 ))"
+}
+
+load_static_ipv4() {
+    local config="$1" server count=0 address prefix address_number host_mask host gateway_number gateway_host
+    [ -f "$config" ] && [ ! -L "$config" ] || return 1
+    [ "$(stat -c '%u:%g:%a:%h' "$config")" = 0:0:600:1 ] && [ "$(stat -c '%s' "$config")" -le 128 ] || return 1
+    static_dns=
+    {
+        IFS= read -r mac && IFS= read -r static_address && IFS= read -r static_gateway || return 1
+        while IFS= read -r server; do
+            count=$((count + 1))
+            [ "$count" -le 3 ] && unicast_ipv4 "$server" || return 1
+            static_dns="$static_dns $server"
+        done
+        [ -z "$server" ] || return 1
+    } < "$config"
+    prefix=${static_address##*/}
+    address=${static_address%/*}
+    case "$prefix" in [0-9]|[12][0-9]|3[012]) ;; *) return 1 ;; esac
+    unicast_ipv4 "$address" && [ "${address%%.*}" != 127 ] || return 1
+    address_number=$(ipv4_number "$address")
+    host_mask=$((0xffffffff >> prefix))
+    host=$((address_number & host_mask))
+    [ "$prefix" -ge 31 ] || { [ "$host" -ne 0 ] && [ "$host" -ne "$host_mask" ]; } || return 1
+    [ "$static_gateway" != - ] || return 0
+    unicast_ipv4 "$static_gateway" && [ "${static_gateway%%.*}" != 127 ] || return 1
+    gateway_number=$(ipv4_number "$static_gateway")
+    gateway_host=$((gateway_number & host_mask))
+    [ "$gateway_number" -ne "$address_number" ] &&
+        [ "$((gateway_number & ~host_mask))" -eq "$((address_number & ~host_mask))" ] || return 1
+    [ "$prefix" -ge 31 ] || { [ "$gateway_host" -ne 0 ] && [ "$gateway_host" -ne "$host_mask" ]; }
+}
+
+apply_static_ipv4() (
+    metric=30320
+    address_added=no
+    gateway_added=no
+    resolver=$(mktemp "$run/.static-resolver.XXXXXXXX") || exit 1
+    rollback() {
+        if [ "$gateway_added" = yes ]; then
+            ip -4 route del default via "$static_gateway" dev "$link" proto 4 metric "$metric" || :
+        fi
+        if [ "$address_added" = yes ]; then
+            ip -4 addr del "$static_address" dev "$link" || :
+        fi
+        rm -f "$resolver"
+    }
+    trap rollback EXIT
+    chmod 0644 "$resolver" || exit 1
+    for server in $static_dns; do
+        printf 'nameserver %s\n' "$server" >> "$resolver" || exit 1
+    done
+    ip -4 addr add "$static_address" dev "$link" || exit 1
+    address_added=yes
+    if [ "$static_gateway" != - ]; then
+        ip -4 route add default via "$static_gateway" dev "$link" proto 4 metric "$metric" || exit 1
+        gateway_added=yes
+    fi
+    mv -fT "$resolver" "$run/resolv.conf" || exit 1
+    trap - EXIT
+)

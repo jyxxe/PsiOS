@@ -73,6 +73,20 @@ def load_core(console):
     assert counter(console, "pids.events", "max") > before
     print("Observed kernel rejection at the Core PID limit", flush=True)
 
+    # Make the kernel reject the daemon's own connection thread while its
+    # workers are already running. The root console stays outside the cgroup.
+    daemon = console.run("pidof psiosd")
+    console.run(f"for i in $(seq 1 30); do threads=$(ls /proc/{daemon}/task | wc -l); "
+        f'[ "$(cat {GROUP}/pids.current)" -eq "$threads" ] && exit 0; sleep 0.1; done; exit 1')
+    before = counter(console, "pids.events", "max")
+    console.run(f"pids=$(cat {GROUP}/pids.current); echo \"$pids\" > {GROUP}/pids.max && "
+        "! su -s /bin/sh psios -c 'psiosctl whoami' >/dev/null 2>&1")
+    console.run(f"echo 24 > {GROUP}/pids.max")
+    assert counter(console, "pids.events", "max") > before
+    assert console.run("pidof psiosd") == daemon
+    console.run("su -s /bin/sh psios -c 'psiosctl whoami' >/dev/null")
+    print("Observed the same Core process recover RPC service after PID exhaustion", flush=True)
+
     daemon = console.run("pidof psiosd")
     before = counter(console, "memory.events.local", "oom_group_kill")
     script = shlex.quote('BEGIN { s="test"; for(i=0;i<25;i++) s=s s; print length(s) }')
@@ -160,7 +174,18 @@ def exercise(args, work):
         assert console.vm.wait(35) == 0
     check_clean_shutdown(upgraded)
     refuse_unavailable_controller(args, work, upgraded, next_receipt)
-    print("PASS native CPU throttling, PID and OOM enforcement, supervised recovery and limit-preserving upgrade")
+    tiny = work / "incomplete-workers.raw"
+    subprocess.run([*installer, tiny, *inputs, "--console-hash", operator_hash, "--root-console-hash", root_hash,
+                    *FLAGS[:-1], "3"], check=True, stdout=subprocess.DEVNULL, timeout=150)
+    with boot(work, tiny) as console:
+        console.login("root", root)
+        preceding = console.until(b"could not start Core workers")
+        assert b"psiosd ready" not in preceding, preceding
+        console.run("! su -s /bin/sh psios -c 'psiosctl whoami' >/dev/null 2>&1")
+        console.send("cd /; exec poweroff")
+        assert console.vm.wait(35) == 0
+    check_clean_shutdown(tiny)
+    print("PASS native CPU, PID and OOM enforcement, RPC and startup pressure, recovery and upgrade")
 
 
 if __name__ == "__main__":

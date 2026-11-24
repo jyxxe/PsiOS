@@ -149,7 +149,13 @@ fn connection(s: &Shared, stream: &mut UnixStream, stop: &AtomicBool) -> Result<
 fn worker(s: Shared, stop: Arc<AtomicBool>, tick: Duration) -> Result<()> {
     while !stop.load(Ordering::Acquire) {
         let correlation = id("scheduler");
-        let task = state(&s)?.transaction(&correlation, broker::claim)?;
+        let task = {
+            let mut store = state(&s)?;
+            if stop.load(Ordering::Acquire) {
+                break;
+            }
+            store.transaction(&correlation, broker::claim)?
+        };
         let Some(task) = task else {
             thread::sleep(tick);
             continue;
@@ -249,6 +255,15 @@ fn bind(path: &Path) -> Result<(UnixListener, Endpoint<'_>)> {
     socket.set_nonblocking(true)?;
     Ok((socket, ep))
 }
+
+fn resource_pressure(error: &std::io::Error) -> bool {
+    use rustix::io::Errno;
+    matches!(
+        error.raw_os_error().map(Errno::from_raw_os_error),
+        Some(Errno::AGAIN | Errno::MFILE | Errno::NFILE | Errno::NOBUFS | Errno::NOMEM)
+    )
+}
+
 pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     let mut db = Store::open(cfg.clone())?;
     let (listener, _endpoint) = bind(&cfg.socket)?;
@@ -256,17 +271,27 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     db.transaction("restart-recovery", broker::recover)?;
     let db = Arc::new(Mutex::new(db));
     let mut workers = Vec::new();
-    let scheduling = db.clone();
-    let shutdown = stop.clone();
-    workers.push(thread::spawn(move || timer(scheduling, shutdown)));
-    for _ in 0..cfg.workers {
-        let running = db.clone();
+    // Withhold the authority from workers until every required thread exists.
+    let startup_guard = state(&db)?;
+    let startup = (|| -> std::io::Result<()> {
+        let scheduling = db.clone();
         let shutdown = stop.clone();
+        workers.push(thread::Builder::new().spawn(move || timer(scheduling, shutdown))?);
         let tick = Duration::from_millis(cfg.tick_ms);
-        workers.push(thread::spawn(move || worker(running, shutdown, tick)));
+        for _ in 0..cfg.workers {
+            let running = db.clone();
+            let shutdown = stop.clone();
+            workers.push(thread::Builder::new().spawn(move || worker(running, shutdown, tick))?);
+        }
+        Ok(())
+    })();
+    if startup.is_ok() {
+        eprintln!("psiosd ready on {}", cfg.socket.display());
+    } else {
+        stop.store(true, Ordering::Release);
     }
+    drop(startup_guard);
     let mut clients: Vec<(UnixStream, thread::JoinHandle<()>)> = Vec::new();
-    eprintln!("psiosd ready on {}", cfg.socket.display());
     let mut accept_error = None;
     while !stop.load(Ordering::Acquire) && !workers.iter().any(thread::JoinHandle::is_finished) {
         let mut i = 0;
@@ -282,6 +307,11 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
             Ok((mut stream, _)) if clients.len() < 32 => {
                 let cancel = match stream.try_clone() {
                     Ok(s) => s,
+                    Err(e) if resource_pressure(&e) => {
+                        let _ = stream.shutdown(Shutdown::Both);
+                        thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
                     Err(e) => {
                         accept_error = Some(e);
                         break;
@@ -289,12 +319,19 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
                 };
                 let s = db.clone();
                 let stop = stop.clone();
-                clients.push((
-                    cancel,
-                    thread::spawn(move || {
-                        let _ = connection(&s, &mut stream, &stop);
-                    }),
-                ));
+                match thread::Builder::new().spawn(move || {
+                    let _ = connection(&s, &mut stream, &stop);
+                }) {
+                    Ok(client) => clients.push((cancel, client)),
+                    Err(e) if resource_pressure(&e) => {
+                        let _ = cancel.shutdown(Shutdown::Both);
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(e) => {
+                        accept_error = Some(e);
+                        break;
+                    }
+                }
             }
             Ok((stream, _)) => {
                 let _ = stream.shutdown(Shutdown::Both);
@@ -302,6 +339,7 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(5))
             }
+            Err(e) if resource_pressure(&e) => thread::sleep(Duration::from_millis(10)),
             Err(e) => {
                 accept_error = Some(e);
                 break;
@@ -328,6 +366,12 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
         }
     }
     result?;
+    startup.map_err(|e| {
+        err(
+            "DependencyUnavailable",
+            format!("could not start Core workers: {e}"),
+        )
+    })?;
     if let Some(e) = accept_error {
         return Err(e.into());
     }

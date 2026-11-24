@@ -1,5 +1,7 @@
 //! Local, immutable DAG definitions and durable Task-broker admission.
+mod binding;
 mod condition;
+mod output;
 mod run;
 
 use crate::{
@@ -9,6 +11,7 @@ use crate::{
     host::Action,
     label, policy, require,
 };
+use binding::Bindings;
 use chrono::{DateTime, SecondsFormat, Utc};
 use condition::Predicate;
 use psios_api::{canonical, sha256};
@@ -34,6 +37,8 @@ struct Step {
     after_selected: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     when: Option<Predicate>,
+    #[serde(default, skip_serializing_if = "Bindings::is_empty")]
+    inputs_from: Bindings,
 }
 
 impl Step {
@@ -41,8 +46,8 @@ impl Step {
         self.after.iter().chain(&self.after_selected)
     }
 
-    fn uses_branching(&self) -> bool {
-        self.when.is_some() || !self.after_selected.is_empty()
+    fn dsl_version(&self) -> u8 {
+        dsl_version(&self.inputs_from, &self.when, &self.after_selected)
     }
 }
 
@@ -78,8 +83,30 @@ struct PreparedStep {
     after_selected: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     when: Option<Predicate>,
+    #[serde(default, skip_serializing_if = "Bindings::is_empty")]
+    inputs_from: Bindings,
     tool_ref: Value,
     request: Value,
+}
+
+impl PreparedStep {
+    fn dsl_version(&self) -> u8 {
+        dsl_version(&self.inputs_from, &self.when, &self.after_selected)
+    }
+}
+
+fn dsl_version(
+    bindings: &Bindings,
+    condition: &Option<Predicate>,
+    after_selected: &[String],
+) -> u8 {
+    if !bindings.is_empty() {
+        3
+    } else if condition.is_some() || !after_selected.is_empty() {
+        2
+    } else {
+        1
+    }
 }
 
 fn stable_id(kind: &str, input: &Value) -> String {
@@ -120,6 +147,7 @@ fn plan(db: &Db<'_>, steps: Vec<Step>) -> Result<Vec<FrozenStep>> {
         if let Some(predicate) = &step.when {
             predicate.validate(&step.after)?;
         }
+        binding::validate(step)?;
     }
     let mut visited = BTreeSet::new();
     while visited.len() < steps.len() {
@@ -169,11 +197,12 @@ pub fn define(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         return Ok(definition(&existing));
     }
     db.cfg.check_admission_space()?;
-    let version = if request.steps.iter().any(Step::uses_branching) {
-        2
-    } else {
-        1
-    };
+    let version = request
+        .steps
+        .iter()
+        .map(Step::dsl_version)
+        .max()
+        .unwrap_or(1);
     let steps = plan(db, request.steps)?;
     let mut spec = json!({"dsl_version": version, "definition_version": "r1", "steps": steps});
     spec["definition_digest"] = json!(sha256(&canonical(&spec)));
@@ -253,18 +282,22 @@ pub fn start(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     let d = db.resolve(&request.definition_ref)?;
     policy::owned(actor, &d)?;
     require(
-        d.kind == DEFINITION && matches!(d.spec["dsl_version"].as_u64(), Some(1 | 2)),
+        d.kind == DEFINITION && matches!(d.spec["dsl_version"].as_u64(), Some(1..=3)),
         "UnsupportedCapability",
         "unsupported workflow definition",
     )?;
     let frozen: Vec<FrozenStep> = decode(&d.spec["steps"])?;
-    let conditional = frozen.iter().any(|step| step.step.uses_branching());
+    let version = frozen
+        .iter()
+        .map(|step| step.step.dsl_version())
+        .max()
+        .unwrap_or(1);
     require(
-        conditional == (d.spec["dsl_version"] == 2),
+        d.spec["dsl_version"] == version,
         "RecoveryRequired",
-        "workflow definition version disagrees with conditional steps",
+        "workflow definition version disagrees with its steps",
     )?;
-    if conditional {
+    if version > 1 {
         policy::delegation(db, actor, &request.delegation_id, "task.read")?;
     }
     db.cfg.check_admission_space()?;
@@ -315,6 +348,7 @@ pub fn start(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
                 after: step.after,
                 after_selected: step.after_selected,
                 when: step.when,
+                inputs_from: step.inputs_from,
                 tool_ref,
                 request: task,
             })

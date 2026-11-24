@@ -101,6 +101,22 @@ pub fn retime_scheduled(template: &Value, trigger_id: &str, deadline_at: &str) -
     s["deadline_at"] = json!(deadline_at);
     seal_request(s)
 }
+pub(crate) fn bind_workflow_input(
+    db: &Db<'_>,
+    actor: &str,
+    template: &Value,
+    input: &Value,
+) -> Result<Value> {
+    require(
+        template["origin_ref"]["origin_type"] == "WorkflowRun",
+        "RecoveryRequired",
+        "workflow input requires a workflow request template",
+    )?;
+    Action::parse(field(template, "task_type"), input)?;
+    let mut s = template.clone();
+    s["input_ref"] = policy::intern_input(db, actor, input)?.reference();
+    seal_request(s)
+}
 fn seal_request(mut s: Value) -> Result<Value> {
     s["request_digest"] = json!(digest("task-submit", "request_digest", &s)?);
     contract("task-submit", &s)?;

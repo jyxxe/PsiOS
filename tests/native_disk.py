@@ -1,8 +1,10 @@
 """Boot a generated disk from OVMF, use its local console and recover after power loss."""
 import argparse
+import base64
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
+import hmac
 import importlib.util
 import json
 import os
@@ -217,9 +219,11 @@ def check_recovered_chat(c, observed):
 
 def check_native_workflow(c):
     node = json.loads(c.run("psiosctl node"))["reference"]["resource_id"]
+    key = "native-workflow-fixture"
+    secret = call(c, "Secret.Put", {"name": "native-workflow-key", "value": key})["resource_id"]
     grant = call(c, "Grant.Issue", {
-        "principal_id": "local-owner", "tool_targets": ["profile-local", node], "units": 4, "ttl_seconds": 120,
-        "actions": ["workflow.manage", "task.submit", "task.read", "system.status", "node.inventory"],
+        "principal_id": "local-owner", "tool_targets": ["profile-local", node, secret], "units": 5, "ttl_seconds": 120,
+        "actions": ["workflow.manage", "task.submit", "task.read", "system.status", "node.inventory", "secret.mac"],
     })
     definition = call(c, "Workflow.Define", {
         "key": "native-offline-workflow",
@@ -230,8 +234,11 @@ def check_native_workflow(c):
             {"id": "unselected", "tool": "node.inventory", "after": ["status"], "input": {},
              "when": {"step": "status", "pointer": "/authority_id", "equals": "other-node"}},
             {"id": "join", "tool": "system.status", "after": [], "after_selected": ["inventory", "unselected"], "input": {}},
+            {"id": "seal", "tool": "secret.mac", "after": ["join"], "input": {"secret_id": secret, "message": ""},
+             "inputs_from": {"message": {"step": "join", "pointer": "/authority_id"}}},
         ],
     })
+    assert definition["definition"]["dsl_version"] == 3
     stamp = int(c.run("date -u +%s"))
     run = call(c, "Workflow.Start", {
         "key": "native-offline-workflow-run", "definition_ref": definition["reference"],
@@ -248,7 +255,7 @@ def check_native_workflow(c):
         assert time.monotonic() < deadline, observed
         time.sleep(0.15)
     assert (phase, observed["state"]["outcome_knowledge"]) == ("Succeeded", "Known"), observed
-    inventory, status, unselected, join = observed["state"]["steps"]
+    inventory, status, unselected, join, seal = observed["state"]["steps"]
     assert (inventory["lifecycle"], status["lifecycle"]) == ("Succeeded", "Succeeded")
     assert inventory["condition"]["selected"] is True and inventory["condition"]["source_task_ref"] == status["task_ref"]
     assert unselected["lifecycle"] == "Skipped" and unselected["task_receipt"] is None
@@ -260,6 +267,13 @@ def check_native_workflow(c):
     artifact, = task["result"]["artifact_refs"]
     report = call(c, "Artifact.Read", {"reference": artifact})
     assert report["memory_bytes"]["MemTotal"] > 0, report
+    binding = seal["input_binding"]
+    assert binding["sources"][0]["source_task_ref"] == join["task_ref"]
+    assert seal["task_receipt"]["request_digest"] == binding["request_digest"]
+    sealed = call(c, "Task.Get", {"id": seal["task_receipt"]["task_id"]})
+    mac_artifact, = sealed["result"]["artifact_refs"]
+    result = call(c, "Artifact.Read", {"reference": mac_artifact})
+    assert base64.b64decode(result["tag"]) == hmac.digest(key.encode(), node.encode(), "sha256")
     return observed
 
 

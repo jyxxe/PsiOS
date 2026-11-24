@@ -1,4 +1,4 @@
-use super::{ACTION, PreparedStep, RUN, check_tool, run_view};
+use super::{ACTION, PreparedStep, RUN, binding, check_tool, run_view};
 use crate::{
     Conditional, Result, Store, broker,
     db::{Db, Doc},
@@ -140,13 +140,17 @@ fn dispatch(
         "workflow index disagrees with dispatch state",
     )?;
     let steps: Vec<PreparedStep> = decode(&run.spec["steps"])?;
+    let version = steps
+        .iter()
+        .map(PreparedStep::dsl_version)
+        .max()
+        .unwrap_or(1);
+    // Early DSL 1 definitions declared their version, while their runs omitted it.
+    let stored_version = run.spec.get("dsl_version").map_or(Some(1), Value::as_u64);
     require(
-        steps
-            .iter()
-            .any(|step| step.when.is_some() || !step.after_selected.is_empty())
-            == (run.spec["dsl_version"] == 2),
+        stored_version == Some(u64::from(version)),
         "RecoveryRequired",
-        "workflow run version disagrees with conditional steps",
+        "workflow run version disagrees with its steps",
     )?;
     let statuses = run.body["steps"]
         .as_array()
@@ -205,7 +209,7 @@ fn dispatch(
         .ok_or_else(|| err("RecoveryRequired", "workflow tool missing"))?;
     policy::delegation(db, &run.owner, delegation, ACTION)?;
     check_tool(db, tool, &step.tool_ref)?;
-    if step.when.is_some() || !step.after_selected.is_empty() {
+    if step.dsl_version() > 1 {
         policy::delegation(db, &run.owner, delegation, "task.read")?;
     }
     if let Some(predicate) = &step.when {
@@ -229,7 +233,21 @@ fn dispatch(
             "stored workflow selection disagrees with the definition",
         )?;
     }
-    let receipt = broker::submit_workflow(db, &run.owner, &step.request, &run.id, &step.step_key)?;
+    let resolved;
+    let request = if step.inputs_from.is_empty() {
+        &step.request
+    } else {
+        let pinned = &state(&step.id).unwrap()["input_binding"];
+        if pinned.is_null() {
+            let mut body = run.body.clone();
+            progress(&mut body, &step.id)?["input_binding"] =
+                binding::pin(db, run, step, statuses)?;
+            return persist_selection(db, run, body, ready_ms);
+        }
+        resolved = binding::request(step, pinned)?;
+        &resolved
+    };
+    let receipt = broker::submit_workflow(db, &run.owner, request, &run.id, &step.step_key)?;
     let task_id = receipt["task_id"]
         .as_str()
         .ok_or_else(|| err("RecoveryRequired", "workflow task receipt has no ID"))?;

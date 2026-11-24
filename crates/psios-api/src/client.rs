@@ -94,7 +94,7 @@ impl Client {
             params["timeout_ms"] = json!(timeout_ms);
         }
         match self.call("Resource.Watch", params.clone()) {
-            Err(error) if error.0.code == "UnsupportedCapability" => self.call(
+            Err(error) if error.code == "UnsupportedCapability" => self.call(
                 if timeout_ms.is_some() {
                     "Event.Wait"
                 } else {

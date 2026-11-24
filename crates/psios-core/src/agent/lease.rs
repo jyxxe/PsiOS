@@ -1,23 +1,7 @@
 use super::*;
-use rustix::time::{ClockId, clock_gettime};
-
-pub(super) struct BootClock {
-    pub(super) boot_id: String,
-    pub(super) millis: i64,
-}
+pub(super) use crate::linux_clock::BootClock;
 
 impl BootClock {
-    pub(super) fn sample() -> Result<Self> {
-        let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
-        let boot_id = uuid::Uuid::parse_str(boot.trim())
-            .map_err(|_| err("StorageUnavailable", "invalid Linux boot identity"))?;
-        let time = clock_gettime(ClockId::Boottime);
-        Ok(Self {
-            boot_id: boot_id.to_string(),
-            millis: time.tv_sec * 1000 + time.tv_nsec / 1_000_000,
-        })
-    }
-
     pub(super) fn current(&self, db: &Db<'_>, session: &Doc) -> Result<bool> {
         Ok(db.c.query_row(
             "SELECT EXISTS(SELECT 1 FROM session_turns WHERE session=?1 AND lease=?2

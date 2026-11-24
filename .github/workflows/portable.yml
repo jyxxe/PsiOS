@@ -128,6 +128,11 @@ jobs:
           python3 tests/native_enrollment.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
             --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
 
+      - name: Expire a scoped grant and queued Task after real UTC rollback in a guest
+        run: |
+          python3 -B tests/native_grant_deadline.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+
       - name: Upgrade a running release through a stopped UEFI disk and boot both generations
         run: |
           mkdir "$RUNNER_TEMP/native-format5"

@@ -159,8 +159,8 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-// Format 24 fences older writers that would otherwise ignore conditional steps.
-pub(super) const CURRENT_FORMAT: u32 = 24;
+// Older writers cannot enforce recorded boot-time authorization deadlines.
+pub(super) const CURRENT_FORMAT: u32 = 25;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -224,6 +224,7 @@ impl Store {
         setup(&conn)?;
         let tx = conn.transaction()?;
         tx.execute_batch(include_str!("state.sql"))?;
+        tx.execute_batch(include_str!("policy/deadlines.sql"))?;
         let mut key = [0u8; 64];
         use ring::rand::{SecureRandom, SystemRandom};
         SystemRandom::new()
@@ -334,6 +335,9 @@ impl Store {
                 }
                 if ver < 20 {
                     db.c.execute_batch(include_str!("chat/rooms.sql"))?;
+                }
+                if ver < 25 {
+                    db.c.execute_batch(include_str!("policy/deadlines.sql"))?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

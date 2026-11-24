@@ -26,9 +26,10 @@ pub fn delegation(db: &Db<'_>, actor: &str, id: &str, action: &str) -> Result<Do
         "PermissionDenied",
         "delegation audience mismatch",
     )?;
+    let clock = deadline::Clock::sample()?;
     require(
         d.body["lifecycle"] == "Active"
-            && !expired(d.body["valid_until"].as_str().unwrap())?
+            && !clock.expired(db, &d.id, d.body["valid_until"].as_str().unwrap())?
             && d.body["actions"]
                 .as_array()
                 .unwrap()
@@ -41,7 +42,7 @@ pub fn delegation(db: &Db<'_>, actor: &str, id: &str, action: &str) -> Result<Do
         active(db, &parent.owner)?;
         require(
             parent.body["lifecycle"] == "Active"
-                && !expired(parent.body["valid_until"].as_str().unwrap())?
+                && !clock.expired(db, &parent.id, parent.body["valid_until"].as_str().unwrap())?
                 && parent.body["actions"]
                     .as_array()
                     .unwrap()
@@ -54,7 +55,7 @@ pub fn delegation(db: &Db<'_>, actor: &str, id: &str, action: &str) -> Result<Do
     let g = db.of(d.body["grant_id"].as_str().unwrap(), "Grant")?;
     require(
         g.body["lifecycle"] == "Active"
-            && !expired(g.spec["valid_until"].as_str().unwrap())?
+            && !clock.expired(db, &g.id, g.spec["valid_until"].as_str().unwrap())?
             && g.spec["actions"]
                 .as_array()
                 .unwrap()
@@ -137,6 +138,7 @@ pub fn delegate(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         )?;
         delegation(db, actor, &parent.id, action)?;
     }
+    let clock = deadline::Clock::sample()?;
     let until =
         after(p.ttl_seconds.into()).min(parent.body["valid_until"].as_str().unwrap().to_owned());
     let mut body = json!({"issuer":actor,"subject":p.principal_id,"parent_ref":parent.reference(),"grant_id":grant.id,
@@ -160,6 +162,7 @@ pub fn delegate(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         body["tool_targets"] = targets.clone();
     }
     let child = db.record("Delegation", &p.principal_id, body)?;
+    clock.register(db, &child.id, p.ttl_seconds)?;
     epoch(db)?;
     Ok(child.reference())
 }

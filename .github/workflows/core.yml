@@ -47,6 +47,13 @@ jobs:
             mount -t tmpfs -o size=1m,nodev,nosuid,noexec tmpfs /sys/fs/cgroup
             PSIOS_TEST_HIDE_PRESSURE=1 python3 -B -m unittest discover -s tests -p test_pressure.py -k test_real_kernel -v
           '
+      - name: Verify layout identity across reuse, resize and device-mapper attachment
+        run: |
+          if ! command -v sfdisk || ! command -v dmsetup; then
+            sudo timeout 180 apt-get install -y --no-install-recommends fdisk dmsetup
+          fi
+          sudo env PSIOS_TEST_BLOCK_LOOP=1 PSIOS_TEST_BLOCK_MAPPER=1 \
+            python3 -B -m unittest discover -s tests -p test_block_layout.py -k test_loop -v
       - name: Pair and inspect real Tasks in headless Chrome
         run: PSIOS_TEST_SHELL_BROWSER=1 python3 -B -m unittest discover -s tests -p test_shell.py -k test_browser -v
       - name: Verify scoped IPv6 probes across a real private veth pair
@@ -252,6 +259,12 @@ jobs:
           git archive d7c08a36454bae006d5eb08b0229eab9f1c159f1 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format21"
           CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format21/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format21/target"
           python3 -B tests/pressure_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format21/target/debug"
+      - name: Upgrade format 22 and keep existing device inventory grants scoped
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format22"
+          git archive 0e1c6be464906583f79c4c709209610a2e78f2a4 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format22"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format22/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format22/target"
+          python3 -B tests/block_layout_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format22/target/debug"
       - name: Verify real systemd service control and crash reconciliation
         run: |
           sudo loginctl enable-linger "$(id -un)"

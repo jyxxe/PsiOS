@@ -26,6 +26,7 @@ pub const TOOLS: &[&str] = &[
     "node.routing_rules",
     "node.processes",
     "node.devices",
+    node::block::TOOL,
     "node.mounts",
     "service.inspect",
     "service.start",
@@ -86,6 +87,7 @@ pub fn readonly(tool: &str) -> bool {
             | "node.routing_rules"
             | "node.processes"
             | "node.devices"
+            | node::block::TOOL
             | "node.mounts"
             | "service.inspect"
             | "volume.files"
@@ -135,6 +137,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | "node.routing_rules"
                     | "node.mounts"
                     | node::pressure::TOOL
+                    | node::block::TOOL
                     | "backup.verify"
                     | storage::publication::INSPECT
                     | agent::START_SESSION

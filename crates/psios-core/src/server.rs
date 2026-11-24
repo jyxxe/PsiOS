@@ -18,6 +18,7 @@ use std::{
 };
 
 type Shared = Arc<Mutex<Store>>;
+type WaitCondition = fn(&Value) -> bool;
 fn state(s: &Shared) -> Result<MutexGuard<'_, Store>> {
     s.lock()
         .map_err(|_| err("RecoveryRequired", "authority mutex poisoned"))
@@ -36,14 +37,19 @@ fn connection(s: &Shared, stream: &mut UnixStream, stop: &AtomicBool) -> Result<
         let r: Request = serde_json::from_value(parse(&bytes)?)?;
         crate::label(&r.request_id)?;
         rid = r.request_id.clone();
-        let read = match r.method.as_str() {
-            "Event.Wait" => Some(("Event.Poll", "events")),
-            "Mailbox.Wait" => Some(("Mailbox.Read", "items")),
+        let wait: Option<(&str, WaitCondition)> = match r.method.as_str() {
+            "Event.Wait" => Some(("Event.Poll", |page| {
+                !page["events"].as_array().unwrap().is_empty()
+            })),
+            "Mailbox.Wait" => Some(("Mailbox.Read", |page| {
+                !page["items"].as_array().unwrap().is_empty()
+            })),
+            "Model.WaitNext" => Some(("Model.ClaimNext", |page| page["available"] == true)),
             _ => None,
         };
-        if let Some((method, items)) = read {
+        if let Some((method, ready)) = wait {
             let changes = state(s)?.changes.clone();
-            return crate::watch::poll(&changes, stop, r, method, items, |request| {
+            return crate::watch::poll(&changes, stop, r, method, ready, |request| {
                 state(s)?.request(peer, request)
             });
         }

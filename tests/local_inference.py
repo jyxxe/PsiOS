@@ -67,10 +67,11 @@ def exercise(node, endpoint, work, *, metered):
     journal = work / "journal"
     journal.mkdir(mode=0o700)
 
-    def start():
+    def start(queued=False):
         result = node.call("Session.Open", dict(key=key(), goal="Call node.inventory now with an empty input object.",
                            skill_ref=skill, model_ref=model, delegation_id=grant["delegation_ref"]["resource_id"],
-                           context_policy="ReferencesOnly", max_turns=2), agent["token"])
+                           context_policy="ReferencesOnly", max_turns=2, **({"provider_queue": True} if queued else {})),
+                           agent["token"])
         return result["reference"]["resource_id"]
 
     def step(sid, settings):
@@ -141,6 +142,24 @@ def exercise(node, endpoint, work, *, metered):
     assert (budget["model_calls_used"], budget["spent"]) == (6, 1), budget
     print("Verified real SmolLM2 CPU inference, UID and model binding, offline failure, one authorized"
           f" node.inventory Task {receipt['task_id']} and deduplicated receipt replay.")
+
+    if metered:
+        queued = start(queued=True)
+        reference = work / "model-ref.json"
+        reference.write_text(json.dumps(model))
+        cfg.write_text(json.dumps(config))
+        dispatched = subprocess.run([node.binaries / "psiosctl", "--socket", node.socket,
+            "--token-file", credential, "model-worker", reference, "--once", "--wait-ms", "2000",
+            "--decision-dir", journal, "--local-model", cfg], capture_output=True, text=True, timeout=45)
+        assert dispatched.returncode == 0, dispatched.stderr
+        receipt = json.loads(dispatched.stdout)
+        assert receipt["session_ref"]["resource_id"] == queued, receipt
+        assert node.wait(receipt["task_id"])["lifecycle"] == "Succeeded"
+        usage = node.call("Resource.Resolve", {"reference": receipt["usage_ref"]})["value"]
+        assert usage["reported_tokens"]["input_tokens"] > 0 and usage["reported_tokens"]["output_tokens"] > 0
+        budget = node.call("Budget.Get", {"id": grant["budget_ref"]["resource_id"]}, agent["token"])
+        assert (budget["model_calls_used"], budget["spent"]) == (7, 2), budget
+        print(f"Verified autonomous provider discovery and real CPU inference for Session {queued}.")
 
 
 if __name__ == "__main__":

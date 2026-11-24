@@ -61,6 +61,14 @@ impl Client {
         provider: &(impl SessionModel + ?Sized),
     ) -> ApiResult<Turn> {
         let claim = self.call("Model.Claim", json!({"session_id":session,"key":key}))?;
+        Self::decide_claim(session, claim, provider)
+    }
+
+    fn decide_claim(
+        session: &str,
+        claim: Value,
+        provider: &(impl SessionModel + ?Sized),
+    ) -> ApiResult<Turn> {
         if let Some(receipt) = claim.get("completed") {
             return Ok(Turn::Completed(receipt.clone()));
         }
@@ -71,6 +79,11 @@ impl Client {
             .as_str()
             .ok_or_else(|| crate::invalid("missing model lease"))?
             .to_owned();
+        if claim["context"]["session_id"] != session {
+            return Err(crate::invalid(
+                "model lease context belongs to another session",
+            ));
+        }
         let output = provider.decide_with_usage(&claim["context"])?;
         Ok(Turn::Decided(DecisionRequest {
             session_id: session.to_owned(),

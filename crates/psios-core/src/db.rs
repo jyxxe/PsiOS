@@ -158,7 +158,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = 16;
+pub(super) const CURRENT_FORMAT: u32 = 17;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -326,6 +326,9 @@ impl Store {
                 }
                 if ver < 13 {
                     db.c.execute_batch(include_str!("chat.sql"))?;
+                }
+                if ver < 17 {
+                    db.c.execute_batch(include_str!("agent/queue.sql"))?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

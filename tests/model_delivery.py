@@ -21,17 +21,22 @@ def frame(peer):
     return prefix + read(length)
 
 
-@contextmanager
 def interrupt_delivery(node, token_file, session, key, directory, *, committed, local_model=None):
+    args = ["model-step", session, "--key", key, "--decision-dir", directory]
+    if local_model is not None:
+        args.extend(["--local-model", local_model])
+    return interrupt_worker_delivery(node, token_file, args, committed=committed,
+                                     timeout=45 if local_model else 10)
+
+
+@contextmanager
+def interrupt_worker_delivery(node, token_file, args, *, committed, timeout=10):
     endpoint = node.base / "delivery.sock"
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
         listener.bind(str(endpoint))
         listener.listen()
-        listener.settimeout(45 if local_model else 10)
-        command = [node.binaries / "psiosctl", "--socket", endpoint, "--token-file", token_file, "model-step",
-                   session, "--key", key, "--decision-dir", directory]
-        if local_model is not None:
-            command.extend(["--local-model", local_model])
+        listener.settimeout(timeout)
+        command = [node.binaries / "psiosctl", "--socket", endpoint, "--token-file", token_file, *args]
         with subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) as worker:
             try:
                 while True:

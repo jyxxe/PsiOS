@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import json
 import os
+import select
 import socket
 import struct
 import time
@@ -35,6 +36,11 @@ class TaskWaitTests(unittest.TestCase):
                                 "method": "Task.Wait", "params": {"id": task, "timeout_ms": 8000}}).encode()
             stream.sendall(struct.pack(">I", len(frame)) + frame)
             return stream.dup()
+
+    def receipt(self, stream):
+        with stream.makefile("rb") as response:
+            length, = struct.unpack(">I", response.read(4))
+            return json.loads(response.read(length))
 
     def test_wait_completion_through_socket_and_cli(self):
         node = self.node
@@ -109,17 +115,17 @@ class TaskWaitTests(unittest.TestCase):
         queued = node.call("Task.Get", {"id": task})
         streams = []
         try:
-            for _ in range(8):
+            for _ in range(12):
                 streams.append(self.wait_stream(task))
-            deadline = time.monotonic() + 2
-            while time.monotonic() < deadline:
-                try:
-                    self.wait_task(task, 10)
-                except Failure as full:
-                    self.assertEqual(full.code, "QueueFull")
-                    break
-            else:
-                self.fail("all wait slots should be occupied")
+            deadline = time.monotonic() + 3
+            while len(streams) > 8:
+                readable, _, _ = select.select(streams, [], [], max(0, deadline - time.monotonic()))
+                self.assertTrue(readable, "all excess waiters should have received a capacity rejection")
+                for stream in readable:
+                    self.assertEqual(self.receipt(stream)["error"]["code"], "QueueFull")
+                    streams.remove(stream)
+                    stream.close()
+            self.assertEqual(len(streams), 8)
             with self.assertRaises(Failure) as event_wait:
                 node.call("Event.Wait", {"limit": 1, "timeout_ms": 30})
             self.assertEqual(event_wait.exception.code, "QueueFull")
@@ -152,8 +158,6 @@ class TaskWaitTests(unittest.TestCase):
             stream.shutdown(socket.SHUT_WR)
             waiting = node.call("Task.Get", {"id": task})
             node.call("Task.Cancel", {"id": task, "expected_resource_version": waiting["task_revision"]})
-            with stream.makefile("rb") as response:
-                length, = struct.unpack(">I", response.read(4))
-                reply = json.loads(response.read(length))
+            reply = self.receipt(stream)
         self.assertEqual(reply["result"], node.call("Task.Get", {"id": task}))
         self.assertEqual(reply["result"]["lifecycle"], "Cancelled")

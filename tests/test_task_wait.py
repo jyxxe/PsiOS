@@ -106,7 +106,9 @@ class TaskWaitTests(unittest.TestCase):
             with self.assertRaises(Failure) as revoked:
                 waiter.result(timeout=3)
             self.assertEqual(revoked.exception.code, "PermissionDenied")
-        owner_view = node.call("Task.Get", {"id": task})
+        self.assertEqual(node.call("Task.Get", {"id": task})["outcome_knowledge"], "NotStarted")
+        self.schedule("Enabled")
+        owner_view = self.wait_task(task, 3000)
         self.assertEqual((owner_view["lifecycle"], owner_view["outcome_knowledge"]), ("Failed", "NotStarted"))
 
     def test_disconnect_releases_a_bounded_wait_slot(self):

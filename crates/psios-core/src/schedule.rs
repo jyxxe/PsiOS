@@ -1,13 +1,13 @@
 //! Durable one-shot admission into the ordinary Task broker.
 use crate::{
-    ById, Conditional, Error, Result, broker,
+    ById, Conditional, Error, Result, Store, broker,
     db::{Db, Doc},
     decode, err,
     host::Action,
     label, node, now, policy, require,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
-use psios_api::{canonical, sha256};
+use psios_api::{canonical, id, sha256};
 use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -181,7 +181,35 @@ fn deferred(error: &Error) -> bool {
         || (error.0.code == "QuotaExceeded" && error.0.retry_condition == "SameRequestAfterBackoff")
 }
 
-pub fn fire(db: &Db<'_>) -> Result<()> {
+struct Rejection {
+    id: String,
+    version: String,
+    phase: &'static str,
+}
+
+pub fn tick(store: &mut Store) -> Result<()> {
+    let correlation = id("schedule-tick");
+    let mut rejection = None;
+    match store.transaction(&correlation, |db| fire(db, &mut rejection)) {
+        Ok(()) => Ok(()),
+        Err(error) if deferred(&error) => Ok(()),
+        Err(error) => {
+            let Some(rejection) = rejection else {
+                return Err(error);
+            };
+            // The attempted admission has rolled back. The caller still holds
+            // the authority lock while this second transaction records the rejection.
+            store.transaction(&correlation, |db| {
+                let schedule = db.of(&rejection.id, "Schedule")?;
+                schedule.cas(&rejection.version)?;
+                settle(db, &schedule, rejection.phase, Some(&error.0.code), None)?;
+                Ok(())
+            })
+        }
+    }
+}
+
+fn fire(db: &Db<'_>, rejection: &mut Option<Rejection>) -> Result<()> {
     let at = Utc::now().timestamp_millis();
     let expired: Option<String> = db.c.query_row(
         "SELECT schedule FROM pending_schedules WHERE deadline_ms<=?1 ORDER BY deadline_ms,schedule LIMIT 1",
@@ -200,10 +228,7 @@ pub fn fire(db: &Db<'_>) -> Result<()> {
         }
         (id, false)
     };
-    match db.cfg.check_admission_space() {
-        Err(e) if deferred(&e) => return Ok(()),
-        result => result?,
-    }
+    db.cfg.check_admission_space()?;
     let schedule = db.of(&id, "Schedule")?;
     if expired {
         settle(db, &schedule, "Expired", Some("DeadlineExceeded"), None)?;
@@ -213,30 +238,29 @@ pub fn fire(db: &Db<'_>) -> Result<()> {
     let delegation = request["delegation_ref"]["resource_id"]
         .as_str()
         .ok_or_else(|| err("RecoveryRequired", "schedule delegation reference missing"))?;
-    db.c.execute_batch("SAVEPOINT schedule_admission")?;
     let result = policy::delegation(db, &schedule.owner, delegation, ACTION)
         .and_then(|_| broker::submit_scheduled(db, &schedule.owner, request, &schedule.id));
-    match result {
-        Ok(receipt) => {
-            db.c.execute_batch("RELEASE schedule_admission")?;
-            settle(db, &schedule, "Triggered", None, Some(receipt))?;
-        }
-        Err(e) => {
-            db.c.execute_batch("ROLLBACK TO schedule_admission; RELEASE schedule_admission")?;
-            match e.0.code.as_str() {
-                _ if deferred(&e) => return Ok(()),
-                "DeadlineExceeded" => settle(db, &schedule, "Expired", Some(&e.0.code), None)?,
-                "PermissionDenied"
-                | "PreconditionFailed"
-                | "Conflict"
-                | "NotFound"
-                | "QuotaExceeded"
-                | "UnsupportedCapability" => {
-                    settle(db, &schedule, "Rejected", Some(&e.0.code), None)?
-                }
-                _ => return Err(e),
-            };
-        }
-    }
+    let receipt = result.inspect_err(|error| {
+        let phase = match error.0.code.as_str() {
+            "DeadlineExceeded" => "Expired",
+            "PermissionDenied"
+            | "PreconditionFailed"
+            | "Conflict"
+            | "NotFound"
+            | "QuotaExceeded"
+            | "UnsupportedCapability"
+                if !deferred(error) =>
+            {
+                "Rejected"
+            }
+            _ => return,
+        };
+        *rejection = Some(Rejection {
+            version: schedule.version(),
+            id: schedule.id.clone(),
+            phase,
+        });
+    })?;
+    settle(db, &schedule, "Triggered", None, Some(receipt))?;
     Ok(())
 }

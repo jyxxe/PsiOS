@@ -109,7 +109,7 @@ fn timer(s: Shared, stop: Arc<AtomicBool>) -> Result<()> {
             if stop.load(Ordering::Acquire) {
                 break;
             }
-            store.transaction(&id("schedule-tick"), schedule::fire)?;
+            schedule::tick(&mut store)?;
         }
         thread::park_timeout(Duration::from_millis(250));
     }

@@ -28,7 +28,7 @@ def check_lease(c):
         raise AssertionError(observed) from failure
 
 
-def exercise(args, work):
+def prepare(args, work):
     for name, source in (("code.fd", "OVMF_CODE_4M.fd"), ("vars.fd", "OVMF_VARS_4M.fd")):
         shutil.copyfile(args.ovmf_dir / source, work / name)
     user_secret, user_hash = password(work, "operator.hash")
@@ -40,7 +40,11 @@ def exercise(args, work):
     refused = subprocess.run(build + ["ff:ff:ff:ff:ff:ff"], capture_output=True, text=True, timeout=10)
     assert refused.returncode and "unicast MAC" in refused.stderr and not image.exists(), refused.stderr
     subprocess.run(build + [MAC], check=True, stdout=subprocess.DEVNULL, timeout=150)
+    return image, user_secret, root_secret
 
+
+def exercise(args, work):
+    image, user_secret, root_secret = prepare(args, work)
     with boot(work, image, network_mac=MAC) as c:
         c.login("psios", user_secret)
         identity = json.loads(c.run("psiosctl whoami"))["authority_id"]

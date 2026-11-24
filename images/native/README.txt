@@ -47,7 +47,7 @@ inode。持久用户文件可放在主目录。
 
 生成新盘时可用 --dhcp-mac 指定一个 virtio 网口并启用 IPv4 DHCP。
 为虚机提供同一 MAC 的网口。该配置管理此网口的 IPv4 地址、DHCP
-默认路由和运行时 DNS。普通账户可使用 busybox ip -4 addr show、
+租约路由和运行时 DNS。支持选项 121 的直连和经网关路由。普通账户可使用 busybox ip -4 addr show、
 busybox ip -4 route show 和 cat /etc/resolv.conf 查看。
 
 升级已初始化的三分区开发盘时，先停止虚机，保留原 raw 磁盘、EFI

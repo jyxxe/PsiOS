@@ -1,15 +1,91 @@
 #!/bin/sh
 # Apply only the DHCP lease of the pinned device. The resolver is runtime state.
 set -efu
-export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C
 run=/run/psios-network
+route_file=$run/routes
 metric=30310
+protocol=16
 device=/sys/class/net/${interface-}
 [ -n "${PSIOS_DHCP_INTERFACE-}" ] && [ "${interface-}" = "$PSIOS_DHCP_INTERFACE" ] || exit 1
 [ "$(cat "$device/ifindex")" = "$PSIOS_DHCP_IFINDEX" ] && [ "$(cat "$device/address")" = "$PSIOS_DHCP_MAC" ] || exit 1
 
 ipv4() {
-    case "$1" in ''|*[!0-9.]*) return 1 ;; esac
+    local value="$1" IFS=. octet
+    set -- $value
+    [ "$#" -eq 4 ] && [ "$value" = "$1.$2.$3.$4" ] || return 1
+    for octet do
+        case "$octet" in ''|*[!0-9]*|0[0-9]*|????*) return 1 ;; esac
+        [ "$octet" -le 255 ] || return 1
+    done
+}
+
+network_prefix() {
+    local prefix="${1%/*}" bits="${1##*/}" IFS=. value
+    case "$bits" in [0-9]|[12][0-9]|3[012]) ;; *) return 1 ;; esac
+    ipv4 "$prefix" || return 1
+    set -- $prefix
+    value=$(( $1 * 16777216 + $2 * 65536 + $3 * 256 + $4 ))
+    value=$((value >> (32 - bits) << (32 - bits)))
+    printf '%s.%s.%s.%s/%s\n' "$((value >> 24))" "$((value >> 16 & 255))" \
+        "$((value >> 8 & 255))" "$((value & 255))" "$bits"
+}
+
+plan_routes() {
+    local gateway prefix seen=' '
+    if [ "${staticroutes+x}" != x ]; then
+        gateway=${router-}
+        gateway=${gateway%% *}
+        [ -n "$gateway" ] || return 0
+        ipv4 "$gateway" && [ "$gateway" != 0.0.0.0 ] || return 1
+        printf '0.0.0.0/0 %s\n' "$gateway"
+        return
+    fi
+    # BusyBox supplies pairs of destination/prefix and router. A zero router
+    # denotes an on-link route. Option 121 takes precedence over option 3.
+    set -- $staticroutes
+    [ "$#" -le 64 ] && [ "$(($# % 2))" -eq 0 ] || return 1
+    while [ "$#" -gt 0 ]; do
+        prefix=$(network_prefix "$1") && ipv4 "$2" || return 1
+        case "$seen" in *" $prefix "*) return 1 ;; esac
+        seen="$seen$prefix "
+        printf '%s %s\n' "$prefix" "$2" || return 1
+        shift 2
+    done
+}
+
+route_command() {
+    local operation="$1" prefix="$2" gateway="$3"
+    if [ "$gateway" = 0.0.0.0 ]; then
+        ip -4 route "$operation" "$prefix" dev "$interface" proto "$protocol" metric "$metric"
+    else
+        ip -4 route "$operation" "$prefix" via "$gateway" dev "$interface" proto "$protocol" metric "$metric"
+    fi
+}
+
+clear_routes() {
+    local prefix gateway message result=0
+    [ -f "$route_file" ] || return 0
+    while read -r prefix gateway; do
+        if ! message=$(route_command del "$prefix" "$gateway" 2>&1); then
+            case "$message" in *": No such process") ;; *) result=1 ;; esac
+        fi
+    done < "$route_file"
+    [ "$result" -eq 0 ] && rm -f "$route_file"
+}
+
+install_routes() {
+    local prefix gateway on_link
+    # Install local links first. Other routes can use a router on those links.
+    for on_link in yes no; do
+        while read -r prefix gateway; do
+            case "$on_link:$gateway" in
+                yes:0.0.0.0) ;;
+                yes:*|no:0.0.0.0) continue ;;
+            esac
+            route_command add "$prefix" "$gateway" || return 1
+        done < "$route_file"
+    done
 }
 
 write_resolver() (
@@ -29,32 +105,26 @@ write_resolver() (
 forget_lease() {
     result=0
     rm -f "$run/resolv.conf" || result=1
-    ip -4 route del default dev "$interface" metric "$metric" 2>/dev/null || :
+    clear_routes || result=1
     ip -4 addr flush dev "$interface" || result=1
     return "$result"
 }
 
-apply_lease() {
+apply_lease() (
     ipv4 "${ip-}" || return 1
     case "${mask-}" in [1-9]|[12][0-9]|3[012]) ;; *) return 1 ;; esac
-    gateway=${router-}
-    gateway=${gateway%% *}
-    if [ -n "${staticroutes-}" ]; then
-        # A classless routing policy takes precedence over the router option.
-        gateway=
-    fi
-    [ -z "$gateway" ] || ipv4 "$gateway" || return 1
+    planned=$(mktemp "$run/.routes.XXXXXX") || return 1
+    trap 'rm -f "$planned"' EXIT
+    plan_routes > "$planned" && clear_routes || return 1
     current=$(ip -4 addr show dev "$interface" | awk '$1 == "inet" {print $2}') || return 1
     if [ "$current" != "$ip/$mask" ]; then
         ip -4 addr flush dev "$interface" && ip -4 addr add "$ip/$mask" dev "$interface" || return 1
     fi
-    ip -4 route del default dev "$interface" metric "$metric" 2>/dev/null || :
-    if [ -n "$gateway" ]; then
-        ip -4 route add default via "$gateway" dev "$interface" metric "$metric" || return 1
-    fi
+    # Publish the set before issuing updates so a partial apply can be undone.
+    mv -f "$planned" "$route_file" && install_routes || return 1
     # Each option is a whitespace-separated list of numeric values from BusyBox.
     write_resolver ${dns-}
-}
+)
 
 case "${1-}" in
     deconfig|leasefail|nak)

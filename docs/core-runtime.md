@@ -4,7 +4,7 @@
 
 ## 从 PR #1 升级
 
-停服并按本机恢复要求保存 state 和 witness。新版首次打开旧库时核对数据库、见证和密钥，在一次带见证的事务中升级至格式 19。格式 17 持久化 Provider 队列，格式 18 登记备份发布观测工具，格式 19 登记会话准入工具。旧格式 1 还会迁移到多工作线程的资源和预算结构。格式 3 登记了网络接口观测，格式 4 增加备份核验。格式 5 给模型租约记录 Linux 启动身份和经过时间期限。格式 6 登记路由观测工具，仍需显式授权。格式 7 要求新恢复卷凭已记录的目录树摘要通过激活校验。升级前已经结算的模型回执可继续查询。从格式 4 或更早升级时，未结算的旧模型调用缺少启动证明，Provider 需要使用新的领取键并消耗新一轮预算。旧二进制拒绝打开超出自身支持范围的格式，软件回退需恢复升级前配对保存的 state 和 witness。离线 `psiosd verify` 报告是否需要升级，`check` 或启动服务会执行升级。已有 Agent 的权限、预算、凭据、取消墓碑、审批和任务身份按原记录保留。涉及绑定卷的新派发会检查卷版本。若旧应用启动计划缺少这个前提，需要提交新计划。
+停服并按本机恢复要求保存 state 和 witness。新版首次打开旧库时核对数据库、见证和密钥，在一次带见证的事务中升级至格式 22。格式 20 增加多人房间，格式 21 登记网络探测，格式 22 登记资源压力观测。格式 17 持久化 Provider 队列，格式 18 登记备份发布观测工具，格式 19 登记会话准入工具。旧格式 1 还会迁移到多工作线程的资源和预算结构。格式 3 登记了网络接口观测，格式 4 增加备份核验。格式 5 给模型租约记录 Linux 启动身份和经过时间期限。格式 6 登记路由观测工具，仍需显式授权。格式 7 要求新恢复卷凭已记录的目录树摘要通过激活校验。升级前已经结算的模型回执可继续查询。从格式 4 或更早升级时，未结算的旧模型调用缺少启动证明，Provider 需要使用新的领取键并消耗新一轮预算。旧二进制拒绝打开超出自身支持范围的格式，软件回退需恢复升级前配对保存的 state 和 witness。离线 `psiosd verify` 报告是否需要升级，`check` 或启动服务会执行升级。已有 Agent 的权限、预算、凭据、取消墓碑、审批和任务身份按原记录保留。涉及绑定卷的新派发会检查卷版本。若旧应用启动计划缺少这个前提，需要提交新计划。
 
 ## 宿主与调度
 
@@ -22,6 +22,22 @@
 ```
 
 任一已配置文件系统低于阈值时，新任务、新输入和新模型租约返回可退避重试的 `QuotaExceeded`。幂等重复请求仍返回原回执，已接受任务继续运行、结算或取消。压力期间的准入拒绝直接返回给调用方，节约原来的持久审计空间。容量采样用于准入，物理空间仍由宿主文件系统共享。可用空间恢复后，当前守护进程重新接受请求。[容量与任务回收测试](../tests/test_platform.py) · [模型租约结算测试](../tests/test_runtime.py)
+
+### Linux 资源压力与守护进程 cgroup
+
+向操作者授予目标 Node 上的 `node.pressure`、`task.submit` 和 `task.read`。用空对象提交 `node.pressure`，结果随 Task 持久保存。已存在的委托及所有者默认委托需要单独授予此能力。以下命令接续本机指南中的 `ctl` 函数。
+
+```bash
+node=$(ctl node | jq -er .reference.resource_id)
+grant=$(jq -n --arg node "$node" '{principal_id:"local-owner",actions:["task.submit","task.read","node.pressure"],
+  tool_targets:[$node],ttl_seconds:300,units:8}' | ctl call Grant.Issue | jq -er .delegation_ref.resource_id)
+task=$(echo '{}' | ctl submit node.pressure --delegation "$grant" --key pressure-observation-1 | jq -er .task_id)
+ctl wait "$task" | jq '{reference:.result.artifact_refs[0]}' | ctl call Artifact.Read
+```
+
+`kernel` 记录内核可见的 CPU、内存和 I/O PSI、最近 10/60/300 秒的停顿比例、累计微秒及 OOM kill 计数。系统级 CPU PSI 只返回 `some`。`core_cgroup` 记录包含 `psiosd` 的 cgroup v2 的设备号、inode、各项 PSI、CPU 时间和节流、内存与交换用量、配置限额、OOM 事件及 PID 用量和限额。限额是该 cgroup 的本地控制值。计算继承后的有效上限还要检查父级。发起者无权另选 PID 或文件路径。[Linux PSI](https://docs.kernel.org/accounting/psi.html) · [Linux cgroup v2](https://docs.kernel.org/admin-guide/cgroup-v2.html)
+
+结果包含节点引用、boot ID、挂载与 cgroup 命名空间和 `CLOCK_BOOTTIME` 的采样起止点。各项按 `Observed`、`Unsupported`、`Denied` 或 `Unavailable` 报告。若复核发现守护进程已离开采样的 cgroup，则该组结果报告 `ChangedDuringObservation`。这些样本用于诊断。任务准入继续使用权威的配置阈值和预算。[真实限额、授权和内核降级验收](../tests/test_pressure.py) · [格式 21 升级](../tests/pressure_upgrade.py)
 
 ### 网络接口与地址
 

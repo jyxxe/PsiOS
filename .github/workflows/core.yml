@@ -36,7 +36,7 @@ jobs:
         run: |
           python3 tests/system.py
           python3 -m unittest discover -s tests -p 'test_*.py' -v
-      - name: Verify scoped addresses and routes in a private Linux network namespace
+      - name: Verify scoped addresses, routes and rules in a private Linux network namespace
         run: |
           sudo unshare --net --mount --propagation private sh -ec '
             ip link set lo up
@@ -54,18 +54,27 @@ jobs:
             ip -4 route add 192.0.2.0/24 via inet6 2001:db8:1::1 dev psios-test table 1000
             ip -4 nexthop add id 123 via 198.51.100.5 dev psios-test
             ip -4 route add 198.18.0.0/24 nhid 123 table 1000
-            PSIOS_TEST_MUTATE_ROUTES=1 python3 -B -m unittest discover -s tests -p test_network.py -v
+            ip -4 rule add priority 100 from 192.0.2.0/24 to 203.0.113.0/24 fwmark 0/255 lookup 1000
+            ip -4 rule add priority 100 iif lo uidrange 1000-1010 ipproto tcp sport 10000-10020 dport 443 prohibit
+            ip -4 rule add priority 200 goto 300
+            ip -4 rule add priority 250 tun_id 9007199254740993 table 1000
+            ip -4 rule add priority 270 l3mdev
+            ip -4 rule add priority 300 oif lo table 254 suppress_prefixlength 0 suppress_ifgroup 5
+            ip -6 rule add priority 120 not from 2001:db8:1::/64 to 2001:db8:2::/64 blackhole
+            PSIOS_TEST_MUTATE_ROUTES=1 PSIOS_TEST_MUTATE_RULES=1 python3 -B -m unittest discover -s tests -p test_network.py -v
             ref=$(mktemp)
             routes=$(mktemp)
-            trap "rm -f \"$ref\" \"$routes\"" EXIT
+            rules=$(mktemp)
+            trap "rm -f \"$ref\" \"$routes\" \"$rules\"" EXIT
             ip -j address show > "$ref"
             { printf "["; ip -j -N link show; printf ","; ip -j -N -4 route show table all;
               printf ","; ip -j -N -6 route show table all; printf "]\n"; } > "$routes"
-            chown "$1" "$ref" "$routes"
+            { printf "["; ip -j -N -4 rule show; printf ","; ip -j -N -6 rule show; printf "]\n"; } > "$rules"
+            chown "$1" "$ref" "$routes" "$rules"
             uid=$(id -u "$1")
             gid=$(id -g "$1")
             mount -t tmpfs tmpfs /usr/sbin
-            PSIOS_TEST_NETWORK_REFERENCE="$ref" PSIOS_TEST_ROUTE_REFERENCE="$routes" \
+            PSIOS_TEST_NETWORK_REFERENCE="$ref" PSIOS_TEST_ROUTE_REFERENCE="$routes" PSIOS_TEST_RULE_REFERENCE="$rules" \
               setpriv --reuid "$uid" --regid "$gid" --clear-groups \
               python3 -B -m unittest discover -s tests -p test_network.py -v
           ' psios-network "$(id -un)"
@@ -119,6 +128,12 @@ jobs:
           cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-last-format5/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-last-format5/target"
           python3 tests/network_routes_upgrade.py --previous-bin "$RUNNER_TEMP/psios-last-format5/target/debug"
           python3 tests/backup_times_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format5/target/debug" --format5-writer-bin "$RUNNER_TEMP/psios-last-format5/target/debug"
+      - name: Upgrade the format 7 routing catalog while retaining prior route cursors
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format7"
+          git archive 412eb56ea36930f75e713288d8833deabf92343e Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format7"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format7/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format7/target"
+          python3 tests/network_rules_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format7/target/debug"
       - name: Verify real systemd service control and crash reconciliation
         run: |
           sudo loginctl enable-linger "$(id -un)"

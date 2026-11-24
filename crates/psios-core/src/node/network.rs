@@ -1,8 +1,12 @@
 //! Bounded, read-only observations in the daemon's network namespace.
 mod kernel;
 mod routes;
+mod rules;
+mod snapshot;
 use crate::{Result, err, now, require};
+use netlink_packet_route::AddressFamily;
 pub use routes::{RouteQuery, observe_routes};
+pub use rules::{RuleQuery, observe_rules};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{fs, net::IpAddr, os::unix::fs::MetadataExt, process::Command};
@@ -44,6 +48,30 @@ struct Address {
         skip_serializing_if = "Option::is_none"
     )]
     peer: Option<IpAddr>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Family {
+    Inet,
+    Inet6,
+}
+
+impl Family {
+    const ALL: [Self; 2] = [Self::Inet, Self::Inet6];
+
+    fn kernel(self) -> AddressFamily {
+        match self {
+            Self::Inet => AddressFamily::Inet,
+            Self::Inet6 => AddressFamily::Inet6,
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord, Serialize)]
+struct Prefix {
+    address: IpAddr,
+    length: u8,
 }
 
 #[derive(Serialize)]

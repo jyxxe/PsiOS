@@ -41,8 +41,8 @@ class OfflineVerification(unittest.TestCase):
         self.assertGreater((n.state / "state.db-wal").stat().st_size, 32)
         before = self.contents()
         result = self.verify()
-        self.assertEqual((result["node_id"], result["database_format"], result["witness"]),
-                         (node, 7, "Confirmed"))
+        self.assertEqual((result["node_id"], result["migration_required"], result["witness"]),
+                         (node, False, "Confirmed"))
         self.assertEqual(self.contents(), before)
         head = n.witness / "head"
         committed = json.loads(head.read_text())["committed"]

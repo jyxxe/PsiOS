@@ -1,4 +1,9 @@
-use super::{kernel::Observer, namespace};
+use super::{
+    Family, Prefix,
+    kernel::Observer,
+    namespace,
+    snapshot::{self, Cursor},
+};
 use crate::{Result, err, host::Work, now, require};
 use netlink_packet_route::{
     AddressFamily, RouteNetlinkMessage,
@@ -7,15 +12,6 @@ use netlink_packet_route::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-
-const PAGE_BYTES: usize = 128 * 1024;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum Family {
-    Inet,
-    Inet6,
-}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -26,48 +22,15 @@ pub struct RouteQuery {
     limit: Option<usize>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Cursor {
-    snapshot_digest: String,
-    offset: usize,
-}
-
 impl RouteQuery {
     pub fn validate(&self) -> Result<()> {
-        require(
-            (1..=128).contains(&self.limit.unwrap_or(32)),
-            "InvalidArgument",
-            "route page limit must be 1 to 128",
-        )?;
+        snapshot::validate(self.cursor.as_ref(), self.limit.unwrap_or(32))?;
         require(
             self.table != Some(0),
             "InvalidArgument",
             "route table must be positive",
-        )?;
-        if let Some(cursor) = &self.cursor {
-            require(
-                cursor.offset > 0
-                    && cursor
-                        .snapshot_digest
-                        .strip_prefix("sha256:")
-                        .is_some_and(|s| {
-                            s.len() == 64
-                                && s.bytes()
-                                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-                        }),
-                "InvalidArgument",
-                "invalid route page cursor",
-            )?;
-        }
-        Ok(())
+        )
     }
-}
-
-#[derive(PartialEq, Eq, PartialOrd, Ord, Serialize)]
-struct Prefix {
-    address: IpAddr,
-    length: u8,
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -207,15 +170,12 @@ fn route(family: Family, table: u32, record: RouteMessage) -> Result<Route> {
 fn collect(q: &RouteQuery) -> Result<Vec<Route>> {
     let mut observer = Observer::open()?;
     let mut routes = Vec::new();
-    for (family, address_family) in [
-        (Family::Inet, AddressFamily::Inet),
-        (Family::Inet6, AddressFamily::Inet6),
-    ] {
+    for family in Family::ALL {
         if q.family.is_some_and(|wanted| wanted != family) {
             continue;
         }
         let mut request = RouteMessage::default();
-        request.header.address_family = address_family;
+        request.header.address_family = family.kernel();
         observer.dump(RouteNetlinkMessage::GetRoute(request), |message| {
             let RouteNetlinkMessage::NewRoute(record) = message else {
                 return Err(err(
@@ -257,43 +217,10 @@ pub fn observe_routes(q: &RouteQuery, w: &Work) -> Result<Value> {
         q.table,
         &routes,
     ))?);
-    let offset = if let Some(cursor) = &q.cursor {
-        require(
-            cursor.snapshot_digest == digest,
-            "ResyncRequired",
-            "route observation changed or cursor scope differs",
-        )?;
-        require(
-            cursor.offset < routes.len(),
-            "InvalidArgument",
-            "route cursor is past the end",
-        )?;
-        cursor.offset
-    } else {
-        0
-    };
-    let mut size = 0;
-    let mut count = 0;
-    for entry in routes[offset..].iter().take(q.limit.unwrap_or(32)) {
-        let len = serde_json::to_vec(entry)?.len() + 1;
-        if size + len > PAGE_BYTES {
-            require(
-                count > 0,
-                "QuotaExceeded",
-                "one route exceeds the result page byte limit",
-            )?;
-            break;
-        }
-        size += len;
-        count += 1;
-    }
-    let end = offset + count;
-    let next = (end < routes.len()).then(|| Cursor {
-        snapshot_digest: digest.clone(),
-        offset: end,
-    });
+    let (entries, next) =
+        snapshot::page(&routes, q.cursor.as_ref(), q.limit.unwrap_or(32), &digest)?;
     Ok(json!({
-        "routes": &routes[offset..end], "snapshot_digest": digest, "next_cursor": next,
+        "routes": entries, "snapshot_digest": digest, "next_cursor": next,
         "boot_id": namespace.boot_id, "network_namespace_inode": namespace.network_namespace_inode,
         "observed_at": now(),
     }))

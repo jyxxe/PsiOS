@@ -66,6 +66,46 @@ impl Client {
         self.service_uid = uid;
         self
     }
+
+    /// List a fixed snapshot and obtain its matching change cursor.
+    pub fn resource_snapshot(
+        &self,
+        kind: Option<&str>,
+        id: Option<&str>,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> ApiResult<Value> {
+        let mut params = json!({"kind":kind.unwrap_or_default(),"cursor":cursor,"limit":limit});
+        if let Some(id) = id {
+            params["id"] = json!(id);
+        }
+        self.call("Resource.List", params)
+    }
+
+    /// Read changes in a snapshot's scope, optionally waiting for the next revision.
+    pub fn watch_resources(
+        &self,
+        cursor: &str,
+        limit: Option<u32>,
+        timeout_ms: Option<u64>,
+    ) -> ApiResult<Value> {
+        let mut params = json!({"cursor":cursor,"limit":limit});
+        if let Some(timeout_ms) = timeout_ms {
+            params["timeout_ms"] = json!(timeout_ms);
+        }
+        match self.call("Resource.Watch", params.clone()) {
+            Err(error) if error.code == "UnsupportedCapability" => self.call(
+                if timeout_ms.is_some() {
+                    "Event.Wait"
+                } else {
+                    "Event.Poll"
+                },
+                params,
+            ),
+            result => result,
+        }
+    }
+
     /// Retrieve and verify an immutable JSON artifact, with a caller-supplied byte limit.
     pub fn artifact_bytes(&self, reference: &ResourceRef, max_bytes: usize) -> ApiResult<Vec<u8>> {
         let mut bytes = Vec::new();

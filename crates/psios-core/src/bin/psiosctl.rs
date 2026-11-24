@@ -57,6 +57,8 @@ enum Cmd {
     },
     List {
         kind: Option<String>,
+        #[arg(long)]
+        id: Option<String>,
     },
     Watch {
         cursor: String,
@@ -282,14 +284,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         )?,
         Cmd::Call { method, file } => c.call(&method, input(&file)?)?,
         Cmd::Get { id } => c.call("Resource.Get", json!({"id": id}))?,
-        Cmd::List { kind } => c.call("Resource.List", json!({"kind": kind.unwrap_or_default()}))?,
-        Cmd::Watch { cursor, wait_ms } => match wait_ms {
-            Some(timeout_ms) => c.call(
-                "Event.Wait",
-                json!({"cursor":cursor,"timeout_ms":timeout_ms}),
-            )?,
-            None => c.call("Event.Poll", json!({"cursor":cursor}))?,
-        },
+        Cmd::List { kind, id } => {
+            c.resource_snapshot(kind.as_deref(), id.as_deref(), None, None)?
+        }
+        Cmd::Watch { cursor, wait_ms } => c.watch_resources(&cursor, None, wait_ms)?,
         Cmd::Inbox { id, limit, wait_ms } => match wait_ms {
             Some(timeout_ms) => c.call(
                 "Mailbox.Wait",

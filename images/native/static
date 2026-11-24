@@ -1,0 +1,49 @@
+# Address, routes and resolver form one install attempt on the selected link.
+apply_static_profile() (
+    metric=30320
+    address4_added=no
+    gateway4_added=no
+    address6_added=no
+    gateway6_added=no
+    resolver=$(mktemp "$run/.static-resolver.XXXXXXXX") || exit 1
+    rollback() {
+        if [ "$gateway4_added" = yes ]; then
+            ip -4 route del default via "$static_gateway" dev "$link" proto 4 metric "$metric" || :
+        fi
+        if [ "$address4_added" = yes ]; then
+            ip -4 addr del "$static_address" dev "$link" || :
+        fi
+        if [ "$gateway6_added" = yes ]; then
+            ip -6 route del default via "$static6_gateway" dev "$link" proto 4 metric "$metric" || :
+        fi
+        if [ "$address6_added" = yes ]; then
+            ip -6 addr del "$static6_address" dev "$link" || :
+        fi
+        unlink "$resolver" || :
+    }
+    trap rollback EXIT
+    trap 'exit 1' HUP INT TERM
+    chmod 0644 "$resolver" || exit 1
+    for server in $static_dns $static6_dns; do
+        printf 'nameserver %s\n' "$server" >> "$resolver" || exit 1
+    done
+    if [ -n "$static6_address" ]; then
+        ip -6 addr add "$static6_address" dev "$link" || exit 1
+        address6_added=yes
+        wait_ipv6_dad || exit 1
+        if [ "$static6_gateway" != - ]; then
+            ip -6 route add default via "$static6_gateway" dev "$link" proto 4 metric "$metric" || exit 1
+            gateway6_added=yes
+        fi
+    fi
+    if [ -n "$static_address" ]; then
+        ip -4 addr add "$static_address" dev "$link" || exit 1
+        address4_added=yes
+        if [ "$static_gateway" != - ]; then
+            ip -4 route add default via "$static_gateway" dev "$link" proto 4 metric "$metric" || exit 1
+            gateway4_added=yes
+        fi
+    fi
+    mv -fT "$resolver" "$run/resolv.conf" || exit 1
+    trap - EXIT HUP INT TERM
+)

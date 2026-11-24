@@ -1,0 +1,78 @@
+# The factory marker permits preparing a new authority once. The staged node
+# and its witness stay private until both directories are checked and installed.
+exists() {
+    [ -e "$1" ] || [ -L "$1" ]
+}
+
+absent() {
+    [ ! -e "$1" ] && [ ! -L "$1" ]
+}
+
+enrollment_marker() {
+    [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -c '%u:%g:%a:%s' "$1")" = 0:0:444:0 ]
+}
+
+enrollment_dir() {
+    [ -d "$1" ] && [ ! -L "$1" ] && [ "$(stat -c '%u:%g:%a' "$1")" = "$2" ]
+}
+
+prepare_authority() {
+    if exists "$work"; then
+        if ! enrollment_dir "$work" 0:0:700 && ! enrollment_dir "$work" 1000:1000:700; then
+            return 1
+        fi
+        rm -rf -- "$work"
+    fi
+    mkdir -m 0700 "$work"
+    chown 1000:1000 "$work"
+    su -s /bin/sh psios -c 'exec /bin/psiosd --state /var/lib/.core-enrollment/psios init' >/dev/null
+    su -s /bin/sh psios -c 'exec /bin/psiosd --state /var/lib/.core-enrollment/psios check' >/dev/null
+    sync -f /var/lib
+    mv "$preparing" "$ready"
+    sync -f /var/lib
+}
+
+publish_authority_directory() {
+    if exists "$1"; then
+        enrollment_dir "$1" 1000:1000:700 && absent "$2" || return 1
+        mv "$1" "$2"
+        sync -f /var/lib
+    fi
+    enrollment_dir "$2" 1000:1000:700
+}
+
+enroll_authority() {
+    local factory=/var/lib/initialize-once preparing=/var/lib/enrollment-preparing ready=/var/lib/enrollment-ready
+    local issued=/var/lib/initialization-issued state=/var/lib/psios witness=/var/lib/psios.witness work=/var/lib/.core-enrollment
+    local path
+    if exists "$factory"; then
+        enrollment_marker "$factory" || return 1
+        for path in "$preparing" "$ready" "$issued" "$state" "$witness" "$work"; do
+            absent "$path" || return 1
+        done
+        mv "$factory" "$preparing"
+        sync -f /var/lib
+    fi
+    if exists "$preparing"; then
+        enrollment_marker "$preparing" || return 1
+        for path in "$ready" "$issued" "$state" "$witness"; do
+            absent "$path" || return 1
+        done
+        prepare_authority
+    fi
+    if exists "$ready"; then
+        enrollment_marker "$ready" && absent "$issued" || return 1
+        if exists "$work"; then
+            enrollment_dir "$work" 1000:1000:700
+        fi
+        publish_authority_directory "$work/psios" "$state"
+        publish_authority_directory "$work/psios.witness" "$witness"
+        su -s /bin/sh psios -c 'exec /bin/psiosd check'
+        if exists "$work"; then rmdir "$work"; fi
+        mv "$ready" "$issued"
+        sync -f /var/lib
+    else
+        enrollment_marker "$issued"
+        su -s /bin/sh psios -c 'exec /bin/psiosd check'
+    fi
+}

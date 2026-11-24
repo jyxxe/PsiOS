@@ -113,7 +113,7 @@ def ramfs(work, args, instance, home_id):
     (work / "psios-home-uuid").write_text(str(home_id) + "\n")
     sectors = [str(mib * 2048) for start, size, _ in PARTITIONS[1:] for mib in (start, size)]
     (work / "psios-storage-layout").write_text(" ".join(sectors) + "\n")
-    boot_scripts = ["init", "shutdown", "dhcp", "dhcp-event", "storage"]
+    boot_scripts = ["init", "shutdown", "dhcp", "dhcp-event", "storage", "enroll"]
     for script in boot_scripts:
         shutil.copyfile(HERE / script, work / f"psios-{script}")
     files = ["bin/psiosd", "bin/psiosctl", "psios-source", "psios-disk-uuid", "psios-home-uuid", "psios-storage-layout"]

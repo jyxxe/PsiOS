@@ -40,6 +40,8 @@ VERIFIED_CORE_SHA256 是上述完整归档核验后记录的 SHA-256。
 登录后可执行 psiosctl whoami。外部只读核验使用同一归档的
 rescue/inspect.py，选择 --partition 2 --state /psios --uid 1000。
 救援参数见 rescue/README.txt。本开发盘的验收范围是 amd64 UEFI 虚机。
+每次开机从空的 /tmp 开始，供普通账户写入，容量为 32 MiB 和 4096 个
+inode。持久用户文件可放在主目录。
 启动检查失败时，串口报告失败阶段，系统关闭已挂载的持久分区后停机。
 可附加 virtio 数据盘。启动阶段按部署 UUID 选择同一系统盘上的状态与
 主目录分区。部署身份重复或分区分属不同磁盘时会拒绝启动。

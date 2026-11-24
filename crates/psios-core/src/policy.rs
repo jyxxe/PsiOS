@@ -53,6 +53,7 @@ pub const TOOLS: &[&str] = &[
 pub const COMMON: &[&str] = &[
     "task.submit",
     "task.read",
+    schedule::ACTION,
     "resource.read",
     "event.read",
     "secret.manage",
@@ -110,7 +111,11 @@ fn bootstrap_actions() -> Vec<String> {
         .filter(|a| {
             !matches!(
                 **a,
-                "node.interfaces" | "node.routes" | "node.routing_rules" | "backup.verify"
+                "node.interfaces"
+                    | "node.routes"
+                    | "node.routing_rules"
+                    | "backup.verify"
+                    | schedule::ACTION
             )
         })
         .map(|a| a.to_string())
@@ -459,8 +464,9 @@ pub fn revoke(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let p: Conditional = decode(p)?;
     let g = db.of(&p.id, "Grant")?;
     g.cas(&p.expected_resource_version)?;
+    let bootstrap = db.of("owner-delegation", "Delegation")?;
     require(
-        g.owner != OWNER,
+        bootstrap.body["grant_id"] != g.id,
         "PermissionDenied",
         "bootstrap grant is reserved",
     )?;

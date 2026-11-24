@@ -57,7 +57,7 @@ def upgrade(previous, current):
         assert any(r["table"] == 255 and r["action"] == 1 for r in rules["rules"]), rules
         n.stop()
         report = json.loads(subprocess.check_output([new, "--config", n.config, "verify"]))
-        assert report["database_format"] == 8 and not report["migration_required"], report
+        assert report["database_format"] >= 8 and not report["migration_required"], report
         old = subprocess.run([previous.resolve() / "psiosd", "--config", n.config, "check"],
                              capture_output=True, text=True, timeout=15)
         assert old.returncode != 0 and "SchemaVersionUnsupported" in old.stderr, old

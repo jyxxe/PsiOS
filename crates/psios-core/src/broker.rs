@@ -17,7 +17,10 @@ pub(crate) use recovery::{reconcile, recover};
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use submission::{authority, deadline};
-pub(crate) use submission::{cancel_origin, lookup, prepare, retry, retry_in_session, submit};
+pub(crate) use submission::{
+    cancel_origin, lookup, prepare, prepare_scheduled, retry, retry_in_session, submit,
+    submit_scheduled,
+};
 
 fn field<'v>(v: &'v Value, k: &str) -> &'v str {
     v[k].as_str().expect("validated persisted field")

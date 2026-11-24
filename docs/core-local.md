@@ -95,6 +95,12 @@ target/debug/psiosctl --socket "$workdir/core/api.sock" --token-file "$workdir/a
 
 服务嵌入仓库中的 JSON Schema，无需在线获取 Schema。CLI 的 `validate task-submit FILE` 可检查结构和提交摘要。摘要使用带用途前缀的 JCS 和 SHA-256。已启用的写接口会进一步检查引用类型、当前授权、版本与真实资源身份。[v1 Schema](v1/schemas/README.md) · [RFC 8785](https://www.rfc-editor.org/rfc/rfc8785)
 
+## 核对本机挂载拓扑
+
+`node.mounts` 接受空对象，通过普通只读 Task 返回 Core 当前 Linux 挂载命名空间的制品。Grant 须包含 `task.submit`、`task.read` 和 `node.mounts`，可用 `tool_targets` 限定节点 ID。结果包含启动 ID、挂载命名空间 inode、观察时间，以及各挂载的 ID、父 ID、设备主次号、文件系统类型、根和挂载点。挂载点的只读标志与 superblock 的只读标志分别报告，便于区分只读 bind 与整个文件系统只读。制品也保存选定的 VFS 标志和传播组。[Linux mountinfo 定义](https://www.kernel.org/doc/html/latest/filesystems/proc.html)
+
+内核转义的路径按原字节解析，非 UTF-8 名称使用 `{ "base64": "…" }`。命名空间文件系统的根可能是 `net:[…]` 等内核名字。挂载 ID 与当前观察绑定，卸载后内核可重新使用 ID。制品只返回选定的 VFS 字段。一次最多观察 4096 项和 512 KiB 内核输入，超限时返回 `QuotaExceeded`。现有制品分块接口可读取超过单个 RPC 帧的报告。[真实 namespace 与 bind 挂载验收](../tests/test_mounts.py) · [格式 15 升级](../tests/mounts_upgrade.py)
+
 ## 应用、卷与审批
 
 | Task 工具 | input |

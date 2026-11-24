@@ -64,6 +64,8 @@ pub enum Action {
     RoutingRules(node::network::RuleQuery),
     #[serde(rename = "node.devices")]
     Devices {},
+    #[serde(rename = "node.mounts")]
+    Mounts {},
     #[serde(rename = "node.processes")]
     Processes(node::ProcessQuery),
     #[serde(rename = "service.inspect")]
@@ -202,6 +204,7 @@ impl Action {
             | Self::RouteLookup(_)
             | Self::RoutingRules(_)
             | Self::Inventory {}
+            | Self::Mounts {}
             | Self::Devices {} => {
                 return db.of(&db.meta("authority")?, "Node");
             }
@@ -342,6 +345,7 @@ impl Work {
             | Action::Routes(_)
             | Action::RouteLookup(_)
             | Action::RoutingRules(_)
+            | Action::Mounts {}
             | Action::Devices {} => node::perform(self),
             Action::Start(_) => apps::start(self, checkpoint),
             Action::Stage { .. }

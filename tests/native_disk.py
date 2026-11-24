@@ -204,7 +204,7 @@ def check_recovered_chat(c, observed):
 def check_native_workflow(c):
     node = json.loads(c.run("psiosctl node"))["reference"]["resource_id"]
     grant = call(c, "Grant.Issue", {
-        "principal_id": "local-owner", "tool_targets": ["profile-local", node], "units": 3, "ttl_seconds": 120,
+        "principal_id": "local-owner", "tool_targets": ["profile-local", node], "units": 4, "ttl_seconds": 120,
         "actions": ["workflow.manage", "task.submit", "task.read", "system.status", "node.inventory"],
     })
     definition = call(c, "Workflow.Define", {
@@ -215,6 +215,7 @@ def check_native_workflow(c):
             {"id": "status", "tool": "system.status", "after": [], "input": {}},
             {"id": "unselected", "tool": "node.inventory", "after": ["status"], "input": {},
              "when": {"step": "status", "pointer": "/authority_id", "equals": "other-node"}},
+            {"id": "join", "tool": "system.status", "after": [], "after_selected": ["inventory", "unselected"], "input": {}},
         ],
     })
     stamp = int(c.run("date -u +%s"))
@@ -233,10 +234,12 @@ def check_native_workflow(c):
         assert time.monotonic() < deadline, observed
         time.sleep(0.15)
     assert (phase, observed["state"]["outcome_knowledge"]) == ("Succeeded", "Known"), observed
-    inventory, status, unselected = observed["state"]["steps"]
+    inventory, status, unselected, join = observed["state"]["steps"]
     assert (inventory["lifecycle"], status["lifecycle"]) == ("Succeeded", "Succeeded")
     assert inventory["condition"]["selected"] is True and inventory["condition"]["source_task_ref"] == status["task_ref"]
     assert unselected["lifecycle"] == "Skipped" and unselected["task_receipt"] is None
+    assert join["lifecycle"] == "Succeeded"
+    assert join["joined_predecessors"] == [{"step_id": "inventory", "task_ref": inventory["task_ref"]}]
     receipt = inventory["task_receipt"]
     assert receipt["origin_ref"]["origin_id"] == identity["id"]
     task = call(c, "Task.Get", {"id": receipt["task_id"]})

@@ -9,10 +9,12 @@ from support import Failure, Node, key, target
 from test_schedule import timestamp
 
 
-def step(name, tool="system.status", input=None, after=(), when=None):
+def step(name, tool="system.status", input=None, after=(), when=None, after_selected=()):
     definition = dict(id=name, tool=tool, input={} if input is None else input, after=list(after))
     if when is not None:
         definition["when"] = when
+    if after_selected:
+        definition["after_selected"] = list(after_selected)
     return definition
 
 
@@ -119,7 +121,9 @@ class WorkflowTests(unittest.TestCase):
         scope = self.grant()
         for steps in ([step("same"), step("same")], [step("dangling", after=["absent"])],
                       [step("left", after=["right"]), step("right", after=["left"])],
-                      [step("dup-parent"), step("later", after=["dup-parent", "dup-parent"])]):
+                      [step("dup-parent"), step("later", after=["dup-parent", "dup-parent"])],
+                      [step("left", after_selected=["right"]), step("right", after=["left"])],
+                      [step("first"), step("join", after=["first"], after_selected=["first"])]):
             self.rejected("InvalidArgument", "Workflow.Define", dict(raw, steps=steps))
         definition = n.call("Workflow.Define", raw)
         self.assertEqual(n.call("Workflow.Define", raw), definition)
@@ -143,7 +147,7 @@ class WorkflowTests(unittest.TestCase):
             step("dependent", after=["unselected"]),
             step("selected", "volume.write", dict(**target(volume), name="proof", content="once"),
                  ["observe"], dict(selector, equals=authority)),
-            step("verify", after=["selected"]),
+            step("verify", after_selected=["unselected", "selected"]),
         ])
         self.assertEqual(definition["definition"]["dsl_version"], 2)
         request = self.request(definition, grant)
@@ -168,10 +172,28 @@ class WorkflowTests(unittest.TestCase):
         node.approve(write)
         finished = self.wait(run, "Succeeded")
         self.assertEqual(node.call("Workflow.Start", request), finished)
-        self.assertEqual(self.phases(finished)["selected"]["condition"], evidence)
+        phases = self.phases(finished)
+        self.assertEqual(phases["selected"]["condition"], evidence)
+        self.assertEqual(phases["verify"]["joined_predecessors"], [
+            {"step_id": "selected", "task_ref": phases["selected"]["task_ref"]}])
         tree = node.state / "volumes" / volume["resource_id"] / "data"
         self.assertEqual({path.name: path.read_text() for path in tree.iterdir()}, {"proof": "once"})
         self.assertEqual(self.budget(grant), (0, 3))
+
+    def test_join_of_unselected_branches_has_no_task(self):
+        node = self.node
+        grant = self.grant(units=4)
+        false = {"step": "observe", "pointer": "/authority_id", "equals": "different-node"}
+        definition = self.define([step("observe"), step("branch-a", after=["observe"], when=false),
+            step("branch-b", after=["observe"], when=false), step("join", after_selected=["branch-a", "branch-b"])])
+        run = node.call("Workflow.Start", self.request(definition, grant))
+        finished = self.phases(self.wait(run, "Succeeded"))
+        self.assertEqual(finished["join"]["reason"], "NoSelectedPredecessor")
+        self.assertEqual(finished["join"]["joined_predecessors"], [])
+        for name in ("branch-a", "branch-b", "join"):
+            self.assertEqual(finished[name]["lifecycle"], "Skipped")
+            self.assertIsNone(finished[name]["task_receipt"])
+        self.assertEqual(self.budget(grant), (0, 1))
 
     def test_condition_rejects_invalid_types_paths_and_missing_task_read(self):
         node = self.node

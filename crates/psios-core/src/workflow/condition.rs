@@ -6,7 +6,6 @@ use crate::{
 use psios_api::{canonical, sha256};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
 
 #[derive(Deserialize, Serialize)]
 #[serde(untagged)]
@@ -24,9 +23,9 @@ pub(super) struct Predicate {
 }
 
 impl Predicate {
-    pub(super) fn validate(&self, parents: &BTreeSet<&str>) -> Result<()> {
+    pub(super) fn validate(&self, parents: &[String]) -> Result<()> {
         require(
-            parents.contains(self.step.as_str()),
+            parents.contains(&self.step),
             "InvalidArgument",
             "workflow condition must read a direct predecessor",
         )?;

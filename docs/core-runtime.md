@@ -221,6 +221,8 @@ jq -n --argjson definition "$definition" --arg grant "$grant" --arg until "$(dat
 
 将此对象填入相应步骤的 `when`，并在该步骤的 `after` 列出 `status`。Core 从前驱 Task 的固定修订取得唯一结果制品，在派发前持久提交所选结果、谓词摘要、Task 和制品引用及值摘要。条件为假时记录 `Skipped`，依赖被跳过步骤的后继也跳过。缺少字段或字段类型不符时以 `PreconditionFailed` 结算。跳过的步骤不申请 Task、审批或派发预算。条件定义使用 DSL 2。数据库格式 24 拒绝使用早期写入者打开带条件的权威。[分支、重启和权限验收](../tests/test_workflow.py) · [格式 23 升级](../tests/workflow_conditions_upgrade.py)
 
+汇合步骤可在 `after_selected` 列出可选分支。它等待这些分支逐一确认成功或跳过，并要求至少一个分支成功才派发。回执保存成功参与的步骤和 Task 修订。所有可选分支都跳过时，汇合步骤以 `NoSelectedPredecessor` 跳过。`after` 继续声明必需前驱，两份清单中的步骤 ID 必须互不重复。
+
 `Workflow.Get` 返回运行修订、定义引用、截止时间、分支判定以及各步骤的 Task 回执和已观察修订。可执行的后继在全部必需前驱已知成功后进入准入。前驱出现未知效果时保留 `Blocked/Unknown`，原 Operation 完成对账后继续。用 `Workflow.Cancel` 提交 ID 和当前修订可关闭派发并取消在途 Task，已经发生的效果仍可从原 Task 和 Operation 查阅。[审批、撤权和队列验收](../tests/test_workflow.py) · [早期 DAG 升级验收](../tests/workflow_upgrade.py)
 
 ## 本机会话

@@ -1,10 +1,12 @@
 """Local links, addresses, routes and policy rules through scoped Tasks."""
 from collections import Counter
+import errno
 import hashlib
 import ipaddress
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import unittest
 
@@ -318,6 +320,104 @@ class NetworkTests(unittest.TestCase):
             fresh = read(submit({"family": "inet"}))
             self.assertEqual([r["action"] for r in fresh["rules"] if r["priority"] == 100], [8, 1])
             self.assertEqual(read(original)["snapshot_digest"], digest)
+
+    def test_route_lookup_matches_kernel_with_rule_selectors(self):
+        n = Node("target/debug")
+        self.addCleanup(n.close)
+        node = n.call("Node.Get", {})["reference"]["resource_id"]
+        tool = "node.route_lookup"
+        actions = ["task.submit", "task.read", tool]
+        loopback = {"destination": "127.0.0.1"}
+        route_reader, route_grant = self.actor(n, ["task.submit", "task.read", "node.routes", "node.routing_rules"], node)
+        for token, grant in [(n.owner, "owner-delegation"), (route_reader, route_grant)]:
+            with self.assertRaises(Failure) as denied:
+                n.prepare(tool, loopback, token=token, delegation=grant)
+            self.assertEqual(denied.exception.code, "PermissionDenied")
+        wrong, scope = self.actor(n, actions, "profile-local")
+        with self.assertRaises(Failure) as denied:
+            n.call("Task.Submit", n.prepare(tool, loopback, token=wrong, delegation=scope), wrong)
+        self.assertEqual(denied.exception.code, "PermissionDenied")
+        token, grant = self.actor(n, actions, node)
+
+        def look(params):
+            request = n.prepare(tool, params, token=token, delegation=grant)
+            task = n.wait(n.call("Task.Submit", request, token)["task_id"])
+            self.assertEqual(task["lifecycle"], "Succeeded", task)
+            ref, = task["result"]["artifact_refs"]
+            return n.call("Artifact.Read", {"reference": ref}, token), ref
+
+        for invalid in ({}, {"destination": "localhost"}, dict(loopback, source="::1"), dict(loopback, uid=2**32-1),
+                        dict(loopback, output_ifindex=0), dict(loopback, source_port=5000)):
+            with self.assertRaises(Failure) as bad:
+                look(invalid)
+            self.assertEqual(bad.exception.code, "InvalidArgument")
+        local, ref = look(loopback)
+        self.assertEqual(local["outcome"], "Resolved", local)
+        self.assertEqual(local["lookup_uid"], os.getuid())
+        self.assertEqual(local["network_namespace_inode"], str(os.stat("/proc/self/ns/net").st_ino))
+        self.assertEqual(local["user_namespace_inode"], str(os.stat("/proc/self/ns/user").st_ino))
+        lo = socket.if_nametoindex("lo")
+        self.assertEqual((local["route"]["kind"], local["route"]["table"], local["route"]["output_ifindex"]),
+                         (2, 255, lo))
+        self.assertIsNone(local["kernel_errno"])
+        bound, _ = look(dict(loopback, output_ifindex=lo))
+        self.assertEqual((bound["outcome"], bound["route"]["output_ifindex"]), ("Resolved", lo))
+        ipv6 = Path("/proc/sys/net/ipv6/conf/lo/disable_ipv6")
+        if ipv6.exists() and ipv6.read_text().strip() == "0":
+            local6, _ = look({"destination": "::1"})
+            self.assertEqual(local6["outcome"], "Resolved", local6)
+            self.assertEqual((local6["route"]["family"], local6["route"]["table"], local6["route"]["output_ifindex"]),
+                             ("inet6", 255, lo))
+        with self.assertRaises(Failure) as denied:
+            n.call("Artifact.Read", {"reference": ref}, route_reader)
+        self.assertEqual(denied.exception.code, "PermissionDenied")
+
+        reference = os.getenv("PSIOS_TEST_LOOKUP_REFERENCE")
+        mutate = os.getenv("PSIOS_TEST_MUTATE_ROUTES")
+        if not (mutate or reference):
+            return
+        flows = [
+            ({"destination": "198.20.0.7", "fwmark": 55}, ["-4", "route", "get", "198.20.0.7", "mark", "55"]),
+            ({"destination": "2001:db8:3::5", "source": "2001:db8:1::2", "transport": "tcp", "source_port": 20000,
+              "destination_port": 443}, ["-6", "route", "get", "2001:db8:3::5", "from", "2001:db8:1::2", "ipproto", "tcp",
+                                        "sport", "20000", "dport", "443"]),
+            ({"destination": "198.20.2.7", "uid": 4242}, ["-4", "route", "get", "198.20.2.7", "uid", "4242"]),
+        ]
+        if reference:
+            self.assertFalse(Path("/usr/sbin/ip").exists())
+            expected = json.loads(Path(reference).read_bytes())
+        else:
+            expected = [json.loads(subprocess.check_output(["/usr/sbin/ip", "-j", "-N", *args])) for _, args in flows]
+        resolved = []
+        for (params, _), (result,) in zip(flows, expected, strict=True):
+            report, original = look(params)
+            self.assertEqual(report["outcome"], "Resolved", report)
+            self.assertEqual(report["lookup_uid"], params.get("uid", os.getuid()))
+            self.assertIsNone(report["kernel_errno"])
+            route = report["route"]
+            self.assertEqual((route["destination"]["address"], route["table"], route["preferred_source"],
+                              route["output_ifindex"], route["gateway"]),
+                             (result["dst"], int(result["table"]), result["prefsrc"],
+                              socket.if_nametoindex(result["dev"]), result["gateway"]))
+            resolved.append((original, report))
+        for params, code in (({"destination": "198.20.0.7"}, errno.ENETUNREACH),
+                             ({"destination": "198.20.1.7"}, errno.EACCES),
+                             ({"destination": "198.20.2.7"}, errno.ENETUNREACH)):
+            rejected, _ = look(params)
+            self.assertEqual((rejected["outcome"], rejected["route"], rejected["kernel_errno"]),
+                             ("KernelRejected", None, code), rejected)
+        other_port, _ = look(dict(flows[1][0], destination_port=444))
+        self.assertEqual(other_port["outcome"], "KernelRejected", other_port)
+        if mutate:
+            args = ["/usr/sbin/ip", "-4", "route", "replace", "198.20.0.0/24", "dev", "psios-test", "table", "2000", "via"]
+            subprocess.run(args + ["198.51.100.12"], check=True)
+            try:
+                updated, _ = look(flows[0][0])
+                self.assertEqual(updated["route"]["gateway"], "198.51.100.12", updated)
+                old, report = resolved[0]
+                self.assertEqual(n.call("Artifact.Read", {"reference": old}, token), report)
+            finally:
+                subprocess.run(args + ["198.51.100.10"], check=True)
 
     def actor(self, n, actions, target):
         a = n.call("Agent.Register", {"name": "observer"})

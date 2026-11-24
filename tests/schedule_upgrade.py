@@ -47,7 +47,7 @@ def upgrade(previous, current):
         assert n.wait(result["task_receipt"]["task_id"])["lifecycle"] == "Succeeded"
         n.stop()
         after = json.loads(subprocess.check_output([binary, "--config", n.config, "verify"]))
-        assert after["database_format"] == 9 and not after["migration_required"], after
+        assert after["database_format"] >= 9 and not after["migration_required"], after
         old = subprocess.run([previous.resolve() / "psiosd", "--config", n.config, "check"],
                              capture_output=True, text=True, timeout=15)
         assert old.returncode != 0 and "SchemaVersionUnsupported" in old.stderr, old

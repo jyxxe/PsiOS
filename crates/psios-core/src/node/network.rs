@@ -1,9 +1,11 @@
 //! Bounded, read-only observations in the daemon's network namespace.
 mod kernel;
+mod lookup;
 mod routes;
 mod rules;
 mod snapshot;
 use crate::{Result, err, now, require};
+pub use lookup::{LookupQuery, observe_lookup};
 use netlink_packet_route::AddressFamily;
 pub use routes::{RouteQuery, observe_routes};
 pub use rules::{RuleQuery, observe_rules};
@@ -68,6 +70,15 @@ impl Family {
     }
 }
 
+impl From<IpAddr> for Family {
+    fn from(address: IpAddr) -> Self {
+        match address {
+            IpAddr::V4(_) => Self::Inet,
+            IpAddr::V6(_) => Self::Inet6,
+        }
+    }
+}
+
 #[derive(PartialEq, Eq, PartialOrd, Ord, Serialize)]
 struct Prefix {
     address: IpAddr,
@@ -87,6 +98,10 @@ fn namespace() -> Result<Namespace> {
             .into(),
         network_namespace_inode: fs::metadata("/proc/self/ns/net")?.ino().to_string(),
     })
+}
+
+fn user_namespace_inode() -> Result<String> {
+    Ok(fs::metadata("/proc/self/ns/user")?.ino().to_string())
 }
 
 fn iproute_interfaces() -> Result<Vec<Interface>> {

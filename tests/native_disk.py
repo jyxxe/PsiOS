@@ -137,8 +137,8 @@ def call(c, method, params):
 def check_native_network(c):
     node = json.loads(c.run("psiosctl node"))["reference"]["resource_id"]
     grant = call(c, "Grant.Issue", dict(principal_id="local-owner", tool_targets=[node],
-                 actions=["task.submit", "task.read", "node.interfaces", "node.routes", "node.routing_rules"],
-                 units=3, ttl_seconds=120))
+                 actions=["task.submit", "task.read", "node.interfaces", "node.routes", "node.routing_rules", "node.route_lookup"],
+                 units=4, ttl_seconds=120))
     delegation = shlex.quote(grant["delegation_ref"]["resource_id"])
     task = json.loads(c.run(f"printf '{{}}' | psiosctl submit node.interfaces --delegation {delegation} --key native-network"))
     done = json.loads(c.run("psiosctl wait " + shlex.quote(task["task_id"])))
@@ -163,6 +163,13 @@ def check_native_network(c):
     rules = call(c, "Artifact.Read", {"reference": done["result"]["artifact_refs"][0]})
     assert rules["network_namespace_inode"] == report["network_namespace_inode"], rules
     assert any(r["priority"] == 0 and r["table"] == 255 and r["action"] == 1 for r in rules["rules"]), rules
+    task = json.loads(c.run(f"printf '{{\"destination\":\"127.0.0.1\"}}' | psiosctl submit node.route_lookup "
+                            f"--delegation {delegation} --key native-route-lookup"))
+    done = json.loads(c.run("psiosctl wait " + shlex.quote(task["task_id"])))
+    assert done["lifecycle"] == "Succeeded", done
+    lookup = call(c, "Artifact.Read", {"reference": done["result"]["artifact_refs"][0]})
+    assert lookup["outcome"] == "Resolved" and lookup["route"]["output_ifindex"] == row["ifindex"], lookup
+    assert lookup["route"]["table"] == 255 and lookup["route"]["kind"] == 2, lookup
 
 
 def schedule_across_power_cut(c):

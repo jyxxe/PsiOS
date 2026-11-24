@@ -54,6 +54,9 @@ jobs:
             ip -4 route add 192.0.2.0/24 via inet6 2001:db8:1::1 dev psios-test table 1000
             ip -4 nexthop add id 123 via 198.51.100.5 dev psios-test
             ip -4 route add 198.18.0.0/24 nhid 123 table 1000
+            ip -4 route add 198.20.0.0/24 via 198.51.100.10 dev psios-test table 2000
+            ip -4 route add 198.20.2.0/24 via 198.51.100.11 dev psios-test table 2000
+            ip -6 route add 2001:db8:3::/64 via 2001:db8:1::1 dev psios-test table 2001
             ip -4 rule add priority 100 from 192.0.2.0/24 to 203.0.113.0/24 fwmark 0/255 lookup 1000
             ip -4 rule add priority 100 iif lo uidrange 1000-1010 ipproto tcp sport 10000-10020 dport 443 prohibit
             ip -4 rule add priority 200 goto 300
@@ -61,20 +64,29 @@ jobs:
             ip -4 rule add priority 270 l3mdev
             ip -4 rule add priority 300 oif lo table 254 suppress_prefixlength 0 suppress_ifgroup 5
             ip -6 rule add priority 120 not from 2001:db8:1::/64 to 2001:db8:2::/64 blackhole
+            ip -4 rule add priority 60 to 198.20.0.0/24 fwmark 55 lookup 2000
+            ip -4 rule add priority 61 to 198.20.1.0/24 prohibit
+            ip -6 rule add priority 62 to 2001:db8:3::/64 ipproto tcp sport 20000 dport 443 lookup 2001
+            ip -4 rule add priority 63 to 198.20.2.0/24 uidrange 4242-4242 lookup 2000
             PSIOS_TEST_MUTATE_ROUTES=1 PSIOS_TEST_MUTATE_RULES=1 python3 -B -m unittest discover -s tests -p test_network.py -v
             ref=$(mktemp)
             routes=$(mktemp)
             rules=$(mktemp)
-            trap "rm -f \"$ref\" \"$routes\" \"$rules\"" EXIT
+            lookups=$(mktemp)
+            trap "rm -f \"$ref\" \"$routes\" \"$rules\" \"$lookups\"" EXIT
             ip -j address show > "$ref"
             { printf "["; ip -j -N link show; printf ","; ip -j -N -4 route show table all;
               printf ","; ip -j -N -6 route show table all; printf "]\n"; } > "$routes"
             { printf "["; ip -j -N -4 rule show; printf ","; ip -j -N -6 rule show; printf "]\n"; } > "$rules"
-            chown "$1" "$ref" "$routes" "$rules"
+            { printf "["; ip -j -N -4 route get 198.20.0.7 mark 55; printf ",";
+              ip -j -N -6 route get 2001:db8:3::5 from 2001:db8:1::2 ipproto tcp sport 20000 dport 443;
+              printf ","; ip -j -N -4 route get 198.20.2.7 uid 4242; printf "]\n"; } > "$lookups"
+            chown "$1" "$ref" "$routes" "$rules" "$lookups"
             uid=$(id -u "$1")
             gid=$(id -g "$1")
             mount -t tmpfs tmpfs /usr/sbin
             PSIOS_TEST_NETWORK_REFERENCE="$ref" PSIOS_TEST_ROUTE_REFERENCE="$routes" PSIOS_TEST_RULE_REFERENCE="$rules" \
+              PSIOS_TEST_LOOKUP_REFERENCE="$lookups" \
               setpriv --reuid "$uid" --regid "$gid" --clear-groups \
               python3 -B -m unittest discover -s tests -p test_network.py -v
           ' psios-network "$(id -un)"
@@ -142,6 +154,12 @@ jobs:
           git archive c43ac95ae95b7918f79e8e352deeef5c57ba684c Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format8"
           CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format8/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format8/target"
           python3 tests/schedule_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format8/target/debug"
+      - name: Migrate format 9 state with a pending timer and exercise kernel lookup
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format9"
+          git archive 121a8c1e11e0f34bcfec4a356a0a36f511731db1 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format9"
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked --workspace --manifest-path "$RUNNER_TEMP/psios-format9/Cargo.toml" --target-dir "$RUNNER_TEMP/psios-format9/target"
+          python3 tests/route_lookup_upgrade.py --previous-bin "$RUNNER_TEMP/psios-format9/target/debug"
       - name: Verify real systemd service control and crash reconciliation
         run: |
           sudo loginctl enable-linger "$(id -un)"

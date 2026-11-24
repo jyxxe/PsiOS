@@ -23,10 +23,12 @@ pub const TOOLS: &[&str] = &[
     "node.routing_rules",
     "node.processes",
     "node.devices",
+    "node.mounts",
     "service.inspect",
     "service.start",
     "service.stop",
     "volume.files",
+    "volume.usage",
     "volume.mkdir",
     "volume.read_chunk",
     "volume.append",
@@ -56,6 +58,9 @@ pub const COMMON: &[&str] = &[
     "task.read",
     schedule::ACTION,
     workflow::ACTION,
+    chat::INVITE,
+    chat::READ,
+    chat::SEND,
     "resource.read",
     "event.read",
     "secret.manage",
@@ -75,8 +80,10 @@ pub fn readonly(tool: &str) -> bool {
             | "node.routing_rules"
             | "node.processes"
             | "node.devices"
+            | "node.mounts"
             | "service.inspect"
             | "volume.files"
+            | "volume.usage"
             | "volume.read_chunk"
             | "application.refresh"
             | "secret.mac"
@@ -118,9 +125,13 @@ fn bootstrap_actions() -> Vec<String> {
                     | "node.routes"
                     | "node.route_lookup"
                     | "node.routing_rules"
+                    | "node.mounts"
                     | "backup.verify"
                     | schedule::ACTION
                     | workflow::ACTION
+                    | chat::INVITE
+                    | chat::READ
+                    | chat::SEND
             )
         })
         .map(|a| a.to_string())
@@ -284,19 +295,26 @@ fn delegations(db: &Db<'_>, actor: &str) -> Result<Vec<Doc>> {
         .collect::<rusqlite::Result<_>>()?)
 }
 pub fn can(db: &Db<'_>, actor: &str, action: &str) -> Result<()> {
-    find_grant(db, actor, action, None)
+    authorized_delegation(db, actor, action, None).map(|_| ())
 }
 pub fn can_target(db: &Db<'_>, actor: &str, action: &str, target: &str) -> Result<()> {
-    find_grant(db, actor, action, Some(target))
+    authorized_delegation(db, actor, action, Some(target)).map(|_| ())
 }
-fn find_grant(db: &Db<'_>, actor: &str, action: &str, target: Option<&str>) -> Result<()> {
+pub(crate) fn authorized_delegation(
+    db: &Db<'_>,
+    actor: &str,
+    action: &str,
+    target: Option<&str>,
+) -> Result<Doc> {
     for d in delegations(db, actor)? {
-        let check = delegation(db, actor, &d.id, action).and_then(|d| match target {
-            Some(resource) => tool_scope(db, &d.reference(), resource),
-            None => Ok(()),
+        let check = delegation(db, actor, &d.id, action).and_then(|d| {
+            if let Some(resource) = target {
+                tool_scope(db, &d.reference(), resource)?;
+            }
+            Ok(d)
         });
         match check {
-            Ok(()) => return Ok(()),
+            Ok(d) => return Ok(d),
             Err(e) if e.0.code == "PermissionDenied" => {}
             Err(e) => return Err(e),
         }

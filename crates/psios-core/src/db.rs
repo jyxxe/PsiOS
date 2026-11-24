@@ -158,7 +158,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = 12;
+pub(super) const CURRENT_FORMAT: u32 = 16;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -324,6 +324,9 @@ impl Store {
                 if ver < 12 {
                     db.c.execute_batch(include_str!("workflow.sql"))?;
                 }
+                if ver < 13 {
+                    db.c.execute_batch(include_str!("chat.sql"))?;
+                }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;
         }
@@ -348,6 +351,11 @@ impl Store {
             db.c.execute(
                 "UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='epoch'",
                 [],
+            )?;
+            db.c.execute(
+                "DELETE FROM chat_send_windows WHERE conversation IN
+                    (SELECT id FROM direct_chats WHERE inviter=?1 OR invitee=?1)",
+                [policy::OWNER],
             )?;
             db.audit(
                 policy::OWNER,

@@ -75,10 +75,15 @@ int main(void) {
         volume = node.get(volume["resource_id"])["reference"]
         busy = node.wait(node.submit("backup.create", target(volume)))
         assert busy["lifecycle"] == "Failed" and busy["conditions"][0]["type"] == "Conflict", busy
+        busy = node.wait(node.submit("volume.usage", {"target": target(volume)}))
+        assert busy["lifecycle"] == "Failed" and busy["conditions"][0]["type"] == "Conflict", busy
         node.stop()
         node.start()
         assert node.perform("application.health", target(app))["container_id"] == cid
         app = node.perform("application.stop", target(app))
+        volume = node.get(volume["resource_id"])["reference"]
+        measured = node.perform("volume.usage", {"target": target(volume)})
+        assert measured["files"] == 2 and measured["logical_file_bytes"] == str(len("new revisionfirst\n")), measured
         app = node.call("Application.Configure", dict(**target(app), environment={"TEST_NAME": "second"}))
         app = node.perform("application.start", target(app))
         app = node.perform("application.stop", target(app))

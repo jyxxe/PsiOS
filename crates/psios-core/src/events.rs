@@ -74,6 +74,42 @@ impl Cursor {
         })
     }
 }
+
+pub(crate) fn sign_position(
+    db: &Db<'_>,
+    actor: &str,
+    scope: &str,
+    position: i64,
+) -> Result<String> {
+    Cursor {
+        mode: "ordered-stream".into(),
+        actor: actor.into(),
+        epoch: db.meta("epoch")?,
+        incarnation: db.incarnation.clone(),
+        kind: scope.into(),
+        snapshot: String::new(),
+        high: 0,
+        position,
+        until: chrono::Utc::now().timestamp() + 600,
+    }
+    .sign(db)
+}
+
+pub(crate) fn read_position(db: &Db<'_>, actor: &str, scope: &str, token: &str) -> Result<i64> {
+    require(
+        token.len() <= 1024,
+        "CursorExpired",
+        "invalid stream cursor",
+    )?;
+    let c = Cursor::read(db, token, actor, "ordered-stream")?;
+    require(
+        c.kind == scope,
+        "CursorExpired",
+        "cursor outside authorized stream",
+    )?;
+    Ok(c.position)
+}
+
 #[derive(Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 struct List {

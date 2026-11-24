@@ -2,6 +2,7 @@ mod agent;
 mod api;
 mod apps;
 mod broker;
+mod chat;
 mod command;
 mod config;
 mod db;

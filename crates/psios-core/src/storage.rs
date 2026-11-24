@@ -2,6 +2,7 @@
 pub mod files;
 mod restore_proof;
 mod staging;
+pub(crate) mod usage;
 use crate::{
     config::{Config, new_file, private_dir, replace},
     db::{Db, Doc},
@@ -106,6 +107,7 @@ pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
                     Action::Read(_)
                         | Action::Chunk(_)
                         | Action::Files(_)
+                        | Action::VolumeUsage(_)
                         | Action::Activate(_)
                         | Action::Delete(_)
                 ),
@@ -722,6 +724,7 @@ pub fn perform(w: &Work) -> Result<Value> {
         | Action::Append(_)
         | Action::MakeDir(_)
         | Action::RemoveEntry(_) => files::perform(w),
+        Action::VolumeUsage(query) => usage::measure(w, query),
         Action::Activate(_) => restore_proof::verify(w),
         Action::Create { .. } => create_volume(w, None),
         Action::Restore(_) => create_volume(w, Some(&w.target)),

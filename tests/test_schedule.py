@@ -209,6 +209,47 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual(self.state(scheduled), original)
         self.assertEqual(self.budget(grant), (0, 1))
 
+    def test_calendar_pins_utc_and_reuses_the_original_trigger_after_restart(self):
+        n = self.node
+        grant = self.grant()
+        due = (datetime.now(timezone.utc) + timedelta(seconds=4)).replace(microsecond=0)
+        phoenix = due.astimezone(timezone(timedelta(hours=-7)))
+        calendar = dict(timezone="America/Phoenix", start_date=phoenix.date().isoformat(),
+                        local_time=phoenix.time().isoformat(), days=1, window_seconds=15,
+                        gap="Reject", fold="Earlier", missed={"mode": "Skip"}, overlap="Allow")
+        request = dict(key=key(), tool="system.status", input={}, calendar=calendar,
+                       delegation_id=grant["delegation_ref"]["resource_id"])
+        self.rejected("InvalidArgument", "Schedule.Create", dict(request, run_at=timestamp(5)))
+        self.rejected("InvalidArgument", "Schedule.Create",
+                      dict(request, calendar=dict(calendar, timezone="Unregistered/Timezone")))
+        self.rejected("InvalidArgument", "Schedule.Create",
+                      dict(request, calendar=dict(calendar, window_seconds=300)))
+        initial = n.call("Schedule.Create", request)
+        state = initial["state"]
+        self.assertEqual(state["timezone"], "America/Phoenix")
+        self.assertEqual(state["calendar"], calendar)
+        plan = state["calendar_plan"]
+        self.assertTrue(plan["timezone_database"])
+        self.assertEqual(plan["skipped_dates"], [])
+        window, = plan["windows"]
+        self.assertEqual(datetime.fromisoformat(window["run_at"]), due)
+        self.assertEqual(datetime.fromisoformat(window["deadline_at"]), due + timedelta(seconds=15))
+        self.rejected("IdempotencyConflict", "Schedule.Create",
+                      dict(request, calendar=dict(calendar, fold="Later")))
+        n.stop(signal.SIGKILL)
+        after(window["run_at"])
+        n.start()
+        completed = self.wait(initial, "Completed")
+        self.assertEqual(completed["state"]["calendar_plan"], plan)
+        trigger, = self.triggers(completed)
+        self.assertEqual(trigger["ordinal"], 1)
+        self.assertEqual(trigger["lifecycle"], "Triggered", trigger)
+        receipt = trigger["task_receipt"]
+        self.assertEqual(receipt["idempotency_key"], state["next"]["trigger_id"])
+        self.assertEqual(n.wait(receipt["task_id"])["lifecycle"], "Succeeded")
+        self.assertEqual(n.call("Schedule.Create", request), completed)
+        self.assertEqual(self.budget(grant), (0, 1))
+
     def test_interval_recovers_only_the_bounded_tail_and_persists_distinct_receipts(self):
         n = self.node
         grant = self.grant(units=2)

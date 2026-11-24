@@ -60,7 +60,6 @@ impl Config {
         file_sizes: impl Iterator<Item = u64>,
         entries: u64,
     ) -> Result<()> {
-        let fs = fstatvfs(destination).map_err(io::Error::from)?;
         let device = destination.metadata()?.dev();
         let mut reserve = 0;
         for (path, floor) in [
@@ -71,19 +70,29 @@ impl Config {
                 reserve = floor;
             }
         }
-        let block = fs.f_frsize.max(1);
-        let bytes = file_sizes
-            .map(|len| len.div_ceil(block).saturating_mul(block))
-            .fold(0u64, u64::saturating_add);
-        require(
-            available(&fs) >= reserve.saturating_add(bytes),
-            "QuotaExceeded",
-            "insufficient destination blocks for backup restore and authority reserve",
-        )?;
-        require(
-            fs.f_files == 0 || entries <= fs.f_favail,
-            "QuotaExceeded",
-            "insufficient destination inodes for backup restore",
-        )
+        check_restore_capacity(destination, file_sizes, entries, reserve)
     }
+}
+
+pub(crate) fn check_restore_capacity(
+    destination: &File,
+    file_sizes: impl Iterator<Item = u64>,
+    entries: u64,
+    reserve: u64,
+) -> Result<()> {
+    let fs = fstatvfs(destination).map_err(io::Error::from)?;
+    let block = fs.f_frsize.max(1);
+    let bytes = file_sizes
+        .map(|len| len.div_ceil(block).saturating_mul(block))
+        .fold(0u64, u64::saturating_add);
+    require(
+        available(&fs) >= reserve.saturating_add(bytes),
+        "QuotaExceeded",
+        "insufficient destination blocks for backup restore and authority reserve",
+    )?;
+    require(
+        fs.f_files == 0 || entries <= fs.f_favail,
+        "QuotaExceeded",
+        "insufficient destination inodes for backup restore",
+    )
 }

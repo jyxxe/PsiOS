@@ -40,6 +40,10 @@ pub(super) fn create(parent: &Path) -> Result<Stage> {
 }
 
 impl Stage {
+    pub(super) fn directory(&self) -> &File {
+        &self.dir
+    }
+
     pub(super) fn path(&self) -> &Path {
         &self.path
     }

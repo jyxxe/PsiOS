@@ -144,7 +144,7 @@ pub(super) fn authority(db: &Db<'_>, actor: &str, s: &Value) -> Result<(Doc, Doc
     )?;
     Ok((d, input))
 }
-pub(super) fn deadline(s: &Value) -> Result<()> {
+fn deadline(s: &Value) -> Result<()> {
     if let Some(t) = s["deadline_at"].as_str() {
         require(!expired(t)?, "DeadlineExceeded", "task deadline passed")?
     }
@@ -290,6 +290,12 @@ fn submit_with_origin(
     )?;
     let plan = plan(db, actor, s, &audience)?;
     let task = id("task");
+    policy::deadline::Clock::sample()?.register_until(
+        db,
+        &task,
+        field(&plan.body, "deadline_at"),
+        retry,
+    )?;
     let op = id("op");
     let at = now();
     let approval = policy::approval(tool);

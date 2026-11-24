@@ -89,6 +89,52 @@ fn approve(s: &mut Store, task: &str) {
 const HOST_WRITE_BARRIER: &str = "PSIOS_TEST_CRASH_STATE";
 
 #[test]
+fn elapsed_approval_is_refused_before_the_queue_sweep() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, mut store) = initialized(tmp.path());
+    let creation = submit(&mut store, "volume.create", json!({"name":"approval-time"}));
+    let source = execute(&mut store, &creation);
+    let task = submit(
+        &mut store,
+        "volume.write",
+        json!({"id":source["resource_id"], "expected_resource_version":source["version"],
+            "name":"never", "content":"late"}),
+    );
+    let waiting = call(&mut store, "Task.Get", json!({"id":task})).unwrap();
+    let request = waiting["conditions"][0]["message"].as_str().unwrap();
+    store
+        .transaction("elapsed-without-sweep", |db| {
+            let req = db.of(request, "ApprovalRequest")?;
+            assert!(!expired(req.body["expires_at"].as_str().unwrap())?);
+            assert_eq!(
+                db.c.execute(
+                    "UPDATE authorization_deadlines SET deadline_boot_ms=0 WHERE resource=?1",
+                    [&task],
+                )?,
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+    let req = call(&mut store, "Resource.Get", json!({"id":request})).unwrap();
+    let result = call(
+        &mut store,
+        "Approval.Decide",
+        json!({"id":request,"expected_resource_version":req["reference"]["version"],
+            "plan_digest":req["value"]["plan_digest"],"approve":true}),
+    );
+    assert_eq!(result.unwrap_err().0.code, "ApprovalInvalidated");
+    assert_eq!(
+        call(&mut store, "Resource.Get", json!({"id":request})).unwrap(),
+        req
+    );
+    assert!(store.transaction("sweep", broker::claim).unwrap().is_none());
+    let task = call(&mut store, "Task.Get", json!({"id":task})).unwrap();
+    assert_eq!(task["outcome_knowledge"], "NotStarted");
+    assert_eq!(task["conditions"][0]["type"], "DeadlineExceeded");
+}
+
+#[test]
 fn backup_export_rechecks_revocation_before_disclosing_a_prepared_read() {
     let tmp = tempfile::tempdir().unwrap();
     let (cfg, mut store) = initialized(tmp.path());
@@ -989,6 +1035,47 @@ fn cancelling_a_backup_before_rename_discards_the_staged_set() {
         (t["lifecycle"].as_str(), t["outcome_knowledge"].as_str()),
         (Some("Cancelled"), Some("Known"))
     );
+    assert_eq!(
+        fs::read_dir(cfg.state_dir.join("backups")).unwrap().count(),
+        0
+    );
+}
+
+#[test]
+fn elapsed_permit_fences_the_backup_publication_checkpoint() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, mut store) = initialized(tmp.path());
+    let created = submit(&mut store, "volume.create", json!({"name":"permit-time"}));
+    let source = execute(&mut store, &created);
+    let task = submit(
+        &mut store,
+        "backup.create",
+        json!({"id":source["resource_id"], "expected_resource_version":source["version"]}),
+    );
+    assert_eq!(claim(&mut store), task);
+    let work = dispatch(&mut store, &task);
+    let receipt = work.perform(|checkpoint| {
+        store.transaction("elapsed-permit", |db| {
+            let permit = db.resolve(&work.effect.spec["permit_ref"])?;
+            assert!(!expired(permit.body["not_after"].as_str().unwrap())?);
+            assert_eq!(
+                db.c.execute(
+                    "UPDATE authorization_deadlines SET deadline_boot_ms=0 WHERE resource=?1",
+                    [&permit.id],
+                )?,
+                1
+            );
+            Ok(())
+        })?;
+        store.transaction("checkpoint", |db| work.checkpoint(db, checkpoint))
+    });
+    assert_eq!(receipt.as_ref().unwrap_err().0.code, "Fenced");
+    store
+        .transaction("finish", |db| broker::finish(db, &work, receipt))
+        .unwrap();
+    let task = call(&mut store, "Task.Get", json!({"id":task})).unwrap();
+    assert_eq!(task["lifecycle"], "Failed");
+    assert_eq!(task["outcome_knowledge"], "Known");
     assert_eq!(
         fs::read_dir(cfg.state_dir.join("backups")).unwrap().count(),
         0

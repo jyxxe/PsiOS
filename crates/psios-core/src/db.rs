@@ -160,8 +160,8 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-// Older writers cannot enforce recorded boot-time authorization deadlines.
-pub(super) const CURRENT_FORMAT: u32 = 25;
+// Older writers cannot enforce boot-time deadlines for Tasks and ExecutionPermits.
+pub(super) const CURRENT_FORMAT: u32 = 26;
 struct CheckedHead {
     version: u32,
     head: String,

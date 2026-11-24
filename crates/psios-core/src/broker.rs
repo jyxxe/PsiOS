@@ -16,7 +16,7 @@ use psios_api::{VERSION, canonical, contract, digest, id, sha256};
 pub(crate) use recovery::{reconcile, recover};
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
-use submission::{authority, deadline};
+use submission::authority;
 pub(crate) use submission::{
     cancel_origin, lookup, prepare, prepare_scheduled, prepare_workflow, retime_scheduled, retry,
     retry_in_session, submit, submit_scheduled, submit_workflow,

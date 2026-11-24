@@ -11,18 +11,21 @@ fn plan_audience(plan: &Doc) -> Vec<Value> {
 fn preflight(db: &Db<'_>, t: &Doc) -> Result<(Doc, Doc)> {
     agent::check_dispatch(db, t)?;
     let (_, input) = authority(db, &t.owner, &t.spec)?;
-    deadline(&t.spec)?;
-    let a = Action::parse(field(&t.spec, "task_type"), &input.body)?;
-    let target = a.target(db, &t.owner)?;
-    let audience = a.audience(db, &t.owner, &t.spec["delegation_ref"], &target)?;
     let op = operation(db, t)?;
     let p = db.resolve(&op.body["plan_ref"])?;
     require(
-        !expired(field(&p.body, "deadline_at"))?
-            && target.reference() == p.body["allowed_effects"][0]["resource_ref"]
+        !policy::deadline::Clock::sample()?.expired(db, &t.id, field(&p.body, "deadline_at"))?,
+        "DeadlineExceeded",
+        "operation deadline passed",
+    )?;
+    let a = Action::parse(field(&t.spec, "task_type"), &input.body)?;
+    let target = a.target(db, &t.owner)?;
+    let audience = a.audience(db, &t.owner, &t.spec["delegation_ref"], &target)?;
+    require(
+        target.reference() == p.body["allowed_effects"][0]["resource_ref"]
             && audience == plan_audience(&p),
         "ApprovalInvalidated",
-        "execution precondition or deadline changed",
+        "execution precondition changed",
     )?;
     Ok((op, p))
 }
@@ -45,7 +48,7 @@ pub fn claim(db: &Db<'_>) -> Result<Option<String>> {
           SELECT q.task,
             julianday(q.valid_until)<=julianday('now') OR EXISTS(
               SELECT 1 FROM authorization_deadlines elapsed
-              WHERE elapsed.resource IN (q.grant_id,l.did) AND elapsed.boot_id=?1
+              WHERE elapsed.resource IN (q.task,q.grant_id,l.did) AND elapsed.boot_id=?1
                 AND (elapsed.time_ns!=?2 OR elapsed.deadline_boot_ms<=?3)
             ) AS expired,
             g.body->>'lifecycle'!='Active' OR d.body->>'lifecycle'!='Active'
@@ -220,6 +223,7 @@ pub fn dispatch(db: &Db<'_>, task: &str) -> Result<Option<Work>> {
     .unwrap()
     .to_utc()
     .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    policy::deadline::Clock::sample()?.register_until(db, &pid, &validity, Some(task))?;
     let mut permit = json!({
         "schema_version": VERSION,
         "permit_id": pid,

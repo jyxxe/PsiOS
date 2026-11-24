@@ -1,5 +1,5 @@
-use crate::{Result, db::Db, linux_clock::BootClock};
-use rusqlite::params;
+use crate::{Result, db::Db, err, linux_clock::BootClock, require};
+use rusqlite::{OptionalExtension, params};
 use std::{fs, io, os::unix::fs::MetadataExt};
 
 pub(crate) struct Clock {
@@ -25,6 +25,44 @@ impl Clock {
             .boot
             .millis
             .saturating_add(i64::from(ttl_seconds) * 1000);
+        self.write(db, resource, deadline_ms)
+    }
+
+    pub(crate) fn register_until(
+        &self,
+        db: &Db<'_>,
+        resource: &str,
+        utc: &str,
+        inherited_from: Option<&str>,
+    ) -> Result<()> {
+        let at = chrono::DateTime::parse_from_rfc3339(utc)
+            .map_err(|_| err("InvalidArgument", "invalid UTC deadline"))?;
+        let remaining_ms = (at - chrono::Utc::now()).num_milliseconds();
+        let mut deadline_ms = self.boot.millis.saturating_add(remaining_ms);
+        if let Some(source) = inherited_from {
+            let prior: Option<(String, i64)> = db.c.query_row(
+                "SELECT time_ns,deadline_boot_ms FROM authorization_deadlines WHERE resource=?1 AND boot_id=?2",
+                params![source, self.boot.boot_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).optional()?;
+            if let Some((time_ns, inherited_deadline)) = prior {
+                require(
+                    time_ns == self.time_ns,
+                    "DeadlineExceeded",
+                    "inherited deadline is outside the current time namespace",
+                )?;
+                deadline_ms = deadline_ms.min(inherited_deadline);
+            }
+        }
+        require(
+            deadline_ms > self.boot.millis,
+            "DeadlineExceeded",
+            "operation deadline passed",
+        )?;
+        self.write(db, resource, deadline_ms)
+    }
+
+    fn write(&self, db: &Db<'_>, resource: &str, deadline_ms: i64) -> Result<()> {
         db.c.execute(
             "INSERT INTO authorization_deadlines(resource,boot_id,time_ns,deadline_boot_ms) VALUES(?1,?2,?3,?4)",
             params![resource, self.boot.boot_id, self.time_ns, deadline_ms],
@@ -32,7 +70,7 @@ impl Clock {
         Ok(())
     }
 
-    pub(super) fn expired(&self, db: &Db<'_>, resource: &str, utc: &str) -> Result<bool> {
+    pub(crate) fn expired(&self, db: &Db<'_>, resource: &str, utc: &str) -> Result<bool> {
         if crate::expired(utc)? {
             return Ok(true);
         }

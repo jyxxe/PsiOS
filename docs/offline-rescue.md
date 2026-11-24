@@ -18,6 +18,22 @@ core_sha=$(awk '$2=="psiosd" {print $1}' rescue-core/SHA256SUMS)
 
 所有输入备妥后，检查机可以断网运行，无需 Git、源码检出或 Cargo。只有二进制的早期归档仍可按对应可信源码中的说明运行启动器。
 
+## 验证和恢复独立的卷备份
+
+创建卷备份后，将该备份目录作为完整副本存入独立介质。在原权威可用时，从 `psiosctl get BACKUP_ID` 的 `.value.manifest_digest` 取得摘要，把它保存到与副本独立的可信记录。恢复时的 `MANIFEST_DIGEST` 来自该记录。使用独立归档中的 `psiosd`，在 Linux 上直接检查副本。
+
+```bash
+rescue-core/psiosd verify-backup --directory /media/backup/backup-id \
+  --manifest-digest "$MANIFEST_DIGEST"
+mkdir -m 700 recovery
+rescue-core/psiosd verify-backup --directory /media/backup/backup-id \
+  --manifest-digest "$MANIFEST_DIGEST" --restore-to recovery/data
+```
+
+工具核验清单摘要、成员集合、路径结构、各文件长度和完整内容。配置、数据库和见证可以留在离线的原节点。恢复前检查目标的空闲数据块与 inode，将数据写入私有暂存目录，通过核验并刷盘后以拒绝覆盖的原子改名发布。恢复保持文件和目录模式以及清单中记录的修改时间，所有权取自恢复账户。恢复结果是普通目录。导回 Core 时按新卷的身份与激活流程操作。[脱离权威的恢复验收](../tests/test_detached_backup.py)
+
+核验或复制失败时工具清理未发布的暂存目录。若恢复进程被强制中止或断电，可能留下该次操作的 `.stage-*` 目录。确认没有恢复进程持有它后，可在保留备份副本的情况下清理该暂存目录。
+
 ## 检查状态盘
 
 示例检查 raw 镜像第一分区内的 `/var/lib/psios` 和 `/var/lib/psios.witness`。将 `SERVICE_UID` 设为原服务账户 UID。若目录的访问权限依赖独立 GID，增加 `--gid`。镜像直接包含文件系统时省略 `--partition`。其他布局可用 `--state` 和 `--witness` 指定分区根目录内的绝对路径。

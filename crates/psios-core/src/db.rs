@@ -14,6 +14,7 @@ use std::{
 use zeroize::Zeroizing;
 
 mod space;
+pub(crate) use space::check_restore_capacity;
 mod verify;
 
 pub struct Store {

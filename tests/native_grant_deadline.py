@@ -7,6 +7,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import time
 
 from native_combined_core import artifact, submit
 from native_disk import REPO, boot, call, check_clean_shutdown, password, stage_guest_chat_token
@@ -50,6 +51,33 @@ def timed_write(console, volume, name, deadline):
     return call(console, "Task.Submit", request)
 
 
+def cordoned_workflow(console, deadline):
+    grant = call(console, "Grant.Issue", {"principal_id": "local-owner", "tool_targets": ["profile-local"],
+        "units": 1, "ttl_seconds": 120, "actions": ["workflow.manage", "system.status", "task.submit", "task.read"]})
+    definition = call(console, "Workflow.Define", {"key": "elapsed-run-definition",
+        "steps": [{"id": "observe", "tool": "system.status", "input": {}, "after": []}]})
+    run = call(console, "Workflow.Start", {"key": "elapsed-run", "definition_ref": definition["reference"],
+        "delegation_id": grant["delegation_ref"]["resource_id"], "deadline_at": deadline})
+    assert run["state"]["lifecycle"] == "Ready" and run["state"]["steps"][0]["task_receipt"] is None, run
+    return run["reference"]["resource_id"], grant["budget_ref"]["resource_id"]
+
+
+def workflow_expired(console, run, budget):
+    until = time.monotonic() + 7
+    while True:
+        workflow = owner(console, "Workflow.Get", {"id": run})["state"]
+        if workflow["lifecycle"] == "Failed":
+            break
+        assert time.monotonic() < until, workflow
+        time.sleep(0.2)
+    assert (workflow["reason"], workflow["outcome_knowledge"]) == ("DeadlineExceeded", "NotStarted"), workflow
+    step, = workflow["steps"]
+    assert step["lifecycle"] == "Cancelled" and step["task_receipt"] is None, step
+    usage = owner(console, "Budget.Get", {"id": budget})
+    assert (usage["spent"], usage["reserved"]) == (0, 0), usage
+    return workflow
+
+
 def exercise(args, work):
     user, operator_hash = password(work, "operator.hash")
     admin, root_hash = password(work, "root.hash")
@@ -78,6 +106,7 @@ def exercise(args, work):
         assert call(console, "Task.Get", {"id": task})["lifecycle"] == "Queued"
         task_expiry = int(console.run("date -u +%s")) + 27
         deadline = datetime.fromtimestamp(task_expiry, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        workflow, budget = cordoned_workflow(console, deadline)
         timed = timed_write(console, volume, "missed-approval", deadline)
         pending = call(console, "Task.Get", {"id": timed["task_id"]})
         assert pending["lifecycle"] == "WaitingApproval", pending
@@ -100,6 +129,7 @@ def exercise(args, work):
         assert "PermissionDenied" in rejection(console, check)
         wait_expiry(console, timed["task_id"], timed["task_revision"])
         wait_expiry(console, retried["task_id"], retried["task_revision"])
+        expired_workflow = workflow_expired(console, workflow, budget)
         req = owner(console, "Resource.Get", {"id": approval_id})
         assert req["value"]["status"] == "Expired" and "decision_ref" not in req["value"], req
         approve = {"id": approval_id, "expected_resource_version": req["reference"]["version"],
@@ -118,6 +148,7 @@ def exercise(args, work):
         assert console.run("cat /proc/sys/kernel/random/boot_id") == boot_id
         assert "PermissionDenied" in rejection(console, check)
         assert owner(console, "Task.Get", {"id": task}) == finished
+        assert workflow_expired(console, workflow, budget) == expired_workflow
         fresh = owner(console, "Grant.Issue", issue)["delegation_ref"]["resource_id"]
         reissued = user_command(f"psiosctl --token-file {shlex.quote(credential)} status --delegation {shlex.quote(fresh)}")
         assert json.loads(console.run(reissued))["authority_id"] == node["resource_id"]
@@ -128,7 +159,7 @@ def exercise(args, work):
         console.run("now=$(date -u +%s); date -u -s \"@$((now+180))\" >/dev/null")
         poweroff(console)
     check_clean_shutdown(disk)
-    print("PASS real UTC rollback, elapsed grant and Task expiry, approval and retry fencing, daemon restart")
+    print("PASS UTC rollback, elapsed grant, Task and WorkflowRun expiry, approval and retry fencing, daemon restart")
 
 
 if __name__ == "__main__":

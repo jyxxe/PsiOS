@@ -77,18 +77,28 @@ pub fn tick(store: &mut Store) -> Result<()> {
 }
 
 fn advance(db: &Db<'_>, rejection: &mut Option<Rejection>) -> Result<()> {
+    let pending: bool =
+        db.c.query_row("SELECT EXISTS(SELECT 1 FROM active_workflows)", [], |row| {
+            row.get(0)
+        })?;
+    if !pending {
+        return Ok(());
+    }
+    let clock = policy::deadline::Clock::sample()?;
     let stamp = Utc::now().timestamp_millis();
     let work =
         db.c.query_row(
-            "SELECT w.run,w.task,(w.stopping=0 AND w.deadline_ms<=?1)
-         FROM active_workflows w
-         WHERE (w.stopping=0 AND w.deadline_ms<=?1) OR
-               w.task IS NULL OR
-               (w.task IS NOT NULL AND w.task_rev != COALESCE(
-                  (SELECT rev FROM versions WHERE id=w.task ORDER BY rev DESC LIMIT 1),-1))
-         ORDER BY CASE WHEN w.stopping=0 AND w.deadline_ms<=?1 THEN 0
-                       WHEN w.task IS NOT NULL THEN 1 ELSE 2 END,w.ready_ms,w.run LIMIT 1",
-            [stamp],
+            "WITH candidates AS (
+                 SELECT w.*, (w.stopping=0 AND (w.deadline_ms<=?1 OR coalesce(
+                     elapsed.time_ns!=?3 OR elapsed.deadline_boot_ms<=?4,0))) AS expired
+                 FROM active_workflows w LEFT JOIN authorization_deadlines elapsed
+                       ON elapsed.resource=w.run AND elapsed.boot_id=?2
+             )
+             SELECT w.run,w.task,w.expired FROM candidates w
+             WHERE w.expired OR w.task IS NULL OR w.task_rev != COALESCE(
+                 (SELECT rev FROM versions WHERE id=w.task ORDER BY rev DESC LIMIT 1),-1)
+             ORDER BY w.expired DESC, (w.task IS NOT NULL) DESC, w.ready_ms,w.run LIMIT 1",
+            params![stamp, clock.boot.boot_id, clock.time_ns, clock.boot.millis],
             |row| {
                 Ok(Work {
                     run: row.get(0)?,

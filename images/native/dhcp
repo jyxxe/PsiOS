@@ -37,4 +37,4 @@ export PSIOS_DHCP_IFINDEX
 printf '1\n' > "/proc/sys/net/ipv6/conf/$link/disable_ipv6" || retry 'could not apply the IPv4-only profile'
 ip link set dev "$link" up || retry 'could not bring up the interface'
 printf 'Waiting for a lease on %s\n' "$link" > "$run/status"
-exec udhcpc -f -R -i "$link" -s /psios-dhcp-event -t 3 -T 3 -A 15 -o -O subnet -O router -O dns >/dev/null 2>&1
+exec udhcpc -f -R -i "$link" -s /psios-dhcp-event -t 3 -T 3 -A 15 -o -O staticroutes -O subnet -O router -O dns >/dev/null 2>&1

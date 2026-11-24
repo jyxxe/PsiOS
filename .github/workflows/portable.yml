@@ -56,7 +56,7 @@ jobs:
           path: ${{ runner.temp }}/rescue-core
       - name: Download and configure rescue VM prerequisites
         run: |
-          packages=(qemu-system-x86 qemu-utils genisoimage cpio e2fsprogs fdisk acl
+          packages=(qemu-system-x86 qemu-utils genisoimage cpio e2fsprogs fdisk acl dnsmasq-base
                     xorriso grub-common grub-efi-amd64-bin dosfstools mtools ovmf seabios openssl)
           missing=()
           for pkg in "${packages[@]}"; do
@@ -94,6 +94,12 @@ jobs:
         run: |
           sudo unshare --net --propagation private runuser -u "$(id -un)" -- \
             python3 tests/native_dhcp.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+
+      - name: Install and renew DHCPv4 classless routes over an isolated TAP
+        run: |
+          sudo unshare --net --propagation private \
+            python3 tests/native_dhcp_routes.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
             --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
 
       - name: Bind one native system disk and refuse duplicate or split filesystems

@@ -219,6 +219,19 @@ Provider 可用 Rust SDK 的 `model_turn_durable`，或运行 `psiosctl model-st
 
 `Session.History` 返回模型轮次、子任务和尝试关系。`Session.Cancel` 关闭后续派发并取消已链接的任务。`Session.Extend` 通过 CAS 增加本次会话的轮次上限，根授权额度独立生效。对于可安全重试的失败子任务，`Session.RetryTask` 使用会话 ID、会话预期修订、原 `task_id` 和新 `key`，沿用同一模型决策，在原任务和会话历史中追加记录。未知写入继续占用原目标，等待核实。
 
+### 持久的 Provider 队列
+
+调用 `Session.Open` 时显式提供 `"provider_queue":true`，允许选定 Model 的 Provider 自动领取该会话。Provider 可用独立凭据和上述 `model.json` 运行以下命令。省略 `--once` 时，进程持续等待并处理可领取的轮次。
+
+```bash
+install -d -m 0700 "$workdir/worker-decisions"
+providerctl model-worker "$workdir/model.json" --decision-dir "$workdir/worker-decisions"
+```
+
+API 的 `Model.ClaimNext` 接受 `model_ref` 和 `key`。`Model.WaitNext` 另接受 1 至 10000 毫秒的 `timeout_ms`。返回 `available:false` 表示暂无可领取轮次。领取按进入就绪状态的顺序执行，等待工具或人工审批期间跳过该会话。每个 Model 最多接纳 128 个自动领取会话，沿用单次租约并发限制、会话轮数和共同根预算。撤权、依赖变更或额度耗尽的会话进入带原因的暂停状态，其他会话仍可领取。
+
+系统在签发租约和计入预算的同一事务中保存 Model 与领取键映射。领取请求重放只能恢复该轮次。只有已落盘的决策可重发，丢失决策的轮次等到原租约失效后才可申请新的额度。Rust SDK 的 `model_next_durable` 先尝试交付已保存的决策，再领取新轮次。若原会话授权已撤销，`Model.ClaimStatus` 通过 Model、领取键和租约 ID 返回该次交付的 `Pending`、`Settled` 或 `Fenced`。该方法只返回状态，任务回执和上下文仍受原会话授权约束。每个工作进程需要独占的暂存目录。[竞争与崩溃验收](../tests/test_model_queue.py)
+
 ## 定向通知与验证
 
 接收方以 `mail.receive` 调用 `Mailbox.Bind`，指定 `name` 和 `sender_principal_id`。指定的发送方以 `mail.send` 调用 `Signal.Send`，提供 `mailbox_id, key, topic` 和可选 `resource_ref`。当前 topic 为 ObservationReady、ReviewRequested、WorkAvailable。附带的资源必须已经对双方可见。接收方用 `Mailbox.Read` 读取，用 `Mailbox.Ack` 的 `previous, through` 确认；崩溃后可重读。会话创建可带 `trigger_signal_ref`，同一信号最多触发一个会话。每个信箱最多有 256 条未确认通知，历史上限 16384 条。

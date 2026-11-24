@@ -74,6 +74,8 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Model.Register" => agent::model(db, actor, p),
         "Model.Retire" => agent::retire(db, actor, p, "Model"),
         "Model.Claim" => agent::claim(db, actor, p),
+        "Model.ClaimNext" => agent::claim_next(db, actor, p),
+        "Model.ClaimStatus" => agent::claim_status(db, actor, p),
         "Model.Respond" => agent::respond(db, actor, p),
         "Mailbox.Bind" => agent::mail::bind(db, actor, p),
         "Mailbox.Close" => agent::mail::close(db, actor, p),

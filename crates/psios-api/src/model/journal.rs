@@ -1,6 +1,6 @@
 //! A private, single-worker outbox for a completed local provider decision.
 use super::{DecisionRequest, SessionModel, Turn};
-use crate::{ApiError, ApiResult, Client, parse};
+use crate::{ApiError, ApiResult, Client, ResourceRef, parse};
 use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags, open, openat, renameat_with, unlinkat};
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
@@ -10,6 +10,7 @@ use std::{
     io::{Read, Write},
     os::unix::fs::MetadataExt,
     path::Path,
+    time::Duration,
 };
 
 const PENDING: &str = "psios-model-pending.json";
@@ -27,7 +28,45 @@ struct Pending {
     authority: String,
     provider: String,
     claim_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    queue_model: Option<ResourceRef>,
     request: DecisionRequest,
+}
+
+impl Pending {
+    fn new(
+        identity: (String, String),
+        claim_key: &str,
+        queue_model: Option<&ResourceRef>,
+        request: DecisionRequest,
+    ) -> Self {
+        Self {
+            format: if request.usage.is_some() { 2 } else { 1 },
+            authority: identity.0,
+            provider: identity.1,
+            claim_key: claim_key.to_owned(),
+            queue_model: queue_model.cloned(),
+            request,
+        }
+    }
+
+    fn verify_origin(
+        &self,
+        identity: &(String, String),
+        model: Option<&ResourceRef>,
+    ) -> ApiResult<()> {
+        if self.authority != identity.0
+            || self.provider != identity.1
+            || self.queue_model.as_ref() != model
+        {
+            return Err(ApiError::new(
+                "Conflict",
+                "journal contains a decision for another authority, provider or model queue",
+            )
+            .into());
+        }
+        Ok(())
+    }
 }
 
 struct Journal(File);
@@ -144,6 +183,75 @@ impl Journal {
 }
 
 impl Client {
+    fn provider_identity(&self) -> ApiResult<(String, String)> {
+        let who = self.call("Principal.WhoAmI", json!({}))?;
+        let identity = |field: &str| {
+            who[field]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| crate::invalid("missing model authority or provider identity"))
+        };
+        Ok((identity("authority_id")?, identity("principal_id")?))
+    }
+
+    fn deliver_record(&self, journal: &Journal, record: &Pending) -> ApiResult<Value> {
+        let answer = self.send_decision(&record.request);
+        // The authority checks previously settled receipts before checking the
+        // lease fence. Fenced therefore also resolves this exact pending request.
+        if answer.is_ok() || answer.as_ref().is_err_and(|e| e.code == "Fenced") {
+            journal.remove()?;
+        }
+        answer
+    }
+
+    fn deliver_queued_record(
+        &self,
+        journal: &Journal,
+        record: &Pending,
+        model: &ResourceRef,
+    ) -> ApiResult<Value> {
+        match self.send_decision(&record.request) {
+            Ok(receipt) => {
+                journal.remove()?;
+                Ok(receipt)
+            }
+            Err(e) if e.code == "Fenced" => {
+                journal.remove()?;
+                Ok(json!({"status":"Fenced"}))
+            }
+            Err(e)
+                if !e.retryable
+                    && matches!(
+                        e.code.as_str(),
+                        "PermissionDenied"
+                            | "PreconditionFailed"
+                            | "QuotaExceeded"
+                            | "InvalidArgument"
+                            | "Conflict"
+                            | "ApprovalInvalidated"
+                            | "SchemaVersionUnsupported"
+                    ) =>
+            {
+                let disposition = self.call("Model.ClaimStatus", json!({
+                    "model_ref":model, "key":record.claim_key, "lease_id":record.request.lease_id
+                }))?;
+                match disposition["status"].as_str() {
+                    Some("Settled" | "Fenced") => {
+                        journal.remove()?;
+                        Ok(disposition)
+                    }
+                    Some("Pending") => Err(ApiError::new(
+                        "OutcomeUnknown",
+                        format!("retained model decision is pending after {}", e.code),
+                    )
+                    .into()),
+                    _ => Err(crate::invalid("invalid queued lease disposition")),
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Retain a model decision before transmission. Reusing the same private
     /// directory, authority, principal, session and key resumes its exact request.
     pub fn model_turn_durable(
@@ -154,22 +262,13 @@ impl Client {
         dir: &Path,
     ) -> ApiResult<Value> {
         let journal = Journal::open(dir)?;
-        let who = self.call("Principal.WhoAmI", json!({}))?;
-        let authority = who["authority_id"]
-            .as_str()
-            .ok_or_else(|| crate::invalid("missing authority identity"))?;
-        let actor = who["principal_id"]
-            .as_str()
-            .ok_or_else(|| crate::invalid("missing provider identity"))?;
+        let identity = self.provider_identity()?;
         let record = if let Some(pending) = journal.pending()? {
-            if pending.authority != authority
-                || pending.provider != actor
-                || pending.request.session_id != session
-                || pending.claim_key != key
-            {
+            pending.verify_origin(&identity, None)?;
+            if pending.request.session_id != session || pending.claim_key != key {
                 return Err(ApiError::new(
                     "Conflict",
-                    "journal contains a decision for another authority, provider, session or key",
+                    "journal contains a decision for another session or key",
                 )
                 .into());
             }
@@ -178,24 +277,63 @@ impl Client {
             match self.decide_turn(session, key, provider)? {
                 Turn::Completed(receipt) => return Ok(receipt),
                 Turn::Decided(request) => {
-                    let record = Pending {
-                        format: if request.usage.is_some() { 2 } else { 1 },
-                        authority: authority.to_owned(),
-                        provider: actor.to_owned(),
-                        claim_key: key.to_owned(),
-                        request,
-                    };
+                    let record = Pending::new(identity, key, None, request);
                     journal.retain(&record)?;
                     record
                 }
             }
         };
-        let answer = self.send_decision(&record.request);
-        // The authority checks previously settled receipts before checking the
-        // lease fence. Fenced therefore also resolves this exact pending request.
-        if answer.is_ok() || answer.as_ref().is_err_and(|e| e.code == "Fenced") {
-            journal.remove()?;
+        self.deliver_record(&journal, &record)
+    }
+
+    /// Recover a retained decision before claiming the next opt-in session for
+    /// this exact model. Each worker requires its own private decision directory.
+    pub fn model_next_durable(
+        &self,
+        model: &ResourceRef,
+        key: &str,
+        provider: &(impl SessionModel + ?Sized),
+        dir: &Path,
+        wait: Duration,
+    ) -> ApiResult<Option<Value>> {
+        let journal = Journal::open(dir)?;
+        let identity = self.provider_identity()?;
+        if let Some(pending) = journal.pending()? {
+            pending.verify_origin(&identity, Some(model))?;
+            return self
+                .deliver_queued_record(&journal, &pending, model)
+                .map(Some);
         }
-        answer
+        let mut params = json!({"model_ref": model, "key": key});
+        let method = if wait.is_zero() {
+            "Model.ClaimNext"
+        } else {
+            let millis = wait.as_millis();
+            if !(1..=10_000).contains(&millis) {
+                return Err(crate::invalid("model wait must be 1 to 10000 milliseconds"));
+            }
+            params["timeout_ms"] = json!(millis);
+            "Model.WaitNext"
+        };
+        let claim = match self.call(method, params.clone()) {
+            Err(e) if e.code == "DependencyUnavailable" => self.call(method, params)?,
+            other => other?,
+        };
+        if claim["available"] == false {
+            return Ok(None);
+        }
+        let session = claim["session_id"]
+            .as_str()
+            .ok_or_else(|| crate::invalid("missing queued model session"))?
+            .to_owned();
+        match Self::decide_claim(&session, claim, provider)? {
+            Turn::Completed(receipt) => Ok(Some(receipt)),
+            Turn::Decided(request) => {
+                let record = Pending::new(identity, key, Some(model), request);
+                journal.retain(&record)?;
+                self.deliver_queued_record(&journal, &record, model)
+                    .map(Some)
+            }
+        }
     }
 }

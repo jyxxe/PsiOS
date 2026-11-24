@@ -1,12 +1,17 @@
 use clap::{Parser, Subcommand};
-use psios_api::{Client, StatusProvider, parse};
+use psios_api::{Client, LocalInventoryModel, ResourceRef, SessionModel, StatusProvider, parse};
 use psios_core::Config;
 use serde_json::{Value, json};
 use std::{
     fs,
     io::{Read, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
+    path::Path,
     path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -100,6 +105,20 @@ enum Cmd {
         #[arg(long)]
         local_model: Option<String>,
     },
+    /// Serve opted-in sessions for a pinned model using a private decision journal.
+    ModelWorker {
+        /// Local file containing the exact ResourceRef returned by Model.Register.
+        model: String,
+        #[arg(long)]
+        decision_dir: PathBuf,
+        #[arg(long)]
+        local_model: Option<String>,
+        #[arg(long, default_value_t = 10_000, value_parser = clap::value_parser!(u64).range(1..=10_000))]
+        wait_ms: u64,
+        /// Process at most one decision and report its receipt or an empty queue.
+        #[arg(long)]
+        once: bool,
+    },
     Node,
     Validate {
         contract: String,
@@ -122,6 +141,62 @@ fn input(path: &str) -> Result<Value, Box<dyn std::error::Error>> {
     }
     Ok(parse(&bytes)?)
 }
+
+fn model_provider(
+    path: Option<&str>,
+    expected_model: Option<&ResourceRef>,
+) -> Result<Box<dyn SessionModel>, Box<dyn std::error::Error>> {
+    if let Some(path) = path {
+        let model: LocalInventoryModel = serde_json::from_value(input(path)?)?;
+        model.validate()?;
+        if expected_model.is_some_and(|reference| model.model_ref != *reference) {
+            return Err(
+                "local inference configuration must name the worker's Model revision".into(),
+            );
+        }
+        Ok(Box::new(model))
+    } else {
+        Ok(Box::new(psios_api::NodeSurvey))
+    }
+}
+
+fn model_worker(
+    client: &Client,
+    model: &ResourceRef,
+    provider: &dyn SessionModel,
+    dir: &Path,
+    wait: Duration,
+    once: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let stop = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, stop.clone())?;
+    signal_hook::flag::register(signal_hook::consts::SIGINT, stop.clone())?;
+    while !stop.load(Ordering::Acquire) {
+        let key = psios_api::id("provider");
+        let result = client.model_next_durable(model, &key, provider, dir, wait);
+        if once {
+            println!("{}", result?.unwrap_or_else(|| json!({"available":false})));
+            break;
+        }
+        match result {
+            Ok(Some(receipt)) => writeln!(std::io::stdout(), "{receipt}")?,
+            Ok(None) => {}
+            Err(e)
+                if e.retryable
+                    || matches!(
+                        e.code.as_str(),
+                        "Fenced" | "OutcomeUnknown" | "DependencyUnavailable" | "DeadlineExceeded"
+                    ) =>
+            {
+                eprintln!("model worker: {}", e.code);
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let o = Opts::parse();
     if let Cmd::Validate { contract, file } = &o.cmd {
@@ -160,23 +235,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             decision_dir,
             local_model,
         } => {
-            let local: Option<psios_api::LocalInventoryModel> = local_model
-                .as_deref()
-                .map(|path| {
-                    let model: psios_api::LocalInventoryModel =
-                        serde_json::from_value(input(path)?)?;
-                    model.validate()?;
-                    Ok::<_, Box<dyn std::error::Error>>(model)
-                })
-                .transpose()?;
-            let provider: &dyn psios_api::SessionModel = match &local {
-                Some(model) => model,
-                None => &psios_api::NodeSurvey,
-            };
+            let provider = model_provider(local_model.as_deref(), None)?;
             match decision_dir {
-                Some(dir) => c.model_turn_durable(&session, &key, provider, &dir)?,
-                None => c.model_turn(&session, &key, provider)?,
+                Some(dir) => c.model_turn_durable(&session, &key, &*provider, &dir)?,
+                None => c.model_turn(&session, &key, &*provider)?,
             }
+        }
+        Cmd::ModelWorker {
+            model,
+            decision_dir,
+            local_model,
+            wait_ms,
+            once,
+        } => {
+            let reference = serde_json::from_value(input(&model)?)?;
+            let provider = model_provider(local_model.as_deref(), Some(&reference))?;
+            return model_worker(
+                &c,
+                &reference,
+                &*provider,
+                &decision_dir,
+                Duration::from_millis(wait_ms),
+                once,
+            );
         }
         Cmd::Node => c.call("Node.Get", json!({}))?,
         Cmd::Whoami => c.call("Principal.WhoAmI", json!({}))?,

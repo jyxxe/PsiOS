@@ -1,6 +1,7 @@
 //! The local runtime coordinates model decisions with (and never independently executes) broker Tasks.
 mod lease;
 pub mod mail;
+mod queue;
 mod registry;
 use crate::{
     broker,
@@ -9,6 +10,7 @@ use crate::{
 };
 pub(crate) use lease::pending_for_grant;
 use psios_api::{ModelTokenUsage, canonical, id, sha256};
+pub use queue::{claim_next, claim_status};
 pub use registry::{model, retire, skill};
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
@@ -24,6 +26,8 @@ struct Open {
     model_ref: Value,
     context_policy: String,
     max_turns: u32,
+    #[serde(default)]
+    provider_queue: bool,
 }
 fn state(d: &Doc) -> &str {
     d.body["lifecycle"].as_str().unwrap_or("")
@@ -55,7 +59,7 @@ fn deps(db: &Db<'_>, s: &Doc) -> Result<(Doc, Doc, Doc)> {
     let m = registry::pinned(db, &s.spec["model_ref"], "Model")?;
     let provider = m.spec["provider_principal_id"].as_str().unwrap();
     policy::active(db, provider)?;
-    policy::can(db, provider, "model.serve")?;
+    policy::can_target(db, provider, "model.serve", &m.id)?;
     Ok((d, skill, m))
 }
 pub fn open(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
@@ -88,6 +92,10 @@ pub fn open(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "QuotaExceeded",
         "active sessions per principal exceeded",
     )?;
+    if o.provider_queue {
+        let model = registry::pinned(db, &o.model_ref, "Model")?;
+        queue::check_capacity(db, &model.id)?;
+    }
     let session=db.create("Session",&sid,actor,p.clone(),json!({"lifecycle":"AwaitingModel","checkpoint_version":"1",
       "turn":0,"goal":o.goal,"skill_ref":o.skill_ref,"model_ref":o.model_ref,"context_policy":o.context_policy,
       "budget_ref":d.body["budget_ref"],"delegation_ref":d.reference(),"max_turns":o.max_turns,"last_task":null,"current_lease":null}))?;
@@ -230,29 +238,11 @@ pub fn claim(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let p: Claim = decode(p)?;
     label(&p.key)?;
     let s = db.of(&p.session_id, "Session")?;
-    let (d, skill, m) = provider(db, &s, actor)?;
-    let previous: Option<(String, String, u32, Option<Value>)> =
-        db.c.query_row(
-            "SELECT lease,expires,turn,receipt FROM session_turns WHERE session=?1 AND claim_key=?2",
-            params![s.id, p.key],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )
-        .optional()?;
-    if let Some((_, _, turn, Some(receipt))) = &previous {
-        return Ok(json!({"turn":turn,"completed":receipt}));
-    }
+    let dependencies = provider(db, &s, actor)?;
+    let (_, skill, model) = &dependencies;
     let clock = lease::BootClock::sample()?;
-    let ctx = context(db, &s, &skill, &m)?;
-    let lease_info = |lease: &str, expires: &str, turn: u32, recovered: bool| json!({"lease_id":lease,"expires_at":expires,"turn":turn,"context":ctx,"recovered":recovered,"usage_format":"tokens.v1"});
-    if let Some((lease, until, turn, _)) = previous {
-        require(
-            state(&s) == "ModelInFlight"
-                && s.body["current_lease"] == lease
-                && clock.current(db, &s)?,
-            "Fenced",
-            "model lease no longer current",
-        )?;
-        return Ok(lease_info(&lease, &until, turn, true));
+    if let Some(previous) = replay_claim(db, &s, skill, model, &clock, &p.key)? {
+        return Ok(previous);
     }
     require(
         state(&s) == "AwaitingModel" || (state(&s) == "ModelInFlight" && !clock.current(db, &s)?),
@@ -260,40 +250,94 @@ pub fn claim(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "session already leased, waiting for a task or closed",
     )?;
     db.cfg.check_admission_space()?;
-    let active = lease::model_slots(db, &clock, &m.id)?;
     require(
-        u64::from(active) < m.spec["max_in_flight"].as_u64().unwrap_or(4),
+        model_has_slot(db, &clock, model)?,
         "QueueFull",
         "model provider concurrency exhausted",
     )?;
+    require(has_turn(&s), "QuotaExceeded", "session turn limit reached")?;
+    let ctx = context(db, &s, skill, model)?;
+    allocate_turn(db, &s, &dependencies, &clock, &p.key, false, ctx)?
+        .ok_or_else(|| err("QuotaExceeded", "root model call budget exhausted"))
+}
+
+fn lease_info(lease: &str, expires: &str, turn: u32, ctx: Value, recovered: bool) -> Value {
+    json!({"lease_id":lease,"expires_at":expires,"turn":turn,"context":ctx,
+           "recovered":recovered,"usage_format":"tokens.v1"})
+}
+
+fn replay_claim(
+    db: &Db<'_>,
+    s: &Doc,
+    skill: &Doc,
+    model: &Doc,
+    clock: &lease::BootClock,
+    key: &str,
+) -> Result<Option<Value>> {
+    let previous: Option<(String, String, u32, Option<Value>)> = db.c.query_row(
+        "SELECT lease,expires,turn,receipt FROM session_turns WHERE session=?1 AND claim_key=?2",
+        params![s.id, key],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    ).optional()?;
+    let Some((lease, until, turn, receipt)) = previous else {
+        return Ok(None);
+    };
+    if let Some(receipt) = receipt {
+        return Ok(Some(json!({"turn":turn,"completed":receipt})));
+    }
+    require(
+        state(s) == "ModelInFlight" && s.body["current_lease"] == lease && clock.current(db, s)?,
+        "Fenced",
+        "model lease no longer current",
+    )?;
+    let ctx = context(db, s, skill, model)?;
+    Ok(Some(lease_info(&lease, &until, turn, ctx, true)))
+}
+
+fn model_has_slot(db: &Db<'_>, clock: &lease::BootClock, model: &Doc) -> Result<bool> {
+    let active = lease::model_slots(db, clock, &model.id)?;
+    Ok(u64::from(active) < model.spec["max_in_flight"].as_u64().unwrap_or(4))
+}
+
+fn has_turn(s: &Doc) -> bool {
+    s.body["turn"].as_u64().unwrap() < s.body["max_turns"].as_u64().unwrap()
+}
+
+// None is returned only if the root budget refused the reservation. Other
+// errors roll back the authority transaction, including the call charge.
+fn allocate_turn(
+    db: &Db<'_>,
+    s: &Doc,
+    dependencies: &(Doc, Doc, Doc),
+    clock: &lease::BootClock,
+    key: &str,
+    queued: bool,
+    ctx: Value,
+) -> Result<Option<Value>> {
+    let (d, _, m) = dependencies;
+    if db.c.execute(
+        "UPDATE model_budgets SET used=used+1 WHERE budget=?1 AND used<maximum",
+        [d.body["budget_ref"]["resource_id"].as_str().unwrap()],
+    )? == 0
+    {
+        return Ok(None);
+    }
     let turn = s.body["turn"].as_u64().unwrap() as u32 + 1;
-    require(
-        u64::from(turn) <= s.body["max_turns"].as_u64().unwrap(),
-        "QuotaExceeded",
-        "session turn limit reached",
-    )?;
-    require(
-        db.c.execute(
-            "UPDATE model_budgets SET used=used+1 WHERE budget=?1 AND used<maximum",
-            [d.body["budget_ref"]["resource_id"].as_str().unwrap()],
-        )? == 1,
-        "QuotaExceeded",
-        "root model call budget exhausted",
-    )?;
     let lease = id("model-call");
     let seconds = m.spec["lease_seconds"].as_i64().unwrap();
     let until = after(seconds);
     db.c.execute(
-        "INSERT INTO session_turns(session,turn,lease,claim_key,expires,boot_id,deadline_boot_ms)
-         VALUES(?1,?2,?3,?4,?5,?6,?7)",
+        "INSERT INTO session_turns(session,turn,lease,claim_key,expires,boot_id,deadline_boot_ms,queue_model)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
         params![
             s.id,
             turn,
             lease,
-            p.key,
+            key,
             until,
             clock.boot_id,
-            clock.millis + seconds * 1000
+            clock.millis + seconds * 1000,
+            queued.then_some(&m.id),
         ],
     )?;
     let mut b = s.body.clone();
@@ -306,8 +350,8 @@ pub fn claim(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "input_bytes": canonical(&ctx).len(), "reserved_calls": 1, "issued_at": now()
     }))?;
     b["current_usage_ref"] = usage.reference();
-    db.status(&s, b)?;
-    Ok(lease_info(&lease, &until, turn, false))
+    db.status(s, b)?;
+    Ok(Some(lease_info(&lease, &until, turn, ctx, false)))
 }
 
 #[derive(Deserialize)]

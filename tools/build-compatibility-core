@@ -1,0 +1,14 @@
+#!/bin/sh
+# Rebuild the archived workspace while sharing its dependency artifacts.
+set -eu
+if [ "$#" -ne 2 ]; then
+    echo "usage: $0 ARCHIVED_WORKSPACE COMPATIBILITY_TARGET_DIR" >&2
+    exit 2
+fi
+manifest=$1/Cargo.toml
+target=$2
+export CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0
+# Git archives preserve commit timestamps and old workspaces share local
+# package identities. Drop their artifacts before selecting a different archive.
+cargo clean --locked --workspace --profile dev --manifest-path "$manifest" --target-dir "$target"
+cargo build --locked --workspace --manifest-path "$manifest" --target-dir "$target"

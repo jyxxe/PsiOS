@@ -265,6 +265,13 @@ pub fn dispatch(db: &Db<'_>, task: &str) -> Result<Option<Work>> {
     db.c.execute("UPDATE budgets SET reserved=reserved-1,spent=spent+1 WHERE id=(SELECT budget FROM queue WHERE task=?1)",[&t.id])?;
     db.c.execute("UPDATE queue SET phase='Dispatched' WHERE task=?1", [&t.id])?;
     db.audit(&t.owner, tool, Some(&work.op.id), "Dispatched")?;
+    if let Action::StartAgentSession(blueprint) = &work.action {
+        // This effect only touches the authority. Publish the Session, its
+        // originating Task receipt and budget movement in this transaction.
+        let receipt = agent::open_for_task(db, &work.task, blueprint)?;
+        finish(db, &work, Ok(receipt))?;
+        return Ok(None);
+    }
     Ok(Some(work))
 }
 pub fn dispatch_failed(db: &Db<'_>, task: &str, e: &Error) -> Result<()> {

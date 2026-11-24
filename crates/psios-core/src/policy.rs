@@ -16,6 +16,7 @@ pub const RUNTIME_PROFILE: &str = "runtime-local-v2";
 pub const PROFILE: &str = "profile-local";
 pub const TOOLS: &[&str] = &[
     "system.status",
+    agent::START_SESSION,
     "node.inventory",
     "node.interfaces",
     "node.routes",
@@ -130,6 +131,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | "node.mounts"
                     | "backup.verify"
                     | storage::publication::INSPECT
+                    | agent::START_SESSION
                     | schedule::ACTION
                     | workflow::ACTION
                     | chat::INVITE

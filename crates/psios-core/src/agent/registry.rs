@@ -68,9 +68,9 @@ pub fn skill(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let mut refs = serde_json::Map::new();
     for tool in &v.tools {
         require(
-            policy::TOOLS.contains(&tool.as_str()) && tools.insert(tool),
+            tool != START_SESSION && policy::TOOLS.contains(&tool.as_str()) && tools.insert(tool),
             "UnsupportedCapability",
-            "unregistered or repeated tool dependency",
+            "unavailable or repeated skill tool dependency",
         )?;
         refs.insert(
             tool.clone(),

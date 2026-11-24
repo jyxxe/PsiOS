@@ -47,6 +47,9 @@ if git -C "$repo" cat-file -e "$sha:images/native/README.txt" 2>/dev/null; then
     if git -C "$repo" cat-file -e "$sha:images/native/dhcp" 2>/dev/null; then
         native_files+=(dhcp dhcp-event)
     fi
+    if git -C "$repo" cat-file -e "$sha:images/native/storage" 2>/dev/null; then
+        native_files+=(storage)
+    fi
     git -C "$repo" archive "$sha:images/native" "${native_files[@]}" | tar --same-permissions -xf - -C native
     checks+=("${native_files[@]/#/native/}")
     members+=(native)

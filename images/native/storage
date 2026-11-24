@@ -1,0 +1,82 @@
+# Disk and partition offsets use the kernel's 512-byte sector units.
+# Only read identification bytes until both filesystems belong to one disk.
+ext4_uuid() {
+    local header
+    # The superblock begins at 1024, the magic is at 56, and the 16-byte UUID is at 104.
+    header=$(od -An -v -tx1 -j "$2" -N 64 "$1" 2>/dev/null | tr -d '[:space:]')
+    [ "${#header}" -eq 128 ] || return 1
+    case "$header" in
+        53ef*) printf '%s' "$header" | cut -c97-128 ;;
+    esac
+}
+
+match_partition() {
+    local sysfs="/sys/class/block/${1##*/}"
+    [ -b "$1" ] && [ -r "$sysfs/start" ] && [ -r "$sysfs/size" ] || return 1
+    [ "$(cat "$sysfs/start")" = "$2" ] && [ "$(cat "$sysfs/size")" = "$3" ] &&
+        [ "$(ext4_uuid "$1" 1080)" = "$4" ] || return 2
+}
+
+uuid_in_extent() {
+    local disk="$1" sectors="$2" start="$3" length="$4"
+    [ "$sectors" -ge "$((start + length))" ] || return 0
+    ext4_uuid "$disk" "$((start * 512 + 1080))"
+}
+
+choose_boot_storage() {
+    local bus disk sectors state_uuid home_uuid state_disk= home_disk= found=no
+    stage=state-device
+    # Wait for all initially visible virtio block devices to expose a disk.
+    # Probing whole disks lets us check for duplicate UUIDs before their partitions appear.
+    for bus in /sys/bus/virtio/devices/virtio*; do
+        [ -r "$bus/device" ] && [ "$(cat "$bus/device")" = 0x0002 ] || continue
+        found=yes
+        set -- "$bus"/block/vd*
+        [ "$#" -eq 1 ] && [ -e "$1" ] || return 1
+        disk=/dev/${1##*/}
+        [ -b "$disk" ] || return 1
+        sectors=$(cat "$1/size") || return 1
+        state_uuid=$(uuid_in_extent "$disk" "$sectors" "$state_start" "$state_size") || return 2
+        home_uuid=$(uuid_in_extent "$disk" "$sectors" "$home_start" "$home_size") || return 2
+        if [ "$state_uuid" = "$expected_state" ]; then
+            if [ -n "$state_disk" ]; then
+                stage=deployment-ambiguity
+                return 2
+            fi
+            state_disk=$disk
+        fi
+        if [ "$home_uuid" = "$expected_home" ]; then
+            if [ -n "$home_disk" ]; then
+                stage=deployment-ambiguity
+                return 2
+            fi
+            home_disk=$disk
+        fi
+    done
+    [ "$found" = yes ] || return 1
+    [ -n "$state_disk" ] || return 2
+    state_device=${state_disk}2
+    match_partition "$state_device" "$state_start" "$state_size" "$expected_state" || return "$?"
+    stage=home-device
+    [ -n "$home_disk" ] || return 2
+    [ "$home_disk" = "$state_disk" ] || return 2
+    home_device=${home_disk}3
+    match_partition "$home_device" "$home_start" "$home_size" "$expected_home"
+}
+
+select_boot_storage() {
+    local state_start state_size home_start home_size expected_state expected_home attempt=0 result
+    read -r state_start state_size home_start home_size < /psios-storage-layout
+    expected_state=$(printf '%s' "$id" | tr -d '-')
+    expected_home=$(printf '%s' "$home_id" | tr -d '-')
+    while :; do
+        if choose_boot_storage; then
+            return 0
+        else
+            result=$?
+        fi
+        [ "$result" -eq 1 ] && [ "$attempt" -lt 50 ] || return 1
+        sleep 0.1
+        attempt=$((attempt + 1))
+    done
+}

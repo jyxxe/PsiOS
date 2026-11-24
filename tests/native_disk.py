@@ -75,14 +75,21 @@ class Console:
 
 
 @contextmanager
-def boot(work, image, network_mac=None):
+def boot(work, image, network_mac=None, extra_disk=None):
     accel = "kvm" if os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
     cmd = ["qemu-system-x86_64", "-nodefaults", "-no-user-config", "-no-reboot", "-machine", "q35",
            "-accel", accel, "-m", "768", "-smp", "2", "-display", "none",
-           "-monitor", "none", "-serial", "stdio", "-boot", "order=c,strict=on",
+           "-monitor", "none", "-serial", "stdio",
            "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=code.fd",
-           "-drive", "if=pflash,format=raw,unit=1,file=vars.fd",
-           "-drive", "if=virtio,format=raw,file=" + image.name]
+           "-drive", "if=pflash,format=raw,unit=1,file=vars.fd"]
+    if extra_disk is not None:
+        cmd += ["-boot", "strict=on",
+                "-drive", f"if=none,format=raw,id=additional,file={extra_disk.name}",
+                "-device", "virtio-blk-pci,drive=additional",
+                "-drive", f"if=none,format=raw,id=installed,file={image.name}",
+                "-device", "virtio-blk-pci,drive=installed,bootindex=1"]
+    else:
+        cmd += ["-boot", "order=c,strict=on", "-drive", f"if=virtio,format=raw,file={image.name}"]
     if network_mac:
         cmd += ["-netdev", "user,id=network,net=192.0.2.0/24,dhcpstart=192.0.2.20",
                 "-device", f"virtio-net-pci,netdev=network,mac={network_mac},romfile="]
@@ -228,7 +235,8 @@ def exercise(args, work):
         assert manifest["required_filesystems"] == {"state": deployment["state_uuid"], "home": deployment["home_uuid"]}
         assert c.run("sha256sum /psios-deployment.json").split()[0] == deployment["deployment_manifest_sha256"]
         payload = ("/bin/psiosd", "/bin/psiosctl", "/psios-source", "/psios-init",
-                   "/psios-disk-uuid", "/psios-home-uuid", "/psios-shutdown", "/psios-dhcp", "/psios-dhcp-event")
+                   "/psios-disk-uuid", "/psios-home-uuid", "/psios-shutdown", "/psios-dhcp", "/psios-dhcp-event",
+                   "/psios-storage", "/psios-storage-layout")
         assert set(manifest["payload_sha256"]) == set(payload)
         for name in payload:
             assert c.run(f"sha256sum {name}").split()[0] == manifest["payload_sha256"][name]

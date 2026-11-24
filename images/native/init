@@ -29,19 +29,13 @@ stage=loopback
 stage=state-device
 /usr/sbin/modprobe virtio_blk
 /usr/sbin/modprobe ext4
-i=0
-while { [ ! -b /dev/vda2 ] || [ ! -b /dev/vda3 ]; } && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
-set -- /sys/class/block/vd?
-[ "$#" -eq 1 ] && [ "$1" = /sys/class/block/vda ] || exit 1
 id=$(cat /psios-disk-uuid)
-blkid /dev/vda2 | grep -F " UUID=\"$id\"" >/dev/null
-stage=home-device
-[ -b /dev/vda3 ]
 home_id=$(cat /psios-home-uuid)
-blkid /dev/vda3 | grep -F " UUID=\"$home_id\"" >/dev/null
+. /psios-storage
+select_boot_storage
 mkdir -p /var/lib /run/psios /home /root /mnt/psios-homes
 stage=state-device
-mount -t ext4 -o nodev,nosuid,noexec /dev/vda2 /var/lib
+mount -t ext4 -o nodev,nosuid,noexec "$state_device" /var/lib
 [ "$(stat -c '%u:%g:%a' /var/lib)" = 0:0:755 ]
 [ "$(stat -c '%u:%g:%a' /var/lib/deployment-uuid)" = 0:0:444 ]
 [ "$(cat /var/lib/deployment-uuid)" = "$id" ]
@@ -52,7 +46,7 @@ mount -o bind /var/lib/etc /etc
 chmod 0700 /run/psios
 chown 1000:1000 /run/psios
 stage=home-mount
-mount -t ext4 -o nodev,nosuid /dev/vda3 /mnt/psios-homes
+mount -t ext4 -o nodev,nosuid "$home_device" /mnt/psios-homes
 [ "$(stat -c '%u:%g:%a' /mnt/psios-homes)" = 0:0:755 ]
 for name in psios root; do
     dir=/mnt/psios-homes/$name

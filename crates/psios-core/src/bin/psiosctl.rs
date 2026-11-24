@@ -15,6 +15,9 @@ use std::{
     time::Duration,
 };
 
+#[path = "shell/mod.rs"]
+mod shell;
+
 #[derive(Parser)]
 #[command(version, about = "PsiOS local system client")]
 struct Opts {
@@ -37,6 +40,8 @@ struct Opts {
 enum Cmd {
     Whoami,
     Capabilities,
+    /// Serve a paired, read-only PsiOS Shell on this machine.
+    Shell,
     Status {
         #[arg(long, default_value = "owner-delegation")]
         delegation: String,
@@ -229,6 +234,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_else(|| rustix::process::geteuid().as_raw()),
     );
     let v = match o.cmd {
+        Cmd::Shell => return shell::run(c),
         Cmd::ModelStep {
             session,
             key,

@@ -58,6 +58,14 @@ jq -e '.result.artifact_refs[0]' "$workdir/task.json" | ctl artifact > "$workdir
 
 `kill -TERM "$daemon_pid"` 请求关闭。再次使用同一目录启动会恢复队列、保留原任务身份和已接受回执。系统服务的打包、首次初始化及升级见[宿主安装指南](host-package.md)。打包单元使用 `/usr/bin/psiosd`。使用过手工单元的主机，迁移前须检查本机单元覆盖和旧二进制路径。服务单元与配置示例使用 `psios` 用户、`/run/psios/api.sock`、`/var/lib/psios` 和独立的 `/var/lib/psios.witness`。[systemd 单元](../contrib/systemd/psiosd.service) · [配置示例](../contrib/systemd/core.json)
 
+## 本机 PsiOS Shell
+
+启动 Core 后，在终端执行 `ctl shell`（沿用上面的 `ctl` 函数）。也可使用同一个 `psiosctl` 的 `--config` 或 `--socket`、`--token-file` 和 `--service-uid`。在同一台机器的浏览器打开终端第一行给出的地址，输入第二行的一次性配对码。
+
+Shell 可以查看节点状态、调度开关、执行队列和权威存储余量，以及分页浏览当前主体可见的任务和最新状态。节点面板要求 `node.inventory`。列表要求 `resource.read` 和 `task.read`，详情按 `task.read` 及任务归属检查。任务列表使用 Core 签发的快照游标。返回首页或快照过期后重新刷新会读取新快照。Core 暂停服务后可在同一会话刷新。
+
+页面和脚本随 CLI 提供，监听随机的 IPv4 回环端口。终端应仅供当前操作者使用。Core 凭据保留在 CLI 进程，浏览器令牌保留在页面内存，重新加载整页后需重新启动 Shell。配对窗口为两分钟，仅允许成功配对一次。服务器执行五分钟空闲和一小时绝对期限。断开会话、Core 拒绝当前主体身份或终端收到退出信号会关闭监听。此入口为本机只读观察界面，远程管理和桌面会话仍待实现。[进程级验收](../tests/test_shell.py)
+
 ## Agent 授权与执行
 
 以下命令接续上述本机示例，使用 `jq` 保存一次性返回的 Agent 凭据。Agent 只获得本机状态工具和读取自己任务的权限。本例预留最多三个 Run 执行单位，授权有效期十分钟。

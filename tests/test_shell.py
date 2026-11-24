@@ -1,5 +1,6 @@
 """Exercise the local browser boundary against a real psiosd process."""
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 from http.client import HTTPConnection
 import json
 import os
@@ -190,6 +191,7 @@ class ShellTests(unittest.TestCase):
 
     def test_scoped_reads_grant_and_identity_revocation(self):
         owner_task = self.node.submit("system.status", {})
+        owner_reference = self.node.wait(owner_task)["result"]["artifact_refs"][0]
         agent, grant = self.node.agent(["resource.read", "task.read", "task.submit", "system.status"])
         credential = self.node.base / "agent.token"
         credential.touch(mode=0o600)
@@ -200,6 +202,8 @@ class ShellTests(unittest.TestCase):
         token = session["token"]
         self.error(shell, 403, "PermissionDenied", "/api/node", data={}, token=token)
         self.error(shell, 403, "PermissionDenied", "/api/task", data={"id": owner_task}, token=token)
+        self.error(shell, 403, "PermissionDenied", "/api/task-artifact",
+                   data={"task_id": owner_task, "reference": owner_reference}, token=token)
 
         delegated = self.node.prepare("system.status", {}, token=agent["token"],
                                       delegation=grant["delegation_ref"]["resource_id"])
@@ -216,3 +220,31 @@ class ShellTests(unittest.TestCase):
         self.node.call("Principal.Revoke", target(self.node.get(agent["principal_id"])["reference"]))
         self.error(shell, 401, "AuthenticationRequired", "/api/node", data={}, token=token)
         self.assertEqual(shell.process.wait(timeout=5), 0)
+
+    def test_previews_only_the_exact_task_artifact_with_a_byte_limit(self):
+        shell = self.shell()
+        token = shell.pair()["token"]
+        task = self.node.submit("system.status", {})
+        reference = self.node.wait(task)["result"]["artifact_refs"][0]
+        request = {"task_id": task, "reference": reference}
+        self.error(shell, 401, "AuthenticationRequired", "/api/task-artifact", data=request)
+        status, headers, result = shell.http("/api/task-artifact", request, token)
+        self.assertEqual((status, result["reference"]), (200, reference))
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual("sha256:" + hashlib.sha256(result["content_json"].encode()).hexdigest(),
+                         reference["digest"])
+        self.assertEqual(json.loads(result["content_json"]), self.node.call("Artifact.Read", {"reference": reference}))
+
+        unrelated = self.node.submit("system.status", {})
+        self.node.wait(unrelated)
+        self.error(shell, 404, "NotFound", "/api/task-artifact", data=dict(request, task_id=unrelated), token=token)
+        wrong = dict(reference, digest="sha256:" + "0" * 64)
+        self.error(shell, 404, "NotFound", "/api/task-artifact", data=dict(request, reference=wrong), token=token)
+
+        volume = self.node.perform("volume.create", {"name": "large-preview"})
+        self.node.perform("volume.write", dict(target(volume), name="large", content="x" * 65536))
+        current = self.node.get(volume["resource_id"])["reference"]
+        task = self.node.submit("volume.read", dict(target(current), name="large"))
+        reference = self.node.wait(task)["result"]["artifact_refs"][0]
+        self.error(shell, 413, "QuotaExceeded", "/api/task-artifact",
+                   data={"task_id": task, "reference": reference}, token=token)

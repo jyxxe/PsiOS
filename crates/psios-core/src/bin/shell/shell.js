@@ -154,6 +154,65 @@ const lifecycles = {
   Succeeded: "成功", Failed: "失败", Cancelled: "已取消", Paused: "已暂停",
 };
 
+function artifactView(taskId, references) {
+  const section = element("section", undefined, "artifacts");
+  const label = element("label", "任务制品");
+  label.htmlFor = "artifact-reference";
+  const choices = element("select");
+  choices.id = "artifact-reference";
+  for (const reference of references) {
+    choices.append(element("option", reference.resource_id));
+  }
+  const preview = element("button", "预览");
+  preview.id = "preview-artifact";
+  preview.type = "button";
+  const controls = element("div", undefined, "artifact-controls");
+  controls.append(choices, preview);
+  const referenceBox = element("pre", undefined, "artifact-reference");
+  referenceBox.setAttribute("aria-label", "固定制品引用");
+  const notice = element("p", "", "message");
+  const content = element("pre", undefined, "artifact-json");
+  content.id = "artifact-json";
+  content.hidden = true;
+  content.tabIndex = 0;
+  content.setAttribute("aria-label", "已核验的 JSON 内容");
+  content.setAttribute("aria-live", "off");
+  section.append(label, controls, referenceBox, notice, content);
+
+  function clear() {
+    referenceBox.textContent = JSON.stringify(references[choices.selectedIndex], null, 2);
+    message(notice, "");
+    content.hidden = true;
+    content.textContent = "";
+  }
+  choices.addEventListener("change", clear);
+  clear();
+
+  preview.addEventListener("click", async () => {
+    if (preview.disabled) return;
+    clear();
+    const reference = references[choices.selectedIndex];
+    preview.disabled = choices.disabled = true;
+    message(notice, "正在核对制品…");
+    try {
+      const result = await request("/api/task-artifact", { task_id: taskId, reference });
+      if (!section.isConnected) return;
+      content.textContent = result.content_json;
+      content.hidden = false;
+      message(notice, "已核对固定版本的 SHA-256 摘要。");
+      content.focus();
+    } catch (error) {
+      if (!section.isConnected) return;
+      message(notice, error.code === "QuotaExceeded"
+        ? "制品超过 64 KiB。可将上述引用交给 psiosctl artifact 导出。"
+        : error.message, true);
+    } finally {
+      preview.disabled = choices.disabled = false;
+    }
+  });
+  return section;
+}
+
 function renderTask(task) {
   taskContent.replaceChildren(fields([
     ["ID", task.task_id, true],
@@ -169,6 +228,8 @@ function renderTask(task) {
     }
     taskContent.append(list);
   }
+  const references = task.result?.artifact_refs;
+  if (references?.length) taskContent.append(artifactView(task.task_id, references));
 }
 
 async function inspectTask(id, focus = false) {

@@ -57,8 +57,13 @@ busybox ip -4 route show 和 cat /etc/resolv.conf 查看。
 
 新盘也可用 --static-mac 和 --static-address 配置没有 DHCP 的网口。
 --static-gateway 可指定同子网网关，--static-dns 可指定最多三个服务器。
+可独立或同时指定 --static-ipv6-address、--static-ipv6-gateway 和
+--static-ipv6-dns。两个地址族使用同一个网口，合计最多三个 DNS 服务器。
+IPv6 网关可以是链路本地地址。系统先等待 IPv6 重复地址检测，再配置
+默认路由。双栈配置成功后一次性发布 DNS。
 该配置写入 root 私有文件，网络状态保存在 /run/psios-network/status。
-静态 IPv4 盘使用格式 4 回执，签名盘的证书信息仍在 secure_boot 中。
+静态 IPv4 盘使用格式 4 回执，静态 IPv6 与双栈盘使用格式 5 回执。
+签名盘的证书信息在 secure_boot 中。
 
 升级已初始化的三分区开发盘时，先停止虚机，保留原 raw 磁盘、EFI
 变量文件和可信的构建回执。使用目标版本的归档和安装器，另需 qemu-img

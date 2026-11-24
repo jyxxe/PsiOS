@@ -52,32 +52,3 @@ load_static_ipv4() {
         [ "$((gateway_number & ~host_mask))" -eq "$((address_number & ~host_mask))" ] || return 1
     [ "$prefix" -ge 31 ] || { [ "$gateway_host" -ne 0 ] && [ "$gateway_host" -ne "$host_mask" ]; }
 }
-
-apply_static_ipv4() (
-    metric=30320
-    address_added=no
-    gateway_added=no
-    resolver=$(mktemp "$run/.static-resolver.XXXXXXXX") || exit 1
-    rollback() {
-        if [ "$gateway_added" = yes ]; then
-            ip -4 route del default via "$static_gateway" dev "$link" proto 4 metric "$metric" || :
-        fi
-        if [ "$address_added" = yes ]; then
-            ip -4 addr del "$static_address" dev "$link" || :
-        fi
-        rm -f "$resolver"
-    }
-    trap rollback EXIT
-    chmod 0644 "$resolver" || exit 1
-    for server in $static_dns; do
-        printf 'nameserver %s\n' "$server" >> "$resolver" || exit 1
-    done
-    ip -4 addr add "$static_address" dev "$link" || exit 1
-    address_added=yes
-    if [ "$static_gateway" != - ]; then
-        ip -4 route add default via "$static_gateway" dev "$link" proto 4 metric "$metric" || exit 1
-        gateway_added=yes
-    fi
-    mv -fT "$resolver" "$run/resolv.conf" || exit 1
-    trap - EXIT
-)

@@ -1,11 +1,15 @@
 #!/bin/sh
-# The legacy invocation starts DHCP. Static IPv4 shares the pinned adapter setup.
+# The DHCP and static profiles share the MAC-bound virtio adapter setup.
 set -eu
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 profile=${1:-dhcp}
 run=/run/psios-network
 umask 022
 mkdir -p -m 0755 "$run"
+static_address=
+static_dns=
+static6_address=
+static6_dns=
 
 retry() {
     printf '%s\n' "$1" > "$run/status"
@@ -23,9 +27,21 @@ case "$profile" in
         . /psios-ipv4
         load_static_ipv4 /etc/psios/static-ipv4 || retry 'invalid static IPv4 profile'
         ;;
-    *) retry 'unsupported IPv4 profile' ;;
+    static6|dual)
+        . /psios-ipv6
+        load_static_ipv6 /etc/psios/static-ipv6 || retry 'invalid static IPv6 profile'
+        if [ "$profile" = dual ]; then
+            v6_mac=$mac
+            . /psios-ipv4
+            load_static_ipv4 /etc/psios/static-ipv4 || retry 'invalid static IPv4 profile'
+            [ "$v6_mac" = "$mac" ] || retry 'static profiles identify different interfaces'
+            set -- $static_dns $static6_dns
+            [ "$#" -le 3 ] || retry 'too many static DNS servers'
+        fi
+        ;;
+    *) retry 'unsupported wired profile' ;;
 esac
-[ "$(readlink /etc/resolv.conf)" = "$run/resolv.conf" ] || retry 'resolver link does not belong to the IPv4 profile'
+[ "$(readlink /etc/resolv.conf)" = "$run/resolv.conf" ] || retry 'resolver link does not belong to the wired profile'
 printf '%s\n' "$mac" | grep -Eq '^[0-9a-f][02468ace](:[0-9a-f]{2}){5}$' || retry 'invalid MAC address'
 [ "${#mac}" -eq 17 ] && [ "$mac" != 00:00:00:00:00:00 ] || retry 'invalid MAC address'
 modprobe virtio_net || retry 'could not load the virtio network driver'
@@ -41,11 +57,28 @@ done
 [ -n "$link" ] || retry 'configured virtio interface is absent'
 case "$link" in *[!a-zA-Z0-9_.-]*) retry 'unsupported interface name' ;; esac
 
-printf '1\n' > "/proc/sys/net/ipv6/conf/$link/disable_ipv6" || retry 'could not apply the IPv4-only profile'
+ipv6_sysctls=/proc/sys/net/ipv6/conf/$link
+if [ -z "$static6_address" ]; then
+    printf '1\n' > "$ipv6_sysctls/disable_ipv6" || retry 'could not apply the IPv4-only profile'
+else
+    for option in accept_ra autoconf accept_redirects; do
+        printf '0\n' > "$ipv6_sysctls/$option" || retry 'could not constrain the static IPv6 interface'
+    done
+    for option in accept_dad dad_transmits; do
+        printf '1\n' > "$ipv6_sysctls/$option" || retry 'could not enable IPv6 duplicate address detection'
+    done
+    printf '0\n' > "$ipv6_sysctls/disable_ipv6" || retry 'could not enable IPv6 on the static interface'
+fi
 ip link set dev "$link" up || retry 'could not bring up the interface'
-if [ "$profile" = static ]; then
-    apply_static_ipv4 || retry "Could not apply static IPv4 on $link"
-    printf 'Static %s on %s\n' "$static_address" "$link" > "$run/status"
+if [ "$profile" != dhcp ]; then
+    . /psios-static
+    case "$profile" in
+        static) family=IPv4; description=$static_address ;;
+        static6) family=IPv6; description=$static6_address ;;
+        dual) family='dual stack'; description="$static_address and $static6_address" ;;
+    esac
+    apply_static_profile || retry "Could not apply static $family on $link"
+    printf 'Static %s on %s\n' "$description" "$link" > "$run/status"
     exit 0
 fi
 modprobe af_packet || retry 'could not load the DHCP packet driver'

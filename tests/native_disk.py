@@ -30,9 +30,16 @@ class Console:
         self.vm = vm
         self.buf = b""
 
-    def until(self, marker, timeout=75):
+    def until(self, marker, timeout=75, reject=None):
         end = time.monotonic() + timeout
-        while marker not in self.buf:
+        while True:
+            position = self.buf.find(marker)
+            if reject is not None:
+                failure = self.buf.find(reject)
+                if failure >= 0 and (position < 0 or failure < position):
+                    raise AssertionError("guest serial console rejected an expected valid login")
+            if position >= 0:
+                break
             remaining = end - time.monotonic()
             if remaining <= 0 or not select.select([self.vm.stdout], [], [], remaining)[0]:
                 raise AssertionError(f"guest did not reach {marker!r}")
@@ -49,15 +56,27 @@ class Console:
         self.vm.stdin.write(line.encode() + b"\r")
         self.vm.stdin.flush()
 
+    def send_secret(self, secret):
+        # Give BusyBox time to switch off echo after printing the prompt.
+        # Under KVM, keep password bursts smaller than the emulated UART FIFO.
+        time.sleep(0.03)
+        for start in range(0, len(secret), 8):
+            self.vm.stdin.write(secret[start:start + 8].encode())
+            self.vm.stdin.flush()
+            time.sleep(0.01)
+        self.send("")
+
     def credentials(self, user, password):
-        self.until(b"login:")
+        self.until(b"login: ")
         self.send(user)
-        self.until(b"Password:")
-        self.send(password)
+        self.until(b"Password: ")
+        self.send_secret(password)
 
     def login(self, user, password):
         self.credentials(user, password)
-        self.until(b"# " if user == "root" else b"$ ")
+        before_shell = self.until(b"# " if user == "root" else b"$ ", reject=b"Login incorrect")
+        if password.encode() in before_shell:
+            raise AssertionError("guest serial console echoed the fixture password")
         marker = "PSIOSLOGIN" + secrets.token_hex(6)
         self.send(f"stty -echo; export PS1=''; printf '\\n{marker}\\n'")
         self.until(("\n" + marker + "\n").encode())
@@ -402,9 +421,9 @@ def exercise(args, work):
         rotated = secrets.token_urlsafe(26)
         c.send("passwd psios")
         c.until(b"New password:")
-        c.send(rotated)
+        c.send_secret(rotated)
         c.until(b"Retype password:")
-        c.send(rotated)
+        c.send_secret(rotated)
         c.until(b"password for psios changed")
         # Keep a home file open across a normal poweroff from the root home.
         c.run("(trap '' TERM HUP; exec tail -f ./maintenance) </dev/null >/dev/null 2>&1 & "

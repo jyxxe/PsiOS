@@ -27,6 +27,7 @@ pub const TOOLS: &[&str] = &[
     "service.start",
     "service.stop",
     "volume.files",
+    "volume.usage",
     "volume.mkdir",
     "volume.read_chunk",
     "volume.append",
@@ -80,6 +81,7 @@ pub fn readonly(tool: &str) -> bool {
             | "node.devices"
             | "service.inspect"
             | "volume.files"
+            | "volume.usage"
             | "volume.read_chunk"
             | "application.refresh"
             | "secret.mac"

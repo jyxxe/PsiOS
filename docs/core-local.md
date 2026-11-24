@@ -103,6 +103,7 @@ target/debug/psiosctl --socket "$workdir/core/api.sock" --token-file "$workdir/a
 | secret.mac | secret_id、message |
 | volume.create | name |
 | volume.read、volume.write | id、expected_resource_version、单个文件名 name；write 另需 UTF-8 content，最大 64 KiB |
+| volume.usage | `target` 包含卷 ID 和预期修订。可选 `path` 指向卷内子目录，默认查询整个数据目录。 |
 | volume.delete、volume.activate、backup.create、backup.restore、backup.delete | id、expected_resource_version。restore 的目标是 Backup，产生新 Volume，读取核实后通过 activate 开放写入。 |
 | application.install | 本地 OCI 镜像配置摘要 image_id、name、release_version、license_expression、argv、environment、cpu_millicores、memory_max_bytes、pids_max、ephemeral_max_bytes，可选 volume 指向卷 id 和 expected_resource_version |
 | application.start、application.stop、application.uninstall、application.health、application.logs | 应用 id、expected_resource_version |
@@ -116,6 +117,12 @@ volume.write、volume.delete、volume.activate、backup.delete、application.ins
 卷与备份使用独占的内部暂存目录，通过拒绝覆盖已有名称的原子改名发布。已知的发布前失败会当场清理暂存。若服务在发布前中断，重启时持有独占权威锁回收。这包括旧版备份暂存以及已恢复为只读权限的子目录。遇到嵌套挂载或异常的暂存目录会保留并记录。只有暂存清理证据时，在途操作仍等待效果对账。[真实写入失败与进程中断测试](../tests/test_storage_recovery.py)
 
 新恢复卷在权威状态中记录通过核验的目录树摘要。`volume.activate` 持有卷的独占占用，从实际目标重新读取内容、路径、权限和清单中保留的修改时间，再核对摘要。校验失败、提交前取消或服务中断时，卷仍待激活，可重新审批。成功时记录 `restore_verification_ref`，并开放后续写入。源备份已按策略删除时，新恢复卷仍可凭保存的摘要核验。旧版本已经创建的待激活卷沿用身份检查，旧清单经新版恢复时会生成新摘要。[激活完整性测试](../tests/test_storage_recovery.py)
+
+### 查询卷用量
+
+用 `volume.usage` 提交只读 Task，并从 `Artifact.Read` 获取结果。授权需要 `task.submit`、`task.read` 和 `volume.usage`，`tool_targets` 可限制为指定卷。结果固定卷引用及数据世代，分别报告普通文件的逻辑字节、文件分配字节、目录分配字节和总分配字节。目录计数包含本次查询的根。分配字节采用 Linux inode 的 512 字节块计数，稀疏文件的空洞会体现在两个数值的差异中。池级剩余空间可通过 `StoragePool.Get` 查询。[Linux inode 字段](https://kernel.googlesource.com/pub/scm/docs/man-pages/man-pages/+/refs/tags/man-pages-6.13/man/man7/inode.7)
+
+测量持有本地卷的排他占用，且支持读取待激活的恢复卷。Core 通过目录文件描述符遍历并复查 inode 及分配量。每次最多遍历 4096 项和 32 层子目录。新扫描可选择更小的子树。符号链接、硬链接文件、设备等特殊文件、嵌套挂载和非 UTF-8 名称会拒绝整个扫描。直接从宿主写入卷的进程须在测量时暂停写入，以获得稳定观察结果。[文件、权限与扫描边界验收](../tests/test_volume_usage.py) · [格式 14 升级](../tests/volume_usage_upgrade.py)
 
 ### 原地核验一份备份
 

@@ -5,7 +5,16 @@ set -eu
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 bb=/bin/busybox
 stage=bootstrap
-trap 'echo "PsiOS boot stopped at $stage; use external rescue media" >/dev/console; "$bb" poweroff -f' EXIT
+payload_verified=no
+abort_boot() {
+    trap - EXIT
+    echo "PsiOS boot stopped at $stage; use external rescue media" >/dev/console || :
+    if [ "$payload_verified" = yes ]; then
+        "$bb" sh /psios-shutdown --mounts-only || :
+    fi
+    "$bb" poweroff -f
+}
+trap abort_boot EXIT
 "$bb" mount -t devtmpfs devtmpfs /dev
 "$bb" mount -t proc proc /proc
 "$bb" mount -t sysfs sysfs /sys
@@ -13,6 +22,7 @@ trap 'echo "PsiOS boot stopped at $stage; use external rescue media" >/dev/conso
 "$bb" --install -s
 stage=deployment-payload
 "$bb" sha256sum -c /psios-payload.sha256 >/dev/null
+payload_verified=yes
 "$bb" hostname psios
 stage=loopback
 "$bb" ip link set lo up

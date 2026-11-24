@@ -327,6 +327,7 @@ def exercise(args, work):
     with boot(work, image) as c:
         c.until(b"PsiOS boot stopped at authority")
         assert c.vm.wait(25) == 0
+    check_clean_shutdown(image)
     extract_partition(image, partition, 65, 192)
     assert read_owner() == original_owner
     absent = subprocess.run(["debugfs", "-R", "stat /psios/state.db", partition], capture_output=True)
@@ -347,7 +348,9 @@ def exercise(args, work):
         assert c.vm.wait(25) == 0
     assert sha(image) == pre_reject
     print(f"Verified source {deployment['source_commit']}, node {first[0]}, task {first[1]['task_id']}, "
-          "matched deployment receipt, authenticated UEFI console, private persistent homes, full-home isolation, offline management, power loss, clean shutdown with a held home file, external rescue, consumed enrollment and damaged payload and mismatched state/home refusal.")
+          "matched deployment receipt, authenticated UEFI console, private persistent homes, full-home isolation, "
+          "offline management, power loss, clean shutdown with a held home file, external rescue, clean ext4 "
+          "after authority refusal, consumed enrollment and damaged payload and mismatched state/home refusal.")
 
 
 if __name__ == "__main__":

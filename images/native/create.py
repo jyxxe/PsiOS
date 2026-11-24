@@ -111,10 +111,12 @@ def ramfs(work, args, instance, home_id):
     install_core(work, args.core_archive, args.core_sha256)
     (work / "psios-disk-uuid").write_text(str(instance) + "\n")
     (work / "psios-home-uuid").write_text(str(home_id) + "\n")
-    boot_scripts = ["init", "shutdown", "dhcp", "dhcp-event"]
+    sectors = [str(mib * 2048) for start, size, _ in PARTITIONS[1:] for mib in (start, size)]
+    (work / "psios-storage-layout").write_text(" ".join(sectors) + "\n")
+    boot_scripts = ["init", "shutdown", "dhcp", "dhcp-event", "storage"]
     for script in boot_scripts:
         shutil.copyfile(HERE / script, work / f"psios-{script}")
-    files = ["bin/psiosd", "bin/psiosctl", "psios-source", "psios-disk-uuid", "psios-home-uuid"]
+    files = ["bin/psiosd", "bin/psiosctl", "psios-source", "psios-disk-uuid", "psios-home-uuid", "psios-storage-layout"]
     files.extend(f"psios-{script}" for script in boot_scripts)
     payload = {"/" + name: sha256(work / name) for name in files}
     inputs = {

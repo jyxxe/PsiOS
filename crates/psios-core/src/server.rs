@@ -246,7 +246,10 @@ fn timer(s: Shared, stop: Arc<AtomicBool>) -> Result<()> {
 fn reclaim_storage(s: Shared, stop: Arc<AtomicBool>, config: Config) -> Result<()> {
     while !stop.load(Ordering::Acquire) {
         let correlation = id("storage-reclaim");
-        let ready = state(&s)?.transaction(&correlation, retirement::next);
+        let ready = state(&s)?.transaction(&correlation, |db| {
+            crate::artifact::ingress::expire(db)?;
+            retirement::next(db)
+        });
         let delay = match ready {
             Ok(Some(job)) if !stop.load(Ordering::Acquire) => {
                 let result = job.reclaim(&config);

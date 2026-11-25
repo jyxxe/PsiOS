@@ -1,0 +1,593 @@
+//! Durable ingress for opaque local artifacts. Publication verifies exact bytes.
+use super::{CHUNK_BYTES, RAW_LAYOUT};
+use crate::{
+    Empty, Error, Result, after,
+    db::{Db, Doc, find},
+    decode, err, label, now, policy, require,
+};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use psios_api::{ApiError, canonical, id, sha256};
+use rusqlite::{Connection, OptionalExtension, Row, params};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+
+pub(crate) const FORMAT: u32 = crate::node::process::FORMAT + 1;
+pub(crate) const SCHEMA: &str = include_str!("ingress.sql");
+pub(crate) const UPLOAD: &str = "artifact.upload";
+pub(crate) const READ: &str = "artifact.read";
+pub(crate) const WITHDRAW: &str = "artifact.withdraw";
+const MAX_BYTES: u32 = 8 * 1024 * 1024;
+const OWNER_BYTES: u32 = 32 * 1024 * 1024;
+const TOTAL_BYTES: u32 = 128 * 1024 * 1024;
+const OWNER_STAGES: u32 = 4;
+const TOTAL_STAGES: u32 = 32;
+const OWNER_REQUESTS: u32 = 4096;
+const TOTAL_REQUESTS: u32 = 65536;
+const WITHDRAWAL: &str = "ArtifactWithdrawal";
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Start {
+    key: String,
+    size_bytes: u32,
+    digest: String,
+    declared_media_type: String,
+    ttl_seconds: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StageId {
+    stage_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Put {
+    stage_id: String,
+    offset: u32,
+    data_base64: String,
+}
+
+struct Stage {
+    id: String,
+    request_digest: String,
+    digest: String,
+    declared_media_type: String,
+    size: u32,
+    received: u32,
+    expires: String,
+    state: String,
+    artifact: Option<String>,
+}
+
+fn stage_row(row: &Row<'_>) -> rusqlite::Result<Stage> {
+    Ok(Stage {
+        id: row.get("id")?,
+        request_digest: row.get("request_digest")?,
+        digest: row.get("digest")?,
+        declared_media_type: row.get("declared_media_type")?,
+        size: row.get("size_bytes")?,
+        received: row.get("received_bytes")?,
+        expires: row.get("expires_at")?,
+        state: row.get("state")?,
+        artifact: row.get("artifact_id")?,
+    })
+}
+
+fn owned(db: &Db<'_>, actor: &str, id: &str) -> Result<Stage> {
+    label(id)?;
+    db.c.query_row(
+        "SELECT * FROM artifact_uploads WHERE owner=?1 AND id=?2",
+        params![actor, id],
+        stage_row,
+    )
+    .optional()?
+    .ok_or_else(|| err("NotFound", "artifact stage unavailable"))
+}
+
+fn response(db: &Db<'_>, stage: &Stage) -> Result<Value> {
+    let reference = stage
+        .artifact
+        .as_deref()
+        .map(|id| db.of(id, "Artifact").map(|doc| doc.reference()))
+        .transpose()?;
+    let expired = stage.state == "Open"
+        && policy::deadline::Clock::sample()?.expired(db, &stage.id, &stage.expires)?;
+    Ok(json!({
+        "stage_id":stage.id,"digest":stage.digest,"size_bytes":stage.size,
+        "received_bytes":stage.received,"expires_at":stage.expires,
+        "state":if expired {"Expired"} else {&stage.state},"artifact_ref":reference,
+    }))
+}
+
+fn require_open(db: &Db<'_>, stage: &Stage) -> Result<()> {
+    require(
+        stage.state != "Expired"
+            && !policy::deadline::Clock::sample()?.expired(db, &stage.id, &stage.expires)?,
+        "DeadlineExceeded",
+        "artifact upload expired",
+    )?;
+    require(
+        stage.state == "Open",
+        "PreconditionFailed",
+        "artifact stage is closed",
+    )
+}
+
+pub(crate) fn authorize(db: &Db<'_>, actor: &str, action: &str) -> Result<()> {
+    policy::can_target(db, actor, action, &db.meta("authority")?)
+}
+
+pub(crate) fn profile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
+    let _: Empty = decode(params)?;
+    authorize(db, actor, UPLOAD)?;
+    Ok(json!({
+        "format":"OpaqueBytesV1","media_type":"application/octet-stream",
+        "max_bytes":MAX_BYTES,"chunk_bytes":CHUNK_BYTES,"owner_bytes":OWNER_BYTES,
+        "total_bytes":TOTAL_BYTES,"owner_open_stages":OWNER_STAGES,"total_open_stages":TOTAL_STAGES,
+        "min_ttl_seconds":5,"max_ttl_seconds":3600,
+    }))
+}
+
+fn valid_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    })
+}
+
+fn valid_media_type(value: &str) -> bool {
+    value.len() <= 96
+        && value.split_once('/').is_some_and(|(kind, subtype)| {
+            [kind, subtype].into_iter().all(|part| {
+                !part.is_empty()
+                    && part
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || b"!#$&^_.+-".contains(&c))
+            })
+        })
+}
+
+fn check_capacity(db: &Db<'_>, actor: &str, bytes: u32) -> Result<()> {
+    let (total, own, total_open, owner_open, total_count, owner_count): (u32, u32, u32, u32, u32, u32) =
+        db.c.query_row(
+            "SELECT coalesce(sum(size_bytes),0),
+                    coalesce(sum(size_bytes) FILTER(WHERE owner=?1),0),
+                    count(*) FILTER(WHERE state='Open'),count(*) FILTER(WHERE owner=?1 AND state='Open'),
+                    (SELECT count(*) FROM artifact_uploads),
+                    (SELECT count(*) FROM artifact_uploads WHERE owner=?1)
+               FROM artifact_uploads INDEXED BY artifact_active_uploads WHERE state IN ('Open','Published')",
+            [actor], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
+        )?;
+    require(
+        total_count < TOTAL_REQUESTS && owner_count < OWNER_REQUESTS,
+        "QuotaExceeded",
+        "artifact upload receipt capacity reached",
+    )?;
+    if total_open >= TOTAL_STAGES
+        || owner_open >= OWNER_STAGES
+        || total.saturating_add(bytes) > TOTAL_BYTES
+        || own.saturating_add(bytes) > OWNER_BYTES
+    {
+        let mut quota = ApiError::new(
+            "QuotaExceeded",
+            "artifact upload staging or retained bytes are full",
+        );
+        quota.retryable = true;
+        quota.retry_condition = "SameRequestAfterBackoff".into();
+        return Err(Error(Box::new(quota)));
+    }
+    Ok(())
+}
+
+pub(crate) fn stage(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
+    authorize(db, actor, UPLOAD)?;
+    let p: Start = decode(params)?;
+    label(&p.key)?;
+    require(
+        valid_digest(&p.digest)
+            && valid_media_type(&p.declared_media_type)
+            && (5..=3600).contains(&p.ttl_seconds),
+        "InvalidArgument",
+        "invalid artifact digest, media type or upload lifetime",
+    )?;
+    require(
+        (1..=MAX_BYTES).contains(&p.size_bytes),
+        "QuotaExceeded",
+        "artifact size outside ingress profile",
+    )?;
+    let request_digest = sha256(&canonical(&serde_json::to_value(&p)?));
+    let prior =
+        db.c.query_row(
+            "SELECT * FROM artifact_uploads WHERE owner=?1 AND request_key=?2",
+            params![actor, p.key],
+            stage_row,
+        )
+        .optional()?;
+    if let Some(prior) = prior {
+        require(
+            prior.request_digest == request_digest,
+            "IdempotencyConflict",
+            "upload key is already bound to a different request",
+        )?;
+        return response(db, &prior);
+    }
+    db.cfg.check_admission_space()?;
+    check_capacity(db, actor, p.size_bytes)?;
+    let id = id("artifact-stage");
+    let expires = after(i64::from(p.ttl_seconds));
+    policy::deadline::Clock::sample()?.register_until(db, &id, &expires, None)?;
+    db.c.execute(
+        "INSERT INTO artifact_uploads(id,owner,request_key,request_digest,digest,declared_media_type,size_bytes,expires_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+        params![id,actor,p.key,request_digest,p.digest,p.declared_media_type,p.size_bytes,expires],
+    )?;
+    db.audit(actor, "Artifact.Stage", Some(&id), "Accepted")?;
+    response(db, &owned(db, actor, &id)?)
+}
+
+pub(crate) fn get(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
+    authorize(db, actor, UPLOAD)?;
+    let p: StageId = decode(params)?;
+    response(db, &owned(db, actor, &p.stage_id)?)
+}
+
+pub(crate) fn put(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
+    authorize(db, actor, UPLOAD)?;
+    let p: Put = decode(params)?;
+    let mut stage = owned(db, actor, &p.stage_id)?;
+    require_open(db, &stage)?;
+    let offset = p.offset as usize;
+    require(
+        p.offset < stage.size && offset.is_multiple_of(CHUNK_BYTES),
+        "InvalidArgument",
+        "upload offset must identify one complete chunk",
+    )?;
+    let length = ((stage.size - p.offset) as usize).min(CHUNK_BYTES);
+    require(
+        p.data_base64.len() == 4 * length.div_ceil(3),
+        "InvalidArgument",
+        "upload must supply one complete chunk",
+    )?;
+    let raw = STANDARD
+        .decode(p.data_base64)
+        .map_err(|_| err("InvalidArgument", "invalid artifact chunk encoding"))?;
+    require(
+        raw.len() == length,
+        "InvalidArgument",
+        "invalid artifact chunk size",
+    )?;
+    let index = (offset / CHUNK_BYTES) as i64;
+    if p.offset < stage.received {
+        let previous: Vec<u8> = db.c.query_row(
+            "SELECT payload FROM artifact_upload_chunks WHERE upload_id=?1 AND chunk_index=?2",
+            params![stage.id, index],
+            |r| r.get(0),
+        )?;
+        require(
+            previous == raw,
+            "IdempotencyConflict",
+            "upload chunk offset already holds other bytes",
+        )?;
+        return response(db, &stage);
+    }
+    require(
+        p.offset == stage.received,
+        "PreconditionFailed",
+        "upload chunks must follow the committed offset",
+    )?;
+    db.cfg.check_admission_space()?;
+    authorize(db, actor, UPLOAD)?;
+    require_open(db, &stage)?;
+    db.c.execute(
+        "INSERT INTO artifact_upload_chunks VALUES(?1,?2,?3,?4)",
+        params![stage.id, index, sha256(&raw), raw],
+    )?;
+    stage.received += length as u32;
+    db.c.execute(
+        "UPDATE artifact_uploads SET received_bytes=?2 WHERE id=?1",
+        params![stage.id, stage.received],
+    )?;
+    response(db, &stage)
+}
+
+fn scan_chunks(
+    conn: &Connection,
+    id: &str,
+    size: usize,
+    received: usize,
+) -> Result<(String, Vec<String>)> {
+    let mut content = Sha256::new();
+    let mut digests = Vec::new();
+    let mut statement = conn.prepare_cached(
+        "SELECT chunk_index,digest,payload FROM artifact_upload_chunks WHERE upload_id=?1 ORDER BY chunk_index",
+    )?;
+    let mut rows = statement.query([id])?;
+    let mut remaining = size;
+    while let Some(row) = rows.next()? {
+        let index: usize = row.get(0)?;
+        let expected: String = row.get(1)?;
+        let payload: Vec<u8> = row.get(2)?;
+        require(
+            remaining > 0 && index == digests.len() && payload.len() == remaining.min(CHUNK_BYTES),
+            "RecoveryRequired",
+            "staged artifact chunks disagree with the committed offset",
+        )?;
+        remaining -= payload.len();
+        require(
+            sha256(&payload) == expected,
+            "RecoveryRequired",
+            "staged artifact chunk digest mismatch",
+        )?;
+        content.update(&payload);
+        digests.push(expected);
+    }
+    require(
+        size - remaining == received,
+        "RecoveryRequired",
+        "staged artifact offset disagrees with its chunks",
+    )?;
+    Ok((format!("sha256:{:x}", content.finalize()), digests))
+}
+
+pub(crate) fn publish(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
+    authorize(db, actor, UPLOAD)?;
+    let p: StageId = decode(params)?;
+    let mut stage = owned(db, actor, &p.stage_id)?;
+    if stage.artifact.is_some() {
+        return response(db, &stage);
+    }
+    require_open(db, &stage)?;
+    require(
+        stage.received == stage.size,
+        "PreconditionFailed",
+        "artifact upload is incomplete",
+    )?;
+    db.cfg.check_admission_space()?;
+    let (digest, digests) = scan_chunks(
+        db.c,
+        &stage.id,
+        stage.size as usize,
+        stage.received as usize,
+    )?;
+    require(
+        digest == stage.digest,
+        "PreconditionFailed",
+        "uploaded bytes do not match the declared artifact digest",
+    )?;
+    authorize(db, actor, UPLOAD)?;
+    require_open(db, &stage)?;
+    let artifact = db.create(
+        "Artifact", &id("artifact"), actor,
+        json!({
+            "content_layout":RAW_LAYOUT,"media_type":"application/octet-stream",
+            "declared_media_type":stage.declared_media_type,"size_bytes":stage.size.to_string(),
+            "digest":stage.digest,"source":{"kind":"LocalSubmission","principal_id":actor,"stage_id":stage.id},
+        }),
+        json!({"chunk_digests":digests}),
+    )?;
+    let copied = db.c.execute(
+        "INSERT INTO artifact_chunks(artifact_id,artifact_rev,chunk_index,payload)
+         SELECT ?2,?3,chunk_index,payload FROM artifact_upload_chunks WHERE upload_id=?1",
+        params![stage.id, artifact.id, artifact.rev],
+    )?;
+    require(
+        copied == digests.len(),
+        "RecoveryRequired",
+        "artifact chunk publication count changed",
+    )?;
+    stage.artifact = Some(artifact.id);
+    db.c.execute(
+        "UPDATE artifact_uploads SET state='Published',artifact_id=?2 WHERE id=?1",
+        params![stage.id, stage.artifact],
+    )?;
+    db.c.execute(
+        "DELETE FROM artifact_upload_chunks WHERE upload_id=?1",
+        [&stage.id],
+    )?;
+    db.c.execute(
+        "DELETE FROM authorization_deadlines WHERE resource=?1",
+        [&stage.id],
+    )?;
+    db.audit(
+        actor,
+        "Artifact.Publish",
+        stage.artifact.as_deref(),
+        "Published",
+    )?;
+    stage.state = "Published".into();
+    response(db, &stage)
+}
+
+fn close(db: &Db<'_>, id: &str, owner: &str, state: &str) -> Result<()> {
+    db.c.execute(
+        "UPDATE artifact_uploads SET state=?2 WHERE id=?1 AND state='Open'",
+        params![id, state],
+    )?;
+    db.c.execute(
+        "DELETE FROM artifact_upload_chunks WHERE upload_id=?1",
+        [id],
+    )?;
+    db.c.execute(
+        "DELETE FROM authorization_deadlines WHERE resource=?1",
+        [id],
+    )?;
+    db.audit(owner, "Artifact.CloseStage", Some(id), state)
+}
+
+pub(crate) fn discard(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
+    authorize(db, actor, UPLOAD)?;
+    let p: StageId = decode(params)?;
+    let mut stage = owned(db, actor, &p.stage_id)?;
+    require(
+        stage.artifact.is_none(),
+        "PreconditionFailed",
+        "a published artifact needs separate withdrawal",
+    )?;
+    if stage.state == "Open" {
+        let expired = policy::deadline::Clock::sample()?.expired(db, &stage.id, &stage.expires)?;
+        stage.state = if expired { "Expired" } else { "Discarded" }.into();
+        close(db, &stage.id, actor, &stage.state)?;
+    }
+    response(db, &stage)
+}
+
+pub(crate) fn expire(db: &Db<'_>) -> Result<()> {
+    let pending: bool = db.c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM artifact_uploads WHERE state='Open')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !pending {
+        return Ok(());
+    }
+    let clock = policy::deadline::Clock::sample()?;
+    let due =
+        db.c.prepare_cached(
+            "SELECT u.id,u.owner FROM artifact_uploads u
+         LEFT JOIN authorization_deadlines d ON d.resource=u.id AND d.boot_id=?1
+         WHERE u.state='Open' AND (julianday(u.expires_at)<=julianday('now')
+                 OR d.time_ns<>?2 OR d.deadline_boot_ms<=?3)
+         ORDER BY u.expires_at,u.id LIMIT 8",
+        )?
+        .query_map(
+            params![clock.boot.boot_id, clock.time_ns, clock.boot.millis],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, owner) in due {
+        close(db, &id, &owner, "Expired")?;
+    }
+    Ok(())
+}
+
+pub(crate) fn verify(conn: &Connection) -> Result<()> {
+    let mut open = conn
+        .prepare("SELECT id,size_bytes,received_bytes FROM artifact_uploads WHERE state='Open'")?;
+    let mut expected_chunks = 0i64;
+    for upload in open.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, usize>(1)?,
+            r.get::<_, usize>(2)?,
+        ))
+    })? {
+        let (id, size, received) = upload?;
+        let (_, digests) = scan_chunks(conn, &id, size, received)?;
+        expected_chunks += digests.len() as i64;
+    }
+    let stored: i64 = conn.query_row("SELECT count(*) FROM artifact_upload_chunks", [], |r| {
+        r.get(0)
+    })?;
+    require(
+        stored == expected_chunks,
+        "RecoveryRequired",
+        "closed stage retains unpublished chunks",
+    )?;
+    let missing: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM artifact_uploads u
+           WHERE u.artifact_id IS NOT NULL AND NOT EXISTS(
+             SELECT 1 FROM versions v WHERE v.id=u.artifact_id AND v.rev=1 AND v.kind='Artifact'
+              AND v.owner=u.owner AND v.spec->>'content_layout'=?1 AND v.spec->>'digest'=u.digest
+              AND v.spec->'source'->>'stage_id'=u.id))",
+        [RAW_LAYOUT],
+        |r| r.get(0),
+    )?;
+    require(
+        !missing,
+        "RecoveryRequired",
+        "upload receipt does not match a published artifact",
+    )
+}
+
+fn withdrawal_id(artifact: &Doc) -> String {
+    format!("withdrawal-{}", artifact.id)
+}
+
+pub(super) fn retention(conn: &Connection, artifact: &Doc) -> Result<Option<Doc>> {
+    let recorded: Option<(String, String)> = conn
+        .query_row(
+            "SELECT owner,state FROM artifact_uploads WHERE artifact_id=?1",
+            [&artifact.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let (owner, state) =
+        recorded.ok_or_else(|| err("RecoveryRequired", "uploaded artifact provenance missing"))?;
+    require(
+        artifact.owner == owner,
+        "RecoveryRequired",
+        "artifact owner disagrees with its publication",
+    )?;
+    let receipt = find(conn, &withdrawal_id(artifact))?;
+    require(
+        match (state.as_str(), &receipt) {
+            ("Published", None) => true,
+            ("Withdrawn", Some(doc)) => {
+                doc.kind == WITHDRAWAL
+                    && doc.owner == owner
+                    && doc.body["artifact_ref"] == artifact.reference()
+            }
+            _ => false,
+        },
+        "RecoveryRequired",
+        "artifact retention disagrees with its publication",
+    )?;
+    Ok(receipt)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Withdraw {
+    reference: Value,
+    reason: String,
+}
+
+pub(crate) fn withdraw(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
+    authorize(db, actor, WITHDRAW)?;
+    let p: Withdraw = decode(params)?;
+    require(
+        !p.reason.trim().is_empty() && p.reason.len() <= 256,
+        "InvalidArgument",
+        "a bounded reason for withdrawal is required",
+    )?;
+    let artifact = db.resolve(&p.reference)?;
+    policy::owned(actor, &artifact)?;
+    require(
+        super::is_raw(&artifact),
+        "InvalidArgument",
+        "expected a published local upload",
+    )?;
+    if let Some(receipt) = retention(db.c, &artifact)? {
+        require(
+            receipt.body["reason"] == p.reason,
+            "IdempotencyConflict",
+            "artifact withdrawal already recorded with another reason",
+        )?;
+        return Ok(json!({"withdrawal_ref":receipt.reference(),"artifact_ref":p.reference}));
+    }
+    let manifest = super::Manifest::read(&artifact)?
+        .ok_or_else(|| err("RecoveryRequired", "artifact manifest unavailable"))?;
+    let count = db.c.execute(
+        "DELETE FROM artifact_chunks WHERE artifact_id=?1 AND artifact_rev=?2",
+        params![artifact.id, artifact.rev],
+    )?;
+    require(
+        count == manifest.chunks.len(),
+        "RecoveryRequired",
+        "uploaded artifact chunks are incomplete",
+    )?;
+    db.c.execute(
+        "UPDATE artifact_uploads SET state='Withdrawn' WHERE artifact_id=?1",
+        [&artifact.id],
+    )?;
+    let receipt = db.create(WITHDRAWAL,&withdrawal_id(&artifact),&artifact.owner,
+        json!({"artifact_id":artifact.id}),
+        json!({"artifact_ref":p.reference,"reason":p.reason,"withdrawn_at":now(),"withdrawn_by":actor}))?;
+    db.audit(actor, "Artifact.Withdraw", Some(&artifact.id), "Withdrawn")?;
+    Ok(json!({"withdrawal_ref":receipt.reference(),"artifact_ref":p.reference}))
+}

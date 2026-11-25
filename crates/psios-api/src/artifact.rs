@@ -12,6 +12,13 @@ pub struct ArtifactRepairReceipt {
     pub chunks_repaired: u64,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ArtifactUploadReceipt {
+    pub stage_id: String,
+    pub reference: ResourceRef,
+    pub size_bytes: u64,
+}
+
 fn source_error(error: Error) -> Box<ApiError> {
     if error.kind() == ErrorKind::UnexpectedEof {
         ApiError::new(
@@ -29,6 +36,119 @@ fn source_error(error: Error) -> Box<ApiError> {
 }
 
 impl Client {
+    /// Register a byte stream and resume at the authority's committed offset.
+    /// Retrying with the same key and unchanged source retrieves a committed publication.
+    pub fn upload_artifact(
+        &self,
+        key: &str,
+        declared_media_type: &str,
+        ttl_seconds: u32,
+        input: &mut (impl Read + Seek),
+    ) -> ApiResult<ArtifactUploadReceipt> {
+        let invalid = || {
+            ApiError::new(
+                "RecoveryRequired",
+                "invalid artifact upload acknowledgement",
+            )
+        };
+        let profile = self.call("Artifact.UploadProfile", json!({}))?;
+        let chunk = profile["chunk_bytes"]
+            .as_u64()
+            .filter(|chunk| (1..=MAX_ARTIFACT_CHUNK as u64).contains(chunk))
+            .ok_or_else(invalid)?;
+        let max = profile["max_bytes"].as_u64().ok_or_else(invalid)?;
+        let origin = input.stream_position().map_err(source_error)?;
+        let end = input.seek(SeekFrom::End(0)).map_err(source_error)?;
+        let size = end.saturating_sub(origin);
+        if size == 0 || size > max {
+            return Err(
+                ApiError::new("QuotaExceeded", "artifact size outside ingress profile").into(),
+            );
+        }
+        input.seek(SeekFrom::Start(origin)).map_err(source_error)?;
+        let mut buffer = vec![0; chunk as usize];
+        let mut digest = Sha256::new();
+        for at in (0..size).step_by(chunk as usize) {
+            let length = (size - at).min(chunk) as usize;
+            input
+                .read_exact(&mut buffer[..length])
+                .map_err(source_error)?;
+            digest.update(&buffer[..length]);
+        }
+        if input.read(&mut [0]).map_err(source_error)? != 0 {
+            return Err(ApiError::new("PreconditionFailed", "artifact source size changed").into());
+        }
+        let digest = format!("sha256:{:x}", digest.finalize());
+        let stage = self.call(
+            "Artifact.Stage",
+            json!({
+                "key":key,"declared_media_type":declared_media_type,"ttl_seconds":ttl_seconds,
+                "size_bytes":size,"digest":digest,
+            }),
+        )?;
+        let stage_id = stage["stage_id"].as_str().ok_or_else(invalid)?.to_owned();
+        if stage["digest"] != digest || stage["size_bytes"] != size {
+            return Err(invalid().into());
+        }
+        let terminal = match stage["state"].as_str() {
+            Some("Published") => stage,
+            Some("Open") => {
+                let received = stage["received_bytes"]
+                    .as_u64()
+                    .filter(|received| {
+                        *received == size || (*received < size && received.is_multiple_of(chunk))
+                    })
+                    .ok_or_else(invalid)?;
+                input
+                    .seek(SeekFrom::Start(origin + received))
+                    .map_err(source_error)?;
+                for offset in (received..size).step_by(chunk as usize) {
+                    let length = (size - offset).min(chunk) as usize;
+                    input
+                        .read_exact(&mut buffer[..length])
+                        .map_err(source_error)?;
+                    let ack = self.call("Artifact.Stage.PutChunk", json!({
+                        "stage_id":stage_id,"offset":offset,"data_base64":STANDARD.encode(&buffer[..length]),
+                    }))?;
+                    if ack["stage_id"] != stage_id
+                        || ack["state"] != "Open"
+                        || !ack["received_bytes"].as_u64().is_some_and(|received| {
+                            (offset + length as u64..=size).contains(&received)
+                        })
+                    {
+                        return Err(invalid().into());
+                    }
+                }
+                self.call("Artifact.Publish", json!({"stage_id":stage_id}))?
+            }
+            Some("Expired") => {
+                return Err(ApiError::new("DeadlineExceeded", "upload key expired").into());
+            }
+            Some("Withdrawn") => {
+                return Err(ApiError::new("ResultEvicted", "published upload was withdrawn").into());
+            }
+            Some("Discarded") => {
+                return Err(ApiError::new("PreconditionFailed", "upload key was discarded").into());
+            }
+            _ => return Err(invalid().into()),
+        };
+        let reference: ResourceRef =
+            serde_json::from_value(terminal["artifact_ref"].clone()).map_err(|_| invalid())?;
+        if terminal["state"] != "Published"
+            || terminal["stage_id"] != stage_id
+            || terminal["size_bytes"] != size
+            || terminal["digest"] != digest
+            || reference.digest != digest
+        {
+            return Err(invalid().into());
+        }
+        Ok(ArtifactUploadReceipt {
+            stage_id,
+            reference,
+            size_bytes: size,
+        })
+    }
+
     /// Verify a settled Task's pinned results and return its current availability view.
     pub fn verify_task_results(
         &self,

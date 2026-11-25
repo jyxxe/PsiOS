@@ -116,7 +116,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
                     let env = d.envelope(&db.meta("authority")?);
                     contract("resource-envelope", &env)?;
                     let reference = d.reference();
-                    let value = if artifact::stored_digest(&d).is_some() {
+                    let value = if artifact::is_json(&d) {
                         artifact::read(db, &d, Some(MAX_FRAME))?
                     } else {
                         d.body
@@ -125,6 +125,13 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
                 }
             }
         }
+        "Artifact.UploadProfile" => artifact::ingress::profile(db, actor, p),
+        "Artifact.Stage" => artifact::ingress::stage(db, actor, p),
+        "Artifact.Stage.Get" => artifact::ingress::get(db, actor, p),
+        "Artifact.Stage.PutChunk" => artifact::ingress::put(db, actor, p),
+        "Artifact.Stage.Discard" => artifact::ingress::discard(db, actor, p),
+        "Artifact.Publish" => artifact::ingress::publish(db, actor, p),
+        "Artifact.Withdraw" => artifact::ingress::withdraw(db, actor, p),
         "Artifact.Read" | "Artifact.Get" | "Artifact.ReadChunk" => {
             let (reference, page) = if method == "Artifact.ReadChunk" {
                 let p: ArtifactPage = decode(p)?;

@@ -52,6 +52,9 @@ pub(super) fn task_receipt(conn: &Connection, task: &Doc) -> Result<Option<Doc>>
 }
 
 pub(super) fn receipt(conn: &Connection, artifact: &Doc) -> Result<Option<Doc>> {
+    if super::is_raw(artifact) {
+        return super::ingress::retention(conn, artifact);
+    }
     if stored_digest(artifact).is_none() {
         return Ok(None);
     }
@@ -79,7 +82,7 @@ pub(crate) fn require_content(conn: &Connection, artifact: &Doc) -> Result<()> {
     require(
         receipt(conn, artifact)?.is_none(),
         "ResultEvicted",
-        "task result content was evicted",
+        "artifact content was evicted",
     )
 }
 

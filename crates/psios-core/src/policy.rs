@@ -80,6 +80,9 @@ pub const COMMON: &[&str] = &[
     chat::READ,
     chat::SEND,
     "resource.read",
+    artifact::ingress::UPLOAD,
+    artifact::ingress::READ,
+    artifact::ingress::WITHDRAW,
     storage::export::ACTION,
     "event.read",
     "secret.manage",
@@ -166,6 +169,9 @@ fn bootstrap_actions() -> Vec<String> {
                     | "node.mounts"
                     | node::pressure::TOOL
                     | node::process::TOOL
+                    | artifact::ingress::UPLOAD
+                    | artifact::ingress::READ
+                    | artifact::ingress::WITHDRAW
                     | node::block::TOOL
                     | "backup.verify"
                     | storage::file_integrity::TOOL
@@ -520,6 +526,9 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         !(reads_results
             || p.actions.iter().any(|action| {
                 action == storage::export::ACTION
+                    || action == artifact::ingress::UPLOAD
+                    || action == artifact::ingress::READ
+                    || action == artifact::ingress::WITHDRAW
                     || action == node::journal::TOOL
                     || action == node::process::TOOL
                     || action == node::RESTART_TOOL

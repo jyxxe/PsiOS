@@ -240,6 +240,14 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 
 旧任务已接受的执行仍可结算。升级按现有块式制品清单和待执行 Task 回填用量。写操作的效果证据、资源状态投影和恢复核验继续由原来的权威存储保护。[配额、重启与真实回收验收](../tests/test_read_result_quota.py) · [格式 50 用量回填](../tests/read_result_quota_upgrade.py)
 
+## 本机制品暂存与发布
+
+`Artifact.UploadProfile` 公布 `OpaqueBytesV1` 的分块、大小、暂存期限及配额。上传主体需要以本机 Node 为目标的 `artifact.upload` Grant。`Artifact.Stage` 固定提交键、预计字节数、SHA-256、声明媒体类型和期限。`Artifact.Stage.PutChunk` 按已提交偏移接收 128 KiB 定长块及末块。中断后通过 `Artifact.Stage.Get` 取得继续位置，用同一键和输入恢复。
+
+`Artifact.Publish` 重新核对全部字节后原子提交不可变引用及来源，发布重试返回原回执。可见内容的媒体类型为 `application/octet-stream`，提交者提供的媒体类型作为独立声明保留。发布前可以丢弃暂存，过期块由后台回收。读取原始字节需要 `artifact.read`。`Artifact.Withdraw` 使用额外的 `artifact.withdraw` Grant 和确切引用，回收字节并保留审计凭据。
+
+`psiosctl artifact-upload ./bundle.bin --key build-1` 和 Rust SDK 的 `Client::upload_artifact` 从已提交偏移继续，`psiosctl artifact` 使用返回的引用导出并校验原始字节。本机 Profile 提供通用产物接口的内容接收与发布，清单转换与 Deployment 安装独立演进。[中断、权限、配额和损坏验收](../tests/test_artifact_ingress.py) · [格式 53 升级](../tests/artifact_ingress_upgrade.py)
+
 ## 任务调度
 
 `Schedule.Create` 为本机 Task 保存一个未来触发时间和截止时间。两者接受带时区偏移的 RFC 3339 时间并转为 UTC，触发依据节点墙钟。授予 `schedule.manage`、`task.submit`、`task.read` 及选定工具，并将权限限制在该工具的目标资源。截止时间须在委托有效期内。同一主体以相同 `key` 重发等价请求会取回原调度状态。输入、授权或时间改变时需要新键。

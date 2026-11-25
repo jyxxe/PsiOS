@@ -11,11 +11,13 @@ use sha2::{Digest, Sha256};
 
 pub(crate) mod availability;
 pub(crate) mod capacity;
+pub(crate) mod ingress;
 pub(crate) mod repair;
 pub(crate) mod retention;
 
 pub const FORMAT: u32 = 30;
 const LAYOUT: &str = "ChunkedJsonV1";
+const RAW_LAYOUT: &str = "ChunkedBytesV1";
 // The chunk size is part of the on-disk format.
 const CHUNK_BYTES: usize = 128 * 1024;
 
@@ -49,8 +51,15 @@ pub(crate) fn dependency_error(error: Error) -> Error {
 }
 
 pub fn stored_digest(artifact: &Doc) -> Option<&Value> {
-    (artifact.kind == "Artifact" && artifact.spec["content_layout"] == LAYOUT)
-        .then(|| &artifact.spec["digest"])
+    (is_json(artifact) || is_raw(artifact)).then(|| &artifact.spec["digest"])
+}
+
+pub(crate) fn is_json(artifact: &Doc) -> bool {
+    artifact.kind == "Artifact" && artifact.spec["content_layout"] == LAYOUT
+}
+
+pub(crate) fn is_raw(artifact: &Doc) -> bool {
+    artifact.kind == "Artifact" && artifact.spec["content_layout"] == RAW_LAYOUT
 }
 
 pub(crate) fn is_task_output(artifact: &Doc, task: &Doc) -> bool {
@@ -174,6 +183,11 @@ impl<'a> Manifest<'a> {
 
 pub fn read(db: &Db<'_>, artifact: &Doc, max_bytes: Option<usize>) -> Result<Value> {
     retention::require_content(db.c, artifact)?;
+    require(
+        !is_raw(artifact),
+        "UnsupportedCapability",
+        "use Artifact.ReadChunk for opaque artifact bytes",
+    )?;
     let Some(manifest) = Manifest::read(artifact)? else {
         return Ok(artifact.body.clone());
     };
@@ -235,10 +249,10 @@ pub fn page(db: &Db<'_>, artifact: &Doc, offset: usize, length: usize) -> Result
 
 pub(crate) fn verify(conn: &Connection) -> Result<()> {
     let mut stmt = conn.prepare(
-        "SELECT * FROM versions WHERE kind='Artifact' AND json_extract(spec,'$.content_layout')=?1",
+        "SELECT * FROM versions WHERE kind='Artifact' AND json_extract(spec,'$.content_layout') IN (?1,?2)",
     )?;
     let mut expected_chunks = 0;
-    for artifact in stmt.query_map([LAYOUT], row)? {
+    for artifact in stmt.query_map([LAYOUT, RAW_LAYOUT], row)? {
         let artifact = artifact?;
         if retention::receipt(conn, &artifact)?.is_some() {
             continue;

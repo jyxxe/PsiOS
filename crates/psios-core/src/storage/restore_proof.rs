@@ -54,6 +54,7 @@ pub(super) fn verify(w: &Work) -> Result<Value> {
         entries: vec![],
         total: 0,
         max_bytes: MAX_BACKUP_BYTES,
+        check: &mut || Ok(()),
     };
     capture.walk(&root, Path::new(""), 0)?;
     let entries = capture.entries.iter().map(|(entry, meta)| {

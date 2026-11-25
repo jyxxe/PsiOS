@@ -10,9 +10,14 @@ use std::{
 
 pub const DEFAULT_BACKUP_MAX_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_BACKUP_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
+const DEFAULT_BACKUP_CAPTURE_TIMEOUT_SECONDS: u32 = 30;
 
 fn default_backup_max_bytes() -> u64 {
     DEFAULT_BACKUP_MAX_BYTES
+}
+
+fn default_backup_capture_timeout_seconds() -> u32 {
+    DEFAULT_BACKUP_CAPTURE_TIMEOUT_SECONDS
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -37,6 +42,8 @@ pub struct Config {
     pub authority_reserve: AuthorityReserve,
     #[serde(default = "default_backup_max_bytes")]
     pub backup_max_bytes: u64,
+    #[serde(default = "default_backup_capture_timeout_seconds")]
+    pub backup_capture_timeout_seconds: u32,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -130,6 +137,7 @@ impl Config {
             docker_socket: default_docker(),
             authority_reserve: AuthorityReserve::default(),
             backup_max_bytes: DEFAULT_BACKUP_MAX_BYTES,
+            backup_capture_timeout_seconds: DEFAULT_BACKUP_CAPTURE_TIMEOUT_SECONDS,
         }
     }
     pub fn load(path: &Path) -> Result<Self> {
@@ -194,6 +202,11 @@ impl Config {
             (1..=MAX_BACKUP_BYTES).contains(&self.backup_max_bytes),
             "InvalidArgument",
             "backup maximum must be between 1 byte and 1 TiB",
+        )?;
+        require(
+            (1..=86_400).contains(&self.backup_capture_timeout_seconds),
+            "InvalidArgument",
+            "backup capture timeout must be between 1 and 86400 seconds",
         )?;
         require(
             (1..=16).contains(&self.workers)

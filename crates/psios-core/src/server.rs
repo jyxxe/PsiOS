@@ -247,6 +247,7 @@ fn worker(s: Shared, changes: Arc<Changes>, stop: Arc<AtomicBool>, tick: Duratio
 }
 
 fn timer(s: Shared, stop: Arc<AtomicBool>) -> Result<()> {
+    let mut next_model_expiry = Instant::now();
     while !stop.load(Ordering::Acquire) {
         {
             let mut store = state(&s)?;
@@ -255,6 +256,14 @@ fn timer(s: Shared, stop: Arc<AtomicBool>) -> Result<()> {
             }
             schedule::tick(&mut store)?;
             workflow::tick(&mut store)?;
+            if Instant::now() >= next_model_expiry {
+                if let Err(error) =
+                    store.transaction("model-expiry", crate::agent::inference::watchdog)
+                {
+                    eprintln!("psiosd model lease expiry: {}", error.0.code);
+                }
+                next_model_expiry = Instant::now() + Duration::from_secs(1);
+            }
         }
         thread::park_timeout(Duration::from_millis(250));
     }

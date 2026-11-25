@@ -102,6 +102,11 @@ pub fn handoff(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
         return Ok(history.body["receipt"].clone());
     }
     previous.cas(&p.expected_resource_version)?;
+    require(
+        !inference::in_flight(db, &previous)?,
+        "PreconditionFailed",
+        "strict model inference has not been settled",
+    )?;
     let recoverable_pause = state(&previous) == "Paused"
         && matches!(
             previous.body["pause_reason"].as_str(),

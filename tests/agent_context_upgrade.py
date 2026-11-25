@@ -12,7 +12,7 @@ def verify(node):
     return json.loads(subprocess.check_output(node.daemon + ["verify"], timeout=20))
 
 
-def upgrade(previous, current):
+def upgrade(previous, current, previous_format):
     node = Node(previous)
     try:
         agent = node.call("Agent.Register", {"name": "upgrade-context-consumer"})
@@ -48,7 +48,7 @@ def upgrade(previous, current):
 
         node.daemon[0] = str((current / "psiosd").absolute())
         prior = verify(node)
-        assert prior["database_format"] == 64 and prior["migration_required"], prior
+        assert prior["database_format"] == previous_format and prior["migration_required"], prior
         node.start()
         assert claim("old-inflight") == {**old, "recovered": True}
         reply = respond(old, {"action": "finish", "summary": "old context settled exactly once"})
@@ -60,9 +60,9 @@ def upgrade(previous, current):
         assert new["context"]["previous_tools"] == [] and new["context"]["last_tool"] is None
         node.stop()
         migrated = verify(node)
-        assert migrated["database_format"] >= 65 and not migrated["migration_required"], migrated
+        assert migrated["database_format"] > previous_format and not migrated["migration_required"], migrated
         assert migrated["node_id"] == prior["node_id"]
-        print("PASS format 64 active lease, exact original context, and newly enabled bounded context")
+        print(f"PASS format {previous_format} active lease, exact original context, and newly enabled bounded context")
     finally:
         node.close()
 
@@ -71,5 +71,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--previous-bin", type=Path, required=True)
     parser.add_argument("--current-bin", type=Path, default=Path("target/debug"))
+    parser.add_argument("--previous-format", type=int, default=64)
     args = parser.parse_args()
-    upgrade(args.previous_bin, args.current_bin)
+    upgrade(args.previous_bin, args.current_bin, args.previous_format)

@@ -259,14 +259,14 @@ enum Cmd {
         session: String,
         #[arg(long)]
         key: String,
-        /// Existing private directory for this provider worker's pending decision.
+        /// Existing private directory for a pending decision or failure report.
         #[arg(long)]
         decision_dir: Option<PathBuf>,
         /// Use the configured local chat-completions server for an inventory Skill.
         #[arg(long)]
         local_model: Option<String>,
     },
-    /// Serve opted-in sessions for a pinned model using a private decision journal.
+    /// Serve opted-in sessions for a pinned model using a private journal.
     ModelWorker {
         /// Local file containing the exact ResourceRef returned by Model.Register.
         model: String,
@@ -276,7 +276,7 @@ enum Cmd {
         local_model: Option<String>,
         #[arg(long, default_value_t = 10_000, value_parser = clap::value_parser!(u64).range(1..=10_000))]
         wait_ms: u64,
-        /// Process at most one decision and report its receipt or an empty queue.
+        /// Process at most one model turn and print its receipt or an empty queue.
         #[arg(long)]
         once: bool,
     },
@@ -288,6 +288,12 @@ enum Cmd {
         /// JSON Model ResourceRef from a file or stdin.
         #[arg(default_value = "-")]
         file: String,
+    },
+    /// Resume a paused session after a recoverable pre-inference or tool content failure.
+    SessionResume {
+        id: String,
+        #[arg(long)]
+        revision: String,
     },
     Node,
     Validate {
@@ -483,6 +489,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::SessionUseFallback { id, revision, file } => {
             c.use_session_fallback(&id, &revision, &serde_json::from_value(input(&file)?)?)?
         }
+        Cmd::SessionResume { id, revision } => c.resume_session(&id, &revision)?,
         Cmd::TaskResults { id } => c.task_results(&id)?,
         Cmd::Artifact { file, max_bytes } => {
             let reference = serde_json::from_value(input(&file)?)?;

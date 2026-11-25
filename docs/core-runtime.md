@@ -483,6 +483,12 @@ jq -n --arg id "$session" '{id:$id}' | agentctl call Session.Get
 
 模型租约在签发时绑定本节点的 Linux boot ID 和 `CLOCK_BOOTTIME`。同次系统启动中，服务重启保留原期限，系统挂起的时间计入租期。调快或调慢 UTC 时钟不会改变处理当前租约的权限。宿主重启后，旧租约的响应会被拒绝。API 的 `expires_at` 是供客户端显示的 UTC 估算。已取消但 Provider 尚未交回结果的调用，仍占用并发名额至原期限。上一启动或旧格式的调用按原 UTC 估算保留剩余名额，用于记录可能尚在外部执行的工作。绝对授权到期仍按现有 UTC 策略判断。[格式迁移测试](../tests/model_leases.py) · [虚机调时与重启测试](../tests/qemu_boot.py)
 
+格式 68 支持由管理员在 `Model.Register` 为新模型版本设定 `inference_outcome_policy: "Strict"`。在此模式下，签发租约就视为可能开始推理。重取同一个领取键只核对原租约或返回已结算回执。没有收到结算报告的租约到期后，会话暂停并记录 `Unknown`。Watchdog 主动收口，直接指定会话与队列领取也会处理旧租约，随后继续服务其他符合条件的会话。未选择严格策略的模型仍沿用原租约行为。
+
+Provider 可用 `Model.ReportFailure` 提交 `session_id`、`model_ref`、`lease_id` 和 `outcome`。Core 校验 Provider 权限与固定模型版本，在当前租约内接受 `NotStarted` 或 `Unknown`。完全相同的报告可重复提交，不同报告发生冲突。此接口提交的是传输结果，模型生成的 `tool`、`finish` 和 `fail` 仍通过 `Model.Respond`。`NotStarted` 保留已使用的调用次数并结算已过去的租约时间。会话所有者可用版本校验的 `Session.Resume` 重验授权、上下文和剩余预算，随后由新租约重新计费。
+
+`Unknown` 保留本次分配的时间额度与原期限内的 Provider 并发名额。该会话无法领取新租约、恢复推理或切换模型。所有者可取消会话，取消仍保留 `Unknown` 与历史报告。直接取消尚未收到响应的严格租约也保留未知结果。`Session.History` 将这些回执记录在对应轮次的 `inference_failure`。[严格推理结算与故障恢复验收](../tests/test_model_inference.py)
+
 `ReferencesOnly` 给模型上一步的结果引用，`LocalToolResults` 允许将授权结果正文交给指定本机 Provider。两种模式都核对当前权限与大小。Session 固定 Skill、工具和 Model 修订。退役依赖会阻止后续派发。重复决策返回原回执，租约被取代后旧决策被拒绝。SDK 遇到已领取但结论不明的模型调用时要求保留决策或等待新租约。工具提交、会话检查点和预算更新使用同一事务。
 
 Provider 可用 Rust SDK 的 `model_turn_durable`，或运行 `psiosctl model-step SESSION --key KEY --decision-dir DIR`。为每个并发工作进程预建独占的服务账户目录（模式 0700），使用支持目录锁、原子重命名和 fsync 的本机文件系统。SDK 在发出决策前将原节点、主体、会话、键、租约和结构化决策写入私有文件并落盘。文件至多 72 KiB，可能包含私有工具输入。重启后用原目录和参数重发已保存的决策，Core 可返回原 Task 回执。确认结算或收到该租约的 `Fenced` 后释放目录。同一目录有未决记录时，其他请求会得到 `Conflict`。

@@ -1,5 +1,5 @@
-//! A private, single-worker outbox for a completed local provider decision.
-use super::{DecisionRequest, SessionModel, Turn};
+//! A private, single-worker outbox for a completed local provider attempt.
+use super::{Delivery, SessionModel, Turn};
 use crate::{ApiError, ApiResult, Client, ResourceRef, parse};
 use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags, open, openat, renameat_with, unlinkat};
 use rustix::io::Errno;
@@ -30,7 +30,7 @@ struct Pending {
     claim_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     queue_model: Option<ResourceRef>,
-    request: DecisionRequest,
+    request: Delivery,
 }
 
 impl Pending {
@@ -38,10 +38,10 @@ impl Pending {
         identity: (String, String),
         claim_key: &str,
         queue_model: Option<&ResourceRef>,
-        request: DecisionRequest,
+        request: Delivery,
     ) -> Self {
         Self {
-            format: if request.usage.is_some() { 2 } else { 1 },
+            format: request.format(),
             authority: identity.0,
             provider: identity.1,
             claim_key: claim_key.to_owned(),
@@ -58,10 +58,12 @@ impl Pending {
         if self.authority != identity.0
             || self.provider != identity.1
             || self.queue_model.as_ref() != model
+            || matches!((&self.request, model),
+                (Delivery::Failure(report), Some(model)) if &report.model_ref != model)
         {
             return Err(ApiError::new(
                 "Conflict",
-                "journal contains a decision for another authority, provider or model queue",
+                "journal contains a delivery for another authority, provider or model queue",
             )
             .into());
         }
@@ -142,8 +144,7 @@ impl Journal {
         }
         let record: Pending =
             serde_json::from_value(parse(&bytes).map_err(|_| invalid())?).map_err(|_| invalid())?;
-        let expected_format = if record.request.usage.is_some() { 2 } else { 1 };
-        if record.format != expected_format {
+        if record.format != record.request.format() {
             return Err(invalid().into());
         }
         // A previous fsync of the renamed directory entry may have returned an
@@ -195,7 +196,7 @@ impl Client {
     }
 
     fn deliver_record(&self, journal: &Journal, record: &Pending) -> ApiResult<Value> {
-        let answer = self.send_decision(&record.request);
+        let answer = self.send_delivery(&record.request);
         // The authority checks previously settled receipts before checking the
         // lease fence. Fenced therefore also resolves this exact pending request.
         if answer.is_ok() || answer.as_ref().is_err_and(|e| e.code == "Fenced") {
@@ -210,7 +211,7 @@ impl Client {
         record: &Pending,
         model: &ResourceRef,
     ) -> ApiResult<Value> {
-        match self.send_decision(&record.request) {
+        match self.send_delivery(&record.request) {
             Ok(receipt) => {
                 journal.remove()?;
                 Ok(receipt)
@@ -233,7 +234,7 @@ impl Client {
                     ) =>
             {
                 let disposition = self.call("Model.ClaimStatus", json!({
-                    "model_ref":model, "key":record.claim_key, "lease_id":record.request.lease_id
+                    "model_ref":model, "key":record.claim_key, "lease_id":record.request.lease_id()
                 }))?;
                 match disposition["status"].as_str() {
                     Some("Settled" | "Fenced") => {
@@ -242,7 +243,7 @@ impl Client {
                     }
                     Some("Pending") => Err(ApiError::new(
                         "OutcomeUnknown",
-                        format!("retained model decision is pending after {}", e.code),
+                        format!("retained model delivery is pending after {}", e.code),
                     )
                     .into()),
                     _ => Err(crate::invalid("invalid queued lease disposition")),
@@ -252,7 +253,7 @@ impl Client {
         }
     }
 
-    /// Retain a model decision before transmission. Reusing the same private
+    /// Retain a model decision or failure report before transmission. Reusing the same private
     /// directory, authority, principal, session and key resumes its exact request.
     pub fn model_turn_durable(
         &self,
@@ -265,7 +266,7 @@ impl Client {
         let identity = self.provider_identity()?;
         let record = if let Some(pending) = journal.pending()? {
             pending.verify_origin(&identity, None)?;
-            if pending.request.session_id != session || pending.claim_key != key {
+            if pending.request.session_id() != session || pending.claim_key != key {
                 return Err(ApiError::new(
                     "Conflict",
                     "journal contains a decision for another session or key",
@@ -276,7 +277,7 @@ impl Client {
         } else {
             match self.decide_turn(session, key, provider)? {
                 Turn::Completed(receipt) => return Ok(receipt),
-                Turn::Decided(request) => {
+                Turn::Deliver(request) => {
                     let record = Pending::new(identity, key, None, request);
                     journal.retain(&record)?;
                     record
@@ -286,7 +287,7 @@ impl Client {
         self.deliver_record(&journal, &record)
     }
 
-    /// Recover a retained decision before claiming the next opt-in session for
+    /// Recover a retained delivery before claiming the next opt-in session for
     /// this exact model. Each worker requires its own private decision directory.
     pub fn model_next_durable(
         &self,
@@ -326,14 +327,42 @@ impl Client {
             .as_str()
             .ok_or_else(|| crate::invalid("missing queued model session"))?
             .to_owned();
-        match Self::decide_claim(&session, claim, provider)? {
+        match Self::decide_claim(&session, claim, provider, Some(model))? {
             Turn::Completed(receipt) => Ok(Some(receipt)),
-            Turn::Decided(request) => {
+            Turn::Deliver(request) => {
                 let record = Pending::new(identity, key, Some(model), request);
                 journal.retain(&record)?;
                 self.deliver_queued_record(&journal, &record, model)
                     .map(Some)
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retained_request_formats_keep_their_original_wire_shape() {
+        let decision = json!({"session_id":"session-fixture","lease_id":"lease-fixture",
+            "decision":{"action":"finish","summary":"inventory ready"}});
+        let mut metered = decision.clone();
+        metered["usage"] = json!({"input_tokens":3,"output_tokens":5});
+        let failed = json!({"session_id":"session-fixture","lease_id":"lease-fixture",
+            "model_ref":{"resource_id":"model-fixture","version":"r1","digest":"digest"},
+            "outcome":"NotStarted"});
+        for (format, request, method) in [
+            (1, decision, "Model.Respond"),
+            (2, metered, "Model.Respond"),
+            (3, failed, "Model.ReportFailure"),
+        ] {
+            let original = json!({"format":format,"request":request,"authority":"local-fixture",
+                "provider":"provider-fixture","claim_key":"fixture"});
+            let restored: Pending = serde_json::from_value(original.clone()).unwrap();
+            assert_eq!(restored.request.format(), format);
+            assert_eq!(restored.request.method(), method);
+            assert_eq!(json!(restored), original);
         }
     }
 }

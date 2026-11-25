@@ -1,5 +1,6 @@
 //! The local runtime coordinates model decisions with (and never independently executes) broker Tasks.
 pub(crate) mod fallback;
+pub(crate) mod inference;
 mod lease;
 pub mod mail;
 pub(crate) mod model_time;
@@ -224,7 +225,8 @@ pub fn extend(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     )?;
     require(
         matches!(state(&s), "AwaitingModel" | "ModelInFlight" | "WaitingTask")
-            || s.body["pause_reason"] == "ModelTurnLimit",
+            || s.body["pause_reason"] == "ModelTurnLimit"
+            || inference::not_started(&s),
         "PreconditionFailed",
         "session cannot be extended",
     )?;
@@ -244,14 +246,18 @@ pub fn history(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let s = db.of(&p.id, "Session")?;
     policy::owned(actor, &s)?;
     policy::can(db, actor, "task.read")?;
-    let turns=db.c.prepare("SELECT t.turn,t.lease,t.expires,t.task,t.receipt,c.context_digest
+    let turns=db.c.prepare("SELECT t.turn,t.lease,t.expires,t.task,t.receipt,c.context_digest,i.receipt
         FROM session_turns t LEFT JOIN model_context_snapshots c ON c.lease=t.lease
+        LEFT JOIN model_inference_leases i ON i.lease=t.lease
         WHERE t.session=?1 ORDER BY t.turn")?
         .query_map([&s.id],|r| {
             let mut view = json!({"turn":r.get::<_,u32>(0)?,"lease_id":r.get::<_,String>(1)?,"expires_at":r.get::<_,String>(2)?,
                 "task_id":r.get::<_,Option<String>>(3)?,"decision":r.get::<_,Option<Value>>(4)?});
             if let Some(digest) = r.get::<_,Option<String>>(5)? {
                 view["context_digest"] = json!(digest);
+            }
+            if let Some(failure) = r.get::<_,Option<Value>>(6)? {
+                view["inference_failure"] = failure;
             }
             Ok(view)
         })?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -264,19 +270,30 @@ pub fn resume(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let session = db.of(&p.id, "Session")?;
     policy::owned(actor, &session)?;
     session.cas(&p.expected_resource_version)?;
+    let not_started = inference::not_started(&session);
     require(
         state(&session) == "Paused"
-            && artifact::is_content_unavailable(
-                session.body["pause_reason"].as_str().unwrap_or_default(),
-            ),
+            && (not_started
+                || artifact::is_content_unavailable(
+                    session.body["pause_reason"].as_str().unwrap_or_default(),
+                )),
         "PreconditionFailed",
-        "session is not waiting for tool result content",
+        "session is not waiting for a retryable model or tool outcome",
     )?;
     let (_, skill, model) = deps(db, &session)?;
+    if not_started {
+        inference::check_resume(db, &session, &model)?;
+    }
     context(db, &session, &skill, &model)?;
     let mut body = session.body.clone();
     body["lifecycle"] = json!("AwaitingModel");
     body.as_object_mut().unwrap().remove("pause_reason");
+    if not_started {
+        body.as_object_mut()
+            .unwrap()
+            .remove("model_inference_failure");
+        body.as_object_mut().unwrap().remove("outcome_knowledge");
+    }
     let updated = db.status(&session, body)?;
     db.audit(actor, "Session.Resume", Some(&session.id), "Resumed")?;
     Ok(response(&updated))
@@ -290,6 +307,9 @@ pub fn cancel(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     s.cas(&p.expected_resource_version)?;
     if matches!(state(&s), "Succeeded" | "Failed" | "Cancelled") {
         return Ok(response(&s));
+    }
+    if let Some(cancelled) = inference::cancel(db, &s, actor)? {
+        return Ok(response(&cancelled));
     }
     let mut b = s.body.clone();
     b["lifecycle"] = json!("Cancelled");
@@ -372,15 +392,29 @@ fn context(db: &Db<'_>, s: &Doc, skill: &Doc, model: &Doc) -> Result<Value> {
     tool_context::bound(&context, maximum)?;
     Ok(context)
 }
-pub fn claim(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
+pub fn claim(db: &Db<'_>, actor: &str, p: &Value) -> Result<Result<Value>> {
     let p: Claim = decode(p)?;
     label(&p.key)?;
     let s = db.of(&p.session_id, "Session")?;
     let dependencies = provider(db, &s, actor)?;
     let (_, skill, model) = &dependencies;
     let clock = lease::Clock::sample()?;
-    if let Some(previous) = replay_claim(db, &s, skill, model, &clock, &p.key)? {
-        return Ok(previous);
+    let expired = inference::expire_addressed(db, &s, &clock)?;
+    let session = expired.as_ref().unwrap_or(&s);
+    if let Some(previous) = replay_claim(db, session, skill, model, &clock, &p.key)? {
+        return Ok(Ok(previous));
+    }
+    if session.body["pause_reason"] == "ModelOutcomeUnknown" {
+        let failure = err(
+            "OutcomeUnknown",
+            "prior model inference must be resolved before starting another turn",
+        );
+        // Keep the expiry write even when the requesting provider used a new key.
+        return if expired.is_some() {
+            Ok(Err(failure))
+        } else {
+            Err(failure)
+        };
     }
     require(
         state(&s) == "AwaitingModel" || (state(&s) == "ModelInFlight" && !clock.current(db, &s)?),
@@ -395,8 +429,9 @@ pub fn claim(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     )?;
     require(has_turn(&s), "QuotaExceeded", "session turn limit reached")?;
     let ctx = context(db, &s, skill, model)?;
-    allocate_turn(db, &s, &dependencies, &clock, &p.key, false, ctx)?
-        .map_err(model_time::ClaimRefusal::error)
+    let result = allocate_turn(db, &s, &dependencies, &clock, &p.key, false, ctx)?
+        .map_err(model_time::ClaimRefusal::error)?;
+    Ok(Ok(result))
 }
 
 fn lease_info(
@@ -434,6 +469,9 @@ fn replay_claim(
     if let Some(receipt) = receipt {
         return Ok(Some(json!({"turn":turn,"completed":receipt})));
     }
+    if let Some(receipt) = inference::failure_receipt(db.c, &lease)? {
+        return Ok(Some(json!({"turn":turn,"completed":receipt})));
+    }
     require(
         state(s) == "ModelInFlight" && s.body["current_lease"] == lease && clock.current(db, s)?,
         "Fenced",
@@ -445,14 +483,9 @@ fn replay_claim(
     } else {
         (context(db, s, skill, model)?, None)
     };
-    Ok(Some(lease_info(
-        &lease,
-        &until,
-        turn,
-        ctx,
-        true,
-        digest.as_deref(),
-    )))
+    let mut result = lease_info(&lease, &until, turn, ctx, true, digest.as_deref());
+    inference::decorate_claim(model, &mut result);
+    Ok(Some(result))
 }
 
 fn model_has_slot(db: &Db<'_>, clock: &lease::Clock, model: &Doc) -> Result<bool> {
@@ -523,15 +556,11 @@ fn allocate_turn(
         tool_context::bind(db, s, &lease, &usage, digest)?;
     }
     b["current_usage_ref"] = usage.reference();
-    db.status(s, b)?;
-    Ok(Ok(lease_info(
-        &lease,
-        &until,
-        turn,
-        ctx,
-        false,
-        digest.as_deref(),
-    )))
+    let issued = db.status(s, b)?;
+    inference::bind(db, &issued, m, clock, clock.boot.millis + window.millis)?;
+    let mut result = lease_info(&lease, &until, turn, ctx, false, digest.as_deref());
+    inference::decorate_claim(m, &mut result);
+    Ok(Ok(result))
 }
 
 #[derive(Deserialize)]
@@ -718,6 +747,7 @@ pub fn respond(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     }
     db.c.execute("UPDATE session_turns SET task=?1,decision_digest=?2,receipt=?3 WHERE session=?4 AND lease=?5",
       params![task,hash,receipt,s.id,p.lease_id])?;
+    inference::responded(db, &model, &p.lease_id)?;
     if let Some(task) = &task {
         db.c.execute(
             "INSERT INTO session_tasks VALUES(?1,?2,?3,1)",

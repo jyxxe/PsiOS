@@ -74,8 +74,9 @@ pub fn claim_status(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> 
     let model = bound_model(db, actor, &p.model_ref)?;
     let (id, settled): (String, bool) =
         db.c.query_row(
-            "SELECT session, receipt IS NOT NULL FROM session_turns
-         WHERE queue_model=?1 AND claim_key=?2 AND lease=?3",
+            "SELECT t.session, t.receipt IS NOT NULL OR i.receipt IS NOT NULL FROM session_turns t
+         LEFT JOIN model_inference_leases i USING(lease)
+         WHERE t.queue_model=?1 AND t.claim_key=?2 AND t.lease=?3",
             params![model.id, key, p.lease_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -120,11 +121,20 @@ pub fn claim_next(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
     if let Some(id) = prior {
         let session = db.of(&id, "Session")?;
         let (_, skill, model) = provider(db, &session, actor)?;
-        let replay = replay_claim(db, &session, &skill, &model, &clock, &key)?
-            .ok_or_else(|| err("RecoveryRequired", "provider claim index has no turn"))?;
+        let expired = inference::expire_addressed(db, &session, &clock)?;
+        let replay = replay_claim(
+            db,
+            expired.as_ref().unwrap_or(&session),
+            &skill,
+            &model,
+            &clock,
+            &key,
+        )?
+        .ok_or_else(|| err("RecoveryRequired", "provider claim index has no turn"))?;
         return Ok(reply(&id, replay));
     }
 
+    inference::expire_queued(db, &clock, &model)?;
     let runnable =
         db.c.prepare(
             "SELECT q.session FROM model_queue q
@@ -132,7 +142,7 @@ pub fn claim_next(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
          LEFT JOIN model_lease_times a ON a.lease=t.lease
          WHERE q.model=?1 AND q.ready_seq IS NOT NULL
            AND (q.lease IS NULL OR
-                (t.lease IS NOT NULL AND (t.boot_id IS NOT ?2 OR t.deadline_boot_ms<=?3 OR
+                (NOT ?5 AND t.lease IS NOT NULL AND (t.boot_id IS NOT ?2 OR t.deadline_boot_ms<=?3 OR
                     (a.lease IS NOT NULL AND a.time_ns!=?4))))
          ORDER BY q.ready_seq",
         )?
@@ -141,7 +151,8 @@ pub fn claim_next(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
                 model.id,
                 clock.boot.boot_id,
                 clock.boot.millis,
-                clock.time_ns
+                clock.time_ns,
+                inference::strict(&model),
             ],
             |r| r.get::<_, String>(0),
         )?

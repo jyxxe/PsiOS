@@ -1,4 +1,5 @@
 """Provider work is delivered through the real Unix API and daemon."""
+import base64
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
@@ -124,7 +125,7 @@ class ModelQueueTests(unittest.TestCase):
 
         n.stop(signal.SIGKILL)
         with closing(sqlite3.connect(n.state / "state.db")) as db, db:
-            parts = db.execute("SELECT artifact_rev,chunk_index,payload FROM artifact_chunks WHERE artifact_id=?",
+            parts = db.execute("SELECT chunk_index,payload FROM artifact_chunks WHERE artifact_id=?",
                                (reference["resource_id"],)).fetchall()
             self.assertTrue(parts)
             db.execute("DELETE FROM artifact_chunks WHERE artifact_id=?", (reference["resource_id"],))
@@ -154,11 +155,15 @@ class ModelQueueTests(unittest.TestCase):
         self.assertEqual(self.status(session), paused)
 
         n.stop()
-        with closing(sqlite3.connect(n.state / "state.db")) as db, db:
-            db.executemany("INSERT INTO artifact_chunks VALUES(?,?,?,?)",
-                           [(reference["resource_id"], *part) for part in parts])
         n.start()
         self.assertEqual(self.status(session), paused)
+        chunk_bytes = n.call("Artifact.Get", {"reference": reference})["repair_chunk_bytes"]
+        for index, payload in parts:
+            response = n.call("Artifact.RepairChunk", {
+                "reference": reference, "offset": index * chunk_bytes,
+                "data_base64": base64.b64encode(payload).decode(),
+            })
+            self.assertTrue(response["repaired"])
         resumed = n.call("Session.Resume", request, self.agent["token"])
         self.assertEqual(resumed["session"]["lifecycle"], "AwaitingModel")
         self.assertEqual(n.call("Budget.Get", budget, self.agent["token"])["model_calls_used"], 2)

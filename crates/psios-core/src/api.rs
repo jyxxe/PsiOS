@@ -157,6 +157,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
             let d = owned_artifact(db, actor, &p.reference)?;
             artifact::page(db, &d, p.offset, p.length)
         }
+        "Artifact.RepairChunk" => artifact::repair::chunk(db, actor, p),
         "Secret.Rotate" => policy::secret_rotate(db, actor, p),
         "Secret.Put" => policy::secret_put(db, actor, p),
         "Secret.Revoke" => policy::secret_revoke(db, actor, p),

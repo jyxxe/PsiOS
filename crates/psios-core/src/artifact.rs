@@ -9,6 +9,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+pub(crate) mod repair;
 pub(crate) mod retention;
 
 pub const FORMAT: u32 = 30;

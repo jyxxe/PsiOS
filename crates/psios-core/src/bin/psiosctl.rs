@@ -94,6 +94,15 @@ enum Cmd {
         #[arg(long, default_value_t = 8 * 1024 * 1024)]
         max_bytes: usize,
     },
+    /// Repair the Artifact from a previously exported, verified JSON file.
+    ArtifactRepair {
+        source: PathBuf,
+        /// JSON Artifact ResourceRef from a file or stdin.
+        #[arg(default_value = "-")]
+        file: String,
+        #[arg(long, default_value_t = 8 * 1024 * 1024)]
+        max_bytes: u64,
+    },
     /// Export a verified backup to a new directory under a private parent.
     BackupExport {
         #[arg(long)]
@@ -306,6 +315,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let reference = serde_json::from_value(input(&file)?)?;
             std::io::stdout().write_all(&c.artifact_bytes(&reference, max_bytes)?)?;
             return Ok(());
+        }
+        Cmd::ArtifactRepair {
+            source,
+            file,
+            max_bytes,
+        } => {
+            let reference = serde_json::from_value(input(&file)?)?;
+            let mut source = fs::File::open(source)?;
+            serde_json::to_value(c.repair_artifact(&reference, &mut source, max_bytes)?)?
         }
         Cmd::BackupExport { output, file } => {
             let reference = serde_json::from_value(input(&file)?)?;

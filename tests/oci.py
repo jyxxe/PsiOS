@@ -21,16 +21,19 @@ def install_from_artifact(node, specification):
     ready = prepare_artifact(node, artifact, allow)
     task_id = node.call("Task.Submit", ready["request"])["task_id"]
     assert node.wait(task_id)["lifecycle"] == "WaitingApproval"
-    for state in ("pending installation", "retained release"):
-        if state == "retained release":
-            completed = node.wait(task_id, autoapprove=True)
-            assert completed["lifecycle"] == "Succeeded", completed
+
+    def assert_retained(state):
         try:
             node.call("Artifact.Withdraw", {"reference": artifact, "reason": state})
         except Failure as denied:
             assert denied.code == "Conflict", denied
         else:
             raise AssertionError("withdrawal bypassed the installation pin")
+
+    assert_retained("pending installation")
+    completed = node.wait(task_id, autoapprove=True)
+    assert completed["lifecycle"] == "Succeeded", completed
+    assert_retained("retained release")
     reference, = completed["result"]["artifact_refs"]
     receipt = node.call("Artifact.Read", {"reference": reference})
     assert receipt["source_artifact_ref"] == artifact, receipt
@@ -39,7 +42,38 @@ def install_from_artifact(node, specification):
     assert receipt["operation_id"] == completed["operation_refs"][0]["resource_id"]
     assert node.get(receipt["application_ref"]["resource_id"])["value"]["lifecycle"] == "Stopped"
     print("Installed a real local OCI image from an approved uploaded declaration", flush=True)
-    return receipt["application_ref"]
+    return receipt["application_ref"], artifact
+
+
+def retire_oci_release(node, app, release, artifact):
+    tool = "application.retire_release"
+    allow = artifact_grant(node, "local-owner", ["task.submit", "task.read", tool],
+                          [app["resource_id"], release["resource_id"]])
+
+    def prepare(current):
+        return node.prepare(tool, {"target": target(current), "release_ref": release, "reason": "deployment removed"},
+                            delegation=allow["delegation_ref"]["resource_id"])
+
+    try:
+        node.call("Task.Submit", prepare(app))
+    except Failure as denied:
+        assert denied.code == "Conflict", denied
+    else:
+        raise AssertionError("retirement accepted a still-selected release")
+    app = node.perform("application.uninstall", target(app))
+    job = node.call("Task.Submit", prepare(app))["task_id"]
+    settled = node.wait(job, autoapprove=True)
+    assert settled["lifecycle"] == "Succeeded", settled
+    reference, = settled["result"]["artifact_refs"]
+    receipt = node.call("Artifact.Read", {"reference": reference})
+    retired = node.call("Resource.Resolve", {"reference": receipt})["value"]
+    assert retired["release_ref"] == release and retired["released_artifact_ref"] == artifact
+    node_id = node.call("Node.Get", {})["reference"]["resource_id"]
+    artifact_grant(node, "local-owner", ["artifact.withdraw", "artifact.read"], [node_id])
+    node.call("Artifact.Withdraw", {"reference": artifact, "reason": "retired local OCI release"})
+    assert node.call("Artifact.Get", {"reference": artifact})["availability"] == "Evicted"
+    assert node.call("Resource.Resolve", {"reference": release})["reference"] == release
+    print("Retired the uninstalled OCI release and reclaimed its source artifact", flush=True)
 
 
 def main(binaries, previous_binaries=None):
@@ -73,7 +107,7 @@ int main(void) {
         spec = dict(image_id=image_id, name="acceptance", release_version="1.0.0", argv=["/probe"],
                     environment={"TEST_NAME": "first"}, license_expression="0BSD", volume=target(volume),
                     cpu_millicores=200, memory_max_bytes=33554432, pids_max=16, ephemeral_max_bytes=1048576)
-        app = install_from_artifact(node, spec)
+        app, source_artifact = install_from_artifact(node, spec)
         app_id = app["resource_id"]
         app_ids.append(app_id)
         data = node.state / "volumes" / volume["resource_id"] / "data"
@@ -170,7 +204,7 @@ int main(void) {
         reverted = node.perform("application.health", target(app))["container_id"]
         assert json.loads(subprocess.check_output(docker + ["inspect", reverted]))[0]["Image"] == image_id
         app = lose_stop_receipt(node, app, reverted, volume)
-        node.perform("application.uninstall", target(app))
+        retire_oci_release(node, app, previous_release, source_artifact)
         volume = node.get(volume["resource_id"])["reference"]
         assert node.perform("volume.read", dict(**target(volume), name="starts"))["content"] == "first\nsecond\nupgraded\nfirst\n"
         backup = node.perform("backup.create", target(volume))

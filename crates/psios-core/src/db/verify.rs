@@ -127,6 +127,9 @@ pub(super) fn check_artifacts(conn: &Connection, identity: &DatabaseIdentity) ->
     if identity.database_format >= crate::apps::artifact_install::FORMAT {
         crate::apps::artifact_install::verify(conn)?;
     }
+    if identity.database_format >= crate::apps::release_retirement::FORMAT {
+        crate::apps::release_retirement::verify(conn)?;
+    }
     Ok(())
 }
 

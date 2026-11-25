@@ -18,9 +18,13 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
         let read = policy::readonly(tool);
         // Activation verifies the filesystem and changes the volume only in the finish transaction.
         let activation_uncommitted = phase == "Dispatched" && tool == "volume.activate";
-        // This adapter inspects a local OCI image. The catalog, pin transfer
-        // and receipt commit together in the broker's finish transaction.
-        let install_uncommitted = phase == "Dispatched" && tool == apps::artifact_install::TOOL;
+        // The catalog change, pin update and receipt commit together in the
+        // finish transaction. Before settlement the host only inspects data.
+        let catalog_uncommitted = phase == "Dispatched"
+            && matches!(
+                tool,
+                apps::artifact_install::TOOL | apps::release_retirement::TOOL
+            );
         let backup_unpublished = phase == "Dispatched"
             && tool == "backup.create"
             && storage::publication::not_published(db, &operation(db, &t)?)?;
@@ -39,7 +43,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
         if phase == "Dispatched"
             && !read
             && !activation_uncommitted
-            && !install_uncommitted
+            && !catalog_uncommitted
             && !backup_unpublished
             && !restore_unpublished
             && !restart_undispatched
@@ -66,7 +70,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
         if t.body["lifecycle"] == "Cancelling"
             || attempt >= 3
             || activation_uncommitted
-            || install_uncommitted
+            || catalog_uncommitted
             || backup_unpublished
             || restore_unpublished
             || restart_undispatched
@@ -92,8 +96,8 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                         "OCI restart interrupted before its invocation was checkpointed"
                     } else if activation_uncommitted {
                         "activation had not committed at restart"
-                    } else if install_uncommitted {
-                        "artifact installation had not committed to the catalog at restart"
+                    } else if catalog_uncommitted {
+                        "application catalog change had not committed at restart"
                     } else if rename_unprepared {
                         "file rename interrupted before its observation was checkpointed"
                     } else if deletion_unprepared {

@@ -869,16 +869,12 @@ fn lost_read_gets_new_claim_and_late_receipt_is_fenced() {
     let run = call(&mut s, "Run.Get", json!({"id": before["current_run_id"]})).unwrap();
     assert_eq!(run["claim_epoch"], "2");
 }
-#[test]
-fn interrupted_oci_artifact_inspection_releases_the_uncommitted_install_pin() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (cfg, mut s) = initialized(tmp.path());
-    let node = call(&mut s, "Node.Get", json!({})).unwrap();
-    let artifact_grant = call(&mut s, "Grant.Issue", json!({
+fn accepted_artifact_install(s: &mut Store) -> (String, Value) {
+    let node = call(s, "Node.Get", json!({})).unwrap();
+    call(s, "Grant.Issue", json!({
         "principal_id":"local-owner","actions":["artifact.upload","artifact.read","artifact.withdraw"],
         "tool_targets":[node["reference"]["resource_id"]],"units":4,"ttl_seconds":90,
     })).unwrap();
-    assert!(artifact_grant["grant_ref"].is_object());
     let bytes = serde_json::to_vec(&json!({
         "format":"PsiOSLocalOciInstallV1","install":{
             "name":"recovery-test","image_id":format!("sha256:{}","d".repeat(64)),
@@ -887,7 +883,7 @@ fn interrupted_oci_artifact_inspection_releases_the_uncommitted_install_pin() {
         },
     })).unwrap();
     let stage = call(
-        &mut s,
+        s,
         "Artifact.Stage",
         json!({
             "key":"interrupted-install","size_bytes":bytes.len(),"digest":psios_api::sha256(&bytes),
@@ -896,33 +892,36 @@ fn interrupted_oci_artifact_inspection_releases_the_uncommitted_install_pin() {
     )
     .unwrap();
     call(
-        &mut s,
+        s,
         "Artifact.Stage.PutChunk",
         json!({"stage_id":stage["stage_id"],
         "offset":0,"data_base64":STANDARD.encode(bytes)}),
     )
     .unwrap();
-    let published = call(
-        &mut s,
-        "Artifact.Publish",
-        json!({"stage_id":stage["stage_id"]}),
-    )
-    .unwrap();
+    let published = call(s, "Artifact.Publish", json!({"stage_id":stage["stage_id"]})).unwrap();
     let reference = published["artifact_ref"].clone();
     let tool = apps::artifact_install::TOOL;
     let grant = call(
-        &mut s,
+        s,
         "Grant.Issue",
         json!({"principal_id":"local-owner",
         "actions":["task.submit","task.read",tool],"ttl_seconds":90,"units":2,
         "tool_targets":["profile-local",reference["resource_id"]]}),
     )
     .unwrap();
-    let prepared = call(&mut s,"Application.PrepareArtifactInstall",json!({
+    let prepared = call(s,"Application.PrepareArtifactInstall",json!({
         "reference":reference,"key":id("install"),"delegation_id":grant["delegation_ref"]["resource_id"],
     })).unwrap();
-    let accepted = call(&mut s, "Task.Submit", prepared["request"].clone()).unwrap();
-    let task = accepted["task_id"].as_str().unwrap();
+    let accepted = call(s, "Task.Submit", prepared["request"].clone()).unwrap();
+    (accepted["task_id"].as_str().unwrap().to_owned(), reference)
+}
+
+#[test]
+fn interrupted_oci_artifact_inspection_releases_the_uncommitted_install_pin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, mut s) = initialized(tmp.path());
+    let (task, reference) = accepted_artifact_install(&mut s);
+    let task = task.as_str();
     approve(&mut s, task);
     assert_eq!(claim(&mut s), task);
     let work = dispatch(&mut s, task);
@@ -951,6 +950,176 @@ fn interrupted_oci_artifact_inspection_releases_the_uncommitted_install_pin() {
             .is_empty()
     );
     assert!(call(&mut s, "Artifact.Withdraw", withdraw).unwrap()["withdrawal_ref"].is_object());
+}
+
+#[test]
+fn retired_release_fences_approved_rollback_and_releases_its_catalog_pin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, mut s) = initialized(tmp.path());
+    let (install, source) = accepted_artifact_install(&mut s);
+    // Exercise the real settlement transaction using a local catalog fixture.
+    // The live Docker test obtains the image observation from the engine.
+    let settle_image = |s: &mut Store, task: &str| {
+        approve(s, task);
+        assert_eq!(claim(s), task);
+        let work = dispatch(s, task);
+        let inspection = json!({"architecture":"amd64","os":"linux","layers":[],"created":now()});
+        s.transaction("catalog-fixture", |db| {
+            broker::finish(db, &work, Ok(inspection))
+        })
+        .unwrap();
+        let task = call(s, "Task.Get", json!({"id":task})).unwrap();
+        assert_eq!(task["lifecycle"], "Succeeded", "{task}");
+        call(
+            s,
+            "Artifact.Read",
+            json!({"reference":task["result"]["artifact_refs"][0]}),
+        )
+        .unwrap()
+    };
+    let installed = settle_image(&mut s, &install);
+    let old = &installed["release_ref"];
+    let app = &installed["application_ref"];
+    let target =
+        |app: &Value| json!({"id":app["resource_id"],"expected_resource_version":app["version"]});
+    let retire = apps::release_retirement::TOOL;
+    let replacement_grant = call(
+        &mut s,
+        "Grant.Issue",
+        json!({
+            "principal_id":"local-owner","actions":["task.submit","task.read",retire],
+            "tool_targets":[app["resource_id"],old["resource_id"]],"ttl_seconds":90,"units":4,
+        }),
+    )
+    .unwrap();
+    let delegation = &replacement_grant["delegation_ref"]["resource_id"];
+    let request_retirement =
+        |s: &mut Store, app: &Value, delegation: &Value| {
+            call(s,"Task.Prepare",json!({
+        "tool":retire,"key":id("retire"),"delegation_id":delegation,
+        "input":{"target":target(app),"release_ref":old,"reason":"superseded installation"},
+    })).unwrap()
+        };
+    let selected = request_retirement(&mut s, app, delegation);
+    assert_eq!(
+        call(&mut s, "Task.Submit", selected).unwrap_err().0.code,
+        "Conflict"
+    );
+
+    let stage = submit(
+        &mut s,
+        "application.stage_release",
+        json!({"target":target(app),"release":{
+            "name":"recovery-test","image_id":format!("sha256:{}","e".repeat(64)),"argv":["/probe"],
+            "release_version":"2.0.0","license_expression":"0BSD","cpu_millicores":200,
+            "memory_max_bytes":33554432,"pids_max":8,"ephemeral_max_bytes":1048576,
+        }}),
+    );
+    let new = settle_image(&mut s, &stage);
+    let selection = submit(
+        &mut s,
+        "application.select_release",
+        json!({"target":target(app),"release_ref":new}),
+    );
+    approve(&mut s, &selection);
+    let app = execute(&mut s, &selection);
+    let rollback = submit(
+        &mut s,
+        "application.select_release",
+        json!({"target":target(&app),"release_ref":old}),
+    );
+    let withdraw = json!({"reference":source,"reason":"release audit retained"});
+    assert_eq!(
+        call(&mut s, "Artifact.Withdraw", withdraw.clone())
+            .unwrap_err()
+            .0
+            .code,
+        "Conflict"
+    );
+
+    let restricted = call(
+        &mut s,
+        "Grant.Issue",
+        json!({
+            "principal_id":"local-owner","actions":["task.submit","task.read",retire],
+            "tool_targets":[app["resource_id"]],"ttl_seconds":90,"units":1,
+        }),
+    )
+    .unwrap();
+    let only_app = request_retirement(&mut s, &app, &restricted["delegation_ref"]["resource_id"]);
+    assert_eq!(
+        call(&mut s, "Task.Submit", only_app).unwrap_err().0.code,
+        "PermissionDenied"
+    );
+
+    let request = request_retirement(&mut s, &app, delegation);
+    let interrupted = call(&mut s, "Task.Submit", request).unwrap()["task_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    approve(&mut s, &interrupted);
+    assert_eq!(claim(&mut s), interrupted);
+    let stale = dispatch(&mut s, &interrupted);
+    drop(s);
+    let mut s = Store::open(cfg.clone()).unwrap();
+    s.transaction("recover-catalog", broker::recover).unwrap();
+    let lost = call(&mut s, "Task.Get", json!({"id":interrupted})).unwrap();
+    assert_eq!(lost["lifecycle"], "Failed");
+    assert_eq!(lost["outcome_knowledge"], "Known");
+    s.transaction("late-catalog", |db| {
+        broker::finish(db, &stale, Ok(json!({})))
+    })
+    .unwrap();
+    assert_eq!(
+        call(&mut s, "Artifact.Withdraw", withdraw.clone())
+            .unwrap_err()
+            .0
+            .code,
+        "Conflict"
+    );
+
+    let request = request_retirement(&mut s, &app, delegation);
+    let accepted = call(&mut s, "Task.Submit", request.clone()).unwrap();
+    let retirement = accepted["task_id"].as_str().unwrap();
+    approve(&mut s, retirement);
+    let receipt = execute(&mut s, retirement);
+    let replay = call(&mut s, "Task.Submit", request).unwrap();
+    assert_eq!(replay["task_id"], retirement);
+    assert_eq!(replay["deduplicated"], true);
+    let original = call(&mut s, "Resource.Resolve", json!({"reference":old})).unwrap();
+    assert_eq!(original["reference"], *old);
+    let retained = call(&mut s, "Resource.Resolve", json!({"reference":receipt})).unwrap();
+    assert_eq!(retained["value"]["released_artifact_ref"], source);
+
+    approve(&mut s, &rollback);
+    assert_eq!(claim(&mut s), rollback);
+    let rejected = s
+        .transaction("dispatch-retired-rollback", |db| {
+            broker::dispatch(db, &rollback)
+        })
+        .err()
+        .expect("dispatch must fence the retired rollback");
+    s.transaction("reject-retired-rollback", |db| {
+        broker::dispatch_failed(db, &rollback, &rejected)
+    })
+    .unwrap();
+    let refused = call(&mut s, "Task.Get", json!({"id":rollback})).unwrap();
+    assert_eq!(refused["lifecycle"], "Failed");
+    assert_eq!(refused["outcome_knowledge"], "NotStarted");
+    assert_eq!(refused["conditions"][0]["type"], "PreconditionFailed");
+    assert!(call(&mut s, "Artifact.Withdraw", withdraw).unwrap()["withdrawal_ref"].is_object());
+    drop(s);
+    let mut s = Store::open(cfg).unwrap();
+    s.transaction("verify-retirement", |db| {
+        apps::artifact_install::verify(db.c)?;
+        apps::release_retirement::verify(db.c)
+    })
+    .unwrap();
+    assert_eq!(
+        call(&mut s, "Resource.Get", json!({"id":app["resource_id"]})).unwrap()["resource"]["spec"]
+            ["release_ref"],
+        new
+    );
 }
 
 #[test]

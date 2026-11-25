@@ -1,6 +1,6 @@
 //! Classify exact Docker save bytes without extracting files or executing the loader.
 use super::valid_image_id;
-use crate::{Result, artifact, decode, err, require};
+use crate::{Result, decode, err, require, storage::oci_archive::MAX_BYTES};
 use psios_api::parse;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -592,7 +592,7 @@ fn compatible_paths(
         }))
 }
 
-const BYTE_LIMIT: u64 = artifact::ingress::MAX_BYTES as u64;
+const BYTE_LIMIT: u64 = MAX_BYTES as u64;
 
 fn input_length(input: &mut impl Seek) -> Result<u64> {
     let length = input.seek(SeekFrom::End(0))?;

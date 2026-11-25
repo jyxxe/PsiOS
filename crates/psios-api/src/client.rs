@@ -84,6 +84,16 @@ pub struct ArtifactPublisherKeyRegistration {
     pub fingerprint: String,
 }
 
+/// Capture one exact image from the identified local Docker Engine.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OciImageCaptureRequest {
+    pub image_id: String,
+    pub expected_engine_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_archive_bytes: Option<u32>,
+}
+
 /// Restore one retained, signed release image into the identified local Docker Engine.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -356,6 +366,21 @@ impl Client {
             params["signature"] = json!(signature);
         }
         self.call("Application.PrepareArtifactRelease", params)
+    }
+
+    /// Prepare a capture request for separate Task submission and owner approval.
+    pub fn prepare_oci_image_capture(
+        &self,
+        capture: &OciImageCaptureRequest,
+        key: &str,
+        delegation_id: &str,
+        deadline_at: Option<&str>,
+    ) -> ApiResult<Value> {
+        self.call(
+            "Task.Prepare",
+            json!({"tool":"application.capture_oci_image","key":key,
+                "delegation_id":delegation_id,"deadline_at":deadline_at,"input":capture}),
+        )
     }
 
     /// Prepare a restore request for separate Task submission and owner approval.

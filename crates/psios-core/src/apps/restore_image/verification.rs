@@ -267,20 +267,16 @@ fn normalized_digest<'a>(
     let computed = match cache.entry(archive.id.clone()) {
         Entry::Occupied(entry) => entry.into_mut(),
         Entry::Vacant(entry) => {
-            let digest = match artifact::open_verified_raw(
-                conn,
-                Some(state),
-                archive,
-                artifact::ingress::MAX_BYTES as usize,
-            ) {
-                Err(failure) if failure.0.code == "ResultEvicted" => None,
-                reader => Some(restore_archive::write_load(
-                    reader?,
-                    std::io::sink(),
-                    &binding.image_id,
-                    &binding.diff_ids,
-                )?),
-            };
+            let digest =
+                match artifact::open_verified_raw(conn, Some(state), archive, MAX_BYTES as usize) {
+                    Err(failure) if failure.0.code == "ResultEvicted" => None,
+                    reader => Some(restore_archive::write_load(
+                        reader?,
+                        std::io::sink(),
+                        &binding.image_id,
+                        &binding.diff_ids,
+                    )?),
+                };
             entry.insert(digest)
         }
     };

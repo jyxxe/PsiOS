@@ -1,12 +1,12 @@
 //! Export bytes from the trusted local Docker Engine without pulling or loading an image.
 use super::{Engine, restore_archive, valid_image_id};
 use crate::{
-    Result, artifact, command,
+    Config, Result, artifact, command,
     db::{Db, Doc, find, resolve},
     decode, err,
     host::Work,
     policy, require,
-    storage::oci_archive::{Depot, Sealed},
+    storage::oci_archive::{DEFAULT_CAPTURE_BYTES, Depot, MAX_BYTES, Sealed},
 };
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,8 @@ use serde_json::{Value, json};
 use std::{fs::File, path::Path, time::Duration};
 
 pub(crate) const FORMAT: u32 = super::publisher::FORMAT + 1;
+// Older writers use an 8 MiB immutable archive bound throughout the authority.
+pub(crate) const CAPACITY_FORMAT: u32 = artifact::files::FORMAT + 1;
 pub(crate) const SCHEMA: &str = include_str!("capture.sql");
 pub(crate) const TOOL: &str = "application.capture_oci_image";
 const SOURCE: &str = "LocalOciImageCapture";
@@ -30,6 +32,12 @@ pub(super) fn valid_engine_id(engine: &str) -> bool {
 pub(crate) struct Request {
     image_id: String,
     expected_engine_id: String,
+    #[serde(default = "default_limit")]
+    max_archive_bytes: u32,
+}
+
+fn default_limit() -> u32 {
+    DEFAULT_CAPTURE_BYTES
 }
 
 impl Request {
@@ -38,6 +46,19 @@ impl Request {
             valid_image_id(&self.image_id) && valid_engine_id(&self.expected_engine_id),
             "InvalidArgument",
             "capture requires an exact local OCI image digest and expected engine identity",
+        )?;
+        require(
+            (1..=MAX_BYTES).contains(&self.max_archive_bytes),
+            "InvalidArgument",
+            "OCI capture byte limit must be between 1 and 33554432",
+        )
+    }
+
+    pub(crate) fn check_ceiling(&self, cfg: &Config) -> Result<()> {
+        require(
+            self.max_archive_bytes <= cfg.oci_capture_max_bytes,
+            "QuotaExceeded",
+            "approved archive limit exceeds the configured OCI capture ceiling",
         )
     }
 }
@@ -67,6 +88,7 @@ pub(crate) struct Captured {
     image: ImageIdentity,
     engine: String,
     compatibility: restore_archive::Compatibility,
+    max_archive_bytes: u32,
 }
 
 pub(crate) fn authorize(db: &Db<'_>, actor: &str) -> Result<()> {
@@ -102,7 +124,7 @@ pub(crate) fn export(
         "local Docker engine identity changed",
     )?;
     let image = identity(&engine, request)?;
-    let limit = artifact::ingress::MAX_BYTES;
+    let limit = request.max_archive_bytes;
     let state = File::open(&work.cfg.state_dir)?;
     work.cfg
         .check_managed_space(&state, std::iter::once(u64::from(limit)), 3)?;
@@ -135,6 +157,7 @@ pub(crate) fn export(
         image,
         engine: id,
         compatibility,
+        max_archive_bytes: limit,
     })
 }
 
@@ -145,6 +168,19 @@ pub(crate) fn check_capacity(db: &Db<'_>, work: &Work, capture: &Captured) -> Re
 
 pub(crate) fn publish(db: &Db<'_>, work: &Work, capture: Captured) -> Result<Value> {
     let owner = &work.task.owner;
+    let crate::host::Action::CaptureOciImage(request) = &work.action else {
+        return Err(err(
+            "Fenced",
+            "archive receipt is outside the capture action",
+        ));
+    };
+    request.check_ceiling(db.cfg)?;
+    require(
+        request.max_archive_bytes == capture.max_archive_bytes
+            && capture.archive.size() <= request.max_archive_bytes,
+        "Fenced",
+        "archive receipt exceeds the approved capture limit",
+    )?;
     let proof_id = format!("oci-image-capture-{}", work.op.id);
     let source = json!({"kind":SOURCE,"capture_id":proof_id,
         "publication_task_ref":work.task.reference(),"publication_run_ref":work.run.reference(),
@@ -165,7 +201,7 @@ pub(crate) fn publish(db: &Db<'_>, work: &Work, capture: Captured) -> Result<Val
         json!({"operation_id":work.op.id}),
         json!({"artifact_ref":reference,"archive_format":ARCHIVE_FORMAT,"engine_id":capture.engine,
             "image":capture.image,"archive_digest":artifact.spec["digest"],"size_bytes":artifact.spec["size_bytes"],
-            "restore_compatibility":compatibility}),
+            "max_archive_bytes":capture.max_archive_bytes,"restore_compatibility":compatibility}),
     )?;
     db.c.execute(
         "INSERT INTO oci_image_captures(artifact,proof,restore_status) VALUES(?1,?2,?3)",
@@ -174,7 +210,7 @@ pub(crate) fn publish(db: &Db<'_>, work: &Work, capture: Captured) -> Result<Val
     db.audit(owner, TOOL, Some(&proof.id), "Published")?;
     Ok(
         json!({"artifact_ref":reference,"capture_ref":proof.reference(),"operation_id":work.op.id,
-        "restore_compatibility":compatibility}),
+        "max_archive_bytes":capture.max_archive_bytes,"restore_compatibility":compatibility}),
     )
 }
 
@@ -208,6 +244,7 @@ fn verify_receipt(
             && body["operation_id"] == operation.id
             && body["artifact_ref"] == archive.reference()
             && body["capture_ref"] == proof.reference()
+            && body["max_archive_bytes"] == proof.body["max_archive_bytes"]
             && body["restore_compatibility"] == proof.body["restore_compatibility"],
         "RecoveryRequired",
         "OCI capture evidence disagrees with the settled receipt",
@@ -228,7 +265,9 @@ fn verify_one(conn: &Connection, artifact: &Doc, proof: &Doc) -> Result<()> {
     let decision = resolve(conn, &permit.body["decision_ref"])?;
     let used = existing(conn, &format!("use-{}", decision.id))?;
     let input = resolve(conn, &task.spec["input_ref"])?;
-    let request: Request = decode(crate::broker::dependencies::tool_input(&input)?)?;
+    let approved = crate::broker::dependencies::tool_input(&input)?;
+    let request: Request = decode(approved)?;
+    request.validate()?;
     let image: ImageIdentity = decode(&proof.body["image"])?;
     require(
         artifact::is_raw(artifact)
@@ -250,7 +289,12 @@ fn verify_one(conn: &Connection, artifact: &Doc, proof: &Doc) -> Result<()> {
             && proof.body["size_bytes"]
                 .as_str()
                 .and_then(|s| s.parse::<u32>().ok())
-                .is_some_and(|size| (1..=artifact::ingress::MAX_BYTES).contains(&size))
+                .is_some_and(|size| (1..=request.max_archive_bytes).contains(&size))
+            && (request.max_archive_bytes <= DEFAULT_CAPTURE_BYTES
+                || artifact::files::managed(artifact))
+            && (proof.body["max_archive_bytes"] == request.max_archive_bytes
+                || (approved.get("max_archive_bytes").is_none()
+                    && proof.body.get("max_archive_bytes").is_none()))
             && proof.body["engine_id"] == request.expected_engine_id
             && valid_engine_id(&request.expected_engine_id)
             && image.matches(&request)
@@ -363,16 +407,12 @@ pub(crate) fn verify_restore_compatibility(conn: &Connection, state: &Path) -> R
             continue;
         }
         let artifact = existing(conn, &artifact)?;
-        let input = match artifact::open_verified_raw(
-            conn,
-            Some(state),
-            &artifact,
-            artifact::ingress::MAX_BYTES as usize,
-        ) {
-            // Withdrawal retains the historical capture and its compatibility receipt.
-            Err(failure) if failure.0.code == "ResultEvicted" => continue,
-            other => other?,
-        };
+        let input =
+            match artifact::open_verified_raw(conn, Some(state), &artifact, MAX_BYTES as usize) {
+                // Withdrawal retains the historical capture and its compatibility receipt.
+                Err(failure) if failure.0.code == "ResultEvicted" => continue,
+                other => other?,
+            };
         let image: ImageIdentity = decode(&proof.body["image"])?;
         let actual = restore_archive::validate_reader(input, &image.config_digest, &image.diff_ids)
             .map_err(|_| {

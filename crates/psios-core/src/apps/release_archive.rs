@@ -4,6 +4,7 @@ use crate::{
     Result, artifact,
     db::{Db, Doc, find, resolve as resource, row},
     decode, err, require,
+    storage::oci_archive::MAX_BYTES,
 };
 use psios_api::OciPublisherSignature;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -21,12 +22,7 @@ pub(super) struct Archive {
 
 impl Archive {
     pub fn check_content(&self, db: &Db<'_>) -> Result<()> {
-        artifact::verify_raw_bytes(
-            db.c,
-            &db.cfg.state_dir,
-            &self.artifact,
-            artifact::ingress::MAX_BYTES as usize,
-        )
+        artifact::verify_raw_bytes(db.c, &db.cfg.state_dir, &self.artifact, MAX_BYTES as usize)
     }
 
     pub fn check_image(&self, image: &Value) -> Result<()> {

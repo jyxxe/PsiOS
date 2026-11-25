@@ -10,6 +10,7 @@ use crate::{
     decode, err,
     host::{Target, Work},
     now, policy, require,
+    storage::oci_archive::MAX_BYTES,
 };
 use psios_api::ResourceRef;
 use rusqlite::{Connection, params};
@@ -159,7 +160,7 @@ pub(crate) fn prepare(db: &Db<'_>, app: &Doc, request: &Request) -> Result<Prepa
             db.c,
             Some(&db.cfg.state_dir),
             &archive.artifact,
-            artifact::ingress::MAX_BYTES as usize,
+            MAX_BYTES as usize,
             output,
         )
     })?;

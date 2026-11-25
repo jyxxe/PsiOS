@@ -44,6 +44,8 @@ pub struct Config {
     pub network_probes: Vec<NetworkProbeConfig>,
     #[serde(default = "default_docker")]
     pub docker_socket: PathBuf,
+    #[serde(default = "default_oci_capture_bytes")]
+    pub oci_capture_max_bytes: u32,
     #[serde(default)]
     pub authority_reserve: AuthorityReserve,
     #[serde(default = "default_backup_max_bytes")]
@@ -110,6 +112,9 @@ fn default_tick() -> u64 {
 fn default_docker() -> PathBuf {
     "/var/run/docker.sock".into()
 }
+fn default_oci_capture_bytes() -> u32 {
+    storage::oci_archive::DEFAULT_CAPTURE_BYTES
+}
 impl Default for Config {
     fn default() -> Self {
         Self::local(Path::new("/var/lib/psios"))
@@ -149,6 +154,7 @@ impl Config {
             network_probes: Vec::new(),
             tick_ms: default_tick(),
             docker_socket: default_docker(),
+            oci_capture_max_bytes: default_oci_capture_bytes(),
             authority_reserve: AuthorityReserve::default(),
             backup_max_bytes: DEFAULT_BACKUP_MAX_BYTES,
             backup_capture_timeout_seconds: DEFAULT_BACKUP_CAPTURE_TIMEOUT_SECONDS,
@@ -212,6 +218,11 @@ impl Config {
             "invalid service allowlist or missing control definition digest",
         )?;
         node::network::probe::validate(&self.network_probes)?;
+        require(
+            (1..=storage::oci_archive::MAX_BYTES).contains(&self.oci_capture_max_bytes),
+            "InvalidArgument",
+            "OCI capture max must be between 1 and 33554432 bytes",
+        )?;
         require(
             (1..=MAX_BACKUP_BYTES).contains(&self.backup_max_bytes),
             "InvalidArgument",

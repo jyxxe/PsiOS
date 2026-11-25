@@ -17,7 +17,8 @@ use std::{
 
 pub(crate) const ROOT: &str = "oci-archives";
 const PAYLOAD: &str = "payload";
-const MAX_BYTES: u64 = artifact::ingress::MAX_BYTES as u64;
+pub(crate) const DEFAULT_CAPTURE_BYTES: u32 = 8 * 1024 * 1024;
+pub(crate) const MAX_BYTES: u32 = 32 * 1024 * 1024;
 
 pub(crate) struct Depot {
     path: PathBuf,
@@ -80,7 +81,7 @@ fn require_id(id: &str) -> Result<()> {
 
 fn require_size(size: u64) -> Result<()> {
     require(
-        (1..=MAX_BYTES).contains(&size),
+        (1..=u64::from(MAX_BYTES)).contains(&size),
         "QuotaExceeded",
         "OCI archive size is outside the managed payload limit",
     )

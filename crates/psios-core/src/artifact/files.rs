@@ -1,4 +1,5 @@
 //! Custody of immutable generated OCI payloads selected by the SQLite authority.
+use crate::storage::oci_archive::MAX_BYTES;
 use crate::{
     Result,
     db::{Db, Doc},
@@ -41,7 +42,7 @@ pub(super) fn open_payload(
     }
     let size = u32::try_from(size)
         .ok()
-        .filter(|size| (1..=super::ingress::MAX_BYTES).contains(size))
+        .filter(|size| (1..=MAX_BYTES).contains(size))
         .ok_or_else(|| err("RecoveryRequired", "managed OCI archive has invalid length"))?;
     let valid: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM oci_archive_blobs b
@@ -130,9 +131,9 @@ pub(crate) fn selected(conn: &Connection, format: u32) -> Result<BTreeMap<String
         .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
     require(
         members.len() <= MAX_FILES
-            && members.values().all(|member| {
-                (1..=u64::from(super::ingress::MAX_BYTES)).contains(&member.size_bytes)
-            })
+            && members
+                .values()
+                .all(|member| (1..=u64::from(MAX_BYTES)).contains(&member.size_bytes))
             && members
                 .values()
                 .map(|member| member.size_bytes)

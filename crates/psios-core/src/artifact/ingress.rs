@@ -188,7 +188,11 @@ pub(crate) fn check_capacity(db: &Db<'_>, actor: &str, bytes: u32) -> Result<()>
 
 pub(crate) fn stage(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     authorize(db, actor, UPLOAD)?;
-    let p: Start = decode(params)?;
+    let stage = begin_stage(db, actor, decode(params)?, MAX_BYTES)?;
+    response(db, &stage)
+}
+
+fn begin_stage(db: &Db<'_>, actor: &str, p: Start, maximum: u32) -> Result<Stage> {
     label(&p.key)?;
     require(
         valid_digest(&p.digest)
@@ -198,7 +202,7 @@ pub(crate) fn stage(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         "invalid artifact digest, media type or upload lifetime",
     )?;
     require(
-        (1..=MAX_BYTES).contains(&p.size_bytes),
+        (1..=maximum).contains(&p.size_bytes),
         "QuotaExceeded",
         "artifact size outside ingress profile",
     )?;
@@ -216,7 +220,7 @@ pub(crate) fn stage(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
             "IdempotencyConflict",
             "upload key is already bound to a different request",
         )?;
-        return response(db, &prior);
+        return Ok(prior);
     }
     db.cfg.check_admission_space()?;
     check_capacity(db, actor, p.size_bytes)?;
@@ -229,7 +233,7 @@ pub(crate) fn stage(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         params![id,actor,p.key,request_digest,p.digest,p.declared_media_type,p.size_bytes,expires],
     )?;
     db.audit(actor, "Artifact.Stage", Some(&id), "Accepted")?;
-    response(db, &owned(db, actor, &id)?)
+    owned(db, actor, &id)
 }
 
 pub(crate) fn get(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
@@ -375,7 +379,7 @@ pub(crate) fn publish_generated_reader(
         "QuotaExceeded",
         "generated content is outside the artifact ingress profile",
     )?;
-    let mut stage = generated(db, actor, size, digest, media)?;
+    let mut stage = generated(db, actor, size, digest, media, MAX_BYTES)?;
     let mut buffer = vec![0; (size as usize).min(CHUNK_BYTES)];
     while stage.received < size {
         let count = ((size - stage.received) as usize).min(buffer.len());
@@ -391,22 +395,27 @@ pub(crate) fn publish_generated_reader(
     publish_stage(db, actor, &stage.id, Some(provenance))
 }
 
-fn generated(db: &Db<'_>, actor: &str, size: u32, digest: &str, media: &str) -> Result<Stage> {
-    let publication = stage(
+fn generated(
+    db: &Db<'_>,
+    actor: &str,
+    size: u32,
+    digest: &str,
+    media: &str,
+    maximum: u32,
+) -> Result<Stage> {
+    authorize(db, actor, UPLOAD)?;
+    begin_stage(
         db,
         actor,
-        &json!({
-            "key":id("generated-output"),"size_bytes":size,"digest":digest,
-            "declared_media_type":media,"ttl_seconds":120,
-        }),
-    )?;
-    let id = publication["stage_id"].as_str().ok_or_else(|| {
-        err(
-            "RecoveryRequired",
-            "generated artifact stage has no identity",
-        )
-    })?;
-    owned(db, actor, id)
+        Start {
+            key: id("generated-output"),
+            size_bytes: size,
+            digest: digest.to_owned(),
+            declared_media_type: media.to_owned(),
+            ttl_seconds: 120,
+        },
+        maximum,
+    )
 }
 
 pub(crate) fn publish_managed_oci(
@@ -423,7 +432,14 @@ pub(crate) fn publish_managed_oci(
         "managed payload has wrong source",
     )?;
     super::files::check_capacity(db)?;
-    let stage = generated(db, actor, archive.size(), archive.digest(), media)?;
+    let stage = generated(
+        db,
+        actor,
+        archive.size(),
+        archive.digest(),
+        media,
+        db.cfg.oci_capture_max_bytes,
+    )?;
     require_open(db, &stage)?;
     let artifact = create_artifact(
         db,
@@ -615,6 +631,18 @@ pub(crate) fn expire(db: &Db<'_>) -> Result<()> {
 }
 
 pub(crate) fn verify(conn: &Connection) -> Result<()> {
+    let oversized: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM artifact_uploads u WHERE u.size_bytes>?1 AND NOT EXISTS(
+            SELECT 1 FROM versions v WHERE v.id=u.artifact_id AND v.rev=1 AND v.kind='Artifact'
+            AND v.spec->>'content_layout'=?2 AND v.spec->'source'->>'kind'='LocalOciImageCapture'))",
+        params![MAX_BYTES, super::files::LAYOUT],
+        |row| row.get(0),
+    )?;
+    require(
+        !oversized,
+        "RecoveryRequired",
+        "oversized upload is outside the managed OCI archive profile",
+    )?;
     let mut open = conn
         .prepare("SELECT id,size_bytes,received_bytes FROM artifact_uploads WHERE state='Open'")?;
     let mut expected_chunks = 0i64;

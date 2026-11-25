@@ -195,7 +195,7 @@ fn oci_capture_staging_uses_approved_byte_limits_and_releases_with_the_lease() {
     };
     let reserved = |store: &mut Store| {
         let status = call(store, "Node.Get", json!({})).unwrap();
-        let staging = &status["admission"]["oci_capture_staging"];
+        let staging = &status["oci_capture_staging"];
         assert_eq!(staging["max_bytes"], budget);
         staging["reserved_bytes"].as_u64().unwrap()
     };

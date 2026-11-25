@@ -271,7 +271,7 @@ Core 核对原会话、模型租约及决策摘要，在一个事务中提交原
 
 守护进程配置 `oci_capture_max_bytes` 默认 8388608 字节，可设为 1 至 33554432 字节。例如，设为 16777216 后，可使用 `psiosctl application-prepare-image-capture --image-id "$image" --engine-id "$engine" --max-archive-bytes 16777216 --delegation "$capture_delegation" --key capture-1` 准备一份显式申请 16 MiB 的请求。SDK 提供 `Client::prepare_oci_image_capture`。提交和执行时都会重查配置，配置低于请求上限时拒绝捕获。制品继续计入 32 MiB 所有者额度与 128 MiB Node 额度，公开 `Artifact.Stage` 的单份上限为 8 MiB。
 
-已领取或执行中的捕获按各自批准的上限预留暂存容量，总共最多 32 MiB。已审批的捕获等待足够容量时保留在队列中，其他符合条件的任务可以执行。执行中的捕获取消后仍占用容量，直到原执行结算。`Node.Get.admission.oci_capture_staging` 显示预留字节和上限，已提交制品仍按原额度单独计量。
+已领取或执行中的捕获按各自批准的上限预留暂存容量，总共最多 32 MiB。已审批的捕获等待足够容量时保留在队列中，其他符合条件的任务可以执行。执行中的捕获取消后仍占用容量，直到原执行结算。`Node.Get` 的 `oci_capture_staging` 字段显示预留字节和上限，已提交制品仍按原额度单独计量。
 
 导出前按批准的上限检查状态盘的块和 inode 余量。Docker 的输出分块写入状态盘的私有暂存目录，同时计算原始摘要。Core 复核 tar 成员，再把已同步的归档发布为 `ManagedOciArchiveV1`，将其制品元数据、`LocalOciImageCapture` 来源、`OciImageCapture` 凭据和 Task 回执记录在同一见证事务。新凭据和回执同时记录批准的上限。回执提交后才能读取归档。`Artifact.ReadChunk` 仍受独立授权并按固定分块核验字节。`artifact.withdraw` 提交后由清理器回收文件。事务回滚可清理当前未引用的文件，见证状态未确定时留待启动按已确认的数据库回收。[真实 Docker 导出和独立重载验收](../tests/oci_capture.py)
 

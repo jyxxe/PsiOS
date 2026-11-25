@@ -2,20 +2,23 @@ use super::{StateLock, Store, checked_head, open_regular};
 use crate::{Config, Result, artifact, config::private_dir, err, policy, require};
 use psios_api::sha256;
 use rusqlite::{Connection, OpenFlags, params};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     fs::{self, OpenOptions, Permissions},
     io::{ErrorKind, Read},
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
-    path::Path,
+    path::{Path, PathBuf},
 };
 use zeroize::Zeroizing;
 
 // Never open the original database with SQLite. Even a read-only SQLite
 // connection can create or update the WAL shared-memory index.
-fn copy_database(source: &Path, target: &Path, limit: u64) -> Result<u64> {
+pub(super) const DATABASE_FILES: &[&str] = &["state.db", "state.db-wal", "state.db-journal"];
+
+pub(super) fn copy_database(source: &Path, target: &Path, limit: u64) -> Result<u64> {
     let mut total = 0;
-    for name in ["state.db", "state.db-wal", "state.db-journal"] {
+    for &name in DATABASE_FILES {
         let file = match open_regular(&source.join(name)) {
             Err(e) if e.kind() == ErrorKind::NotFound && name != "state.db" => continue,
             other => other?,
@@ -41,6 +44,86 @@ fn copy_database(source: &Path, target: &Path, limit: u64) -> Result<u64> {
     Ok(total)
 }
 
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DatabaseIdentity {
+    pub node_id: String,
+    pub recovery_incarnation: String,
+    pub head: String,
+    pub database_format: u32,
+}
+
+pub(super) fn lock_offline(cfg: &Config) -> Result<StateLock> {
+    cfg.validate()?;
+    private_dir(&cfg.state_dir, false)?;
+    private_dir(&cfg.witness_dir, false)?;
+    let lock = open_regular(&cfg.state_dir.join("daemon.lock"))?;
+    lock.try_lock_shared()
+        .map_err(|_| err("Conflict", "stop the authority before offline verification"))?;
+    Ok(StateLock(lock))
+}
+
+pub(super) fn scratch_parent(scratch: &Path) -> Result<PathBuf> {
+    let parent = scratch.canonicalize()?;
+    let meta = parent.metadata()?;
+    require(
+        meta.is_dir()
+            && (meta.uid() == 0 || meta.uid() == rustix::process::geteuid().as_raw())
+            && (meta.mode() & 0o022 == 0 || meta.mode() & 0o1000 != 0),
+        "PermissionDenied",
+        "verification scratch directory must protect its entries",
+    )?;
+    Ok(parent)
+}
+
+pub(super) fn outside_authority(cfg: &Config, path: &Path) -> Result<()> {
+    require(
+        !path.starts_with(&cfg.state_dir) && !path.starts_with(&cfg.witness_dir),
+        "InvalidArgument",
+        "offline copy destination must be outside state and witness",
+    )
+}
+
+pub(super) fn checked_copy(directory: &Path) -> Result<(Connection, DatabaseIdentity)> {
+    let copy = Connection::open_with_flags(
+        directory.join("state.db"),
+        OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )?;
+    copy.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")?;
+    let check: String = copy.query_row("PRAGMA integrity_check(1)", [], |r| r.get(0))?;
+    require(
+        check == "ok",
+        "RecoveryRequired",
+        "database integrity check failed",
+    )?;
+    require(
+        !copy.prepare("PRAGMA foreign_key_check")?.exists([])?,
+        "RecoveryRequired",
+        "foreign key integrity check failed",
+    )?;
+    let database_format = copy.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    require(
+        (1..=super::CURRENT_FORMAT).contains(&database_format),
+        "SchemaVersionUnsupported",
+        "unsupported state database version",
+    )?;
+    let meta = |key| copy.query_row("SELECT value FROM meta WHERE key=?1", [key], |r| r.get(0));
+    let identity = DatabaseIdentity {
+        node_id: meta("authority")?,
+        recovery_incarnation: meta("incarnation")?,
+        head: meta("head")?,
+        database_format,
+    };
+    Ok((copy, identity))
+}
+
+pub(super) fn check_artifacts(conn: &Connection, identity: &DatabaseIdentity) -> Result<()> {
+    if identity.database_format >= artifact::FORMAT {
+        artifact::verify(conn)?;
+    }
+    Ok(())
+}
+
 fn owner_matches(conn: &Connection, path: &Path) -> Result<bool> {
     let f = match open_regular(path) {
         Ok(file) => file,
@@ -61,78 +144,47 @@ fn owner_matches(conn: &Connection, path: &Path) -> Result<bool> {
     )?)
 }
 
+pub(super) fn verified_witness(
+    copy: &Connection,
+    cfg: &Config,
+) -> Result<(&'static str, &'static str)> {
+    let checked = checked_head(copy, cfg)?;
+    let next = cfg.witness_dir.join("owner.next");
+    let rotation = match fs::symlink_metadata(&next) {
+        Err(e) if e.kind() == ErrorKind::NotFound => "None",
+        Err(e) => return Err(e.into()),
+        Ok(_) if owner_matches(copy, &next)? => "PendingPromotion",
+        Ok(_) => "PendingDiscard",
+    };
+    require(
+        rotation == "PendingPromotion"
+            || owner_matches(copy, &cfg.witness_dir.join("owner.token"))?,
+        "RecoveryRequired",
+        "local owner credential does not match the authority",
+    )?;
+    let witness = match checked.witness.get("pending") {
+        None => "Confirmed",
+        Some(v) if *v == checked.head => "PendingCommitFinalization",
+        Some(_) => "PendingIntentDiscard",
+    };
+    Ok((witness, rotation))
+}
+
 impl Store {
     pub fn verify(cfg: &Config, scratch: &Path, max_bytes: u64) -> Result<Value> {
-        cfg.validate()?;
-        private_dir(&cfg.state_dir, false)?;
-        private_dir(&cfg.witness_dir, false)?;
-        let lock = open_regular(&cfg.state_dir.join("daemon.lock"))?;
-        lock.try_lock_shared()
-            .map_err(|_| err("Conflict", "stop the authority before offline verification"))?;
-        let _lock = StateLock(lock);
-        let parent = scratch.canonicalize()?;
-        require(
-            !parent.starts_with(&cfg.state_dir) && !parent.starts_with(&cfg.witness_dir),
-            "InvalidArgument",
-            "verification scratch must be outside state and witness",
-        )?;
-        let meta = parent.metadata()?;
-        require(
-            meta.is_dir()
-                && (meta.uid() == 0 || meta.uid() == rustix::process::geteuid().as_raw())
-                && (meta.mode() & 0o022 == 0 || meta.mode() & 0o1000 != 0),
-            "PermissionDenied",
-            "verification scratch directory must protect its entries",
-        )?;
+        let _lock = lock_offline(cfg)?;
+        let parent = scratch_parent(scratch)?;
+        outside_authority(cfg, &parent)?;
         let tmp = tempfile::Builder::new()
             .prefix("psios-verify-")
             .permissions(Permissions::from_mode(0o700))
             .tempdir_in(parent)?;
         let bytes = copy_database(&cfg.state_dir, tmp.path(), max_bytes)?;
-        let copy = Connection::open_with_flags(
-            tmp.path().join("state.db"),
-            OpenFlags::SQLITE_OPEN_READ_WRITE,
-        )?;
-        copy.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")?;
-        let check: String = copy.query_row("PRAGMA integrity_check(1)", [], |r| r.get(0))?;
-        require(
-            check == "ok",
-            "RecoveryRequired",
-            "database integrity check failed",
-        )?;
-        require(
-            !copy.prepare("PRAGMA foreign_key_check")?.exists([])?,
-            "RecoveryRequired",
-            "foreign key integrity check failed",
-        )?;
-        let checked = checked_head(&copy, cfg)?;
-        if checked.version >= artifact::FORMAT {
-            artifact::verify(&copy)?;
-        }
-        let next = cfg.witness_dir.join("owner.next");
-        let rotation = match fs::symlink_metadata(&next) {
-            Err(e) if e.kind() == ErrorKind::NotFound => "None",
-            Err(e) => return Err(e.into()),
-            Ok(_) if owner_matches(&copy, &next)? => "PendingPromotion",
-            Ok(_) => "PendingDiscard",
-        };
-        require(
-            rotation == "PendingPromotion"
-                || owner_matches(&copy, &cfg.witness_dir.join("owner.token"))?,
-            "RecoveryRequired",
-            "local owner credential does not match the authority",
-        )?;
-        let witness = match checked.witness.get("pending") {
-            None => "Confirmed",
-            Some(v) if *v == checked.head => "PendingCommitFinalization",
-            Some(_) => "PendingIntentDiscard",
-        };
-        let node: String =
-            copy.query_row("SELECT value FROM meta WHERE key='authority'", [], |r| {
-                r.get(0)
-            })?;
+        let (copy, identity) = checked_copy(tmp.path())?;
+        let (witness, rotation) = verified_witness(&copy, cfg)?;
+        check_artifacts(&copy, &identity)?;
         Ok(
-            json!({"node_id":node, "database_format":checked.version, "migration_required":checked.version < super::CURRENT_FORMAT,
+            json!({"node_id":identity.node_id, "database_format":identity.database_format, "migration_required":identity.database_format < super::CURRENT_FORMAT,
             "sqlite_integrity":"Verified","foreign_keys":"Verified","witness":witness,
             "owner_rotation":rotation,"copied_bytes":bytes}),
         )

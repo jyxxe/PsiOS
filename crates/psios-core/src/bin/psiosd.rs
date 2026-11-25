@@ -1,7 +1,9 @@
 use clap::{Parser, Subcommand};
 use psios_core::{Config, Store, inspect_detached_backup, server};
 use std::{
-    path::PathBuf,
+    fs::File,
+    io::{Read, Write, stdin, stdout},
+    path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicBool},
 };
 
@@ -30,6 +32,28 @@ enum Cmd {
         #[arg(long)]
         scratch_dir: Option<PathBuf>,
     },
+    /// Capture a verified database checkpoint from a stopped authority.
+    Checkpoint {
+        /// New checkpoint directory under a private, operator-owned parent.
+        #[arg(long)]
+        output: PathBuf,
+        /// Maximum combined database and journal size in MiB.
+        #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u32).range(1..))]
+        max_copy_mib: u32,
+    },
+    /// Verify a checkpoint without a running authority or its credentials.
+    VerifyCheckpoint(CheckpointInput),
+    /// Write the original bytes of a pinned artifact from a verified checkpoint.
+    CheckpointArtifact {
+        #[command(flatten)]
+        checkpoint: CheckpointInput,
+        /// JSON Artifact ResourceRef file or standard input.
+        #[arg(long, default_value = "-")]
+        reference_file: PathBuf,
+        /// Maximum number of original payload bytes to extract.
+        #[arg(long, default_value_t = 8 * 1024 * 1024)]
+        max_bytes: usize,
+    },
     /// Inspect a detached backup and optionally restore its verified files to a new directory.
     VerifyBackup {
         /// Directory containing the copied manifest and data blobs.
@@ -44,6 +68,44 @@ enum Cmd {
     },
     RecoverOwner,
 }
+
+#[derive(clap::Args)]
+struct CheckpointInput {
+    /// Private directory containing the checkpoint manifest and SQLite members.
+    #[arg(long)]
+    directory: PathBuf,
+    /// Trusted manifest digest recorded when the checkpoint was published.
+    #[arg(long)]
+    manifest_digest: String,
+    /// Maximum combined database and journal size in MiB.
+    #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u32).range(1..))]
+    max_copy_mib: u32,
+    /// Parent directory for the temporary verification copy (defaults to TMPDIR).
+    #[arg(long)]
+    scratch_dir: Option<PathBuf>,
+}
+
+fn read_reference(path: &Path) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let mut bytes = Vec::new();
+    let limit = psios_api::MAX_FRAME;
+    if path == Path::new("-") {
+        stdin()
+            .lock()
+            .take(limit as u64 + 1)
+            .read_to_end(&mut bytes)?;
+    } else {
+        File::open(path)?
+            .take(limit as u64 + 1)
+            .read_to_end(&mut bytes)?;
+    }
+    if bytes.len() > limit {
+        return Err(
+            psios_core::err("InvalidArgument", "artifact reference exceeds size limit").into(),
+        );
+    }
+    Ok(psios_api::parse(&bytes)?)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let o = Opts::parse();
     let cfg = || Config::resolve(o.config.as_deref(), o.state.as_deref());
@@ -68,6 +130,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let scratch = scratch_dir.unwrap_or_else(std::env::temp_dir);
             let report = Store::verify(&cfg()?, &scratch, u64::from(max_copy_mib) * 1024 * 1024)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Cmd::Checkpoint {
+            output,
+            max_copy_mib,
+        } => {
+            let report =
+                Store::checkpoint(&cfg()?, &output, u64::from(max_copy_mib) * 1024 * 1024)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Cmd::VerifyCheckpoint(input) => {
+            let scratch = input.scratch_dir.unwrap_or_else(std::env::temp_dir);
+            let report = Store::verify_checkpoint(
+                &input.directory,
+                &input.manifest_digest,
+                &scratch,
+                u64::from(input.max_copy_mib) * 1024 * 1024,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Cmd::CheckpointArtifact {
+            checkpoint,
+            reference_file,
+            max_bytes,
+        } => {
+            let scratch = checkpoint.scratch_dir.unwrap_or_else(std::env::temp_dir);
+            let reference = read_reference(&reference_file)?;
+            let bytes = Store::checkpoint_artifact(
+                &checkpoint.directory,
+                &checkpoint.manifest_digest,
+                &scratch,
+                u64::from(checkpoint.max_copy_mib) * 1024 * 1024,
+                &reference,
+                max_bytes,
+            )?;
+            stdout().lock().write_all(&bytes)?;
         }
         Cmd::VerifyBackup {
             directory,

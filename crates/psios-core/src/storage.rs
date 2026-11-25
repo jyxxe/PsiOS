@@ -425,7 +425,7 @@ impl Capture<'_> {
         )
     }
 }
-fn copy_hash(r: &mut File, w: &mut impl Write, max: u64) -> Result<(u64, String)> {
+pub(crate) fn copy_hash(r: &mut File, w: &mut impl Write, max: u64) -> Result<(u64, String)> {
     let mut hash = Sha256::new();
     let mut buf = [0u8; 32 * 1024];
     let mut len = 0;

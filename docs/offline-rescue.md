@@ -18,6 +18,28 @@ core_sha=$(awk '$2=="psiosd" {print $1}' rescue-core/SHA256SUMS)
 
 所有输入备妥后，检查机可以断网运行，无需 Git、源码检出或 Cargo。只有二进制的早期归档仍可按对应可信源码中的说明运行启动器。
 
+## 保存权威检查点并修复制品
+
+停止 `psiosd` 后，以服务账户执行 `checkpoint`。命令在私有暂存目录中重放 SQLite 崩溃日志，核验数据库、见证、所有者凭据和分块制品，然后刷盘并原子发布目录。清单记录节点、恢复代次、数据库格式、提交头以及实际封存的数据库和日志文件。将回执中的 `manifest_digest` 存入与检查点独立的可信记录。在受保护的位置保管检查点，其中包含 Task 结果、审计和数据库中的密文。卷数据、见证文件和密钥材料需独立保管。
+
+```bash
+mkdir -m 700 checkpoints
+psiosd --config /etc/psios/core.json checkpoint --output checkpoints/authority
+```
+
+脱机核验只需要检查点、独立记录中的摘要和可信 `psiosd`。使用原 Task 的制品 `ResourceRef` 可取回复核过摘要的原始字节。两条命令都在临时副本中读取 SQLite，`--scratch-dir` 可指定暂存位置，`--max-copy-mib` 限制复制量，提取还受 `--max-bytes` 限制。
+
+```bash
+psiosd verify-checkpoint --directory checkpoints/authority \
+  --manifest-digest "$MANIFEST_DIGEST"
+umask 077
+psiosd checkpoint-artifact --directory checkpoints/authority \
+  --manifest-digest "$MANIFEST_DIGEST" --reference-file artifact-ref.json > artifact.json
+psiosctl --config /etc/psios/core.json artifact-repair artifact.json < artifact-ref.json
+```
+
+`artifact-repair` 由当前权威验证本机所有者身份、制品引用和分块摘要，然后修复缺失或损坏的内容。这样可以恢复原 Task 结果并保留检查点之后的授权、任务和操作历史。[崩溃检查点与在线修复验收](../tests/test_authority_checkpoint.py)
+
 ## 验证和恢复独立的卷备份
 
 原权威在线时，可授予操作者目标 Backup 上的 `backup.export`，再用当前 Backup 的 `ResourceRef` 导出经过核验的完整副本。导出命令接受 JSON 引用文件或标准输入，目标必须是私有父目录下的新目录。将导出回执中的 `manifest_digest` 保存到与副本独立的可信记录。手工转存既有副本时，也可以用 `psiosctl get BACKUP_ID` 读取同一摘要。[权限与分页](core-runtime.md#导出备份) · [在线导出与脱机恢复验收](../tests/test_backup_export.py)

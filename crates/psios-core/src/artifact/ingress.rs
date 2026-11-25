@@ -11,6 +11,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::io::Read;
 
 pub(crate) const FORMAT: u32 = crate::node::process::FORMAT + 1;
 pub(crate) const SCHEMA: &str = include_str!("ingress.sql");
@@ -355,8 +356,21 @@ pub(crate) fn publish_generated(
     media: &str,
     provenance: Value,
 ) -> Result<Value> {
+    let size = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+    publish_generated_reader(db, actor, bytes, size, &sha256(bytes), media, provenance)
+}
+
+pub(crate) fn publish_generated_reader(
+    db: &Db<'_>,
+    actor: &str,
+    mut bytes: impl Read,
+    size: u32,
+    digest: &str,
+    media: &str,
+    provenance: Value,
+) -> Result<Value> {
     require(
-        !bytes.is_empty() && bytes.len() <= MAX_BYTES as usize,
+        (1..=MAX_BYTES).contains(&size),
         "QuotaExceeded",
         "generated content is outside the artifact ingress profile",
     )?;
@@ -364,7 +378,7 @@ pub(crate) fn publish_generated(
         db,
         actor,
         &json!({
-            "key":id("generated-output"),"size_bytes":bytes.len(),"digest":sha256(bytes),
+            "key":id("generated-output"),"size_bytes":size,"digest":digest,
             "declared_media_type":media,"ttl_seconds":120,
         }),
     )?;
@@ -375,9 +389,18 @@ pub(crate) fn publish_generated(
         )
     })?;
     let mut stage = owned(db, actor, stage_id)?;
-    for chunk in bytes.chunks(CHUNK_BYTES) {
-        append_chunk(db, &mut stage, chunk)?;
+    let mut buffer = vec![0; (size as usize).min(CHUNK_BYTES)];
+    while stage.received < size {
+        let count = ((size - stage.received) as usize).min(buffer.len());
+        bytes.read_exact(&mut buffer[..count])?;
+        append_chunk(db, &mut stage, &buffer[..count])?;
     }
+    let mut extra = [0; 1];
+    require(
+        bytes.read(&mut extra)? == 0,
+        "PreconditionFailed",
+        "generated artifact exceeds its declared size",
+    )?;
     publish_stage(db, actor, stage_id, Some(provenance))
 }
 

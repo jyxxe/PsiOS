@@ -7,11 +7,10 @@ use crate::{
     host::Work,
     policy, require,
 };
-use psios_api::sha256;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::{fs::File, io::Seek, time::Duration};
 
 pub(crate) const FORMAT: u32 = super::publisher::FORMAT + 1;
 pub(crate) const SCHEMA: &str = include_str!("capture.sql");
@@ -62,7 +61,9 @@ impl ImageIdentity {
 }
 
 pub(crate) struct Captured {
-    bytes: Vec<u8>,
+    file: File,
+    size: u32,
+    digest: String,
     image: ImageIdentity,
     engine: String,
     compatibility: restore_archive::Compatibility,
@@ -101,21 +102,35 @@ pub(crate) fn export(
         "local Docker engine identity changed",
     )?;
     let image = identity(&engine, request)?;
-    let bytes = command::capture_bytes(
+    let limit = artifact::ingress::MAX_BYTES;
+    let state = File::open(&work.cfg.state_dir)?;
+    work.cfg
+        .check_restore_space(&state, std::iter::once(u64::from(limit)), 1)?;
+    // The image exporter never writes into the user's shared scratch mount.
+    // Drop (including a failed or canceled capture) closes the anonymous file.
+    let mut file = tempfile::tempfile_in(&work.cfg.state_dir)?;
+    let mut output = restore_archive::HashOutput::new(&mut file);
+    let size = command::capture_to(
         engine.command_line(&["image".into(), "save".into(), request.image_id.clone()]),
-        artifact::ingress::MAX_BYTES as usize,
+        &mut output,
+        limit as usize,
         Duration::from_secs(20),
         check_authority,
-    )?;
+    )? as u32;
+    let digest = output.finish();
     require(
         identity(&engine, request)? == image && engine.identity()? == id,
         "PreconditionFailed",
         "local OCI image or Docker engine changed during capture",
     )?;
-    let compatibility = restore_archive::validate(&bytes, &image.config_digest, &image.diff_ids)?;
+    let compatibility =
+        restore_archive::validate_reader(&mut file, &image.config_digest, &image.diff_ids)?;
+    file.rewind()?;
     check_authority()?;
     Ok(Captured {
-        bytes,
+        file,
+        size,
+        digest,
         image,
         engine: id,
         compatibility,
@@ -124,7 +139,7 @@ pub(crate) fn export(
 
 pub(crate) fn check_capacity(db: &Db<'_>, work: &Work, capture: &Captured) -> Result<()> {
     db.cfg.check_admission_space()?;
-    artifact::ingress::check_capacity(db, &work.task.owner, capture.bytes.len() as u32)
+    artifact::ingress::check_capacity(db, &work.task.owner, capture.size)
 }
 
 pub(crate) fn publish(db: &Db<'_>, work: &Work, capture: Captured) -> Result<Value> {
@@ -133,7 +148,15 @@ pub(crate) fn publish(db: &Db<'_>, work: &Work, capture: Captured) -> Result<Val
     let source = json!({"kind":SOURCE,"capture_id":proof_id,
         "publication_task_ref":work.task.reference(),"publication_run_ref":work.run.reference(),
         "publication_effect_ref":work.effect.reference(),"publication_operation_id":work.op.id});
-    let accepted = artifact::ingress::publish_generated(db, owner, &capture.bytes, MEDIA, source)?;
+    let accepted = artifact::ingress::publish_generated_reader(
+        db,
+        owner,
+        capture.file,
+        capture.size,
+        &capture.digest,
+        MEDIA,
+        source,
+    )?;
     let reference = &accepted["artifact_ref"];
     let artifact = db.resolve(reference)?;
     let compatibility = capture.compatibility.evidence();
@@ -340,7 +363,7 @@ pub(crate) fn verify_restore_compatibility(conn: &Connection) -> Result<()> {
             continue;
         }
         let artifact = existing(conn, &artifact)?;
-        let bytes = match artifact::checkpoint_bytes(
+        let input = match artifact::open_verified_raw(
             conn,
             &artifact,
             artifact::ingress::MAX_BYTES as usize,
@@ -350,7 +373,7 @@ pub(crate) fn verify_restore_compatibility(conn: &Connection) -> Result<()> {
             other => other?,
         };
         let image: ImageIdentity = decode(&proof.body["image"])?;
-        let actual = restore_archive::validate(&bytes, &image.config_digest, &image.diff_ids)
+        let actual = restore_archive::validate_reader(input, &image.config_digest, &image.diff_ids)
             .map_err(|_| {
                 err(
                     "RecoveryRequired",
@@ -358,7 +381,7 @@ pub(crate) fn verify_restore_compatibility(conn: &Connection) -> Result<()> {
                 )
             })?;
         require(
-            artifact.spec["digest"] == sha256(&bytes) && evidence == &actual.evidence(),
+            evidence == &actual.evidence(),
             "RecoveryRequired",
             "OCI captured bytes disagree with compatibility evidence",
         )?;

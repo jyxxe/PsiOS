@@ -9,6 +9,9 @@ use psios_api::id;
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 
+pub(crate) const FORMAT: u32 = 38;
+pub(crate) const SCHEMA: &str = include_str!("parallel.sql");
+
 struct Work {
     run: String,
     task: Option<String>,
@@ -27,15 +30,16 @@ pub fn cancel(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     let run = db.of(&request.id, RUN)?;
     policy::owned(actor, &run)?;
     run.cas(&request.expected_resource_version)?;
-    let task: Option<String> =
+    require(
         db.c.query_row(
-            "SELECT task FROM active_workflows WHERE run=?1 AND stopping=0",
+            "SELECT EXISTS(SELECT 1 FROM active_workflows WHERE run=?1 AND stopping=0)",
             [&run.id],
-            |row| row.get(0),
-        )
-        .optional()?
-        .ok_or_else(|| err("Conflict", "workflow is already stopping or settled"))?;
-    Ok(run_view(&stop(db, &run, task.as_deref(), "Cancelled")?))
+            |row| row.get::<_, bool>(0),
+        )?,
+        "Conflict",
+        "workflow is already stopping or settled",
+    )?;
+    Ok(run_view(&stop(db, &run, run.body.clone(), "Cancelled")?))
 }
 
 pub fn resume(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
@@ -71,18 +75,18 @@ pub fn resume(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         })?;
     step["lifecycle"] = json!("Pending");
     step["reason"] = Value::Null;
-    body["lifecycle"] = json!("Ready");
-    body["reason"] = Value::Null;
     require(
-        db.c.execute(
-            "UPDATE active_workflows SET result_blocked=0,ready_ms=?2
-             WHERE run=?1 AND task IS NULL AND stopping=0 AND result_blocked=1",
-            params![run.id, Utc::now().timestamp_millis()],
-        )? == 1,
+        db.c.query_row("SELECT EXISTS(SELECT 1 FROM active_workflows WHERE run=?1 AND stopping=0 AND result_blocked=1)",
+                       [&run.id], |row| row.get::<_,bool>(0))?,
         "RecoveryRequired",
         "workflow result wait has no active entry",
     )?;
-    Ok(run_view(&db.status(&run, body)?))
+    Ok(run_view(&publish(
+        db,
+        &run,
+        body,
+        Utc::now().timestamp_millis(),
+    )?))
 }
 
 pub fn tick(store: &mut Store) -> Result<()> {
@@ -119,23 +123,12 @@ pub fn tick(store: &mut Store) -> Result<()> {
                 if artifact::is_content_unavailable(&error.0.code) {
                     step["lifecycle"] = json!("Blocked");
                     step["reason"] = json!(error.0.code);
-                    body["lifecycle"] = json!("Blocked");
-                    body["reason"] = json!(error.0.code);
-                    require(
-                        db.c.execute(
-                            "UPDATE active_workflows SET result_blocked=1
-                             WHERE run=?1 AND task IS NULL AND stopping=0 AND result_blocked=0",
-                            [&run.id],
-                        )? == 1,
-                        "RecoveryRequired",
-                        "workflow result wait lacks its ready entry",
-                    )?;
-                    db.status(&run, body)?;
+                    publish(db, &run, body, Utc::now().timestamp_millis())?;
                     return Ok(());
                 }
                 step["lifecycle"] = json!("Failed");
                 step["reason"] = json!(error.0.code);
-                finish(db, &run, body, "Failed", Some(&error.0.code))?;
+                fail(db, &run, body, &error.0.code)?;
                 Ok(())
             })
         }
@@ -152,20 +145,24 @@ fn advance(db: &Db<'_>, rejection: &mut Option<Rejection>) -> Result<()> {
     }
     let clock = policy::deadline::Clock::sample()?;
     let stamp = Utc::now().timestamp_millis();
+    let enabled = node::enabled(db)?;
     let work =
         db.c.query_row(
             "WITH candidates AS (
                  SELECT w.*, (w.stopping=0 AND (w.deadline_ms<=?1 OR coalesce(
-                     elapsed.time_ns!=?3 OR elapsed.deadline_boot_ms<=?4,0))) AS expired
+                     elapsed.time_ns!=?3 OR elapsed.deadline_boot_ms<=?4,0))) AS expired,
+                     (SELECT a.task FROM active_workflow_tasks a WHERE a.run=w.run
+                      AND a.task_rev != coalesce((SELECT rev FROM versions WHERE id=a.task
+                          ORDER BY rev DESC LIMIT 1),-1) ORDER BY a.step LIMIT 1) AS changed_task
                  FROM active_workflows w LEFT JOIN authorization_deadlines elapsed
                        ON elapsed.resource=w.run AND elapsed.boot_id=?2
              )
-             SELECT w.run,w.task,w.expired FROM candidates w
-             WHERE w.expired OR (w.result_blocked=0 AND
-                 (w.task IS NULL OR w.task_rev != COALESCE(
-                  (SELECT rev FROM versions WHERE id=w.task ORDER BY rev DESC LIMIT 1),-1)))
-             ORDER BY w.expired DESC, (w.task IS NOT NULL) DESC, w.ready_ms,w.run LIMIT 1",
-            params![stamp, clock.boot.boot_id, clock.time_ns, clock.boot.millis],
+             SELECT w.run,w.changed_task,w.expired FROM candidates w
+             WHERE w.expired OR w.changed_task IS NOT NULL OR
+                   (?5 AND w.stopping=0 AND w.result_blocked=0 AND w.ready_ms IS NOT NULL
+                    AND (SELECT count(*) FROM active_workflow_tasks a WHERE a.run=w.run)<w.max_parallel_steps)
+             ORDER BY w.expired DESC,(w.changed_task IS NOT NULL) DESC,w.ready_ms,w.run LIMIT 1",
+            params![stamp, clock.boot.boot_id, clock.time_ns, clock.boot.millis, enabled],
             |row| {
                 Ok(Work {
                     run: row.get(0)?,
@@ -178,11 +175,11 @@ fn advance(db: &Db<'_>, rejection: &mut Option<Rejection>) -> Result<()> {
     let Some(work) = work else { return Ok(()) };
     let run = db.of(&work.run, RUN)?;
     if work.expired {
-        stop(db, &run, work.task.as_deref(), "DeadlineExceeded")?;
+        stop(db, &run, run.body.clone(), "DeadlineExceeded")?;
     } else if let Some(task) = work.task {
         let task = db.of(&task, "Task")?;
         observe(db, &run, run.body.clone(), &task)?;
-    } else if node::enabled(db)? {
+    } else {
         dispatch(db, &run, stamp, rejection)?;
     }
     Ok(())
@@ -202,7 +199,10 @@ fn dispatch(
     rejection: &mut Option<Rejection>,
 ) -> Result<()> {
     require(
-        run.body["lifecycle"] == "Ready" && run.body["active_step"].is_null(),
+        matches!(
+            run.body["lifecycle"].as_str(),
+            Some("Ready" | "Running" | "WaitingApproval")
+        ) && run.body["stop_reason"].is_null(),
         "RecoveryRequired",
         "workflow index disagrees with dispatch state",
     )?;
@@ -247,22 +247,26 @@ fn dispatch(
         }
         return persist_selection(db, run, body, ready_ms);
     }
-    let step = steps
-        .iter()
-        .find(|step| {
-            has_status(&step.id, "Pending")
-                && step.after.iter().all(|dep| has_status(dep, "Succeeded"))
-                && step
-                    .after_selected
-                    .iter()
-                    .all(|dep| has_status(dep, "Succeeded") || has_status(dep, "Skipped"))
-        })
-        .ok_or_else(|| {
-            err(
-                "RecoveryRequired",
-                "active workflow has no ready dependencies",
-            )
-        })?;
+    let step = steps.iter().find(|step| {
+        has_status(&step.id, "Pending")
+            && step.after.iter().all(|dep| has_status(dep, "Succeeded"))
+            && step
+                .after_selected
+                .iter()
+                .all(|dep| has_status(dep, "Succeeded") || has_status(dep, "Skipped"))
+    });
+    let Some(step) = step else {
+        require(
+            has_children(db, run)?,
+            "RecoveryRequired",
+            "active workflow has no ready dependencies",
+        )?;
+        db.c.execute(
+            "UPDATE active_workflows SET ready_ms=NULL WHERE run=?1",
+            [&run.id],
+        )?;
+        return Ok(());
+    };
     *rejection = Some(Rejection {
         run: run.id.clone(),
         version: run.version(),
@@ -331,10 +335,12 @@ fn dispatch(
             .collect();
         projection["joined_predecessors"] = json!(selected);
     }
-    body["active_step"] = json!(step.id);
     require(
-        db.c.execute("UPDATE active_workflows SET task=?2,task_rev=?3,ready_ms=?4 WHERE run=?1 AND task IS NULL AND stopping=0",
-                     params![run.id, task.id, task.rev, ready_ms])? == 1,
+        db.c.execute("INSERT INTO active_workflow_tasks(run,step,task,task_rev)
+                      SELECT w.run,?2,?3,?4 FROM active_workflows w WHERE w.run=?1 AND w.stopping=0
+                        AND w.ready_ms IS NOT NULL AND w.result_blocked=0
+                        AND (SELECT count(*) FROM active_workflow_tasks a WHERE a.run=w.run)<w.max_parallel_steps",
+                     params![run.id, step.id, task.id, task.rev])? == 1,
         "RecoveryRequired",
         "workflow admission did not replace a ready entry",
     )?;
@@ -351,29 +357,41 @@ fn all_steps_complete(body: &Value) -> bool {
 }
 
 fn persist_selection(db: &Db<'_>, run: &Doc, body: Value, ready_ms: i64) -> Result<()> {
-    if all_steps_complete(&body) {
-        finish(db, run, body, "Succeeded", None)?;
-    } else {
-        require(
-            db.c.execute(
-                "UPDATE active_workflows SET ready_ms=?2 WHERE run=?1 AND task IS NULL AND stopping=0",
-                params![run.id, ready_ms],
-            )? == 1,
-            "RecoveryRequired",
-            "workflow selection lacks a ready entry",
-        )?;
-        db.status(run, body)?;
-    }
+    publish(db, run, body, ready_ms)?;
     Ok(())
 }
 
-fn observe(db: &Db<'_>, run: &Doc, mut body: Value, task: &Doc) -> Result<Doc> {
-    let step_id = body["active_step"]
-        .as_str()
-        .ok_or_else(|| err("RecoveryRequired", "workflow active step missing"))?
-        .to_owned();
-    let stopping = body["stop_reason"].as_str().map(str::to_owned);
-    let step = progress(&mut body, &step_id)?;
+fn active_tasks(db: &Db<'_>, run: &Doc) -> Result<Vec<(String, String)>> {
+    Ok(db
+        .c
+        .prepare("SELECT step,task FROM active_workflow_tasks WHERE run=?1 ORDER BY step")?
+        .query_map([&run.id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+fn has_children(db: &Db<'_>, run: &Doc) -> Result<bool> {
+    Ok(db.c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM active_workflow_tasks WHERE run=?1)",
+        [&run.id],
+        |row| row.get(0),
+    )?)
+}
+
+fn record_task(
+    db: &Db<'_>,
+    run: &Doc,
+    body: &mut Value,
+    task: &Doc,
+) -> Result<Option<&'static str>> {
+    let step_id: String =
+        db.c.query_row(
+            "SELECT step FROM active_workflow_tasks WHERE run=?1 AND task=?2",
+            params![run.id, task.id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| err("RecoveryRequired", "workflow task has no active dispatch"))?;
+    let step = progress(body, &step_id)?;
     require(
         task.owner == run.owner
             && task.body["origin_ref"]["origin_type"] == "WorkflowRun"
@@ -401,56 +419,48 @@ fn observe(db: &Db<'_>, run: &Doc, mut body: Value, task: &Doc) -> Result<Doc> {
         "Paused" => "Running",
         phase => phase,
     });
-    if knowledge != "Unknown" && matches!(phase, "Succeeded" | "Failed" | "Cancelled") {
-        body["active_step"] = Value::Null;
-        if let Some(reason) = &stopping {
-            return finish(db, run, body, stop_phase(reason), Some(reason));
-        }
-        if phase != "Succeeded" {
-            let reason = if phase == "Failed" {
-                "StepFailed"
-            } else {
-                "StepCancelled"
-            };
-            return finish(db, run, body, "Failed", Some(reason));
-        }
-        if all_steps_complete(&body) {
-            return finish(db, run, body, "Succeeded", None);
-        }
-        require(
-            db.c.execute("UPDATE active_workflows SET task=NULL,task_rev=0,ready_ms=?3 WHERE run=?1 AND task=?2",
-                         params![run.id, task.id, Utc::now().timestamp_millis()])? == 1,
-            "RecoveryRequired",
-            "workflow completion lacks the original dispatch",
-        )?;
-        body["lifecycle"] = json!("Ready");
-        body["outcome_knowledge"] = json!("InFlight");
-        body["reason"] = Value::Null;
+    if knowledge == "Unknown" {
+        step["reason"] = json!("OutcomeUnknown");
+    } else if phase == "Paused" {
+        step["reason"] = json!("TaskPaused");
     } else {
-        let (phase, reason, outcome): (&str, Option<&str>, &str) = if knowledge == "Unknown" {
-            ("Blocked", Some("OutcomeUnknown"), "Unknown")
-        } else if phase == "Paused" {
-            ("Blocked", Some("TaskPaused"), "InFlight")
-        } else if stopping.is_some() {
-            ("Cancelling", stopping.as_deref(), "InFlight")
-        } else if phase == "WaitingApproval" {
-            ("WaitingApproval", None, "InFlight")
-        } else {
-            ("Running", None, "InFlight")
-        };
-        body["lifecycle"] = json!(phase);
-        body["reason"] = json!(reason);
-        body["outcome_knowledge"] = json!(outcome);
-        require(
-            db.c.execute(
-                "UPDATE active_workflows SET task_rev=?3,stopping=?4 WHERE run=?1 AND task=?2",
-                params![run.id, task.id, task.rev, stopping.is_some()],
-            )? == 1,
-            "RecoveryRequired",
-            "workflow observation lacks the original dispatch",
-        )?;
+        step.as_object_mut()
+            .expect("workflow step projection")
+            .remove("reason");
     }
-    db.status(run, body)
+
+    let terminal = knowledge != "Unknown" && matches!(phase, "Succeeded" | "Failed" | "Cancelled");
+    let affected = if terminal {
+        db.c.execute(
+            "DELETE FROM active_workflow_tasks WHERE run=?1 AND task=?2",
+            params![run.id, task.id],
+        )?
+    } else {
+        db.c.execute(
+            "UPDATE active_workflow_tasks SET task_rev=?3 WHERE run=?1 AND task=?2",
+            params![run.id, task.id, task.rev],
+        )?
+    };
+    require(
+        affected == 1,
+        "RecoveryRequired",
+        "workflow observation lacks the original dispatch",
+    )?;
+    Ok(match (terminal, phase) {
+        (true, "Failed") => Some("StepFailed"),
+        (true, "Cancelled") => Some("StepCancelled"),
+        _ => None,
+    })
+}
+
+fn observe(db: &Db<'_>, run: &Doc, mut body: Value, task: &Doc) -> Result<Doc> {
+    let failure = record_task(db, run, &mut body, task)?;
+    if let Some(reason) = failure
+        && body["stop_reason"].is_null()
+    {
+        return fail(db, run, body, reason);
+    }
+    publish(db, run, body, Utc::now().timestamp_millis())
 }
 
 fn stop_phase(reason: &str) -> &'static str {
@@ -461,15 +471,94 @@ fn stop_phase(reason: &str) -> &'static str {
     }
 }
 
-fn stop(db: &Db<'_>, run: &Doc, task: Option<&str>, reason: &str) -> Result<Doc> {
-    let mut body = run.body.clone();
-    body["stop_reason"] = json!(reason);
-    if let Some(id) = task {
-        let task = broker::cancel_task(db, &db.of(id, "Task")?)?;
-        observe(db, run, body, &task)
+fn fail(db: &Db<'_>, run: &Doc, body: Value, reason: &str) -> Result<Doc> {
+    if has_children(db, run)? {
+        stop(db, run, body, reason)
     } else {
-        finish(db, run, body, stop_phase(reason), Some(reason))
+        finish(db, run, body, "Failed", Some(reason))
     }
+}
+
+fn stop(db: &Db<'_>, run: &Doc, mut body: Value, reason: &str) -> Result<Doc> {
+    body["stop_reason"] = json!(reason);
+    for (_, id) in active_tasks(db, run)? {
+        let task = broker::cancel_task(db, &db.of(&id, "Task")?)?;
+        record_task(db, run, &mut body, &task)?;
+    }
+    publish(db, run, body, Utc::now().timestamp_millis())
+}
+
+fn publish(db: &Db<'_>, run: &Doc, mut body: Value, stamp: i64) -> Result<Doc> {
+    let active = active_tasks(db, run)?;
+    let stopping = body["stop_reason"].as_str().map(str::to_owned);
+    if active.is_empty() {
+        if let Some(reason) = stopping.as_deref() {
+            return finish(db, run, body, stop_phase(reason), Some(reason));
+        }
+        if all_steps_complete(&body) {
+            return finish(db, run, body, "Succeeded", None);
+        }
+    }
+    let steps = body["steps"]
+        .as_array()
+        .ok_or_else(|| err("RecoveryRequired", "workflow step projections missing"))?;
+    let unknown = steps
+        .iter()
+        .any(|step| step["outcome_knowledge"] == "Unknown");
+    let paused = steps.iter().any(|step| step["reason"] == "TaskPaused");
+    let dependency = steps
+        .iter()
+        .filter(|step| step["lifecycle"] == "Blocked")
+        .filter_map(|step| step["reason"].as_str())
+        .find(|reason| artifact::is_content_unavailable(reason));
+    let waiting_approval = !active.is_empty()
+        && active.iter().all(|(id, _)| {
+            steps
+                .iter()
+                .any(|step| step["step_id"] == *id && step["lifecycle"] == "WaitingApproval")
+        });
+    let result_blocked = dependency.is_some();
+    let (phase, reason, can_admit) = if unknown {
+        ("Blocked", Some("OutcomeUnknown"), false)
+    } else if paused {
+        ("Blocked", Some("TaskPaused"), false)
+    } else if let Some(reason) = stopping.as_deref() {
+        ("Cancelling", Some(reason), false)
+    } else if let Some(reason) = dependency {
+        ("Blocked", Some(reason), false)
+    } else if active.is_empty() {
+        ("Ready", None, true)
+    } else if waiting_approval {
+        ("WaitingApproval", None, true)
+    } else {
+        ("Running", None, true)
+    };
+    let reason = reason.map(str::to_owned);
+    body["lifecycle"] = json!(phase);
+    body["reason"] = json!(reason);
+    body["active_step"] = json!(active.first().map(|(step, _)| step));
+    if run.spec.get("max_parallel_steps").is_some() {
+        body["active_steps"] = json!(active.iter().map(|(step, _)| step).collect::<Vec<_>>());
+    }
+    if unknown {
+        body["outcome_knowledge"] = json!("Unknown");
+    } else if !active.is_empty() || body["outcome_knowledge"] != "NotStarted" {
+        body["outcome_knowledge"] = json!("InFlight");
+    }
+    require(
+        db.c.execute(
+            "UPDATE active_workflows SET ready_ms=?2,stopping=?3,result_blocked=?4 WHERE run=?1",
+            params![
+                run.id,
+                can_admit.then_some(stamp),
+                stopping.is_some(),
+                result_blocked
+            ],
+        )? == 1,
+        "RecoveryRequired",
+        "workflow state has no active entry",
+    )?;
+    db.status(run, body)
 }
 
 fn finish(
@@ -480,7 +569,11 @@ fn finish(
     reason: Option<&str>,
 ) -> Result<Doc> {
     require(
-        db.c.execute("DELETE FROM active_workflows WHERE run=?1", [&run.id])? == 1,
+        db.c.execute(
+            "DELETE FROM active_workflows WHERE run=?1 AND NOT EXISTS(
+            SELECT 1 FROM active_workflow_tasks WHERE run=?1)",
+            [&run.id],
+        )? == 1,
         "RecoveryRequired",
         "workflow closed without an active entry",
     )?;
@@ -497,6 +590,9 @@ fn finish(
     body["lifecycle"] = json!(phase);
     body["reason"] = json!(reason);
     body["active_step"] = Value::Null;
+    if run.spec.get("max_parallel_steps").is_some() {
+        body["active_steps"] = json!([]);
+    }
     if body["outcome_knowledge"] != "NotStarted" || phase == "Succeeded" {
         body["outcome_knowledge"] = json!("Known");
     }

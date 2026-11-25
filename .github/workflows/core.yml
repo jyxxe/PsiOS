@@ -351,6 +351,13 @@ jobs:
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format34" "$RUNNER_TEMP/psios-compatibility-target"
           export XDG_RUNTIME_DIR="/run/user/$(id -u)"
           python3 -B tests/service_restart.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
+      - name: Publish native service observations and trigger a durable Task
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format35"
+          git archive 22a814b6d96dd56a88201774c45cea208feda865 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format35"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format35" "$RUNNER_TEMP/psios-compatibility-target"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          python3 -B tests/service_state.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Exercise a real OCI engine and persistent volume
         run: PSIOS_TEST_OCI_KERNEL_LIMITS=1 python3 tests/oci.py
 

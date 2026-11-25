@@ -269,7 +269,9 @@ Core 核对原会话、模型租约及决策摘要，在一个事务中提交原
 
 `application.capture_oci_image` 接受 `image_id` 和 `expected_engine_id`。本机所有者使用显式限定在当前 Node 的任务委托和 `artifact.upload` 授权，提交后再批准包含镜像和引擎身份的计划。适配器仅从配置的本机 Docker Engine 以完整镜像配置摘要导出有层的 Linux amd64 镜像，前后核对引擎身份和层摘要。归档大小最多 8 MiB，并计入现有 Node 与所有者的制品额度。
 
-导出前按归档上限检查状态盘的块和 inode 余量。Docker 的输出分块写入状态目录的私有匿名文件，同时计算原始摘要。Core 按 tar 成员的偏移和长度读取该文件，再分块提交制品字节、`LocalOciImageCapture` 来源、`OciImageCapture` 凭据和 Task 回执。它们仍在同一个事务中提交。归档可用独立授权的 `Artifact.ReadChunk` 分块读取并核对完整 SHA-256，回收需要独立的 `artifact.withdraw`。取消、进程中断或发布失败会释放暂存文件，未完成的制品不会发布。[真实 Docker 导出和独立重载验收](../tests/oci_capture.py)
+导出前按归档上限检查状态盘的块和 inode 余量。Docker 的输出分块写入状态盘的私有暂存目录，同时计算原始摘要。Core 复核 tar 成员，再把已同步的归档发布为 `ManagedOciArchiveV1`，将其制品元数据、`LocalOciImageCapture` 来源、`OciImageCapture` 凭据和 Task 回执记录在同一见证事务。回执提交后才能读取归档。`Artifact.ReadChunk` 仍受独立授权并按固定分块核验字节。`artifact.withdraw` 提交后由清理器回收文件。事务回滚可清理当前未引用的文件，见证状态未确定时留待启动按已确认的数据库回收。[真实 Docker 导出和独立重载验收](../tests/oci_capture.py)
+
+格式 66 新捕获的归档保存在状态目录 `oci-archives`。单份上限仍为 8 MiB。现有 SQLite 制品沿用原位置和引用。停机 `psiosd verify` 可用原状态盘上的只读归档核对数据库副本，离线迁移演练只修改暂存数据库。如果检查点包含这些活跃归档，`psiosd checkpoint` 写入 `psios.authority.checkpoint.v2` 清单及可独立读取的归档副本。`verify-checkpoint` 核对数据库选择的集合、字节数、摘要和实际目录成员。`checkpoint-artifact` 可从独立检查点按固定引用提取原始归档。[检查点与故障验收](../tests/oci_capture.py)
 
 捕获会在持久提交前检查原始 tar，并记录 `restore_compatibility`。`Verified` 对应 `DockerClassicTaglessSaveV1`，要求单个无标签镜像，精确匹配配置摘要和有序未压缩层 DiffID。外层 tar 支持两种读取器能一致解释的 V7、USTAR 和 GNU 普通文件或目录。库间解释歧义或标签会阻止发布。存在 OCI 索引时，两个视图的配置和层必须一致，且索引只直接指向一个镜像。镜像 ID 使用清单摘要、层使用压缩格式或布局不受支持时，原始捕获可保留并报告 `Unsupported`。升级到数据库格式 63 后，旧捕获标为 `Unverified`，其历史回执依旧省略此字段。证明覆盖归档结构及镜像身份，实际恢复还会检查层元数据及目的引擎。[归档格式测试](../crates/psios-core/src/apps/restore_archive/tests.rs)
 

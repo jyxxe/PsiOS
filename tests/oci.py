@@ -46,6 +46,23 @@ def assert_retained(node, source, archive, reason):
 
 @contextmanager
 def corrupted_archive(node, archive):
+    payload = node.state / "oci-archives" / archive["resource_id"] / "payload"
+    if payload.is_file():
+        original = payload.read_bytes()
+
+        def write(data):
+            payload.chmod(0o600)
+            try:
+                payload.write_bytes(data)
+            finally:
+                payload.chmod(0o400)
+
+        write(bytes(len(original)))
+        try:
+            yield
+        finally:
+            write(original)
+        return
     identity = (archive["resource_id"],)
     with sqlite3.connect(node.state / "state.db") as db:
         original, = db.execute("SELECT payload FROM artifact_chunks WHERE artifact_id=? AND chunk_index=0", identity).fetchone()

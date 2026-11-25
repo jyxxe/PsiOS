@@ -2,6 +2,7 @@
 use super::*;
 use rusqlite::OptionalExtension;
 use std::collections::HashMap;
+use std::path::Path;
 
 fn existing(conn: &Connection, identity: &Value) -> Result<Doc> {
     let id = identity.as_str().ok_or_else(|| {
@@ -257,6 +258,7 @@ fn queue_phase(conn: &Connection, task: &Doc, op: &Doc) -> Result<String> {
 
 fn normalized_digest<'a>(
     conn: &Connection,
+    state: &Path,
     archive: &Doc,
     binding: &Binding,
     cache: &'a mut HashMap<String, Option<String>>,
@@ -267,6 +269,7 @@ fn normalized_digest<'a>(
         Entry::Vacant(entry) => {
             let digest = match artifact::open_verified_raw(
                 conn,
+                Some(state),
                 archive,
                 artifact::ingress::MAX_BYTES as usize,
             ) {
@@ -284,7 +287,7 @@ fn normalized_digest<'a>(
     Ok(computed.as_deref())
 }
 
-pub(crate) fn verify(conn: &Connection) -> Result<()> {
+pub(crate) fn verify(conn: &Connection, state: &Path) -> Result<()> {
     let mut intents = conn.prepare("SELECT * FROM current WHERE kind=?1")?;
     let mut locked = 0i64;
     let mut checkpoints = 0i64;
@@ -327,7 +330,8 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
         }
         if let Some(checkpoint) = checkpoint {
             let recorded = recorded(conn, &op, &document, checkpoint)?;
-            let digest = normalized_digest(conn, &archive.artifact, &binding, &mut normalized)?;
+            let digest =
+                normalized_digest(conn, state, &archive.artifact, &binding, &mut normalized)?;
             require(
                 digest.is_some_and(|got| {
                     recorded.checkpoint.body["normalized_archive_digest"] == got

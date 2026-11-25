@@ -20,8 +20,13 @@ pub(super) struct Archive {
 }
 
 impl Archive {
-    pub fn check_content(&self, conn: &Connection) -> Result<()> {
-        artifact::verify_raw_bytes(conn, &self.artifact, artifact::ingress::MAX_BYTES as usize)
+    pub fn check_content(&self, db: &Db<'_>) -> Result<()> {
+        artifact::verify_raw_bytes(
+            db.c,
+            &db.cfg.state_dir,
+            &self.artifact,
+            artifact::ingress::MAX_BYTES as usize,
+        )
     }
 
     pub fn check_image(&self, image: &Value) -> Result<()> {

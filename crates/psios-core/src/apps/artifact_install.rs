@@ -167,7 +167,7 @@ pub(crate) fn add_source_audience(
         let artifact = db.resolve(&json!(reference))?;
         policy::owned(actor, &artifact)?;
         let archive = release_archive::read(db.c, artifact, &descriptor.install.image_id)?;
-        archive.check_content(db.c)?;
+        archive.check_content(db)?;
         audience.push(archive.artifact.reference());
     }
     Ok(())
@@ -369,7 +369,7 @@ pub(super) fn check_release_source(db: &Db<'_>, release: &Doc) -> Result<()> {
         )?;
     }
     if let Some(archive) = binding {
-        archive.check_content(db.c)?;
+        archive.check_content(db)?;
     }
     Ok(())
 }

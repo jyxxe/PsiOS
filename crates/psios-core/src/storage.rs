@@ -5,6 +5,7 @@ pub(crate) mod file_integrity;
 pub(crate) mod file_move;
 pub mod files;
 mod intake;
+pub(crate) mod oci_archive;
 pub(crate) mod publication;
 pub(crate) mod read_holds;
 mod restore_proof;

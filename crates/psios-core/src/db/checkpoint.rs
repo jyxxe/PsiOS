@@ -3,7 +3,7 @@ use crate::{
     Config, Result, artifact,
     config::{new_file, private_dir},
     decode, err, now, require,
-    storage::copy_hash,
+    storage::{copy_hash, oci_archive::ROOT as OCI_ARCHIVE_ROOT},
 };
 use psios_api::{VERSION, canonical, id, parse, sha256};
 use rusqlite::Connection;
@@ -19,6 +19,7 @@ use std::{
 };
 
 const FORMAT: &str = "psios.authority.checkpoint.v1";
+const FILE_FORMAT: &str = "psios.authority.checkpoint.v2";
 const MANIFEST: &str = "manifest.json";
 const MAX_MANIFEST: u64 = 64 * 1024;
 
@@ -33,6 +34,8 @@ struct Checkpoint {
     witness_at_capture: String,
     owner_rotation_at_capture: String,
     members: BTreeMap<String, Member>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    oci_archives: BTreeMap<String, artifact::files::Member>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -90,12 +93,16 @@ fn copy_members(
         "PreconditionFailed",
         "checkpoint manifest contains unsupported database entries",
     )?;
-    let mut expected = checkpoint.members.len() + 1;
+    let mut expected =
+        checkpoint.members.len() + 1 + usize::from(!checkpoint.oci_archives.is_empty());
     for item in fs::read_dir(source)? {
         let name = item?.file_name();
         require(
-            name.to_str()
-                .is_some_and(|name| name == MANIFEST || checkpoint.members.contains_key(name)),
+            name.to_str().is_some_and(|name| {
+                name == MANIFEST
+                    || checkpoint.members.contains_key(name)
+                    || (name == OCI_ARCHIVE_ROOT && !checkpoint.oci_archives.is_empty())
+            }),
             "PreconditionFailed",
             "checkpoint contains an unexpected entry",
         )?;
@@ -149,7 +156,7 @@ fn with_checkpoint<T>(
     expected_digest: &str,
     scratch: &Path,
     max_bytes: u64,
-    action: impl FnOnce(&Connection, &Checkpoint) -> Result<T>,
+    action: impl FnOnce(&Connection, &Checkpoint, &Path) -> Result<T>,
 ) -> Result<T> {
     require(
         fs::symlink_metadata(directory)?.is_dir(),
@@ -168,7 +175,9 @@ fn with_checkpoint<T>(
     )?;
     let checkpoint: Checkpoint = decode(&parse(&bytes)?)?;
     require(
-        checkpoint.format == FORMAT && checkpoint.schema_version == VERSION,
+        checkpoint.schema_version == VERSION
+            && (checkpoint.format == FORMAT && checkpoint.oci_archives.is_empty()
+                || checkpoint.format == FILE_FORMAT && !checkpoint.oci_archives.is_empty()),
         "SchemaVersionUnsupported",
         "unsupported authority checkpoint format",
     )?;
@@ -186,7 +195,13 @@ fn with_checkpoint<T>(
         "RecoveryRequired",
         "checkpoint identity differs from its database",
     )?;
-    action(&copy, &checkpoint)
+    require(
+        artifact::files::selected(&copy, identity.database_format)? == checkpoint.oci_archives,
+        "RecoveryRequired",
+        "checkpoint managed archive set disagrees with its database",
+    )?;
+    artifact::files::check_checkpoint_payloads(&source, &checkpoint.oci_archives)?;
+    action(&copy, &checkpoint, &source)
 }
 
 impl Store {
@@ -210,7 +225,9 @@ impl Store {
         verify::copy_database(&cfg.state_dir, tmp.path(), max_bytes)?;
         let (copy, identity) = verify::checked_copy(tmp.path())?;
         let (witness, rotation) = verify::verified_witness(&copy, cfg)?;
-        verify::check_artifacts(&copy, &identity)?;
+        verify::check_artifacts(&copy, &identity, &cfg.state_dir)?;
+        let oci_archives = artifact::files::selected(&copy, identity.database_format)?;
+        artifact::files::copy_checkpoint_payloads(&cfg.state_dir, tmp.path(), &oci_archives)?;
         copy.close().map_err(|(_, error)| error)?;
         // The shared-memory index is recreated from the archived database and WAL.
         match fs::remove_file(tmp.path().join("state.db-shm")) {
@@ -219,7 +236,12 @@ impl Store {
             Err(e) => return Err(e.into()),
         }
         let checkpoint = Checkpoint {
-            format: FORMAT.into(),
+            format: if oci_archives.is_empty() {
+                FORMAT
+            } else {
+                FILE_FORMAT
+            }
+            .into(),
             schema_version: VERSION.into(),
             checkpoint_id: id("authority-checkpoint"),
             captured_at: now(),
@@ -227,9 +249,16 @@ impl Store {
             witness_at_capture: witness.into(),
             owner_rotation_at_capture: rotation.into(),
             members: capture_members(tmp.path(), max_bytes)?,
+            oci_archives,
         };
         let raw = canonical(&json!(checkpoint));
+        require(
+            raw.len() as u64 <= MAX_MANIFEST,
+            "QuotaExceeded",
+            "checkpoint manifest exceeds byte limit",
+        )?;
         new_file(&tmp.path().join(MANIFEST), &raw)?;
+        File::open(tmp.path())?.sync_all()?;
         renameat_with(
             &root,
             tmp.path().file_name().unwrap(),
@@ -260,10 +289,16 @@ impl Store {
         scratch: &Path,
         max_bytes: u64,
     ) -> Result<Value> {
-        with_checkpoint(directory, digest, scratch, max_bytes, |copy, checkpoint| {
-            verify::check_artifacts(copy, &checkpoint.identity)?;
-            Ok(report(checkpoint, digest))
-        })
+        with_checkpoint(
+            directory,
+            digest,
+            scratch,
+            max_bytes,
+            |copy, checkpoint, source| {
+                verify::check_artifacts(copy, &checkpoint.identity, source)?;
+                Ok(report(checkpoint, digest))
+            },
+        )
     }
 
     pub fn checkpoint_artifact(
@@ -274,14 +309,32 @@ impl Store {
         reference: &Value,
         max_artifact_bytes: usize,
     ) -> Result<Vec<u8>> {
-        with_checkpoint(directory, digest, scratch, max_copy_bytes, |copy, _| {
-            let artifact = resolve(copy, reference)?;
-            require(
-                artifact.kind == "Artifact",
-                "InvalidArgument",
-                "expected a result artifact reference",
-            )?;
-            artifact::checkpoint_bytes(copy, &artifact, max_artifact_bytes)
-        })
+        with_checkpoint(
+            directory,
+            digest,
+            scratch,
+            max_copy_bytes,
+            |copy, _, source| {
+                let artifact = resolve(copy, reference)?;
+                require(
+                    artifact.kind == "Artifact",
+                    "InvalidArgument",
+                    "expected a result artifact reference",
+                )?;
+                if artifact::files::managed(&artifact) {
+                    let mut bytes = Vec::new();
+                    artifact::copy_verified_raw(
+                        copy,
+                        Some(source),
+                        &artifact,
+                        max_artifact_bytes,
+                        &mut bytes,
+                    )?;
+                    Ok(bytes)
+                } else {
+                    artifact::checkpoint_bytes(copy, &artifact, max_artifact_bytes)
+                }
+            },
+        )
     }
 }

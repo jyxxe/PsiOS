@@ -4,6 +4,7 @@ use crate::{
     Empty, Error, Result, after,
     db::{Db, Doc, find},
     decode, err, label, now, policy, require,
+    storage::oci_archive::Sealed,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use psios_api::{ApiError, canonical, id, sha256};
@@ -20,7 +21,7 @@ pub(crate) const READ: &str = "artifact.read";
 pub(crate) const WITHDRAW: &str = "artifact.withdraw";
 pub(crate) const MAX_BYTES: u32 = 8 * 1024 * 1024;
 const OWNER_BYTES: u32 = 32 * 1024 * 1024;
-const TOTAL_BYTES: u32 = 128 * 1024 * 1024;
+pub(super) const TOTAL_BYTES: u32 = 128 * 1024 * 1024;
 const OWNER_STAGES: u32 = 4;
 const TOTAL_STAGES: u32 = 32;
 const OWNER_REQUESTS: u32 = 4096;
@@ -374,21 +375,7 @@ pub(crate) fn publish_generated_reader(
         "QuotaExceeded",
         "generated content is outside the artifact ingress profile",
     )?;
-    let staged = stage(
-        db,
-        actor,
-        &json!({
-            "key":id("generated-output"),"size_bytes":size,"digest":digest,
-            "declared_media_type":media,"ttl_seconds":120,
-        }),
-    )?;
-    let stage_id = staged["stage_id"].as_str().ok_or_else(|| {
-        err(
-            "RecoveryRequired",
-            "generated artifact stage has no identity",
-        )
-    })?;
-    let mut stage = owned(db, actor, stage_id)?;
+    let mut stage = generated(db, actor, size, digest, media)?;
     let mut buffer = vec![0; (size as usize).min(CHUNK_BYTES)];
     while stage.received < size {
         let count = ((size - stage.received) as usize).min(buffer.len());
@@ -401,11 +388,63 @@ pub(crate) fn publish_generated_reader(
         "PreconditionFailed",
         "generated artifact exceeds its declared size",
     )?;
-    publish_stage(db, actor, stage_id, Some(provenance))
+    publish_stage(db, actor, &stage.id, Some(provenance))
+}
+
+fn generated(db: &Db<'_>, actor: &str, size: u32, digest: &str, media: &str) -> Result<Stage> {
+    let publication = stage(
+        db,
+        actor,
+        &json!({
+            "key":id("generated-output"),"size_bytes":size,"digest":digest,
+            "declared_media_type":media,"ttl_seconds":120,
+        }),
+    )?;
+    let id = publication["stage_id"].as_str().ok_or_else(|| {
+        err(
+            "RecoveryRequired",
+            "generated artifact stage has no identity",
+        )
+    })?;
+    owned(db, actor, id)
+}
+
+pub(crate) fn publish_managed_oci(
+    db: &Db<'_>,
+    actor: &str,
+    artifact_id: &str,
+    archive: Sealed,
+    media: &str,
+    source: Value,
+) -> Result<Value> {
+    require(
+        source["kind"] == "LocalOciImageCapture",
+        "RecoveryRequired",
+        "managed payload has wrong source",
+    )?;
+    super::files::check_capacity(db)?;
+    let stage = generated(db, actor, archive.size(), archive.digest(), media)?;
+    require_open(db, &stage)?;
+    let artifact = create_artifact(
+        db,
+        actor,
+        &stage,
+        artifact_id,
+        super::files::LAYOUT,
+        archive.chunks(),
+        source,
+    )?;
+    archive.publish(&artifact.id)?;
+    let value = finish_published(db, actor, stage, &artifact)?;
+    db.c.execute(
+        "INSERT INTO oci_archive_blobs(artifact) VALUES(?1)",
+        [&artifact.id],
+    )?;
+    Ok(value)
 }
 
 fn publish_stage(db: &Db<'_>, actor: &str, stage_id: &str, source: Option<Value>) -> Result<Value> {
-    let mut stage = owned(db, actor, stage_id)?;
+    let stage = owned(db, actor, stage_id)?;
     if stage.artifact.is_some() {
         require(
             source.is_none(),
@@ -434,25 +473,15 @@ fn publish_stage(db: &Db<'_>, actor: &str, stage_id: &str, source: Option<Value>
     )?;
     authorize(db, actor, UPLOAD)?;
     require_open(db, &stage)?;
-    let mut source = source.unwrap_or_else(|| json!({"kind":"LocalSubmission"}));
-    source["principal_id"] = json!(actor);
-    source["stage_id"] = json!(stage.id);
-    let kind = source["kind"].as_str().ok_or_else(|| {
-        err(
-            "RecoveryRequired",
-            "generated artifact source has no provenance kind",
-        )
-    })?;
-    let artifact = db.create(
-        "Artifact",
-        &id("artifact"),
+    let source = source.unwrap_or_else(|| json!({"kind":"LocalSubmission"}));
+    let artifact = create_artifact(
+        db,
         actor,
-        json!({
-            "content_layout":RAW_LAYOUT,"media_type":"application/octet-stream",
-            "declared_media_type":stage.declared_media_type,"size_bytes":stage.size.to_string(),
-            "digest":stage.digest,"source":source,
-        }),
-        json!({"chunk_digests":digests}),
+        &stage,
+        &id("artifact"),
+        RAW_LAYOUT,
+        &digests,
+        source,
     )?;
     let copied = db.c.execute(
         "INSERT INTO artifact_chunks(artifact_id,artifact_rev,chunk_index,payload)
@@ -464,9 +493,44 @@ fn publish_stage(db: &Db<'_>, actor: &str, stage_id: &str, source: Option<Value>
         "RecoveryRequired",
         "artifact chunk publication count changed",
     )?;
-    stage.artifact = Some(artifact.id);
+    finish_published(db, actor, stage, &artifact)
+}
+
+fn create_artifact(
+    db: &Db<'_>,
+    actor: &str,
+    stage: &Stage,
+    artifact_id: &str,
+    layout: &str,
+    digests: &[String],
+    mut source: Value,
+) -> Result<Doc> {
+    source["principal_id"] = json!(actor);
+    source["stage_id"] = json!(stage.id);
+    require(
+        source["kind"].is_string(),
+        "RecoveryRequired",
+        "generated artifact source has no provenance kind",
+    )?;
+    db.create(
+        "Artifact",
+        artifact_id,
+        actor,
+        json!({
+            "content_layout":layout,"media_type":"application/octet-stream",
+            "declared_media_type":stage.declared_media_type,"size_bytes":stage.size.to_string(),
+            "digest":stage.digest,"source":source,
+        }),
+        json!({"chunk_digests":digests}),
+    )
+}
+
+fn finish_published(db: &Db<'_>, actor: &str, mut stage: Stage, artifact: &Doc) -> Result<Value> {
+    let kind = artifact.spec["source"]["kind"].as_str();
+    stage.artifact = Some(artifact.id.clone());
     db.c.execute(
-        "UPDATE artifact_uploads SET state='Published',artifact_id=?2,source_kind=?3 WHERE id=?1",
+        "UPDATE artifact_uploads SET state='Published',artifact_id=?2,source_kind=?3,
+             received_bytes=size_bytes WHERE id=?1",
         params![stage.id, stage.artifact, kind],
     )?;
     db.c.execute(
@@ -484,6 +548,7 @@ fn publish_stage(db: &Db<'_>, actor: &str, stage_id: &str, source: Option<Value>
         "Published",
     )?;
     stage.state = "Published".into();
+    stage.received = stage.size;
     response(db, &stage)
 }
 
@@ -576,9 +641,11 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
         "SELECT EXISTS(SELECT 1 FROM artifact_uploads u
            WHERE u.artifact_id IS NOT NULL AND NOT EXISTS(
              SELECT 1 FROM versions v WHERE v.id=u.artifact_id AND v.rev=1 AND v.kind='Artifact'
-              AND v.owner=u.owner AND v.spec->>'content_layout'=?1 AND v.spec->>'digest'=u.digest
+              AND v.owner=u.owner AND (v.spec->>'content_layout'=?1
+                   OR (v.spec->>'content_layout'=?2 AND u.source_kind='LocalOciImageCapture'))
+              AND v.spec->>'digest'=u.digest
               AND v.spec->'source'->>'stage_id'=u.id))",
-        [RAW_LAYOUT],
+        [RAW_LAYOUT, super::files::LAYOUT],
         |r| r.get(0),
     )?;
     require(
@@ -666,7 +733,12 @@ pub(crate) fn withdraw(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value
         params![artifact.id, artifact.rev],
     )?;
     require(
-        count == manifest.chunks.len(),
+        count
+            == if super::files::managed(&artifact) {
+                0
+            } else {
+                manifest.chunks.len()
+            },
         "RecoveryRequired",
         "uploaded artifact chunks are incomplete",
     )?;

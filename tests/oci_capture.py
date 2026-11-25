@@ -6,14 +6,17 @@ import io
 import json
 from pathlib import Path
 import random
+import shutil
 import signal
 import sqlite3
 import subprocess
 import tarfile
 import threading
+import time
 
 from oci_recovery import ReceiptBarrier
 from support import Failure, Node, key, target
+from uuid import uuid4
 
 
 TOOL = "application.capture_oci_image"
@@ -59,6 +62,53 @@ def no_lost_publication(node, expected):
         assert db.execute("SELECT count(*) FROM oci_image_captures").fetchone() == (expected,)
         assert db.execute("SELECT count(*) FROM artifact_uploads WHERE source_kind='LocalOciImageCapture'").fetchone() == (expected,)
         assert db.execute("SELECT count(*) FROM artifact_upload_chunks").fetchone() == (0,)
+        assert db.execute("SELECT count(*) FROM oci_archive_blobs").fetchone() == (expected,)
+        assert db.execute("SELECT count(*) FROM artifact_chunks JOIN oci_archive_blobs "
+                          "ON artifact_id=artifact").fetchone() == (0,)
+
+
+def checkpoint_archive(node, reference, expected):
+    node.stop()
+    checkpoint = node.base / "archive-checkpoint"
+    report = json.loads(subprocess.check_output(node.daemon + ["checkpoint", "--output", checkpoint], timeout=30))
+    manifest = report["manifest"]
+    assert manifest["format"] == "psios.authority.checkpoint.v2"
+    assert manifest["oci_archives"] == {reference["resource_id"]:
+        {"size_bytes": len(expected), "digest": reference["digest"]}}
+    payload = checkpoint / "oci-archives" / reference["resource_id"] / "payload"
+    assert payload.read_bytes() == expected and payload.stat().st_mode & 0o777 == 0o400
+    scratch = node.base / "archive-scratch"
+    scratch.mkdir(mode=0o700)
+    options = ["--directory", checkpoint, "--manifest-digest", report["manifest_digest"], "--scratch-dir", scratch]
+    parked_state = node.base / "parked-state"
+    parked_witness = node.base / "parked-witness"
+    node.state.rename(parked_state)
+    try:
+        node.witness.rename(parked_witness)
+        try:
+            daemon = node.binaries / "psiosd"
+            raw = subprocess.check_output([daemon, "verify-checkpoint", *options], timeout=20)
+            assert json.loads(raw) == report
+            extracted = subprocess.check_output([daemon, "checkpoint-artifact", *options],
+                                                input=json.dumps(reference).encode(), timeout=20)
+            assert extracted == expected
+            extra = payload.parent / "unexpected"
+            extra.mkdir()
+            malformed = subprocess.run([daemon, "verify-checkpoint", *options], capture_output=True, timeout=20)
+            assert malformed.returncode != 0 and not malformed.stdout
+            extra.rmdir()
+            payload.chmod(0o600)
+            payload.write_bytes(bytes(len(expected)))
+            payload.chmod(0o400)
+            corrupt = subprocess.run([daemon, "verify-checkpoint", *options], capture_output=True, timeout=20)
+            assert corrupt.returncode != 0 and b"chunk digest mismatch" in corrupt.stderr, corrupt
+        finally:
+            parked_witness.rename(node.witness)
+    finally:
+        parked_state.rename(node.state)
+    assert list(scratch.iterdir()) == []
+    subprocess.run(node.daemon + ["verify", "--rehearse-migration"], check=True, capture_output=True, timeout=30)
+    node.start()
 
 
 def interrupted(node, create_task, operation, revoke=None):
@@ -156,6 +206,7 @@ def main(binaries):
         parsed = n.call("Artifact.Get", {"reference": raw})
         assert parsed["resource"]["spec"]["declared_media_type"] == MEDIA
         assert parsed["resource"]["spec"]["source"]["kind"] == "LocalOciImageCapture"
+        assert parsed["resource"]["spec"]["content_layout"] == "ManagedOciArchiveV1"
         data = bytearray()
         while True:
             reply = n.call("Artifact.ReadChunk", {"reference": raw, "offset": len(data), "length": CHUNK})
@@ -164,6 +215,7 @@ def main(binaries):
                 break
         assert CHUNK < len(data) == int(proof["size_bytes"]) <= MAX
         assert "sha256:" + hashlib.sha256(data).hexdigest() == proof["archive_digest"]
+        checkpoint_archive(n, raw, data)
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as tar:
             manifest, = json.load(tar.extractfile("manifest.json"))
             assert not manifest.get("RepoTags"), manifest
@@ -199,6 +251,12 @@ def main(binaries):
         with sqlite3.connect(n.state / "state.db") as db:
             db.execute("DROP TRIGGER reject_capture")
         no_lost_publication(n, 1)
+        depot = n.state / "oci-archives"
+        assert sorted(item.name for item in depot.iterdir()) == [raw["resource_id"]]
+        # Reproduce the disk-only state that a kill between rename and witness
+        # commit could leave behind, without a live Task touching this fixture.
+        abandoned = depot / f"artifact-{uuid4()}"
+        shutil.copytree(depot / raw["resource_id"], abandoned)
 
         interrupted(n, submit, "cancel")
         interrupted(n, submit, "restart")
@@ -206,11 +264,16 @@ def main(binaries):
         interrupted(n, lambda: submit(delegation=revoked["delegation_ref"]["resource_id"]),
                     "revoke", revoked["grant_ref"])
         no_lost_publication(n, 1)
+        assert sorted(item.name for item in depot.iterdir()) == [raw["resource_id"]]
 
         grant(n, owner, "artifact.withdraw")
         withdrawal = n.call("Artifact.Withdraw", remove)
         assert n.call("Artifact.Withdraw", remove) == withdrawal
         denied(n, "ResultEvicted", "Artifact.ReadChunk", {"reference": raw, "offset": 0, "length": 1})
+        deadline = time.monotonic() + 8
+        while (depot / raw["resource_id"]).exists():
+            assert time.monotonic() < deadline, "withdrawn managed OCI archive stayed on disk"
+            time.sleep(0.05)
         n.stop()
         subprocess.run(n.daemon + ["verify"], check=True, capture_output=True, timeout=15)
         with sqlite3.connect(n.state / "state.db") as db:

@@ -8,10 +8,16 @@ use psios_api::{canonical, id, sha256};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::{
+    fs::File,
+    io::{self, Read, Seek, SeekFrom, Write},
+    os::unix::fs::FileExt,
+    path::Path,
+};
 
 pub(crate) mod availability;
 pub(crate) mod capacity;
+pub(crate) mod files;
 pub(crate) mod ingress;
 pub(crate) mod repair;
 pub(crate) mod retention;
@@ -21,7 +27,7 @@ pub const FORMAT: u32 = 30;
 const LAYOUT: &str = "ChunkedJsonV1";
 const RAW_LAYOUT: &str = "ChunkedBytesV1";
 // The chunk size is part of the on-disk format.
-const CHUNK_BYTES: usize = 128 * 1024;
+pub(crate) const CHUNK_BYTES: usize = 128 * 1024;
 
 pub(crate) fn is_content_unavailable(code: &str) -> bool {
     matches!(code, "ResultEvicted" | "ResultUnavailable")
@@ -61,7 +67,11 @@ pub(crate) fn is_json(artifact: &Doc) -> bool {
 }
 
 pub(crate) fn is_raw(artifact: &Doc) -> bool {
-    artifact.kind == "Artifact" && artifact.spec["content_layout"] == RAW_LAYOUT
+    artifact.kind == "Artifact"
+        && matches!(
+            artifact.spec["content_layout"].as_str(),
+            Some(RAW_LAYOUT | files::LAYOUT)
+        )
 }
 
 pub(crate) fn is_task_output(artifact: &Doc, task: &Doc) -> bool {
@@ -127,9 +137,28 @@ impl<'a> Manifest<'a> {
     }
 
     fn chunk(&self, conn: &Connection, index: usize) -> Result<Vec<u8>> {
+        self.payload_chunk(conn, None, index)
+    }
+
+    fn payload_chunk(
+        &self,
+        conn: &Connection,
+        file: Option<&File>,
+        index: usize,
+    ) -> Result<Vec<u8>> {
         let expected_size = (self.size - index * CHUNK_BYTES).min(CHUNK_BYTES);
-        let bytes: Vec<u8> = conn
-            .prepare_cached(
+        let bytes: Vec<u8> = if let Some(file) = file {
+            let mut bytes = vec![0; expected_size];
+            file.read_exact_at(&mut bytes, (index * CHUNK_BYTES) as u64)
+                .map_err(|_| {
+                    err(
+                        "RecoveryRequired",
+                        "managed OCI archive chunk is unreadable",
+                    )
+                })?;
+            bytes
+        } else {
+            conn.prepare_cached(
                 "SELECT payload FROM artifact_chunks
                  WHERE artifact_id=?1 AND artifact_rev=?2 AND chunk_index=?3 AND length(payload)=?4",
             )?
@@ -143,7 +172,8 @@ impl<'a> Manifest<'a> {
                 |r| r.get(0),
             )
             .optional()?
-            .ok_or_else(|| err("RecoveryRequired", "artifact chunk is missing or has changed size"))?;
+            .ok_or_else(|| err("RecoveryRequired", "artifact chunk is missing or has changed size"))?
+        };
         require(
             self.chunks[index] == sha256(&bytes),
             "RecoveryRequired",
@@ -153,13 +183,18 @@ impl<'a> Manifest<'a> {
     }
 
     fn verify(&self, conn: &Connection) -> Result<()> {
-        self.verify_into(conn, &mut io::sink()).map(|_| ())
+        self.verify_into(conn, None, &mut io::sink()).map(|_| ())
     }
 
-    fn verify_into(&self, conn: &Connection, output: &mut impl Write) -> Result<usize> {
+    fn verify_into(
+        &self,
+        conn: &Connection,
+        file: Option<&File>,
+        output: &mut impl Write,
+    ) -> Result<usize> {
         let mut digest = Sha256::new();
         for index in 0..self.chunks.len() {
-            let bytes = self.chunk(conn, index)?;
+            let bytes = self.payload_chunk(conn, file, index)?;
             digest.update(&bytes);
             output.write_all(&bytes)?;
         }
@@ -210,6 +245,11 @@ pub(crate) fn checkpoint_bytes(
     max_bytes: usize,
 ) -> Result<Vec<u8>> {
     retention::require_content(conn, artifact)?;
+    require(
+        !files::managed(artifact),
+        "UnsupportedCapability",
+        "managed OCI archive requires a payload directory",
+    )?;
     if let Some(manifest) = Manifest::read(artifact)? {
         return manifest.original_bytes(conn, Some(max_bytes));
     }
@@ -222,8 +262,13 @@ pub(crate) fn checkpoint_bytes(
     Ok(bytes)
 }
 
-pub(crate) fn verify_raw_bytes(conn: &Connection, artifact: &Doc, max_bytes: usize) -> Result<()> {
-    copy_verified_raw(conn, artifact, max_bytes, &mut io::sink()).map(|_| ())
+pub(crate) fn verify_raw_bytes(
+    conn: &Connection,
+    state: &Path,
+    artifact: &Doc,
+    max_bytes: usize,
+) -> Result<()> {
+    copy_verified_raw(conn, Some(state), artifact, max_bytes, &mut io::sink()).map(|_| ())
 }
 
 fn raw_manifest<'a>(
@@ -246,16 +291,20 @@ fn raw_manifest<'a>(
 /// Copy verified bytes in one pass. Publish or use the private destination only on success.
 pub(crate) fn copy_verified_raw(
     conn: &Connection,
+    state: Option<&Path>,
     artifact: &Doc,
     max_bytes: usize,
     output: &mut impl Write,
 ) -> Result<usize> {
-    raw_manifest(conn, artifact, max_bytes)?.verify_into(conn, output)
+    let manifest = raw_manifest(conn, artifact, max_bytes)?;
+    let file = files::open_payload(conn, state, artifact, manifest.size)?;
+    manifest.verify_into(conn, file.as_ref(), output)
 }
 
 /// Read one immutable checked manifest under the caller's retained database snapshot.
 pub(crate) struct VerifiedRaw<'a> {
     conn: &'a Connection,
+    file: Option<File>,
     manifest: Manifest<'a>,
     position: usize,
     cached: Option<(usize, Vec<u8>)>,
@@ -264,13 +313,16 @@ pub(crate) struct VerifiedRaw<'a> {
 /// Check the aggregate content digest before returning a bounded reader.
 pub(crate) fn open_verified_raw<'a>(
     conn: &'a Connection,
+    state: Option<&Path>,
     artifact: &'a Doc,
     max_bytes: usize,
 ) -> Result<VerifiedRaw<'a>> {
     let manifest = raw_manifest(conn, artifact, max_bytes)?;
-    manifest.verify(conn)?;
+    let file = files::open_payload(conn, state, artifact, manifest.size)?;
+    manifest.verify_into(conn, file.as_ref(), &mut io::sink())?;
     Ok(VerifiedRaw {
         conn,
+        file,
         manifest,
         position: 0,
         cached: None,
@@ -289,13 +341,16 @@ impl Read for VerifiedRaw<'_> {
             .is_none_or(|(cached, _)| *cached != index)
         {
             self.cached = None;
-            let chunk = self.manifest.chunk(self.conn, index).map_err(|error| {
-                if error.0.code == "RecoveryRequired" {
-                    io::Error::new(io::ErrorKind::InvalidData, error)
-                } else {
-                    io::Error::other(error)
-                }
-            })?;
+            let chunk = self
+                .manifest
+                .payload_chunk(self.conn, self.file.as_ref(), index)
+                .map_err(|error| {
+                    if error.0.code == "RecoveryRequired" {
+                        io::Error::new(io::ErrorKind::InvalidData, error)
+                    } else {
+                        io::Error::other(error)
+                    }
+                })?;
             self.cached = Some((index, chunk));
         }
         let bytes = &self.cached.as_ref().expect("loaded chunk").1[self.position % CHUNK_BYTES..];
@@ -333,10 +388,11 @@ pub fn page(db: &Db<'_>, artifact: &Doc, offset: usize, length: usize) -> Result
     };
     let (data, end, size) = if let Some(manifest) = Manifest::read(artifact)? {
         let end = page_end(manifest.size)?;
+        let file = files::open_payload(db.c, Some(&db.cfg.state_dir), artifact, manifest.size)?;
         let mut data = Vec::with_capacity(end - offset);
         let mut position = offset;
         while position < end {
-            let bytes = manifest.chunk(db.c, position / CHUNK_BYTES)?;
+            let bytes = manifest.payload_chunk(db.c, file.as_ref(), position / CHUNK_BYTES)?;
             let start = position % CHUNK_BYTES;
             let count = (bytes.len() - start).min(end - position);
             data.extend_from_slice(&bytes[start..start + count]);
@@ -355,20 +411,23 @@ pub fn page(db: &Db<'_>, artifact: &Doc, offset: usize, length: usize) -> Result
     }))
 }
 
-pub(crate) fn verify(conn: &Connection) -> Result<()> {
+pub(crate) fn verify(conn: &Connection, state: Option<&Path>) -> Result<()> {
     let mut stmt = conn.prepare(
-        "SELECT * FROM versions WHERE kind='Artifact' AND json_extract(spec,'$.content_layout') IN (?1,?2)",
+        "SELECT * FROM versions WHERE kind='Artifact' AND json_extract(spec,'$.content_layout') IN (?1,?2,?3)",
     )?;
     let mut expected_chunks = 0;
-    for artifact in stmt.query_map([LAYOUT, RAW_LAYOUT], row)? {
+    for artifact in stmt.query_map([LAYOUT, RAW_LAYOUT, files::LAYOUT], row)? {
         let artifact = artifact?;
         if retention::receipt(conn, &artifact)?.is_some() {
             continue;
         }
         let manifest = Manifest::read(&artifact)?
             .ok_or_else(|| err("RecoveryRequired", "missing artifact content manifest"))?;
-        manifest.verify(conn)?;
-        expected_chunks += manifest.chunks.len() as i64;
+        let file = files::open_payload(conn, state, &artifact, manifest.size)?;
+        manifest.verify_into(conn, file.as_ref(), &mut io::sink())?;
+        if file.is_none() {
+            expected_chunks += manifest.chunks.len() as i64;
+        }
     }
     let actual_chunks: i64 =
         conn.query_row("SELECT COUNT(*) FROM artifact_chunks", [], |r| r.get(0))?;
@@ -413,19 +472,19 @@ mod tests {
                 let artifact = db.resolve(reference)?;
 
                 assert!(
-                    matches!(open_verified_raw(db.c, &artifact, bytes.len() - 1),
+                    matches!(open_verified_raw(db.c, None, &artifact, bytes.len() - 1),
                     Err(error) if error.0.code == "QuotaExceeded")
                 );
                 let mut different_digest = artifact.clone();
                 different_digest.spec["digest"] = json!(sha256(b"different archive"));
                 assert!(
-                    matches!(open_verified_raw(db.c, &different_digest, bytes.len()),
+                    matches!(open_verified_raw(db.c, None, &different_digest, bytes.len()),
                     Err(error) if error.0.code == "RecoveryRequired")
                 );
 
                 let mut file = tempfile::tempfile_in(temporary.path())?;
                 assert_eq!(
-                    copy_verified_raw(db.c, &artifact, bytes.len(), &mut file)?,
+                    copy_verified_raw(db.c, None, &artifact, bytes.len(), &mut file)?,
                     bytes.len()
                 );
                 file.rewind()?;
@@ -433,7 +492,7 @@ mod tests {
                 file.read_to_end(&mut copied)?;
                 assert_eq!(copied, bytes);
 
-                let mut reader = open_verified_raw(db.c, &artifact, bytes.len())?;
+                let mut reader = open_verified_raw(db.c, None, &artifact, bytes.len())?;
                 assert_eq!(reader.seek(SeekFrom::End(-9))?, (CHUNK_BYTES - 1) as u64);
                 let mut sample = [0; 9];
                 reader.read_exact(&mut sample)?;
@@ -463,7 +522,7 @@ mod tests {
                 );
                 let mut discarded = io::sink();
                 assert_eq!(
-                    copy_verified_raw(db.c, &artifact, bytes.len(), &mut discarded)
+                    copy_verified_raw(db.c, None, &artifact, bytes.len(), &mut discarded)
                         .unwrap_err()
                         .0
                         .code,
@@ -475,8 +534,10 @@ mod tests {
                     policy::OWNER,
                     &json!({"reference":reference,"reason":"test withdrawal"}),
                 )?;
-                assert!(matches!(open_verified_raw(db.c, &artifact, bytes.len()),
-                    Err(error) if error.0.code == "ResultEvicted"));
+                assert!(
+                    matches!(open_verified_raw(db.c, None, &artifact, bytes.len()),
+                    Err(error) if error.0.code == "ResultEvicted")
+                );
                 Ok(())
             })
             .unwrap();
@@ -499,7 +560,7 @@ mod tests {
                     page(db, &artifact, 0, CHUNK_BYTES)?["data_base64"],
                     STANDARD.encode(raw)
                 );
-                verify(db.c)?;
+                verify(db.c, None)?;
                 Ok(())
             })
             .unwrap();

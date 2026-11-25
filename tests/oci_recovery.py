@@ -1,4 +1,5 @@
 """Drop a committed Docker start or removal receipt before the worker can settle it."""
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -6,8 +7,10 @@ import selectors
 import signal
 import socket
 import socketserver
+import sqlite3
 import subprocess
 import threading
+from urllib.parse import parse_qs, urlsplit
 
 from support import Failure, target
 
@@ -261,3 +264,181 @@ def lose_stop_receipt(n, app, cid, volume):
     result, observed = lose_receipt(n, app, volume, "application.stop", remove)
     assert observed["container_id"] == cid
     return result
+
+
+@contextmanager
+def stop_proxy(node, settings, name, match, *, forward=False):
+    socket_path = node.base / (name + ".sock")
+    upstream = settings.get("docker_socket", "/var/run/docker.sock")
+    with ReceiptBarrier(socket_path, upstream, match, forward=forward) as barrier:
+        server = threading.Thread(target=barrier.serve_forever, daemon=True)
+        server.start()
+        try:
+            node.stop()
+            node.config.write_text(json.dumps(dict(settings, docker_socket=str(socket_path))))
+            node.start()
+            yield barrier
+        finally:
+            barrier.release.set()
+            try:
+                node.stop()
+            finally:
+                barrier.shutdown()
+                server.join(3)
+                node.config.write_text(json.dumps(settings))
+
+
+def endpoint(request, method, suffix):
+    for line in request.splitlines():
+        parts = line.split(b" ", 2)
+        if len(parts) == 3 and parts[0] == method and parts[2].startswith(b"HTTP/"):
+            url = urlsplit(parts[1])
+            if url.path.endswith(suffix):
+                return url
+    return None
+
+
+def refusal(code, call):
+    try:
+        call()
+    except Failure as error:
+        assert error.code == code, error
+    else:
+        raise AssertionError(f"expected {code}")
+
+
+def continue_after_lost_stop(node, app, volume, *, lose_removal):
+    """Keep exit and removal evidence separate, including two lost receipts."""
+    app_id = app["resource_id"]
+    volume_id = volume["resource_id"]
+    settings = json.loads(node.config.read_text())
+    limited = dict(settings, queue_limit=1, recovery_queue_limit=1)
+    name = "stop-cont-lost" if lose_removal else "stop-cont-direct"
+    tool = "application.continue_stop"
+
+    def health():
+        task_id = node.submit("application.health", target(app))
+        task = node.wait(task_id)
+        assert task["lifecycle"] == "Succeeded", task
+        artifact, = task["result"]["artifact_refs"]
+        return task_id, artifact, node.call("Artifact.Read", {"reference": artifact})
+
+    def reconciliation(operation, evidence):
+        return node.call("Operation.Reconcile", dict(target(operation), evidence_ref=evidence))
+
+    def holds():
+        with sqlite3.connect(node.state / "state.db", timeout=5) as db:
+            return dict(db.execute("SELECT volume,holder FROM holds WHERE volume IN (?,?)", (app_id, volume_id)))
+
+    _, stale, running = health()
+    cid = running["container_id"]
+    container_path = f"/containers/{cid}".encode()
+    docker = ["docker", "--host", "unix://" + settings.get("docker_socket", "/var/run/docker.sock")]
+    assert running["process_running"] and running["started_at"], running
+    try:
+        with stop_proxy(node, settings, name + "-stop",
+                        lambda request: endpoint(request, b"POST", container_path + b"/stop") is not None) as barrier:
+            original_task = node.submit("application.stop", target(app))
+            assert barrier.confirmed.wait(15), "Docker did not confirm the original stop"
+            node.stop(signal.SIGKILL)
+
+        container, = json.loads(subprocess.check_output(docker + ["inspect", cid], timeout=15))
+        assert (container["State"]["Status"], container["State"]["StartedAt"]) == ("exited", running["started_at"]), container
+        seen = {}
+
+        def trace_removal(request):
+            if endpoint(request, b"POST", container_path + b"/stop") is not None:
+                seen["stop"] = True
+            remove = endpoint(request, b"DELETE", container_path)
+            if remove is not None:
+                seen["remove"] = parse_qs(remove.query)
+            return remove is not None
+
+        with stop_proxy(node, limited, name + "-rm", trace_removal, forward=not lose_removal) as barrier:
+            lost = node.wait(original_task)
+            assert (lost["lifecycle"], lost["outcome_knowledge"]) == ("Paused", "Unknown"), lost
+            original, = lost["operation_refs"]
+            original_holds = {app_id: original["resource_id"], volume_id: app_id}
+            assert holds() == original_holds
+            admission = node.call("Node.Get", {})["admission"]
+            assert admission["ordinary"] == {"used": 1, "limit": 1}, admission
+            observed_task, exit_ref, exited = health()
+            assert node.get(f"recovery-admission-{observed_task}")["value"]["unresolved_operation_ref"] == original
+            assert exited["runtime_state"] == "Exited" and exited["exit_confirmed"], exited
+            for field in ("container_id", "engine_id", "start_operation_id", "started_at"):
+                assert exited[field] == running[field], (field, exited, running)
+            grant = node.call("Grant.Issue", {"principal_id": "local-owner",
+                "actions": ["task.submit", "task.read", tool], "tool_targets": [app_id, volume_id],
+                "units": 4, "ttl_seconds": 120})["delegation_ref"]["resource_id"]
+
+            def request(evidence, delegation=grant):
+                return node.prepare(tool, {"target": target(app), "operation_ref": original,
+                    "evidence_ref": evidence}, delegation=delegation)
+
+            if not lose_removal:
+                refusal("PermissionDenied", lambda: request(exit_ref, "owner-delegation"))
+                limited_scope = node.call("Grant.Issue", {"principal_id": "local-owner",
+                    "actions": ["task.submit", "task.read", tool], "tool_targets": [app_id],
+                    "units": 1, "ttl_seconds": 120})["delegation_ref"]["resource_id"]
+                refusal("PermissionDenied", lambda: node.call("Task.Submit", request(exit_ref, limited_scope)))
+            refusal("OutcomeUnknown", lambda: node.call("Task.Submit", request(stale)))
+            submitted = request(exit_ref)
+            cleanup = node.call("Task.Submit", submitted)["task_id"]
+            assert node.get(f"recovery-admission-{cleanup}")["value"]["unresolved_operation_ref"] == original
+            waiting = node.wait(cleanup)
+            assert waiting["lifecycle"] == "WaitingApproval" and "remove" not in seen, waiting
+            node.approve(cleanup)
+            assert barrier.confirmed.wait(15), "Docker did not confirm cleanup removal"
+            assert "stop" not in seen, "cleanup issued an additional stop"
+            for flag in (b"force", b"v"):
+                assert not {b"1", b"true"}.intersection(seen["remove"].get(flag, [])), seen
+            if lose_removal:
+                node.stop(signal.SIGKILL)
+            else:
+                barrier.release.set()
+                completed = node.wait(cleanup)
+                assert (completed["lifecycle"], completed["outcome_knowledge"]) == ("Succeeded", "Known"), completed
+
+        node.start()
+        assert "stop" not in seen, "cleanup issued an additional stop"
+        assert holds() == original_holds
+        assert node.wait(original_task)["outcome_knowledge"] == "Unknown"
+        assert node.call("Task.Submit", submitted)["task_id"] == cleanup
+        if lose_removal:
+            unresolved = node.wait(cleanup)
+            assert (unresolved["lifecycle"], unresolved["outcome_knowledge"]) == ("Paused", "Unknown"), unresolved
+            cleanup_op, = unresolved["operation_refs"]
+            _, absence_ref, absent = health()
+            assert absent["removal_confirmed"] and absent["container_id"] == cid, absent
+            refusal("Conflict", lambda: reconciliation(original, absence_ref))
+            assert holds() == original_holds
+            settled = reconciliation(cleanup_op, absence_ref)
+            assert settled["outcome_knowledge"] == "Known", settled
+            assert node.wait(original_task)["outcome_knowledge"] == "Unknown" and holds() == original_holds
+
+        completed = node.wait(cleanup)
+        assert (completed["lifecycle"], completed["outcome_knowledge"]) == ("Succeeded", "Known"), completed
+        cleanup_ref, = completed["result"]["artifact_refs"]
+        observed = node.call("Artifact.Read", {"reference": cleanup_ref})
+        assert observed == {"original_operation_ref": original, "application_ref": app, "container_id": cid,
+            "engine_id": running["engine_id"], "start_operation_id": running["start_operation_id"],
+            "removal_confirmed": True}, observed
+        refusal("OutcomeUnknown", lambda: reconciliation(original, cleanup_ref))
+        _, absence_ref, absent = health()
+        assert absent["removal_confirmed"] and absent["container_id"] == cid, absent
+        recovered = reconciliation(original, absence_ref)
+        assert recovered["outcome_knowledge"] == "Known", recovered
+        settled = node.wait(original_task)
+        assert settled["lifecycle"] == "Succeeded" and settled["operation_refs"][0]["resource_id"] == original["resource_id"], settled
+        result_ref, = settled["result"]["artifact_refs"]
+        stopped = node.call("Artifact.Read", {"reference": result_ref})
+        assert stopped == node.get(app_id)["reference"] and holds() == {}
+        assert node.get(volume_id)["value"]["attachment_refs"] == []
+        logs = node.perform("application.logs", target(stopped))
+        assert logs["availability"] == "Unavailable" and not logs["stdout"] and not logs["stderr"], logs
+        print(f"Verified OCI stopped-container continuation ({name}) with a full ordinary queue", flush=True)
+        return stopped
+    finally:
+        node.stop()
+        node.config.write_text(json.dumps(settings))
+        node.start()

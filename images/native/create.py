@@ -524,7 +524,8 @@ def source_snapshot(work, disk, args, prior, layout, signing):
     marker = read_partition_file(work, state, "/deployment-uuid", 64)
     if marker != (prior["state_uuid"] + "\n").encode():
         raise ValueError("state partition deployment marker does not match the prior receipt")
-    cfg = json.loads(read_partition_file(work, state, "/etc/psios/core.json", 64 * 1024))
+    core_config = read_root_file(work, state, "/etc/psios/core.json", 64 * 1024, "0(?:444|644)")
+    cfg = json.loads(core_config)
     network = prior.get("network_profile")
     if network == STATIC_IPV4:
         validate_persisted_static(work, state, 4)
@@ -543,16 +544,23 @@ def source_snapshot(work, disk, args, prior, layout, signing):
     if not isinstance(cfg, dict) or (cfg.get("state_dir"), cfg.get("witness_dir")) != ("/var/lib/psios", "/var/lib/psios.witness"):
         raise ValueError("offline upgrade requires the native state and witness locations")
     replayed = [part for part, replay in ((2, replayed_state), (3, replayed_home)) if replay]
-    return digest, replayed
+    return digest, replayed, core_config
 
 
-def verify_authority(work, disk):
+def verify_authority(work, disk, core_config):
     core = work / "bin" / "psiosd"
-    return json.loads(subprocess.check_output([
+    config = work / "persisted-core.json"
+    with config.open("xb") as file:
+        config.chmod(0o600)
+        file.write(core_config)
+    report = json.loads(subprocess.check_output([
         sys.executable, HERE.parent / "rescue" / "inspect.py", disk,
         "--iso", work / "base.iso", "--core", core, "--core-sha256", sha256(core),
         "--partition", "2", "--state", "/psios", "--uid", "1000",
+        "--migration-config", config,
     ], timeout=210))
+    report["migration_rehearsal"]["configuration_sha256"] = hashlib.sha256(core_config).hexdigest()
+    return report
 
 
 def build(args):
@@ -576,7 +584,7 @@ def build(args):
                     signing.certificate_sha256 != prior["secure_boot"]["certificate_sha256"]):
                 raise ValueError("a Secure Boot upgrade requires the existing signing certificate")
             instance, home_id = prior["state_uuid"], prior["home_uuid"]
-            source_digest, replayed = source_snapshot(work, disk, args, prior, layout, signing)
+            source_digest, replayed, core_config = source_snapshot(work, disk, args, prior, layout, signing)
         else:
             layout = Layout(MIN_STATE_MIB if args.state_mib is None else args.state_mib,
                             MIN_HOME_MIB if args.home_mib is None else args.home_mib)
@@ -585,7 +593,7 @@ def build(args):
         disk.chmod(0o600)
         ramfs(work, args, instance, home_id, layout, signing, network_profile, core_limits=core_limits)
         source_commit = (work / "psios-source").read_text().strip()
-        authority = verify_authority(work, disk) if prior else None
+        authority = verify_authority(work, disk, core_config) if prior else None
         efi = boot_media.secure_efi_application(work, CMDLINE, signing) if signing else boot_media.efi_application(work, CMDLINE)
         esp = work / "esp.fat"
         with esp.open("xb") as f:

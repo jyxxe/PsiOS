@@ -398,6 +398,12 @@ jobs:
           git archive ae573d8ea74ac703adadf6764785895dec4534e5 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format41"
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format41" "$RUNNER_TEMP/psios-compatibility-target"
           python3 -B tests/restore_publication_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
+      - name: Preserve an acknowledged scoped event cursor across indexing
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format43"
+          git archive a8b9c0839cd3844de83e529fa3c2f9dcb25f20d3 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format43"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format43" "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/indexed_events_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Stream and restore a backup larger than the default limit
         run: PSIOS_TEST_LARGE_BACKUP=1 python3 -B -m unittest discover -s tests -p test_backup_limits.py -v
       - name: Exercise a real OCI engine and persistent volume

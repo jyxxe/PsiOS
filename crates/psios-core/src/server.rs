@@ -219,11 +219,28 @@ fn worker(s: Shared, changes: Arc<Changes>, stop: Arc<AtomicBool>, tick: Duratio
                 Ok(())
             },
         );
+        let archive = match &receipt {
+            Ok(crate::host::Output::OciImage(capture)) => Some(capture.archive_id.clone()),
+            _ => None,
+        };
         let done =
             state(&s)?.transaction(&correlation, |db| broker::finish_host(db, &work, receipt));
         if let Err(e) = done {
             eprintln!("psiosd {} receipt commit failed: {}", work.op.id, e.0.code);
-            state(&s)?.transaction(&correlation, |db| broker::settlement_failed(db, &work))?;
+            let mut store = state(&s)?;
+            // A pending witness seals the Store. In that case retain the file
+            // until startup establishes which database head actually committed.
+            if let Some(archive) = archive
+                && let Err(error) = store.transaction(&correlation, |db| {
+                    crate::artifact::files::reclaim_uncommitted(db, &archive)
+                })
+            {
+                eprintln!(
+                    "psiosd managed OCI archive settlement cleanup: {}",
+                    error.0.code
+                );
+            }
+            store.transaction(&correlation, |db| broker::settlement_failed(db, &work))?;
         }
     }
     Ok(())
@@ -245,8 +262,13 @@ fn timer(s: Shared, stop: Arc<AtomicBool>) -> Result<()> {
 }
 
 fn reclaim_storage(s: Shared, stop: Arc<AtomicBool>, config: Config) -> Result<()> {
+    let mut archive_cursor = String::new();
     while !stop.load(Ordering::Acquire) {
         let correlation = id("storage-reclaim");
+        if let Err(error) = reclaim_one_oci_archive(&s, &config, &correlation, &mut archive_cursor)
+        {
+            eprintln!("psiosd managed OCI archive reclamation: {}", error.0.code);
+        }
         let ready = state(&s)?.transaction(&correlation, |db| {
             crate::artifact::ingress::expire(db)?;
             retirement::next(db)
@@ -269,6 +291,25 @@ fn reclaim_storage(s: Shared, stop: Arc<AtomicBool>, config: Config) -> Result<(
             }
         };
         thread::park_timeout(delay);
+    }
+    Ok(())
+}
+
+fn reclaim_one_oci_archive(
+    s: &Shared,
+    config: &Config,
+    correlation: &str,
+    cursor: &mut String,
+) -> Result<()> {
+    let withdrawn = state(s)?.transaction(correlation, |db| {
+        crate::artifact::files::next_disposal(db, cursor)
+    })?;
+    if let Some(id) = withdrawn {
+        cursor.clone_from(&id);
+        if let Some(depot) = crate::storage::oci_archive::Depot::open(&config.state_dir)? {
+            depot.retire(&id)?;
+        }
+        state(s)?.transaction(correlation, |db| crate::artifact::files::dispose(db, &id))?;
     }
     Ok(())
 }
@@ -335,6 +376,7 @@ fn resource_pressure(error: &std::io::Error) -> bool {
 
 pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     let mut db = Store::open(cfg.clone())?;
+    db.reclaim_oci_archives()?;
     let (listener, _endpoint) = bind(&cfg.socket)?;
     crate::storage::reclaim_on_startup(&cfg);
     db.transaction("restart-recovery", broker::recover)?;

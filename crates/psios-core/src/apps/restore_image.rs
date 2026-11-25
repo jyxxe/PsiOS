@@ -157,6 +157,7 @@ pub(crate) fn prepare(db: &Db<'_>, app: &Doc, request: &Request) -> Result<Prepa
     let (archive, _) = engine::seal_file(|output| {
         artifact::copy_verified_raw(
             db.c,
+            Some(&db.cfg.state_dir),
             &archive.artifact,
             artifact::ingress::MAX_BYTES as usize,
             output,
@@ -298,7 +299,7 @@ pub(crate) fn record(
         "Fenced",
         "restore dispatch differs from the original permitted target",
     )?;
-    archive.check_content(db.c)?;
+    archive.check_content(db)?;
     let doc = db.get(&intent_id(&work.op.id))?;
     db.create(
         CHECKPOINT,

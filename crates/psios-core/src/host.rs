@@ -500,7 +500,7 @@ pub struct Work {
 }
 pub(crate) enum Output {
     Receipt(Value),
-    OciImage(apps::capture::Captured),
+    OciImage(Box<apps::capture::Captured>),
 }
 pub(crate) enum Checkpoint<'a> {
     OciStart {
@@ -639,7 +639,7 @@ impl Work {
     ) -> Result<Output> {
         if let Action::CaptureOciImage(request) = &self.action {
             return apps::capture::export(self, request, &mut check_streaming)
-                .map(Output::OciImage);
+                .map(|capture| Output::OciImage(Box::new(capture)));
         }
         self.perform_receipt(checkpoint, check_streaming)
             .map(Output::Receipt)

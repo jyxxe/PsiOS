@@ -6,11 +6,12 @@ use crate::{
     decode, err,
     host::Work,
     policy, require,
+    storage::oci_archive::{Depot, Sealed},
 };
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{fs::File, io::Seek, time::Duration};
+use std::{fs::File, path::Path, time::Duration};
 
 pub(crate) const FORMAT: u32 = super::publisher::FORMAT + 1;
 pub(crate) const SCHEMA: &str = include_str!("capture.sql");
@@ -61,9 +62,8 @@ impl ImageIdentity {
 }
 
 pub(crate) struct Captured {
-    file: File,
-    size: u32,
-    digest: String,
+    pub(crate) archive_id: String,
+    archive: Sealed,
     image: ImageIdentity,
     engine: String,
     compatibility: restore_archive::Compatibility,
@@ -105,11 +105,13 @@ pub(crate) fn export(
     let limit = artifact::ingress::MAX_BYTES;
     let state = File::open(&work.cfg.state_dir)?;
     work.cfg
-        .check_managed_space(&state, std::iter::once(u64::from(limit)), 1)?;
-    // The image exporter never writes into the user's shared scratch mount.
-    // Drop (including a failed or canceled capture) closes the anonymous file.
-    let mut file = tempfile::tempfile_in(&work.cfg.state_dir)?;
-    let mut output = restore_archive::HashOutput::new(&mut file);
+        .check_managed_space(&state, std::iter::once(u64::from(limit)), 3)?;
+    let depot = Depot::create(&work.cfg.state_dir)?;
+    let mut staged = depot.stage(|root| {
+        work.cfg
+            .check_managed_space(root, std::iter::once(u64::from(limit)), 2)
+    })?;
+    let mut output = restore_archive::HashOutput::new(staged.file());
     let size = command::capture_to(
         engine.command_line(&["image".into(), "save".into(), request.image_id.clone()]),
         &mut output,
@@ -124,13 +126,12 @@ pub(crate) fn export(
         "local OCI image or Docker engine changed during capture",
     )?;
     let compatibility =
-        restore_archive::validate_reader(&mut file, &image.config_digest, &image.diff_ids)?;
-    file.rewind()?;
+        restore_archive::validate_reader(staged.file(), &image.config_digest, &image.diff_ids)?;
+    let archive = staged.seal(u64::from(size), &digest)?;
     check_authority()?;
     Ok(Captured {
-        file,
-        size,
-        digest,
+        archive_id: psios_api::id("artifact"),
+        archive,
         image,
         engine: id,
         compatibility,
@@ -139,7 +140,7 @@ pub(crate) fn export(
 
 pub(crate) fn check_capacity(db: &Db<'_>, work: &Work, capture: &Captured) -> Result<()> {
     db.cfg.check_admission_space()?;
-    artifact::ingress::check_capacity(db, &work.task.owner, capture.size)
+    artifact::ingress::check_capacity(db, &work.task.owner, capture.archive.size())
 }
 
 pub(crate) fn publish(db: &Db<'_>, work: &Work, capture: Captured) -> Result<Value> {
@@ -148,12 +149,11 @@ pub(crate) fn publish(db: &Db<'_>, work: &Work, capture: Captured) -> Result<Val
     let source = json!({"kind":SOURCE,"capture_id":proof_id,
         "publication_task_ref":work.task.reference(),"publication_run_ref":work.run.reference(),
         "publication_effect_ref":work.effect.reference(),"publication_operation_id":work.op.id});
-    let accepted = artifact::ingress::publish_generated_reader(
+    let accepted = artifact::ingress::publish_managed_oci(
         db,
         owner,
-        capture.file,
-        capture.size,
-        &capture.digest,
+        &capture.archive_id,
+        capture.archive,
         MEDIA,
         source,
     )?;
@@ -341,7 +341,7 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn verify_restore_compatibility(conn: &Connection) -> Result<()> {
+pub(crate) fn verify_restore_compatibility(conn: &Connection, state: &Path) -> Result<()> {
     let mut captures =
         conn.prepare("SELECT artifact,proof,restore_status FROM oci_image_captures")?;
     for capture in captures.query_map([], |r| {
@@ -365,6 +365,7 @@ pub(crate) fn verify_restore_compatibility(conn: &Connection) -> Result<()> {
         let artifact = existing(conn, &artifact)?;
         let input = match artifact::open_verified_raw(
             conn,
+            Some(state),
             &artifact,
             artifact::ingress::MAX_BYTES as usize,
         ) {

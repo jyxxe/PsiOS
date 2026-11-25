@@ -121,9 +121,16 @@ pub(super) fn checked_copy(directory: &Path) -> Result<(Connection, DatabaseIden
     Ok((copy, identity))
 }
 
-pub(super) fn check_artifacts(conn: &Connection, identity: &DatabaseIdentity) -> Result<()> {
+pub(super) fn check_artifacts(
+    conn: &Connection,
+    identity: &DatabaseIdentity,
+    state: &Path,
+) -> Result<()> {
+    if identity.database_format >= artifact::files::FORMAT {
+        artifact::files::verify_registry(conn)?;
+    }
     if identity.database_format >= artifact::FORMAT {
-        artifact::verify(conn)?;
+        artifact::verify(conn, Some(state))?;
     }
     if identity.database_format >= artifact::ingress::FORMAT {
         artifact::ingress::verify(conn)?;
@@ -147,10 +154,10 @@ pub(super) fn check_artifacts(conn: &Connection, identity: &DatabaseIdentity) ->
         crate::apps::release_archive::verify(conn)?;
     }
     if identity.database_format >= crate::apps::restore_archive::FORMAT {
-        crate::apps::capture::verify_restore_compatibility(conn)?;
+        crate::apps::capture::verify_restore_compatibility(conn, state)?;
     }
     if identity.database_format >= crate::apps::restore_image::FORMAT {
-        crate::apps::restore_image::verify(conn)?;
+        crate::apps::restore_image::verify(conn, state)?;
     }
     if identity.database_format >= crate::agent::tool_context::FORMAT {
         crate::agent::tool_context::verify(conn)?;
@@ -226,7 +233,7 @@ impl Store {
         let bytes = copy_database(&cfg.state_dir, &state, max_bytes)?;
         let (copy, identity) = checked_copy(&state)?;
         let (witness, rotation) = verified_witness(&copy, cfg)?;
-        check_artifacts(&copy, &identity)?;
+        check_artifacts(&copy, &identity, &cfg.state_dir)?;
         drop(copy);
         let mut report = json!({"node_id":identity.node_id, "database_format":identity.database_format, "migration_required":identity.database_format < CURRENT_FORMAT,
             "sqlite_integrity":"Verified","foreign_keys":"Verified","witness":witness,
@@ -255,18 +262,19 @@ impl Store {
             rehearsal.witness_dir = witness;
             rehearsal.socket = tmp.path().join("unused-api.sock");
             rehearsal.docker_socket = tmp.path().join("unused-docker.sock");
-            report["migration_rehearsal"] = run_rehearsal(rehearsal, &identity).map_err(|e| {
-                err(
-                    e.0.code.as_str(),
-                    format!("migration rehearsal failed: {}", e.0.message),
-                )
-            })?;
+            report["migration_rehearsal"] = run_rehearsal(rehearsal, &identity, &cfg.state_dir)
+                .map_err(|e| {
+                    err(
+                        e.0.code.as_str(),
+                        format!("migration rehearsal failed: {}", e.0.message),
+                    )
+                })?;
         }
         Ok(report)
     }
 }
 
-fn run_rehearsal(cfg: Config, before: &DatabaseIdentity) -> Result<Value> {
+fn run_rehearsal(cfg: Config, before: &DatabaseIdentity, payload_root: &Path) -> Result<Value> {
     // Store::open finalizes pending witness writes and executes the production migration.
     // Its paths lead only to the temporary clone. No server, broker or effect recovery starts.
     drop(Store::open(cfg.clone())?);
@@ -281,7 +289,7 @@ fn run_rehearsal(cfg: Config, before: &DatabaseIdentity) -> Result<Value> {
         "RecoveryRequired",
         "migrated copy did not preserve the verified authority",
     )?;
-    check_artifacts(&copy, &after)?;
+    check_artifacts(&copy, &after, payload_root)?;
     Ok(
         json!({"status":"Verified", "source_format":before.database_format, "target_format":after.database_format}),
     )

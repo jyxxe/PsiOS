@@ -435,7 +435,7 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
         Ok(output) => {
             let body = match output {
                 host::Output::Receipt(receipt) => host::apply(db, w, &receipt)?,
-                host::Output::OciImage(capture) => apps::capture::publish(db, w, capture)?,
+                host::Output::OciImage(capture) => apps::capture::publish(db, w, *capture)?,
             };
             let a = artifact::publish(
                 db,

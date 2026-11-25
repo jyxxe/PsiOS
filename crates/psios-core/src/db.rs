@@ -190,7 +190,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = agent::tool_context::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = artifact::files::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -455,11 +455,18 @@ impl Store {
                 if ver < agent::tool_context::FORMAT {
                     db.c.execute_batch(agent::tool_context::SCHEMA)?;
                 }
+                if ver < artifact::files::FORMAT {
+                    db.c.execute_batch(artifact::files::SCHEMA)?;
+                }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;
         }
         store.transaction("node-config", node::sync)?;
         Ok(store)
+    }
+
+    pub(crate) fn reclaim_oci_archives(&self) -> Result<()> {
+        artifact::files::reclaim(&self.conn, &self.config.state_dir)
     }
     /// Offline recovery requires the Linux service account, exclusive lock and a fresh witness.
     pub fn recover_owner(&mut self) -> Result<()> {

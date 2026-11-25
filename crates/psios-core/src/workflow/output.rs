@@ -59,6 +59,7 @@ pub(super) fn artifact(db: &Db<'_>, run: &Doc, source: &Value, step: &str) -> Re
         "RecoveryRequired",
         "workflow artifact does not belong to its source Task",
     )?;
+    crate::apps::log_tail::authorize_task(db, &run.owner, &task)?;
     let body = artifact::read(db, &artifact, None).map_err(artifact::dependency_error)?;
     Ok((artifact, body))
 }

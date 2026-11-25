@@ -59,7 +59,18 @@ rescue-core/psiosd verify-backup --directory /media/backup/backup-id \
   --manifest-digest "$MANIFEST_DIGEST" --restore-to recovery/data
 ```
 
-工具核验清单摘要、成员集合、路径结构、各文件长度和完整内容。配置、数据库和见证可以留在离线的原节点。恢复前检查目标的空闲数据块与 inode，将数据写入私有暂存目录，通过核验并刷盘后以拒绝覆盖的原子改名发布。恢复保持文件和目录模式以及清单中记录的修改时间，所有权取自恢复账户。恢复结果是普通目录。导回 Core 时按新卷的身份与激活流程操作。[脱离权威的恢复验收](../tests/test_detached_backup.py)
+工具核验清单摘要、成员集合、路径结构、各文件长度和完整内容。配置、数据库和见证可以留在离线的原节点。恢复前检查目标的空闲数据块与 inode，将数据写入私有暂存目录，通过核验并刷盘后以拒绝覆盖的原子改名发布。恢复保持文件和目录模式以及清单中记录的修改时间，所有权取自恢复账户。恢复结果是普通目录。[脱离权威的恢复验收](../tests/test_detached_backup.py)
+
+### 导入新节点并恢复到新卷
+
+在已初始化的接收节点停止 `psiosd`，以该节点服务账户运行 `import-backup`。来源为 PsiOS 单卷备份的 `backup-export` 目录，摘要使用独立可信记录。导入核验原清单和所有数据块，将副本写入接收节点的私有备份存储，随后发布新节点可查询的 `Backup` 引用。原备份 ID、源卷引用和数据代次保留为来源信息。本地授予后续任务与导出权限。
+
+```bash
+psiosd --config /etc/psios/core.json import-backup \
+  --directory /media/backup/backup-id --manifest-digest "$MANIFEST_DIGEST"
+```
+
+启动服务后，使用回执里的 `reference` 提交 `backup.restore`。新卷有新的资源 ID 与数据代次。检查内容后提交并审批 `volume.activate`，激活前写入和应用挂载受限。导入记录在发布前绑定接收节点的目录身份。若目录已发布而登记中断，以同一摘要重试即可重新检查字节并完成登记。只有对应已提交导入记录的目录可通过此方式恢复。[跨节点恢复与登记故障验收](../tests/test_backup_intake.py)
 
 核验或复制失败时工具清理未发布的暂存目录。若恢复进程被强制中止或断电，可能留下该次操作的 `.stage-*` 目录。确认没有恢复进程持有它后，可在保留备份副本的情况下清理该暂存目录。
 

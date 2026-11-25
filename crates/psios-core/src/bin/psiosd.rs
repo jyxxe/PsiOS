@@ -66,6 +66,15 @@ enum Cmd {
         #[arg(long)]
         restore_to: Option<PathBuf>,
     },
+    /// Register a verified detached backup with a stopped local authority.
+    ImportBackup {
+        /// Directory containing the copied manifest and data blobs.
+        #[arg(long)]
+        directory: PathBuf,
+        /// Trusted manifest digest obtained from the original authority.
+        #[arg(long)]
+        manifest_digest: String,
+    },
     RecoverOwner,
 }
 
@@ -173,6 +182,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let report =
                 inspect_detached_backup(&directory, &manifest_digest, restore_to.as_deref())?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Cmd::ImportBackup {
+            directory,
+            manifest_digest,
+        } => {
+            let report = Store::import_detached_backup(cfg()?, &directory, &manifest_digest)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Cmd::Check => {

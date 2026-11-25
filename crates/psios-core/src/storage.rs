@@ -2,6 +2,7 @@
 mod detached;
 pub(crate) mod export;
 pub mod files;
+mod intake;
 pub(crate) mod publication;
 mod restore_proof;
 mod staging;
@@ -616,12 +617,14 @@ impl RestoreDestination<'_> {
     }
 }
 
-fn inspect_members(
-    root: &File,
-    m: &BackupManifest,
-    digest: &Value,
-    destination: Option<RestoreDestination<'_>>,
-) -> Result<Value> {
+fn file_sizes(m: &BackupManifest) -> impl Iterator<Item = u64> + Clone + '_ {
+    m.entries
+        .iter()
+        .filter(|entry| entry.digest.is_some())
+        .map(|entry| entry.bytes)
+}
+
+fn validate_members(m: &BackupManifest) -> Result<u64> {
     require(
         m.entries.len() <= MAX_ENTRIES,
         "QuotaExceeded",
@@ -643,13 +646,8 @@ fn inspect_members(
         .ok()
         .filter(|n| *n <= MAX_BACKUP)
         .ok_or_else(|| err("PreconditionFailed", "invalid backup byte count"))?;
-    let file_sizes = m
-        .entries
-        .iter()
-        .filter(|entry| entry.digest.is_some())
-        .map(|entry| entry.bytes);
     require(
-        file_sizes.clone().try_fold(0u64, u64::checked_add) == Some(declared),
+        file_sizes(m).try_fold(0u64, u64::checked_add) == Some(declared),
         "PreconditionFailed",
         "backup length mismatch",
     )?;
@@ -674,8 +672,30 @@ fn inspect_members(
             "invalid backup entry tree",
         )?;
     }
+    Ok(declared)
+}
+
+fn backup_blob(root: &File, index: usize, bytes: u64) -> Result<File> {
+    let file = child(root, format!("blob-{index}"), OFlags::RDONLY)?;
+    let meta = file.metadata()?;
+    regular(&meta)?;
+    require(
+        meta.len() == bytes,
+        "PreconditionFailed",
+        "backup blob length mismatch",
+    )?;
+    Ok(file)
+}
+
+fn inspect_members(
+    root: &File,
+    m: &BackupManifest,
+    digest: &Value,
+    destination: Option<RestoreDestination<'_>>,
+) -> Result<Value> {
+    let declared = validate_members(m)?;
     if let Some(destination) = &destination {
-        destination.check_space(file_sizes, m.entries.len() as u64)?;
+        destination.check_space(file_sizes(m), m.entries.len() as u64)?;
     }
     let mut dirs = vec![];
     let mut total = 0;
@@ -686,14 +706,7 @@ fn inspect_members(
             .map(|destination| entry_parent(destination.directory, &e.path))
             .transpose()?;
         if let Some(expected) = &e.digest {
-            let mut original = child(root, format!("blob-{i}"), OFlags::RDONLY)?;
-            let meta = original.metadata()?;
-            regular(&meta)?;
-            require(
-                meta.len() == e.bytes && e.bytes <= MAX_BACKUP - total,
-                "PreconditionFailed",
-                "backup blob length mismatch",
-            )?;
+            let mut original = backup_blob(root, i, e.bytes)?;
             let mut output = if let Some((dir, name)) = target {
                 let fd = rustix::fs::openat(
                     &dir,

@@ -2,11 +2,14 @@
 use super::*;
 use crate::db::{find, resolve, row};
 use rusqlite::{Connection, params};
+mod settlement;
+pub(crate) use settlement::record_settlement;
 
 pub(crate) const FORMAT: u32 = agent::inference::FORMAT + 1;
 const EPOCH: &str = "host-service-control-epoch";
 const INTENT: &str = "HostServiceControlIntent";
 const CHECKPOINT: &str = "HostServiceControlCheckpoint";
+const CONFIRMATION: &str = "HostServiceControlConfirmation";
 
 #[derive(Clone, Copy)]
 pub(super) enum Control {
@@ -110,13 +113,36 @@ fn checkpoint_id(operation: &str) -> String {
     format!("host-service-control-checkpoint-{operation}")
 }
 
+fn confirmation_id(operation: &str) -> String {
+    format!("host-service-control-confirmation-{operation}")
+}
+
+fn version(conn: &Connection, id: &str, revision: i64) -> Result<Doc> {
+    conn.query_row(
+        "SELECT * FROM versions WHERE id=?1 AND rev=?2",
+        params![id, revision],
+        row,
+    )
+    .optional()?
+    .ok_or_else(|| {
+        err(
+            "RecoveryRequired",
+            "systemd control historical revision is missing",
+        )
+    })
+}
+
+fn position(conn: &Connection, subject: &Doc) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT seq FROM versions WHERE id=?1 AND rev=?2",
+        params![subject.id, subject.rev],
+        |r| r.get(0),
+    )?)
+}
+
 fn original_effect(conn: &Connection, op: &Doc) -> Result<(Doc, i64)> {
     let effect = resolve(conn, &op.body["effect_refs"][0])?;
-    let original = conn.query_row(
-        "SELECT * FROM versions WHERE id=?1 AND rev=1",
-        [&effect.id],
-        row,
-    )?;
+    let original = version(conn, &effect.id, 1)?;
     let seq = conn.query_row(
         "SELECT seq FROM versions WHERE id=?1 AND rev=1",
         [&effect.id],
@@ -133,33 +159,147 @@ fn original_effect(conn: &Connection, op: &Doc) -> Result<(Doc, i64)> {
     Ok((original, seq))
 }
 
-fn binding(operation: &Doc, effect: &Doc, run: &Doc) -> Value {
+fn binding(operation: &Doc, effect: &Doc, run: &Doc, task: &Doc, approval_use: &Doc) -> Value {
     json!({"operation_ref":operation.reference(),"plan_ref":operation.body["plan_ref"],
-        "effect_ref":effect.reference(),"permit_ref":effect.spec["permit_ref"],
+        "effect_ref":effect.reference(),"permit_ref":effect.spec["permit_ref"],"approval_use_ref":approval_use.reference(),
+        "task_ref":task.reference(),
         "run_ref":run.reference(),"service_ref":effect.body["resource_ref"],"tool":effect.body["action"]})
 }
 
-fn held(db: &Db<'_>, service: &Doc, op: &Doc) -> Result<()> {
-    let present: bool = db.c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM holds WHERE volume=?1 AND holder=?2)",
-        params![service.id, op.id],
-        |r| r.get(0),
+struct Authority<'a> {
+    task: &'a Doc,
+    issued: &'a Doc,
+    effect: &'a Doc,
+    run: &'a Doc,
+    permit: &'a Doc,
+    plan: &'a Doc,
+    use_: &'a Doc,
+}
+
+fn approved(conn: &Connection, authority: Authority<'_>) -> Result<()> {
+    let Authority {
+        task,
+        issued,
+        effect,
+        run,
+        permit,
+        plan,
+        use_,
+    } = authority;
+    let decision = resolve(conn, &permit.body["decision_ref"])?;
+    let request = resolve(conn, &decision.body["request_ref"])?;
+    let used = version(conn, &use_.id, 1)?;
+    let approval = version(conn, &request.id, 2)?;
+    let verification = resolve(conn, &decision.body["verification_evidence_ref"])?;
+    let proof = resolve(conn, &permit.body["auth_proof"]["record_ref"])?;
+    let indexed: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM approval_bindings WHERE request=?1 AND task=?2 AND decision=?3 AND operation=?4)",
+        params![request.id,task.id,decision.id,issued.id], |r|r.get(0),
     )?;
+    let audience = json!([effect.body["resource_ref"]]);
     require(
-        present && service.kind == "HostService",
+        indexed
+            && task.kind == "Task"
+            && task.owner == issued.owner
+            && issued.spec["task_id"] == task.id
+            && task.body["operation_refs"] == json!([issued.reference()])
+            && task.body["current_run_id"] == run.id
+            && task.body["lifecycle"] == "Running"
+            && task.body["outcome_knowledge"] == "InFlight"
+            && run.body["task_id"] == task.id
+            && permit.body["authorization_ref"] == task.spec["delegation_ref"]
+            && permit.body["audience_resource_refs"] == audience
+            && permit.body["preconditions"] == plan.body["preconditions"]
+            && permit.body["recovery_incarnation"] == run.body["recovery_incarnation"]
+            && proof.kind == "PermitBinding"
+            && proof.rev == 1
+            && proof.owner == issued.owner
+            && proof.body["operation_id"] == issued.id
+            && proof.body["effect_id"] == effect.id
+            && proof.body["permit_id"] == permit.id
+            && proof.body["audience_resource_refs"] == audience
+            && proof.body["claim_id"] == run.body["claim_id"]
+            && proof.body["claim_epoch"] == run.body["claim_epoch"]
+            && proof.body["plan_digest"] == plan.body["plan_digest"]
+            && decision.kind == "ApprovalDecision"
+            && decision.rev == 1
+            && decision.owner == issued.owner
+            && decision.body["decision"] == "Approved"
+            && decision.body["use_limit"] == "SingleOperation"
+            && decision.body["approver_principal_id"] == policy::OWNER
+            && decision.body["plan_digest"] == plan.body["plan_digest"]
+            && decision.body["preconditions"] == plan.body["preconditions"]
+            && verification.kind == "ApprovalEvidence"
+            && verification.owner == issued.owner
+            && verification.body["authenticated_approver"] == policy::OWNER
+            && verification.body["plan_digest"] == plan.body["plan_digest"]
+            && request.kind == "ApprovalRequest"
+            && request.rev == 1
+            && request.owner == issued.owner
+            && request.spec["task_id"] == task.id
+            && request.body["status"] == "Pending"
+            && request.body["plan_ref"] == plan.reference()
+            && request.body["plan_digest"] == plan.body["plan_digest"]
+            && approval.kind == request.kind
+            && approval.spec == request.spec
+            && approval.owner == request.owner
+            && approval.body["status"] == "Approved"
+            && approval.body["decision_ref"] == decision.reference()
+            && use_.kind == "ApprovalUse"
+            && use_.rev == 2
+            && use_.owner == issued.owner
+            && use_.id == format!("use-{}", decision.id)
+            && use_.body["decision_ref"] == decision.reference()
+            && use_.body["operation_id"] == issued.id
+            && use_.body["plan_digest"] == plan.body["plan_digest"]
+            && use_.body["binding_status"] == "Bound"
+            && use_.body["validity_status"] == "Valid"
+            && used.kind == use_.kind
+            && used.owner == use_.owner
+            && used.body["decision_ref"] == decision.reference()
+            && used.body["plan_digest"] == plan.body["plan_digest"]
+            && used.body["binding_status"] == "Unbound"
+            && used.body["validity_status"] == "Valid"
+            && position(conn, &decision)? < position(conn, use_)?
+            && position(conn, use_)? < position(conn, permit)?
+            && position(conn, permit)? < position(conn, effect)?
+            && position(conn, effect)? < position(conn, issued)?
+            && position(conn, issued)? < position(conn, run)?
+            && position(conn, run)? < position(conn, task)?,
         "RecoveryRequired",
-        "systemd control no longer owns its service hold",
+        "systemd dispatch disagrees with its original approval or authenticated permit",
     )
+}
+
+fn holds(conn: &Connection, service: &Doc, op: &Doc, outstanding: bool) -> Result<()> {
+    let actual: (i64, i64) = conn.query_row(
+        "SELECT count(*) FILTER (WHERE volume=?1),count(*) FROM holds WHERE holder=?2",
+        params![service.id, op.id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let expected = if outstanding { (1, 1) } else { (0, 0) };
+    require(
+        actual == expected && service.kind == "HostService",
+        "RecoveryRequired",
+        "systemd operation does not have its expected exclusive service hold",
+    )
+}
+
+fn held(db: &Db<'_>, service: &Doc, op: &Doc) -> Result<()> {
+    holds(db.c, service, op, true)
 }
 
 pub(super) fn begin(db: &Db<'_>, work: &Work) -> Result<()> {
     held(db, &work.target, &work.op)?;
+    let permit = db.resolve(&work.effect.spec["permit_ref"])?;
+    let decision = db.resolve(&permit.body["decision_ref"])?;
+    let use_ = db.of(&format!("use-{}", decision.id), "ApprovalUse")?;
     db.create(
         INTENT,
         &intent_id(&work.op.id),
         &work.op.owner,
         json!({"operation_id":work.op.id}),
-        binding(&work.op, &work.effect, &work.run),
+        binding(&work.op, &work.effect, &work.run, &work.task, &use_),
     )?;
     Ok(())
 }
@@ -183,9 +323,11 @@ fn intent(conn: &Connection, op: &Doc) -> Result<Option<Doc>> {
     })?;
     let issued = resolve(conn, &intent.body["operation_ref"])?;
     let run = resolve(conn, &intent.body["run_ref"])?;
+    let task = resolve(conn, &intent.body["task_ref"])?;
+    let use_ = resolve(conn, &intent.body["approval_use_ref"])?;
     let permit = resolve(conn, &effect.spec["permit_ref"])?;
     let plan = resolve(conn, &op.body["plan_ref"])?;
-    let mut expected = binding(&issued, &effect, &run);
+    let mut expected = binding(&issued, &effect, &run, &task, &use_);
     if let Some(reference) = intent.body.get("checkpoint_ref") {
         expected["checkpoint_ref"] = reference.clone();
     }
@@ -203,6 +345,8 @@ fn intent(conn: &Connection, op: &Doc) -> Result<Option<Doc>> {
             && issued.body["outcome_knowledge"] == "InFlight"
             && issued.body["effect_refs"][0] == effect.reference()
             && issued.body["plan_ref"] == plan.reference()
+            && effect.body["phase"] == "PermitBound"
+            && effect.body["outcome_knowledge"] == "InFlight"
             && run.kind == "Run"
             && run.owner == op.owner
             && run.body["operation_refs"][0] == issued.reference()
@@ -214,9 +358,23 @@ fn intent(conn: &Connection, op: &Doc) -> Result<Option<Doc>> {
             && permit.body["plan_digest"] == plan.body["plan_digest"]
             && permit.body["decision_ref"].is_object()
             && plan.kind == "OperationPlan"
+            && plan.owner == op.owner
+            && plan.body["allowed_effects"][0]["action"] == effect.body["action"]
             && plan.body["allowed_effects"][0]["resource_ref"] == effect.body["resource_ref"],
         "RecoveryRequired",
         "systemd control intent disagrees with the approved dispatch",
+    )?;
+    approved(
+        conn,
+        Authority {
+            task: &task,
+            issued: &issued,
+            effect: &effect,
+            run: &run,
+            permit: &permit,
+            plan: &plan,
+            use_: &use_,
+        },
     )?;
     Ok(Some(intent))
 }
@@ -225,13 +383,45 @@ pub(crate) fn not_dispatched(db: &Db<'_>, op: &Doc) -> Result<bool> {
     let Some(intent) = intent(db.c, op)? else {
         return Ok(false);
     };
-    let present = db.find(&checkpoint_id(&op.id))?;
+    let target = db.resolve(&intent.body["service_ref"])?;
+    holds(db.c, &target, op, true)?;
+    let current = db.resolve(&op.body["effect_refs"][0])?;
+    if let Some(saved) = checkpoint_link(db.c, op, &intent)? {
+        require(
+            current.reference() == saved.body["effect_ref"],
+            "RecoveryRequired",
+            "systemd started effect is not current",
+        )?;
+        return Ok(false);
+    }
     require(
-        present.as_ref().map(Doc::reference) == intent.body.get("checkpoint_ref").cloned(),
+        current.reference() == intent.body["effect_ref"],
         "RecoveryRequired",
-        "systemd dispatch has a missing or unbound checkpoint",
+        "systemd pending effect is not current",
     )?;
-    Ok(present.is_none())
+    Ok(true)
+}
+
+pub(crate) fn worker_started(db: &Db<'_>, work: &Work, task: &Doc) -> Result<bool> {
+    let op = db.of(&work.op.id, "Operation")?;
+    let run = db.of(&work.run.id, "Run")?;
+    let effect = db.resolve(&op.body["effect_refs"][0])?;
+    let started = !not_dispatched(db, &op)?;
+    require(
+        op.spec == work.op.spec
+            && op.body["plan_ref"] == work.op.body["plan_ref"]
+            && op.body["lifecycle"] == "Running"
+            && op.body["outcome_knowledge"] == "InFlight"
+            && effect.id == work.effect.id
+            && effect.spec == work.effect.spec
+            && effect.rev == work.effect.rev + i64::from(started)
+            && db.of(&effect.id, "Effect")?.reference() == effect.reference()
+            && run.body["operation_refs"][0] == op.reference()
+            && task.body["operation_refs"][0] == op.reference(),
+        "Fenced",
+        "systemd worker receipt differs from its current effect revision",
+    )?;
+    Ok(started)
 }
 
 fn matches_service(service: &Doc, observation: &Value) -> bool {
@@ -297,7 +487,14 @@ pub(crate) fn record(db: &Db<'_>, work: &Work, target: &Doc, before: &Value) -> 
     let manager: Manager = decode(&target.spec["manager"])?;
     require(
         intent.rev == 1
-            && intent.body == binding(&work.op, &work.effect, &work.run)
+            && intent.body["effect_ref"] == work.effect.reference()
+            && intent.body["operation_ref"] == work.op.reference()
+            && intent.body["run_ref"] == work.run.reference()
+            && intent.body["task_ref"] == work.task.reference()
+            && db.of(&work.op.id, "Operation")?.reference() == work.op.reference()
+            && db.of(&work.effect.id, "Effect")?.reference() == work.effect.reference()
+            && db.of(&work.run.id, "Run")?.reference() == work.run.reference()
+            && db.of(&work.task.id, "Task")?.reference() == work.task.reference()
             && target.reference() == intent.body["service_ref"]
             && matches_service(target, before)
             && before["manager_uid"] == manager_uid(&manager)
@@ -306,12 +503,25 @@ pub(crate) fn record(db: &Db<'_>, work: &Work, target: &Doc, before: &Value) -> 
         "Fenced",
         "systemd invocation differs from its approved dispatch",
     )?;
+    let mut effect = work.effect.body.clone();
+    effect["phase"] = json!("EffectStarted");
+    let effect = db.status(&work.effect, effect)?;
+    let mut operation = work.op.body.clone();
+    operation["effect_refs"] = json!([effect.reference()]);
+    operation["updated_at"] = json!(now());
+    let operation = db.status(&work.op, operation)?;
+    for subject in [&work.run, &work.task] {
+        let mut state = subject.body.clone();
+        state["operation_refs"] = json!([operation.reference()]);
+        db.status(subject, state)?;
+    }
     let checkpoint = db.create(
         CHECKPOINT,
         &checkpoint_id(&work.op.id),
         &work.op.owner,
         json!({"operation_id":work.op.id}),
-        json!({"intent_ref":intent.reference(),"verb":control.verb(),"before":before}),
+        json!({"intent_ref":intent.reference(),"verb":control.verb(),"before":before,
+            "effect_ref":effect.reference(),"operation_ref":operation.reference()}),
     )?;
     let mut called = intent.body.clone();
     called["checkpoint_ref"] = checkpoint.reference();
@@ -319,13 +529,7 @@ pub(crate) fn record(db: &Db<'_>, work: &Work, target: &Doc, before: &Value) -> 
     Ok(())
 }
 
-fn checkpoint(
-    conn: &Connection,
-    op: &Doc,
-    intent: &Doc,
-    service: &Doc,
-    control: Control,
-) -> Result<Option<Doc>> {
+fn checkpoint_link(conn: &Connection, op: &Doc, intent: &Doc) -> Result<Option<Doc>> {
     let saved = find(conn, &checkpoint_id(&op.id))?;
     require(
         saved.as_ref().map(Doc::reference) == intent.body.get("checkpoint_ref").cloned(),
@@ -338,12 +542,12 @@ fn checkpoint(
     let original = resolve(conn, &checkpoint.body["intent_ref"])?;
     let mut pending = intent.body.clone();
     pending.as_object_mut().unwrap().remove("checkpoint_ref");
-    let tool = intent.body["tool"]
-        .as_str()
-        .ok_or_else(|| err("RecoveryRequired", "systemd tool is missing"))?;
-    let plan = resolve(conn, &intent.body["plan_ref"])?;
-    let input = resolve(conn, &plan.body["purpose_ref"])?;
-    let action = Action::parse(tool, crate::broker::dependencies::tool_input(&input)?)?;
+    let initial = resolve(conn, &pending["effect_ref"])?;
+    let effect = resolve(conn, &checkpoint.body["effect_ref"])?;
+    let dispatch = resolve(conn, &checkpoint.body["operation_ref"])?;
+    let prepared = resolve(conn, &original.body["operation_ref"])?;
+    let mut started = initial.body.clone();
+    started["phase"] = json!("EffectStarted");
     require(
         checkpoint.kind == CHECKPOINT
             && checkpoint.rev == 1
@@ -355,7 +559,45 @@ fn checkpoint(
             && original.owner == intent.owner
             && original.spec == intent.spec
             && original.body == pending
-            && checkpoint.body["verb"] == control.verb()
+            && effect.kind == "Effect"
+            && effect.id == initial.id
+            && effect.rev == initial.rev + 1
+            && effect.spec == initial.spec
+            && effect.owner == initial.owner
+            && effect.body == started
+            && dispatch.kind == "Operation"
+            && dispatch.id == op.id
+            && dispatch.rev == prepared.rev + 1
+            && dispatch.spec == op.spec
+            && dispatch.owner == op.owner
+            && dispatch.body["plan_ref"] == prepared.body["plan_ref"]
+            && dispatch.body["lifecycle"] == "Running"
+            && dispatch.body["outcome_knowledge"] == "InFlight"
+            && dispatch.body["effect_refs"] == json!([effect.reference()]),
+        "RecoveryRequired",
+        "systemd checkpoint disagrees with its dispatch intent and started effect",
+    )?;
+    Ok(Some(checkpoint))
+}
+
+fn checkpoint(
+    conn: &Connection,
+    op: &Doc,
+    intent: &Doc,
+    service: &Doc,
+    control: Control,
+) -> Result<Option<Doc>> {
+    let Some(checkpoint) = checkpoint_link(conn, op, intent)? else {
+        return Ok(None);
+    };
+    let tool = intent.body["tool"]
+        .as_str()
+        .ok_or_else(|| err("RecoveryRequired", "systemd tool is missing"))?;
+    let plan = resolve(conn, &intent.body["plan_ref"])?;
+    let input = resolve(conn, &plan.body["purpose_ref"])?;
+    let action = Action::parse(tool, crate::broker::dependencies::tool_input(&input)?)?;
+    require(
+        checkpoint.body["verb"] == control.verb()
             && service.reference() == intent.body["service_ref"]
             && matches_service(service, &checkpoint.body["before"])
             && expected_invocation(&action, &checkpoint.body["before"]),
@@ -400,8 +642,9 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
         "SELECT body->>'operation_id' FROM versions WHERE kind='Effect' AND rev=1 AND seq>?1
           AND body->>'action' IN ('service.start','service.stop','service.restart')",
     )?;
-    let mut intents = 0u64;
-    let mut checkpoints = 0u64;
+    let mut intents = 0i64;
+    let mut checkpoints = 0i64;
+    let mut confirmations = 0i64;
     for id in statement.query_map([epoch(conn)?], |r| r.get::<_, String>(0))? {
         let op = find(conn, &id?)?
             .ok_or_else(|| err("RecoveryRequired", "systemd operation is missing"))?;
@@ -419,20 +662,16 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
         if saved.is_some() {
             checkpoints += 1;
         }
-        require(
-            (op.body["outcome_knowledge"] != "Unknown" || saved.is_some())
-                && (op.body["lifecycle"] != "Succeeded" || saved.is_some())
-                && (op.body["outcome_knowledge"] != "NotStarted" || saved.is_none()),
-            "RecoveryRequired",
-            "systemd checkpoint disagrees with the recorded outcome",
-        )?;
+        let context = settlement::verify_state(conn, &op, &intent, &target, saved.as_ref())?;
+        confirmations += i64::from(settlement::verify_confirmation(conn, &context)?);
     }
-    let counts: (u64,u64) = conn.query_row(
-        "SELECT count(*) FILTER (WHERE kind=?1),count(*) FILTER (WHERE kind=?2) FROM current WHERE kind IN (?1,?2)",
-        [INTENT,CHECKPOINT], |r| Ok((r.get(0)?,r.get(1)?)),
+    let counts: (i64,i64,i64) = conn.query_row(
+        "SELECT count(*) FILTER (WHERE kind=?1),count(*) FILTER (WHERE kind=?2),count(*) FILTER (WHERE kind=?3)
+         FROM current WHERE kind IN (?1,?2,?3)",
+        [INTENT,CHECKPOINT,CONFIRMATION], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
     )?;
     require(
-        counts == (intents, checkpoints),
+        counts == (intents, checkpoints, confirmations),
         "RecoveryRequired",
         "systemd dispatch evidence contains unbound records",
     )

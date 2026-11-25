@@ -36,6 +36,10 @@ def main(previous):
     def launches():
         return invocations.read_text().splitlines()
 
+    def verify_failure(message):
+        failed = subprocess.run(node.daemon + ["verify"], capture_output=True, timeout=15)
+        assert failed.returncode and message in failed.stderr, failed
+
     try:
         starter.write_text(f"""set -eu
 printf '%s\\n' "$INVOCATION_ID" >> {invocations}
@@ -148,6 +152,14 @@ ExecStart=/bin/sh {starter}
         assert (unknown["lifecycle"], unknown["outcome_knowledge"]) == ("Paused", "Unknown"), unknown
         operation = unknown["operation_refs"][0]
         reconcile = target(operation)
+        node.stop()
+        with sqlite3.connect(database, timeout=10) as db:
+            db.execute("DELETE FROM holds WHERE holder=?", (operation["resource_id"],))
+        verify_failure(b"expected exclusive service hold")
+        with sqlite3.connect(database, timeout=10) as db:
+            db.execute("INSERT INTO holds(volume,holder) VALUES(?,?)", (service_id, operation["resource_id"]))
+        subprocess.run(node.daemon + ["verify"], check=True, capture_output=True, timeout=15)
+        node.start()
         competing = node.submit("service.stop", target(service))
         node.approve(competing)
         fenced = node.wait(competing)
@@ -167,6 +179,9 @@ ExecStart=/bin/sh {starter}
         recovered_result = node.call("Artifact.Read", {"reference": recovered["result"]["artifact_refs"][0]})
         assert recovered_result["checkpoint_ref"]["resource_id"] == checkpoint_id, recovered_result
         assert launches() == [first["invocation_id"], second, third]
+        witness_task = node.call("Artifact.Get", {"reference": proof})["resource"]["spec"]["task_id"]
+        node.call("Task.EvictResults", dict(target(node.get(witness_task)["reference"]), reason="inspected effect is already settled"))
+        refuses("ResultEvicted", lambda: node.call("Artifact.Read", {"reference": proof}))
         node.stop()
         after = json.loads(subprocess.check_output(node.daemon + ["verify"], timeout=15))
         assert after["database_format"] >= 69 and not after["migration_required"], after
@@ -174,10 +189,28 @@ ExecStart=/bin/sh {starter}
             record, = db.execute("SELECT body FROM versions WHERE id=? AND rev=1", (checkpoint_id,)).fetchone()
             db.execute("UPDATE versions SET body=json_set(body,'$.before.manager_uid',2999999999) WHERE id=? AND rev=1",
                        (checkpoint_id,))
-        damaged = subprocess.run(node.daemon + ["verify"], capture_output=True, timeout=15)
-        assert damaged.returncode and b"missing or unbound checkpoint" in damaged.stderr, damaged
+        verify_failure(b"missing or unbound checkpoint")
         with sqlite3.connect(database, timeout=10) as db:
             db.execute("UPDATE versions SET body=? WHERE id=? AND rev=1", (record, checkpoint_id))
+            operation_id = operation["resource_id"]
+            db.execute("INSERT INTO holds(volume,holder) VALUES(?,?)", (service_id, operation_id))
+        verify_failure(b"expected exclusive service hold")
+        with sqlite3.connect(database, timeout=10) as db:
+            db.execute("DELETE FROM holds WHERE holder=?", (operation_id,))
+            approval_id, = db.execute("SELECT decision FROM approval_bindings WHERE operation=?", (operation_id,)).fetchone()
+            approval, = db.execute("SELECT body FROM versions WHERE id=? AND rev=1", (approval_id,)).fetchone()
+            db.execute("UPDATE versions SET body=json_set(body,'$.decision','Rejected') WHERE id=? AND rev=1", (approval_id,))
+        verify_failure(b"reference digest mismatch")
+        with sqlite3.connect(database, timeout=10) as db:
+            db.execute("UPDATE versions SET body=? WHERE id=? AND rev=1", (approval, approval_id))
+            confirmation_id, confirmation = db.execute(
+                "SELECT id,body FROM current WHERE kind='HostServiceControlConfirmation' AND spec->>'operation_id'=?",
+                (operation_id,)).fetchone()
+            db.execute("UPDATE versions SET body=json_set(body,'$.result_ref',json(?)) WHERE id=? AND rev=1",
+                       (json.dumps(completed["result"]["artifact_refs"][0]), confirmation_id))
+        verify_failure(b"settled receipt disagrees")
+        with sqlite3.connect(database, timeout=10) as db:
+            db.execute("UPDATE versions SET body=? WHERE id=? AND rev=1", (confirmation, confirmation_id))
         subprocess.run(node.daemon + ["verify"], check=True, capture_output=True, timeout=15)
         print("PASS real restart, approval, boot match, durable deduplication and lost-receipt reconciliation")
     finally:

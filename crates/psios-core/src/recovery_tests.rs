@@ -111,6 +111,7 @@ fn systemd_task_releases_its_hold_after_restart_before_the_command_checkpoint() 
     approve(&mut store, &original);
     assert_eq!(claim(&mut store), original);
     let work = dispatch(&mut store, &original);
+    assert_eq!(work.effect.body["phase"], "PermitBound");
     let operation = work.op.id.clone();
     drop(work);
 

@@ -150,6 +150,11 @@ fn close(
         if let Some(a) = artifact {
             let mut refs = vec![a.reference()];
             refs.extend(a.spec.get("reconciliation_evidence_ref").cloned());
+            if node::service_control::is_tool(field(&t.spec, "task_type"))
+                && let Some(confirmation) = node::service_control::record_settlement(db, &op, a)?
+            {
+                refs.push(confirmation.reference());
+            }
             b["evidence_refs"] = json!(refs);
         }
         *r = db.status(&e, b)?.reference();

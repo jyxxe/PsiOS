@@ -53,6 +53,14 @@ struct ArtifactChunk {
     next_offset: Option<usize>,
     data_base64: String,
 }
+
+/// The exact artifact content required from an already admitted Task.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskOutputRequirement {
+    pub task_id: String,
+    pub digest: String,
+}
 impl Client {
     pub fn new(socket: impl AsRef<Path>, token: impl Into<String>) -> Self {
         Self {
@@ -201,10 +209,23 @@ impl Client {
         key: &str,
         delegation: &str,
     ) -> ApiResult<Value> {
-        let request = self.call(
-            "Task.Prepare",
-            json!({"tool": tool, "input": input, "key": key, "delegation_id": delegation}),
-        )?;
+        self.submit_with_requirements(tool, input, key, delegation, &[])
+    }
+
+    pub fn submit_with_requirements(
+        &self,
+        tool: &str,
+        input: Value,
+        key: &str,
+        delegation: &str,
+        requirements: &[TaskOutputRequirement],
+    ) -> ApiResult<Value> {
+        let mut prepare =
+            json!({"tool": tool, "input": input, "key": key, "delegation_id": delegation});
+        if !requirements.is_empty() {
+            prepare["requires"] = json!(requirements);
+        }
+        let request = self.call("Task.Prepare", prepare)?;
         match self.call("Task.Submit", request.clone()) {
             Err(e) if e.code == "DependencyUnavailable" => {
                 let state = self

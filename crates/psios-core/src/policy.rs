@@ -654,19 +654,33 @@ pub fn budget(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
 }
 
 pub fn intern_input(db: &Db<'_>, actor: &str, input: &Value) -> Result<Doc> {
-    let digest = sha256(&canonical(&json!([actor, input])));
+    intern_input_kind(db, actor, "Input", input)
+}
+
+pub(crate) fn intern_input_kind(
+    db: &Db<'_>,
+    actor: &str,
+    kind: &str,
+    input: &Value,
+) -> Result<Doc> {
+    let material = if kind == "Input" {
+        json!([actor, input])
+    } else {
+        json!([actor, kind, input])
+    };
+    let digest = sha256(&canonical(&material));
     let id = format!("input-{}", &digest[7..]);
     match db.get(&id) {
         Ok(d) => Ok(d),
         Err(e) if e.0.code == "NotFound" => {
             db.cfg.check_admission_space()?;
-            let (count,size):(i64,i64)=db.c.query_row("SELECT count(*),coalesce(sum(length(CAST(body AS BLOB))),0) FROM versions WHERE kind='Input' AND owner=?1",[actor],|r|Ok((r.get(0)?,r.get(1)?)))?;
+            let (count,size):(i64,i64)=db.c.query_row("SELECT count(*),coalesce(sum(length(CAST(body AS BLOB))),0) FROM versions WHERE kind IN ('Input','TaskInputManifest') AND owner=?1",[actor],|r|Ok((r.get(0)?,r.get(1)?)))?;
             require(
                 count < 4096 && size + canonical(input).len() as i64 <= 64 * 1024 * 1024,
                 "QuotaExceeded",
                 "retained input quota exceeded",
             )?;
-            db.create("Input", &id, actor, json!({}), input.clone())
+            db.create(kind, &id, actor, json!({}), input.clone())
         }
         Err(e) => Err(e),
     }

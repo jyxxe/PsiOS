@@ -179,6 +179,14 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 
 新接受的 Task 在同一事务中固定计划的经过时间截止点。审批决定、队列结算和派发按 UTC 与经过时间中先到期的一项处理。原任务在当前内核启动中的截止点同时约束重试，幂等重发仍可取回原回执。执行许可的短期窗口也保存经过时间，适用于立即准入与备份发布、OCI 启动等后续检查点。已经派发的操作仍按实际效果与回执结算。格式 26 保留早期已接受 Task 的 UTC 期限与审批状态。跨内核启动继续使用原 UTC 截止时间。[真实回拨验收](../tests/native_grant_deadline.py) · [格式 25 升级](../tests/task_deadline_upgrade.py)
 
+## 任务输出依赖
+
+`Task.Prepare` 可填 `requires`，每项指定已有上游 `task_id` 和结果制品的 `digest`。依赖属于固定输入清单，参与请求摘要和审批计划。最多指定四个不同上游，所有内容校验共用 8 MiB 上限。主体须有权读取各上游。Rust SDK 使用 `Client::submit_with_requirements`，CLI 使用 `psiosctl submit --requires FILE` 读取依赖 JSON 数组。
+
+上游尚未成功，或结果经权威标为 `Unavailable` 时，下游保持 `WaitingResource` 并保留原执行预算。依赖全部可用后，Core 校验固定摘要及实际字节，再开启审批或排队。领取和派发时复核权限与制品。实际执行快照保存通过核验的制品引用。工具仍接收清单中的 `tool_input`。需要读取制品内容时，调用者沿用固定引用和 `Artifact.Read`。
+
+上游失败、摘要不匹配、已生效的结果回收、授权变化或截止均可让下游在派发前结束。未结算的下游保留上游制品，直到取消、失败或完成结算。修复标为不可用的上游制品后，先用 `Task.VerifyResults` 重新确认结果，再继续派发。[重启、审批与制品恢复验收](../tests/test_task_dependencies.py) · [格式 40 升级](../tests/task_dependencies_upgrade.py)
+
 ## 任务调度
 
 `Schedule.Create` 为本机 Task 保存一个未来触发时间和截止时间。两者接受带时区偏移的 RFC 3339 时间并转为 UTC，触发依据节点墙钟。授予 `schedule.manage`、`task.submit`、`task.read` 及选定工具，并将权限限制在该工具的目标资源。截止时间须在委托有效期内。同一主体以相同 `key` 重发等价请求会取回原调度状态。输入、授权或时间改变时需要新键。

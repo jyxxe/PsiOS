@@ -1,5 +1,6 @@
 mod approval;
 pub(crate) mod concurrency;
+pub(crate) mod dependencies;
 mod execution;
 mod history;
 pub(crate) use history::{archive, history};
@@ -97,7 +98,10 @@ fn close(
             db.status(&d, b)?;
         }
     }
-    if matches!(phase.as_str(), "WaitingApproval" | "Queued" | "Claimed") {
+    if matches!(
+        phase.as_str(),
+        "WaitingResource" | "WaitingApproval" | "Queued" | "Claimed"
+    ) {
         let decision:Option<String>=db.c.query_row("SELECT a.decision FROM approval_bindings a JOIN current d ON d.id=a.decision
             WHERE a.task=?1 AND a.operation IS NULL AND d.kind='ApprovalDecision' AND d.body->>'decision'='Approved' ",[&t.id],|r|r.get(0)).optional()?;
         if let Some(decision) = decision {
@@ -179,6 +183,7 @@ fn close(
         db.status(&r, b)?;
     }
     if !unknown {
+        dependencies::release(db, &t.id)?;
         db.c.execute("DELETE FROM holds WHERE holder=?1", [&op.id])?;
     }
     db.audit(&t.owner, "Task.Terminate", Some(&t.id), state)?;

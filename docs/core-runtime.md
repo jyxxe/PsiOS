@@ -231,6 +231,12 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 
 `Task.Admission`、`Client::task_admission` 和 `psiosctl task-admission` 公开当前主体的普通准入用量，要求 `task.submit`。[竞争、重启及对账验收](../tests/test_principal_admission.py)
 
+### 按主体限制块式读取结果
+
+`read_result_bytes_per_principal` 可为普通只读 Task 的块式结果设置每主体 4 MiB 至 1 TiB 的上限。接受 Task 时为本次结果预留 4 MiB。完成时按实际 JSON 字节从预留转为保留，用量和制品在同一事务提交。失败、取消及显式回收释放对应字节。设置上限后，`Task.Admission.read_results` 显示预留、保留和上限。额度吃满时，提交返回可退避重试的 `QuotaExceeded`。
+
+旧任务已接受的执行仍可结算。升级按现有块式制品清单和待执行 Task 回填用量。写操作的效果证据、资源状态投影和恢复核验继续由原来的权威存储保护。[配额、重启与真实回收验收](../tests/test_read_result_quota.py) · [格式 50 用量回填](../tests/read_result_quota_upgrade.py)
+
 ## 任务调度
 
 `Schedule.Create` 为本机 Task 保存一个未来触发时间和截止时间。两者接受带时区偏移的 RFC 3339 时间并转为 UTC，触发依据节点墙钟。授予 `schedule.manage`、`task.submit`、`task.read` 及选定工具，并将权限限制在该工具的目标资源。截止时间须在委托有效期内。同一主体以相同 `key` 重发等价请求会取回原调度状态。输入、授权或时间改变时需要新键。

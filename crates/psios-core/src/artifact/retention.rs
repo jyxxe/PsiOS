@@ -228,6 +228,7 @@ pub fn evict(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
             "RecoveryRequired",
             "artifact payload count disagrees with the retained manifest",
         )?;
+        super::capacity::release(db, &artifact.id)?;
         bytes_removed += manifest.size as u128;
     }
     let mut body = task.body.clone();

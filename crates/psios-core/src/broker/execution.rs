@@ -391,6 +391,7 @@ pub fn finish(db: &Db<'_>, w: &Work, result: Result<Value>) -> Result<()> {
         ) {
             w.check_streaming(db)?;
         }
+        artifact::capacity::check_result(db, &t, &receipt)?;
         Ok(receipt)
     });
     match result {
@@ -407,6 +408,7 @@ pub fn finish(db: &Db<'_>, w: &Work, result: Result<Value>) -> Result<()> {
                 }),
                 &body,
             )?;
+            artifact::capacity::retain(db, &t, &a)?;
             close(
                 db,
                 &t,

@@ -187,6 +187,7 @@ fn close(
     if !unknown {
         admission::release(db, &t.id)?;
         dependencies::release(db, &t.id)?;
+        artifact::capacity::release(db, &t.id)?;
         storage::read_holds::release(db, &t.id)?;
         db.c.execute("DELETE FROM holds WHERE holder=?1", [&op.id])?;
     }

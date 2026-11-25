@@ -99,7 +99,8 @@ class FileRenameTests(unittest.TestCase):
         inode = self.source.stat().st_ino
         n.stop()
         settings = json.loads(n.config.read_text())
-        n.config.write_text(json.dumps(dict(settings, queue_limit=1, recovery_queue_limit=1)))
+        n.config.write_text(json.dumps(dict(settings, queue_limit=1, recovery_queue_limit=1,
+                                           read_result_bytes_per_principal=4 * 1024 * 1024)))
         n.start()
         with sqlite3.connect(n.state / "state.db", timeout=10) as database:
             database.execute(f"""CREATE TRIGGER lose_rename_receipt BEFORE INSERT ON versions

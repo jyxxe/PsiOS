@@ -301,6 +301,7 @@ fn submit_with_origin(
     db.cfg.check_admission_space()?;
     let requirements = dependencies::requirements(&input)?;
     let recovery = admission::select(db, actor, &a, &target, !requirements.is_empty())?;
+    artifact::capacity::check_admission(db, actor, tool)?;
     let budget = field(&s["budget_ref"], "resource_id");
     if recovery.is_some() {
         require(
@@ -410,6 +411,7 @@ fn submit_with_origin(
     if let Some(operation) = &recovery {
         admission::bind(db, &t, operation)?;
     }
+    artifact::capacity::reserve(db, &t, tool)?;
     dependencies::pin(db, &t, &requirements)?;
     db.audit(actor, "Task.Accept", Some(&task), "Allowed")?;
     Ok(receipt)

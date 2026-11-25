@@ -105,7 +105,7 @@ pub(crate) fn export(
     let limit = artifact::ingress::MAX_BYTES;
     let state = File::open(&work.cfg.state_dir)?;
     work.cfg
-        .check_restore_space(&state, std::iter::once(u64::from(limit)), 1)?;
+        .check_managed_space(&state, std::iter::once(u64::from(limit)), 1)?;
     // The image exporter never writes into the user's shared scratch mount.
     // Drop (including a failed or canceled capture) closes the anonymous file.
     let mut file = tempfile::tempfile_in(&work.cfg.state_dir)?;

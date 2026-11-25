@@ -2,7 +2,7 @@
   "schema_version": "1.0.0",
   "document_version": "1.0.0",
   "source_document": "docs/14-roadmap-and-decisions.md",
-  "scope": "从 v1 第 14 章工作项表转换的 26 项实施计划；未创建外部工单，未实施代码或执行产品验收。",
+  "scope": "从 v1 第 14 章维护的 27 项实施计划；包含 Shell 浏览器桌面专项。未创建外部工单，计划不代表实现或产品验收。",
   "dependency_semantics": {
     "dependencies": "仅含 WI ID，表示集成/验收前置；允许文中明确的隔离原型并行。",
     "conditional_dependencies": "逐项按冻结的支持范围判定，适用时为必需验收前置；不适用必须保留范围与理由，不得借此省略已宣传能力。",
@@ -1372,6 +1372,11 @@
           "work_item_id": "WI-023",
           "applies_when": "发布范围纳入可选 TableFS Profile 时；选择普通文件系统方案时记录未纳入理由及普通卷证据。",
           "required_when_applicable": true
+        },
+        {
+          "work_item_id": "WI-027",
+          "applies_when": "发布范围声明完整 Shell 浏览器桌面时；既有本机查询入口不得冒充该能力。",
+          "required_when_applicable": true
         }
       ],
       "dependency_notes": "原表 WI-012、WI-017～WI-024 已完全展开：WI-012/WI-024 为强前置，WI-017～WI-023 按本次支持范围逐项判定。范围冻结不可用来遗漏已对外声明能力的验收；不把未纳入的可选服务变成 M6 全局前置。"
@@ -1424,6 +1429,59 @@
       "adr_gates": [],
       "conditional_dependencies": [],
       "dependency_notes": "持续治理项无一次性前置 WI；范围、合同、实现证据或宣传改变时触发，不通过回指所有工作项形成依赖环。"
+    },
+    {
+      "id": "WI-027",
+      "title": "Shell 浏览器桌面、Dock、多窗口、工作区、对象协作、可访问性与恢复",
+      "priority": "P1",
+      "stage": [
+        "M0",
+        "M2",
+        "M3",
+        "M4",
+        "M6"
+      ],
+      "dependencies": [
+        "WI-003",
+        "WI-004",
+        "WI-008"
+      ],
+      "acceptance_criteria": [
+        "M0 冻结视图与应用接入合同；M2 建立桌面、菜单栏、Dock、启动器、多窗口、工作区、恢复和可用基础应用，不以管理仪表盘作为默认首页。",
+        "M3 文件/Agent Chat/PsiFlow 与任务中心协作；关闭视图不取消任务，聊天不覆盖执行权威，跨应用引用不自动授权。",
+        "M4 按能力接入 NativeWeb/GUI Bridge 并验证三版；恢复不复活租约，未安装图形后端不阻断浏览器桌面。",
+        "M6 完成 AT-SHL-001～015 的适用组合，记录键盘/输入法、无障碍、窄屏及客户端/服务端/GUI 资源预算。"
+      ],
+      "owner_role": "Shell/体验、Application、Identity 及对应 Task/Chat/PsiFlow/GUI 服务维护者",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [],
+      "source_stage_text": "M0、M2–M4、M6",
+      "source_dependency_text": "WI-003、004、008；Chat/PsiFlow/GUI 接入按已启用范围依赖 WI-016、015、020",
+      "adr_gates": [
+        "ADR-16",
+        "ADR-20"
+      ],
+      "conditional_dependencies": [
+        {
+          "work_item_id": "WI-016",
+          "applies_when": "启用 Agent Chat 集成时",
+          "required_when_applicable": true
+        },
+        {
+          "work_item_id": "WI-015",
+          "applies_when": "启用 PsiFlow 集成时",
+          "required_when_applicable": true
+        },
+        {
+          "work_item_id": "WI-020",
+          "applies_when": "启用远程图形应用时",
+          "required_when_applicable": true
+        }
+      ]
     }
   ],
   "legacy_work_item_mappings": [

@@ -148,6 +148,18 @@
 | V1-GUI-008 | [V1-GUI-008：NativeWeb的浏览器安全边界](../docs/07-applications-packages-gui.md) | SEC-V1-10, AT-STA-024, AT-CORE-015 |
 | V1-GUI-009 | [V1-GUI-009：秘密、隐私和数据去向](../docs/07-applications-packages-gui.md) | AT-STA-025 |
 | V1-GUI-010 | [V1-GUI-010：第三方与节点边界](../docs/07-applications-packages-gui.md) | AT-STA-021 |
+| V1-SHL-001 | [V1-SHL-001：桌面优先的产品定位](../docs/07-applications-packages-gui.md) | AT-SHL-001, AT-SHL-012 |
+| V1-SHL-002 | [V1-SHL-002：菜单栏、Dock 与应用入口](../docs/07-applications-packages-gui.md) | AT-SHL-001, AT-SHL-002, AT-SHL-003 |
+| V1-SHL-003 | [V1-SHL-003：多窗口与独立生命周期](../docs/07-applications-packages-gui.md) | AT-SHL-002, AT-SHL-003, AT-SHL-006, AT-SHL-011, AT-SHL-013 |
+| V1-SHL-004 | [V1-SHL-004：工作区与目标上下文](../docs/07-applications-packages-gui.md) | AT-SHL-005, AT-SHL-014 |
+| V1-SHL-005 | [V1-SHL-005：布局恢复与多设备](../docs/07-applications-packages-gui.md) | AT-SHL-004, AT-SHL-005, AT-SHL-009, AT-SHL-011, AT-SHL-014 |
+| V1-SHL-006 | [V1-SHL-006：第一方 Web 与图形应用接入](../docs/07-applications-packages-gui.md) | AT-SHL-010, AT-SHL-011, AT-SHL-012 |
+| V1-SHL-007 | [V1-SHL-007：对象协作与 Agent 上下文](../docs/07-applications-packages-gui.md) | AT-SHL-007, AT-SHL-008 |
+| V1-SHL-008 | [V1-SHL-008：Shell 视图契约与隔离](../docs/07-applications-packages-gui.md) | AT-SHL-003, AT-SHL-004, AT-SHL-007, AT-SHL-009, AT-SHL-010 |
+| V1-SHL-009 | [V1-SHL-009：任务、通知与真实状态](../docs/07-applications-packages-gui.md) | AT-SHL-006, AT-SHL-008, AT-SHL-009 |
+| V1-SHL-010 | [V1-SHL-010：一致视觉与资源预算](../docs/07-applications-packages-gui.md) | AT-SHL-015 |
+| V1-SHL-011 | [V1-SHL-011：浏览器、无障碍与窄屏](../docs/07-applications-packages-gui.md) | AT-SHL-013, AT-SHL-014 |
+| V1-SHL-012 | [V1-SHL-012：三版一致与阶段交付](../docs/07-applications-packages-gui.md) | AT-SHL-001, AT-SHL-012, AT-SHL-015 |
 | V1-TSK-001 | [V1-TSK-001（必须）：`task_id`、`run_id`、`operation_id`、`event_id`、`artifact_id` 由各自权威分配且不得复用](../docs/08-tasks-events.md) | AT-COMP-009 |
 | V1-TSK-002 | [V1-TSK-002（必须）：创建请求不携带尚未分配的 `task_id` 或 `run_id`](../docs/08-tasks-events.md) | AT-TSK-001 |
 | V1-TSK-003 | [V1-TSK-003（必须）：在一个本地事务或经过验证的等效协议中完成：提交去重判定、输入清单引用与保留关系、任务元数据容量预留、Task 记录、必要审计意图和 outbox](../docs/08-tasks-events.md) | AT-TSK-001, AT-TSK-008, AT-CORE-007 |

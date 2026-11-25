@@ -1,5 +1,6 @@
 """Upgrade an actual PR #1 state and witness in place, including accepted but unexecuted work."""
 import argparse
+from contextlib import closing
 import hashlib
 import json
 from pathlib import Path
@@ -49,8 +50,20 @@ def main(previous):
         assert rehearsed == report and migration["status"] == "Verified", rehearsed
         assert migration["source_format"] == 1 and migration["target_format"] > 1, migration
         assert authority_contents(n) == original and not list(scratch.iterdir())
-        with sqlite3.connect(n.state / "state.db") as db:
+        with closing(sqlite3.connect(n.state / "state.db")) as db, db:
             assert db.execute("PRAGMA user_version").fetchone() == (1,)
+            db.execute("CREATE INDEX versions_origin_seq ON versions(seq)")
+        # An integral, witnessed database can still be incompatible with a new DDL step.
+        conflicting = authority_contents(n)
+        clean = json.loads(subprocess.check_output([binary, "--config", n.config, "verify"], timeout=20))
+        assert clean["database_format"] == 1 and clean["sqlite_integrity"] == "Verified", clean
+        failed = subprocess.run([binary, "--config", n.config, "verify", "--rehearse-migration",
+            "--scratch-dir", scratch], capture_output=True, timeout=20)
+        assert failed.returncode != 0 and not failed.stdout, failed
+        assert b"migration rehearsal failed" in failed.stderr and b"StorageUnavailable" in failed.stderr, failed
+        assert authority_contents(n) == conflicting and not list(scratch.iterdir())
+        with closing(sqlite3.connect(n.state / "state.db")) as db, db:
+            db.execute("DROP INDEX versions_origin_seq")
         n.daemon[0] = binary
         n.config.write_text(json.dumps(base))
         n.start()

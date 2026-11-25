@@ -11,9 +11,11 @@
 | Agent 与协作 | 本机提供独立 Agent 和 Provider 身份、版本化 Skill、绑定 Linux 启动身份与挂起计时的模型租约、持久多轮 Session、受权工具派发与取消。已通过 SmolLM2 在禁网 CPU 环境派发真实盘点 Task。已验证 Provider 报告的输入和输出 Token 随决策结算到原调用记录，支持崩溃重放。Provider 可用私有暂存目录，在工作进程丢失响应后交付原决策。显式入队的 Session 可由独立 Provider 按 Model 持续领取。现有定时触发可借助明确授权的 Task 原子创建会话并保留起源。已验证领取竞争、撤权、租约过期和响应中断后的事务恢复。定向信号支持幂等发送、等待、重投、条件确认和一次性触发会话。 本机 PsiFlow 支持不可变的字面量 Task 依赖图、基于固定任务制品的条件选择和已选分支汇合。 支持将前驱的制品字符串固化为普通 Task 输入，已验证重启保留审批内容、越权和超长拒绝，以及原生盘断电后保留输入引用。分支与前驱回执可随进程重启和断电恢复。 新 WorkflowRun 的步骤继承原经过时间窗口。原生来宾真实回拨和同次启动重启后，过期实例保留未执行回执且未占用预算。已验证审批后重启、取消、撤权、队列压力及实际写入丢回执时阻塞后继并经对账恢复。本机私聊支持邀请、成员授权、持久文本、去重和已读位点。已验证丢发送回执、进程故障、撤权、跨会话游标与容量压力。本机多人房间使用同一消息账本，支持邀请、加入后历史、移除、退出、所有权交接和有效期内恢复归档，已验证成员撤销与发送竞争、重新加入及现有私聊原地升级。 | 按外部认证事件触发会话、云模型适配与计费、完整 Service Bus、群聊线程、订阅投递与跨协议桥接、并行编排与补偿、Project 和 Computer Use 待开发。[运行协议](core-runtime.md) · [Provider 队列验收](../tests/test_model_queue.py) · [多主体测试](../tests/test_runtime.py) |
 | 用户交互与集群 | 本机 CLI、Rust SDK 和无需模型的传统系统管理入口可用。CLI 与 SDK 可按固定版本分块导出任务制品并核对完整摘要，已验证超过单帧上限的结果。两台独立虚机已验证会生成不同的身份。共享 PsiOS Shell 提供本机一次性配对，在浏览器查看授权节点状态、存储余量和任务列表及详情。 可核对任务制品的固定版本及完整摘要，并预览 64 KiB 内的 JSON。 | macOS 式浏览器桌面的菜单栏、Dock、多窗口、工作区和布局恢复待开发；现有本机查询入口仅是初始实现。[Shell 设计](v1/docs/07-applications-packages-gui.md#5-psios-shell浏览器桌面工作环境)。Shell 远程接入及管理操作、Argon KDE 与 GUI Bridge、节点加入和退出、跨节点路由、租约共识及故障接管待开发。[本机 Shell](core-local.md#本机-psios-shell) · [集群规范](v1/docs/12-cluster-coordination.md) |
 
-## Agent Artifacts 应用化设计增补（2026-11-25）
+## Agent Artifacts 应用化进度（2026-11-25）
 
-已登记[通用产物接口](v1/docs/09-agents-models-protocols.md#911-agent-通用产物接口)和[安装为应用的设计](v1/docs/07-applications-packages-gui.md#6-agent-artifacts-作为应用安装)，由 WI-028 与 AT-AIF-001～010 跟踪。当前已有任务制品读取/导出、有限 JSON 预览和 OCI 应用能力；跨 Agent 的通用产物上传、清单适配、隔离交互预览、安装入口及端到端升级/回退仍待实现与验证。本次仅更新规范，新增能力为 NotVerified，产品验收为 NotRun。
+- 本机授权主体可分块暂存和发布通用字节，按提交偏移继续中断的上传。下载核对原始摘要，回收需要独立权限。原生 Agent 的成功模型会话可以将最终摘要发布为带模型、Skill、Provider 和租约来源的制品。已验证断线、重启、重复请求、配额、授权撤销及事务失败。[上传验收](../tests/test_artifact_ingress.py) · [模型输出发布验收](../tests/test_session_output.py)
+- `PsiOSLocalOciInstallV1` 适配器可从固定制品准备本机镜像安装或新版本暂存。批准后由 Docker 验证并运行镜像。实际验收覆盖模型输出生成声明、切换和回滚、退役后回收字节，以及持久卷和备份恢复。Agent 可按应用授权读取版本历史。[OCI 端到端验收](../tests/oci.py) · [应用与制品接口](core-runtime.md#从本机制品准备-oci-安装)
+- WI-028 的 `AT-AIF-001`～`010` 产品验收仍待执行。缺口包括完整跨 Agent 产物接口、外部 Agent 从产物提交到安装的联合验收、OCI 以外的适配器、浏览器隔离交互预览、注册表或远端来源信任链，以及通用应用发布和更新流程。[通用产物接口](v1/docs/09-agents-models-protocols.md#911-agent-通用产物接口) · [应用化设计](v1/docs/07-applications-packages-gui.md#6-agent-artifacts-作为应用安装)
 
 ## 如何复核
 

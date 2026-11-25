@@ -163,6 +163,10 @@ def exercise(args, work):
     next_receipt = json.loads(subprocess.check_output(upgrade, timeout=310))
     assert next_receipt["format"] == 6 and next_receipt["core_limits"] == LIMITS
     assert next_receipt["upgrade"]["previous_image_sha256"] == sha(disk) == unchanged
+    verified = next_receipt["upgrade"]["verified_authority"]
+    rehearsal = verified["migration_rehearsal"]
+    assert not verified["migration_required"] and rehearsal["status"] == "Verified", verified
+    assert rehearsal["source_format"] == rehearsal["target_format"] == verified["database_format"], rehearsal
     with boot(work, upgraded) as console:
         console.login("psios", user)
         after = check_state(console)

@@ -87,7 +87,7 @@ if ! "$bb" su -s /bin/sh psioscheck -c \
     > /report 2>/diagnostic; then
     prefix=authority
     if "$bb" grep -q 'migration rehearsal failed' /diagnostic; then prefix=migration-rehearsal; fi
-    for code in QuotaExceeded PermissionDenied RecoveryRequired SchemaVersionUnsupported StorageUnavailable Conflict; do
+    for code in QuotaExceeded PermissionDenied RecoveryRequired SchemaVersionUnsupported StorageUnavailable Conflict InvalidArgument; do
         if "$bb" grep -q "$code" /diagnostic; then stage=$prefix-$code; break; fi
     done
     exit 1

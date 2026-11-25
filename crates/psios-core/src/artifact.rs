@@ -143,6 +143,24 @@ impl<'a> Manifest<'a> {
             "artifact content digest mismatch",
         )
     }
+
+    fn original_bytes(&self, conn: &Connection, max_bytes: Option<usize>) -> Result<Vec<u8>> {
+        require(
+            max_bytes.is_none_or(|limit| self.size <= limit),
+            "QuotaExceeded",
+            "artifact exceeds requested content byte limit",
+        )?;
+        let mut bytes = Vec::new();
+        for index in 0..self.chunks.len() {
+            bytes.extend(self.chunk(conn, index)?);
+        }
+        require(
+            sha256(&bytes) == self.digest,
+            "RecoveryRequired",
+            "artifact content digest mismatch",
+        )?;
+        Ok(bytes)
+    }
 }
 
 pub fn read(db: &Db<'_>, artifact: &Doc, max_bytes: Option<usize>) -> Result<Value> {
@@ -150,22 +168,26 @@ pub fn read(db: &Db<'_>, artifact: &Doc, max_bytes: Option<usize>) -> Result<Val
     let Some(manifest) = Manifest::read(artifact)? else {
         return Ok(artifact.body.clone());
     };
-    require(
-        max_bytes.is_none_or(|limit| manifest.size <= limit),
-        "QuotaExceeded",
-        "artifact exceeds inline response limit, use Artifact.ReadChunk",
-    )?;
-    let mut bytes = Vec::new();
-    for index in 0..manifest.chunks.len() {
-        bytes.extend(manifest.chunk(db.c, index)?);
-    }
-    require(
-        sha256(&bytes) == manifest.digest,
-        "RecoveryRequired",
-        "artifact content digest mismatch",
-    )?;
-    serde_json::from_slice(&bytes)
+    serde_json::from_slice(&manifest.original_bytes(db.c, max_bytes)?)
         .map_err(|_| err("RecoveryRequired", "artifact JSON is unreadable"))
+}
+
+pub(crate) fn checkpoint_bytes(
+    conn: &Connection,
+    artifact: &Doc,
+    max_bytes: usize,
+) -> Result<Vec<u8>> {
+    retention::require_content(conn, artifact)?;
+    if let Some(manifest) = Manifest::read(artifact)? {
+        return manifest.original_bytes(conn, Some(max_bytes));
+    }
+    let bytes = canonical(&artifact.body);
+    require(
+        bytes.len() <= max_bytes,
+        "QuotaExceeded",
+        "artifact exceeds requested content byte limit",
+    )?;
+    Ok(bytes)
 }
 
 pub fn page(db: &Db<'_>, artifact: &Doc, offset: usize, length: usize) -> Result<Value> {

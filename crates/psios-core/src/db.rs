@@ -15,6 +15,7 @@ use zeroize::Zeroizing;
 
 mod space;
 pub(crate) use space::check_restore_capacity;
+mod checkpoint;
 mod verify;
 
 pub struct Store {
@@ -112,6 +113,23 @@ pub(crate) fn find(conn: &Connection, id: &str) -> Result<Option<Doc>> {
             row,
         )
         .optional()?)
+}
+fn resolve(conn: &Connection, reference: &Value) -> Result<Doc> {
+    let rf: ResourceRef = decode(reference)?;
+    let d = conn
+        .query_row(
+            "SELECT * FROM versions WHERE id=?1 AND 'r'||rev=?2",
+            params![rf.resource_id, rf.version],
+            row,
+        )
+        .optional()?
+        .ok_or_else(|| err("PreconditionFailed", "resource version unavailable"))?;
+    require(
+        d.reference() == *reference,
+        "PreconditionFailed",
+        "reference digest mismatch",
+    )?;
+    Ok(d)
 }
 fn token() -> String {
     format!(
@@ -470,22 +488,7 @@ impl Db<'_> {
         Ok(d)
     }
     pub fn resolve(&self, v: &Value) -> Result<Doc> {
-        let rf: ResourceRef = decode(v)?;
-        let d = self
-            .c
-            .query_row(
-                "SELECT * FROM versions WHERE id=?1 AND 'r'||rev=?2",
-                params![rf.resource_id, rf.version],
-                row,
-            )
-            .optional()?
-            .ok_or_else(|| err("PreconditionFailed", "resource version unavailable"))?;
-        require(
-            d.reference() == *v,
-            "PreconditionFailed",
-            "reference digest mismatch",
-        )?;
-        Ok(d)
+        resolve(self.c, v)
     }
     pub fn create(
         &self,

@@ -153,6 +153,149 @@ fn a_root_budget_slot_is_held_through_claim_and_dispatch() {
 }
 
 #[test]
+fn oci_capture_staging_uses_approved_byte_limits_and_releases_with_the_lease() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = Config::local(&tmp.path().join("core"));
+    let budget = apps::capture::STAGING_BYTES;
+    cfg.oci_capture_max_bytes = budget;
+    Store::init(&cfg).unwrap();
+    let mut store = Store::open(cfg.clone()).unwrap();
+    let node = call(&mut store, "Node.Get", json!({})).unwrap()["reference"]["resource_id"].clone();
+    let grant = call(
+        &mut store,
+        "Grant.Issue",
+        json!({"principal_id":"local-owner",
+        "actions":["task.submit","task.read","artifact.upload",apps::capture::TOOL],
+        "units":8,"ttl_seconds":90,"tool_targets":[node]}),
+    )
+    .unwrap();
+    let producer = submit(&mut store, "system.status", json!({}));
+    execute(&mut store, &producer);
+    let output =
+        call(&mut store, "Task.Get", json!({"id":producer})).unwrap()["result"]["artifact_refs"][0]
+            ["digest"]
+            .clone();
+
+    let capture = |store: &mut Store, max_bytes: Option<u32>, requires: bool| {
+        let mut input = json!({"image_id":format!("sha256:{}","a".repeat(64)),
+                               "expected_engine_id":"test-local-engine"});
+        if let Some(bytes) = max_bytes {
+            input["max_archive_bytes"] = json!(bytes);
+        }
+        let mut params = json!({"tool":apps::capture::TOOL,"input":input,"key":id("capture"),
+            "delegation_id":grant["delegation_ref"]["resource_id"]});
+        if requires {
+            params["requires"] = json!([{"task_id":producer,"digest":output}]);
+        }
+        let prepared = call(store, "Task.Prepare", params).unwrap();
+        let accepted = call(store, "Task.Submit", prepared).unwrap();
+        let task = accepted["task_id"].as_str().unwrap().to_owned();
+        approve(store, &task);
+        task
+    };
+    let reserved = |store: &mut Store| {
+        let status = call(store, "Node.Get", json!({})).unwrap();
+        let staging = &status["admission"]["oci_capture_staging"];
+        assert_eq!(staging["max_bytes"], budget);
+        staging["reserved_bytes"].as_u64().unwrap()
+    };
+    let default_bytes = storage::oci_archive::DEFAULT_CAPTURE_BYTES;
+    let first = capture(&mut store, Some(budget - default_bytes), true);
+    let waiting = capture(&mut store, Some(budget), false);
+    let legacy = capture(&mut store, None, false);
+    assert_eq!(reserved(&mut store), 0);
+    assert_eq!(claim(&mut store), first);
+    assert_eq!(reserved(&mut store), u64::from(budget - default_bytes));
+    assert_eq!(claim(&mut store), legacy);
+    assert_eq!(reserved(&mut store), u64::from(budget));
+    assert!(
+        store
+            .transaction("capture-budget-full", broker::claim)
+            .unwrap()
+            .is_none()
+    );
+    let check_waiting = |store: &mut Store| {
+        let queued = call(store, "Task.Get", json!({"id":waiting})).unwrap();
+        assert_eq!(queued["lifecycle"], "Queued");
+        assert!(queued.get("current_run_id").is_none());
+        store
+            .transaction("check-queued-approval", |db| {
+                let (attempts, bound): (u32, Option<String>) = db.c.query_row(
+                "SELECT q.attempt,a.operation FROM queue q JOIN approval_bindings a ON a.task=q.task
+                 WHERE q.task=?1",
+                [&waiting], |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+                assert_eq!((attempts, bound), (0, None));
+                Ok(())
+            })
+            .unwrap();
+    };
+    check_waiting(&mut store);
+    let control = submit(&mut store, "system.status", json!({}));
+    execute(&mut store, &control);
+    check_waiting(&mut store);
+    store
+        .transaction("overbooked-capture-dispatch", |db| {
+            // Inject an overbooked slot to exercise the dispatch fence independently
+            // of the normal claim filter. Do not leave the injected state behind.
+            db.c.execute("UPDATE queue SET phase='Claimed' WHERE task=?1", [&waiting])?;
+            assert!(broker::dispatch(db, &legacy)?.is_none());
+            db.c.execute("UPDATE queue SET phase='Queued' WHERE task=?1", [&waiting])?;
+            let bound: Option<String> = db.c.query_row(
+                "SELECT operation FROM approval_bindings WHERE task=?1",
+                [&legacy],
+                |row| row.get(0),
+            )?;
+            assert!(bound.is_none());
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(reserved(&mut store), u64::from(budget - default_bytes));
+    assert_eq!(claim(&mut store), legacy);
+
+    let cancel = |store: &mut Store, task: &str| {
+        let revision =
+            call(store, "Resource.Get", json!({"id":task})).unwrap()["reference"]["version"]
+                .clone();
+        call(
+            store,
+            "Task.Cancel",
+            json!({"id":task,"expected_resource_version":revision}),
+        )
+        .unwrap()
+    };
+    assert_eq!(cancel(&mut store, &legacy)["lifecycle"], "Cancelled");
+    assert_eq!(reserved(&mut store), u64::from(budget - default_bytes));
+    let running = dispatch(&mut store, &first);
+    assert_eq!(cancel(&mut store, &first)["lifecycle"], "Cancelling");
+    assert_eq!(reserved(&mut store), u64::from(budget - default_bytes));
+    check_waiting(&mut store);
+    store
+        .transaction("cancelled-capture-settlement", |db| {
+            broker::finish(
+                db,
+                &running,
+                Err(err("Fenced", "capture cancellation observed")),
+            )
+        })
+        .unwrap();
+    assert_eq!(reserved(&mut store), 0);
+    assert_eq!(claim(&mut store), waiting);
+    drop(dispatch(&mut store, &waiting));
+    assert_eq!(reserved(&mut store), u64::from(budget));
+
+    drop(store);
+    let mut store = Store::open(cfg).unwrap();
+    store
+        .transaction("recover-capture-lease", broker::recover)
+        .unwrap();
+    assert_eq!(reserved(&mut store), 0);
+    let lost = call(&mut store, "Task.Get", json!({"id":waiting})).unwrap();
+    assert_eq!(lost["lifecycle"], "Failed");
+    assert_eq!(lost["conditions"][0]["type"], "LeaseLost");
+}
+
+#[test]
 fn storage_deletion_interrupted_before_rename_can_settle_without_replaying() {
     for prepared in [false, true] {
         let tmp = tempfile::tempdir().unwrap();

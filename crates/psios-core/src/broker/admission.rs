@@ -1,6 +1,6 @@
 //! A full ordinary queue must leave room to verify its unresolved effects.
 use crate::{
-    Empty, Result, artifact,
+    Empty, Result, apps, artifact,
     db::{Db, Doc},
     decode, err,
     host::Action,
@@ -38,6 +38,8 @@ pub(crate) fn status(db: &Db<'_>) -> Result<Value> {
     Ok(json!({
         "ordinary": {"used":used.ordinary,"limit":db.cfg.queue_limit},
         "recovery": {"used":used.recovery,"limit":db.cfg.recovery_queue_limit},
+        "oci_capture_staging": {"reserved_bytes":apps::capture::reserved_staging_bytes(db)?,
+                                "max_bytes":apps::capture::STAGING_BYTES},
     }))
 }
 

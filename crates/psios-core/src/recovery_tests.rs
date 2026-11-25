@@ -1592,3 +1592,108 @@ fn elapsed_permit_fences_the_backup_publication_checkpoint() {
         0
     );
 }
+
+#[test]
+fn detached_volume_readers_overlap_and_fence_writes_through_recovery() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (config, mut store) = initialized(tmp.path());
+    let create = submit(&mut store, "volume.create", json!({"name":"readers"}));
+    let volume = execute(&mut store, &create);
+    let identity = volume["resource_id"].as_str().unwrap();
+    let file = config
+        .state_dir
+        .join("volumes")
+        .join(identity)
+        .join("data/entry");
+    fs::write(&file, "original").unwrap();
+    let read = json!({"id":identity,"expected_resource_version":volume["version"],"name":"entry"});
+    let write = json!({"id":identity,"expected_resource_version":volume["version"],"name":"entry","content":"updated"});
+    let first = submit(&mut store, "volume.read", read.clone());
+    let second = submit(
+        &mut store,
+        "volume.read_chunk",
+        json!({"target":{"id":identity,"expected_resource_version":volume["version"]},"path":"entry","offset":0,"limit":32}),
+    );
+    assert_eq!(claim(&mut store), first);
+    let first_work = dispatch(&mut store, &first);
+    assert_eq!(claim(&mut store), second);
+    let second_work = dispatch(&mut store, &second);
+    let count = |store: &mut Store| {
+        store
+            .transaction("count-volume-readers", |db| {
+                Ok(db.c.query_row(
+                    "SELECT count(*) FROM volume_read_holds WHERE volume=?1",
+                    [identity],
+                    |r| r.get::<_, u32>(0),
+                )?)
+            })
+            .unwrap()
+    };
+    assert_eq!(count(&mut store), 2);
+
+    let blocked_write = submit(&mut store, "volume.write", write.clone());
+    approve(&mut store, &blocked_write);
+    assert_eq!(claim(&mut store), blocked_write);
+    let error = store
+        .transaction("blocked-write", |db| broker::dispatch(db, &blocked_write))
+        .err()
+        .expect("active readers must prevent the write dispatch");
+    assert_eq!(error.0.code, "Conflict");
+    store
+        .transaction("fail-blocked-write", |db| {
+            broker::dispatch_failed(db, &blocked_write, &error)
+        })
+        .unwrap();
+    let denied = call(&mut store, "Task.Get", json!({"id":blocked_write})).unwrap();
+    assert_eq!(denied["outcome_knowledge"], "NotStarted");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "original");
+
+    let receipt =
+        first_work.perform(|_| panic!("read should not persist a host-effect checkpoint"));
+    store
+        .transaction("settle-first-reader", |db| {
+            broker::finish(db, &first_work, receipt)
+        })
+        .unwrap();
+    assert_eq!(count(&mut store), 1);
+    drop(second_work);
+    drop(store);
+
+    let mut store = Store::open(config).unwrap();
+    assert_eq!(count(&mut store), 1);
+    store
+        .transaction("recover-reader", broker::recover)
+        .unwrap();
+    assert_eq!(count(&mut store), 0);
+    let retried = execute(&mut store, &second);
+    assert_eq!(
+        STANDARD
+            .decode(retried["data_base64"].as_str().unwrap())
+            .unwrap(),
+        b"original"
+    );
+    assert_eq!(count(&mut store), 0);
+
+    let writer = submit(&mut store, "volume.write", write);
+    approve(&mut store, &writer);
+    assert_eq!(claim(&mut store), writer);
+    let writing = dispatch(&mut store, &writer);
+    let blocked_read = submit(&mut store, "volume.read", read);
+    assert_eq!(claim(&mut store), blocked_read);
+    let error = store
+        .transaction("blocked-reader", |db| broker::dispatch(db, &blocked_read))
+        .err()
+        .expect("an exclusive writer must prevent the reader dispatch");
+    assert_eq!(error.0.code, "Conflict");
+    store
+        .transaction("fail-blocked-reader", |db| {
+            broker::dispatch_failed(db, &blocked_read, &error)
+        })
+        .unwrap();
+    assert_eq!(count(&mut store), 0);
+    let receipt = writing.perform(|_| panic!("ordinary write settled by its native receipt"));
+    store
+        .transaction("finish-writer", |db| broker::finish(db, &writing, receipt))
+        .unwrap();
+    assert_eq!(fs::read_to_string(file).unwrap(), "updated");
+}

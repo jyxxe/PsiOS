@@ -15,6 +15,19 @@ def digest(payload):
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
+def wait_for_open_file(node, path):
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        for fd in Path(f"/proc/{node.process.pid}/fd").iterdir():
+            try:
+                if os.readlink(fd) == str(path):
+                    return
+            except FileNotFoundError:
+                pass
+        time.sleep(0.005)
+    raise AssertionError("no live file verification descriptor observed")
+
+
 class FileIntegrityTests(unittest.TestCase):
     def setUp(self):
         self.n = Node(os.getenv("PSIOS_TEST_BIN_DIR", "target/debug"))
@@ -112,26 +125,13 @@ class FileIntegrityTests(unittest.TestCase):
             subprocess.run(["umount", self.file], check=True)
         self.assertEqual(self.finish(self.submit())["content_digest"], digest(b"the volume file"))
 
-    def wait_open(self):
-        proc = self.n.process
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            for fd in Path(f"/proc/{proc.pid}/fd").iterdir():
-                try:
-                    if os.readlink(fd) == str(self.file):
-                        return
-                except FileNotFoundError:
-                    pass
-            time.sleep(0.005)
-        self.fail("no live file verification descriptor observed")
-
     def test_changed_inode_and_revoked_stream_are_never_published(self):
         n = self.n
         limit = 128 * 1024 * 1024
         with self.file.open("wb") as stream:
             stream.truncate(limit)
         active = self.submit(self.input(max_bytes=limit))
-        self.wait_open()
+        wait_for_open_file(n, self.file)
         n.process.send_signal(signal.SIGSTOP)
         try:
             _, status = os.waitpid(n.process.pid, os.WUNTRACED)
@@ -144,6 +144,6 @@ class FileIntegrityTests(unittest.TestCase):
             n.process.send_signal(signal.SIGCONT)
         self.assert_failed(active, "PreconditionFailed")
         active = self.submit(self.input(max_bytes=limit))
-        self.wait_open()
+        wait_for_open_file(n, self.file)
         n.call("Grant.Revoke", target(self.grant["grant_ref"]))
         self.assert_failed(active, "Fenced", "PermissionDenied")

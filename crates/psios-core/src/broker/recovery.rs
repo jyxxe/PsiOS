@@ -126,6 +126,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             *last = db.status(&effect, b)?.reference();
             op = op_update(db, &op, "Pending", "NotStarted", effects, json!([]))?;
             db.c.execute("DELETE FROM holds WHERE holder=?1", [&op.id])?;
+            storage::read_holds::release(db, &t.id)?;
         }
         let knowledge = if read && phase == "Dispatched" {
             "Unknown"

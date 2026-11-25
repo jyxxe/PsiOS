@@ -70,7 +70,13 @@ jq -e '.result.artifact_refs[0]' "$workdir/task.json" | ctl artifact > "$workdir
 jq -e '.result.artifact_refs[0]' "$workdir/task.json" | ctl artifact-repair "$workdir/result.json"
 ```
 
-低层 `Artifact.RepairChunk` 接受 `reference`、原始字节 `offset` 和 `data_base64`。偏移按 `Artifact.Get` 返回的 `repair_chunk_bytes` 对齐，最后一块使用原有长度。每块须与原清单的摘要匹配。相同块重复提交返回 `repaired:false`。已回收的结果返回 `ResultEvicted`。修复后可按原引用读取结果并继续受影响的会话或工作流。[修复验收](../tests/test_artifact.py)
+低层 `Artifact.RepairChunk` 接受 `reference`、原始字节 `offset` 和 `data_base64`。偏移按 `Artifact.Get` 返回的 `repair_chunk_bytes` 对齐，最后一块使用原有长度。每块须与原清单的摘要匹配。相同块重复提交返回 `repaired:false`。已回收的结果返回 `ResultEvicted`。[修复验收](../tests/test_artifact.py)
+
+本机所有者可用 `Task.VerifyResults` 核验已结算任务的固定制品引用和完整字节。请求包含 `id`、当前 `expected_resource_version` 和可选 `max_bytes`，默认 8 MiB，最多 64 MiB。发现缺失或损坏时，Task 产生新修订，在 `result.availability` 中记录 `Unavailable`，并保留 `Succeeded`、Run、Operation 和原始引用。部分修复后再次核验仍返回 `Unavailable`。所有结果通过核验后才写入 `Available`，然后可以恢复依赖的 Agent 会话或 WorkflowRun。两次状态变化均可通过 Task 历史和资源事件查询。[当前结果与权限验收](../tests/test_artifact.py)
+
+```bash
+ctl task-verify-results TASK_ID --revision TASK_REVISION
+```
 
 `kill -TERM "$daemon_pid"` 请求关闭。再次使用同一目录启动会恢复队列、保留原任务身份和已接受回执。系统服务的打包、首次初始化及升级见[宿主安装指南](host-package.md)。打包单元使用 `/usr/bin/psiosd`。使用过手工单元的主机，迁移前须检查本机单元覆盖和旧二进制路径。服务单元与配置示例使用 `psios` 用户、`/run/psios/api.sock`、`/var/lib/psios` 和独立的 `/var/lib/psios.witness`。[systemd 单元](../contrib/systemd/psiosd.service) · [配置示例](../contrib/systemd/core.json)
 
@@ -113,7 +119,7 @@ target/debug/psiosctl --socket "$workdir/core/api.sock" --token-file "$workdir/a
 | Task.Prepare、Task.Submit、Task.LookupSubmission | Prepare 把 tool、input、key、delegation_id 和可选 deadline_at 变成可重传的 v1 TaskSubmit。Submit 和 Lookup 接受这个完整对象。SDK 在 ACK 丢失后先查询原键。 |
 | Task.Get、Task.Cancel、Task.CancelOrigin、Task.Retry | Cancel 使用任务版本。CancelOrigin 接收 v1 CancelOrigin 并支持先到墓碑。Retry 需要旧任务版本和新键，创建关联的新任务。 |
 | Approval.Decide、Run.Get、Operation.Get、Operation.Reconcile | 决策绑定已显示的计划摘要、审批请求版本和单次使用单元。Reconcile 使用 Operation 的 id 和 expected_resource_version。可核实文本写入、分块追加、受管服务启停和 OCI 容器删除后的停止结果，以及有启动检查点的在运行容器。 |
-| Artifact.Get、Artifact.Read、Artifact.ReadChunk、Artifact.RepairChunk、Task.EvictResults | 制品查询使用固定版本 reference，分块读取另需 offset 和 length。本机所有者可按原摘要修复分块，或按任务当前修订回收已结算的只读结果。 |
+| Artifact.Get、Artifact.Read、Artifact.ReadChunk、Artifact.RepairChunk、Task.VerifyResults、Task.EvictResults | 制品查询使用固定版本 reference，分块读取另需 offset 和 length。本机所有者可修复分块、核验已结算结果，或回收已结算的只读结果。 |
 | Secret.Put、Secret.Revoke、Audit.List | Secret.Put 接受 name/value，仅返回 SecretRef。secret.mac 可使用秘密计算 HMAC。Audit.List 支持 after 和 limit。 |
 | Tool.Call、Capability.Discover | 即时入口支持 system.status。执行其他注册工具通过 Task.Submit，服务端承担审批、预算、派发和回执保存。 |
 | StoragePool.Get、StoragePool.Configure、Application.Configure | 本地池实时报告容量。所有者用 CAS 开关新卷分配。应用停止后可用 CAS 修改非秘密环境配置。 |

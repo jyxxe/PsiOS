@@ -43,7 +43,8 @@ pub fn history(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         .query_map(params![t.id,after,through,limit+1],|r|{
             let d=crate::db::row(r)?;
             Ok(json!({"reference":d.reference(),"at":d.stamp,"run_id":d.body["current_run_id"],"lifecycle":d.body["lifecycle"],
-                "outcome_knowledge":d.body["outcome_knowledge"],"conditions":d.body["conditions"],"operation_refs":d.body["operation_refs"]}))
+                "outcome_knowledge":d.body["outcome_knowledge"],"result_availability":d.body["result"]["availability"],
+                "conditions":d.body["conditions"],"operation_refs":d.body["operation_refs"]}))
         })?.collect::<rusqlite::Result<Vec<_>>>()?;
     let more = items.len() > limit as usize;
     items.truncate(limit as usize);

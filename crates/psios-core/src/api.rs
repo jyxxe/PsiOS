@@ -193,6 +193,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Message.AckRead" => chat::ack(db, actor, p),
         "Task.Prepare" => broker::prepare(db, actor, p),
         "Task.EvictResults" => artifact::retention::evict(db, actor, p),
+        "Task.VerifyResults" => artifact::availability::verify(db, actor, p),
         "Task.Submit" => broker::submit(db, actor, p, None),
         "Task.LookupSubmission" => broker::lookup(db, actor, p),
         "Task.Cancel" => broker::cancel(db, actor, p),

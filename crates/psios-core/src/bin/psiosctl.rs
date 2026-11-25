@@ -103,6 +103,16 @@ enum Cmd {
         #[arg(long, default_value_t = 8 * 1024 * 1024)]
         max_bytes: u64,
     },
+    /// Verify and record the availability of a settled Task's pinned results.
+    TaskVerifyResults {
+        id: String,
+        /// Current task_revision returned by Task.Get.
+        #[arg(long)]
+        revision: String,
+        /// Cap bytes read from SQLite (default 8 MiB, maximum 64 MiB).
+        #[arg(long)]
+        max_bytes: Option<u64>,
+    },
     /// Export a verified backup to a new directory under a private parent.
     BackupExport {
         #[arg(long)]
@@ -325,6 +335,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let mut source = fs::File::open(source)?;
             serde_json::to_value(c.repair_artifact(&reference, &mut source, max_bytes)?)?
         }
+        Cmd::TaskVerifyResults {
+            id,
+            revision,
+            max_bytes,
+        } => c.verify_task_results(&id, &revision, max_bytes)?,
         Cmd::BackupExport { output, file } => {
             let reference = serde_json::from_value(input(&file)?)?;
             psios_core::download_backup(&c, &reference, &output)?

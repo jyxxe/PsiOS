@@ -38,7 +38,7 @@ psiosd checkpoint-artifact --directory checkpoints/authority \
 psiosctl --config /etc/psios/core.json artifact-repair artifact.json < artifact-ref.json
 ```
 
-`artifact-repair` 由当前权威验证本机所有者身份、制品引用和分块摘要，然后修复缺失或损坏的内容。这样可以恢复原 Task 结果并保留检查点之后的授权、任务和操作历史。[崩溃检查点与在线修复验收](../tests/test_authority_checkpoint.py)
+`artifact-repair` 由当前权威验证本机所有者身份、制品引用和分块摘要，然后修复缺失或损坏的内容。这样可以恢复原 Task 结果并保留检查点之后的授权、任务和操作历史。已记录为 `Unavailable` 的 Task 在修复后需要重新核验，再恢复受影响的会话或工作流。[崩溃检查点与在线修复验收](../tests/test_authority_checkpoint.py) · [任务结果核验](core-local.md)
 
 ## 验证和恢复独立的卷备份
 

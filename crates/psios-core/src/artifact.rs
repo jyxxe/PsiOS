@@ -9,6 +9,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+pub(crate) mod availability;
 pub(crate) mod repair;
 pub(crate) mod retention;
 
@@ -49,6 +50,13 @@ pub(crate) fn dependency_error(error: Error) -> Error {
 pub fn stored_digest(artifact: &Doc) -> Option<&Value> {
     (artifact.kind == "Artifact" && artifact.spec["content_layout"] == LAYOUT)
         .then(|| &artifact.spec["digest"])
+}
+
+pub(crate) fn is_task_output(artifact: &Doc, task: &Doc) -> bool {
+    artifact.kind == "Artifact"
+        && artifact.owner == task.owner
+        && artifact.spec["task_id"] == task.id
+        && artifact.spec["run_id"] == task.body["current_run_id"]
 }
 
 pub fn publish(db: &Db<'_>, owner: &str, mut spec: Value, value: &Value) -> Result<Doc> {

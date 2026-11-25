@@ -4,6 +4,7 @@ pub mod journal;
 mod mounts;
 pub mod network;
 pub mod pressure;
+pub mod service_state;
 use crate::{
     config::Manager,
     db::{Db, Doc},
@@ -62,7 +63,8 @@ pub fn sync(db: &Db<'_>) -> Result<()> {
         {
             body["start_operation_id"] = start.clone();
         }
-        upsert(db, "HostService", &sid, spec, body)?;
+        let registered = upsert(db, "HostService", &sid, spec, body)?;
+        service_state::sync(db, &registered, boot.trim())?;
         active.insert(sid);
     }
     let known =
@@ -75,7 +77,8 @@ pub fn sync(db: &Db<'_>) -> Result<()> {
         let d = db.get(id)?;
         let mut body = d.body.clone();
         body["lifecycle"] = json!("Unregistered");
-        db.status(&d, body)?;
+        let retired = db.status(&d, body)?;
+        service_state::sync(db, &retired, boot.trim())?;
     }
     network::probe::sync(db, &id)
 }
@@ -226,12 +229,16 @@ fn devices() -> Result<Value> {
 pub(crate) fn service_target(db: &Db<'_>, id: &str, revision: &str) -> Result<Doc> {
     let service = db.of(id, "HostService")?;
     service.cas(revision)?;
+    require_registered(&service)?;
+    Ok(service)
+}
+
+fn require_registered(service: &Doc) -> Result<()> {
     require(
         service.body["lifecycle"] == "Registered",
         "PreconditionFailed",
         "unregistered system unit",
-    )?;
-    Ok(service)
+    )
 }
 
 fn configured_service(w: &Work) -> Result<&crate::config::ServiceConfig> {
@@ -306,15 +313,26 @@ fn service(w: &Work) -> Result<Value> {
             }
         }
         require(
-            props.get("Id") == Some(&cfg.unit.as_str())
-                && props.get("LoadState") == Some(&"loaded"),
+            props.get("Id") == Some(&cfg.unit.as_str()),
             "PreconditionFailed",
             "unit identity unavailable or aliased",
         )?;
+        let load_state = props.get("LoadState").copied().unwrap_or_default();
+        let definition = if load_state == "loaded" {
+            Some(psios_api::sha256(&command("cat", &[], false)?))
+        } else {
+            require(
+                matches!(w.action, Action::ServiceObserve(_))
+                    && matches!(load_state, "not-found" | "masked" | "bad-setting" | "error"),
+                "PreconditionFailed",
+                "unit is not loaded",
+            )?;
+            None
+        };
         let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
         Ok(
-            json!({"unit":cfg.unit,"boot_id":boot.trim(),"active_state":props.get("ActiveState"),"sub_state":props.get("SubState"),
-          "definition_digest":psios_api::sha256(&command("cat",&[],false)?),"needs_reload":props.get("NeedDaemonReload")!=Some(&"no"),"main_pid":props.get("MainPID"),"invocation_id":props.get("InvocationID"),"observed_at":now()}),
+            json!({"unit":cfg.unit,"boot_id":boot.trim(),"load_state":load_state,"active_state":props.get("ActiveState"),"sub_state":props.get("SubState"),
+          "definition_digest":definition,"needs_reload":props.get("NeedDaemonReload")!=Some(&"no"),"main_pid":props.get("MainPID"),"invocation_id":props.get("InvocationID"),"observed_at":now()}),
         )
     };
     let before = inspect()?;

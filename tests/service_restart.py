@@ -142,7 +142,7 @@ ExecStart=/bin/sh {starter}
         assert launches() == [first["invocation_id"], second, third]
         node.stop()
         after = json.loads(subprocess.check_output(node.daemon + ["verify"], timeout=15))
-        assert after["database_format"] == 35 and not after["migration_required"], after
+        assert after["database_format"] >= 35 and not after["migration_required"], after
         print("PASS real restart, approval, boot match, durable deduplication and lost-receipt reconciliation")
     finally:
         release.touch(exist_ok=True)

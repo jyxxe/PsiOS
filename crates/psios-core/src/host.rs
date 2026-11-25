@@ -100,6 +100,8 @@ pub enum Action {
     Processes(node::ProcessQuery),
     #[serde(rename = "service.inspect")]
     ServiceInspect(Target),
+    #[serde(rename = "service.observe")]
+    ServiceObserve(node::service_state::Query),
     #[serde(rename = "service.logs")]
     ServiceLogs(node::journal::Query),
     #[serde(rename = "service.start")]
@@ -179,6 +181,7 @@ impl Action {
             Self::RoutingRules(q) => q.validate()?,
             Self::BlockLayout(q) => q.validate()?,
             Self::ServiceLogs(q) => q.validate()?,
+            Self::ServiceObserve(q) => q.validate()?,
             Self::ServiceRestart(restart) => restart.validate()?,
             Self::Create { name } => label(name)?,
             Self::Read(f) => storage::filename(&f.name)?,
@@ -261,6 +264,7 @@ impl Action {
             Self::ServiceLogs(q) => {
                 return node::service_target(db, &q.id, &q.expected_resource_version);
             }
+            Self::ServiceObserve(q) => return q.target(db),
             Self::ServiceRestart(r) => {
                 return node::service_target(db, &r.id, &r.expected_resource_version);
             }
@@ -415,6 +419,7 @@ impl Work {
         }
         match &self.action {
             Action::ServiceInspect(_)
+            | Action::ServiceObserve(_)
             | Action::ServiceLogs(_)
             | Action::ServiceStart(_)
             | Action::ServiceStop(_)
@@ -585,6 +590,7 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
 }
 pub fn apply(db: &Db<'_>, w: &Work, receipt: &Value) -> Result<Value> {
     match w.action {
+        Action::ServiceObserve(_) => node::service_state::publish(db, w, receipt),
         Action::ServiceStart(_) | Action::ServiceStop(_) | Action::ServiceRestart(_) => {
             node::apply(db, w, receipt)
         }

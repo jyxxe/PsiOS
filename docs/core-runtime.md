@@ -126,6 +126,10 @@ Core 可选地先向该目标指定的解析器发出 TCP DNS 请求。按端点
 
 丢失回执时，服务占用保留到对账完成。使用派发后最新的 `service.inspect` 制品作为 `Operation.Reconcile` 的证据。对账核验原配置和启动 ID，确认新代次已处于活跃状态，记录旧、新调用身份。期间保持原任务及幂等记录。格式 35 安装独立的重启能力。[真实重启与崩溃恢复验收](../tests/service_restart.py)
 
+`service.observe` 将指定 HostService 的实际运行状态写入 `HostServiceState`。显式授予目标服务上的 `service.observe`、`task.submit` 和 `task.read`，输入使用 HostService 的 `id` 和 `expected_spec_generation`。结果包含固定 `service_state_ref` 和本次观测。控制操作更新 HostService 的当前修订后，同一配置代次仍可继续采样。采样确认规格和 Linux 启动一致，按持久派发顺序发布，重复状态保持同一观察资源修订。
+
+订阅 `HostServiceState` 的资源事件可观察 `Active`、`Inactive`、`Failed` 等变化。systemd 明确报告单元缺失或屏蔽时可查询 `Missing`、`Masked`。使用现有 Schedule 的 `LifecycleEntered` 可将观测结果送入授权任务。观测和 Task 结果在同一事务中发布，已登记配置移除时状态变为 `Retired`。格式 36 创建状态并安装能力，配置完成后的初始状态为 `Unknown`。[真实服务、事件和故障验收](../tests/service_state.py)
+
 ## 卷文件与应用版本
 
 | Task 工具 | 参数与行为 |

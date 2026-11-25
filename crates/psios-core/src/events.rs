@@ -24,6 +24,8 @@ struct Cursor {
     until: i64,
 }
 
+const ORDERED_SNAPSHOT_PREFIX: &str = "snapshot-";
+
 #[derive(Deserialize, Serialize)]
 struct CursorPayload(
     String,
@@ -35,6 +37,12 @@ struct CursorPayload(
 );
 
 impl Cursor {
+    fn orders_by_creation(&self) -> bool {
+        // Snapshot IDs are authenticated by the cursor. Existing pages keep
+        // their original revision positions until they finish or expire.
+        self.resource.is_none() && self.snapshot.starts_with(ORDERED_SNAPSHOT_PREFIX)
+    }
+
     fn signing_mode(mode: &str, scoped: bool) -> &str {
         match (mode, scoped) {
             ("page", true) => "page-by-resource",
@@ -185,7 +193,7 @@ pub fn list(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             incarnation: db.incarnation.clone(),
             kind: p.kind,
             resource: p.id,
-            snapshot: uuid::Uuid::new_v4().simple().to_string(),
+            snapshot: format!("{ORDERED_SNAPSHOT_PREFIX}{}", uuid::Uuid::new_v4().simple()),
             high: db
                 .c
                 .query_row("SELECT COALESCE(MAX(seq),0) FROM versions", [], |r| {
@@ -196,16 +204,16 @@ pub fn list(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         }
     };
     let (sql, values) = query::selection(&c, query::View::Snapshot, n + 1);
-    let mut docs =
+    let mut items =
         db.c.prepare_cached(&sql)?
             .query_map(params_from_iter(values), |r| {
-                Ok((r.get::<_, i64>("seq")?, row(r)?))
+                Ok((r.get::<_, i64>("page_position")?, row(r)?.reference()))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-    let complete = docs.len() <= n as usize;
-    docs.truncate(n as usize);
-    if let Some(d) = docs.last() {
-        c.position = d.0
+    let complete = items.len() <= n as usize;
+    items.truncate(n as usize);
+    if let Some((position, _)) = items.last() {
+        c.position = *position;
     }
     let next = if complete { None } else { Some(c.sign(db)?) };
     c.mode = "watch".into();
@@ -218,7 +226,7 @@ pub fn list(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "authority_id": db.meta("authority")?,
         "recovery_incarnation": c.incarnation,
         "snapshot_id": c.snapshot,
-        "items": docs.iter().map(|(_,d)|d.reference()).collect::<Vec<_>>(),
+        "items": items.into_iter().map(|(_,reference)|reference).collect::<Vec<_>>(),
         "complete": complete,
         "next_cursor": next,
         "watch_start_cursor": c.sign(db)?,

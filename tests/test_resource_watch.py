@@ -88,6 +88,9 @@ class ResourceWatchTests(unittest.TestCase):
         private = n.submit("system.status", {})
         second = submit()
         old_second = n.get(second)["reference"]
+        # Updating the earliest Task must not move it behind the later Task
+        # when starting a new snapshot.
+        n.call("Task.Cancel", target(n.get(first)["reference"]), token)
         before = n.call("Resource.List", {"kind": "Task", "limit": 1}, token)
         self.assertEqual(before["items"], [n.get(first)["reference"]])
         self.assertFalse(before["complete"])

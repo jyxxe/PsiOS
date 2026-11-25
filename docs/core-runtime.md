@@ -211,6 +211,12 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 
 核验任务结算或取消时释放预留。重启保留尚未结算的准入。如果目标已对账，待派发的核验任务会在领取前结束。最终对账继续使用 `Operation.Reconcile` 和核验证据。[满队列与恢复验收](../tests/test_recovery_admission.py)
 
+### 按主体限制普通任务准入
+
+`principal_queue_limit` 可设为 1 至 `queue_limit`，默认沿用节点的普通准入上限。同一提交主体的不同 Grant 和委托共享该上限，等待、执行和未对账的普通 Task 都计入占用。已接受请求的幂等回执继续可查，其他主体仍可使用节点剩余容量。普通占用达到主体上限时，原未知操作的核验还可以使用预留位置。
+
+`Task.Admission`、`Client::task_admission` 和 `psiosctl task-admission` 公开当前主体的普通准入用量，要求 `task.submit`。[竞争、重启及对账验收](../tests/test_principal_admission.py)
+
 ## 任务调度
 
 `Schedule.Create` 为本机 Task 保存一个未来触发时间和截止时间。两者接受带时区偏移的 RFC 3339 时间并转为 UTC，触发依据节点墙钟。授予 `schedule.manage`、`task.submit`、`task.read` 及选定工具，并将权限限制在该工具的目标资源。截止时间须在委托有效期内。同一主体以相同 `key` 重发等价请求会取回原调度状态。输入、授权或时间改变时需要新键。

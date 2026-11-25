@@ -114,6 +114,11 @@ impl Client {
         }
     }
 
+    /// Report the submitting principal's open Task count and admission limit.
+    pub fn task_admission(&self) -> ApiResult<Value> {
+        self.call("Task.Admission", json!({}))
+    }
+
     /// Read result status and exact artifact references for an authorized Task.
     pub fn task_results(&self, task: &str) -> ApiResult<Value> {
         self.call("Task.Results", json!({"id": task}))

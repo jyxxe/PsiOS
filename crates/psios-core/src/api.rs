@@ -191,6 +191,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Task.Retry" => broker::retry(db, actor, p),
         "Task.History" => broker::history(db, actor, p),
         "Task.Archive" => broker::archive(db, actor, p),
+        "Task.Admission" => broker::admission::principal(db, actor, p),
         "Task.Get" => broker::get(db, actor, p, "Task"),
         "Task.Results" => broker::result_access::get(db, actor, p),
         "Run.Get" => broker::get(db, actor, p, "Run"),

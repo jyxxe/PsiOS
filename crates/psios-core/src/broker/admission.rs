@@ -1,8 +1,8 @@
 //! A full ordinary queue must leave room to verify its unresolved effects.
 use crate::{
-    Result,
+    Empty, Result,
     db::{Db, Doc},
-    err,
+    decode, err,
     host::Action,
     policy, require,
 };
@@ -38,6 +38,26 @@ pub(crate) fn status(db: &Db<'_>) -> Result<Value> {
     Ok(json!({
         "ordinary": {"used":used.ordinary,"limit":db.cfg.queue_limit},
         "recovery": {"used":used.recovery,"limit":db.cfg.recovery_queue_limit},
+    }))
+}
+
+fn principal_ordinary(db: &Db<'_>, actor: &str) -> Result<u32> {
+    Ok(db.c.query_row(
+        "SELECT count(*) FROM queue q CROSS JOIN submissions s ON s.task=q.task
+         WHERE q.phase<>'Done' AND s.owner=?1
+           AND NOT EXISTS(SELECT 1 FROM recovery_admissions r WHERE r.task=q.task)",
+        [actor],
+        |row| row.get(0),
+    )?)
+}
+
+pub(crate) fn principal(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
+    let _: Empty = decode(params)?;
+    policy::can(db, actor, "task.submit")?;
+    let limit = db.cfg.principal_queue_limit.unwrap_or(db.cfg.queue_limit);
+    Ok(json!({
+        "principal_id":actor,
+        "ordinary":{"used":principal_ordinary(db, actor)?,"limit":limit},
     }))
 }
 
@@ -107,21 +127,28 @@ fn linked_operation(db: &Db<'_>, action: &Action, target: &Doc) -> Result<Option
 /// Call after authorizing the actual tool and each resource in its audience.
 pub(super) fn select(
     db: &Db<'_>,
+    actor: &str,
     action: &Action,
     target: &Doc,
     has_dependencies: bool,
 ) -> Result<Option<Doc>> {
     let used = capacity(db)?;
-    if used.ordinary < db.cfg.queue_limit {
+    let exhausted = if used.ordinary >= db.cfg.queue_limit {
+        "durable queue full"
+    } else if let Some(maximum) = db.cfg.principal_queue_limit
+        && principal_ordinary(db, actor)? >= maximum
+    {
+        "submitting principal's durable queue is full"
+    } else {
         return Ok(None);
-    }
-    let full = || err("QueueFull", "durable queue full");
+    };
     require(
         !has_dependencies && used.recovery < db.cfg.recovery_queue_limit,
         "QueueFull",
-        "durable queue full",
+        exhausted,
     )?;
-    let operation = linked_operation(db, action, target)?.ok_or_else(full)?;
+    let operation =
+        linked_operation(db, action, target)?.ok_or_else(|| err("QueueFull", exhausted))?;
     let already: bool = db.c.query_row(
         "SELECT EXISTS(SELECT 1 FROM recovery_admissions WHERE operation=?1)",
         [&operation.id],

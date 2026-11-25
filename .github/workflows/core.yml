@@ -153,10 +153,13 @@ jobs:
           trap 'rmdir "$scratch"' EXIT
           sudo unshare --mount --propagation private sh -ec '
             mount -t tmpfs -o size=32m,nr_inodes=512,mode=1777 tmpfs "$1"
+            trap "umount \"$1\"" EXIT
             TMPDIR="$1" PSIOS_TEST_CAPACITY_ALLOCATION=1 runuser -u "$2" -- \
               python3 -B -m unittest discover -s tests -p test_platform.py -k test_pauses_new_work -v
             TMPDIR="$1" PSIOS_TEST_CAPACITY_ALLOCATION=1 runuser -u "$2" -- \
               python3 -B -m unittest discover -s tests -p test_backup.py -k test_restore_preflights -v
+            TMPDIR="$1" PSIOS_TEST_CAPACITY_ALLOCATION=1 runuser -u "$2" -- \
+              python3 -B -m unittest discover -s tests -p test_storage_reserve.py -v
             TMPDIR="$1" PSIOS_TEST_CAPACITY_ALLOCATION=1 runuser -u "$2" -- \
               python3 -B -m unittest discover -s tests -p test_schedule.py -k test_waits_for_authority -v
             TMPDIR="$1" PSIOS_TEST_CAPACITY_ALLOCATION=1 runuser -u "$2" -- \

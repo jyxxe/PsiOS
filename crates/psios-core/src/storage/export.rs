@@ -430,7 +430,7 @@ fn export_backup(
         let identity = sha256(&canonical(&json!(["psios-backup-export-v1", name, backup])));
         staging::resume(&parent, &format!("{RESUME_PREFIX}{}", &identity[7..]))?
     } else {
-        staging::create(&parent)?
+        staging::create(&parent, |_| Ok(()))?
     };
     let mut file = staged_member(&stage, "manifest.json", resumable)?;
     let receipt = transfer_member(

@@ -18,9 +18,10 @@ pub(super) struct Stage {
     retain_on_failure: bool,
 }
 
-pub(super) fn create(parent: &Path) -> Result<Stage> {
+pub(super) fn create(parent: &Path, preflight: impl FnOnce(&File) -> Result<()>) -> Result<Stage> {
     private_dir(parent, false)?;
     let root = File::open(parent)?;
+    preflight(&root)?;
     let path = tempfile::Builder::new()
         .permissions(Permissions::from_mode(0o700))
         .prefix(PREFIX)
@@ -198,7 +199,7 @@ mod tests {
         let existing = parent.join("volume-existing");
         fs::create_dir(&existing).unwrap();
         let inode = existing.metadata().unwrap().ino();
-        let stage = create(&parent).unwrap();
+        let stage = create(&parent, |_| Ok(())).unwrap();
         let scratch = stage.path().to_path_buf();
         fs::write(scratch.join("record"), b"proposed data").unwrap();
 

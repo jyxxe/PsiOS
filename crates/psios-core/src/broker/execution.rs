@@ -281,10 +281,21 @@ pub fn dispatch(db: &Db<'_>, task: &str) -> Result<Option<Work>> {
     db.c.execute("UPDATE budgets SET reserved=reserved-1,spent=spent+1 WHERE id=(SELECT budget FROM queue WHERE task=?1)",[&t.id])?;
     db.c.execute("UPDATE queue SET phase='Dispatched' WHERE task=?1", [&t.id])?;
     db.audit(&t.owner, tool, Some(&work.op.id), "Dispatched")?;
-    if let Action::StartAgentSession(blueprint) = &work.action {
-        // This effect only touches the authority. Publish the Session, its
-        // originating Task receipt and budget movement in this transaction.
-        let receipt = agent::open_for_task(db, &work.task, blueprint)?;
+    // Authority-only effects publish the admitted child and the parent Task
+    // receipt together, before the worker can cross a host boundary.
+    let receipt = match &work.action {
+        Action::StartAgentSession(blueprint) => {
+            Some(agent::open_for_task(db, &work.task, blueprint)?)
+        }
+        Action::StartWorkflow(blueprint) => Some(workflow::start_for_task(
+            db,
+            &work.task,
+            blueprint,
+            field(&p.body, "deadline_at"),
+        )?),
+        _ => None,
+    };
+    if let Some(receipt) = receipt {
         finish(db, &work, Ok(receipt))?;
         return Ok(None);
     }

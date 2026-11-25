@@ -211,6 +211,12 @@ Core 在创建时固定 IANA 数据版本、UTC 窗口和因 `gap` 跳过的当�
 
 每个 `ScheduleTrigger` 保存来源事件 ID、资源版本、序号和 Task 回执。队列满时可通过 `pending_trigger_ref` 查询持久等待中的原触发。接受任务时，写入触发结算、推进源游标和创建 Task 在同一事务完成。如果到期或取消，待提交触发保留终态及原事件。用 `Schedule.Get` 的 `trigger_refs` 查询已结算历史。[事件调度验收](../tests/test_resource_event_schedule.py) · [格式 31 升级验收](../tests/resource_event_schedule_upgrade.py)
 
+### 通过任务启动工作流
+
+普通 Task 或 Schedule 可选择 `workflow.start`。输入为固定的 `definition_ref` 和正整数 `max_runtime_seconds`。委托须允许 `workflow.start`、`workflow.manage`、任务读写以及图中各工具，并覆盖定义和执行目标。工作流步骤直接使用各自的工具，嵌套启动需要另行支持。
+
+核心在同一事务写入 WorkflowRun、启动 Task 的结果与预算结算。结果包含子运行引用和发起 Task 的固定修订。通过 `Workflow.Get` 查询子运行的执行进度。子运行及其步骤继承发起 Task 的截止时间，启动和各步骤扣同一根额度。涉及宿主效果的步骤沿用普通任务审批。[工作流启动验收](../tests/test_workflow.py) · [格式 32 升级验收](../tests/workflow_launch_upgrade.py)
+
 ### 通过调度创建 Agent 会话
 
 将 `agent.session.start` 作为 `Schedule.Create` 的 `tool`。输入包括 `goal`、完整的 `skill_ref` 和 `model_ref`、`context_policy` 及 `max_turns`。所选委托需要包含 `schedule.manage`、`agent.session.start`、`session.run`、`task.submit`、`task.read` 及 Skill 所需工具。启用资源范围时，计划同时核对指定的 Model 和 Skill，后续工具依然各自核对资源。也可通过普通 Task.Submit 接受同一个工具。

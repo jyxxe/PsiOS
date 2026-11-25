@@ -1,9 +1,12 @@
 """Run literal Task DAGs through the real authority, approval and crash recovery."""
 import base64
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
+from datetime import datetime
 import hmac
 import json
 import signal
+import sqlite3
 import time
 import unittest
 
@@ -137,6 +140,125 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(path.read_text(), n.call("Principal.WhoAmI", {})["authority_id"])
         self.assertEqual(n.call("Task.EvictResults", request)["eviction"]["previous_task_ref"], source)
         self.assertEqual(self.fetch(run), final)
+
+    def test_resource_event_starts_one_workflow_with_shared_budget_and_approval(self):
+        n = self.node
+        self.grant()
+        volume = n.perform("volume.create", {"name": "brokered-workflow"})
+        write = step("record", "volume.write", {**target(volume), "name": "proof", "content": "scheduled"},
+                     after=["observe"])
+        definition = self.define([step("observe"), write])["reference"]
+        scope = self.grant([
+            "workflow.start", "system.status", "volume.write", "schedule.manage", "resource.read", "event.read",
+        ], [definition["resource_id"], "profile-local", volume["resource_id"]], units=3)
+        due = timestamp(35)
+        request = {
+            "key": key(), "tool": "workflow.start",
+            "input": {"definition_ref": definition, "max_runtime_seconds": 600},
+            "delegation_id": scope["delegation_ref"]["resource_id"],
+            "event": {"source_ref": n.call("Node.Get", {})["reference"],
+                      "condition": {"kind": "SpecChanged"}, "expires_at": due, "max_triggers": 1},
+        }
+        planned = n.call("Schedule.Create", request)
+        self.node_scheduling("Cordoned")
+        self.node_scheduling("Enabled")
+        deadline = time.monotonic() + 8
+        while True:
+            schedule = n.call("Schedule.Get", {"id": planned["reference"]["resource_id"]})
+            if schedule["state"]["lifecycle"] == "Completed":
+                break
+            self.assertLess(time.monotonic(), deadline, schedule)
+            time.sleep(.05)
+        trigger_id = schedule["state"]["trigger_refs"][0]["resource_id"]
+        trigger = n.call("Schedule.TriggerGet", {"id": trigger_id})["state"]
+        task = n.wait(trigger["task_receipt"]["task_id"])
+        self.assertEqual(task["lifecycle"], "Succeeded")
+        launch = n.call("Artifact.Read", {"reference": task["result"]["artifact_refs"][0]})
+        self.assertEqual(launch["definition_ref"], definition)
+        self.assertEqual(datetime.fromisoformat(launch["deadline_at"]), datetime.fromisoformat(due))
+        parent = n.call("Resource.Resolve", {"reference": launch["origin_task_ref"]})["value"]
+        self.assertEqual(parent["task_id"], task["task_id"])
+        self.assertEqual(parent["origin_ref"]["origin_id"], planned["reference"]["resource_id"])
+        run = {"reference": launch["workflow_run_ref"]}
+        awaiting = self.wait(run, "WaitingApproval")
+        self.assertEqual(awaiting["state"]["origin_task_ref"], launch["origin_task_ref"])
+        self.assertEqual(self.budget(scope), (1, 2))
+        with closing(sqlite3.connect(n.state / "state.db")) as db:
+            parent_cutoff, = db.execute("SELECT deadline_boot_ms FROM authorization_deadlines WHERE resource=?",
+                                       (task["task_id"],)).fetchone()
+            run_cutoff, = db.execute("SELECT deadline_boot_ms FROM authorization_deadlines WHERE resource=?",
+                                    (run["reference"]["resource_id"],)).fetchone()
+        self.assertLessEqual(run_cutoff, parent_cutoff)
+        path = n.state / "volumes" / volume["resource_id"] / "data" / "proof"
+        self.assertFalse(path.exists())
+
+        n.stop(signal.SIGKILL)
+        n.start()
+        self.assertEqual(n.call("Schedule.Create", request), schedule)
+        self.assertEqual(n.call("Schedule.TriggerGet", {"id": trigger_id})["state"], trigger)
+        self.assertEqual(self.fetch(run), awaiting)
+        self.assertEqual(len(n.call("Resource.List", {"kind": "WorkflowRun"})["items"]), 1)
+        n.approve(self.phases(awaiting)["record"]["task_receipt"]["task_id"])
+        self.wait(run, "Succeeded")
+        self.assertEqual(path.read_text(), "scheduled")
+        self.assertEqual(self.budget(scope), (0, 3))
+
+    def test_brokered_workflow_requires_explicit_scope_and_disallows_recursive_steps(self):
+        n = self.node
+        self.grant()
+        definition = self.define([step("observe")])["reference"]
+        blueprint = {"definition_ref": definition, "max_runtime_seconds": 30}
+        self.rejected("UnsupportedCapability", "Workflow.Define",
+                      {"key": key(), "steps": [step("recursive", "workflow.start", blueprint)]})
+        self.rejected("PermissionDenied", "Task.Prepare", {
+            "tool": "workflow.start", "input": blueprint, "key": key(), "delegation_id": "owner-delegation",
+        })
+        untargeted = self.grant(["workflow.start", "system.status"], ["profile-local"], units=2)
+        prepared = n.prepare("workflow.start", blueprint, delegation=untargeted["delegation_ref"]["resource_id"])
+        self.rejected("PermissionDenied", "Task.Submit", prepared)
+        incomplete = n.call("Grant.Issue", {
+            "principal_id": "local-owner", "units": 2, "ttl_seconds": 90,
+            "tool_targets": [definition["resource_id"], "profile-local"],
+            "actions": ["workflow.start", "system.status", "task.submit", "task.read"],
+        })
+        prepare = n.prepare("workflow.start", blueprint, delegation=incomplete["delegation_ref"]["resource_id"])
+        task = n.wait(n.call("Task.Submit", prepare)["task_id"])
+        self.assertEqual((task["lifecycle"], task["outcome_knowledge"]), ("Failed", "NotStarted"))
+        self.assertEqual(task["conditions"][0]["type"], "PermissionDenied")
+        self.assertEqual(self.budget(incomplete), (0, 0))
+        self.assertEqual(n.call("Resource.List", {"kind": "WorkflowRun"})["items"], [])
+
+    def test_brokered_workflow_rolls_back_child_when_launch_result_cannot_commit(self):
+        n = self.node
+        self.grant()
+        definition = self.define([step("observe")])["reference"]
+        scope = self.grant(["workflow.start", "system.status"], [definition["resource_id"], "profile-local"], units=2)
+        blueprint = {"definition_ref": definition, "max_runtime_seconds": 30}
+        delegation = scope["delegation_ref"]["resource_id"]
+        request = n.prepare("workflow.start", blueprint, delegation=delegation)
+        n.stop()
+        with closing(sqlite3.connect(n.state / "state.db")) as db, db:
+            db.execute("""
+                CREATE TRIGGER fail_launch_receipt BEFORE INSERT ON artifact_chunks
+                BEGIN SELECT RAISE(ABORT, 'test workflow launch receipt failure'); END
+            """)
+        n.start()
+        failed = n.wait(n.call("Task.Submit", request)["task_id"])
+        self.assertEqual((failed["lifecycle"], failed["outcome_knowledge"]), ("Failed", "NotStarted"))
+        self.assertEqual(failed["conditions"][0]["type"], "StorageUnavailable")
+        self.assertEqual(n.call("Resource.List", {"kind": "WorkflowRun"})["items"], [])
+        self.assertEqual(self.budget(scope), (0, 0))
+        n.stop()
+        with closing(sqlite3.connect(n.state / "state.db")) as db, db:
+            db.execute("DROP TRIGGER fail_launch_receipt")
+        n.start()
+        self.assertTrue(n.call("Task.Submit", request)["deduplicated"])
+        fresh = n.prepare("workflow.start", blueprint, delegation=delegation)
+        task = n.wait(n.call("Task.Submit", fresh)["task_id"])
+        self.assertEqual(task["lifecycle"], "Succeeded")
+        result = n.call("Artifact.Read", {"reference": task["result"]["artifact_refs"][0]})
+        self.wait({"reference": result["workflow_run_ref"]}, "Succeeded")
+        self.assertEqual(self.budget(scope), (0, 2))
 
     def test_artifact_mapping_enforces_the_destination_tool_size_limit(self):
         n = self.node

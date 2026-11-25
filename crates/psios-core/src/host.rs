@@ -54,6 +54,8 @@ pub enum Action {
     Status {},
     #[serde(rename = "agent.session.start")]
     StartAgentSession(agent::SessionBlueprint),
+    #[serde(rename = "workflow.start")]
+    StartWorkflow(workflow::StartBlueprint),
     #[serde(rename = "node.inventory")]
     Inventory {},
     #[serde(rename = "node.pressure")]
@@ -145,6 +147,7 @@ impl Action {
         let a: Self = decode(&json!({"tool": tool, "input": input}))?;
         match &a {
             Self::StartAgentSession(blueprint) => blueprint.validate()?,
+            Self::StartWorkflow(blueprint) => blueprint.validate()?,
             Self::Processes(p) => p.validate()?,
             Self::Interfaces(q) => q.validate()?,
             Self::Routes(q) => q.validate()?,
@@ -212,6 +215,7 @@ impl Action {
         let (id, version, kind) = match self {
             Self::Status {} => return db.get(policy::PROFILE),
             Self::StartAgentSession(blueprint) => return blueprint.model(db),
+            Self::StartWorkflow(blueprint) => return blueprint.definition(db, actor),
             Self::NetworkProbe(target) => return node::network::probe::target(db, target),
             Self::Processes(_)
             | Self::Interfaces(_)

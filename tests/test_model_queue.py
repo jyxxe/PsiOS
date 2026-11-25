@@ -39,10 +39,13 @@ class ModelQueueTests(unittest.TestCase):
             provider_principal_id=self.provider["principal_id"], max_in_flight=1, max_context_bytes=131072,
             max_output_bytes=8192), **kwargs))
 
-    def new_agent(self, calls=12):
+    def new_agent(self, calls=12, lease_ms=None):
         agent = self.n.call("Agent.Register", {"name": "observer"})
-        grant = self.n.call("Grant.Issue", dict(principal_id=agent["principal_id"], units=12, model_calls=calls,
-            actions=self.tools + ["task.submit", "task.read", "session.run"], ttl_seconds=180))
+        request = dict(principal_id=agent["principal_id"], units=12, model_calls=calls,
+                       actions=self.tools + ["task.submit", "task.read", "session.run"], ttl_seconds=180)
+        if lease_ms is not None:
+            request["model_lease_ms"] = lease_ms
+        grant = self.n.call("Grant.Issue", request)
         return agent, grant
 
     def open(self, agent=None, grant=None, **kwargs):
@@ -184,6 +187,114 @@ class ModelQueueTests(unittest.TestCase):
         self.assertEqual(n.call("Task.Get", {"id": tid}, self.agent["token"]), restored)
         spent = n.call("Budget.Get", budget, self.agent["token"])
         self.assertEqual((spent["model_calls_used"], spent["spent"]), (3, 1))
+
+    def test_shared_lease_time_waits_for_refund_and_survives_restart(self):
+        n = self.n
+        self.model = self.register_model(max_in_flight=4)
+        limit = 8000
+        actor, grant = self.new_agent(lease_ms=limit)
+        budget_id = {"id": grant["budget_ref"]["resource_id"]}
+
+        def budget():
+            return n.call("Budget.Get", budget_id, actor["token"])
+
+        first, second = self.open(actor, grant), self.open(actor, grant)
+        manual = self.open(actor, grant, provider_queue=False)
+        claim = self.next_turn("metered-window")
+        self.assertEqual(claim["session_id"], first["resource_id"])
+        self.assertEqual((budget()["model_lease_ms_charged"], budget()["model_lease_ms_remaining"]), (limit, 0))
+        self.assertEqual(self.next_turn(), {"available": False})
+        self.assertEqual(self.status(second, actor)["session"]["lifecycle"], "AwaitingModel")
+        with self.assertRaises(Failure) as busy:
+            n.call("Model.Claim", {"session_id": manual["resource_id"], "key": key()}, self.provider["token"])
+        self.assertEqual(busy.exception.code, "QueueFull")
+        other = self.open()
+        ready = self.next_turn()
+        self.assertEqual(ready["session_id"], other["resource_id"])
+        self.finish(ready)
+        n.stop(signal.SIGKILL)
+        n.start()
+        replayed = self.next_turn("metered-window")
+        self.assertEqual(replayed["lease_id"], claim["lease_id"])
+        self.assertEqual(replayed["expires_at"], claim["expires_at"])
+        self.assertEqual(budget()["model_calls_used"], 1)
+        response = {"session_id": claim["session_id"], "lease_id": claim["lease_id"],
+                    "decision": {"action": "finish", "summary": "metered"},
+                    "usage": {"input_tokens": 12, "output_tokens": 3}}
+        receipt = n.call("Model.Respond", response, self.provider["token"])
+        usage = n.call("Resource.Resolve", {"reference": receipt["usage_ref"]})["value"]
+        elapsed = usage["authority_elapsed_lease_ms"]
+        self.assertGreaterEqual(elapsed, 1)
+        self.assertLess(elapsed, limit)
+        self.assertEqual(usage["reserved_lease_ms"], limit)
+        self.assertEqual(usage["lease_measurement_source"], "LinuxBoottime")
+        self.assertEqual(usage["reported_tokens"], response["usage"])
+        self.assertEqual(budget()["model_lease_ms_charged"], elapsed)
+        self.assertEqual(n.call("Model.Respond", response, self.provider["token"]), receipt)
+        self.assertEqual(budget()["model_lease_ms_charged"], elapsed)
+
+        next_call = self.next_turn("next-metered-window")
+        self.assertEqual(next_call["session_id"], second["resource_id"])
+        active = self.status(second, actor)
+        n.call("Session.Cancel", target(active["reference"]), actor["token"])
+        self.assertEqual((budget()["model_lease_ms_charged"], budget()["model_calls_used"]), (limit, 2))
+        waiting = self.open(actor, grant)
+        self.assertEqual(self.next_turn(), {"available": False})
+        self.assertEqual(self.status(waiting, actor)["session"]["pause_reason"], "ModelTimeBudgetExhausted")
+        with self.assertRaises(Failure) as fenced:
+            self.finish(next_call)
+        self.assertEqual(fenced.exception.code, "Fenced")
+        self.assertEqual(budget()["model_lease_ms_maximum"], limit)
+
+    def test_metered_expiry_keeps_full_charge_and_fences_the_response(self):
+        self.model = self.register_model(max_in_flight=2)
+        actor, grant = self.new_agent(lease_ms=350)
+        original, next_session = self.open(actor, grant), self.open(actor, grant)
+        claim = self.next_turn()
+        self.assertEqual(claim["session_id"], original["resource_id"])
+        time.sleep(0.45)
+        with self.assertRaises(Failure) as expired:
+            self.finish(claim)
+        self.assertEqual(expired.exception.code, "Fenced")
+        self.assertEqual(self.next_turn(), {"available": False})
+        self.assertEqual(self.status(next_session, actor)["session"]["pause_reason"], "ModelTimeBudgetExhausted")
+        budget = self.n.call("Budget.Get", {"id": grant["budget_ref"]["resource_id"]}, actor["token"])
+        self.assertEqual((budget["model_lease_ms_charged"], budget["model_calls_used"]), (350, 1))
+
+    def test_metered_response_rolls_back_time_and_tool_admission_together(self):
+        n = self.n
+        actor, grant = self.new_agent(lease_ms=8000)
+        session = self.open(actor, grant)
+        claim = self.next_turn()
+        self.assertEqual(claim["session_id"], session["resource_id"])
+        request = {"session_id": claim["session_id"], "lease_id": claim["lease_id"],
+                   "decision": {"action": "tool", "tool": "node.inventory", "input": {}}}
+        params = {"id": grant["budget_ref"]["resource_id"]}
+        n.stop()
+        with closing(sqlite3.connect(n.state / "state.db")) as db, db:
+            db.execute("""CREATE TRIGGER reject_usage BEFORE INSERT ON versions
+                        WHEN NEW.kind='ModelUsage' AND NEW.rev>1
+                        BEGIN SELECT RAISE(ABORT, 'test model lease settlement failure'); END""")
+        n.start()
+        before = n.call("Resource.List", {"kind": "Task"})["items"]
+        with self.assertRaises(Failure) as aborted:
+            n.call("Model.Respond", request, self.provider["token"])
+        self.assertEqual(aborted.exception.code, "StorageUnavailable")
+        self.assertEqual(n.call("Resource.List", {"kind": "Task"})["items"], before)
+        self.assertEqual(n.call("Budget.Get", params, actor["token"])["model_lease_ms_charged"], 8000)
+        self.assertEqual(self.status(session, actor)["session"]["lifecycle"], "ModelInFlight")
+        n.stop()
+        with closing(sqlite3.connect(n.state / "state.db")) as db, db:
+            db.execute("DROP TRIGGER reject_usage")
+        n.start()
+        receipt = n.call("Model.Respond", request, self.provider["token"])
+        self.assertEqual(n.call("Model.Respond", request, self.provider["token"]), receipt)
+        self.assertEqual(n.wait(receipt["task_id"])["lifecycle"], "Succeeded")
+        usage = n.call("Resource.Resolve", {"reference": receipt["usage_ref"]})["value"]
+        self.assertNotIn("reported_tokens", usage)
+        budget = n.call("Budget.Get", params, actor["token"])
+        self.assertEqual(budget["model_lease_ms_charged"], usage["authority_elapsed_lease_ms"])
+        self.assertEqual((budget["model_calls_used"], budget["spent"]), (1, 1))
 
     def test_long_poll_rechecks_provider_and_does_not_starve_valid_sessions(self):
         peer, empty = self.new_agent(calls=0)

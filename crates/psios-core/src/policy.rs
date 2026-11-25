@@ -438,6 +438,7 @@ struct GrantIssue {
     units: u32,
     #[serde(default)]
     model_calls: u32,
+    model_lease_ms: Option<u32>,
     max_delegation_depth: Option<u32>,
     tool_targets: Option<Vec<String>>,
     ttl_seconds: u32,
@@ -464,6 +465,8 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     )?;
     require(
         p.model_calls <= 1_000_000
+            && p.model_lease_ms
+                .is_none_or(|limit| limit <= agent::model_time::MAX_BUDGET_MS)
             && (1..=1_000_000).contains(&p.units)
             && (1..=86400 * 30).contains(&p.ttl_seconds),
         "InvalidArgument",
@@ -505,10 +508,11 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         p.allow_delegation,
     )?;
     db.c.execute(
-        "INSERT INTO model_budgets(budget,maximum) VALUES(?1,?2)",
+        "INSERT INTO model_budgets(budget,maximum,maximum_lease_ms) VALUES(?1,?2,?3)",
         params![
             issued["budget_ref"]["resource_id"].as_str().unwrap(),
-            p.model_calls
+            p.model_calls,
+            p.model_lease_ms,
         ],
     )?;
     if p.tool_targets.is_some() || p.max_delegation_depth.is_some() {
@@ -613,10 +617,18 @@ pub fn budget(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let p: ById = decode(p)?;
     let b = db.of(&p.id, "Budget")?;
     owned(actor, &b)?;
-    Ok(db.c.query_row("SELECT b.maximum,b.reserved,b.spent,coalesce(m.maximum,0),coalesce(m.used,0)
+    Ok(db.c.query_row("SELECT b.maximum,b.reserved,b.spent,coalesce(m.maximum,0),coalesce(m.used,0),m.maximum_lease_ms,m.charged_lease_ms
         FROM budgets b LEFT JOIN model_budgets m ON m.budget=b.id WHERE b.id=?1",[&b.id],|r|{
-        Ok(json!({"maximum":r.get::<_,u32>(0)?,"reserved":r.get::<_,u32>(1)?,"spent":r.get::<_,u32>(2)?,
-            "model_calls_maximum":r.get::<_,u32>(3)?,"model_calls_used":r.get::<_,u32>(4)?}))})?)
+        let mut budget = json!({"maximum":r.get::<_,u32>(0)?,"reserved":r.get::<_,u32>(1)?,"spent":r.get::<_,u32>(2)?,
+            "model_calls_maximum":r.get::<_,u32>(3)?,"model_calls_used":r.get::<_,u32>(4)?});
+        if let Some(limit) = r.get::<_,Option<u32>>(5)? {
+            let charged: u32 = r.get(6)?;
+            budget["model_lease_ms_maximum"] = json!(limit);
+            budget["model_lease_ms_charged"] = json!(charged);
+            budget["model_lease_ms_remaining"] = json!(limit - charged);
+        }
+        Ok(budget)
+    })?)
 }
 
 pub fn intern_input(db: &Db<'_>, actor: &str, input: &Value) -> Result<Doc> {

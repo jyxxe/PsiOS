@@ -1,5 +1,5 @@
 use super::*;
-use lease::BootClock;
+use lease::Clock;
 
 const MAX_SESSIONS_PER_MODEL: u32 = 128;
 
@@ -90,7 +90,7 @@ pub fn claim_status(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> 
         let session = db.of(&id, "Session")?;
         if state(&session) == "ModelInFlight"
             && session.body["current_lease"] == p.lease_id
-            && BootClock::sample()?.current(db, &session)?
+            && Clock::sample()?.current(db, &session)?
         {
             "Pending"
         } else {
@@ -116,7 +116,7 @@ pub fn claim_next(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
             |r| r.get(0),
         )
         .optional()?;
-    let clock = BootClock::sample()?;
+    let clock = Clock::sample()?;
     if let Some(id) = prior {
         let session = db.of(&id, "Session")?;
         let (_, skill, model) = provider(db, &session, actor)?;
@@ -129,14 +129,22 @@ pub fn claim_next(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
         db.c.prepare(
             "SELECT q.session FROM model_queue q
          LEFT JOIN session_turns t ON t.lease=q.lease
+         LEFT JOIN model_lease_times a ON a.lease=t.lease
          WHERE q.model=?1 AND q.ready_seq IS NOT NULL
            AND (q.lease IS NULL OR
-                (t.lease IS NOT NULL AND (t.boot_id IS NOT ?2 OR t.deadline_boot_ms<=?3)))
+                (t.lease IS NOT NULL AND (t.boot_id IS NOT ?2 OR t.deadline_boot_ms<=?3 OR
+                    (a.lease IS NOT NULL AND a.time_ns!=?4))))
          ORDER BY q.ready_seq",
         )?
-        .query_map(params![model.id, clock.boot_id, clock.millis], |r| {
-            r.get::<_, String>(0)
-        })?
+        .query_map(
+            params![
+                model.id,
+                clock.boot.boot_id,
+                clock.boot.millis,
+                clock.time_ns
+            ],
+            |r| r.get::<_, String>(0),
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     if !runnable.is_empty() && model_has_slot(db, &clock, &model)? {
         db.cfg.check_admission_space()?;
@@ -180,13 +188,17 @@ pub fn claim_next(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
                 }
                 Err(e) => return Err(e),
             };
-            if let Some(result) =
-                allocate_turn(db, &session, &dependencies, &clock, &key, true, context)?
-            {
-                db.audit(actor, "Model.ClaimNext", Some(&id), "Allowed")?;
-                return Ok(reply(&id, result));
+            match allocate_turn(db, &session, &dependencies, &clock, &key, true, context)? {
+                Ok(result) => {
+                    db.audit(actor, "Model.ClaimNext", Some(&id), "Allowed")?;
+                    return Ok(reply(&id, result));
+                }
+                Err(refusal) => {
+                    if let Some(reason) = refusal.pause_reason() {
+                        pause(db, &session, reason)?;
+                    }
+                }
             }
-            pause(db, &session, "ModelBudgetExhausted")?;
         }
     }
     Ok(json!({"available":false}))

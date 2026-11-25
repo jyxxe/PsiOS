@@ -1,16 +1,18 @@
 use super::*;
-pub(super) use crate::linux_clock::BootClock;
+pub(super) use crate::policy::deadline::Clock;
 
-impl BootClock {
+impl Clock {
     pub(super) fn current(&self, db: &Db<'_>, session: &Doc) -> Result<bool> {
         Ok(db.c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM session_turns WHERE session=?1 AND lease=?2
-             AND receipt IS NULL AND boot_id=?3 AND deadline_boot_ms>?4)",
+            "SELECT EXISTS(SELECT 1 FROM session_turns t LEFT JOIN model_lease_times a ON a.lease=t.lease
+             WHERE t.session=?1 AND t.lease=?2 AND t.receipt IS NULL AND t.boot_id=?3
+               AND t.deadline_boot_ms>?4 AND (a.lease IS NULL OR a.time_ns=?5))",
             params![
                 session.id,
                 session.body["current_lease"].as_str(),
-                self.boot_id,
-                self.millis
+                self.boot.boot_id,
+                self.boot.millis,
+                self.time_ns,
             ],
             |r| r.get(0),
         )?)
@@ -22,7 +24,7 @@ impl BootClock {
 // upgrade only the original UTC estimate is available for residual accounting.
 fn outstanding(
     db: &Db<'_>,
-    clock: Option<&BootClock>,
+    clock: Option<&Clock>,
     model: Option<&str>,
     grant: Option<&str>,
     provider: Option<&str>,
@@ -30,15 +32,16 @@ fn outstanding(
     Ok(db.c.query_row(
         "SELECT count(*) FROM session_turns st JOIN current s ON s.id=st.session
          JOIN current d ON d.id=s.spec->>'delegation_id' JOIN current m ON m.id=s.spec->'model_ref'->>'resource_id'
+         LEFT JOIN model_lease_times a ON a.lease=st.lease
          WHERE st.receipt IS NULL AND (m.id=?1 OR d.body->>'grant_id'=?2 OR m.spec->>'provider_principal_id'=?3)
-         AND CASE WHEN ?4 IS NULL THEN 1 WHEN st.boot_id=?4 THEN st.deadline_boot_ms>?5
+         AND CASE WHEN ?4 IS NULL THEN 1 WHEN st.boot_id=?4 AND (a.lease IS NULL OR a.time_ns=?6) THEN st.deadline_boot_ms>?5
                   ELSE julianday(st.expires)>julianday('now') END",
-        params![model, grant, provider, clock.map(|c| &c.boot_id), clock.map(|c| c.millis)],
+        params![model, grant, provider, clock.map(|c| &c.boot.boot_id), clock.map(|c| c.boot.millis), clock.map(|c| &c.time_ns)],
         |r| r.get(0),
     )?)
 }
 
-pub(super) fn model_slots(db: &Db<'_>, clock: &BootClock, model: &str) -> Result<u32> {
+pub(super) fn model_slots(db: &Db<'_>, clock: &Clock, model: &str) -> Result<u32> {
     outstanding(db, Some(clock), Some(model), None, None)
 }
 
@@ -52,7 +55,7 @@ pub(crate) fn pending_for_grant(db: &Db<'_>, grant: &Doc) -> Result<bool> {
     // A missing clock must not prevent revocation or claim all work has finished.
     Ok(outstanding(
         db,
-        BootClock::sample().ok().as_ref(),
+        Clock::sample().ok().as_ref(),
         None,
         Some(&grant.id),
         provider,

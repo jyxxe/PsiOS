@@ -14,6 +14,7 @@ pub(crate) mod capacity;
 pub(crate) mod ingress;
 pub(crate) mod repair;
 pub(crate) mod retention;
+pub(crate) mod session_output;
 
 pub const FORMAT: u32 = 30;
 const LAYOUT: &str = "ChunkedJsonV1";

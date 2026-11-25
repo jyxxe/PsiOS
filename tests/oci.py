@@ -9,7 +9,8 @@ import tarfile
 from support import Failure, Node, key, target
 from oci_recovery import check_kernel_limits, lose_start_receipt, lose_stop_receipt
 from oci_restart import verify_restart
-from test_artifact_install import TOOL as ARTIFACT_INSTALL, grant as artifact_grant, prepare as prepare_artifact, publish_install
+from test_artifact_install import MEDIA, TOOL as ARTIFACT_INSTALL, grant as artifact_grant, prepare as prepare_artifact, publish_install
+from test_session_output import generate_artifact
 
 
 def install_from_artifact(node, specification):
@@ -48,7 +49,10 @@ def install_from_artifact(node, specification):
 def stage_from_artifact(node, app, specification):
     node_id = node.call("Node.Get", {})["reference"]["resource_id"]
     artifact_grant(node, "local-owner", ["artifact.upload", "artifact.read", "artifact.withdraw"], [node_id])
-    source = publish_install(node, specification)
+    declaration = json.dumps({"format": "PsiOSLocalOciInstallV1", "install": specification})
+    source = generate_artifact(node, "local-owner", None, declaration, MEDIA)
+    provenance = node.call("Artifact.Get", {"reference": source})["resource"]["spec"]["source"]
+    assert provenance["kind"] == "LocalSessionOutput" and provenance["session_ref"]["resource_id"]
     allow = artifact_grant(node, "local-owner", ["task.submit", "task.read", "application.stage_artifact_release"],
                           [app["resource_id"], source["resource_id"]])
     app_file = node.base / "stage-application.json"
@@ -66,7 +70,7 @@ def stage_from_artifact(node, app, specification):
     receipt = node.call("Artifact.Read", {"reference": reference})
     evidence = node.call("Resource.Resolve", {"reference": receipt["stage_ref"]})["value"]
     assert evidence["source_artifact_ref"] == source and evidence["application_ref"] == app
-    print("Staged a newer real OCI release through the CLI and approved artifact workflow", flush=True)
+    print("Staged a newer real OCI release from a verified model session output", flush=True)
     return receipt["release_ref"], source
 
 
@@ -251,6 +255,8 @@ int main(void) {
         assert node.perform("volume.read", dict(**target(restored), name="starts"))["content"] == "first\nsecond\nupgraded\nfirst\n"
         node.perform("volume.activate", target(restored))
         verify_restart(node, docker, spec, app_ids)
+        node.stop()
+        subprocess.run(node.daemon + ["verify"], check=True, stdout=subprocess.DEVNULL, timeout=15)
         print("PASS live OCI lifecycle, scoped restart, isolated execution, release rollback, external exit, receipt recovery, volume holds and verified backup restore")
     finally:
         for app_id in app_ids:

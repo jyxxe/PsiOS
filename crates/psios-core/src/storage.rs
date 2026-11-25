@@ -5,6 +5,7 @@ pub(crate) mod file_integrity;
 pub mod files;
 mod intake;
 pub(crate) mod publication;
+pub(crate) mod read_holds;
 mod restore_proof;
 pub(crate) mod restore_publication;
 pub(crate) mod retirement;
@@ -110,16 +111,8 @@ pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
     if let Some(v) = &w.volume {
         if v.spec["storage_restore_phase"] == "AwaitingActivation" {
             require(
-                matches!(
-                    w.action,
-                    Action::Read(_)
-                        | Action::Chunk(_)
-                        | Action::Files(_)
-                        | Action::VolumeUsage(_)
-                        | Action::VerifyVolumeFile(_)
-                        | Action::Activate(_)
-                        | Action::Delete(_)
-                ),
+                read_holds::reader(&w.action)
+                    || matches!(w.action, Action::Activate(_) | Action::Delete(_)),
                 "PreconditionFailed",
                 "restored volume requires activation",
             )?;
@@ -136,6 +129,15 @@ pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
                 r.get(0)
             })
             .optional()?;
+        if read_holds::reader(&w.action) {
+            require(
+                holder.is_none(),
+                "Conflict",
+                "volume held by workload or unresolved operation",
+            )?;
+            return read_holds::acquire(db, &v.id, &w.task.id);
+        }
+        read_holds::ensure_no_readers(db, &v.id)?;
         if matches!(
             w.action,
             Action::RestartApp(_) | Action::InspectOciInstance(_)

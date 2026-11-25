@@ -157,6 +157,8 @@ Core 可选地先向该目标指定的解析器发出 TCP DNS 请求。按端点
 
 Core 通过已打开的目录和文件描述符流式校验私有普通文件。校验结束时核对原目录中的路径和文件版本，落库前复核执行许可。可在恢复卷激活前核对文件。改变文件身份、超过字节上限或撤销执行权都会得到明确结算结果。[二进制文件、路径限制、数据世代及撤权验收](../tests/test_volume_file_integrity.py)
 
+同一未挂载卷可同时执行文件读取、分块读取、目录列表、空间统计和文件校验。Core 为每项在途读取保存独立的持有记录。写入、备份、激活、删除和应用挂载仍要求排他访问。冲突按现有 Task 语义结算，进程恢复会清除原读取持有并按剩余预算重试。读取成功时只释放本次持有。[读写隔离与恢复验收](../crates/psios-core/src/recovery_tests.rs) · [格式 48 在途读取升级](../tests/volume_read_holds_upgrade.py)
+
 ### 重启正在运行的 OCI 实例
 
 `application.inspect_instance` 校验实际容器、发布配置、卷挂载、Linux 启动身份和有效资源限制。将结果中的 `boot_id`、`started_at` 分别作为 `expected_boot_id`、`expected_started_at`，连同应用 ID 与当前修订提交 `application.restart`。两项能力均需显式授权。应用绑定卷时，授权目标同时包含应用和卷。

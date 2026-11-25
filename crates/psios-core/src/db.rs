@@ -190,7 +190,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = storage::file_integrity::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = storage::read_holds::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -408,6 +408,9 @@ impl Store {
                 }
                 if ver < agent::fallback::FORMAT {
                     db.c.execute_batch(agent::fallback::SCHEMA)?;
+                }
+                if ver < storage::read_holds::FORMAT {
+                    db.c.execute_batch(storage::read_holds::SCHEMA)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

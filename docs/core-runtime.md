@@ -203,6 +203,14 @@ jq -n --arg id "$schedule" '{id:$id}' | ctl call Schedule.Get
 
 Core 在创建时固定 IANA 数据版本、UTC 窗口和因 `gap` 跳过的当地日期。`Schedule.Get` 的 `calendar_plan` 可查询这些值。服务重启或更新时区数据库后，既有定义继续采用原窗口和触发 ID。更改规则时取消仍待触发的旧定义，并使用新键创建新定义。`missed`、`overlap`、重试和 Task 回执遵守上述序列规则。[夏令时 UTC 对照与断电验收](../tests/native_calendar.py) · [格式 13 升级](../tests/calendar_upgrade.py)
 
+### 本机资源事件调度
+
+`Schedule.Create` 可用 `event` 代替定时字段。`event.source_ref` 固定当前资源版本，`event.expires_at` 指定 RFC 3339 截止时间，`event.max_triggers` 接受 1 至 32。`event.condition` 可用 `{"kind":"SpecChanged"}` 匹配资源配置代次增加，或用 `{"kind":"LifecycleEntered","lifecycle":"Succeeded"}` 匹配进入指定状态的转换。规则从创建时的源版本之后开始读取权威修订。
+
+所选委托需要 `schedule.manage`、`resource.read`、`task.read`、`event.read`、`task.submit` 和目的工具的授权。调度器重新校验源可见性、委托、固定工具能力和有效期限。Task 沿用独立审批、执行许可和共享预算。前一个 Task 尚未结算或效果未知时，该次匹配记录为跳过。队列满时保留原源修订等待，截止时间到达后停止创建新任务。
+
+每个 `ScheduleTrigger` 保存来源事件 ID、资源版本、序号和 Task 回执。队列满时可通过 `pending_trigger_ref` 查询持久等待中的原触发。接受任务时，写入触发结算、推进源游标和创建 Task 在同一事务完成。如果到期或取消，待提交触发保留终态及原事件。用 `Schedule.Get` 的 `trigger_refs` 查询已结算历史。[事件调度验收](../tests/test_resource_event_schedule.py) · [格式 31 升级验收](../tests/resource_event_schedule_upgrade.py)
+
 ### 通过调度创建 Agent 会话
 
 将 `agent.session.start` 作为 `Schedule.Create` 的 `tool`。输入包括 `goal`、完整的 `skill_ref` 和 `model_ref`、`context_policy` 及 `max_turns`。所选委托需要包含 `schedule.manage`、`agent.session.start`、`session.run`、`task.submit`、`task.read` 及 Skill 所需工具。启用资源范围时，计划同时核对指定的 Model 和 Skill，后续工具依然各自核对资源。也可通过普通 Task.Submit 接受同一个工具。

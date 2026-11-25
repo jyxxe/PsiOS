@@ -1,6 +1,7 @@
 //! Durable admission into the ordinary Task broker.
 mod calendar;
 mod repeat;
+mod resource_event;
 
 use crate::{
     ById, Conditional, Error, Result, Store, broker,
@@ -28,6 +29,7 @@ struct Create {
     deadline_at: Option<String>,
     repeat: Option<repeat::Repeat>,
     calendar: Option<calendar::Calendar>,
+    event: Option<resource_event::Rule>,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -83,10 +85,85 @@ fn reference(d: &Doc) -> Value {
     json!({"reference": d.reference(), "state": d.body})
 }
 
+fn schedule_id(db: &Db<'_>, actor: &str, key: &str) -> Result<String> {
+    let identity = sha256(&canonical(&json!([
+        "psios/schedule/once/1",
+        db.meta("authority")?,
+        actor,
+        key
+    ])));
+    Ok(format!("schedule-{}", &identity[7..]))
+}
+
+fn existing(db: &Db<'_>, actor: &str, id: &str, creation: &str) -> Result<Option<Value>> {
+    let Some(schedule) = db.find(id)? else {
+        return Ok(None);
+    };
+    policy::can(db, actor, "task.read")?;
+    require(
+        schedule.kind == "Schedule"
+            && schedule.owner == actor
+            && schedule.spec["creation_digest"] == creation,
+        "IdempotencyConflict",
+        "schedule key already bound to another request",
+    )?;
+    Ok(Some(reference(&schedule)))
+}
+
+fn scope_end(db: &Db<'_>, delegation: &Doc) -> Result<DateTime<Utc>> {
+    let grant = db.of(delegation.body["grant_id"].as_str().unwrap(), "Grant")?;
+    Ok(instant(delegation.body["valid_until"].as_str().unwrap())?
+        .min(instant(grant.spec["valid_until"].as_str().unwrap())?))
+}
+
+fn prepare_template(
+    db: &Db<'_>,
+    actor: &str,
+    p: &Create,
+    delegation: &Doc,
+    schedule: &str,
+    trigger: &str,
+    deadline: &str,
+) -> Result<Value> {
+    let action = Action::parse(&p.tool, &p.input)?;
+    let target = action.target(db, actor)?;
+    action.audience(db, actor, &delegation.reference(), &target)?;
+    db.cfg.check_admission_space()?;
+    let pending: u32 = db.c.query_row(
+        "SELECT (SELECT count(*) FROM pending_schedules)
+              + (SELECT count(*) FROM pending_event_schedules)",
+        [],
+        |r| r.get(0),
+    )?;
+    require(
+        pending < db.cfg.queue_limit,
+        "QueueFull",
+        "pending schedule capacity reached",
+    )?;
+    broker::prepare_scheduled(
+        db,
+        actor,
+        &json!({"tool":p.tool,"input":p.input,"key":trigger,
+                "delegation_id":p.delegation_id,"deadline_at":deadline}),
+        schedule,
+    )
+}
+
 pub fn create(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     let p: Create = decode(params)?;
     label(&p.key)?;
     policy::active(db, actor)?;
+    if let Some(event) = &p.event {
+        require(
+            p.run_at.is_none()
+                && p.deadline_at.is_none()
+                && p.repeat.is_none()
+                && p.calendar.is_none(),
+            "InvalidArgument",
+            "event schedules use their own expiration",
+        )?;
+        return resource_event::create(db, actor, &p, event);
+    }
     let mut definition = vec![json!(p.tool), p.input.clone(), json!(p.delegation_id)];
     let timing = match (
         p.run_at.as_deref(),
@@ -128,30 +205,13 @@ pub fn create(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
             ));
         }
     };
-    let authority = db.meta("authority")?;
-    let identity = sha256(&canonical(&json!([
-        "psios/schedule/once/1",
-        authority,
-        actor,
-        p.key
-    ])));
-    let id = format!("schedule-{}", &identity[7..]);
+    let id = schedule_id(db, actor, &p.key)?;
     let creation = sha256(&canonical(&Value::Array(definition)));
-    if let Some(existing) = db.find(&id)? {
-        policy::can(db, actor, "task.read")?;
-        require(
-            existing.kind == "Schedule"
-                && existing.owner == actor
-                && existing.spec["creation_digest"] == creation,
-            "IdempotencyConflict",
-            "schedule key already bound to another request",
-        )?;
-        return Ok(reference(&existing));
+    if let Some(record) = existing(db, actor, &id, &creation)? {
+        return Ok(record);
     }
     let d = policy::delegation(db, actor, &p.delegation_id, ACTION)?;
-    let g = db.of(d.body["grant_id"].as_str().unwrap(), "Grant")?;
-    let scope_end = instant(d.body["valid_until"].as_str().unwrap())?
-        .min(instant(g.spec["valid_until"].as_str().unwrap())?);
+    let scope_end = scope_end(db, &d)?;
     let (first, last_deadline, mut spec, body) = match timing {
         Timing::Fixed {
             first,
@@ -186,24 +246,15 @@ pub fn create(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         "InvalidArgument",
         "schedule requires a future run and deadline within its authorization lifetime",
     )?;
-    let action = Action::parse(&p.tool, &p.input)?;
-    let target = action.target(db, actor)?;
-    action.audience(db, actor, &d.reference(), &target)?;
-    db.cfg.check_admission_space()?;
-    let pending: u32 =
-        db.c.query_row("SELECT count(*) FROM pending_schedules", [], |r| r.get(0))?;
-    require(
-        pending < db.cfg.queue_limit,
-        "QueueFull",
-        "pending schedule capacity reached",
-    )?;
     let trigger_id = trigger_id(&id, &timestamp(first.run_at));
-    let request = broker::prepare_scheduled(
+    let request = prepare_template(
         db,
         actor,
-        &json!({"tool": p.tool, "input": p.input, "key": trigger_id,
-                "delegation_id": p.delegation_id, "deadline_at": timestamp(first.deadline_at)}),
+        &p,
+        &d,
         &id,
+        &trigger_id,
+        &timestamp(first.deadline_at),
     )?;
     spec["creation_digest"] = json!(creation);
     spec["request"] = request;
@@ -250,26 +301,28 @@ fn settle(
     reason: Option<&str>,
     receipt: Option<Value>,
 ) -> Result<Doc> {
-    remove_pending(db, schedule)?;
     let mut body = schedule.body.clone();
+    resource_event::settle_pending(db, schedule, phase, reason, &mut body)?;
+    remove_pending(db, schedule)?;
     body["lifecycle"] = json!(phase);
     body["settled_at"] = json!(now());
     body["reason"] = json!(reason);
     if body.get("next").is_some() {
         body["next"] = Value::Null;
-    } else {
+    } else if schedule.spec["event"].is_null() {
         body["task_receipt"] = receipt.unwrap_or(Value::Null);
     }
     db.status(schedule, body)
 }
 
 fn remove_pending(db: &Db<'_>, schedule: &Doc) -> Result<()> {
+    let sql = if schedule.spec["event"].is_object() {
+        "DELETE FROM pending_event_schedules WHERE schedule=?1"
+    } else {
+        "DELETE FROM pending_schedules WHERE schedule=?1"
+    };
     require(
-        schedule.body["lifecycle"] == "Pending"
-            && db.c.execute(
-                "DELETE FROM pending_schedules WHERE schedule=?1",
-                [&schedule.id],
-            )? == 1,
+        schedule.body["lifecycle"] == "Pending" && db.c.execute(sql, [&schedule.id])? == 1,
         "RecoveryRequired",
         "schedule state disagrees with its pending entry",
     )
@@ -280,6 +333,17 @@ fn deferred(error: &Error) -> bool {
         || (error.0.code == "QuotaExceeded" && error.0.retry_condition == "SameRequestAfterBackoff")
 }
 
+fn previous_task_active(db: &Db<'_>, schedule: &Doc) -> Result<bool> {
+    let Some(id) = schedule.body["last_task_id"].as_str() else {
+        return Ok(false);
+    };
+    let task = db.of(id, "Task")?;
+    Ok(!matches!(
+        task.body["lifecycle"].as_str(),
+        Some("Succeeded" | "Failed" | "Cancelled")
+    ) || task.body["outcome_knowledge"] == "Unknown")
+}
+
 struct Rejection {
     id: String,
     version: String,
@@ -287,6 +351,11 @@ struct Rejection {
 }
 
 pub fn tick(store: &mut Store) -> Result<()> {
+    tick_timed(store)?;
+    resource_event::tick(store)
+}
+
+fn tick_timed(store: &mut Store) -> Result<()> {
     let correlation = id("schedule-tick");
     let mut rejection = None;
     match store.transaction(&correlation, |db| fire(db, &mut rejection)) {

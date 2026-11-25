@@ -281,6 +281,8 @@ Core 核对原会话、模型租约及决策摘要，在一个事务中提交原
 
 本机所有者可通过 `Task.Prepare` 和 `Task.Submit` 提交 `application.restore_release_image`。输入包含应用的 `target`、精确的 `release_ref`、`image_archive_ref`、`publisher_key_ref` 和 `expected_engine_id`。委托需要限定在应用、版本、V2 声明、签名密钥、归档和本机 Node。恢复需要独立的 Node 范围 `artifact.read` 授权和所有者审批。镜像已存在时，任务返回已知的 `PreconditionFailed` 并跳过导入。
 
+`psiosctl application-prepare-image-restore --key restore-1 --delegation "$restore_delegation" restore.json` 从文件读取 `application_ref`、`release_ref`、`image_archive_ref`、`publisher_key_ref` 和 `expected_engine_id`。`psiosctl application-prepare-image-restore-inspection --key inspect-1 --delegation "$inspection_delegation" operation-ref.json` 读取待核实的原 Operation 引用。两个命令均输出可通过 `psiosctl call Task.Submit` 提交的 JSON。Core 按应用或 Operation 的 ID 和版本解析目标，在受理时绑定完整资源引用。Rust SDK 提供 `Client::prepare_release_image_restore` 和 `Client::prepare_release_image_restore_inspection`，沿用同一 Task 流程。
+
 该能力使用 Linux amd64 Docker Engine API v1.44 的经典 `overlay2` 或 `vfs` 镜像存储。服务复核仍有效的签名以及保留归档的完整字节，从核验过的镜像配置和层生成单镜像无标签归档，并记录两个归档的 SHA-256。恢复拒绝压缩层、稀疏层和扩展层元数据，累计层字节上限为 8 MiB。导入使用绑定同一个 Engine 的本机 Unix 连接，依赖 Docker 及其文件系统报告空间或运行错误。
 
 只有检查点提交后才向 Docker 发起一次导入。中断后，待核实的原 Operation 对应用和该引擎内的镜像保持独占。使用单独委托提交只读 `application.inspect_release_image_restore`，以原 Operation 的 `target` 为输入，并覆盖原计划资源。精确引擎上的镜像摘要及有序层 DiffID 得到确认后，可向 `Operation.Reconcile` 提供新的检查结果。镜像缺失、引擎身份变化或不匹配的结果都会保留 `OutcomeUnknown`。观察和结算原 Operation 不会重发导入。离线校验核对原检查点和结算证据。发行版本退役后，已合法回收的原始字节可只保留历史摘要和回执。[真实 Docker 进程中断和恢复验收](../tests/oci_restore.py)

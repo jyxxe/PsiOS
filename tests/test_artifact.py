@@ -138,6 +138,84 @@ class ArtifactStorageTests(unittest.TestCase):
         check = subprocess.run(n.daemon + ["verify"], capture_output=True, text=True, timeout=20)
         self.assertEqual(check.returncode, 0, check.stderr)
 
+    def test_result_verification_preserves_the_execution_and_tracks_partial_repair(self):
+        n = self.n
+        task = n.wait(n.submit("volume.read", self.params))
+        tid = task["task_id"]
+        original = n.get(tid)["reference"]
+        request = target(original)
+        reference, = task["result"]["artifact_refs"]
+        operation_ref, = task["operation_refs"]
+        op_args = {"id": operation_ref["resource_id"]}
+        run_args = {"id": task["current_run_id"]}
+        execution = (n.call("Run.Get", run_args), n.call("Operation.Get", op_args))
+        chunks = [n.call("Artifact.ReadChunk", dict(reference=reference, offset=offset,
+                                                   length=CHUNK))["data_base64"]
+                  for offset in (0, CHUNK)]
+        inspector, _ = n.agent(["task.read", "resource.read"])
+        self.denied("PermissionDenied", "Task.VerifyResults", request, inspector["token"])
+        self.denied("QuotaExceeded", "Task.VerifyResults", dict(request, max_bytes=1))
+        self.denied("InvalidArgument", "Task.VerifyResults", dict(request, max_bytes=67108865))
+        self.assertEqual(n.call("Task.VerifyResults", request), task)
+
+        n.stop()
+        with closing(sqlite3.connect(n.state / "state.db")) as db, db:
+            db.execute("UPDATE artifact_chunks SET payload=zeroblob(length(payload))"
+                       " WHERE artifact_id=? AND chunk_index=0", (reference["resource_id"],))
+            db.execute("DELETE FROM artifact_chunks WHERE artifact_id=? AND chunk_index=1",
+                       (reference["resource_id"],))
+            db.execute("""
+                CREATE TRIGGER fail_verification BEFORE INSERT ON audit
+                WHEN NEW.method='Task.VerifyResults' AND NEW.decision='Unavailable' BEGIN
+                    SELECT RAISE(ABORT, 'test availability audit failure');
+                END
+            """)
+        n.start()
+        self.denied("StorageUnavailable", "Task.VerifyResults", request)
+        self.assertEqual(n.get(tid)["reference"], original)
+        n.stop()
+        with closing(sqlite3.connect(n.state / "state.db")) as db, db:
+            db.execute("DROP TRIGGER fail_verification")
+        n.start()
+        cursor = n.call("Resource.List", {"kind": "Task", "id": tid})["watch_start_cursor"]
+
+        def verify(_):
+            try:
+                return n.call("Task.VerifyResults", request)
+            except Failure as error:
+                return error.code
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(verify, range(2)))
+        self.assertIn("Conflict", outcomes)
+        unavailable, = [outcome for outcome in outcomes if isinstance(outcome, dict)]
+        self.assertEqual((unavailable["lifecycle"], unavailable["outcome_knowledge"]), ("Succeeded", "Known"))
+        self.assertEqual(unavailable["result"], {"availability": "Unavailable", "artifact_refs": [reference]})
+        self.assertIn("ResultUnavailable", [item["type"] for item in unavailable["conditions"]])
+        self.assertEqual(n.call("Resource.Resolve", {"reference": original})["value"], task)
+        n.stop(signal.SIGKILL)
+        n.start()
+        self.assertEqual(n.call("Task.Get", {"id": tid}), unavailable)
+        verify_current = dict(request, expected_resource_version=unavailable["task_revision"])
+        n.call("Artifact.RepairChunk", dict(reference=reference, offset=0, data_base64=chunks[0]))
+        self.assertEqual(n.call("Task.VerifyResults", verify_current), unavailable)
+        n.call("Artifact.RepairChunk", dict(reference=reference, offset=CHUNK, data_base64=chunks[1]))
+        cli = [n.binaries / "psiosctl", "--config", n.config, "task-verify-results",
+               tid, "--revision", unavailable["task_revision"]]
+        restored = json.loads(subprocess.check_output(cli, timeout=20))
+        self.assertEqual(restored, dict(task, task_revision=restored["task_revision"]))
+        self.assertEqual(n.call("Artifact.Read", {"reference": reference})["content"], self.content)
+        self.assertEqual((n.call("Run.Get", run_args), n.call("Operation.Get", op_args)), execution)
+
+        events = n.call("Resource.Watch", {"cursor": cursor})["events"]
+        self.assertEqual([event["payload_ref"]["version"] for event in events],
+                         [unavailable["task_revision"], restored["task_revision"]])
+        history = n.call("Task.History", {"id": tid, "after_version": task["task_revision"]})["items"]
+        self.assertEqual([revision["result_availability"] for revision in history], ["Unavailable", "Available"])
+        audit = [record["decision"] for record in n.call("Audit.List", {"limit": 128})
+                 if record["method"] == "Task.VerifyResults" and record["resource"] == tid]
+        self.assertEqual(audit, ["Unavailable", "Available"])
+
     def test_second_chunk_write_failure_rolls_back_manifest_and_success(self):
         n = self.n
         before = n.call("Resource.List", {"kind": "Artifact"})["items"]
@@ -242,6 +320,7 @@ class ArtifactStorageTests(unittest.TestCase):
         self.assertEqual(n.call("Run.Get", run_args), run)
         self.assertEqual(n.call("Task.Get", {"id": tid})["result"],
                          {"availability": "Evicted", "artifact_refs": [reference]})
+        self.assertEqual(n.call("Task.VerifyResults", target(data["task_ref"])), n.call("Task.Get", {"id": tid}))
         evictions = [entry for entry in n.call("Audit.List", {"limit": 128})
                      if entry["method"] == "Task.EvictResults"]
         self.assertEqual([entry["resource"] for entry in evictions if entry["decision"] == "Evicted"], [tid])

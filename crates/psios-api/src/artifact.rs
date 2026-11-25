@@ -29,6 +29,19 @@ fn source_error(error: Error) -> Box<ApiError> {
 }
 
 impl Client {
+    /// Verify a settled Task's pinned results and return its current availability view.
+    pub fn verify_task_results(
+        &self,
+        id: &str,
+        expected_resource_version: &str,
+        max_bytes: Option<u64>,
+    ) -> ApiResult<serde_json::Value> {
+        self.call(
+            "Task.VerifyResults",
+            json!({"id":id,"expected_resource_version":expected_resource_version,"max_bytes":max_bytes}),
+        )
+    }
+
     /// Verify the entire source before repairing available chunks at the pinned reference.
     /// Each accepted repair is durable and safe to repeat with the original bytes.
     pub fn repair_artifact(

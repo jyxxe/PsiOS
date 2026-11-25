@@ -1,4 +1,4 @@
-use super::{CHUNK_BYTES, Manifest, stored_digest};
+use super::{CHUNK_BYTES, Manifest, is_task_output, stored_digest};
 use crate::{
     Result, agent,
     db::{Db, Doc, find},
@@ -41,6 +41,14 @@ fn validate_record(record: &Doc, task: &Doc) -> Result<()> {
         "RecoveryRequired",
         "result eviction disagrees with the producing Task",
     )
+}
+
+pub(super) fn task_receipt(conn: &Connection, task: &Doc) -> Result<Option<Doc>> {
+    let record = find(conn, &receipt_id(&task.id))?;
+    if let Some(record) = &record {
+        validate_record(record, task)?;
+    }
+    Ok(record)
 }
 
 pub(super) fn receipt(conn: &Connection, artifact: &Doc) -> Result<Option<Doc>> {
@@ -142,8 +150,7 @@ pub fn evict(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     )?;
     let task = db.of(&p.id, "Task")?;
     let record_id = receipt_id(&task.id);
-    if let Some(record) = db.find(&record_id)? {
-        validate_record(&record, &task)?;
+    if let Some(record) = task_receipt(db.c, &task)? {
         require(
             record.body["previous_task_ref"]["version"] == p.expected_resource_version
                 && record.body["reason"] == p.reason,
@@ -186,10 +193,7 @@ pub fn evict(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     for reference in refs {
         let artifact = db.resolve(reference)?;
         require(
-            artifact.kind == "Artifact"
-                && artifact.owner == task.owner
-                && artifact.spec["task_id"] == task.id
-                && artifact.spec["run_id"] == task.body["current_run_id"],
+            is_task_output(&artifact, &task),
             "RecoveryRequired",
             "task result refers to a foreign artifact",
         )?;

@@ -140,6 +140,10 @@ class ModelQueueTests(unittest.TestCase):
         self.assertEqual(paused["session"]["turn"], 1)
         self.assertIsNone(paused["session"]["current_lease"])
         self.assertEqual(self.next_turn(), {"available": False})
+        verification = {"id": tid, "expected_resource_version": tool["task_revision"]}
+        unavailable = n.call("Task.VerifyResults", verification)
+        self.assertEqual((unavailable["lifecycle"], unavailable["result"]["availability"]),
+                         ("Succeeded", "Unavailable"))
         budget = {"id": self.grant["budget_ref"]["resource_id"]}
         self.assertEqual(n.call("Budget.Get", budget, self.agent["token"])["model_calls_used"], 2)
         request = target(paused["reference"])
@@ -164,6 +168,11 @@ class ModelQueueTests(unittest.TestCase):
                 "data_base64": base64.b64encode(payload).decode(),
             })
             self.assertTrue(response["repaired"])
+        with self.assertRaises(Failure) as needs_verification:
+            n.call("Session.Resume", request, self.agent["token"])
+        self.assertEqual(needs_verification.exception.code, "ResultUnavailable")
+        restored = n.call("Task.VerifyResults", dict(verification, expected_resource_version=unavailable["task_revision"]))
+        self.assertEqual(restored, dict(tool, task_revision=restored["task_revision"]))
         resumed = n.call("Session.Resume", request, self.agent["token"])
         self.assertEqual(resumed["session"]["lifecycle"], "AwaitingModel")
         self.assertEqual(n.call("Budget.Get", budget, self.agent["token"])["model_calls_used"], 2)
@@ -172,7 +181,7 @@ class ModelQueueTests(unittest.TestCase):
         self.assertEqual(claim["context"]["last_tool"]["local_tool_result"], original)
         self.assertEqual(self.next_turn("after-repair")["lease_id"], claim["lease_id"])
         self.finish(claim)
-        self.assertEqual(n.call("Task.Get", {"id": tid}, self.agent["token"]), tool)
+        self.assertEqual(n.call("Task.Get", {"id": tid}, self.agent["token"]), restored)
         spent = n.call("Budget.Get", budget, self.agent["token"])
         self.assertEqual((spent["model_calls_used"], spent["spent"]), (3, 1))
 

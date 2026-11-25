@@ -33,7 +33,16 @@ pub(super) fn artifact(db: &Db<'_>, run: &Doc, source: &Value, step: &str) -> Re
         "RecoveryRequired",
         "workflow input source is not its settled predecessor",
     )?;
-    artifact::require_task_result(&task.body["result"])?;
+    let current = db.of(&task.id, "Task")?;
+    let pinned_result = &task.body["result"];
+    let current_result = &current.body["result"];
+    artifact::require_task_result(
+        if current_result["artifact_refs"] == pinned_result["artifact_refs"] {
+            current_result
+        } else {
+            pinned_result
+        },
+    )?;
     let reference = task.body["result"]["artifact_refs"]
         .as_array()
         .filter(|refs| refs.len() == 1)
@@ -46,10 +55,7 @@ pub(super) fn artifact(db: &Db<'_>, run: &Doc, source: &Value, step: &str) -> Re
         })?;
     let artifact = db.resolve(reference).map_err(artifact::dependency_error)?;
     require(
-        artifact.kind == "Artifact"
-            && artifact.owner == run.owner
-            && artifact.spec["task_id"] == task.id
-            && artifact.spec["run_id"] == task.body["current_run_id"],
+        artifact::is_task_output(&artifact, &task),
         "RecoveryRequired",
         "workflow artifact does not belong to its source Task",
     )?;

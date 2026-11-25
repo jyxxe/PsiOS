@@ -467,6 +467,14 @@ fn workflow_resumes_a_missing_artifact_and_keeps_pinned_input_after_restart() {
             )?)
         })
         .unwrap();
+    let unavailable = call(
+        &mut store,
+        "Task.VerifyResults",
+        json!({"id":source,"expected_resource_version":source_task["task_revision"]}),
+    )
+    .unwrap();
+    assert_eq!(unavailable["lifecycle"], "Succeeded");
+    assert_eq!(unavailable["result"]["availability"], "Unavailable");
     workflow::tick(&mut store).unwrap();
     workflow::tick(&mut store).unwrap();
     let waiting = call(&mut store, "Workflow.Get", lookup.clone()).unwrap();
@@ -502,12 +510,20 @@ fn workflow_resumes_a_missing_artifact_and_keeps_pinned_input_after_restart() {
     )
     .unwrap();
     assert_eq!(repair["repaired"], true);
+    let restored = call(
+        &mut store,
+        "Task.VerifyResults",
+        json!({"id":source,"expected_resource_version":unavailable["task_revision"]}),
+    )
+    .unwrap();
+    assert_eq!(restored["result"], source_task["result"]);
+    assert_eq!(restored["operation_refs"], source_task["operation_refs"]);
     resume["expected_resource_version"] = blocked["reference"]["version"].clone();
     call(&mut store, "Workflow.Resume", resume).unwrap();
     workflow::tick(&mut store).unwrap();
     assert_eq!(
         call(&mut store, "Task.Get", json!({"id":source})).unwrap(),
-        source_task
+        restored
     );
     let pinned = call(&mut store, "Workflow.Get", lookup.clone()).unwrap();
     let binding = &pinned["state"]["steps"][1]["input_binding"];

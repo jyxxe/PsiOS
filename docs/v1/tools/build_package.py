@@ -139,6 +139,7 @@ def create_readme(stats):
            '本包整合v0.1～v0.6、Project导入材料、完整Space规划与风险台账，统一当前规则并保留历史来源。推荐先用[离线阅读器](html/index.html)浏览，或阅读[完整Markdown合订本](PsiOS-v1-complete.md)。精确文件目录见[DIRECTORY.md](DIRECTORY.md)。\n',
            'v1是文档版本；当前没有宣称软件已发布、最新仓库已审计、硬件已通过或技术选型已经批准。\n',
            '当前 Shell 方向为类似 macOS 的浏览器桌面；规范见[第 07 章第 5 节](docs/07-applications-packages-gui.md#5-psios-shell浏览器桌面工作环境)。新增桌面能力尚待实现与验收，修订历史见[CHANGELOG](CHANGELOG.md)。\n',
+           'Agent 可经通用接口交付 Artifacts 并安装为受管理应用；设计见[应用第 6 节](docs/07-applications-packages-gui.md#6-agent-artifacts-作为应用安装)及[Agent 第 9.11 节](docs/09-agents-models-protocols.md#911-agent-通用产物接口)。WI-028 跟踪接口冻结与实现，新增产品验收仍为 NotRun。GitHub 当前文档为唯一规范权威，原始 ZIP 仅为历史快照。\n',
            '## 本包包含什么\n',
            '| 内容 | 实际数量/范围 |\n|---|---|',
            f'| 独立规范章节 | {len(docs)}章，含架构、共同合同、安全、恢复、存储、应用、Agent、Chat、Workflow、集群、发布、路线和词典 |',

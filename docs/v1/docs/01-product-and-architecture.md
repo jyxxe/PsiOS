@@ -31,6 +31,8 @@ PsiOS Shell 的产品定位是**类似 macOS 的浏览器桌面工作环境**。
 
 Shell 的窗口层在浏览器内运行，不依赖远程桌面视频流；KDE Plasma 负责 Argon 本机原生窗口、显示和输入。远程图形应用通过可选 GUI Bridge 接入桌面。三版共享交互模型，按实际服务、权限和后端能力呈现应用。
 
+Agent 产物应用化是统一应用模型的设计目标：原生或第三方 Agent 通过通用接口交付 Artifacts，PsiOS 完成清单适配、权限裁决和受控安装，用户即可在应用启动器打开。Artifact 内容、ApplicationRelease 运行合同、Deployment 与用户数据各自管理，应用不依赖原生成会话存活；详见[第 07 章第 6 节](07-applications-packages-gui.md#6-agent-artifacts-作为应用安装)及[第 09 章第 9.11 节](09-agents-models-protocols.md#911-agent-通用产物接口)。此增补不表示接口或安装体验已经实现。
+
 ## 2. 逻辑组件与信任边界
 
 ```mermaid

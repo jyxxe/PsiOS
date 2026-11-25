@@ -2,7 +2,7 @@
   "schema_version": "1.0.0",
   "document_version": "1.0.0",
   "source_document": "docs/14-roadmap-and-decisions.md",
-  "scope": "从 v1 第 14 章维护的 27 项实施计划；包含 Shell 浏览器桌面专项。未创建外部工单，计划不代表实现或产品验收。",
+  "scope": "从 v1 第 14 章维护的 28 项实施计划；包含 Shell 浏览器桌面与 Agent Artifacts 应用化专项。未创建外部工单，计划不代表实现或产品验收。",
   "dependency_semantics": {
     "dependencies": "仅含 WI ID，表示集成/验收前置；允许文中明确的隔离原型并行。",
     "conditional_dependencies": "逐项按冻结的支持范围判定，适用时为必需验收前置；不适用必须保留范围与理由，不得借此省略已宣传能力。",
@@ -1479,6 +1479,62 @@
         {
           "work_item_id": "WI-020",
           "applies_when": "启用远程图形应用时",
+          "required_when_applicable": true
+        }
+      ]
+    },
+    {
+      "id": "WI-028",
+      "title": "Agent 通用产物接口与 Artifacts 应用化",
+      "priority": "P1",
+      "stage": [
+        "M0",
+        "M3",
+        "M4"
+      ],
+      "dependencies": [
+        "WI-003",
+        "WI-004",
+        "WI-007",
+        "WI-008",
+        "WI-013",
+        "WI-014"
+      ],
+      "acceptance_criteria": [
+        "M0 冻结交付描述、能力发现、请求/回执 Schema、正反例、错误映射、幂等与有限资源预算；复用 ResourceRef 和现有完整应用清单。",
+        "M3 原生和至少一个独立第三方 Agent 在同一权限模型下完成静态 Web/OCI 产物提交及受控安装，Shell 可预览、安装并从启动器打开；验证来源、断线恢复与保留关系。",
+        "M4 按支持范围验证有状态更新/回退、构建与其他包适配、远程目标及三版；完成 AT-AIF-001～010 的适用组合，记录源码/制品与执行证据。"
+      ],
+      "owner_role": "Application/Artifact、Agent Adapter、Identity 与 Shell 维护者",
+      "owner": null,
+      "status": "Planned",
+      "implementation_status": "NotVerified",
+      "test_status": "NotRun",
+      "source_document": "docs/14-roadmap-and-decisions.md",
+      "legacy_sources": [],
+      "source_stage_text": "M0、M3、M4",
+      "source_dependency_text": "WI-003、004、007、008、013、014；Shell/包导入/跨节点按支持范围依赖 WI-027、021、018",
+      "adr_gates": [
+        "ADR-05",
+        "ADR-06",
+        "ADR-09",
+        "ADR-16",
+        "ADR-19"
+      ],
+      "conditional_dependencies": [
+        {
+          "work_item_id": "WI-027",
+          "applies_when": "宣称 Shell 预览、安装及启动器路径时",
+          "required_when_applicable": true
+        },
+        {
+          "work_item_id": "WI-021",
+          "applies_when": "支持第三方包导入和隔离构建适配时",
+          "required_when_applicable": true
+        },
+        {
+          "work_item_id": "WI-018",
+          "applies_when": "支持跨节点安装或运行目标时",
           "required_when_applicable": true
         }
       ]

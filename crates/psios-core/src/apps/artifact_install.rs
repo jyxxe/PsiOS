@@ -1,11 +1,11 @@
 //! Adapt an immutable local OCI installation declaration into the existing broker.
 use crate::{
     Result, artifact, broker,
-    db::{Db, Doc},
+    db::{Db, Doc, resolve, row},
     decode, host, policy, require,
 };
 use psios_api::{ResourceRef, parse};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -124,6 +124,61 @@ pub(crate) fn pinned(db: &Db<'_>, artifact: &str) -> Result<bool> {
     )?)
 }
 
+pub(super) fn release_source(conn: &Connection, release: &Doc) -> Result<Option<Value>> {
+    let evidence = conn
+        .query_row(
+            "SELECT * FROM versions WHERE kind='ApplicationArtifactInstallation'
+         AND rev=1 AND spec->>'release_id'=?1",
+            [&release.id],
+            row,
+        )
+        .optional()?;
+    let Some(evidence) = evidence else {
+        return Ok(None);
+    };
+    let reference = &evidence.body["source_artifact_ref"];
+    let source = resolve(conn, reference).map_err(|_| {
+        crate::err(
+            "RecoveryRequired",
+            "installation lost its exact source artifact",
+        )
+    })?;
+    require(
+        evidence.owner == release.owner
+            && source.owner == release.owner
+            && evidence.spec["application_id"] == release.body["application_id"]
+            && evidence.body["release_ref"] == release.reference()
+            && artifact::is_raw(&source),
+        "RecoveryRequired",
+        "installation source evidence disagrees with its release",
+    )?;
+    Ok(Some(reference.clone()))
+}
+
+pub(super) fn drop_release_pin(db: &Db<'_>, release: &Doc) -> Result<Option<Value>> {
+    let source = release_source(db.c, release)?;
+    let held: Option<String> =
+        db.c.query_row(
+            "SELECT artifact FROM application_artifact_pins WHERE kind='Release' AND holder=?1",
+            [&release.id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    require(
+        source.as_ref().and_then(|r| r["resource_id"].as_str()) == held.as_deref()
+            && source.is_some() == held.is_some(),
+        "RecoveryRequired",
+        "release source disagrees with its artifact retention pin",
+    )?;
+    if held.is_some() {
+        db.c.execute(
+            "DELETE FROM application_artifact_pins WHERE kind='Release' AND holder=?1",
+            [&release.id],
+        )?;
+    }
+    Ok(source)
+}
+
 pub(crate) fn verify(conn: &Connection) -> Result<()> {
     let inconsistent: bool = conn.query_row(
         "WITH retained(artifact,holder,kind) AS (
@@ -135,6 +190,8 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
            UNION ALL
            SELECT e.body->'source_artifact_ref'->>'resource_id', e.spec->>'release_id', 'Release'
              FROM versions e WHERE e.kind='ApplicationArtifactInstallation' AND e.rev=1
+                AND NOT EXISTS(SELECT 1 FROM versions r WHERE r.id='retired-'||(e.spec->>'release_id')
+                   AND r.kind='ApplicationReleaseRetirement' AND r.rev=1)
          ) SELECT
           EXISTS(SELECT 1 FROM retained e LEFT JOIN application_artifact_pins p
                    ON p.kind=e.kind AND p.holder=e.holder AND p.artifact=e.artifact

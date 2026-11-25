@@ -348,10 +348,13 @@ pub fn dispatch_failed(db: &Db<'_>, task: &str, e: &Error) -> Result<()> {
 }
 
 pub fn settlement_failed(db: &Db<'_>, w: &Work) -> Result<()> {
-    let reason = if matches!(w.action, Action::InstallArtifact(_)) {
+    let reason = if matches!(
+        w.action,
+        Action::InstallArtifact(_) | Action::RetireRelease(_)
+    ) {
         err(
             "StorageUnavailable",
-            "installation catalog transaction did not commit",
+            "application catalog transaction did not commit",
         )
     } else if policy::readonly(field(&w.task.spec, "task_type")) {
         err("StorageUnavailable", "read result could not be committed")

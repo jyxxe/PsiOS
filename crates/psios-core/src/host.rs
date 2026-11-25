@@ -158,6 +158,8 @@ pub enum Action {
     Stage { target: Target, release: Install },
     #[serde(rename = "application.select_release")]
     Select { target: Target, release_ref: Value },
+    #[serde(rename = "application.retire_release")]
+    RetireRelease(apps::release_retirement::Request),
     #[serde(rename = "application.refresh")]
     Refresh(Target),
     #[serde(rename = "application.install")]
@@ -224,6 +226,7 @@ impl Action {
             Self::Select { release_ref, .. } => {
                 let _: psios_api::ResourceRef = decode(release_ref)?;
             }
+            Self::RetireRelease(request) => request.validate()?,
             Self::Mac { message, .. } => require(
                 message.len() <= 8192,
                 "QuotaExceeded",
@@ -263,6 +266,10 @@ impl Action {
             Self::Restore(_) => resources.push(db.of("local", "StoragePool")?.reference()),
             Self::InstallArtifact(input) => {
                 resources.push(apps::artifact_install::source(db, actor, input)?.reference());
+            }
+            Self::RetireRelease(input) => {
+                resources
+                    .push(apps::release_retirement::candidate(db, primary, input)?.reference());
             }
             _ => {}
         }
@@ -356,6 +363,11 @@ impl Action {
                 let install = apps::artifact_install::specification(db, actor, input)?;
                 return install_target(db, actor, &install);
             }
+            Self::RetireRelease(input) => (
+                &input.target.id,
+                Some(&input.target.expected_resource_version),
+                "Application",
+            ),
             Self::Stage { target: t, .. }
             | Self::Select { target: t, .. }
             | Self::Refresh(t)
@@ -476,6 +488,7 @@ impl Work {
                 | Action::InspectFileRename(_)
                 | Action::InspectProcess(_)
                 | Action::InstallArtifact(_)
+                | Action::RetireRelease(_)
         ) {
             self.checkpoint_authority(db)?;
         }
@@ -599,6 +612,7 @@ impl Work {
             | Action::Uninstall(_)
             | Action::Install(_)
             | Action::InstallArtifact(_)
+            | Action::RetireRelease(_)
             | Action::Health(_)
             | Action::InspectOciInstance(_)
             | Action::Logs(_) => apps::perform(self),
@@ -687,7 +701,10 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     } else if target.kind == "Application"
         && !matches!(
             a,
-            Action::Stage { .. } | Action::Select { .. } | Action::Refresh(_)
+            Action::Stage { .. }
+                | Action::Select { .. }
+                | Action::Refresh(_)
+                | Action::RetireRelease(_)
         )
     {
         target.spec["volume_id"]
@@ -779,6 +796,7 @@ pub fn apply(db: &Db<'_>, w: &Work, receipt: &Value) -> Result<Value> {
         | Action::Refresh(_)
         | Action::Install(_)
         | Action::InstallArtifact(_)
+        | Action::RetireRelease(_)
         | Action::Start(_)
         | Action::RestartApp(_)
         | Action::Stop(_)

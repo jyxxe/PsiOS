@@ -114,7 +114,7 @@ pub(crate) fn find(conn: &Connection, id: &str) -> Result<Option<Doc>> {
         )
         .optional()?)
 }
-fn resolve(conn: &Connection, reference: &Value) -> Result<Doc> {
+pub(crate) fn resolve(conn: &Connection, reference: &Value) -> Result<Doc> {
     let rf: ResourceRef = decode(reference)?;
     let d = conn
         .query_row(
@@ -190,7 +190,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = apps::artifact_install::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = apps::release_retirement::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -424,6 +424,9 @@ impl Store {
                 }
                 if ver < apps::artifact_install::FORMAT {
                     db.c.execute_batch(apps::artifact_install::SCHEMA)?;
+                }
+                if ver < apps::release_retirement::FORMAT {
+                    db.c.execute_batch(apps::release_retirement::SCHEMA)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

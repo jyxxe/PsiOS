@@ -11,6 +11,7 @@ use std::{collections::BTreeMap, process::Command};
 
 pub(crate) mod artifact_install;
 mod cgroup;
+pub(crate) mod release_retirement;
 pub(crate) mod restart;
 
 fn environment(env: &BTreeMap<String, String>) -> Result<()> {
@@ -164,6 +165,7 @@ pub fn launch_spec(db: &Db<'_>, app: &Doc) -> Result<Install> {
         "PreconditionFailed",
         "release references do not describe this deployment",
     )?;
+    release_retirement::available(db, &release)?;
     let r = &spec.body["resources"];
     let count = |k: &str| {
         r[k].as_str()
@@ -195,12 +197,10 @@ pub fn preflight(db: &Db<'_>, w: &Work) -> Result<()> {
         Action::Select {
             ref release_ref, ..
         } => {
-            let release = db.resolve(release_ref)?;
+            let release = release_retirement::associated(db, &w.target, release_ref)?;
+            release_retirement::available(db, &release)?;
             require(
-                w.target.body["lifecycle"] == "Stopped"
-                    && release.kind == "ApplicationRelease"
-                    && release.body["application_id"] == w.target.id
-                    && release.owner == w.target.owner,
+                w.target.body["lifecycle"] == "Stopped",
                 "PreconditionFailed",
                 "release selection requires a stopped application and its own immutable release",
             )?;
@@ -707,6 +707,7 @@ pub fn perform(w: &Work) -> Result<Value> {
                 .image_id,
         ),
         Action::Select { release_ref, .. } => Ok(json!({"release_ref":release_ref})),
+        Action::RetireRelease(_) => Ok(json!({})),
         Action::Health(_) if w.start_checkpoint.is_some() => {
             observe_start(w, &e, w.start_checkpoint.as_ref().unwrap())
         }
@@ -1038,7 +1039,7 @@ pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
             Ok(staged.reference())
         }
         Action::Select { release_ref, .. } => {
-            let release = db.resolve(release_ref)?;
+            let release = release_retirement::associated(db, &w.target, release_ref)?;
             let spec = db.resolve(&release.body["release_spec_ref"])?;
             let image = db.resolve(&release.body["artifact_ref"])?;
             select_deployment(
@@ -1049,6 +1050,7 @@ pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
                 spec.body["execution"]["environment"].clone(),
             )
         }
+        Action::RetireRelease(input) => release_retirement::retire(db, w, input),
         Action::Refresh(_) => {
             let mut b = w.target.body.clone();
             b["last_observation"] = r.clone();
@@ -1159,6 +1161,7 @@ fn select_deployment(
     image: &Value,
     environment: Value,
 ) -> Result<Value> {
+    release_retirement::available(db, release)?;
     let mut spec = d.spec.clone();
     let previous = db.resolve(&d.spec["deployment_ref"])?;
     db.status(

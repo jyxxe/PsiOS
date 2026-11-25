@@ -472,6 +472,12 @@ jobs:
           git archive e6524344606d50472cd0f1d55a92280efc54908c Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format54"
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format54" "$RUNNER_TEMP/psios-compatibility-target"
           python3 -B tests/artifact_install_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
+      - name: Preserve a format 55 pending installation across release retirement support
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format55"
+          git archive 8ac18125e2261fbdae3024b425d14ae4243944a5 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format55"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format55" "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/release_retirement_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Stream and restore a backup larger than the default limit
         run: PSIOS_TEST_LARGE_BACKUP=1 python3 -B -m unittest discover -s tests -p test_backup_limits.py -v
       - name: Exercise a real OCI engine and persistent volume

@@ -143,6 +143,7 @@ Core 可选地先向该目标指定的解析器发出 TCP DNS 请求。按端点
 | volume.read_chunk | `target, path, offset, limit`。取回 Base64 数据、块摘要、下一偏移和 EOF。可以从待激活的恢复卷读取。 |
 | application.stage_release | `target` 指应用，`release` 使用安装参数，省略 volume。依据本机 OCI 摘要生成属于同一应用的清单和不可变 Release，保留当前部署。 |
 | application.select_release | `target, release_ref`。应用停止时经审批切换至选定 Release，生成新部署。选回已有版本使用相同接口。卷数据世代保持连续，应用层数据库迁移须另外协调。 |
+| application.retire_release | `target, release_ref, reason`。经审批退役当前无部署使用的 Release，保留审计记录并释放源制品保留关系。 |
 | application.refresh | 应用 ID 和预期修订。把引擎观测写回 Application 和 RuntimeInstance。进程意外退出时记录 Exited 和 NotReady，并保留现场及数据占用，直到显式停止清理。 |
 
 多段路径通过 Linux openat2 在已核实的卷根目录内解析。符号链接与嵌套挂载不能作为中间路径。追加和目录修改需要批准。未知追加可以用 `Operation.Reconcile` 核对原卷、预期长度和原始字节范围。应用启动、停止会把应用与绑定卷同时列入计划前提和 ExecutionPermit。还原卷会检查目标 StoragePool 的版本和分配状态。[Linux openat2 手册](https://man7.org/linux/man-pages/man2/openat2.2.html)
@@ -253,6 +254,12 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 本机适配器读取 `application/vnd.psios.oci-install.v1+json` 制品。正文是 `{"format":"PsiOSLocalOciInstallV1","install":{...}}`，其中 `install` 使用 `application.install` 的字段，指定已存在的 OCI 镜像配置摘要、绝对入口、资源限制和可选卷版本。`Application.PrepareArtifactInstall` 接受 `reference`、`key`、`delegation_id` 和可选 `deadline_at`，返回可供 `Task.Submit` 使用的请求及具体部署参数。
 
 读取源制品需要 Node 范围的 `artifact.read`，安装委托需要 `application.install_artifact` 且覆盖制品与目标卷或 `profile-local`。Task 准入固定源摘要并创建审批计划。待审批与执行期间保留制品，安装提交时由不可变 Release 接续保留。成功回执关联 Operation、Application、Release、Deployment 和制品来源。目录提交前中断会结算为已知失败并释放 Task 的保留关系。安装得到处于 `Stopped` 的应用，通过已有 `application.start` 启动。[授权及恢复验收](../tests/test_artifact_install.py) · [真实 OCI 验收](../tests/oci.py)
+
+### 退役本机应用版本
+
+通过 Task 工具 `application.retire_release` 提交应用当前版本 `target`、确切 `release_ref` 和原因。Grant 必须覆盖应用和 Release，审批绑定这两项引用。仍有应用或 Deployment 使用的版本会被拒绝。切换后可退役已替代的版本，卸载后也可退役最后一次部署的版本。
+
+退役提交后，原 Release 及 `ApplicationReleaseRetirement` 凭据仍可查询。启动和版本选择检查退役状态，待执行的旧回滚同样受此约束。退役会原子释放 Release 对本机制品的保留关系。没有其他保留者时，有权主体可另行调用 `Artifact.Withdraw` 回收字节。持久卷和备份延续各自的生命周期。[真实 OCI 验收](../tests/oci.py) · [格式 55 安装任务升级验收](../tests/release_retirement_upgrade.py)
 
 ## 任务调度
 

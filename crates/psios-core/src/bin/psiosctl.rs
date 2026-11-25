@@ -123,6 +123,9 @@ enum Cmd {
         /// Maximum total payload bytes to download.
         #[arg(long, default_value_t = DEFAULT_BACKUP_MAX_BYTES, value_parser = clap::value_parser!(u64).range(1..=MAX_BACKUP_BYTES))]
         max_bytes: u64,
+        /// Keep and resume a private staged export for this output path and reference.
+        #[arg(long)]
+        resume: bool,
     },
     Agent {
         #[arg(long)]
@@ -347,9 +350,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             output,
             file,
             max_bytes,
+            resume,
         } => {
             let reference = serde_json::from_value(input(&file)?)?;
-            psios_core::download_backup_with_limit(&c, &reference, &output, max_bytes)?
+            if resume {
+                psios_core::resume_backup_with_limit(&c, &reference, &output, max_bytes)?
+            } else {
+                psios_core::download_backup_with_limit(&c, &reference, &output, max_bytes)?
+            }
         }
         Cmd::Agent { key, delegation } => c.execute_agent(&StatusProvider, &key, &delegation)?,
         Cmd::Validate { .. } => unreachable!(),

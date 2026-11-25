@@ -46,6 +46,8 @@ pub struct ApiError {
     pub retry_condition: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
 }
 impl ApiError {
     pub fn new(code: &str, message: impl Into<String>) -> Self {
@@ -66,6 +68,7 @@ impl ApiError {
             retryable: condition == "SameRequestAfterBackoff",
             retry_condition: condition.into(),
             operation_id: None,
+            details: None,
         }
     }
 }

@@ -26,6 +26,7 @@ pub(super) fn expected_digest(value: &str) -> bool {
 pub(super) fn output_parent<'a>(
     source: Option<&File>,
     output: &'a Path,
+    require_new: bool,
 ) -> Result<(std::path::PathBuf, &'a str)> {
     let name = output
         .file_name()
@@ -46,7 +47,8 @@ pub(super) fn output_parent<'a>(
         )?;
     }
     match fs::symlink_metadata(parent.join(name)) {
-        Ok(_) => return Err(err("Conflict", "output already exists")),
+        Ok(_) if require_new => return Err(err("Conflict", "output already exists")),
+        Ok(_) => (),
         Err(error) if error.kind() == io::ErrorKind::NotFound => (),
         Err(error) => return Err(error.into()),
     }
@@ -137,7 +139,7 @@ pub fn inspect_detached_backup_with_limit(
     )?;
     let (archive, _) = open_detached(directory, manifest_digest)?;
     let destination = output
-        .map(|path| output_parent(Some(&archive.root), path))
+        .map(|path| output_parent(Some(&archive.root), path, true))
         .transpose()?;
     let stage = destination
         .as_ref()

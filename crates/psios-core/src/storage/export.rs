@@ -1,4 +1,6 @@
 //! Authorized, revision-pinned reads of the native backup directory format.
+mod integrity;
+
 use super::{
     BackupManifest, MAX_ENTRIES, MAX_MANIFEST, child, copy_hash, detached, file_sizes,
     inspect_detached_backup_with_limit, open_backup, open_manifest, regular, same_source, staging,
@@ -6,30 +8,33 @@ use super::{
 };
 use crate::{
     Config, DEFAULT_BACKUP_MAX_BYTES, MAX_BACKUP_BYTES, Result,
+    config::private_dir,
     db::{Db, Doc},
     decode, err, policy, require,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use psios_api::{BackupChunk, BackupMember, Client, MAX_ARTIFACT_CHUNK, ResourceRef};
-use rustix::fs::OFlags;
+pub(crate) use integrity::Cache;
+use integrity::MemberIntegrity;
+use psios_api::{
+    BackupChunk, BackupMember, BackupMemberReceipt, Client, MAX_ARTIFACT_CHUNK, ResourceRef,
+    canonical, sha256,
+};
+use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    fs::{File, Metadata, OpenOptions},
-    io::{BufReader, Read, Seek, SeekFrom, sink},
-    os::unix::fs::{FileExt, OpenOptionsExt},
+    fs::{self, File, Metadata},
+    io::{BufReader, ErrorKind, Read, Seek, SeekFrom, sink},
+    os::unix::fs::{FileExt, MetadataExt},
     path::Path,
-    sync::{Arc, Mutex, TryLockError},
+    sync::Arc,
 };
 
 pub(crate) const ACTION: &str = "backup.export";
 pub(crate) const METHOD: &str = "Backup.Export";
-
-#[derive(Default)]
-pub(crate) struct Cache(Option<Index>);
+const RESUME_PREFIX: &str = ".psios-backup-export-";
 
 struct Index {
-    reference: ResourceRef,
     directory: Metadata,
     manifest: Metadata,
     digest: String,
@@ -50,7 +55,7 @@ struct Entry {
     bytes: u64,
     digest: Option<String>,
     #[serde(skip)]
-    verified: Option<Metadata>,
+    integrity: MemberIntegrity,
 }
 
 #[derive(Deserialize)]
@@ -66,12 +71,11 @@ pub(crate) struct Job {
     config: Config,
     backup: Doc,
     request: ReadMember,
-    cache: Arc<Mutex<Cache>>,
+    cache: Arc<Cache>,
 }
 
 fn index(
     backup: &Doc,
-    reference: &ResourceRef,
     directory: &Metadata,
     manifest: &mut File,
     metadata: &Metadata,
@@ -101,7 +105,6 @@ fn index(
         "backup manifest disagrees with authority",
     )?;
     Ok(Index {
-        reference: reference.clone(),
         directory: directory.clone(),
         manifest: metadata.clone(),
         digest,
@@ -151,7 +154,7 @@ impl Entry {
         let Some(digest) = &self.digest else {
             return Err(err("NotFound", "backup member is a directory"));
         };
-        let mut file = child(root, format!("blob-{index}"), OFlags::RDONLY)?;
+        let file = child(root, format!("blob-{index}"), OFlags::RDONLY)?;
         let metadata = file.metadata()?;
         regular(&metadata)?;
         require(
@@ -164,21 +167,8 @@ impl Entry {
             "InvalidArgument",
             "offset beyond backup member",
         )?;
-        if self
-            .verified
-            .as_ref()
-            .is_none_or(|previous| !same_source(previous, &metadata))
-        {
-            let (bytes, actual) = copy_hash(&mut file, &mut sink(), self.bytes)?;
-            require(
-                bytes == self.bytes
-                    && actual == *digest
-                    && same_source(&metadata, &file.metadata()?),
-                "PreconditionFailed",
-                "backup member integrity failed",
-            )?;
-            self.verified = Some(metadata.clone());
-        }
+        self.integrity
+            .verify(&file, &metadata, self.bytes, digest)?;
         chunk(&file, &metadata, digest, offset, length)
     }
 }
@@ -207,12 +197,7 @@ fn authorize(db: &Db<'_>, actor: &str, request: &ReadMember) -> Result<Doc> {
     Ok(backup)
 }
 
-pub(crate) fn prepare(
-    db: &Db<'_>,
-    actor: &str,
-    params: &Value,
-    cache: Arc<Mutex<Cache>>,
-) -> Result<Job> {
+pub(crate) fn prepare(db: &Db<'_>, actor: &str, params: &Value, cache: Arc<Cache>) -> Result<Job> {
     let request = decode(params)?;
     let backup = authorize(db, actor, &request)?;
     Ok(Job {
@@ -238,37 +223,20 @@ pub(crate) fn finish(
 
 impl Job {
     pub(crate) fn read(self) -> Result<BackupChunk> {
-        let mut cache = self.cache.try_lock().map_err(|error| match error {
-            TryLockError::WouldBlock => {
-                let mut error = err("QuotaExceeded", "backup export reader is busy");
-                error.0.retryable = true;
-                error.0.retry_condition = "SameRequestAfterBackoff".into();
-                error
-            }
-            TryLockError::Poisoned(_) => {
-                err("RecoveryRequired", "backup export reader was interrupted")
-            }
-        })?;
         let request = self.request;
+        let slot = self.cache.checkout(&request.reference)?;
+        let mut cached = slot.try_lock().map_err(integrity::lock_error)?;
         let (_, root) = open_backup(&self.config, &self.backup.id)?;
         let directory = root.metadata()?;
         let mut manifest = open_manifest(&root)?;
         let metadata = manifest.metadata()?;
-        if cache.0.as_ref().is_none_or(|index| {
-            index.reference != request.reference
-                || !same_source(&index.directory, &directory)
-                || !same_source(&index.manifest, &metadata)
+        if cached.as_ref().is_none_or(|index| {
+            !same_source(&index.directory, &directory) || !same_source(&index.manifest, &metadata)
         }) {
-            cache.0 = None;
-            cache.0 = Some(index(
-                &self.backup,
-                &request.reference,
-                &directory,
-                &mut manifest,
-                &metadata,
-            )?);
+            *cached = None;
+            *cached = Some(index(&self.backup, &directory, &mut manifest, &metadata)?);
         }
-        let index = cache.0.as_mut().unwrap();
+        let index = cached.as_mut().unwrap();
         let reply = match request.member {
             BackupMember::Manifest => chunk(
                 &manifest,
@@ -304,44 +272,196 @@ pub fn download_backup_with_limit(
     output: &Path,
     max_bytes: u64,
 ) -> Result<Value> {
+    export_backup(client, backup, output, max_bytes, false)
+}
+
+/// Continue the private export associated with this pinned backup and output name.
+pub fn resume_backup_with_limit(
+    client: &Client,
+    backup: &ResourceRef,
+    output: &Path,
+    max_bytes: u64,
+) -> Result<Value> {
+    export_backup(client, backup, output, max_bytes, true)
+}
+
+fn staged_member(stage: &staging::Stage, name: &str, resumable: bool) -> Result<File> {
+    let access = if resumable {
+        OFlags::RDWR
+    } else {
+        OFlags::WRONLY | OFlags::EXCL
+    };
+    let file = File::from(
+        openat2(
+            stage.directory(),
+            name,
+            access | OFlags::CREATE | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            Mode::RUSR | Mode::WUSR,
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
+        )
+        .map_err(std::io::Error::from)?,
+    );
+    private_member(stage, &file.metadata()?)?;
+    Ok(file)
+}
+
+fn private_member(stage: &staging::Stage, meta: &Metadata) -> Result<()> {
+    regular(meta)?;
+    require(
+        meta.uid() == rustix::process::geteuid().as_raw()
+            && meta.mode() & 0o077 == 0
+            && meta.dev() == stage.directory().metadata()?.dev(),
+        "PermissionDenied",
+        "backup staging member is outside the private export",
+    )
+}
+
+fn check_export_space(
+    stage: &staging::Stage,
+    manifest: &BackupManifest,
+    resumable: bool,
+) -> Result<()> {
+    if !resumable {
+        let sizes = file_sizes(manifest);
+        return crate::db::check_restore_capacity(
+            stage.directory(),
+            sizes.clone(),
+            sizes.count() as u64,
+            0,
+        );
+    }
+    let mut new_entries = 0;
+    let mut remaining = Vec::new();
+    for (index, entry) in manifest
+        .entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.digest.is_some())
+    {
+        let path = stage.path().join(format!("blob-{index}"));
+        let written = match fs::symlink_metadata(path) {
+            Ok(meta) => {
+                private_member(stage, &meta)?;
+                meta.blocks().saturating_mul(512).min(meta.len())
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                new_entries += 1;
+                0
+            }
+            Err(e) => return Err(e.into()),
+        };
+        remaining.push(entry.bytes.saturating_sub(written));
+    }
+    crate::db::check_restore_capacity(stage.directory(), remaining.into_iter(), new_entries, 0)
+}
+
+fn transfer_member(
+    client: &Client,
+    backup: &ResourceRef,
+    member: BackupMember,
+    max_bytes: u64,
+    file: &mut File,
+    resumable: bool,
+) -> Result<BackupMemberReceipt> {
+    if resumable {
+        let had_prefix = file.metadata()?.len() > 0;
+        match client.resume_backup_member(backup, member, max_bytes, file) {
+            Ok(receipt) => return Ok(receipt),
+            Err(e)
+                if had_prefix
+                    && matches!(e.code.as_str(), "RecoveryRequired" | "InvalidArgument") =>
+            {
+                file.set_len(0)?;
+                file.seek(SeekFrom::Start(0))?;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(client.download_backup_member(backup, member, max_bytes, file)?)
+}
+
+fn export_backup(
+    client: &Client,
+    backup: &ResourceRef,
+    output: &Path,
+    max_bytes: u64,
+    resumable: bool,
+) -> Result<Value> {
     require(
         (1..=MAX_BACKUP_BYTES).contains(&max_bytes),
         "InvalidArgument",
         "invalid backup export byte limit",
     )?;
-    let (parent, name) = detached::output_parent(None, output)?;
-    let stage = staging::create(&parent)?;
-    let create_file = |name: &str| {
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(stage.path().join(name))
+    let (parent, name) = detached::output_parent(None, output, !resumable)?;
+    require(
+        !name.starts_with(RESUME_PREFIX),
+        "InvalidArgument",
+        "output name is reserved for staged backup exports",
+    )?;
+    let published = parent.join(name);
+    let stage = if resumable {
+        private_dir(&parent, false)?;
+        match fs::symlink_metadata(&published) {
+            Ok(_) => {
+                let receipt = client.download_backup_member(
+                    backup,
+                    BackupMember::Manifest,
+                    MAX_MANIFEST,
+                    &mut sink(),
+                )?;
+                let mut report = inspect_detached_backup_with_limit(
+                    &published,
+                    &receipt.digest,
+                    None,
+                    max_bytes,
+                )?;
+                require(
+                    report["backup_id"] == backup.resource_id,
+                    "PreconditionFailed",
+                    "output belongs to a different backup",
+                )?;
+                report["backup_ref"] = json!(backup);
+                report["exported_directory"] = json!(published.display().to_string());
+                return Ok(report);
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => (),
+            Err(e) => return Err(e.into()),
+        }
+        let identity = sha256(&canonical(&json!(["psios-backup-export-v1", name, backup])));
+        staging::resume(&parent, &format!("{RESUME_PREFIX}{}", &identity[7..]))?
+    } else {
+        staging::create(&parent)?
     };
-    let mut file = create_file("manifest.json")?;
-    let receipt =
-        client.download_backup_member(backup, BackupMember::Manifest, MAX_MANIFEST, &mut file)?;
+    let mut file = staged_member(&stage, "manifest.json", resumable)?;
+    let receipt = transfer_member(
+        client,
+        backup,
+        BackupMember::Manifest,
+        MAX_MANIFEST,
+        &mut file,
+        resumable,
+    )?;
     file.sync_all()?;
     drop(file);
-    let manifest: BackupManifest = serde_json::from_reader(BufReader::new(File::open(
-        stage.path().join("manifest.json"),
-    )?))?;
+    let manifest: BackupManifest =
+        serde_json::from_reader(BufReader::new(open_manifest(stage.directory())?))?;
     require(
         manifest.backup_id == backup.resource_id,
         "PreconditionFailed",
         "export manifest identity disagrees with the pinned backup",
     )?;
     validate_members(&manifest, max_bytes)?;
-    let sizes = file_sizes(&manifest);
-    crate::db::check_restore_capacity(stage.directory(), sizes.clone(), sizes.count() as u64, 0)?;
+    check_export_space(&stage, &manifest, resumable)?;
     for (index, entry) in manifest.entries.iter().enumerate() {
         if let Some(expected) = &entry.digest {
-            let mut file = create_file(&format!("blob-{index}"))?;
-            let member = client.download_backup_member(
+            let mut file = staged_member(&stage, &format!("blob-{index}"), resumable)?;
+            let member = transfer_member(
+                client,
                 backup,
                 BackupMember::Blob { index },
                 entry.bytes,
                 &mut file,
+                resumable,
             )?;
             require(
                 member.bytes == entry.bytes && member.digest == *expected,
@@ -355,6 +475,6 @@ pub fn download_backup_with_limit(
         inspect_detached_backup_with_limit(stage.path(), &receipt.digest, None, max_bytes)?;
     stage.publish(name)?;
     report["backup_ref"] = json!(backup);
-    report["exported_directory"] = json!(parent.join(name).display().to_string());
+    report["exported_directory"] = json!(published.display().to_string());
     Ok(report)
 }

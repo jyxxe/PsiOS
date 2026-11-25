@@ -25,7 +25,7 @@ pub struct Store {
     keys: Zeroizing<Vec<u8>>,
     sealed: bool,
     pub(crate) changes: std::sync::Arc<watch::Changes>,
-    pub(crate) export_cache: std::sync::Arc<std::sync::Mutex<storage::export::Cache>>,
+    pub(crate) export_cache: std::sync::Arc<storage::export::Cache>,
 }
 pub(crate) struct Db<'a> {
     pub c: &'a Connection,

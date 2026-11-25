@@ -163,7 +163,9 @@ Core 可选地先向该目标指定的解析器发出 TCP DNS 请求。按端点
 
 每次请求传入 `reference`、`member`、`offset` 和 `length`。`member` 取 `{"kind":"Manifest"}` 或 `{"kind":"Blob","index":0}`，`index` 对应清单中的零基条目位置，目录没有 blob。每块最多 131072 字节。响应包含成员完整摘要、总字节数、当前与后续偏移，以及 Base64 编码的块数据。Core 核验每个文件的内容，并在回传每一块之前重新核对授权、修订及占用状态和提交审计。[接口与故障验收](../tests/test_backup_export.py)
 
-Rust SDK 的 `Client::download_backup_member` 从头流式核验单个成员。`psiosctl backup-export` 校验完整副本并发布到私有父目录下的新路径。将回执清单摘要保存到独立介质，可用 `psiosd verify-backup` 在原服务离线时校验或恢复副本。[命令与脱机恢复](offline-rescue.md#验证和恢复独立的卷备份)
+服务长文件的首次读取时，一个请求最多核验 16 MiB，并在每次本机读取后检查经过时间。文件还在核验时返回可重试的 `QuotaExceeded`，`details` 中包含已核验字节 `backup_verified_bytes` 和成员长度 `backup_member_bytes`。使用原偏移继续请求，直到完整 SHA-256 核验通过并返回数据。服务独立保留最近四个备份修订的核验状态，文件身份、内容元数据或清单变更后重新核验。守护进程重启后重新核验。
+
+Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并流式获取单个成员，`Client::resume_backup_member` 也可核验已有的私有文件前缀。`psiosctl backup-export` 校验完整副本并发布到私有父目录下。将回执清单摘要保存到独立介质，可用 `psiosd verify-backup` 在原服务离线时校验或恢复副本。[命令与脱机恢复](offline-rescue.md#验证和恢复独立的卷备份)
 
 ## 身份与权限
 

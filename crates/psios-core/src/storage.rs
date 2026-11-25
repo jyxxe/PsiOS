@@ -218,17 +218,18 @@ fn create_volume(
         "Conflict",
         "volume operation identity already present",
     )?;
-    let stage = staging::create(&parent)?;
+    let identity = canonical(&json!([vid, inc]));
+    let stage = staging::create(&parent, |root| {
+        w.cfg
+            .check_managed_space(root, std::iter::once(identity.len() as u64), 3)
+    })?;
     let data = stage.path().join("data");
     private_dir(&data, true)?;
+    new_file(&stage.path().join("identity"), &identity)?;
     let proof = match restore {
         Some(backup) => inspect_backup(&w.cfg, backup, Some(&data))?["restore_proof"].clone(),
         None => Value::Null,
     };
-    new_file(
-        &stage.path().join("identity"),
-        &canonical(&json!([vid, inc])),
-    )?;
     let m = fs::symlink_metadata(&data)?;
     let stats = rustix::fs::statvfs(&data).map_err(std::io::Error::from)?;
     let capacity = stats.f_blocks.saturating_mul(stats.f_frsize);
@@ -552,7 +553,9 @@ pub(crate) fn backup(
     check()?;
     let parent = w.cfg.state_dir.join("backups");
     let bid = format!("backup-{}", w.op.id);
-    let stage = staging::create(&parent)?;
+    let stage = staging::create(&parent, |root| {
+        w.cfg.check_managed_space(root, std::iter::empty(), 1)
+    })?;
     let started = now();
     let mut capture = Capture {
         out: Some(RestoreDestination {
@@ -589,10 +592,10 @@ pub(crate) fn backup(
     let bytes = canonical(&manifest);
     (capture.check)()?;
     w.cfg
-        .check_restore_space(stage.directory(), std::iter::once(bytes.len() as u64), 1)?;
+        .check_managed_space(stage.directory(), std::iter::once(bytes.len() as u64), 1)?;
     new_file(&stage.path().join("manifest.json"), &bytes)?;
     w.cfg
-        .check_restore_space(stage.directory(), std::iter::empty(), 0)?;
+        .check_managed_space(stage.directory(), std::iter::empty(), 0)?;
     let current = capture_root(w)?;
     capture.confirm_source(&current, &before)?;
     let receipt = json!({
@@ -713,7 +716,7 @@ struct RestoreDestination<'a> {
 impl RestoreDestination<'_> {
     fn check_space(&self, file_sizes: impl Iterator<Item = u64>, entries: u64) -> Result<()> {
         match self.authority {
-            Some(config) => config.check_restore_space(self.directory, file_sizes, entries),
+            Some(config) => config.check_managed_space(self.directory, file_sizes, entries),
             None => db::check_restore_capacity(self.directory, file_sizes, entries, 0),
         }
     }
@@ -954,12 +957,17 @@ pub fn perform(w: &Work) -> Result<Value> {
             Ok(json!({"name":f.name,"content":text}))
         }
         Action::Write(f) => {
-            let path = w.data.as_ref().unwrap().join(&f.name);
+            let root = w.data.as_ref().unwrap();
+            let directory = File::open(root)?;
+            registered_root(&w.target, &directory.metadata()?)?;
+            let path = root.join(&f.name);
             match fs::symlink_metadata(&path) {
                 Ok(m) => regular(&m)?,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
             }
+            w.cfg
+                .check_managed_space(&directory, std::iter::once(f.content.len() as u64), 1)?;
             replace(&path, f.content.as_bytes()).map_err(unknown)?;
             Ok(json!({"name": f.name, "digest": sha256(f.content.as_bytes())}))
         }

@@ -118,6 +118,10 @@ Core 可选地先向该目标指定的解析器发出 TCP DNS 请求。按端点
 
 `service.start`、`service.stop` 经过审批、目标占用、定义摘要和 manager 加载状态检查。已派发后丢失回执时，先执行新的 `service.inspect` Task，再向 `Operation.Reconcile` 提交 Operation 的 ID、修订和新的 `evidence_ref`。服务会核对证据来源、调度先后、受管目标、定义和期望状态。系统记录可观察到的结果。具有宿主管理权的其他程序也可以改变该 unit，外部 unit 依赖和程序包变更属于宿主运维的信任边界。[systemctl 官方手册](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html)
 
+`service.logs` 通过只读 Task 查询已登记服务在当前启动中的 journald 尾部记录。给操作者显式授予 `service.logs`、`task.submit` 和 `task.read`，并用 `tool_targets` 指定目标 HostService。输入为 `id`、`expected_resource_version` 和可选 `limit`，默认 16 条，最多 32 条。服务侧按 Linux 启动 ID 和准确的 systemd 单元筛选，用户服务还核对 manager 的属主 UID。日志查询可与控制操作同时进行。
+
+制品包含固定服务引用、采集时间和可核验的日志游标。消息按 UTF-8 或 Base64 返回，每条最多 4096 字节，无法表示的消息标为 `Omitted`。`journalctl` 不可用、权限不足导致查询失败或执行超时返回 `DependencyUnavailable`。总输出超限时减小 `limit` 后重新提交。升级到格式 34 会安装能力描述，已有授权范围继续由原授权记录决定。[真实日志与格式升级验收](../tests/service_journal.py) · [journalctl 官方手册](https://www.freedesktop.org/software/systemd/man/latest/journalctl.html)
+
 ## 卷文件与应用版本
 
 | Task 工具 | 参数与行为 |

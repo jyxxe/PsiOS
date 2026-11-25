@@ -31,6 +31,7 @@ pub const TOOLS: &[&str] = &[
     node::block::TOOL,
     "node.mounts",
     "service.inspect",
+    node::journal::TOOL,
     "service.start",
     "service.stop",
     "volume.files",
@@ -93,6 +94,7 @@ pub fn readonly(tool: &str) -> bool {
             | node::block::TOOL
             | "node.mounts"
             | "service.inspect"
+            | node::journal::TOOL
             | "volume.files"
             | "volume.usage"
             | "volume.read_chunk"
@@ -137,6 +139,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | "node.routes"
                     | "node.route_lookup"
                     | node::network::probe::TOOL
+                    | node::journal::TOOL
                     | "node.routing_rules"
                     | "node.mounts"
                     | node::pressure::TOOL
@@ -463,10 +466,10 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     require(
         !p.actions
             .iter()
-            .any(|action| action == storage::export::ACTION)
+            .any(|action| action == storage::export::ACTION || action == node::journal::TOOL)
             || p.tool_targets.is_some(),
         "InvalidArgument",
-        "backup export grants require an explicit target scope",
+        "backup export and service log grants require an explicit target scope",
     )?;
     if let Some(ids) = &p.tool_targets {
         require(

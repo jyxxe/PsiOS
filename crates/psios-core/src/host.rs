@@ -80,6 +80,8 @@ pub enum Action {
     Processes(node::ProcessQuery),
     #[serde(rename = "service.inspect")]
     ServiceInspect(Target),
+    #[serde(rename = "service.logs")]
+    ServiceLogs(node::journal::Query),
     #[serde(rename = "service.start")]
     ServiceStart(Target),
     #[serde(rename = "service.stop")]
@@ -154,6 +156,7 @@ impl Action {
             Self::RouteLookup(q) => q.validate()?,
             Self::RoutingRules(q) => q.validate()?,
             Self::BlockLayout(q) => q.validate()?,
+            Self::ServiceLogs(q) => q.validate()?,
             Self::Create { name } => label(name)?,
             Self::Read(f) => storage::filename(&f.name)?,
             Self::VolumeUsage(query) => query.validate()?,
@@ -230,14 +233,10 @@ impl Action {
                 return db.of(&db.meta("authority")?, "Node");
             }
             Self::ServiceInspect(t) | Self::ServiceStart(t) | Self::ServiceStop(t) => {
-                let d = db.of(&t.id, "HostService")?;
-                d.cas(&t.expected_resource_version)?;
-                require(
-                    d.body["lifecycle"] == "Registered",
-                    "PreconditionFailed",
-                    "unregistered system unit",
-                )?;
-                return Ok(d);
+                return node::service_target(db, &t.id, &t.expected_resource_version);
+            }
+            Self::ServiceLogs(q) => {
+                return node::service_target(db, &q.id, &q.expected_resource_version);
             }
             Self::Create { .. } => return db.get("local"),
             Self::Mac { secret_id, .. } => (secret_id, None, "Secret"),
@@ -390,6 +389,7 @@ impl Work {
         }
         match &self.action {
             Action::ServiceInspect(_)
+            | Action::ServiceLogs(_)
             | Action::ServiceStart(_)
             | Action::ServiceStop(_)
             | Action::Inventory {}

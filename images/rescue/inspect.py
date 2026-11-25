@@ -27,6 +27,26 @@ def guest_path(value):
     return value
 
 
+def configuration(args):
+    config = {"socket": "/run/rescue.sock"}
+    if args.migration_config is not None:
+        def unique_fields(items):
+            result = dict(items)
+            if len(result) != len(items):
+                raise ValueError("duplicate field in migration configuration")
+            return result
+
+        with regular_file(args.migration_config) as source:
+            data = source.read(64 * 1024 + 1)
+        if len(data) > 64 * 1024:
+            raise ValueError("migration configuration exceeds size limit")
+        config = json.loads(data, object_pairs_hook=unique_fields)
+        if not isinstance(config, dict):
+            raise ValueError("migration configuration must be an object")
+    return {**config, "state_dir": "/source" + args.state,
+            "witness_dir": "/source" + (args.witness or args.state + ".witness")}
+
+
 def prepare(work, args, require_secure_boot):
     boot_media.prepare_kernel(work, args.iso)
     pinned_copy(args.core, work / "psiosd", args.core_sha256, 64 * 1024 * 1024)
@@ -36,12 +56,11 @@ def prepare(work, args, require_secure_boot):
     # Keep input paths in JSON. The init script sources only these numeric settings.
     settings = (f"PARTITION={args.partition}\nSERVICE_UID={args.uid}\n"
                 f"SERVICE_GID={args.gid if args.gid is not None else args.uid}\nCOPY_MIB={args.max_copy_mib}\n"
-                f"OVERLAY={int(args.journal_overlay_mib is not None)}\nSECURE_BOOT={int(require_secure_boot)}\n")
+                f"OVERLAY={int(args.journal_overlay_mib is not None)}\nSECURE_BOOT={int(require_secure_boot)}\n"
+                f"REHEARSE={int(args.migration_config is not None)}\n")
     (work / "rescue-settings").write_text(settings)
     (work / "rescue-settings").chmod(0o600)
-    config = {"state_dir": "/source" + args.state, "witness_dir": "/source" + (args.witness or args.state + ".witness"),
-              "socket": "/run/rescue.sock"}
-    (work / "rescue.json").write_text(json.dumps(config))
+    (work / "rescue.json").write_text(json.dumps(configuration(args), allow_nan=False))
     (work / "rescue.json").chmod(0o644)
     for name in ("psios-rescue", "psiosd", "rescue-settings", "rescue.json"):
         os.utime(work / name, (boot_media.EPOCH, boot_media.EPOCH))
@@ -112,6 +131,13 @@ def inspect(args):
         report = json.loads(body)
         if report["sqlite_integrity"] != "Verified" or report["foreign_keys"] != "Verified":
             raise ValueError("incomplete authority verification")
+        if args.migration_config is not None:
+            probe = report.get("migration_rehearsal", {})
+            source, target = probe.get("source_format"), probe.get("target_format")
+            if (probe.get("status") != "Verified" or type(source) is not int or type(target) is not int
+                    or source != report["database_format"] or target < source
+                    or report["migration_required"] is not (target > source)):
+                raise ValueError("incomplete migration rehearsal")
         if signing:
             if output.count(b"\nPSIOS-SECURE-BOOT/1\nEnforced\n") != 1:
                 raise ValueError("rescue guest did not confirm Secure Boot")
@@ -135,6 +161,8 @@ def main():
     parser.add_argument("--state", type=guest_path, default="/var/lib/psios")
     parser.add_argument("--witness", type=guest_path, help="defaults to STATE.witness")
     parser.add_argument("--max-copy-mib", type=int, default=64, help="database and journal copy limit (1–256 MiB)")
+    parser.add_argument("--migration-config", type=Path, metavar="CORE_JSON",
+                        help="rehearse opening a private authority copy with the staged Core and deployment configuration")
     parser.add_argument("--journal-overlay-mib", type=int, metavar="MIB",
                         help="allow ext4 journal replay on a disposable bounded overlay (16–512 MiB)")
     parser.add_argument("--firmware", choices=["direct", "bios", "uefi"], default="direct",
@@ -158,6 +186,8 @@ def main():
         parser.error("journal overlay limit must be 16–512 MiB")
     if args.firmware != "direct" and args.journal_overlay_mib is not None:
         parser.error("firmware media require a read-only block device")
+    if args.migration_config is not None and (args.firmware != "direct" or args.journal_overlay_mib is not None):
+        parser.error("migration rehearsal requires direct boot and a clean read-only disk")
     if args.save_rescue_iso is not None:
         if args.firmware == "direct":
             parser.error("saving an ISO requires bios or uefi firmware inspection")

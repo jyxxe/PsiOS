@@ -3,11 +3,12 @@ import argparse
 import json
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
 
-from native_disk import boot, check_native_network, check_state, password, sha
+from native_disk import boot, check_native_network, check_state, extract_partition, password, replace_partition, sha
 
 
 def shutdown(console, admin):
@@ -15,6 +16,29 @@ def shutdown(console, admin):
     console.login("root", admin)
     console.send("cd /; exec poweroff")
     assert console.vm.wait(35) == 0
+
+
+def add_migration_conflict(work, disk):
+    partition = work / "conflicting-state.ext4"
+    source = "/psios/state.db"
+    db = work / "conflicting-state.db"
+    extract_partition(disk, partition, 65, 192)
+    subprocess.run(["debugfs", "-R", f"dump {source} {db.name}", partition], cwd=work,
+                   check=True, capture_output=True, timeout=20)
+    con = sqlite3.connect(db)
+    try:
+        with con:
+            # The old schema permits this index, which conflicts with the target migration.
+            assert con.execute("PRAGMA user_version").fetchone() == (5,)
+            con.execute("CREATE INDEX versions_origin_seq ON versions(seq)")
+            assert con.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+    finally:
+        con.close()
+    patch = (f"rm {source}\nwrite {db.name} {source}\nset_inode_field {source} mode 0100600\n"
+             f"set_inode_field {source} uid 1000\nset_inode_field {source} gid 1000\n")
+    subprocess.run(["debugfs", "-w", "-f", "-", partition], cwd=work, input=patch,
+                   check=True, capture_output=True, text=True, timeout=20)
+    replace_partition(disk, partition, 65)
 
 
 def exercise(args, work):
@@ -44,6 +68,7 @@ def exercise(args, work):
         c.send("exit")
         c.login("root", admin)
         c.run("sed -i 's/^{/{\"workers\":2,/' /etc/psios/core.json")
+        core_config_digest = c.run("sha256sum /etc/psios/core.json").split()[0]
         c.run("echo retained-admin > /root/maintenance; sync")
         # Capture a crash-consistent image with real outstanding ext4 journals.
         c.vm.kill()
@@ -62,6 +87,9 @@ def exercise(args, work):
     upgrade = json.loads(subprocess.check_output(prepare, timeout=330))
     verified = upgrade["upgrade"]["verified_authority"]
     assert (verified["node_id"], verified["database_format"], verified["migration_required"]) == (first[0], 5, True), verified
+    rehearsal = verified["migration_rehearsal"]
+    assert rehearsal["status"] == "Verified" and rehearsal["source_format"] == 5 < rehearsal["target_format"], rehearsal
+    assert rehearsal["configuration_sha256"] == core_config_digest, rehearsal
     assert upgrade["state_uuid"] == old["state_uuid"] and upgrade["home_uuid"] == old["home_uuid"]
     assert upgrade["upgrade"]["previous_image_sha256"] == sha(previous) == old_digest
     assert upgrade["upgrade"]["previous_source_commit"] == old["source_commit"] != upgrade["source_commit"]
@@ -81,6 +109,7 @@ def exercise(args, work):
         check_native_network(c)
         c.send("exit")
         c.login("root", admin)
+        assert c.run("sha256sum /etc/psios/core.json").split()[0] == core_config_digest
         assert c.run("cat maintenance") == "retained-admin"
         c.send("poweroff")
         assert c.vm.wait(35) == 0
@@ -103,7 +132,20 @@ def exercise(args, work):
         candidate.seek(source.tell())
         for _ in range(258):
             assert source.read(1024 * 1024) == candidate.read(1024 * 1024)
-    print("PASS clean and crash-replayed UEFI upgrades, receipt and lock checks, preserved authority and homes, and independent prior boot")
+    assert clean["upgrade"]["verified_authority"]["migration_rehearsal"] == rehearsal
+
+    # Use the disposable, stopped second copy to inject an otherwise valid old schema.
+    add_migration_conflict(work, clean_disk)
+    conflicting_digest = sha(clean_disk)
+    previous_receipt.write_text(json.dumps(clean))
+    blocked = work / "must-not-publish.raw"
+    prepare[2] = blocked
+    prepare[4] = clean_disk
+    refused = subprocess.run(prepare, capture_output=True, text=True, timeout=330)
+    assert refused.returncode != 0 and "migration-rehearsal-StorageUnavailable" in refused.stderr, refused
+    assert not refused.stdout and not blocked.exists()
+    assert sha(clean_disk) == conflicting_digest and not list(work.glob(".psios-disk-*"))
+    print("PASS clean and crash-replayed UEFI upgrades, private migration rehearsal, publication refusal and independent prior boot")
 
 
 if __name__ == "__main__":

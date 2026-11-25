@@ -56,6 +56,8 @@ pub struct Config {
 pub struct AuthorityReserve {
     pub state_bytes: u64,
     pub witness_bytes: u64,
+    pub state_inodes: u64,
+    pub witness_inodes: u64,
 }
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]

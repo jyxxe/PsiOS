@@ -143,7 +143,7 @@ pub fn inspect_detached_backup_with_limit(
         .transpose()?;
     let stage = destination
         .as_ref()
-        .map(|(parent, _)| staging::create(parent))
+        .map(|(parent, _)| staging::create(parent, |_| Ok(())))
         .transpose()?;
     let mut report = inspect_members(
         &archive.root,

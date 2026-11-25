@@ -1,5 +1,18 @@
 use super::*;
+use psios_api::sha256;
+use std::io::Cursor;
 use tar::{Builder, EntryType, Header};
+
+fn validate(bytes: &[u8], image: &str, diff_ids: &[String]) -> Result<Compatibility> {
+    validate_reader(Cursor::new(bytes), image, diff_ids)
+}
+
+fn canonical_load(bytes: &[u8], image: &str, diff_ids: &[String]) -> Result<Vec<u8>> {
+    let mut output = Vec::new();
+    let digest = write_load(Cursor::new(bytes), &mut output, image, diff_ids)?;
+    assert_eq!(digest, sha256(&output));
+    Ok(output)
+}
 
 fn encode(members: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
     let mut out = Builder::new(Vec::new());
@@ -120,7 +133,29 @@ fn normalized_load_has_only_one_tagless_manifest_and_unmodified_image_members() 
     let bytes = fixture.tar();
     let normalized = canonical_load(&bytes, &fixture.image, &fixture.layers).unwrap();
     assert_ne!(normalized, bytes);
-    let members = Members::read(&normalized).unwrap();
+    let config = blob(&fixture.image);
+    let layer = blob(&fixture.layers[0]);
+    let manifest = json_bytes(&json!([{"Config":config,"RepoTags":[],"Layers":[layer]}]));
+    // The persisted checkpoint digest uses the original classic tar emitter.
+    let mut original = Builder::new(Vec::new());
+    for (path, bytes) in [
+        (config.as_str(), &fixture.members[&config]),
+        (layer.as_str(), &fixture.members[&layer]),
+        ("manifest.json", &manifest),
+    ] {
+        let mut header = Header::new_ustar();
+        header.set_mode(0o600);
+        header.set_entry_type(EntryType::Regular);
+        header.set_size(bytes.len() as u64);
+        original.append_data(&mut header, path, &bytes[..]).unwrap();
+    }
+    assert_eq!(normalized, original.into_inner().unwrap());
+    let legacy = Fixture::new(false);
+    assert_eq!(
+        canonical_load(&legacy.tar(), &legacy.image, &legacy.layers).unwrap(),
+        normalized
+    );
+    let members = Members::read(Cursor::new(&normalized), normalized.len() as u64).unwrap();
     assert_eq!(members.files.len(), 3);
     assert!(members.directories.is_empty());
     assert_eq!(
@@ -130,12 +165,47 @@ fn normalized_load_has_only_one_tagless_manifest_and_unmodified_image_members() 
     for digest in [&fixture.image, &fixture.layers[0]] {
         let path = blob(digest);
         let actual = members.file(&path).unwrap();
-        assert_eq!(actual.digest(), digest);
-        assert_eq!(actual.bytes, fixture.members[&path]);
+        assert_eq!(members.digest(actual).unwrap(), digest);
+        let mut bytes = Vec::new();
+        members
+            .reader(actual)
+            .unwrap()
+            .read_to_end(&mut bytes)
+            .unwrap();
+        assert_eq!(bytes, fixture.members[&path]);
     }
     assert_eq!(
         validate(&normalized, &fixture.image, &fixture.layers).unwrap(),
         Compatibility::Verified,
+    );
+}
+
+#[test]
+fn seek_window_and_normalizer_reject_truncated_member_bytes() {
+    let bytes = b"prefixpayloadnext";
+    let members = Members {
+        input: RefCell::new(Cursor::new(bytes)),
+        files: BTreeMap::new(),
+        directories: BTreeSet::new(),
+    };
+    let member = Member {
+        offset: 6,
+        size: 7,
+        digest: OnceCell::new(),
+    };
+    let mut reader = members.reader(&member).unwrap();
+    assert!(reader.seek(SeekFrom::Start(8)).is_err());
+    assert_eq!(reader.seek(SeekFrom::End(-2)).unwrap(), 5);
+    let mut remaining = Vec::new();
+    reader.read_to_end(&mut remaining).unwrap();
+    assert_eq!(remaining, b"ad");
+    let mut output = Builder::new(Vec::new());
+    assert_eq!(
+        append_canonical(&mut output, "fixture", 8, &b"payload"[..])
+            .unwrap_err()
+            .0
+            .code,
+        "PreconditionFailed",
     );
 }
 
@@ -150,7 +220,10 @@ fn normalized_load_rejects_nested_extension_records() {
         .unwrap();
     let layer = tar.into_inner().unwrap();
     assert_eq!(
-        check_inner_layer(&layer).unwrap_err().0.code,
+        check_inner_layer(Cursor::new(&layer), layer.len() as u64)
+            .unwrap_err()
+            .0
+            .code,
         "UnsupportedCapability",
     );
 }
@@ -176,7 +249,7 @@ fn repeated_layers_share_one_cached_member_digest() {
         (config_path, config),
         (layer_path.clone(), layer),
     ]));
-    let members = Members::read(&bytes).unwrap();
+    let members = Members::read(Cursor::new(&bytes), bytes.len() as u64).unwrap();
     assert_eq!(
         canonical_load(&bytes, &id, &diff_ids).unwrap_err().0.code,
         "QuotaExceeded",
@@ -190,7 +263,10 @@ fn repeated_layers_share_one_cached_member_digest() {
     let cached = member.digest.get().unwrap();
     assert_eq!(cached, &diff);
     for _ in 0..128 {
-        assert!(std::ptr::eq(cached.as_str(), member.digest()));
+        assert!(std::ptr::eq(
+            cached.as_str(),
+            members.digest(member).unwrap()
+        ));
     }
 }
 
@@ -299,7 +375,7 @@ fn outer_header_formats_must_have_one_interpretation() {
     };
     for header in [Header::new_old(), Header::new_ustar(), Header::new_gnu()] {
         let bytes = archive(header);
-        assert!(Members::read(&bytes).is_ok());
+        assert!(Members::read(Cursor::new(&bytes), bytes.len() as u64).is_ok());
     }
 
     let mut other_version = Header::new_ustar();

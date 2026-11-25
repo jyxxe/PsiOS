@@ -144,7 +144,7 @@ fn copy_archive(
     stage: &staging::Stage,
 ) -> Result<()> {
     let files = file_sizes(&archive.manifest);
-    store.config.check_restore_space(
+    store.config.check_managed_space(
         stage.directory(),
         files.clone().chain(std::iter::once(raw.len() as u64)),
         files.count() as u64 + 1,
@@ -171,7 +171,7 @@ fn copy_archive(
     new_file(&stage.path().join("manifest.json"), raw)?;
     store
         .config
-        .check_restore_space(stage.directory(), std::iter::empty(), 0)
+        .check_managed_space(stage.directory(), std::iter::empty(), 0)
 }
 
 fn receipt(backup: &Doc, reused: bool) -> Value {
@@ -305,7 +305,11 @@ impl Store {
             Err(e) if e.kind() == ErrorKind::NotFound => (),
             Err(e) => return Err(e.into()),
         }
-        let stage = staging::create(&parent)?;
+        let stage = staging::create(&parent, |root| {
+            store
+                .config
+                .check_managed_space(root, std::iter::empty(), 1)
+        })?;
         copy_archive(&store, &archive, &raw, &stage)?;
         let state =
             json!({"lifecycle":"Prepared", "directory":directory_identity(stage.directory())?});

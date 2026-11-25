@@ -84,6 +84,17 @@ pub struct ArtifactPublisherKeyRegistration {
     pub fingerprint: String,
 }
 
+/// Restore one retained, signed release image into the identified local Docker Engine.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OciReleaseImageRestoreRequest {
+    pub application_ref: ResourceRef,
+    pub release_ref: ResourceRef,
+    pub image_archive_ref: ResourceRef,
+    pub publisher_key_ref: ResourceRef,
+    pub expected_engine_id: String,
+}
+
 impl Client {
     pub fn new(socket: impl AsRef<Path>, token: impl Into<String>) -> Self {
         Self {
@@ -345,6 +356,42 @@ impl Client {
             params["signature"] = json!(signature);
         }
         self.call("Application.PrepareArtifactRelease", params)
+    }
+
+    /// Prepare a restore request for separate Task submission and owner approval.
+    pub fn prepare_release_image_restore(
+        &self,
+        restore: &OciReleaseImageRestoreRequest,
+        key: &str,
+        delegation_id: &str,
+        deadline_at: Option<&str>,
+    ) -> ApiResult<Value> {
+        let application = &restore.application_ref;
+        self.call(
+            "Task.Prepare",
+            json!({"tool":"application.restore_release_image","key":key,
+                "delegation_id":delegation_id,"deadline_at":deadline_at,"input":{
+                    "target":{"id":application.resource_id,"expected_resource_version":application.version},
+                    "release_ref":restore.release_ref,"image_archive_ref":restore.image_archive_ref,
+                    "publisher_key_ref":restore.publisher_key_ref,"expected_engine_id":restore.expected_engine_id,
+                }}),
+        )
+    }
+
+    /// Prepare a read-only inspection of the original unresolved restore operation.
+    pub fn prepare_release_image_restore_inspection(
+        &self,
+        operation: &ResourceRef,
+        key: &str,
+        delegation_id: &str,
+        deadline_at: Option<&str>,
+    ) -> ApiResult<Value> {
+        self.call(
+            "Task.Prepare",
+            json!({"tool":"application.inspect_release_image_restore","key":key,
+                "delegation_id":delegation_id,"deadline_at":deadline_at,
+                "input":{"id":operation.resource_id,"expected_resource_version":operation.version}}),
+        )
     }
 
     pub fn submit(

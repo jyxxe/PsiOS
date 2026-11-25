@@ -12,7 +12,7 @@ use rustix::fs::{MemfdFlags, SealFlags, fcntl_add_seals, memfd_create};
 use serde_json::Value;
 use std::{
     fs::File,
-    io::{self, Read, Seek, Write},
+    io::{self, Read, Seek},
     path::Path,
     pin::Pin,
     task::{Context, Poll},
@@ -30,25 +30,28 @@ pub(super) struct Input {
 }
 
 impl Input {
-    pub fn seal(bytes: &[u8]) -> Result<Self> {
-        let fd = memfd_create(
-            "psios-oci-restore",
-            MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING,
-        )
-        .map_err(io::Error::from)?;
-        let mut file = File::from(fd);
-        file.write_all(bytes)?;
-        file.rewind()?;
-        fcntl_add_seals(
-            &file,
-            SealFlags::WRITE | SealFlags::GROW | SealFlags::SHRINK | SealFlags::SEAL,
-        )
-        .map_err(io::Error::from)?;
-        Ok(Self {
-            file,
-            remaining: bytes.len() as u64,
-        })
+    pub fn seal<T>(write: impl FnOnce(&mut File) -> Result<T>) -> Result<(Self, T)> {
+        let (file, value) = seal_file(write)?;
+        let remaining = file.metadata()?.len();
+        Ok((Self { file, remaining }, value))
     }
+}
+
+pub(super) fn seal_file<T>(write: impl FnOnce(&mut File) -> Result<T>) -> Result<(File, T)> {
+    let fd = memfd_create(
+        "psios-oci-restore",
+        MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING,
+    )
+    .map_err(io::Error::from)?;
+    let mut file = File::from(fd);
+    let value = write(&mut file)?;
+    file.rewind()?;
+    fcntl_add_seals(
+        &file,
+        SealFlags::WRITE | SealFlags::GROW | SealFlags::SHRINK | SealFlags::SEAL,
+    )
+    .map_err(io::Error::from)?;
+    Ok((file, value))
 }
 
 #[derive(Default)]
@@ -312,7 +315,11 @@ mod tests {
     fn same_unix_connection_checks_engine_streams_exact_fd_and_verifies_image() {
         let temp = tempfile::tempdir().unwrap();
         let socket = temp.path().join("docker.sock");
-        let sealed = Input::seal(b"exact fd contents").unwrap();
+        let (sealed, ()) = Input::seal(|file| {
+            std::io::Write::write_all(file, b"exact fd contents")?;
+            Ok(())
+        })
+        .unwrap();
         let seals = rustix::fs::fcntl_get_seals(&sealed.file).unwrap();
         assert!(
             seals

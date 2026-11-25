@@ -1,13 +1,14 @@
 //! Classify exact Docker save bytes without extracting files or executing the loader.
 use super::valid_image_id;
 use crate::{Result, artifact, decode, err, require};
-use psios_api::{parse, sha256};
+use psios_api::parse;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
-    cell::OnceCell,
+    cell::{OnceCell, RefCell, RefMut},
     collections::{BTreeMap, BTreeSet},
-    io::Cursor,
+    io::{self, Read, Seek, SeekFrom, Write},
 };
 
 pub(crate) const FORMAT: u32 = super::release_archive::FORMAT + 1;
@@ -61,19 +62,52 @@ fn invalid(message: &str) -> crate::Error {
     err("PreconditionFailed", message)
 }
 
-struct Member<'a> {
-    bytes: &'a [u8],
+struct Member {
+    offset: u64,
+    size: u64,
     digest: OnceCell<String>,
 }
 
-impl Member<'_> {
-    fn digest(&self) -> &str {
-        self.digest.get_or_init(|| sha256(self.bytes))
+// Each view has an independent, member-relative offset. tar's inner reader must
+// never seek or read past the outer member into a different file.
+struct MemberInput<'a, R> {
+    reader: RefMut<'a, R>,
+    member: &'a Member,
+    position: u64,
+}
+
+impl<R: Read> Read for MemberInput<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let n = buffer
+            .len()
+            .min((self.member.size - self.position) as usize);
+        let read = self.reader.read(&mut buffer[..n])?;
+        self.position += read as u64;
+        Ok(read)
     }
 }
 
-struct Members<'a> {
-    files: BTreeMap<String, Member<'a>>,
+impl<R: Seek> Seek for MemberInput<'_, R> {
+    fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+        let position = match from {
+            SeekFrom::Start(position) => Some(position),
+            SeekFrom::End(offset) => self.member.size.checked_add_signed(offset),
+            SeekFrom::Current(offset) => self.position.checked_add_signed(offset),
+        }
+        .filter(|position| *position <= self.member.size)
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "seek outside OCI tar member")
+        })?;
+        self.reader
+            .seek(SeekFrom::Start(self.member.offset + position))?;
+        self.position = position;
+        Ok(position)
+    }
+}
+
+struct Members<R> {
+    input: RefCell<R>,
+    files: BTreeMap<String, Member>,
     directories: BTreeSet<String>,
 }
 
@@ -133,21 +167,35 @@ fn unambiguous_header(header: &tar::Header) -> bool {
     zero_fill(&common.pad)
 }
 
-impl<'a> Members<'a> {
-    fn read(bytes: &'a [u8]) -> Result<Self> {
+fn zeros(input: &mut (impl Read + Seek), offset: u64, mut size: u64) -> Result<bool> {
+    input.seek(SeekFrom::Start(offset))?;
+    let mut buffer = [0u8; 8192];
+    while size > 0 {
+        let length = size.min(buffer.len() as u64) as usize;
+        input.read_exact(&mut buffer[..length])?;
+        if !zero_fill(&buffer[..length]) {
+            return Ok(false);
+        }
+        size -= length as u64;
+    }
+    Ok(true)
+}
+
+impl<R: Read + Seek> Members<R> {
+    fn read(mut input: R, length: u64) -> Result<Self> {
         require(
-            bytes.len().is_multiple_of(BLOCK),
+            length.is_multiple_of(BLOCK as u64),
             "PreconditionFailed",
             "OCI archive has incomplete tar blocks",
         )?;
-        let mut tar = tar::Archive::new(Cursor::new(bytes));
-        let mut members = Self {
-            files: BTreeMap::new(),
-            directories: BTreeSet::new(),
-        };
-        let mut next = 0usize;
+        input.rewind()?;
+        let mut tar = tar::Archive::new(&mut input);
+        let mut files = BTreeMap::new();
+        let mut directories = BTreeSet::new();
+        let mut padding = Vec::new();
+        let mut next = 0u64;
         for (ordinal, entry) in tar
-            .entries()
+            .entries_with_seek()
             .map_err(|_| invalid("unreadable OCI tar archive"))?
             .raw(true)
             .enumerate()
@@ -183,25 +231,21 @@ impl<'a> Members<'a> {
             } else {
                 raw
             };
-            let start = next + BLOCK;
+            let start = next + BLOCK as u64;
             require(
-                entry.raw_header_position() == next as u64
-                    && entry.raw_file_position() == start as u64,
+                entry.raw_header_position() == next && entry.raw_file_position() == start,
                 "PreconditionFailed",
                 "OCI tar member offsets disagree",
             )?;
-            let size = usize::try_from(entry.size())
-                .map_err(|_| invalid("OCI tar member size overflows"))?;
+            let size = entry.size();
             let end = start
                 .checked_add(size)
-                .filter(|end| *end <= bytes.len())
+                .filter(|end| *end <= length)
                 .ok_or_else(|| invalid("OCI tar member is truncated"))?;
-            next = end.next_multiple_of(BLOCK);
-            require(
-                next <= bytes.len() && bytes[end..next].iter().all(|b| *b == 0),
-                "PreconditionFailed",
-                "OCI tar padding is invalid",
-            )?;
+            next = end.next_multiple_of(BLOCK as u64);
+            if next > end {
+                padding.push((end, next - end));
+            }
             if directory && ordinal == 0 && path == "." {
                 continue;
             }
@@ -211,15 +255,15 @@ impl<'a> Members<'a> {
                 "OCI tar member has an invalid path",
             )?;
             let unique = if directory {
-                !members.files.contains_key(path) && members.directories.insert(path.into())
+                !files.contains_key(path) && directories.insert(path.to_owned())
             } else {
-                !members.directories.contains(path)
-                    && members
-                        .files
+                !directories.contains(path)
+                    && files
                         .insert(
-                            path.into(),
+                            path.to_owned(),
                             Member {
-                                bytes: &bytes[start..end],
+                                offset: start,
+                                size,
                                 digest: OnceCell::new(),
                             },
                         )
@@ -232,44 +276,82 @@ impl<'a> Members<'a> {
             )?;
         }
         require(
-            !members.files.is_empty()
-                && bytes.len().saturating_sub(next) >= 2 * BLOCK
-                && bytes[next..].iter().all(|b| *b == 0),
+            !files.is_empty()
+                && length.saturating_sub(next) >= (2 * BLOCK) as u64
+                && zeros(&mut input, next, length - next)?,
             "PreconditionFailed",
             "OCI tar has no unambiguous end marker",
         )?;
-        for path in members.files.keys().chain(&members.directories) {
+        for (start, size) in padding {
+            require(
+                zeros(&mut input, start, size)?,
+                "PreconditionFailed",
+                "OCI tar padding is invalid",
+            )?;
+        }
+        for path in files.keys().chain(&directories) {
             for (separator, _) in path.match_indices('/') {
                 require(
-                    !members.files.contains_key(&path[..separator]),
+                    !files.contains_key(&path[..separator]),
                     "PreconditionFailed",
                     "OCI tar file conflicts with a directory",
                 )?;
             }
         }
         require(
-            !members.files.contains_key("repositories")
-                && !members.directories.contains("repositories"),
+            !files.contains_key("repositories") && !directories.contains("repositories"),
             "PreconditionFailed",
             "OCI archive contains repository tag metadata",
         )?;
-        Ok(members)
+        Ok(Self {
+            input: RefCell::new(input),
+            files,
+            directories,
+        })
     }
 
-    fn file(&self, path: &str) -> Result<&Member<'a>> {
+    fn file(&self, path: &str) -> Result<&Member> {
         self.files
             .get(path)
             .ok_or_else(|| invalid("OCI archive metadata references a missing tar member"))
     }
 
-    fn metadata(&self, path: &str) -> Result<Value> {
-        let bytes = self.file(path)?.bytes;
+    fn reader<'a>(&'a self, member: &'a Member) -> Result<MemberInput<'a, R>> {
+        let mut reader = self.input.borrow_mut();
+        reader.seek(SeekFrom::Start(member.offset))?;
+        Ok(MemberInput {
+            reader,
+            member,
+            position: 0,
+        })
+    }
+
+    fn digest<'a>(&self, member: &'a Member) -> Result<&'a str> {
+        if let Some(digest) = member.digest.get() {
+            return Ok(digest);
+        }
+        let mut reader = self.reader(member)?;
+        let mut digest = Sha256::new();
         require(
-            bytes.len() <= MAX_METADATA,
+            io::copy(&mut reader, &mut digest)? == member.size,
+            "PreconditionFailed",
+            "OCI tar member is truncated",
+        )?;
+        Ok(member
+            .digest
+            .get_or_init(|| format!("sha256:{:x}", digest.finalize())))
+    }
+
+    fn metadata(&self, path: &str) -> Result<Value> {
+        let member = self.file(path)?;
+        require(
+            member.size <= MAX_METADATA as u64,
             "QuotaExceeded",
             "OCI archive metadata exceeds byte limit",
         )?;
-        parse(bytes).map_err(|_| invalid("OCI archive metadata is malformed or ambiguous"))
+        let mut bytes = vec![0; member.size as usize];
+        self.reader(member)?.read_exact(&mut bytes)?;
+        parse(&bytes).map_err(|_| invalid("OCI archive metadata is malformed or ambiguous"))
     }
 }
 
@@ -310,7 +392,7 @@ fn no_annotations(annotations: &Value) -> bool {
 }
 
 impl Descriptor {
-    fn member(&self, members: &Members<'_>) -> Result<String> {
+    fn member(&self, members: &Members<impl Read + Seek>) -> Result<String> {
         require(
             valid_image_id(&self.digest)
                 && self.urls.as_ref().is_none_or(Vec::is_empty)
@@ -329,7 +411,7 @@ impl Descriptor {
         let path = format!("blobs/sha256/{}", &self.digest[7..]);
         let data = members.file(&path)?;
         require(
-            data.bytes.len() == self.size && data.digest() == self.digest,
+            data.size == self.size as u64 && members.digest(data)? == self.digest,
             "PreconditionFailed",
             "OCI descriptor size or digest disagrees with the archive",
         )?;
@@ -349,7 +431,10 @@ fn layer_media(media: &str) -> Result<bool> {
     }
 }
 
-fn validate_oci(members: &Members<'_>, docker: &DockerManifest) -> Result<Option<(String, bool)>> {
+fn validate_oci(
+    members: &Members<impl Read + Seek>,
+    docker: &DockerManifest,
+) -> Result<Option<(String, bool)>> {
     let layout = members.files.contains_key("oci-layout");
     let index = members.files.contains_key("index.json");
     require(
@@ -433,15 +518,18 @@ fn validate_oci(members: &Members<'_>, docker: &DockerManifest) -> Result<Option
     Ok(Some((descriptor.digest, compressed)))
 }
 
-fn compressed(bytes: &[u8]) -> bool {
-    [
+fn compressed(mut input: impl Read, length: u64) -> Result<bool> {
+    let mut bytes = [0; 6];
+    let bytes = &mut bytes[..length.min(6) as usize];
+    input.read_exact(bytes)?;
+    Ok([
         b"\x1f\x8b".as_slice(),
         b"\x28\xb5\x2f\xfd",
         b"BZh",
         b"\xfd7zXZ\0",
     ]
     .into_iter()
-    .any(|magic| bytes.starts_with(magic))
+    .any(|magic| bytes.starts_with(magic)))
 }
 
 fn hex_name(name: &str) -> bool {
@@ -452,7 +540,7 @@ fn hex_name(name: &str) -> bool {
 }
 
 fn compatible_paths(
-    members: &Members<'_>,
+    members: &Members<impl Read + Seek>,
     docker: &DockerManifest,
     config: &str,
     has_index: bool,
@@ -467,7 +555,7 @@ fn compatible_paths(
         for (path, member) in &members.files {
             if let Some(name) = path.strip_prefix("blobs/sha256/") {
                 require(
-                    hex_name(name) && member.digest().strip_prefix("sha256:") == Some(name),
+                    hex_name(name) && members.digest(member)?.strip_prefix("sha256:") == Some(name),
                     "PreconditionFailed",
                     "OCI blob filename disagrees with its digest",
                 )?;
@@ -504,34 +592,47 @@ fn compatible_paths(
         }))
 }
 
-pub(super) fn validate(bytes: &[u8], image: &str, diff_ids: &[String]) -> Result<Compatibility> {
+const BYTE_LIMIT: u64 = artifact::ingress::MAX_BYTES as u64;
+
+fn input_length(input: &mut impl Seek) -> Result<u64> {
+    let length = input.seek(SeekFrom::End(0))?;
     require(
-        bytes.len() <= artifact::ingress::MAX_BYTES as usize,
+        length <= BYTE_LIMIT,
         "QuotaExceeded",
         "OCI archive exceeds byte limit",
     )?;
-    if compressed(bytes) {
+    input.rewind()?;
+    Ok(length)
+}
+
+pub(super) fn validate_reader(
+    mut input: impl Read + Seek,
+    image: &str,
+    diff_ids: &[String],
+) -> Result<Compatibility> {
+    let length = input_length(&mut input)?;
+    if compressed(&mut input, length)? {
         return Ok(Compatibility::Unsupported("ArchiveLayout"));
     }
-    let members = Members::read(bytes)?;
+    let members = Members::read(input, length)?;
     validate_members(&members, image, diff_ids)
 }
 
 // Produce a single classic Docker manifest from the validated members. Never pass
 // original outer tar headers or JSON alias fields to Docker's different parsers.
-pub(super) fn canonical_load(bytes: &[u8], image: &str, diff_ids: &[String]) -> Result<Vec<u8>> {
-    let limit = artifact::ingress::MAX_BYTES as usize;
+pub(super) fn write_load(
+    mut input: impl Read + Seek,
+    output: impl Write,
+    image: &str,
+    diff_ids: &[String],
+) -> Result<String> {
+    let length = input_length(&mut input)?;
     require(
-        bytes.len() <= limit,
-        "QuotaExceeded",
-        "OCI archive exceeds restore input limit",
-    )?;
-    require(
-        !compressed(bytes),
+        !compressed(&mut input, length)?,
         "UnsupportedCapability",
         "restore requires an uncompressed outer tar",
     )?;
-    let members = Members::read(bytes)?;
+    let members = Members::read(input, length)?;
     require(
         validate_members(&members, image, diff_ids)? == Compatibility::Verified,
         "UnsupportedCapability",
@@ -541,14 +642,13 @@ pub(super) fn canonical_load(bytes: &[u8], image: &str, diff_ids: &[String]) -> 
     let docker = &manifests[0];
     let config = members.file(&docker.config)?;
     let config_path = format!("blobs/sha256/{}", &image[7..]);
-    let mut canonical = tar::Builder::new(Vec::new());
-    append_canonical(&mut canonical, &config_path, config.bytes)?;
     let mut layers = Vec::with_capacity(diff_ids.len());
+    let mut entries = vec![(config_path.clone(), config)];
     let mut seen = BTreeSet::new();
-    let mut remaining = limit;
+    let mut remaining = BYTE_LIMIT;
     for (path, diff_id) in docker.layers.iter().zip(diff_ids) {
-        let layer = members.file(path)?.bytes;
-        remaining = remaining.checked_sub(layer.len()).ok_or_else(|| {
+        let layer = members.file(path)?;
+        remaining = remaining.checked_sub(layer.size).ok_or_else(|| {
             err(
                 "QuotaExceeded",
                 "OCI restore layer chain exceeds the cumulative byte limit",
@@ -558,38 +658,95 @@ pub(super) fn canonical_load(bytes: &[u8], image: &str, diff_ids: &[String]) -> 
         if seen.insert(diff_id) {
             // Skip PAX, GNU sparse and other extension records that could change
             // the effective member size in Docker's inner layer reader.
-            check_inner_layer(layer)?;
-            append_canonical(&mut canonical, &path, layer)?;
+            check_inner_layer(members.reader(layer)?, layer.size)?;
+            entries.push((path.clone(), layer));
         }
         layers.push(path);
     }
     let manifest =
         serde_json::to_vec(&json!([{"Config":config_path,"RepoTags":[],"Layers":layers}]))?;
-    append_canonical(&mut canonical, "manifest.json", &manifest)?;
-    let result = canonical.into_inner()?;
+    let member_space = |size: u64| BLOCK as u64 + size.next_multiple_of(BLOCK as u64);
+    let length = entries
+        .iter()
+        .map(|(_, member)| member_space(member.size))
+        .sum::<u64>()
+        + member_space(manifest.len() as u64)
+        + (2 * BLOCK) as u64;
     require(
-        result.len() <= limit,
+        length <= BYTE_LIMIT,
         "QuotaExceeded",
         "normalized OCI archive exceeds load input limit",
     )?;
-    Ok(result)
+    let mut canonical = tar::Builder::new(HashOutput::new(output));
+    for (path, member) in entries {
+        append_canonical(&mut canonical, &path, member.size, members.reader(member)?)?;
+    }
+    append_canonical(
+        &mut canonical,
+        "manifest.json",
+        manifest.len() as u64,
+        &manifest[..],
+    )?;
+    let mut output = canonical.into_inner()?;
+    output.flush()?;
+    Ok(output.finish())
 }
 
-fn append_canonical(tar: &mut tar::Builder<Vec<u8>>, path: &str, data: &[u8]) -> Result<()> {
+pub(super) struct HashOutput<W> {
+    output: W,
+    digest: Sha256,
+}
+
+impl<W> HashOutput<W> {
+    pub fn new(output: W) -> Self {
+        Self {
+            output,
+            digest: Sha256::new(),
+        }
+    }
+
+    pub fn finish(self) -> String {
+        format!("sha256:{:x}", self.digest.finalize())
+    }
+}
+
+impl<W: Write> Write for HashOutput<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let written = self.output.write(bytes)?;
+        self.digest.update(&bytes[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.output.flush()
+    }
+}
+
+fn append_canonical(
+    tar: &mut tar::Builder<impl Write>,
+    path: &str,
+    size: u64,
+    data: impl Read,
+) -> Result<()> {
     let mut header = tar::Header::new_ustar();
     header.set_path(path)?;
-    header.set_size(data.len() as u64);
+    header.set_size(size);
     header.set_mode(0o600);
     header.set_entry_type(tar::EntryType::Regular);
     header.set_cksum();
-    tar.append(&header, data)?;
-    Ok(())
+    let mut data = data.take(size);
+    tar.append(&header, &mut data)?;
+    require(
+        data.limit() == 0,
+        "PreconditionFailed",
+        "OCI tar member is truncated",
+    )
 }
 
-fn check_inner_layer(bytes: &[u8]) -> Result<()> {
-    let mut layer = tar::Archive::new(Cursor::new(bytes));
-    let mut position = 0usize;
-    for entry in layer.entries()?.raw(true) {
+fn check_inner_layer(mut input: impl Read + Seek, length: u64) -> Result<()> {
+    let mut layer = tar::Archive::new(&mut input);
+    let mut position = 0u64;
+    for entry in layer.entries_with_seek()?.raw(true) {
         let entry = entry.map_err(|_| invalid("malformed OCI layer tar"))?;
         let header = entry.header();
         let old = header.as_old();
@@ -609,32 +766,29 @@ fn check_inner_layer(bytes: &[u8]) -> Result<()> {
             "UnsupportedCapability",
             "OCI restore layer uses unsupported tar extension or filesystem entry type",
         )?;
-        let start = position + BLOCK;
+        let start = position + BLOCK as u64;
         require(
-            entry.raw_header_position() == position as u64
-                && entry.raw_file_position() == start as u64,
+            entry.raw_header_position() == position && entry.raw_file_position() == start,
             "PreconditionFailed",
             "OCI layer has ambiguous tar member offsets",
         )?;
-        let size =
-            usize::try_from(entry.size()).map_err(|_| invalid("OCI layer size overflows"))?;
         position = start
-            .checked_add(size)
-            .filter(|end| *end <= bytes.len())
+            .checked_add(entry.size())
+            .filter(|end| *end <= length)
             .ok_or_else(|| invalid("OCI layer tar member is truncated"))?
-            .next_multiple_of(BLOCK);
+            .next_multiple_of(BLOCK as u64);
     }
     require(
-        bytes.len().is_multiple_of(BLOCK)
-            && bytes.len().saturating_sub(position) >= 2 * BLOCK
-            && bytes[position..].iter().all(|byte| *byte == 0),
+        length.is_multiple_of(BLOCK as u64)
+            && length.saturating_sub(position) >= (2 * BLOCK) as u64
+            && zeros(&mut input, position, length - position)?,
         "PreconditionFailed",
         "OCI layer has no unambiguous tar end marker",
     )
 }
 
 fn validate_members(
-    members: &Members<'_>,
+    members: &Members<impl Read + Seek>,
     image: &str,
     diff_ids: &[String],
 ) -> Result<Compatibility> {
@@ -652,7 +806,7 @@ fn validate_members(
         "PreconditionFailed",
         "Docker archive contains tags or a parent image",
     )?;
-    let config_digest = members.file(&docker.config)?.digest();
+    let config_digest = members.digest(members.file(&docker.config)?)?;
     let config = members.metadata(&docker.config)?;
     require(
         config["os"] == "linux"
@@ -667,11 +821,11 @@ fn validate_members(
     let mut compressed_layer = false;
     for (path, diff_id) in docker.layers.iter().zip(diff_ids) {
         let payload = members.file(path)?;
-        if compressed(payload.bytes) {
+        if compressed(members.reader(payload)?, payload.size)? {
             compressed_layer = true;
         } else {
             require(
-                payload.digest() == *diff_id,
+                members.digest(payload)? == *diff_id,
                 "PreconditionFailed",
                 "OCI archive layer disagrees with the inspected DiffID",
             )?;

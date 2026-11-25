@@ -1,6 +1,7 @@
 //! Single-node directory volumes. A writer or an uncertain operation retains the volume hold.
 mod detached;
 pub(crate) mod export;
+pub(crate) mod file_integrity;
 pub mod files;
 mod intake;
 pub(crate) mod publication;
@@ -115,6 +116,7 @@ pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
                         | Action::Chunk(_)
                         | Action::Files(_)
                         | Action::VolumeUsage(_)
+                        | Action::VerifyVolumeFile(_)
                         | Action::Activate(_)
                         | Action::Delete(_)
                 ),

@@ -38,6 +38,7 @@ pub const TOOLS: &[&str] = &[
     node::RESTART_TOOL,
     "volume.files",
     "volume.usage",
+    storage::file_integrity::TOOL,
     "volume.mkdir",
     "volume.read_chunk",
     "volume.append",
@@ -105,6 +106,7 @@ pub fn readonly(tool: &str) -> bool {
             | node::journal::TOOL
             | "volume.files"
             | "volume.usage"
+            | storage::file_integrity::TOOL
             | "volume.read_chunk"
             | "application.refresh"
             | "secret.mac"
@@ -159,6 +161,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | node::pressure::TOOL
                     | node::block::TOOL
                     | "backup.verify"
+                    | storage::file_integrity::TOOL
                     | storage::export::ACTION
                     | storage::publication::INSPECT
                     | storage::restore_publication::INSPECT
@@ -512,6 +515,7 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
                     || action == node::RESTART_TOOL
                     || action == node::service_state::TOOL
                     || action == storage::restore_publication::INSPECT
+                    || action == storage::file_integrity::TOOL
                     || action == apps::restart::TOOL
                     || action == apps::restart::INSPECT
                     || action == agent::fallback::ACTION

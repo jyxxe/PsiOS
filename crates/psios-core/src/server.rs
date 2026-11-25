@@ -205,10 +205,10 @@ fn worker(s: Shared, stop: Arc<AtomicBool>, tick: Duration) -> Result<()> {
                 crate::require(
                     !stop.load(Ordering::Acquire),
                     "LeaseLost",
-                    "authority stopped before backup publication",
+                    "authority stopped during the host data operation",
                 )?;
                 if Instant::now() >= check_after {
-                    state(&s)?.transaction(&correlation, |db| work.check_backup_capture(db))?;
+                    state(&s)?.transaction(&correlation, |db| work.check_streaming(db))?;
                     check_after = Instant::now() + Duration::from_millis(100);
                 }
                 Ok(())

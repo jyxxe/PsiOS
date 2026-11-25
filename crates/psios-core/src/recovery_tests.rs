@@ -1211,7 +1211,20 @@ fn oci_stop_recovery_rejects_missing_and_mismatched_active_custody() {
         .unwrap();
     let stop_task = submit(&mut store, "application.stop", target(&app));
     assert_eq!(claim(&mut store), stop_task);
+    let initial_stop = dispatch(&mut store, &stop_task);
+    assert_eq!(initial_stop.effect.body["phase"], "PermitBound");
+    store
+        .transaction("recover-before-stop", broker::recover)
+        .unwrap();
+    let not_started = call(&mut store, "Task.Get", json!({"id":stop_task})).unwrap();
+    assert_eq!(not_started["outcome_knowledge"], "NotStarted");
+    let retried = call(&mut store, "Task.Retry", json!({
+        "id":stop_task,"expected_resource_version":not_started["task_revision"],"key":id("retry-stop"),
+    })).unwrap();
+    let stop_task = retried["task_id"].as_str().unwrap();
+    assert_eq!(claim(&mut store), stop_task);
     let stop = dispatch(&mut store, &stop_task);
+    assert_ne!(stop.op.id, initial_stop.op.id);
     let before = json!({"engine_id":"oci-test-engine","container_id":container,
         "start_operation_id":start.op.id,"started_at":"2026-11-25T12:00:00Z",
         "docker_state":"running","process_running":true,"runtime_state":"Running"});
@@ -1254,14 +1267,63 @@ fn oci_stop_recovery_rejects_missing_and_mismatched_active_custody() {
     })).unwrap();
     let cleanup = call(&mut store, "Task.Submit", request).unwrap();
     let cleanup = cleanup["task_id"].as_str().unwrap();
+    let evict = json!({"id":health["task_id"],"expected_resource_version":health["task_revision"],
+        "reason":"reclaim worker observation"});
+    assert_eq!(
+        call(&mut store, "Task.EvictResults", evict.clone())
+            .unwrap_err()
+            .0
+            .code,
+        "Conflict"
+    );
+    approve(&mut store, cleanup);
+    assert_eq!(claim(&mut store), cleanup);
+    let initial_cleanup = dispatch(&mut store, cleanup);
+    assert_eq!(initial_cleanup.effect.body["phase"], "PermitBound");
+    store
+        .transaction("recover-before-removal-authorization", broker::recover)
+        .unwrap();
+    let not_started = call(&mut store, "Task.Get", json!({"id":cleanup})).unwrap();
+    assert_eq!(not_started["outcome_knowledge"], "NotStarted");
+    assert_eq!(not_started["lifecycle"], "Failed");
+    store
+        .transaction("check-released-proof", |db| {
+            assert!(!apps::stop::retains_result(
+                db,
+                health["task_id"].as_str().unwrap()
+            )?);
+            assert_eq!(
+                db.of(&initial_cleanup.effect.id, "Effect")?.body["phase"],
+                "PermitBound"
+            );
+            Ok(())
+        })
+        .unwrap();
+    let retried = call(&mut store, "Task.Retry", json!({
+        "id":cleanup,"expected_resource_version":not_started["task_revision"],"key":id("retry-cleanup"),
+    })).unwrap();
+    let cleanup = retried["task_id"].as_str().unwrap();
+    assert_eq!(
+        call(&mut store, "Task.Get", json!({"id":cleanup})).unwrap()["lifecycle"],
+        "WaitingApproval"
+    );
     approve(&mut store, cleanup);
     assert_eq!(claim(&mut store), cleanup);
     let work = dispatch(&mut store, cleanup);
+    assert_ne!(work.op.id, initial_cleanup.op.id);
+    assert_eq!(
+        call(&mut store, "Task.EvictResults", evict.clone())
+            .unwrap_err()
+            .0
+            .code,
+        "Conflict"
+    );
     store
         .transaction("remove-checkpoint", |db| {
             work.checkpoint(db, host::Checkpoint::OciStopCleanup(&exited))
         })
         .unwrap();
+    assert!(call(&mut store, "Task.EvictResults", evict).unwrap()["eviction"].is_object());
     store
         .transaction("recover-removal", broker::recover)
         .unwrap();
@@ -1286,6 +1348,10 @@ fn oci_stop_recovery_rejects_missing_and_mismatched_active_custody() {
                     "DELETE FROM versions WHERE id=?1",
                     format!("oci-stop-cleanup-dispatch-{}", work.op.id),
                 ),
+            (
+                "UPDATE versions SET body=json_set(body,'$.snapshot.observation.exit_code',111) WHERE id=?1",
+                format!("oci-stop-exit-evidence-{cleanup}"),
+            ),
                 ("DELETE FROM holds WHERE volume=?1", start.target.id.clone()),
             ] {
                 db.c.execute_batch("SAVEPOINT corrupt_oci_stop")?;

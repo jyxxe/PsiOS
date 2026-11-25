@@ -560,6 +560,16 @@ impl Work {
         Ok(target)
     }
 
+    pub(crate) fn check_absent_stop_settlement(&self, db: &Db<'_>) -> Result<()> {
+        require(
+            matches!(self.action, Action::Stop(_)),
+            "Fenced",
+            "result has no OCI stop authority",
+        )?;
+        self.checkpoint_authority(db)?;
+        Ok(())
+    }
+
     pub(crate) fn check_streaming(&self, db: &Db<'_>) -> Result<()> {
         require(
             matches!(

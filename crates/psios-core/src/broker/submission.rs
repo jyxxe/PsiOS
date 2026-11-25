@@ -298,6 +298,11 @@ fn submit_with_origin(
     let a = Action::parse(tool, dependencies::tool_input(&input)?)?;
     let target = a.target(db, actor)?;
     let audience = a.audience(db, actor, &s["delegation_ref"], &target)?;
+    let stop_cleanup = if let Action::ContinueOciStop(request) = &a {
+        Some(apps::stop::admissible(db, &target, request)?)
+    } else {
+        None
+    };
     db.cfg.check_admission_space()?;
     let requirements = dependencies::requirements(&input)?;
     let recovery = admission::select(db, actor, &a, &target, !requirements.is_empty())?;
@@ -410,6 +415,9 @@ fn submit_with_origin(
     )?;
     if let Some(operation) = &recovery {
         admission::bind(db, &t, operation)?;
+    }
+    if let Some(prepared) = &stop_cleanup {
+        apps::stop::admit(db, &t, prepared)?;
     }
     artifact::capacity::reserve(db, &t, tool)?;
     apps::artifact_install::acquire(db, &t, &a, &audience)?;

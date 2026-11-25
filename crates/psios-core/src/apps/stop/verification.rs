@@ -53,14 +53,22 @@ pub(super) fn intent(conn: &Connection, op: &Doc, epoch: i64) -> Result<Option<I
         |r| Ok((row(r)?, r.get("seq")?)),
     )?;
     let tool = effect.body["action"].as_str().unwrap_or_default();
+    let initial_phase = if seq < epoch {
+        "EffectStarted"
+    } else {
+        "PermitBound"
+    };
     require(
         op.kind == "Operation"
             && op.body["effect_refs"] == json!([current_effect.reference()])
             && effect.kind == "Effect"
+            && current_effect.kind == effect.kind
+            && current_effect.owner == effect.owner
+            && current_effect.spec == effect.spec
             && effect.owner == op.owner
             && effect.body["operation_id"] == op.id
-            && effect.body["phase"] == "EffectStarted"
-            && matches!(tool, "application.stop" | TOOL),
+            && effect.body["phase"] == initial_phase
+            && is_tool(tool),
         "RecoveryRequired",
         "OCI stop effect does not bind its original operation",
     )?;
@@ -127,6 +135,61 @@ pub(super) fn intent(conn: &Connection, op: &Doc, epoch: i64) -> Result<Option<I
         "RecoveryRequired",
         "OCI stop journal disagrees with the recorded outcome",
     )?;
+    let started = if let Some(checkpoint) = &dispatch {
+        let started = resolve(conn, &checkpoint.body["started_effect_ref"])?;
+        let running = resolve(conn, &checkpoint.body["started_operation_ref"])?;
+        let mut body = effect.body.clone();
+        body["phase"] = json!("EffectStarted");
+        require(
+            started.kind == "Effect"
+                && started.id == effect.id
+                && started.rev == effect.rev + 1
+                && started.spec == effect.spec
+                && started.owner == effect.owner
+                && started.body == body
+                && running.kind == "Operation"
+                && running.id == op.id
+                && running.rev == issued.rev + 1
+                && running.spec == issued.spec
+                && running.owner == issued.owner
+                && running.body["outcome_knowledge"] == "InFlight"
+                && running.body["plan_ref"] == issued.body["plan_ref"]
+                && running.body["effect_refs"] == json!([started.reference()]),
+            "RecoveryRequired",
+            "OCI stop command checkpoint has no started effect",
+        )?;
+        Some(started)
+    } else {
+        None
+    };
+    let phase_matches = match op.body["outcome_knowledge"].as_str() {
+        Some("InFlight") => {
+            current_effect.reference() == started.as_ref().unwrap_or(&effect).reference()
+        }
+        Some("NotStarted") => {
+            started.is_none()
+                && current_effect.body["phase"] == "PermitBound"
+                && current_effect.rev == effect.rev + 1
+        }
+        Some("Unknown") => {
+            started.is_some()
+                && current_effect.body["phase"] == "EffectStarted"
+                && current_effect.rev == effect.rev + 2
+        }
+        Some("Known") => {
+            matches!(
+                current_effect.body["phase"].as_str(),
+                Some("EffectConfirmed" | "EffectReconciled")
+            ) && (started.is_some()
+                || (!cleanup && current_effect.body["phase"] == "EffectConfirmed"))
+        }
+        _ => false,
+    };
+    require(
+        phase_matches && current_effect.body["outcome_knowledge"] == op.body["outcome_knowledge"],
+        "RecoveryRequired",
+        "OCI stop effect phase disagrees with the witnessed outcome",
+    )?;
     if cleanup {
         if let Some(sample) = &dispatch {
             require(
@@ -187,12 +250,21 @@ fn check_link(conn: &Connection, journal: &Intent, task: &Doc, epoch: i64) -> Re
     })?;
     let input = resolve(conn, &task.spec["input_ref"])?;
     let request: Request = crate::decode(crate::broker::dependencies::tool_input(&input)?)?;
+    let proof = evidence::record(
+        conn,
+        task,
+        task.body["outcome_knowledge"] == "InFlight" && journal.dispatch.is_none(),
+    )?;
     require(
         dispatch.kind == STOP
             && original.body["outcome_knowledge"] == "Unknown"
             && original_journal.removal.is_none()
             && request.operation_ref == original.reference()
             && request.evidence_ref == custody["exit_evidence_ref"]
+            && journal.doc.body["exit_provenance_ref"] == proof.reference()
+            && proof.body["snapshot"]["artifact_ref"] == request.evidence_ref
+            && proof.body["binding"] == custody["binding"]
+            && started(&proof.body["snapshot"]["observation"]) == custody["started_at"].as_str()
             && request.target.id == custody["binding"]["application_ref"]["resource_id"]
             && request.target.expected_resource_version
                 == custody["binding"]["application_ref"]["version"]
@@ -258,6 +330,7 @@ fn active_binding(conn: &Connection, binding: &Value, original: &Doc) -> Result<
 
 pub(crate) fn verify_active(conn: &Connection) -> Result<()> {
     let epoch = epoch(conn)?;
+    evidence::verify_pins(conn)?;
     let mut statement = conn.prepare(
         "SELECT q.task,q.operation,q.phase FROM queue q JOIN current t ON q.task=t.id
          WHERE q.phase IN ('Dispatched','Unknown') AND t.spec->>'task_type' IN ('application.stop',?1)",
@@ -305,6 +378,7 @@ pub(crate) fn verify_active(conn: &Connection) -> Result<()> {
 
 pub(crate) fn verify(conn: &Connection) -> Result<()> {
     verify_active(conn)?;
+    evidence::verify_history(conn)?;
     let epoch = epoch(conn)?;
     let mut statement = conn.prepare(
         "SELECT body->>'operation_id' FROM versions WHERE kind='Effect' AND rev=1 AND seq>?1

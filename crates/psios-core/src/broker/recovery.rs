@@ -107,7 +107,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                 } else {
                     "Failed"
                 },
-                if service_undispatched {
+                if service_undispatched || stop_undispatched {
                     "NotStarted"
                 } else {
                     "Known"
@@ -275,12 +275,20 @@ pub(crate) fn inspected(
         "PreconditionFailed",
         "expected a retained inspection artifact",
     )?;
-    let observation_task = db.of(field(&proof.spec, "task_id"), "Task")?;
-    let inspect_op = db.of(field(&proof.spec, "operation_id"), "Operation")?;
+    let identity = |name: &str| {
+        proof.spec[name].as_str().ok_or_else(|| {
+            err(
+                "PreconditionFailed",
+                "inspection artifact has no producing Task, Run or Operation",
+            )
+        })
+    };
+    let observation_task = db.of(identity("task_id")?, "Task")?;
+    let inspect_op = db.of(identity("operation_id")?, "Operation")?;
     let inspect_plan = db.resolve(&inspect_op.body["plan_ref"])?;
     let fresh:bool=db.c.query_row("SELECT EXISTS(SELECT 1 FROM versions sample JOIN versions lost
                 ON sample.seq>lost.seq WHERE sample.kind='Run' AND sample.id=?1 AND sample.rev=1 AND lost.id=?2 AND lost.rev=?3)",
-                params![proof.spec["run_id"].as_str(),op.id,op.rev],|r|r.get(0))?;
+                params![identity("run_id")?,op.id,op.rev],|r|r.get(0))?;
     require(
         fresh
             && observation_task.spec["task_type"] == tool

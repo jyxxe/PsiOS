@@ -345,7 +345,7 @@ pub fn dispatch(db: &Db<'_>, task: &str) -> Result<Option<Work>> {
             "operation_id": op.id,
             "resource_ref": target,
             "action": tool,
-            "phase": if node::service_control::is_tool(tool) { "PermitBound" } else { "EffectStarted" },
+            "phase": if node::service_control::is_tool(tool) || apps::stop::is_tool(tool) { "PermitBound" } else { "EffectStarted" },
             "outcome_knowledge": "InFlight",
             "evidence_refs": []
         }),
@@ -410,7 +410,7 @@ pub fn settlement_failed(db: &Db<'_>, w: &Work) -> Result<()> {
             "OCI image restore stopped before load was checkpointed",
         )
     } else if matches!(w.action, Action::Stop(_) | Action::ContinueOciStop(_))
-        && apps::stop::not_dispatched(db, &w.op)?
+        && apps::stop::not_dispatched(db, &db.of(&w.op.id, "Operation")?)?
     {
         err(
             "StorageUnavailable",
@@ -486,6 +486,15 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
     } else {
         None
     };
+    let stop_started = if matches!(w.action, Action::Stop(_) | Action::ContinueOciStop(_)) {
+        Some(apps::stop::worker_started(db, w, &t)?)
+    } else {
+        None
+    };
+    if cancelled && stop_started == Some(false) {
+        close(db, &t, "Cancelled", "NotStarted", None, None)?;
+        return Ok(());
+    }
     if cancelled && matches!(w.action, Action::Activate(_) | Action::CaptureOciImage(_)) {
         close(db, &t, "Cancelled", "Known", None, None)?;
         return Ok(());
@@ -495,6 +504,14 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
             service_started != Some(false),
             "Fenced",
             "systemd result has no committed invocation",
+        )?;
+        if stop_started == Some(false) {
+            w.check_absent_stop_settlement(db)?;
+        }
+        require(
+            stop_started != Some(false)
+                || matches!((&w.action, &output), (Action::Stop(_), host::Output::Receipt(v)) if v["already_absent"] == true),
+            "Fenced", "OCI stop result has no witnessed command or verified absence",
         )?;
         w.check_result_publication(db)?;
         match &output {
@@ -531,8 +548,13 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
             )?;
         }
         Err(e) => {
-            let service_undispatched = service_started == Some(false);
-            let e = if service_started == Some(true) && e.0.code != "OutcomeUnknown" {
+            let undispatched = service_started == Some(false) || stop_started == Some(false);
+            let e = if stop_started == Some(true) && e.0.code != "OutcomeUnknown" {
+                err(
+                    "OutcomeUnknown",
+                    "unable to settle the checkpointed OCI stop or removal",
+                )
+            } else if service_started == Some(true) && e.0.code != "OutcomeUnknown" {
                 err(
                     "OutcomeUnknown",
                     "unable to settle the checkpointed systemd invocation",
@@ -540,7 +562,7 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
             } else {
                 e
             };
-            let unknown = !service_undispatched && e.0.code == "OutcomeUnknown";
+            let unknown = !undispatched && e.0.code == "OutcomeUnknown";
             close(
                 db,
                 &t,
@@ -553,7 +575,7 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                 },
                 if unknown {
                     "Unknown"
-                } else if service_undispatched {
+                } else if undispatched {
                     "NotStarted"
                 } else {
                     "Known"

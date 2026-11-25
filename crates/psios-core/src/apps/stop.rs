@@ -12,12 +12,17 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 pub(crate) const TOOL: &str = "application.continue_stop";
+pub(crate) fn is_tool(tool: &str) -> bool {
+    matches!(tool, "application.stop" | TOOL)
+}
 pub(crate) const FORMAT: u32 = crate::node::service_control::FORMAT + 1;
 const SCHEMA: &str = "CREATE TABLE oci_stop_cleanups (
     original TEXT PRIMARY KEY, cleanup TEXT NOT NULL UNIQUE
 ) STRICT;";
 
+mod evidence;
 mod verification;
+pub(crate) use evidence::retains_result;
 pub(crate) use verification::{verify, verify_active};
 
 const EPOCH: &str = "oci-stop-checkpoint-epoch";
@@ -37,7 +42,7 @@ pub(crate) struct Request {
 pub(crate) struct Prepared {
     original: Doc,
     checkpoint: Doc,
-    evidence: Doc,
+    evidence: Value,
     binding: Value,
     started_at: String,
 }
@@ -140,6 +145,7 @@ fn bound(doc: &Doc, kind: &str, op: &Doc) -> bool {
 
 pub(crate) fn migrate(db: &Db<'_>) -> Result<()> {
     db.c.execute_batch(SCHEMA)?;
+    db.c.execute_batch(evidence::SCHEMA)?;
     db.create(
         "OCIStopCheckpointEpoch",
         EPOCH,
@@ -170,7 +176,34 @@ fn start_intent(db: &Db<'_>, work: &Work, mut body: Value) -> Result<()> {
     Ok(())
 }
 
-fn advance(db: &Db<'_>, work: &Work, intent: &Doc, kind: &str, body: Value) -> Result<()> {
+fn advance(db: &Db<'_>, work: &Work, intent: &Doc, kind: &str, mut body: Value) -> Result<()> {
+    if kind != REMOVE {
+        require(
+            intent.rev == 1
+                && intent.body["effect_ref"] == work.effect.reference()
+                && work.effect.body["phase"] == "PermitBound"
+                && db.of(&work.effect.id, "Effect")?.reference() == work.effect.reference()
+                && db.of(&work.op.id, "Operation")?.reference() == work.op.reference()
+                && db.of(&work.run.id, "Run")?.reference() == work.run.reference()
+                && db.of(&work.task.id, "Task")?.reference() == work.task.reference(),
+            "Fenced",
+            "OCI stop lost its bound execution permit",
+        )?;
+        let mut effect = work.effect.body.clone();
+        effect["phase"] = json!("EffectStarted");
+        let effect = db.status(&work.effect, effect)?;
+        let mut operation = work.op.body.clone();
+        operation["effect_refs"] = json!([effect.reference()]);
+        operation["updated_at"] = json!(crate::now());
+        let operation = db.status(&work.op, operation)?;
+        for subject in [&work.run, &work.task] {
+            let mut state = subject.body.clone();
+            state["operation_refs"] = json!([operation.reference()]);
+            db.status(subject, state)?;
+        }
+        body["started_effect_ref"] = effect.reference();
+        body["started_operation_ref"] = operation.reference();
+    }
     let checkpoint = create(db, work, kind, body)?;
     let mut state = intent.body.clone();
     state[if kind == REMOVE {
@@ -192,6 +225,27 @@ pub(crate) fn not_dispatched(db: &Db<'_>, op: &Doc) -> Result<bool> {
         return Ok(false);
     };
     Ok(intent.dispatch.is_none())
+}
+
+pub(crate) fn worker_started(db: &Db<'_>, work: &Work, task: &Doc) -> Result<bool> {
+    let op = db.of(&work.op.id, "Operation")?;
+    let run = db.of(&work.run.id, "Run")?;
+    let effect = db.resolve(&op.body["effect_refs"][0])?;
+    let started = !not_dispatched(db, &op)?;
+    require(
+        op.spec == work.op.spec
+            && op.body["plan_ref"] == work.op.body["plan_ref"]
+            && op.body["outcome_knowledge"] == "InFlight"
+            && effect.id == work.effect.id
+            && effect.spec == work.effect.spec
+            && effect.rev == work.effect.rev + i64::from(started)
+            && db.of(&effect.id, "Effect")?.reference() == effect.reference()
+            && run.body["operation_refs"] == json!([op.reference()])
+            && task.body["operation_refs"] == json!([op.reference()]),
+        "Fenced",
+        "OCI stop worker result differs from its current effect",
+    )?;
+    Ok(started)
 }
 
 fn read_checkpoint(db: &Db<'_>, kind: &str, op: &Doc) -> Result<Doc> {
@@ -288,7 +342,7 @@ pub(crate) fn run(
         .ok_or_else(|| err("RecoveryRequired", "OCI instance identity missing"))?;
     let before = match live(w, &engine) {
         Ok(observed) => observed,
-        Err(_) if engine.removed(w, cid)? => return Ok(json!({})),
+        Err(_) if engine.removed(w, cid)? => return Ok(json!({"already_absent":true})),
         Err(error) => return Err(error),
     };
     require(
@@ -322,7 +376,10 @@ pub(crate) fn record(db: &Db<'_>, work: &Work, sample: &Value, removing: bool) -
         "OCI stop checkpoint does not match original instance",
     )?;
     if removing {
-        let stop = read_checkpoint(db, STOP, &work.op)?;
+        let original = db.of(&work.op.id, "Operation")?;
+        let stop = verification::intent(db.c, &original, verification::epoch(db.c)?)?
+            .and_then(|intent| intent.dispatch)
+            .ok_or_else(|| err("RecoveryRequired", "OCI stop command checkpoint is missing"))?;
         require(
             stop.body["binding"] == binding
                 && exact_exited(&binding, sample)
@@ -389,7 +446,7 @@ pub(crate) fn prepare(db: &Db<'_>, app: &Doc, request: &Request) -> Result<Prepa
         "OutcomeUnknown",
         "original OCI removal may have been sent; reconcile its absence before proceeding",
     )?;
-    let (evidence, exit) = fresh_health(db, Some(&request.evidence_ref), &original, app)?;
+    let (_, exit, evidence) = inspect_health(db, Some(&request.evidence_ref), &original, app)?;
     require(
         checkpoint.body["binding"] == binding
             && exact_exited(&binding, &exit)
@@ -412,34 +469,21 @@ pub(crate) fn fresh_health(
     op: &Doc,
     app: &Doc,
 ) -> Result<(Doc, Value)> {
+    let (proof, observation, _) = inspect_health(db, reference, op, app)?;
+    Ok((proof, observation))
+}
+
+fn inspect_health(
+    db: &Db<'_>,
+    reference: Option<&Value>,
+    op: &Doc,
+    app: &Doc,
+) -> Result<(Doc, Value, Value)> {
     let (proof, observation) =
         crate::broker::inspect_recovery(db, reference, op, app, "application.health")?;
-    let task = db.of(proof.spec["task_id"].as_str().unwrap_or_default(), "Task")?;
-    let source = db.of(
-        proof.spec["operation_id"].as_str().unwrap_or_default(),
-        "Operation",
-    )?;
-    let effect = db.resolve(&source.body["effect_refs"][0])?;
-    require(
-        crate::artifact::is_json(&proof)
-            && crate::artifact::is_task_output(&proof, &task)
-            && task.body["result"]["artifact_refs"] == json!([proof.reference()])
-            && task.body["operation_refs"] == json!([source.reference()])
-            && source.owner == task.owner
-            && source.spec["task_id"] == task.id
-            && source.body["lifecycle"] == "Succeeded"
-            && effect.kind == "Effect"
-            && effect.owner == task.owner
-            && effect.body["operation_id"] == source.id
-            && effect.body["action"] == "application.health"
-            && effect.body["resource_ref"] == app.reference()
-            && effect.body["phase"] == "EffectConfirmed"
-            && effect.body["evidence_refs"] == json!([proof.reference()])
-            && proof.spec["effect_id"] == effect.id,
-        "OutcomeUnknown",
-        "OCI health evidence is not the retained result of the independent observation",
-    )?;
-    Ok((proof, observation))
+    let snapshot = evidence::capture(db.c, &proof, &observation)?;
+    evidence::verify(db.c, &snapshot, op, &app.reference(), false)?;
+    Ok((proof, observation, snapshot))
 }
 
 fn active(db: &Db<'_>, original: &str) -> Result<Option<String>> {
@@ -453,23 +497,36 @@ fn active(db: &Db<'_>, original: &str) -> Result<Option<String>> {
         .optional()?)
 }
 
-pub(crate) fn admissible(db: &Db<'_>, app: &Doc, request: &Request) -> Result<()> {
+pub(crate) fn admissible(db: &Db<'_>, app: &Doc, request: &Request) -> Result<Prepared> {
     let prepared = prepare(db, app, request)?;
     require(
         active(db, &prepared.original.id)?.is_none(),
         "Conflict",
         "the unresolved stop already has an active removal continuation",
-    )
+    )?;
+    Ok(prepared)
+}
+
+pub(crate) fn admit(db: &Db<'_>, task: &Doc, prepared: &Prepared) -> Result<()> {
+    evidence::admit(db, task, prepared)
 }
 
 fn custody(prepared: &Prepared) -> Value {
     json!({"original_operation_ref":prepared.original.reference(),
         "original_checkpoint_ref":prepared.checkpoint.reference(),
-        "exit_evidence_ref":prepared.evidence.reference(),"binding":prepared.binding,
+        "exit_evidence_ref":prepared.evidence["artifact_ref"],"binding":prepared.binding,
         "started_at":prepared.started_at})
 }
 
 pub(crate) fn begin_cleanup(db: &Db<'_>, work: &Work, prepared: &Prepared) -> Result<()> {
+    let accepted = evidence::record(db.c, &work.task, true)?;
+    require(
+        accepted.body["snapshot"] == prepared.evidence
+            && accepted.body["original_operation_ref"] == prepared.original.reference()
+            && accepted.body["binding"] == prepared.binding,
+        "Fenced",
+        "OCI cleanup proof changed since admission",
+    )?;
     require(
         db.c.execute(
             "INSERT OR IGNORE INTO oci_stop_cleanups VALUES(?1,?2)",
@@ -478,7 +535,11 @@ pub(crate) fn begin_cleanup(db: &Db<'_>, work: &Work, prepared: &Prepared) -> Re
         "Conflict",
         "the unresolved stop already has an active removal continuation",
     )?;
-    start_intent(db, work, json!({"custody":custody(prepared)}))
+    start_intent(
+        db,
+        work,
+        json!({"custody":custody(prepared),"exit_provenance_ref":accepted.reference()}),
+    )
 }
 
 pub(crate) fn record_cleanup(
@@ -489,9 +550,12 @@ pub(crate) fn record_cleanup(
 ) -> Result<()> {
     let prepared = prepare(db, &work.target, request)?;
     let intent = read_checkpoint(db, INTENT, &work.op)?;
+    let accepted = evidence::record(db.c, &work.task, true)?;
     require(
         active(db, &prepared.original.id)?.as_deref() == Some(work.op.id.as_str())
             && intent.body["custody"] == custody(&prepared)
+            && intent.body["exit_provenance_ref"] == accepted.reference()
+            && accepted.body["snapshot"] == prepared.evidence
             && exact_exited(&prepared.binding, sample)
             && started(sample) == Some(prepared.started_at.as_str()),
         "Fenced",
@@ -503,7 +567,8 @@ pub(crate) fn record_cleanup(
         &intent,
         CLEANUP,
         json!({"custody":custody(&prepared),"observation":sample}),
-    )
+    )?;
+    evidence::release(db, &work.task.id)
 }
 
 pub(crate) fn cleanup(
@@ -535,12 +600,12 @@ fn receipt(original_ref: &Value, binding: &Value) -> Value {
         "start_operation_id":binding["start_operation_id"],"removal_confirmed":true})
 }
 
-pub(crate) fn release(db: &Db<'_>, operation: &str) -> Result<()> {
+pub(crate) fn release(db: &Db<'_>, operation: &str, task: &str) -> Result<()> {
     db.c.execute(
         "DELETE FROM oci_stop_cleanups WHERE cleanup=?1",
         [operation],
     )?;
-    Ok(())
+    evidence::release(db, task)
 }
 
 pub(crate) fn cleanup_held(db: &Db<'_>, request: &Request, op: &Doc) -> Result<bool> {
@@ -574,7 +639,7 @@ pub(crate) fn settle_cleanup(db: &Db<'_>, work: &Work, observed: &Value) -> Resu
         .stop_cleanup
         .as_ref()
         .ok_or_else(|| err("Fenced", "OCI stop cleanup input unavailable"))?;
-    let recorded = read_checkpoint(db, CLEANUP, &work.op)?;
+    let recorded = read_checkpoint(db, CLEANUP, &db.of(&work.op.id, "Operation")?)?;
     let binding =
         original_app_binding(db.c, &work.target, &prepared.original, work.volume.as_ref())?;
     require(

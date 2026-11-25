@@ -212,7 +212,7 @@ fn close(
             apps::restore_image::release(db, &op.id)?;
         }
         if t.spec["task_type"] == apps::stop::TOOL {
-            apps::stop::release(db, &op.id)?;
+            apps::stop::release(db, &op.id, &t.id)?;
         }
         storage::read_holds::release(db, &t.id)?;
         db.c.execute("DELETE FROM holds WHERE holder=?1", [&op.id])?;

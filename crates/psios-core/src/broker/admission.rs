@@ -1,6 +1,6 @@
 //! A full ordinary queue must leave room to verify its unresolved effects.
 use crate::{
-    Empty, Result, apps, artifact,
+    Empty, Result, artifact,
     db::{Db, Doc},
     decode, err,
     host::Action,
@@ -152,9 +152,6 @@ pub(super) fn select(
     target: &Doc,
     has_dependencies: bool,
 ) -> Result<Option<Doc>> {
-    if let Action::ContinueOciStop(request) = action {
-        apps::stop::admissible(db, target, request)?;
-    }
     let used = capacity(db)?;
     let exhausted = if used.ordinary >= db.cfg.queue_limit {
         "durable queue full"

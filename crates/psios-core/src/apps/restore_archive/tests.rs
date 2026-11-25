@@ -454,7 +454,7 @@ fn rejects_invalid_paths_duplicate_entries_extra_archive_data_and_limits() {
             .message
             .contains("end marker")
     );
-    let oversized = vec![0; artifact::ingress::MAX_BYTES as usize + 1];
+    let oversized = vec![0; MAX_BYTES as usize + 1];
     assert_eq!(
         validate(&oversized, "", &[]).unwrap_err().0.code,
         "QuotaExceeded"

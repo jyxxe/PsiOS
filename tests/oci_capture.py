@@ -67,7 +67,7 @@ def no_lost_publication(node, expected):
                           "ON artifact_id=artifact").fetchone() == (0,)
 
 
-def checkpoint_archive(node, reference, expected):
+def checkpoint_archive(node, reference, expected, max_bytes=MAX):
     node.stop()
     checkpoint = node.base / "archive-checkpoint"
     report = json.loads(subprocess.check_output(node.daemon + ["checkpoint", "--output", checkpoint], timeout=30))
@@ -89,7 +89,7 @@ def checkpoint_archive(node, reference, expected):
             daemon = node.binaries / "psiosd"
             raw = subprocess.check_output([daemon, "verify-checkpoint", *options], timeout=20)
             assert json.loads(raw) == report
-            extracted = subprocess.check_output([daemon, "checkpoint-artifact", *options],
+            extracted = subprocess.check_output([daemon, "checkpoint-artifact", *options, "--max-bytes", str(max_bytes)],
                                                 input=json.dumps(reference).encode(), timeout=20)
             assert extracted == expected
             extra = payload.parent / "unexpected"

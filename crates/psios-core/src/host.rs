@@ -329,8 +329,9 @@ impl Action {
             Self::StartWorkflow(blueprint) => return blueprint.definition(db, actor),
             Self::NetworkProbe(target) => return node::network::probe::target(db, target),
             Self::PublishSessionSummary(_) => return db.of(&db.meta("authority")?, "Node"),
-            Self::CaptureOciImage(_) => {
+            Self::CaptureOciImage(request) => {
                 apps::capture::authorize(db, actor)?;
+                request.check_ceiling(db.cfg)?;
                 return db.of(&db.meta("authority")?, "Node");
             }
             Self::Processes(_)

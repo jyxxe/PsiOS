@@ -267,11 +267,13 @@ Core 核对原会话、模型租约及决策摘要，在一个事务中提交原
 
 ### 保存本机 OCI 镜像字节
 
-`application.capture_oci_image` 接受 `image_id` 和 `expected_engine_id`。本机所有者使用显式限定在当前 Node 的任务委托和 `artifact.upload` 授权，提交后再批准包含镜像和引擎身份的计划。适配器仅从配置的本机 Docker Engine 以完整镜像配置摘要导出有层的 Linux amd64 镜像，前后核对引擎身份和层摘要。归档大小最多 8 MiB，并计入现有 Node 与所有者的制品额度。
+`application.capture_oci_image` 接受 `image_id`、`expected_engine_id` 和可选的整数 `max_archive_bytes`。本机所有者使用显式限定在当前 Node 的任务委托和 `artifact.upload` 授权，提交后再批准包含镜像、引擎和原始输入的计划。省略上限时，任务固定使用 8 MiB，配置提高后也沿用该值。适配器从配置的本机 Docker Engine 以完整镜像配置摘要导出有层的 Linux amd64 镜像，前后核对引擎身份和层摘要。
 
-导出前按归档上限检查状态盘的块和 inode 余量。Docker 的输出分块写入状态盘的私有暂存目录，同时计算原始摘要。Core 复核 tar 成员，再把已同步的归档发布为 `ManagedOciArchiveV1`，将其制品元数据、`LocalOciImageCapture` 来源、`OciImageCapture` 凭据和 Task 回执记录在同一见证事务。回执提交后才能读取归档。`Artifact.ReadChunk` 仍受独立授权并按固定分块核验字节。`artifact.withdraw` 提交后由清理器回收文件。事务回滚可清理当前未引用的文件，见证状态未确定时留待启动按已确认的数据库回收。[真实 Docker 导出和独立重载验收](../tests/oci_capture.py)
+守护进程配置 `oci_capture_max_bytes` 默认 8388608 字节，可设为 1 至 33554432 字节。例如，设为 16777216 后，可使用 `psiosctl application-prepare-image-capture --image-id "$image" --engine-id "$engine" --max-archive-bytes 16777216 --delegation "$capture_delegation" --key capture-1` 准备一份显式申请 16 MiB 的请求。SDK 提供 `Client::prepare_oci_image_capture`。提交和执行时都会重查配置，配置低于请求上限时拒绝捕获。制品继续计入 32 MiB 所有者额度与 128 MiB Node 额度，公开 `Artifact.Stage` 的单份上限为 8 MiB。
 
-格式 66 新捕获的归档保存在状态目录 `oci-archives`。单份上限仍为 8 MiB。现有 SQLite 制品沿用原位置和引用。停机 `psiosd verify` 可用原状态盘上的只读归档核对数据库副本，离线迁移演练只修改暂存数据库。如果检查点包含这些活跃归档，`psiosd checkpoint` 写入 `psios.authority.checkpoint.v2` 清单及可独立读取的归档副本。`verify-checkpoint` 核对数据库选择的集合、字节数、摘要和实际目录成员。`checkpoint-artifact` 可从独立检查点按固定引用提取原始归档。[检查点与故障验收](../tests/oci_capture.py)
+导出前按批准的上限检查状态盘的块和 inode 余量。Docker 的输出分块写入状态盘的私有暂存目录，同时计算原始摘要。Core 复核 tar 成员，再把已同步的归档发布为 `ManagedOciArchiveV1`，将其制品元数据、`LocalOciImageCapture` 来源、`OciImageCapture` 凭据和 Task 回执记录在同一见证事务。新凭据和回执同时记录批准的上限。回执提交后才能读取归档。`Artifact.ReadChunk` 仍受独立授权并按固定分块核验字节。`artifact.withdraw` 提交后由清理器回收文件。事务回滚可清理当前未引用的文件，见证状态未确定时留待启动按已确认的数据库回收。[真实 Docker 导出和独立重载验收](../tests/oci_capture.py)
+
+格式 66 开始，新捕获的归档保存在状态目录 `oci-archives`。格式 67 启用大于 8 MiB 的显式捕获，现有 SQLite 制品沿用原位置和引用。停机 `psiosd verify` 可用原状态盘上的只读归档核对数据库副本，离线迁移演练只修改暂存数据库。如果检查点包含这些活跃归档，`psiosd checkpoint` 写入 `psios.authority.checkpoint.v2` 清单及可独立读取的归档副本。`verify-checkpoint` 核对数据库选择的集合、字节数、摘要和实际目录成员。可用 `checkpoint-artifact --max-bytes 16777216` 从独立检查点按固定引用提取 16 MiB 以内的原始归档。调低捕获配置后，已保留归档仍可校验、读取、提取和恢复。[大归档检查点与真实恢复验收](../tests/oci_capacity.py)
 
 捕获会在持久提交前检查原始 tar，并记录 `restore_compatibility`。`Verified` 对应 `DockerClassicTaglessSaveV1`，要求单个无标签镜像，精确匹配配置摘要和有序未压缩层 DiffID。外层 tar 支持两种读取器能一致解释的 V7、USTAR 和 GNU 普通文件或目录。库间解释歧义或标签会阻止发布。存在 OCI 索引时，两个视图的配置和层必须一致，且索引只直接指向一个镜像。镜像 ID 使用清单摘要、层使用压缩格式或布局不受支持时，原始捕获可保留并报告 `Unsupported`。升级到数据库格式 63 后，旧捕获标为 `Unverified`，其历史回执依旧省略此字段。证明覆盖归档结构及镜像身份，实际恢复还会检查层元数据及目的引擎。[归档格式测试](../crates/psios-core/src/apps/restore_archive/tests.rs)
 
@@ -287,7 +289,7 @@ Core 核对原会话、模型租约及决策摘要，在一个事务中提交原
 
 `psiosctl application-prepare-image-restore --key restore-1 --delegation "$restore_delegation" restore.json` 从文件读取 `application_ref`、`release_ref`、`image_archive_ref`、`publisher_key_ref` 和 `expected_engine_id`。`psiosctl application-prepare-image-restore-inspection --key inspect-1 --delegation "$inspection_delegation" operation-ref.json` 读取待核实的原 Operation 引用。两个命令均输出可通过 `psiosctl call Task.Submit` 提交的 JSON。Core 按应用或 Operation 的 ID 和版本解析目标，在受理时绑定完整资源引用。Rust SDK 提供 `Client::prepare_release_image_restore` 和 `Client::prepare_release_image_restore_inspection`，沿用同一 Task 流程。
 
-该能力使用 Linux amd64 Docker Engine API v1.44 的经典 `overlay2` 或 `vfs` 镜像存储。服务复核仍有效的签名以及保留归档的完整字节，将核验过的镜像配置和层分块写入单镜像无标签归档。导入前封印文件描述符并记录两个归档的 SHA-256。恢复拒绝压缩层、稀疏层和扩展层元数据，累计层字节上限为 8 MiB。导入使用绑定同一个 Engine 的本机 Unix 连接，依赖 Docker 及其文件系统报告空间或运行错误。
+该能力使用 Linux amd64 Docker Engine API v1.44 的经典 `overlay2` 或 `vfs` 镜像存储。服务复核仍有效的签名以及保留归档的完整字节，将核验过的镜像配置和层分块写入单镜像无标签归档。导入前封印文件描述符并记录两个归档的 SHA-256。恢复拒绝压缩层、稀疏层和扩展层元数据，累计层字节及生成的导入归档各以 32 MiB 为上限。导入使用绑定同一个 Engine 的本机 Unix 连接，依赖 Docker 及其文件系统报告空间或运行错误。
 
 只有检查点提交后才向 Docker 发起一次导入。中断后，待核实的原 Operation 对应用和该引擎内的镜像保持独占。使用单独委托提交只读 `application.inspect_release_image_restore`，以原 Operation 的 `target` 为输入，并覆盖原计划资源。精确引擎上的镜像摘要及有序层 DiffID 得到确认后，可向 `Operation.Reconcile` 提供新的检查结果。镜像缺失、引擎身份变化或不匹配的结果都会保留 `OutcomeUnknown`。观察和结算原 Operation 不会重发导入。离线校验核对原检查点和结算证据。发行版本退役后，已合法回收的原始字节可只保留历史摘要和回执。[真实 Docker 进程中断和恢复验收](../tests/oci_restore.py)
 

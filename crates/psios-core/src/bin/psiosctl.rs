@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use psios_api::{
-    Client, LocalInventoryModel, OciPublisherSignature, ResourceRef, SessionModel, StatusProvider,
-    TaskOutputRequirement, parse,
+    Client, LocalInventoryModel, OciImageCaptureRequest, OciPublisherSignature, ResourceRef,
+    SessionModel, StatusProvider, TaskOutputRequirement, parse,
 };
 use psios_core::{Config, DEFAULT_BACKUP_MAX_BYTES, MAX_BACKUP_BYTES};
 use serde_json::{Value, json};
@@ -164,6 +164,24 @@ enum Cmd {
         /// JSON Artifact ResourceRef from a file or stdin.
         #[arg(default_value = "-")]
         file: String,
+    },
+    /// Prepare a Task to capture a local OCI image. Submit and approve it separately.
+    ApplicationPrepareImageCapture {
+        /// Full SHA-256 configuration digest of the local image.
+        #[arg(long)]
+        image_id: String,
+        /// Identity of the configured local Docker Engine.
+        #[arg(long)]
+        engine_id: String,
+        /// Maximum archive bytes for the approved Task, defaulting to 8 MiB.
+        #[arg(long)]
+        max_archive_bytes: Option<u32>,
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        delegation: String,
+        #[arg(long)]
+        deadline_at: Option<String>,
     },
     /// Prepare the Task to restore a signed release image. Submit and approve it separately.
     ApplicationPrepareImageRestore {
@@ -530,6 +548,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 signature.as_ref(),
             )?
         }
+        Cmd::ApplicationPrepareImageCapture {
+            image_id,
+            engine_id,
+            max_archive_bytes,
+            key,
+            delegation,
+            deadline_at,
+        } => c.prepare_oci_image_capture(
+            &OciImageCaptureRequest {
+                image_id,
+                expected_engine_id: engine_id,
+                max_archive_bytes,
+            },
+            &key,
+            &delegation,
+            deadline_at.as_deref(),
+        )?,
         Cmd::ApplicationPrepareImageRestore {
             key,
             delegation,

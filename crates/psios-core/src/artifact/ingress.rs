@@ -309,11 +309,13 @@ fn scan_chunks(
     let mut rows = statement.query([id])?;
     let mut remaining = size;
     while let Some(row) = rows.next()? {
-        let index: usize = row.get(0)?;
+        let index: i64 = row.get(0)?;
         let expected: String = row.get(1)?;
         let payload: Vec<u8> = row.get(2)?;
         require(
-            remaining > 0 && index == digests.len() && payload.len() == remaining.min(CHUNK_BYTES),
+            remaining > 0
+                && index == digests.len() as i64
+                && payload.len() == remaining.min(CHUNK_BYTES),
             "RecoveryRequired",
             "staged artifact chunks disagree with the committed offset",
         )?;
@@ -472,12 +474,12 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
     for upload in open.query_map([], |r| {
         Ok((
             r.get::<_, String>(0)?,
-            r.get::<_, usize>(1)?,
-            r.get::<_, usize>(2)?,
+            r.get::<_, u32>(1)?,
+            r.get::<_, u32>(2)?,
         ))
     })? {
         let (id, size, received) = upload?;
-        let (_, digests) = scan_chunks(conn, &id, size, received)?;
+        let (_, digests) = scan_chunks(conn, &id, size as usize, received as usize)?;
         expected_chunks += digests.len() as i64;
     }
     let stored: i64 = conn.query_row("SELECT count(*) FROM artifact_upload_chunks", [], |r| {

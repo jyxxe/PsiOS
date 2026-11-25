@@ -12,7 +12,7 @@ use crate::{
     label, policy, require,
 };
 use binding::Bindings;
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use condition::Predicate;
 use psios_api::{canonical, sha256};
 use rusqlite::params;
@@ -22,6 +22,7 @@ use std::collections::BTreeSet;
 
 pub use run::{cancel, resume, tick};
 pub const ACTION: &str = "workflow.manage";
+pub(crate) const START_TOOL: &str = "workflow.start";
 const MAX_STEPS: usize = 16;
 const DEFINITION: &str = "WorkflowDefinition";
 const RUN: &str = "WorkflowRun";
@@ -163,6 +164,11 @@ fn plan(db: &Db<'_>, steps: Vec<Step>) -> Result<Vec<FrozenStep>> {
     )?;
     for step in &steps {
         label(&step.id)?;
+        require(
+            step.tool != START_TOOL,
+            "UnsupportedCapability",
+            "starting a workflow as a workflow step is unsupported",
+        )?;
         let parents: BTreeSet<_> = step.predecessors().map(String::as_str).collect();
         require(
             parents.len() == step.after.len() + step.after_selected.len()
@@ -271,15 +277,94 @@ fn instant(value: &str) -> Result<DateTime<Utc>> {
 }
 
 pub fn start(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
-    let request: Start = decode(params)?;
+    Ok(run_view(&start_run(db, actor, decode(params)?, None)?))
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StartBlueprint {
+    definition_ref: Value,
+    max_runtime_seconds: u32,
+}
+
+fn authorized_definition(db: &Db<'_>, actor: &str, reference: &Value) -> Result<Doc> {
+    let definition = db.resolve(reference)?;
+    policy::owned(actor, &definition)?;
+    require(
+        definition.kind == DEFINITION
+            && matches!(definition.spec["dsl_version"].as_u64(), Some(1..=3)),
+        "UnsupportedCapability",
+        "unsupported workflow definition",
+    )?;
+    Ok(definition)
+}
+
+impl StartBlueprint {
+    pub(crate) fn validate(&self) -> Result<()> {
+        let _: psios_api::ResourceRef = decode(&self.definition_ref)?;
+        require(
+            self.max_runtime_seconds > 0,
+            "InvalidArgument",
+            "workflow maximum runtime must be positive",
+        )
+    }
+
+    pub(crate) fn definition(&self, db: &Db<'_>, actor: &str) -> Result<Doc> {
+        authorized_definition(db, actor, &self.definition_ref)
+    }
+}
+
+pub(crate) fn start_for_task(
+    db: &Db<'_>,
+    task: &Doc,
+    blueprint: &StartBlueprint,
+    parent_deadline: &str,
+) -> Result<Value> {
+    require(
+        task.body["origin_ref"]["origin_type"] != RUN,
+        "UnsupportedCapability",
+        "starting a workflow as a workflow step is unsupported",
+    )?;
+    let delegation = task.spec["delegation_ref"]["resource_id"]
+        .as_str()
+        .ok_or_else(|| err("RecoveryRequired", "workflow launch task has no delegation"))?;
+    let now = Utc::now();
+    let deadline = (now + TimeDelta::seconds(i64::from(blueprint.max_runtime_seconds)))
+        .min(instant(parent_deadline)?);
+    require(
+        deadline > now,
+        "DeadlineExceeded",
+        "workflow launch deadline passed",
+    )?;
+    let run = start_run(
+        db,
+        &task.owner,
+        Start {
+            key: task.id.clone(),
+            definition_ref: blueprint.definition_ref.clone(),
+            delegation_id: delegation.into(),
+            deadline_at: deadline.to_rfc3339_opts(SecondsFormat::AutoSi, true),
+        },
+        Some(task),
+    )?;
+    Ok(json!({
+        "workflow_run_ref":run.reference(),"definition_ref":run.spec["definition_ref"],
+        "origin_task_ref":run.body["origin_task_ref"],"deadline_at":run.spec["deadline_at"]
+    }))
+}
+
+fn start_run(db: &Db<'_>, actor: &str, request: Start, origin: Option<&Doc>) -> Result<Doc> {
     label(&request.key)?;
     policy::active(db, actor)?;
     let deadline = instant(&request.deadline_at)?;
     let deadline_at = deadline.to_rfc3339_opts(SecondsFormat::AutoSi, true);
-    let id = stable_id(
-        "workflow-run",
-        &json!([db.meta("authority")?, actor, request.key]),
-    );
+    let authority = db.meta("authority")?;
+    let identity = if origin.is_some() {
+        json!([authority, actor, "Task", request.key])
+    } else {
+        json!([authority, actor, request.key])
+    };
+    let id = stable_id("workflow-run", &identity);
     let creation = sha256(&canonical(&json!([
         request.definition_ref,
         request.delegation_id,
@@ -294,9 +379,16 @@ pub fn start(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
             "IdempotencyConflict",
             "workflow run key already bound",
         )?;
-        return Ok(run_view(&existing));
+        return Ok(existing);
     }
     let delegation = policy::delegation(db, actor, &request.delegation_id, ACTION)?;
+    if let Some(task) = origin {
+        require(
+            task.spec["delegation_ref"] == delegation.reference(),
+            "PermissionDenied",
+            "workflow launch delegation changed",
+        )?;
+    }
     let grant = db.of(delegation.body["grant_id"].as_str().unwrap(), "Grant")?;
     let expires = instant(delegation.body["valid_until"].as_str().unwrap())?
         .min(instant(grant.spec["valid_until"].as_str().unwrap())?);
@@ -305,13 +397,7 @@ pub fn start(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         "InvalidArgument",
         "workflow deadline must be within authorization",
     )?;
-    let d = db.resolve(&request.definition_ref)?;
-    policy::owned(actor, &d)?;
-    require(
-        d.kind == DEFINITION && matches!(d.spec["dsl_version"].as_u64(), Some(1..=3)),
-        "UnsupportedCapability",
-        "unsupported workflow definition",
-    )?;
+    let d = authorized_definition(db, actor, &request.definition_ref)?;
     let frozen: Vec<FrozenStep> = decode(&d.spec["steps"])?;
     let version = frozen
         .iter()
@@ -387,6 +473,11 @@ pub fn start(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
                    "task_receipt": null, "task_ref": null})
         })
         .collect();
+    let mut state = json!({"lifecycle":"Ready","outcome_knowledge":"NotStarted","reason":null,
+        "active_step":null,"stop_reason":null,"steps":projections});
+    if let Some(task) = origin {
+        state["origin_task_ref"] = task.reference();
+    }
     let run = db.create(
         RUN,
         &id,
@@ -394,14 +485,13 @@ pub fn start(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         json!({"definition_ref": d.reference(), "creation_digest": creation, "steps": steps,
                "dsl_version": d.spec["dsl_version"],
                "delegation_id": request.delegation_id, "deadline_at": deadline_at}),
-        json!({"lifecycle": "Ready", "outcome_knowledge": "NotStarted", "reason": null,
-               "active_step": null, "stop_reason": null, "steps": projections}),
+        state,
     )?;
     policy::deadline::Clock::sample()?.register_until(
         db,
         &id,
         &deadline_at,
-        Some(&delegation.id),
+        Some(origin.map_or(delegation.id.as_str(), |task| task.id.as_str())),
     )?;
     let deadline_ms = deadline.timestamp_millis()
         + i64::from(!deadline.timestamp_subsec_nanos().is_multiple_of(1_000_000));
@@ -409,7 +499,7 @@ pub fn start(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         "INSERT INTO active_workflows(run,deadline_ms,ready_ms) VALUES(?1,?2,?3)",
         params![id, deadline_ms, Utc::now().timestamp_millis()],
     )?;
-    Ok(run_view(&run))
+    Ok(run)
 }
 
 fn check_tool(db: &Db<'_>, tool: &str, pinned: &Value) -> Result<()> {

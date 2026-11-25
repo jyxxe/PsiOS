@@ -18,6 +18,7 @@ pub const PROFILE: &str = "profile-local";
 pub const TOOLS: &[&str] = &[
     "system.status",
     agent::START_SESSION,
+    workflow::START_TOOL,
     "node.inventory",
     node::pressure::TOOL,
     "node.interfaces",
@@ -144,6 +145,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | storage::export::ACTION
                     | storage::publication::INSPECT
                     | agent::START_SESSION
+                    | workflow::START_TOOL
                     | schedule::ACTION
                     | workflow::ACTION
                     | chat::INVITE

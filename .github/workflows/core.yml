@@ -322,6 +322,12 @@ jobs:
           git archive da66c3c0d4a0d1937a729d1f9f81121576d98791 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format31"
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format31" "$RUNNER_TEMP/psios-compatibility-target"
           python3 -B tests/resource_event_schedule_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
+      - name: Install workflow launch without widening format 32 grants
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format32"
+          git archive e82b78ab63a9b162dd51e5a6bf44be9e2cbd91e7 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format32"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format32" "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/workflow_launch_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Verify real systemd service control and crash reconciliation
         run: |
           sudo loginctl enable-linger "$(id -un)"

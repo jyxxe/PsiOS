@@ -173,7 +173,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     Ok(bytes)
 }
 // Older writers cannot dispatch workflow steps with pinned input mappings.
-pub(super) const CURRENT_FORMAT: u32 = 32;
+pub(super) const CURRENT_FORMAT: u32 = 33;
 struct CheckedHead {
     version: u32,
     head: String,

@@ -135,7 +135,7 @@ pub(super) fn intent(conn: &Connection, op: &Doc, epoch: i64) -> Result<Option<I
         "RecoveryRequired",
         "OCI stop journal disagrees with the recorded outcome",
     )?;
-    let started = if let Some(checkpoint) = &dispatch {
+    let started_effect = if let Some(checkpoint) = &dispatch {
         let started = resolve(conn, &checkpoint.body["started_effect_ref"])?;
         let running = resolve(conn, &checkpoint.body["started_operation_ref"])?;
         let mut body = effect.body.clone();
@@ -164,15 +164,15 @@ pub(super) fn intent(conn: &Connection, op: &Doc, epoch: i64) -> Result<Option<I
     };
     let phase_matches = match op.body["outcome_knowledge"].as_str() {
         Some("InFlight") => {
-            current_effect.reference() == started.as_ref().unwrap_or(&effect).reference()
+            current_effect.reference() == started_effect.as_ref().unwrap_or(&effect).reference()
         }
         Some("NotStarted") => {
-            started.is_none()
+            started_effect.is_none()
                 && current_effect.body["phase"] == "PermitBound"
                 && current_effect.rev == effect.rev + 1
         }
         Some("Unknown") => {
-            started.is_some()
+            started_effect.is_some()
                 && current_effect.body["phase"] == "EffectStarted"
                 && current_effect.rev == effect.rev + 2
         }
@@ -180,7 +180,7 @@ pub(super) fn intent(conn: &Connection, op: &Doc, epoch: i64) -> Result<Option<I
             matches!(
                 current_effect.body["phase"].as_str(),
                 Some("EffectConfirmed" | "EffectReconciled")
-            ) && (started.is_some()
+            ) && (started_effect.is_some()
                 || (!cleanup && current_effect.body["phase"] == "EffectConfirmed"))
         }
         _ => false,
@@ -354,7 +354,7 @@ pub(crate) fn verify_active(conn: &Connection) -> Result<()> {
             let original = check_link(conn, &journal, &task, epoch)?;
             require(
                 needed(conn, &original.id)?.reference() == original.reference()
-                    && active(conn, &original.id)?.as_deref() == Some(op.id.as_str()),
+                    && active_cleanup(conn, &original.id)?.as_deref() == Some(op.id.as_str()),
                 "RecoveryRequired",
                 "active OCI removal continuation has a missing or mismatched latch",
             )?;

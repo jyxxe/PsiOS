@@ -486,9 +486,8 @@ fn inspect_health(
     Ok((proof, observation, snapshot))
 }
 
-fn active(db: &Db<'_>, original: &str) -> Result<Option<String>> {
-    Ok(db
-        .c
+fn active_cleanup(conn: &rusqlite::Connection, original: &str) -> Result<Option<String>> {
+    Ok(conn
         .query_row(
             "SELECT cleanup FROM oci_stop_cleanups WHERE original=?1",
             [original],
@@ -500,7 +499,7 @@ fn active(db: &Db<'_>, original: &str) -> Result<Option<String>> {
 pub(crate) fn admissible(db: &Db<'_>, app: &Doc, request: &Request) -> Result<Prepared> {
     let prepared = prepare(db, app, request)?;
     require(
-        active(db, &prepared.original.id)?.is_none(),
+        active_cleanup(db.c, &prepared.original.id)?.is_none(),
         "Conflict",
         "the unresolved stop already has an active removal continuation",
     )?;
@@ -552,7 +551,7 @@ pub(crate) fn record_cleanup(
     let intent = read_checkpoint(db, INTENT, &work.op)?;
     let accepted = evidence::record(db.c, &work.task, true)?;
     require(
-        active(db, &prepared.original.id)?.as_deref() == Some(work.op.id.as_str())
+        active_cleanup(db.c, &prepared.original.id)?.as_deref() == Some(work.op.id.as_str())
             && intent.body["custody"] == custody(&prepared)
             && intent.body["exit_provenance_ref"] == accepted.reference()
             && accepted.body["snapshot"] == prepared.evidence
@@ -610,12 +609,12 @@ pub(crate) fn release(db: &Db<'_>, operation: &str, task: &str) -> Result<()> {
 
 pub(crate) fn cleanup_held(db: &Db<'_>, request: &Request, op: &Doc) -> Result<bool> {
     let original = db.resolve(&request.operation_ref)?;
-    Ok(active(db, &original.id)?.as_deref() == Some(op.id.as_str()))
+    Ok(active_cleanup(db.c, &original.id)?.as_deref() == Some(op.id.as_str()))
 }
 
 pub(crate) fn original_ready(db: &Db<'_>, app: &Doc, op: &Doc, volume: Option<&Doc>) -> Result<()> {
     require(
-        active(db, &op.id)?.is_none(),
+        active_cleanup(db.c, &op.id)?.is_none(),
         "Conflict",
         "settle the exact OCI removal continuation first",
     )?;
@@ -643,7 +642,7 @@ pub(crate) fn settle_cleanup(db: &Db<'_>, work: &Work, observed: &Value) -> Resu
     let binding =
         original_app_binding(db.c, &work.target, &prepared.original, work.volume.as_ref())?;
     require(
-        active(db, &prepared.original.id)?.as_deref() == Some(work.op.id.as_str())
+        active_cleanup(db.c, &prepared.original.id)?.as_deref() == Some(work.op.id.as_str())
             && prepared.binding == binding
             && recorded.body["custody"] == custody(prepared)
             && *observed == receipt(&prepared.original.reference(), &binding),
@@ -670,7 +669,7 @@ pub(crate) fn reconcile_cleanup(
     let binding = original_app_binding(db.c, app, &original, volume.as_ref())?;
     let prepared = &recorded.body["custody"];
     require(
-        active(db, &original.id)?.as_deref() == Some(op.id.as_str())
+        active_cleanup(db.c, &original.id)?.as_deref() == Some(op.id.as_str())
             && original.body["outcome_knowledge"] == "Unknown"
             && db.get(&original.id)?.reference() == original.reference()
             && prepared["original_operation_ref"] == original.reference()

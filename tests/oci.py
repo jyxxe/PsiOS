@@ -45,7 +45,32 @@ def install_from_artifact(node, specification):
     return receipt["application_ref"], artifact
 
 
-def retire_oci_release(node, app, release, artifact):
+def stage_from_artifact(node, app, specification):
+    node_id = node.call("Node.Get", {})["reference"]["resource_id"]
+    artifact_grant(node, "local-owner", ["artifact.upload", "artifact.read", "artifact.withdraw"], [node_id])
+    source = publish_install(node, specification)
+    allow = artifact_grant(node, "local-owner", ["task.submit", "task.read", "application.stage_artifact_release"],
+                          [app["resource_id"], source["resource_id"]])
+    app_file = node.base / "stage-application.json"
+    source_file = node.base / "stage-artifact.json"
+    app_file.write_text(json.dumps(app))
+    source_file.write_text(json.dumps(source))
+    preview = node.cli(node.witness / "owner.token", "artifact-prepare-release", "--application", app_file,
+                       "--delegation", allow["delegation_ref"]["resource_id"], "--key", key(), source_file)
+    assert preview["resource_refs"] == [app, source], preview
+    accepted = node.call("Task.Submit", preview["request"])["task_id"]
+    assert node.wait(accepted)["lifecycle"] == "WaitingApproval"
+    settled = node.wait(accepted, autoapprove=True)
+    assert settled["lifecycle"] == "Succeeded", settled
+    reference, = settled["result"]["artifact_refs"]
+    receipt = node.call("Artifact.Read", {"reference": reference})
+    evidence = node.call("Resource.Resolve", {"reference": receipt["stage_ref"]})["value"]
+    assert evidence["source_artifact_ref"] == source and evidence["application_ref"] == app
+    print("Staged a newer real OCI release through the CLI and approved artifact workflow", flush=True)
+    return receipt["release_ref"], source
+
+
+def retire_oci_release(node, app, release, artifact, uninstall=False):
     tool = "application.retire_release"
     allow = artifact_grant(node, "local-owner", ["task.submit", "task.read", tool],
                           [app["resource_id"], release["resource_id"]])
@@ -54,13 +79,14 @@ def retire_oci_release(node, app, release, artifact):
         return node.prepare(tool, {"target": target(current), "release_ref": release, "reason": "deployment removed"},
                             delegation=allow["delegation_ref"]["resource_id"])
 
-    try:
-        node.call("Task.Submit", prepare(app))
-    except Failure as denied:
-        assert denied.code == "Conflict", denied
-    else:
-        raise AssertionError("retirement accepted a still-selected release")
-    app = node.perform("application.uninstall", target(app))
+    if uninstall:
+        try:
+            node.call("Task.Submit", prepare(app))
+        except Failure as denied:
+            assert denied.code == "Conflict", denied
+        else:
+            raise AssertionError("retirement accepted a still-selected release")
+        app = node.perform("application.uninstall", target(app))
     job = node.call("Task.Submit", prepare(app))["task_id"]
     settled = node.wait(job, autoapprove=True)
     assert settled["lifecycle"] == "Succeeded", settled
@@ -73,7 +99,7 @@ def retire_oci_release(node, app, release, artifact):
     node.call("Artifact.Withdraw", {"reference": artifact, "reason": "retired local OCI release"})
     assert node.call("Artifact.Get", {"reference": artifact})["availability"] == "Evicted"
     assert node.call("Resource.Resolve", {"reference": release})["reference"] == release
-    print("Retired the uninstalled OCI release and reclaimed its source artifact", flush=True)
+    print("Retired the " + ("uninstalled" if uninstall else "superseded") + " OCI release and reclaimed its source artifact", flush=True)
 
 
 def main(binaries, previous_binaries=None):
@@ -159,7 +185,7 @@ int main(void) {
         assert upgraded_image != spec["image_id"]
         release = dict(spec, image_id=upgraded_image, release_version="2.0.0", environment={"TEST_NAME": "upgraded"})
         del release["volume"]
-        staged = node.perform("application.stage_release", dict(target=target(app), release=release))
+        staged, staged_artifact = stage_from_artifact(node, app, release)
         assert node.get(app_id)["resource"]["spec"]["release_ref"] == previous_release
         agent = node.call("Agent.Register", {"name": "installer"})
         grant = node.call("Grant.Issue", dict(principal_id=agent["principal_id"], actions=["task.submit","task.read","application.install"],
@@ -204,7 +230,8 @@ int main(void) {
         reverted = node.perform("application.health", target(app))["container_id"]
         assert json.loads(subprocess.check_output(docker + ["inspect", reverted]))[0]["Image"] == image_id
         app = lose_stop_receipt(node, app, reverted, volume)
-        retire_oci_release(node, app, previous_release, source_artifact)
+        retire_oci_release(node, app, staged, staged_artifact)
+        retire_oci_release(node, app, previous_release, source_artifact, uninstall=True)
         volume = node.get(volume["resource_id"])["reference"]
         assert node.perform("volume.read", dict(**target(volume), name="starts"))["content"] == "first\nsecond\nupgraded\nfirst\n"
         backup = node.perform("backup.create", target(volume))

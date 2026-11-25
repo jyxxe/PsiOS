@@ -23,7 +23,9 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
         let catalog_uncommitted = phase == "Dispatched"
             && matches!(
                 tool,
-                apps::artifact_install::TOOL | apps::release_retirement::TOOL
+                apps::artifact_install::TOOL
+                    | apps::artifact_install::STAGE_TOOL
+                    | apps::release_retirement::TOOL
             );
         let backup_unpublished = phase == "Dispatched"
             && tool == "backup.create"

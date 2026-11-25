@@ -47,6 +47,7 @@ pub const TOOLS: &[&str] = &[
     "volume.append",
     "volume.remove_entry",
     "application.stage_release",
+    apps::artifact_install::STAGE_TOOL,
     "application.select_release",
     apps::release_retirement::TOOL,
     "application.refresh",
@@ -138,6 +139,7 @@ pub fn approval(tool: &str) -> bool {
             | storage::file_move::TOOL
             | "volume.mkdir"
             | "application.stage_release"
+            | apps::artifact_install::STAGE_TOOL
             | "application.select_release"
             | apps::release_retirement::TOOL
             | "service.start"
@@ -177,6 +179,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | artifact::ingress::READ
                     | artifact::ingress::WITHDRAW
                     | apps::artifact_install::TOOL
+                    | apps::artifact_install::STAGE_TOOL
                     | apps::release_retirement::TOOL
                     | node::block::TOOL
                     | "backup.verify"
@@ -536,6 +539,7 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
                     || action == artifact::ingress::READ
                     || action == artifact::ingress::WITHDRAW
                     || action == apps::artifact_install::TOOL
+                    || action == apps::artifact_install::STAGE_TOOL
                     || action == apps::release_retirement::TOOL
                     || action == node::journal::TOOL
                     || action == node::process::TOOL

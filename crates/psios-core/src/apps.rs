@@ -166,6 +166,7 @@ pub fn launch_spec(db: &Db<'_>, app: &Doc) -> Result<Install> {
         "release references do not describe this deployment",
     )?;
     release_retirement::available(db, &release)?;
+    artifact_install::check_release_source(db, &release)?;
     let r = &spec.body["resources"];
     let count = |k: &str| {
         r[k].as_str()
@@ -187,18 +188,23 @@ pub fn launch_spec(db: &Db<'_>, app: &Doc) -> Result<Install> {
     validate(&launch)?;
     Ok(launch)
 }
+fn stage_precondition(app: &Doc, release: &Install) -> Result<()> {
+    require(
+        app.body["lifecycle"] != "Uninstalled" && app.spec["name"] == release.name,
+        "PreconditionFailed",
+        "staged release must belong to an installed application with the same name",
+    )
+}
+
 pub fn preflight(db: &Db<'_>, w: &Work) -> Result<()> {
     match w.action {
-        Action::Stage { ref release, .. } => require(
-            w.target.body["lifecycle"] != "Uninstalled" && w.target.spec["name"] == release.name,
-            "PreconditionFailed",
-            "staged release must belong to an installed application with the same name",
-        )?,
+        Action::Stage { ref release, .. } => stage_precondition(&w.target, release)?,
         Action::Select {
             ref release_ref, ..
         } => {
             let release = release_retirement::associated(db, &w.target, release_ref)?;
             release_retirement::available(db, &release)?;
+            artifact_install::check_release_source(db, &release)?;
             require(
                 w.target.body["lifecycle"] == "Stopped",
                 "PreconditionFailed",
@@ -695,17 +701,9 @@ pub fn perform(w: &Work) -> Result<Value> {
     match &w.action {
         Action::InspectOciInstance(_) => restart::observe(w),
         Action::Install(s) | Action::Stage { release: s, .. } => e.image(&s.image_id),
-        Action::InstallArtifact(_) => e.image(
-            &w.launch
-                .as_ref()
-                .ok_or_else(|| {
-                    err(
-                        "RecoveryRequired",
-                        "artifact installation specification missing",
-                    )
-                })?
-                .image_id,
-        ),
+        Action::InstallArtifact(_) | Action::StageArtifactRelease(_) => {
+            e.image(&artifact_spec(w)?.image_id)
+        }
         Action::Select { release_ref, .. } => Ok(json!({"release_ref":release_ref})),
         Action::RetireRelease(_) => Ok(json!({})),
         Action::Health(_) if w.start_checkpoint.is_some() => {
@@ -934,7 +932,7 @@ fn install(db: &Db<'_>, w: &Work, s: &Install, r: &Value) -> Result<Value> {
         }),
     )?;
     Ok(
-        artifact_install::retain(db, w, &application, &release, &deploy)?
+        artifact_install::retain(db, w, &application, &release, Some(&deploy))?
             .unwrap_or_else(|| application.reference()),
     )
 }
@@ -1012,32 +1010,34 @@ pub fn stopped(
     Ok(db.update(app,spec,json!({"lifecycle":"Stopped","desired_state":"Stopped","runtime_state":"Absent","last_logs":logs,
         "health":"Unknown","readiness":"NotReady","observed_at":now()}))?.reference())
 }
+fn artifact_spec(work: &Work) -> Result<&Install> {
+    work.launch
+        .as_ref()
+        .ok_or_else(|| err("RecoveryRequired", "artifact release specification missing"))
+}
+
+fn stage(db: &Db<'_>, work: &Work, release: &Install, inspection: &Value) -> Result<Value> {
+    let staged = record_release(
+        db,
+        &work.op.id,
+        &work.target.id,
+        &work.target.owner,
+        work.target.spec["volume_id"].is_string(),
+        release,
+        inspection,
+    )?;
+    Ok(
+        artifact_install::retain(db, work, &work.target, &staged, None)?
+            .unwrap_or_else(|| staged.reference()),
+    )
+}
+
 pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
     match &w.action {
         Action::Install(s) => install(db, w, s, r),
-        Action::InstallArtifact(_) => install(
-            db,
-            w,
-            w.launch.as_ref().ok_or_else(|| {
-                err(
-                    "RecoveryRequired",
-                    "artifact installation specification missing",
-                )
-            })?,
-            r,
-        ),
-        Action::Stage { release, .. } => {
-            let staged = record_release(
-                db,
-                &w.op.id,
-                &w.target.id,
-                &w.target.owner,
-                w.target.spec["volume_id"].is_string(),
-                release,
-                r,
-            )?;
-            Ok(staged.reference())
-        }
+        Action::InstallArtifact(_) => install(db, w, artifact_spec(w)?, r),
+        Action::Stage { release, .. } => stage(db, w, release, r),
+        Action::StageArtifactRelease(_) => stage(db, w, artifact_spec(w)?, r),
         Action::Select { release_ref, .. } => {
             let release = release_retirement::associated(db, &w.target, release_ref)?;
             let spec = db.resolve(&release.body["release_spec_ref"])?;

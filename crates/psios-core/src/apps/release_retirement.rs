@@ -155,7 +155,8 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
                 && plan.spec["action"] == TOOL
                 && plan.body["allowed_effects"][0]["resource_ref"] == app.reference()
                 && plan.body["preconditions"][1]["resource_ref"] == release.reference()
-                && receipt.body["released_artifact_ref"] == json!(source),
+                && receipt.body["released_artifact_ref"]
+                    == json!(source.as_ref().map(Doc::reference)),
             "RecoveryRequired",
             "retirement receipt disagrees with its plan or source",
         )?;

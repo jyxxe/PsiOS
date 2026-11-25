@@ -117,6 +117,21 @@ enum Cmd {
         #[arg(long, default_value_t = 600)]
         ttl_seconds: u32,
     },
+    /// Prepare a Task to stage an uploaded OCI declaration for an existing application.
+    ArtifactPrepareRelease {
+        /// JSON Application ResourceRef from a file.
+        #[arg(long, value_name = "FILE")]
+        application: String,
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        delegation: String,
+        #[arg(long)]
+        deadline_at: Option<String>,
+        /// JSON Artifact ResourceRef from a file or stdin.
+        #[arg(default_value = "-")]
+        file: String,
+    },
     /// Repair the Artifact from a previously exported, verified JSON file.
     ArtifactRepair {
         source: PathBuf,
@@ -390,6 +405,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 &mut source,
             )?)?
         }
+        Cmd::ArtifactPrepareRelease {
+            application,
+            key,
+            delegation,
+            deadline_at,
+            file,
+        } => c.prepare_artifact_release(
+            &serde_json::from_value(input(&application)?)?,
+            &serde_json::from_value(input(&file)?)?,
+            &key,
+            &delegation,
+            deadline_at.as_deref(),
+        )?,
         Cmd::ArtifactRepair {
             source,
             file,

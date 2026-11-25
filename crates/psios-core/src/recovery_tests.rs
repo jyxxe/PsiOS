@@ -869,24 +869,15 @@ fn lost_read_gets_new_claim_and_late_receipt_is_fenced() {
     let run = call(&mut s, "Run.Get", json!({"id": before["current_run_id"]})).unwrap();
     assert_eq!(run["claim_epoch"], "2");
 }
-fn accepted_artifact_install(s: &mut Store) -> (String, Value) {
-    let node = call(s, "Node.Get", json!({})).unwrap();
-    call(s, "Grant.Issue", json!({
-        "principal_id":"local-owner","actions":["artifact.upload","artifact.read","artifact.withdraw"],
-        "tool_targets":[node["reference"]["resource_id"]],"units":4,"ttl_seconds":90,
-    })).unwrap();
-    let bytes = serde_json::to_vec(&json!({
-        "format":"PsiOSLocalOciInstallV1","install":{
-            "name":"recovery-test","image_id":format!("sha256:{}","d".repeat(64)),
-            "release_version":"1.0.0","argv":["/probe"],"license_expression":"0BSD",
-            "cpu_millicores":200,"memory_max_bytes":33554432,"pids_max":8,"ephemeral_max_bytes":1048576,
-        },
-    })).unwrap();
+fn publish_oci_declaration(s: &mut Store, specification: Value) -> Value {
+    let bytes =
+        serde_json::to_vec(&json!({"format":"PsiOSLocalOciInstallV1","install":specification}))
+            .unwrap();
     let stage = call(
         s,
         "Artifact.Stage",
         json!({
-            "key":"interrupted-install","size_bytes":bytes.len(),"digest":psios_api::sha256(&bytes),
+            "key":id("oci-declaration"),"size_bytes":bytes.len(),"digest":psios_api::sha256(&bytes),
             "declared_media_type":"application/vnd.psios.oci-install.v1+json","ttl_seconds":120,
         }),
     )
@@ -899,7 +890,23 @@ fn accepted_artifact_install(s: &mut Store) -> (String, Value) {
     )
     .unwrap();
     let published = call(s, "Artifact.Publish", json!({"stage_id":stage["stage_id"]})).unwrap();
-    let reference = published["artifact_ref"].clone();
+    published["artifact_ref"].clone()
+}
+
+fn accepted_artifact_install(s: &mut Store) -> (String, Value) {
+    let node = call(s, "Node.Get", json!({})).unwrap();
+    call(s, "Grant.Issue", json!({
+        "principal_id":"local-owner","actions":["artifact.upload","artifact.read","artifact.withdraw"],
+        "tool_targets":[node["reference"]["resource_id"]],"units":4,"ttl_seconds":90,
+    })).unwrap();
+    let reference = publish_oci_declaration(
+        s,
+        json!({
+            "name":"recovery-test","image_id":format!("sha256:{}","d".repeat(64)),
+            "release_version":"1.0.0","argv":["/probe"],"license_expression":"0BSD",
+            "cpu_millicores":200,"memory_max_bytes":33554432,"pids_max":8,"ephemeral_max_bytes":1048576,
+        }),
+    );
     let tool = apps::artifact_install::TOOL;
     let grant = call(
         s,
@@ -952,32 +959,187 @@ fn interrupted_oci_artifact_inspection_releases_the_uncommitted_install_pin() {
     assert!(call(&mut s, "Artifact.Withdraw", withdraw).unwrap()["withdrawal_ref"].is_object());
 }
 
+// Settle a catalog operation against controlled OCI metadata. The integration
+// test inspects the real engine and runs both selected releases.
+fn settle_oci_catalog(s: &mut Store, task: &str) -> Value {
+    approve(s, task);
+    assert_eq!(claim(s), task);
+    let work = dispatch(s, task);
+    let inspection = json!({"architecture":"amd64","os":"linux","layers":[],"created":now()});
+    s.transaction("catalog-fixture", |db| {
+        broker::finish(db, &work, Ok(inspection))
+    })
+    .unwrap();
+    let task = call(s, "Task.Get", json!({"id":task})).unwrap();
+    assert_eq!(task["lifecycle"], "Succeeded", "{task}");
+    call(
+        s,
+        "Artifact.Read",
+        json!({"reference":task["result"]["artifact_refs"][0]}),
+    )
+    .unwrap()
+}
+
+#[test]
+fn artifact_release_stage_rolls_back_failed_receipts_and_checks_the_selected_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, mut s) = initialized(tmp.path());
+    let (install, _) = accepted_artifact_install(&mut s);
+    let installed = settle_oci_catalog(&mut s, &install);
+    let app = &installed["application_ref"];
+    let target = |reference: &Value| json!({"id":reference["resource_id"],"expected_resource_version":reference["version"]});
+    let bundle = publish_oci_declaration(
+        &mut s,
+        json!({
+            "name":"recovery-test","image_id":format!("sha256:{}","e".repeat(64)),
+            "release_version":"2.1.0","argv":["/probe"],"license_expression":"0BSD",
+            "cpu_millicores":200,"memory_max_bytes":33554432,"pids_max":8,"ephemeral_max_bytes":1048576,
+        }),
+    );
+    let issue = |s: &mut Store, tool_targets: Value| {
+        call(s,"Grant.Issue",json!({
+        "principal_id":"local-owner","actions":["task.submit","task.read",apps::artifact_install::STAGE_TOOL],
+        "tool_targets":tool_targets,"ttl_seconds":90,"units":4,
+    })).unwrap()
+    };
+    let prepare = |s: &mut Store, grant: &Value| {
+        call(
+            s,
+            "Application.PrepareArtifactRelease",
+            json!({
+                "target":target(app),"reference":bundle,"key":id("release"),"delegation_id":grant["delegation_ref"]["resource_id"],
+            }),
+        )
+    };
+    let incomplete = issue(&mut s, json!([app["resource_id"]]));
+    assert_eq!(
+        prepare(&mut s, &incomplete).unwrap_err().0.code,
+        "PermissionDenied"
+    );
+    let permit = issue(&mut s, json!([app["resource_id"], bundle["resource_id"]]));
+    let preview = prepare(&mut s, &permit).unwrap();
+    assert_eq!(preview["resource_refs"], json!([app, bundle]));
+    assert_eq!(preview["release"]["release_version"], "2.1.0");
+    assert_eq!(preview["selected_release_ref"], installed["release_ref"]);
+
+    let task = call(&mut s, "Task.Submit", preview["request"].clone()).unwrap();
+    let task = task["task_id"].as_str().unwrap();
+    let withdrawal = json!({"reference":bundle,"reason":"stage finished"});
+    assert_eq!(
+        call(&mut s, "Artifact.Withdraw", withdrawal.clone())
+            .unwrap_err()
+            .0
+            .code,
+        "Conflict"
+    );
+    approve(&mut s, task);
+    assert_eq!(claim(&mut s), task);
+    let work = dispatch(&mut s, task);
+    s.transaction("inject-catalog-abort",|db| {
+        db.c.execute_batch("CREATE TRIGGER test_stage_receipt_abort BEFORE INSERT ON versions
+            WHEN NEW.kind='ApplicationArtifactReleaseStage' BEGIN SELECT raise(ABORT,'withhold stage receipt'); END;")?;
+        Ok(())
+    }).unwrap();
+    let observation = json!({"architecture":"amd64","os":"linux","layers":[],"created":now()});
+    assert_eq!(
+        s.transaction("reject-catalog", |db| broker::finish(
+            db,
+            &work,
+            Ok(observation)
+        ))
+        .unwrap_err()
+        .0
+        .code,
+        "StorageUnavailable"
+    );
+    s.transaction("record-catalog-failure", |db| {
+        db.c.execute_batch("DROP TRIGGER test_stage_receipt_abort")?;
+        broker::settlement_failed(db, &work)?;
+        assert!(!apps::artifact_install::pinned(
+            db,
+            bundle["resource_id"].as_str().unwrap()
+        )?);
+        Ok(())
+    })
+    .unwrap();
+    let failed = call(&mut s, "Task.Get", json!({"id":task})).unwrap();
+    assert_eq!(failed["lifecycle"], "Failed");
+    assert_eq!(failed["outcome_knowledge"], "Known");
+    assert_eq!(
+        call(
+            &mut s,
+            "Resource.List",
+            json!({"kind":"ApplicationRelease"})
+        )
+        .unwrap()["items"],
+        json!([installed["release_ref"]])
+    );
+
+    let ready = prepare(&mut s, &permit).unwrap();
+    let stage_task = call(&mut s, "Task.Submit", ready["request"].clone()).unwrap();
+    let settled = settle_oci_catalog(&mut s, stage_task["task_id"].as_str().unwrap());
+    let stage = call(
+        &mut s,
+        "Resource.Resolve",
+        json!({"reference":settled["stage_ref"]}),
+    )
+    .unwrap();
+    assert_eq!(stage["value"]["source_artifact_ref"], bundle);
+    assert_eq!(stage["value"]["application_ref"], *app);
+    assert_eq!(
+        call(&mut s, "Resource.Get", json!({"id":app["resource_id"]})).unwrap()["reference"],
+        *app
+    );
+    assert_eq!(
+        call(&mut s, "Artifact.Withdraw", withdrawal)
+            .unwrap_err()
+            .0
+            .code,
+        "Conflict"
+    );
+    s.transaction("verify-source-pins", |db| {
+        apps::artifact_install::verify(db.c)
+    })
+    .unwrap();
+
+    let selection = submit(
+        &mut s,
+        "application.select_release",
+        json!({"target":target(app),"release_ref":settled["release_ref"]}),
+    );
+    approve(&mut s, &selection);
+    let selected = execute(&mut s, &selection);
+    let start = submit(&mut s, "application.start", target(&selected));
+    approve(&mut s, &start);
+    s.transaction("damage-selected-source", |db| {
+        db.c.execute(
+            "UPDATE artifact_chunks SET payload=zeroblob(length(payload)) WHERE artifact_id=?1",
+            [bundle["resource_id"].as_str().unwrap()],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(claim(&mut s), start);
+    let corrupt = s
+        .transaction("check-selected-source", |db| broker::dispatch(db, &start))
+        .err()
+        .expect("corrupt source must prevent host dispatch");
+    assert_eq!(corrupt.0.code, "RecoveryRequired");
+    s.transaction("settle-damaged-source", |db| {
+        broker::dispatch_failed(db, &start, &corrupt)
+    })
+    .unwrap();
+    let result = call(&mut s, "Task.Get", json!({"id":start})).unwrap();
+    assert_eq!(result["lifecycle"], "Failed");
+    assert_eq!(result["outcome_knowledge"], "NotStarted");
+}
+
 #[test]
 fn retired_release_fences_approved_rollback_and_releases_its_catalog_pin() {
     let tmp = tempfile::tempdir().unwrap();
     let (cfg, mut s) = initialized(tmp.path());
     let (install, source) = accepted_artifact_install(&mut s);
-    // Exercise the real settlement transaction using a local catalog fixture.
-    // The live Docker test obtains the image observation from the engine.
-    let settle_image = |s: &mut Store, task: &str| {
-        approve(s, task);
-        assert_eq!(claim(s), task);
-        let work = dispatch(s, task);
-        let inspection = json!({"architecture":"amd64","os":"linux","layers":[],"created":now()});
-        s.transaction("catalog-fixture", |db| {
-            broker::finish(db, &work, Ok(inspection))
-        })
-        .unwrap();
-        let task = call(s, "Task.Get", json!({"id":task})).unwrap();
-        assert_eq!(task["lifecycle"], "Succeeded", "{task}");
-        call(
-            s,
-            "Artifact.Read",
-            json!({"reference":task["result"]["artifact_refs"][0]}),
-        )
-        .unwrap()
-    };
-    let installed = settle_image(&mut s, &install);
+    let installed = settle_oci_catalog(&mut s, &install);
     let old = &installed["release_ref"];
     let app = &installed["application_ref"];
     let target =
@@ -1015,7 +1177,7 @@ fn retired_release_fences_approved_rollback_and_releases_its_catalog_pin() {
             "memory_max_bytes":33554432,"pids_max":8,"ephemeral_max_bytes":1048576,
         }}),
     );
-    let new = settle_image(&mut s, &stage);
+    let new = settle_oci_catalog(&mut s, &stage);
     let selection = submit(
         &mut s,
         "application.select_release",

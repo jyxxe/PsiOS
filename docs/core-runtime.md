@@ -142,6 +142,7 @@ Core 可选地先向该目标指定的解析器发出 TCP DNS 请求。按端点
 | volume.append | `target, path, offset, data_base64`。偏移为零时排他新建，后续追加要求实际长度等于偏移。每块最多 96 KiB，单文件上限 256 MiB。沿用主体的 Task 输入保留额度。 |
 | volume.read_chunk | `target, path, offset, limit`。取回 Base64 数据、块摘要、下一偏移和 EOF。可以从待激活的恢复卷读取。 |
 | application.stage_release | `target` 指应用，`release` 使用安装参数，省略 volume。依据本机 OCI 摘要生成属于同一应用的清单和不可变 Release，保留当前部署。 |
+| application.stage_artifact_release | `target, reference`。在应用和制品范围内批准新的不可变 Release，继承现有应用的卷绑定。制品保留和来源凭据随版本提交。 |
 | application.select_release | `target, release_ref`。应用停止时经审批切换至选定 Release，生成新部署。选回已有版本使用相同接口。卷数据世代保持连续，应用层数据库迁移须另外协调。 |
 | application.retire_release | `target, release_ref, reason`。经审批退役当前无部署使用的 Release，保留审计记录并释放源制品保留关系。 |
 | application.refresh | 应用 ID 和预期修订。把引擎观测写回 Application 和 RuntimeInstance。进程意外退出时记录 Exited 和 NotReady，并保留现场及数据占用，直到显式停止清理。 |
@@ -254,6 +255,12 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 本机适配器读取 `application/vnd.psios.oci-install.v1+json` 制品。正文是 `{"format":"PsiOSLocalOciInstallV1","install":{...}}`，其中 `install` 使用 `application.install` 的字段，指定已存在的 OCI 镜像配置摘要、绝对入口、资源限制和可选卷版本。`Application.PrepareArtifactInstall` 接受 `reference`、`key`、`delegation_id` 和可选 `deadline_at`，返回可供 `Task.Submit` 使用的请求及具体部署参数。
 
 读取源制品需要 Node 范围的 `artifact.read`，安装委托需要 `application.install_artifact` 且覆盖制品与目标卷或 `profile-local`。Task 准入固定源摘要并创建审批计划。待审批与执行期间保留制品，安装提交时由不可变 Release 接续保留。成功回执关联 Operation、Application、Release、Deployment 和制品来源。目录提交前中断会结算为已知失败并释放 Task 的保留关系。安装得到处于 `Stopped` 的应用，通过已有 `application.start` 启动。[授权及恢复验收](../tests/test_artifact_install.py) · [真实 OCI 验收](../tests/oci.py)
+
+### 从本机制品暂存新版本
+
+`Application.PrepareArtifactRelease` 接受应用的 `target`、确切制品 `reference`、`key`、`delegation_id` 和可选 `deadline_at`。制品使用相同 OCI 声明格式，要求应用名称一致并省略 `volume`。调用者需要 Node 范围的 `artifact.read`，以及同时覆盖应用与制品的 `application.stage_artifact_release` 委托。`Client::prepare_artifact_release` 和 `psiosctl artifact-prepare-release --application app-ref.json --delegation "$delegation" --key upgrade-1 artifact-ref.json` 返回新版本参数、当前选定版本及可提交的 Task 请求。
+
+批准后用真实 OCI 引擎核验本机镜像。新 Release、源制品保留及 `ApplicationArtifactReleaseStage` 凭据原子提交。选定版本通过单独审批的 `application.select_release` 更新。切换和启动前都重新核验版本的制品保留记录及源字节，损坏会阻断执行。[真实镜像升级与回滚验收](../tests/oci.py)
 
 ### 退役本机应用版本
 

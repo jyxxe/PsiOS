@@ -20,8 +20,8 @@
       "id": "V1-GOV-002",
       "document": "docs/00-reading-and-authority.md",
       "line": 26,
-      "heading": "V1-GOV-002｜证据不得跨层推断。** 文档链接检查、Schema 自检和示例验证通过，只证明本包的特定结构条件；不能推出持久性、安全隔离、并发正确性或硬件兼容通过。历史 XeLab 压缩包中的报告是来源作者的记录，不能当成本次执行结果，也不证明最新 Forgejo HEAD 相同。",
-      "summary": "**V1-GOV-002｜证据不得跨层推断。** 文档链接检查、Schema 自检和示例验证通过，只证明本包的特定结构条件；不能推出持久性、安全隔离、并发正确性或硬件兼容通过。历史 XeLab 压缩包中的报告是来源作者的记录，不能当成本次执行结果，也不证明最新 Forgejo HEAD 相同。",
+      "heading": "V1-GOV-002｜证据不得跨层推断。** 文档链接检查、Schema 自检和示例验证通过，只证明本包的特定结构条件；不能推出持久性、安全隔离、并发正确性或硬件兼容通过。历史报告不能作为本次执行证据，也不能替代 PsiOS 当前提交的实际验证。",
+      "summary": "**V1-GOV-002｜证据不得跨层推断。** 文档链接检查、Schema 自检和示例验证通过，只证明本包的特定结构条件；不能推出持久性、安全隔离、并发正确性或硬件兼容通过。历史报告不能作为本次执行证据，也不能替代 PsiOS 当前提交的实际验证。",
       "design_status": "Specified",
       "implementation_status": "NotVerified",
       "planned_test_ids": [
@@ -123,7 +123,7 @@
     {
       "id": "V1-ARCH-001",
       "document": "docs/01-product-and-architecture.md",
-      "line": 49,
+      "line": 53,
       "heading": "V1-ARCH-001｜启动依赖为有向无环图。** Host 的设备、根卷、日志、最小本机认证和救援先就绪；Core 状态引擎与正常 Policy 之后；OCI 与普通控制器其次；模型、Agent、Chat、Workflow、Project、索引及远端观测再启动。服务管理器必须区分启动必需、运行必需、可选增强。图形或模型失败只影响相应能力，不能让节点反复重启整个系统。",
       "summary": "**V1-ARCH-001｜启动依赖为有向无环图。** Host 的设备、根卷、日志、最小本机认证和救援先就绪；Core 状态引擎与正常 Policy 之后；OCI 与普通控制器其次；模型、Agent、Chat、Workflow、Project、索引及远端观测再启动。服务管理器必须区分启动必需、运行必需、可选增强。图形或模型失败只影响相应能力，不能让节点反复重启整个系统。",
       "design_status": "Specified",
@@ -136,7 +136,7 @@
     {
       "id": "V1-ARCH-002",
       "document": "docs/01-product-and-architecture.md",
-      "line": 51,
+      "line": 55,
       "heading": "V1-ARCH-002｜一个字段一个写入权威。** 资源控制器对自己的 `status` 负责，期望状态 `spec` 的权威通过显式转交指定；各域只存其他域的受控引用及带来源修订的缓存投影，不复制第二套可独立修改的事实。源变化通过可靠 outbox/Event 发布，投影失败不能反向覆盖源。",
       "summary": "**V1-ARCH-002｜一个字段一个写入权威。** 资源控制器对自己的 `status` 负责，期望状态 `spec` 的权威通过显式转交指定；各域只存其他域的受控引用及带来源修订的缓存投影，不复制第二套可独立修改的事实。源变化通过可靠 outbox/Event 发布，投影失败不能反向覆盖源。",
       "design_status": "Specified",
@@ -149,7 +149,7 @@
     {
       "id": "V1-ARCH-003",
       "document": "docs/01-product-and-architecture.md",
-      "line": 66,
+      "line": 70,
       "heading": "V1-ARCH-003｜Core 不是所有服务常驻的集合。** Core 是兼容契约和必备基础实现。离线救援使用最小宿主工具；正常管理使用 Core API；协作、模型与增强数据服务按需启用。Helium 的资源目标通过实际进程、内存、镜像、日志、队列和空闲功耗测量确定，不能凭“轻量”给出无证据的 1 GB 或固定磁盘结论。",
       "summary": "**V1-ARCH-003｜Core 不是所有服务常驻的集合。** Core 是兼容契约和必备基础实现。离线救援使用最小宿主工具；正常管理使用 Core API；协作、模型与增强数据服务按需启用。Helium 的资源目标通过实际进程、内存、镜像、日志、队列和空闲功耗测量确定，不能凭“轻量”给出无证据的 1 GB 或固定磁盘结论。",
       "design_status": "Specified",
@@ -162,7 +162,7 @@
     {
       "id": "V1-ARCH-004",
       "document": "docs/01-product-and-architecture.md",
-      "line": 70,
+      "line": 74,
       "heading": "V1-ARCH-004｜服务失效隔离。** 未装 Data Services 返回 `ServiceNotInstalled`；后端不支持操作返回 `UnsupportedCapability`；已装但依赖故障返回 `DependencyUnavailable`。三者不可混成“成功但空列表”。通过能力发现显示服务版本、支持范围、硬限、实测 Profile 和当前可用状态。",
       "summary": "**V1-ARCH-004｜服务失效隔离。** 未装 Data Services 返回 `ServiceNotInstalled`；后端不支持操作返回 `UnsupportedCapability`；已装但依赖故障返回 `DependencyUnavailable`。三者不可混成“成功但空列表”。通过能力发现显示服务版本、支持范围、硬限、实测 Profile 和当前可用状态。",
       "design_status": "Specified",
@@ -175,7 +175,7 @@
     {
       "id": "V1-ARCH-005",
       "document": "docs/01-product-and-architecture.md",
-      "line": 91,
+      "line": 95,
       "heading": "V1-ARCH-005｜复用需逐模块验收。** 旧归档中出现 `psios-*` crate 名不表示已有 PsiOS v1 实现。先确认仓库、完整提交 SHA、license、依赖、外部地址、授权默认值、数据格式、root 权限和测试条件，再决定 reuse/adapt/rewrite/exclude。Project 文件中的压缩包只是可核验来源，不自动替代最新 Forgejo 审计。",
       "summary": "**V1-ARCH-005｜复用需逐模块验收。** 旧归档中出现 `psios-*` crate 名不表示已有 PsiOS v1 实现。先确认仓库、完整提交 SHA、license、依赖、外部地址、授权默认值、数据格式、root 权限和测试条件，再决定 reuse/adapt/rewrite/exclude。Project 文件中的压缩包只是可核验来源，不自动替代最新 Forgejo 审计。",
       "design_status": "Specified",
@@ -638,8 +638,8 @@
       "id": "V1-NET-004",
       "document": "docs/03-host-updates-network-devices.md",
       "line": 82,
-      "heading": "V1-NET-004｜断联不扩权。** 远程服务不可达时本机网络配置、日志和已有获准本地服务可用；涉及在线批准/租约的共享写暂停。跨NAT/代理可选Worker主动连接模式，但API Key只用于引导或规定的受限目的，正式节点访问仍需可轮换身份和明确资源授权；旧XeLab的具体网络拓扑不自动成为PsiOS约束。",
-      "summary": "**V1-NET-004｜断联不扩权。** 远程服务不可达时本机网络配置、日志和已有获准本地服务可用；涉及在线批准/租约的共享写暂停。跨NAT/代理可选Worker主动连接模式，但API Key只用于引导或规定的受限目的，正式节点访问仍需可轮换身份和明确资源授权；旧XeLab的具体网络拓扑不自动成为PsiOS约束。",
+      "heading": "V1-NET-004｜断联不扩权。** 远程服务不可达时本机网络配置、日志和已有获准本地服务可用；涉及在线批准/租约的共享写暂停。跨NAT/代理可选Worker主动连接模式，但API Key只用于引导或规定的受限目的，正式节点访问仍需可轮换身份和明确资源授权；网络拓扑应按 PsiOS 本身的安全模型、场景和验收结果确定。",
+      "summary": "**V1-NET-004｜断联不扩权。** 远程服务不可达时本机网络配置、日志和已有获准本地服务可用；涉及在线批准/租约的共享写暂停。跨NAT/代理可选Worker主动连接模式，但API Key只用于引导或规定的受限目的，正式节点访问仍需可轮换身份和明确资源授权；网络拓扑应按 PsiOS 本身的安全模型、场景和验收结果确定。",
       "design_status": "Specified",
       "implementation_status": "NotVerified",
       "planned_test_ids": [
@@ -1962,6 +1962,186 @@
       "verification_plan_status": "Planned"
     },
     {
+      "id": "V1-SHL-001",
+      "document": "docs/07-applications-packages-gui.md",
+      "line": 256,
+      "heading": "V1-SHL-001：桌面优先的产品定位",
+      "summary": "### V1-SHL-001：桌面优先的产品定位",
+      "design_status": "Specified",
+      "implementation_status": "NotVerified",
+      "planned_test_ids": [
+        "AT-SHL-001",
+        "AT-SHL-012"
+      ],
+      "verification_plan_status": "Planned"
+    },
+    {
+      "id": "V1-SHL-002",
+      "document": "docs/07-applications-packages-gui.md",
+      "line": 262,
+      "heading": "V1-SHL-002：菜单栏、Dock 与应用入口",
+      "summary": "### V1-SHL-002：菜单栏、Dock 与应用入口",
+      "design_status": "Specified",
+      "implementation_status": "NotVerified",
+      "planned_test_ids": [
+        "AT-SHL-001",
+        "AT-SHL-002",
+        "AT-SHL-003"
+      ],
+      "verification_plan_status": "Planned"
+    },
+    {
+      "id": "V1-SHL-003",
+      "document": "docs/07-applications-packages-gui.md",
+      "line": 278,
+      "heading": "V1-SHL-003：多窗口与独立生命周期",
+      "summary": "### V1-SHL-003：多窗口与独立生命周期",
+      "design_status": "Specified",
+      "implementation_status": "NotVerified",
+      "planned_test_ids": [
+        "AT-SHL-002",
+        "AT-SHL-003",
+        "AT-SHL-006",
+        "AT-SHL-011",
+        "AT-SHL-013"
+      ],
+      "verification_plan_status": "Planned"
+    },
+    {
+      "id": "V1-SHL-004",
+      "document": "docs/07-applications-packages-gui.md",
+      "line": 293,
+      "heading": "V1-SHL-004：工作区与目标上下文",
+      "summary": "### V1-SHL-004：工作区与目标上下文",
+      "design_status": "Specified",
+      "implementation_status": "NotVerified",
+      "planned_test_ids": [
+        "AT-SHL-005",
+        "AT-SHL-014"
+      ],
+      "verification_plan_status": "Planned"
+    },
+    {
+      "id": "V1-SHL-005",
+      "document": "docs/07-applications-packages-gui.md",
+      "line": 299,
+      "heading": "V1-SHL-005：布局恢复与多设备",
+      "summary": "### V1-SHL-005：布局恢复与多设备",
+      "design_status": "Specified",
+      "implementation_status": "NotVerified",
+      "planned_test_ids": [
+        "AT-SHL-004",
+        "AT-SHL-005",
+        "AT-SHL-009",
+        "AT-SHL-011",
+        "AT-SHL-014"
+      ],
+      "verification_plan_status": "Planned"
+    },
+    {
+      "id": "V1-SHL-006",
+      "document": "docs/07-applications-packages-gui.md",
+      "line": 307,
+      "heading": "V1-SHL-006：第一方 Web 与图形应用接入",
+      "summary": "### V1-SHL-006：第一方 Web 与图形应用接入",
+      "design_status": "Specified",
+      "implementation_status": "NotVerified",
+      "planned_test_ids": [
+        "AT-SHL-010",
+        "AT-SHL-011",
+        "AT-SHL-012"
+      ],
+      "verification_plan_status": "Planned"
+    },
+    {
+      "id": "V1-SHL-007",
+      "document": "docs/07-applications-packages-gui.md",
+      "line": 319,
+      "heading": "V1-SHL-007：对象协作与 Agent 上下文",
+      "summary": "### V1-SHL-007：对象协作与 Agent 上下文",
+      "design_status": "Specified",
+      "implementation_status": "NotVerified",
+      "planned_test_ids": [
+        "AT-SHL-007",
+        "AT-SHL-008"
+      ],
+      "verification_plan_status": "Planned"
+    },
+    {
+      "id": "V1-SHL-008",
+      "document": "docs/07-applications-packages-gui.md",
+      "line": 327,
+      "heading": "V1-SHL-008：Shell 视图契约与隔离",
+      "summary": "### V1-SHL-008：Shell 视图契约与隔离",
+      "design_status": "Specified",
+      "implementation_status": "NotVerified",
+      "planned_test_ids": [
+        "AT-SHL-003",
+        "AT-SHL-004",
+        "AT-SHL-007",
+        "AT-SHL-009",
+        "AT-SHL-010"
+      ],
+      "verification_plan_status": "Planned"
+    },
+    {
+      "id": "V1-SHL-009",
+      "document": "docs/07-applications-packages-gui.md",
+      "line": 341,
+      "heading": "V1-SHL-009：任务、通知与真实状态",
+      "summary": "### V1-SHL-009：任务、通知与真实状态",
+      "design_status": "Specified",
+      "implementation_status": "NotVerified",
+      "planned_test_ids": [
+        "AT-SHL-006",
+        "AT-SHL-008",
+        "AT-SHL-009"
+      ],
+      "verification_plan_status": "Planned"
+    },
+    {
+      "id": "V1-SHL-010",
+      "document": "docs/07-applications-packages-gui.md",
+      "line": 349,
+      "heading": "V1-SHL-010：一致视觉与资源预算",
+      "summary": "### V1-SHL-010：一致视觉与资源预算",
+      "design_status": "Specified",
+      "implementation_status": "NotVerified",
+      "planned_test_ids": [
+        "AT-SHL-015"
+      ],
+      "verification_plan_status": "Planned"
+    },
+    {
+      "id": "V1-SHL-011",
+      "document": "docs/07-applications-packages-gui.md",
+      "line": 357,
+      "heading": "V1-SHL-011：浏览器、无障碍与窄屏",
+      "summary": "### V1-SHL-011：浏览器、无障碍与窄屏",
+      "design_status": "Specified",
+      "implementation_status": "NotVerified",
+      "planned_test_ids": [
+        "AT-SHL-013",
+        "AT-SHL-014"
+      ],
+      "verification_plan_status": "Planned"
+    },
+    {
+      "id": "V1-SHL-012",
+      "document": "docs/07-applications-packages-gui.md",
+      "line": 365,
+      "heading": "V1-SHL-012：三版一致与阶段交付",
+      "summary": "### V1-SHL-012：三版一致与阶段交付",
+      "design_status": "Specified",
+      "implementation_status": "NotVerified",
+      "planned_test_ids": [
+        "AT-SHL-001",
+        "AT-SHL-012",
+        "AT-SHL-015"
+      ],
+      "verification_plan_status": "Planned"
+    },
+    {
       "id": "V1-TSK-001",
       "document": "docs/08-tasks-events.md",
       "line": 18,
@@ -3193,7 +3373,7 @@
     {
       "id": "V1-PLAN-003",
       "document": "docs/14-roadmap-and-decisions.md",
-      "line": 71,
+      "line": 72,
       "heading": "V1-PLAN-003｜选择必须可反驳。** 25份ADR均为 `Proposed`。其中规定的安全和一致性不变量来自正文；候选技术满足不变量的证据仍待真实实现。比较必须有可重复的环境、指标、失败注入、退出迁移成本、许可证和维护负担，不能用历史benchmark中的单个漂亮数字冻结路线。",
       "summary": "**V1-PLAN-003｜选择必须可反驳。** 25份ADR均为 `Proposed`。其中规定的安全和一致性不变量来自正文；候选技术满足不变量的证据仍待真实实现。比较必须有可重复的环境、指标、失败注入、退出迁移成本、许可证和维护负担，不能用历史benchmark中的单个漂亮数字冻结路线。",
       "design_status": "Specified",
@@ -3206,7 +3386,7 @@
     {
       "id": "V1-PLAN-004",
       "document": "docs/14-roadmap-and-decisions.md",
-      "line": 87,
+      "line": 88,
       "heading": "V1-PLAN-004｜失败有具体后果。** 无法证明旧执行端被fence时停止资源重分配；无法证明安全状态新鲜时保持隔离；无法核实外部效果时停止重放；无法实现TableFS所需持久性时使用已验证的普通文件系统+索引；图形后端无法限制输入范围时降为只读或拒绝该Profile；第三方协议缺取消/幂等时不伪造强能力。",
       "summary": "**V1-PLAN-004｜失败有具体后果。** 无法证明旧执行端被fence时停止资源重分配；无法证明安全状态新鲜时保持隔离；无法核实外部效果时停止重放；无法实现TableFS所需持久性时使用已验证的普通文件系统+索引；图形后端无法限制输入范围时降为只读或拒绝该Profile；第三方协议缺取消/幂等时不伪造强能力。",
       "design_status": "Specified",

@@ -55,6 +55,7 @@ def normalize_tables():
 
 def regenerate_indexes():
     tests=strict_load(ROOT/'registries/test-cases.json')
+    work_count=len(strict_load(ROOT/'registries/work-items.json')['work_items'])
     coverage={}
     for t in tests:
         for q in t['requirement_ids']:coverage.setdefault(q,[]).append(t['id'])
@@ -104,10 +105,10 @@ def regenerate_indexes():
     for r in references:
         out.append(f"| {r['id']} | [{md_cell(r['title'])}]({r['url']}) | {md_cell('；'.join(r['claims']))} |")
     out += ['\n## 原始输入与代码边界\n',
-            '[规划材料清单](source-inventory.json) · [设计稿归档](archive/README.md)。\n',
-            '此包未获取当前Forgejo HEAD，未安装或执行归档代码。保存源文件是为了可追溯，不把历史文件的计划、测试数字或脚本自动提升为当前权威。\n']
+            '[原始输入清单](source-inventory.json) · [历史源说明](archive/README.md)。\n',
+            '规划材料用于记录设计变更；实现状态以 PsiOS 源码、构建制品和实际测试为准。\n']
     write('sources/README.md','\n'.join(out))
-    write('registries/README.md', '''# 机器登记表
+    write('registries/README.md', f'''# 机器登记表
 
 所有登记表的状态均按00章区分。当前规范定位来自docs，不允许手改requirements.json创造新的规范。
 
@@ -117,7 +118,7 @@ def regenerate_indexes():
 | [findings.json](findings.json) | 本次逐项缺陷与修正证据；只关闭规范问题，不自动关闭工程风险 |
 | [legacy-requirements.json](legacy-requirements.json) | 所有旧要求/测试的原句、来源、范围展开及新去向；由migration工具生成 |
 | [adrs.json](adrs.json) | 25份待决ADR、候选、原范围与门槛；接受须连同正文、实现与证据修改 |
-| [work-items.json](work-items.json) | 26个稳定工程工作项、依赖和旧编号来源；未创建外部工单 |
+| [work-items.json](work-items.json) | {work_count}个稳定工程工作项、依赖和旧编号来源；未创建外部工单 |
 | [test-cases.json](test-cases.json) | 产品验证计划、夹具、注入、预期及证据；本版全部NotRun |
 
 外部参考资料另在[sources/references.json](../sources/references.json)，Schema清单在[schemas/catalog.json](../schemas/catalog.json)，样例清单在[examples/manifest.json](../examples/manifest.json)。不能将不同表的同名status跨层比较。
@@ -127,6 +128,7 @@ def regenerate_indexes():
 
 def create_readme(stats):
     reqs,tests,findings,refs,sev,kinds=stats
+    work_count=len(strict_load(ROOT/'registries/work-items.json')['work_items'])
     cat=strict_load(ROOT/'schemas/catalog.json')['contracts']
     ex=strict_load(ROOT/'examples/manifest.json')['examples']
     legacy=strict_load(ROOT/'registries/legacy-requirements.json')['summary']
@@ -136,6 +138,7 @@ def create_readme(stats):
            '**文档版本1.0.0 · 2026-11-22 · 设计基线，待工程验证**\n',
            '本包整合v0.1～v0.6、Project导入材料、完整Space规划与风险台账，统一当前规则并保留历史来源。推荐先用[离线阅读器](html/index.html)浏览，或阅读[完整Markdown合订本](PsiOS-v1-complete.md)。精确文件目录见[DIRECTORY.md](DIRECTORY.md)。\n',
            'v1是文档版本；当前没有宣称软件已发布、最新仓库已审计、硬件已通过或技术选型已经批准。\n',
+           '当前 Shell 方向为类似 macOS 的浏览器桌面；规范见[第 07 章第 5 节](docs/07-applications-packages-gui.md#5-psios-shell浏览器桌面工作环境)。新增桌面能力尚待实现与验收，修订历史见[CHANGELOG](CHANGELOG.md)。\n',
            '## 本包包含什么\n',
            '| 内容 | 实际数量/范围 |\n|---|---|',
            f'| 独立规范章节 | {len(docs)}章，含架构、共同合同、安全、恢复、存储、应用、Agent、Chat、Workflow、集群、发布、路线和词典 |',
@@ -144,9 +147,9 @@ def create_readme(stats):
            f'| 机器合同 | {len(cat)}份JSON Schema；关键请求严格拒绝未知字段 |',
            f'| 正反样例 | {sum(x["expected"]=="Valid" for x in ex)}个正例、{sum(x["expected"]=="Invalid" for x in ex)}个反例，另有摘要向量 |',
            f'| 产品验证计划 | {len(tests)}个具体场景，全部NotRun；文档/治理与真实运行验证区分 |',
-           '| ADR / 工作项 / 操作手册 | 25份Proposed ADR、26个WI工作项、6份可执行顺序明确的runbook |',
+           f'| ADR / 工作项 / 操作手册 | 25份Proposed ADR、{work_count}个WI工作项、6份可执行顺序明确的runbook |',
            f'| 历史迁移 | {legacy["unique_requirement_ids"]}个旧要求、{legacy["unique_test_ids"]}个旧测试均有文档去向 |',
-           f'| 规划资料 | {14}份设计文档与页面元数据；{len(refs)}个公开技术规范引用 |',
+           '| 规划资料 | PsiOS 设计草案、Space 规划及验收记录；公开技术规范另见参考资料清单 |',
            '\n映射率只表示有明确去向，Schema检查只验证结构和列明的局部关系；两者都不能当作产品通过率。\n',
            '## 建议阅读顺序\n',
            '1. **确定边界：** 00阅读与权威 → 01产品架构 → 02共同合同。\n',
@@ -176,9 +179,9 @@ def create_readme(stats):
     write('VERSION','1.0.0\n')
     write('NOTICE.md', '''# 来源与使用说明
 
-本包是 PsiOS 项目的设计文档交付，不是安装介质或已验证软件发行版。各功能、实现、许可证和发布资格必须以 PsiOS 自身代码与验收结果为准。
+本包是PsiOS项目的设计文档交付，不是安装介质或已验证软件发行版。项目规划文件与技术规范保留可追溯修订信息；所有依赖遵循各自许可证及其适用范围。本包不授予超出许可证的任何权利。
 
-设计资料、技术候选和任务记录不等同于软件功能验证。实际复用需按ADR-17检查确切源码、许可证、依赖及安全边界。
+设计资料、技术候选和任务记录不等同于软件功能验证。组件准入需按 ADR-17 核验许可证、依赖、安全边界和可维护性。
 
 新文档中的架构与接口是设计要求；具体代码许可、发布签名、支持范围、性能和维护期限须由项目治理另行确定。示例中的ID、摘要引用、时间、许可和预算均为虚构夹具。
 ''')
@@ -213,8 +216,12 @@ python tools/build_package.py --zip ../PsiOS-v1.0.0-docs-2026-11-22.zip
 ## 实际检查范围
 
 严格JSON读取、Schema语法/本地ref、正反例与拒绝层次、无损计数范围、夹具摘要向量、局部关系/依赖图、规范ID、链接、注册表定位、产品计划仍NotRun、原文定义切片与归档SHA、最终交付清单。未覆盖的签名真实性、分布式并发、真实fencing、断电、硬件、协议互通和性能在报告中明确列为NotProven。
+
+历史映射中的原文切片对应 2026-11-22 封存交付。仓库检出会离线读取并校验同级 releases 目录的五个分段。单独分发修订版时，使用 `python tools/validate_package.py --original-delivery /path/to/PsiOS-v1.0.0-docs-2026-11-22.zip` 复核历史切片。当前分章和来源副本分别按当前清单核验。
 ''')
-    write('CHANGELOG.md', f'''# v1.0.0 修订说明
+    # Revision notes are authored history, not a derived summary to overwrite.
+    if not (ROOT/'CHANGELOG.md').exists():
+        write('CHANGELOG.md', f'''# v1.0.0 修订说明
 
 日期：{DATE}。本版将多份递增草案和增量台账整合成单一设计基线。
 
@@ -223,7 +230,7 @@ python tools/build_package.py --zip ../PsiOS-v1.0.0-docs-2026-11-22.zip
 - 整理为17章、{len(reqs)}条规范；字段、状态、权限、引用、恢复和失败语义交叉对齐。
 - 登记{len(findings)}项独立错误/歧义/缺口，含原文依据、修正位置和验证方法。
 - 补{len(cat)}份Schema、{len(ex)}个正反样例及5组摘要向量；明确文档校验不是产品测试。
-- 为25个ADR补候选、验证、否决、降级和复审；为26项工程任务确定依赖和验收输出。
+- 为25个ADR补候选、验证、否决、降级和复审；为{work_count}项工程任务确定依赖和验收输出。
 - 提供6份恢复/运维手册和{len(tests)}个具体待运行验收计划。
 - 保留{legacy['unique_requirement_ids']}个旧要求和{legacy['unique_test_ids']}个旧验收编号的去向，原源逐字节存档。
 

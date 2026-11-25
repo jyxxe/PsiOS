@@ -12,6 +12,7 @@ use std::{collections::BTreeMap, process::Command};
 pub(crate) mod artifact_install;
 mod cgroup;
 pub(crate) mod inventory;
+pub(crate) mod publisher;
 pub(crate) mod release_retirement;
 pub(crate) mod restart;
 
@@ -145,7 +146,7 @@ pub fn profiles(db: &Db<'_>) -> Result<()> {
     }
     Ok(())
 }
-pub fn launch_spec(db: &Db<'_>, app: &Doc) -> Result<Install> {
+pub fn launch_spec(db: &Db<'_>, app: &Doc, authorizing_start: bool) -> Result<Install> {
     let deployment = db.resolve(&app.spec["deployment_ref"])?;
     require(
         deployment.kind == "Deployment"
@@ -168,6 +169,9 @@ pub fn launch_spec(db: &Db<'_>, app: &Doc) -> Result<Install> {
     )?;
     release_retirement::available(db, &release)?;
     artifact_install::check_release_source(db, &release)?;
+    if authorizing_start {
+        publisher::check_launch(db, &release, &spec)?;
+    }
     let r = &spec.body["resources"];
     let count = |k: &str| {
         r[k].as_str()
@@ -189,6 +193,25 @@ pub fn launch_spec(db: &Db<'_>, app: &Doc) -> Result<Install> {
     validate(&launch)?;
     Ok(launch)
 }
+pub(crate) fn check_selected_publisher(db: &Db<'_>, app: &Doc) -> Result<()> {
+    let release = db.resolve(&app.spec["release_ref"])?;
+    let spec = db.resolve(&release.body["release_spec_ref"])?;
+    publisher::check_launch(db, &release, &spec)
+}
+
+pub(crate) fn check_release_selection(db: &Db<'_>, app: &Doc, reference: &Value) -> Result<()> {
+    let release = release_retirement::associated(db, app, reference)?;
+    release_retirement::available(db, &release)?;
+    artifact_install::check_release_source(db, &release)?;
+    let spec = db.resolve(&release.body["release_spec_ref"])?;
+    publisher::check_launch(db, &release, &spec)?;
+    require(
+        app.body["lifecycle"] == "Stopped",
+        "PreconditionFailed",
+        "release selection requires a stopped application and its own immutable release",
+    )
+}
+
 fn stage_precondition(app: &Doc, release: &Install) -> Result<()> {
     require(
         app.body["lifecycle"] != "Uninstalled" && app.spec["name"] == release.name,
@@ -202,16 +225,7 @@ pub fn preflight(db: &Db<'_>, w: &Work) -> Result<()> {
         Action::Stage { ref release, .. } => stage_precondition(&w.target, release)?,
         Action::Select {
             ref release_ref, ..
-        } => {
-            let release = release_retirement::associated(db, &w.target, release_ref)?;
-            release_retirement::available(db, &release)?;
-            artifact_install::check_release_source(db, &release)?;
-            require(
-                w.target.body["lifecycle"] == "Stopped",
-                "PreconditionFailed",
-                "release selection requires a stopped application and its own immutable release",
-            )?;
-        }
+        } => check_release_selection(db, &w.target, release_ref)?,
         Action::Start(_) | Action::Uninstall(_) => require(
             w.target.body["lifecycle"] == "Stopped",
             "PreconditionFailed",
@@ -349,6 +363,9 @@ impl Engine<'_> {
         let Some(engine) = w.target.body["engine_id"].as_str() else {
             return Ok(false);
         };
+        self.absent(w, cid, engine)
+    }
+    fn absent(&self, w: &Work, cid: &str, engine: &str) -> Result<bool> {
         require(
             self.identity()? == engine,
             "PreconditionFailed",
@@ -380,6 +397,17 @@ impl Engine<'_> {
             "OCI engine changed during observation",
         )?;
         Ok(true)
+    }
+    fn discard_unstarted(&self, w: &Work, cid: &str, engine: &str) -> Result<bool> {
+        if self.identity()? != engine {
+            return Ok(false);
+        }
+        let created = self.managed(w, cid, &w.op.id)?;
+        if created["State"]["Status"] != "created" || created["State"]["Running"] != false {
+            return Ok(false);
+        }
+        self.command(&["container", "rm", cid].map(String::from), true)?;
+        self.absent(w, cid, engine)
     }
     fn managed(&self, w: &Work, id: &str, start_op: &str) -> Result<Value> {
         if let Some(engine) = w.target.body["engine_id"].as_str() {
@@ -518,12 +546,17 @@ pub fn start(w: &Work, checkpoint: impl FnOnce(&str, &str) -> Result<()>) -> Res
         "OutcomeUnknown",
         "engine changed after container creation",
     )?;
-    checkpoint(&engine.id, &cid).map_err(|_| {
-        err(
+    if let Err(denial) = checkpoint(&engine.id, &cid) {
+        if denial.0.code == "PermissionDenied"
+            && e.discard_unstarted(w, &cid, &engine.id).unwrap_or(false)
+        {
+            return Err(denial);
+        }
+        return Err(err(
             "OutcomeUnknown",
             "created container could not be authorized and checkpointed before start",
-        )
-    })?;
+        ));
+    }
     e.command(&["start".into(), cid.clone()], true)
         .map_err(|_| err("OutcomeUnknown", "created instance start unconfirmed"))?;
     let observed = e
@@ -777,23 +810,48 @@ pub fn perform(w: &Work) -> Result<Value> {
 }
 fn record_release(
     db: &Db<'_>,
-    operation: &str,
+    work: &Work,
     app: &str,
-    owner: &str,
     has_volume: bool,
     s: &Install,
     r: &Value,
 ) -> Result<Doc> {
+    let owner = if work.target.kind == "Application" {
+        &work.target.owner
+    } else {
+        &work.task.owner
+    };
     let release = id("release");
     let specid = id("release-spec");
     let profile = db.get("oci-local")?.reference();
-    let publisher = db.get(owner)?.reference();
     let image = db.record(
         "OCIImage",
         owner,
         json!({"config_digest": s.image_id, "inspection": r, "source": "local-engine"}),
     )?;
-    let admission=db.record("AdmissionRecord",owner,json!({"operation": operation, "source_trust": "UserSuppliedUnverified", "scope": "local-image-id"}))?.reference();
+    let mut sources = vec![image.reference()];
+    let (publisher, source_trust, admission) =
+        match artifact_install::publisher_verification(db, work)? {
+            Some(signer) => {
+                sources.push(signer.artifact_ref);
+                (
+                    signer.publisher_ref,
+                    "PublisherVerified",
+                    signer.evidence_ref,
+                )
+            }
+            None => (
+                db.get(owner)?.reference(),
+                "UserSuppliedUnverified",
+                db.record(
+                    "AdmissionRecord",
+                    owner,
+                    json!({"operation":work.op.id,
+                "source_trust":"UserSuppliedUnverified","scope":"local-image-id"}),
+                )?
+                .reference(),
+            ),
+        };
     let license=db.record("LicenseMaterial",owner,json!({"declared_by": owner, "expression": s.license_expression, "verification": "Unverified"}))?.reference();
     let build = db
         .record(
@@ -854,10 +912,10 @@ fn record_release(
             "io_profile_ref": db.get("oci-io")?.reference()
         },
         "provenance": {
-            "source_refs": [image.reference()],
+            "source_refs": sources,
             "license_expression": s.license_expression,
             "license_material_ref": license,
-            "source_trust": "UserSuppliedUnverified",
+            "source_trust": source_trust,
             "trust_evidence_or_admission_policy_ref": admission,
             "build_record_ref": build,
             "sbom_ref": sbom
@@ -894,7 +952,7 @@ fn record_release(
 fn install(db: &Db<'_>, w: &Work, s: &Install, r: &Value) -> Result<Value> {
     let owner = &w.task.owner;
     let app = format!("app-{}", w.op.id);
-    let release = record_release(db, &w.op.id, &app, owner, w.volume.is_some(), s, r)?;
+    let release = record_release(db, w, &app, w.volume.is_some(), s, r)?;
     let deploy_spec = json!({
         "application_id": app,
         "release_ref": release.reference(),
@@ -1020,9 +1078,8 @@ fn artifact_spec(work: &Work) -> Result<&Install> {
 fn stage(db: &Db<'_>, work: &Work, release: &Install, inspection: &Value) -> Result<Value> {
     let staged = record_release(
         db,
-        &work.op.id,
+        work,
         &work.target.id,
-        &work.target.owner,
         work.target.spec["volume_id"].is_string(),
         release,
         inspection,

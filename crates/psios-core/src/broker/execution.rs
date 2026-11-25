@@ -363,6 +363,7 @@ pub fn finish(db: &Db<'_>, w: &Work, result: Result<Value>) -> Result<()> {
         || w.run.body["recovery_incarnation"] != db.incarnation
     {
         let receipt = match result {
+            Ok(_) if matches!(w.action, Action::InspectProcess(_)) => json!({"code":"Fenced"}),
             Ok(value) => json!({"receipt": value}),
             Err(e) => json!({"code": e.0.code}),
         };
@@ -385,12 +386,7 @@ pub fn finish(db: &Db<'_>, w: &Work, result: Result<Value>) -> Result<()> {
         return Ok(());
     }
     let result = result.and_then(|receipt| {
-        if matches!(
-            w.action,
-            Action::VerifyVolumeFile(_) | Action::InspectFileRename(_)
-        ) {
-            w.check_streaming(db)?;
-        }
+        w.check_result_publication(db)?;
         artifact::capacity::check_result(db, &t, &receipt)?;
         Ok(receipt)
     });

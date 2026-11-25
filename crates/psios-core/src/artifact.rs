@@ -214,6 +214,19 @@ pub(crate) fn checkpoint_bytes(
     Ok(bytes)
 }
 
+pub(crate) fn verify_raw_bytes(conn: &Connection, artifact: &Doc, max_bytes: usize) -> Result<()> {
+    retention::require_content(conn, artifact)?;
+    let manifest = Manifest::read(artifact)?
+        .filter(|_| is_raw(artifact))
+        .ok_or_else(|| err("RecoveryRequired", "invalid opaque artifact manifest"))?;
+    require(
+        manifest.size <= max_bytes,
+        "QuotaExceeded",
+        "opaque artifact exceeds verification limit",
+    )?;
+    manifest.verify(conn)
+}
+
 pub fn page(db: &Db<'_>, artifact: &Doc, offset: usize, length: usize) -> Result<Value> {
     retention::require_content(db.c, artifact)?;
     let page_end = |size: usize| -> Result<usize> {

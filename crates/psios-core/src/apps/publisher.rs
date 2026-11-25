@@ -125,7 +125,7 @@ pub(super) fn message(artifact: &Doc) -> Vec<u8> {
     )
 }
 
-fn signature(
+pub(super) fn signature(
     conn: &Connection,
     artifact: &Doc,
     proof: &OciPublisherSignature,
@@ -138,8 +138,7 @@ fn signature(
     )?;
     let publisher = resolve(conn, &key.body["publisher_ref"])?;
     require(
-        crate::artifact::is_raw(artifact)
-            && artifact.spec["declared_media_type"] == super::artifact_install::MEDIA
+        super::artifact_install::is_declaration(artifact)
             && key.body["lifecycle"] == "Active"
             && key.spec["signature_domain"] == DOMAIN
             && key.spec["algorithm"] == "Ed25519"

@@ -1,4 +1,5 @@
 //! Adapt immutable local OCI declarations into the application catalog.
+use super::release_archive;
 use crate::{
     Result, artifact, broker,
     db::{Db, Doc, find, resolve, row},
@@ -16,7 +17,9 @@ pub(crate) const STAGE_FORMAT: u32 = super::release_retirement::FORMAT + 1;
 pub(crate) const STAGE_SCHEMA: &str = include_str!("artifact_stage_release.sql");
 pub(crate) const STAGE_TOOL: &str = "application.stage_artifact_release";
 pub(super) const MEDIA: &str = "application/vnd.psios.oci-install.v1+json";
+pub(super) const MEDIA_V2: &str = "application/vnd.psios.oci-install.v2+json";
 const DESCRIPTOR: &str = "PsiOSLocalOciInstallV1";
+const ARCHIVED_DESCRIPTOR: &str = "PsiOSLocalOciInstallV2";
 const MAX_DESCRIPTOR: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -36,9 +39,22 @@ pub struct StageRequest {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Descriptor {
+struct LegacyDescriptor {
     format: String,
     install: host::Install,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArchivedDescriptor {
+    format: String,
+    install: host::Install,
+    image_archive_ref: ResourceRef,
+}
+
+pub(super) struct Descriptor {
+    pub install: host::Install,
+    pub archive: Option<ResourceRef>,
 }
 
 #[derive(Deserialize)]
@@ -57,7 +73,7 @@ pub(crate) fn source(db: &Db<'_>, actor: &str, reference: &ResourceRef) -> Resul
     let doc = db.resolve(&json!(reference))?;
     policy::owned(actor, &doc)?;
     require(
-        artifact::is_raw(&doc) && doc.spec["declared_media_type"] == MEDIA,
+        is_declaration(&doc),
         "UnsupportedCapability",
         "expected a local OCI installation declaration artifact",
     )?;
@@ -65,16 +81,41 @@ pub(crate) fn source(db: &Db<'_>, actor: &str, reference: &ResourceRef) -> Resul
     Ok(doc)
 }
 
-fn read_descriptor(db: &Db<'_>, source: &Doc) -> Result<host::Install> {
-    let bytes = artifact::checkpoint_bytes(db.c, source, MAX_DESCRIPTOR)?;
-    let descriptor: Descriptor = decode(&parse(&bytes)?)?;
+pub(super) fn is_declaration(doc: &Doc) -> bool {
+    artifact::is_raw(doc)
+        && matches!(
+            doc.spec["declared_media_type"].as_str(),
+            Some(MEDIA | MEDIA_V2)
+        )
+}
+
+pub(super) fn read_descriptor(conn: &Connection, source: &Doc) -> Result<Descriptor> {
     require(
-        descriptor.format == DESCRIPTOR,
+        is_declaration(source),
         "UnsupportedCapability",
         "unsupported local OCI installation declaration format",
     )?;
-    super::validate(&descriptor.install)?;
-    Ok(descriptor.install)
+    let bytes = artifact::checkpoint_bytes(conn, source, MAX_DESCRIPTOR)?;
+    let value = parse(&bytes)?;
+    let (format, expected, install, archive) = if source.spec["declared_media_type"] == MEDIA_V2 {
+        let descriptor: ArchivedDescriptor = decode(&value)?;
+        (
+            descriptor.format,
+            ARCHIVED_DESCRIPTOR,
+            descriptor.install,
+            Some(descriptor.image_archive_ref),
+        )
+    } else {
+        let descriptor: LegacyDescriptor = decode(&value)?;
+        (descriptor.format, DESCRIPTOR, descriptor.install, None)
+    };
+    require(
+        format == expected,
+        "UnsupportedCapability",
+        "OCI declaration does not match its media profile",
+    )?;
+    super::validate(&install)?;
+    Ok(Descriptor { install, archive })
 }
 
 pub(crate) fn specification(
@@ -82,7 +123,7 @@ pub(crate) fn specification(
     actor: &str,
     reference: &ResourceRef,
 ) -> Result<host::Install> {
-    read_descriptor(db, &source(db, actor, reference)?)
+    Ok(read_descriptor(db.c, &source(db, actor, reference)?)?.install)
 }
 
 pub(crate) fn stage_source(
@@ -92,7 +133,7 @@ pub(crate) fn stage_source(
     target: &Doc,
 ) -> Result<Doc> {
     let source = source(db, actor, &input.reference)?;
-    let release = read_descriptor(db, &source)?;
+    let release = read_descriptor(db.c, &source)?.install;
     require(
         release.volume.is_none(),
         "InvalidArgument",
@@ -104,14 +145,30 @@ pub(crate) fn stage_source(
 
 pub(crate) fn add_source_audience(
     db: &Db<'_>,
+    actor: &str,
+    delegation: &Value,
     source: &Doc,
     proof: Option<&OciPublisherSignature>,
     audience: &mut Vec<Value>,
 ) -> Result<()> {
+    let descriptor = read_descriptor(db.c, source)?;
+    require(
+        descriptor.archive.is_none() || proof.is_some(),
+        "PermissionDenied",
+        "archived OCI declarations require a publisher signature",
+    )?;
     audience.push(source.reference());
     if let Some(signature) = proof {
         let (key, _) = super::publisher::check(db, source, signature)?;
         audience.push(key.reference());
+    }
+    if let Some(reference) = descriptor.archive {
+        policy::tool_scope(db, delegation, &reference.resource_id)?;
+        let artifact = db.resolve(&json!(reference))?;
+        policy::owned(actor, &artifact)?;
+        let archive = release_archive::read(db.c, artifact, &descriptor.install.image_id)?;
+        archive.check_content(db.c)?;
+        audience.push(archive.artifact.reference());
     }
     Ok(())
 }
@@ -150,6 +207,9 @@ pub(crate) fn prepare(db: &Db<'_>, actor: &str, params: &Value, tool: &str) -> R
     )?;
     let mut response =
         json!({"request":request,"source_artifact_ref":p.reference,"resource_refs":refs});
+    if let Some(archive) = refs.get(release_archive::PLAN_POSITION) {
+        response["image_archive_ref"] = archive.clone();
+    }
     if let Some(signature) = &p.signature {
         let source = source(db, actor, &p.reference)?;
         let (key, publisher) = super::publisher::check(db, &source, signature)?;
@@ -172,7 +232,12 @@ pub(crate) fn prepare(db: &Db<'_>, actor: &str, params: &Value, tool: &str) -> R
     Ok(response)
 }
 
-pub(crate) fn acquire(db: &Db<'_>, task: &Doc, action: &host::Action) -> Result<()> {
+pub(crate) fn acquire(
+    db: &Db<'_>,
+    task: &Doc,
+    action: &host::Action,
+    audience: &[Value],
+) -> Result<()> {
     let reference = match action {
         host::Action::InstallArtifact(input) => Some(&input.reference),
         host::Action::StageArtifactRelease(input) => Some(&input.reference),
@@ -183,6 +248,9 @@ pub(crate) fn acquire(db: &Db<'_>, task: &Doc, action: &host::Action) -> Result<
             "INSERT INTO application_artifact_pins(artifact,holder,kind) VALUES(?1,?2,'Task')",
             params![reference.resource_id, task.id],
         )?;
+        if let Some(archive) = audience.get(release_archive::PLAN_POSITION) {
+            release_archive::pin_task(db, &task.id, archive)?;
+        }
     }
     Ok(())
 }
@@ -192,27 +260,32 @@ pub(crate) fn release(db: &Db<'_>, task: &str) -> Result<()> {
         "DELETE FROM application_artifact_pins WHERE kind='Task' AND holder=?1",
         [task],
     )?;
+    release_archive::unpin(db, "Task", task)?;
     Ok(())
 }
 
 pub(crate) fn pinned(db: &Db<'_>, artifact: &str) -> Result<bool> {
     Ok(db.c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM application_artifact_pins WHERE artifact=?1)",
+        "SELECT EXISTS(SELECT 1 FROM application_artifact_pins WHERE artifact=?1)
+             OR EXISTS(SELECT 1 FROM application_image_archive_pins WHERE artifact=?1)",
         [artifact],
         |r| r.get(0),
     )?)
 }
 
-pub(super) fn release_source(conn: &Connection, release: &Doc) -> Result<Option<Doc>> {
-    let evidence = conn
+pub(super) fn release_evidence(conn: &Connection, release: &Doc) -> Result<Option<Doc>> {
+    Ok(conn
         .query_row(
             "SELECT * FROM versions WHERE kind IN ('ApplicationArtifactInstallation','ApplicationArtifactReleaseStage')
              AND rev=1 AND spec->>'release_id'=?1",
             [&release.id],
             row,
         )
-        .optional()?;
-    let Some(evidence) = evidence else {
+        .optional()?)
+}
+
+pub(super) fn release_source(conn: &Connection, release: &Doc) -> Result<Option<Doc>> {
+    let Some(evidence) = release_evidence(conn, release)? else {
         return Ok(None);
     };
     let reference = &evidence.body["source_artifact_ref"];
@@ -281,8 +354,22 @@ fn pinned_source(conn: &Connection, release: &Doc) -> Result<Option<Doc>> {
 }
 
 pub(super) fn check_release_source(db: &Db<'_>, release: &Doc) -> Result<()> {
-    if let Some(source) = pinned_source(db.c, release)? {
-        artifact::checkpoint_bytes(db.c, &source, MAX_DESCRIPTOR)?;
+    let source = pinned_source(db.c, release)?;
+    let binding = release_archive::check_release_pin(db.c, release, source.as_ref())?;
+    if let Some(source) = source {
+        let descriptor = read_descriptor(db.c, &source)?;
+        require(
+            descriptor
+                .archive
+                .as_ref()
+                .map(|reference| json!(reference))
+                == binding.as_ref().map(|archive| archive.artifact.reference()),
+            "RecoveryRequired",
+            "signed declaration disagrees with the retained OCI archive",
+        )?;
+    }
+    if let Some(archive) = binding {
+        archive.check_content(db.c)?;
     }
     Ok(())
 }
@@ -301,6 +388,27 @@ pub(super) fn publisher_verification(
     };
     let source = source(db, &work.task.owner, reference)?;
     super::publisher::record(db, &work.task.owner, &work.op.id, &source, signature).map(Some)
+}
+
+pub(super) fn work_archive(
+    db: &Db<'_>,
+    work: &host::Work,
+) -> Result<Option<release_archive::Archive>> {
+    let reference = match &work.action {
+        host::Action::InstallArtifact(input) => &input.reference,
+        host::Action::StageArtifactRelease(input) => &input.reference,
+        _ => return Ok(None),
+    };
+    let source = source(db, &work.task.owner, reference)?;
+    let descriptor = read_descriptor(db.c, &source)?;
+    let archive = descriptor
+        .archive
+        .map(|reference| {
+            release_archive::resolve(db.c, &json!(reference), &descriptor.install.image_id)
+        })
+        .transpose()?;
+    release_archive::check_pin(db.c, "Task", &work.task.id, archive.as_ref())?;
+    Ok(archive)
 }
 
 pub(super) fn drop_release_pin(db: &Db<'_>, release: &Doc) -> Result<Option<Value>> {
@@ -421,6 +529,11 @@ pub(super) fn retain(
     let mut result = json!({"application_ref":application.reference(),"release_ref":release.reference(),
         "source_artifact_ref":reference,
         "operation_id":work.op.id});
+    if let Some(archive) = work_archive(db, work)? {
+        release_archive::pin_release(db, &work.task.id, &release.id, &archive.artifact.id)?;
+        result["image_archive_ref"] = archive.artifact.reference();
+        result["image_capture_ref"] = archive.proof.reference();
+    }
     if let Some(deployment) = deployment {
         result["deployment_ref"] = deployment.reference();
     }

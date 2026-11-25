@@ -78,6 +78,10 @@ class ReceiptBarrier(socketserver.ThreadingUnixStreamServer):
         self.release = threading.Event()
         super().__init__(str(path), Relay)
 
+    def confirm(self, request):
+        self.confirmed.set()
+        return self.release.wait(20) and self.forward
+
 
 class Relay(socketserver.BaseRequestHandler):
     def handle(self):
@@ -99,8 +103,7 @@ class Relay(socketserver.BaseRequestHandler):
                             request_tail = (request_tail + data)[-8192:]
                             matched |= server.match_request(request_tail)
                         elif matched and not held and server.status in data:
-                            server.confirmed.set()
-                            if not server.release.wait(20) or not server.forward:
+                            if not server.confirm(request_tail):
                                 return
                             held = True
                         event.data.sendall(data)

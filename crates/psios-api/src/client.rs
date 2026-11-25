@@ -61,6 +61,29 @@ pub struct TaskOutputRequirement {
     pub task_id: String,
     pub digest: String,
 }
+
+/// Detached Ed25519 signature for a local OCI declaration.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OciPublisherSignature {
+    pub key_ref: ResourceRef,
+    pub signature_base64: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum ArtifactPublisherKeyLifecycle {
+    Active,
+    Revoked,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactPublisherKeyRegistration {
+    pub reference: ResourceRef,
+    pub lifecycle: ArtifactPublisherKeyLifecycle,
+    pub fingerprint: String,
+}
+
 impl Client {
     pub fn new(socket: impl AsRef<Path>, token: impl Into<String>) -> Self {
         Self {
@@ -238,6 +261,53 @@ impl Client {
         )
     }
 
+    /// Register raw Ed25519 public key bytes encoded as standard Base64 for a publisher principal.
+    pub fn register_artifact_publisher_key(
+        &self,
+        principal_id: &str,
+        public_key_base64: &str,
+    ) -> ApiResult<ArtifactPublisherKeyRegistration> {
+        let result = self.call(
+            "Artifact.PublisherKey.Register",
+            json!({"principal_id":principal_id,"public_key_base64":public_key_base64}),
+        )?;
+        serde_json::from_value(result)
+            .map_err(|_| invalid("invalid artifact publisher key registration response"))
+    }
+
+    /// Revoke the current revision of a local publisher key.
+    pub fn revoke_artifact_publisher_key(
+        &self,
+        id: &str,
+        expected_resource_version: &str,
+        reason: &str,
+    ) -> ApiResult<ResourceRef> {
+        let result = self.call(
+            "Artifact.PublisherKey.Revoke",
+            json!({"id":id,"expected_resource_version":expected_resource_version,"reason":reason}),
+        )?;
+        serde_json::from_value(result)
+            .map_err(|_| invalid("invalid artifact publisher key revocation response"))
+    }
+
+    /// Prepare an approval-bound local OCI installation from an exact declaration.
+    pub fn prepare_artifact_install(
+        &self,
+        artifact: &ResourceRef,
+        key: &str,
+        delegation_id: &str,
+        deadline_at: Option<&str>,
+        signature: Option<&OciPublisherSignature>,
+    ) -> ApiResult<Value> {
+        let mut params = json!({
+            "reference":artifact,"key":key,"delegation_id":delegation_id,"deadline_at":deadline_at,
+        });
+        if let Some(signature) = signature {
+            params["signature"] = json!(signature);
+        }
+        self.call("Application.PrepareArtifactInstall", params)
+    }
+
     /// Prepare an approval-bound local OCI release for an exact application revision.
     pub fn prepare_artifact_release(
         &self,
@@ -247,10 +317,34 @@ impl Client {
         delegation_id: &str,
         deadline_at: Option<&str>,
     ) -> ApiResult<Value> {
-        self.call("Application.PrepareArtifactRelease", json!({
+        self.prepare_artifact_release_with_signature(
+            application,
+            artifact,
+            key,
+            delegation_id,
+            deadline_at,
+            None,
+        )
+    }
+
+    /// Prepare a release from a declaration with optional detached publisher evidence.
+    pub fn prepare_artifact_release_with_signature(
+        &self,
+        application: &ResourceRef,
+        artifact: &ResourceRef,
+        key: &str,
+        delegation_id: &str,
+        deadline_at: Option<&str>,
+        signature: Option<&OciPublisherSignature>,
+    ) -> ApiResult<Value> {
+        let mut params = json!({
             "target":{"id":application.resource_id,"expected_resource_version":application.version},
             "reference":artifact,"key":key,"delegation_id":delegation_id,"deadline_at":deadline_at,
-        }))
+        });
+        if let Some(signature) = signature {
+            params["signature"] = json!(signature);
+        }
+        self.call("Application.PrepareArtifactRelease", params)
     }
 
     pub fn submit(

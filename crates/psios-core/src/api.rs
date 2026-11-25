@@ -132,6 +132,8 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Artifact.Stage.Discard" => artifact::ingress::discard(db, actor, p),
         "Artifact.Publish" => artifact::ingress::publish(db, actor, p),
         "Artifact.Withdraw" => artifact::ingress::withdraw(db, actor, p),
+        "Artifact.PublisherKey.Register" => apps::publisher::register(db, actor, p),
+        "Artifact.PublisherKey.Revoke" => apps::publisher::revoke(db, actor, p),
         "Artifact.Read" | "Artifact.Get" | "Artifact.ReadChunk" => {
             let (reference, page) = if method == "Artifact.ReadChunk" {
                 let p: ArtifactPage = decode(p)?;

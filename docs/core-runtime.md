@@ -269,6 +269,14 @@ Core 核对原会话、模型租约及决策摘要，在一个事务中提交原
 
 批准后用真实 OCI 引擎核验本机镜像。新 Release、源制品保留及 `ApplicationArtifactReleaseStage` 凭据原子提交。选定版本通过单独审批的 `application.select_release` 更新。切换和启动前都重新核验版本的制品保留记录及源字节，损坏会阻断执行。[真实镜像升级与回滚验收](../tests/oci.py)
 
+### 验证本机 OCI 声明的发布者
+
+本机所有者通过 `Artifact.PublisherKey.Register` 将 32 字节 Ed25519 公钥的标准 Base64 与 `principal_id` 绑定。发布者对 RFC 8785 规范化 JSON 执行分离签名，字段是 `domain`（`psios/local-oci-declaration-signature/1`）、`artifact_digest`、`declared_media_type` 和字符串 `size_bytes`。签名覆盖确切声明的内容摘要和经服务端记录的媒体类型及字节数。
+
+在 `Application.PrepareArtifactInstall` 或 `Application.PrepareArtifactRelease` 传入 `signature`，其中包含 `key_ref` 和 64 字节签名的 `signature_base64`。命令 `psiosctl artifact-prepare-install` 和 `psiosctl artifact-prepare-release` 通过 `--signature` 读取同结构的文件，Rust SDK 支持类型化调用。授权范围需要包含源制品、安装目标和公钥。成功结算的 ReleaseSpec 记录 `PublisherVerified`、签名凭据和源制品。审批继续绑定具体部署资源与制品。
+
+`Artifact.PublisherKey.Revoke` 接受公钥 ID、`expected_resource_version` 及原因。Core 在版本选择的提交事务，以及启动和重启的宿主检查点重新检查发布者授权。先完成撤销会拒绝这些操作。先通过宿主检查点的调用可以完成，并按实际效果结算。运行实例可以继续观测和停止，离线验证能从安装或暂存回执校验历史版本的签名和发布者身份。[签名与撤销验收](../tests/test_oci_publisher.py)
+
 ### 退役本机应用版本
 
 通过 Task 工具 `application.retire_release` 提交应用当前版本 `target`、确切 `release_ref` 和原因。Grant 必须覆盖应用和 Release，审批绑定这两项引用。仍有应用或 Deployment 使用的版本会被拒绝。切换后可退役已替代的版本，卸载后也可退役最后一次部署的版本。

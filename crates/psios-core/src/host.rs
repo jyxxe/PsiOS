@@ -273,16 +273,25 @@ impl Action {
             }
             Self::Restore(_) => resources.push(db.of("local", "StoragePool")?.reference()),
             Self::InstallArtifact(input) => {
-                resources
-                    .push(apps::artifact_install::source(db, actor, &input.reference)?.reference());
+                let source = apps::artifact_install::source(db, actor, &input.reference)?;
+                apps::artifact_install::add_source_audience(
+                    db,
+                    &source,
+                    input.signature.as_ref(),
+                    &mut resources,
+                )?;
             }
             Self::PublishSessionSummary(input) => {
                 resources.push(artifact::session_output::source(db, actor, input)?.reference());
             }
             Self::StageArtifactRelease(input) => {
-                resources.push(
-                    apps::artifact_install::stage_source(db, actor, input, primary)?.reference(),
-                );
+                let source = apps::artifact_install::stage_source(db, actor, input, primary)?;
+                apps::artifact_install::add_source_audience(
+                    db,
+                    &source,
+                    input.signature.as_ref(),
+                    &mut resources,
+                )?;
             }
             Self::RetireRelease(input) => {
                 resources
@@ -506,6 +515,10 @@ impl Work {
     }
 
     pub(crate) fn check_result_publication(&self, db: &Db<'_>) -> Result<()> {
+        if let Action::Select { release_ref, .. } = &self.action {
+            let target = self.checkpoint_authority(db)?;
+            return apps::check_release_selection(db, &target, release_ref);
+        }
         if matches!(
             self.action,
             Action::VerifyVolumeFile(_)
@@ -525,6 +538,7 @@ impl Work {
         let target = self.checkpoint_authority(db)?;
         match (&self.action, event) {
             (Action::Start(_), Checkpoint::OciStart { engine, container }) => {
+                apps::check_selected_publisher(db, &target)?;
                 let evidence = json!({"start_operation_id":self.op.id, "effect_ref":self.effect.reference(),
                     "application_ref":target.reference(),"volume_ref":self.volume.as_ref().map(Doc::reference),
                     "engine_id":engine, "container_id":container});
@@ -552,6 +566,7 @@ impl Work {
                 storage::file_move::record(db, self, request, before)
             }
             (Action::RestartApp(request), Checkpoint::OciRestart(before)) => {
+                apps::check_selected_publisher(db, &target)?;
                 apps::restart::record(db, self, request, before)
             }
             (
@@ -780,10 +795,9 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
             actor,
             &input.reference,
         )?),
-        Action::Start(_) | Action::RestartApp(_) | Action::InspectOciInstance(_) => {
-            Some(apps::launch_spec(db, &target)?)
-        }
-        _ if start_checkpoint.is_some() => Some(apps::launch_spec(db, &target)?),
+        Action::Start(_) | Action::RestartApp(_) => Some(apps::launch_spec(db, &target, true)?),
+        Action::InspectOciInstance(_) => Some(apps::launch_spec(db, &target, false)?),
+        _ if start_checkpoint.is_some() => Some(apps::launch_spec(db, &target, false)?),
         _ => None,
     };
     let w = Work {

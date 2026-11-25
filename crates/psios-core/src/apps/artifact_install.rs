@@ -1,10 +1,10 @@
 //! Adapt immutable local OCI declarations into the application catalog.
 use crate::{
     Result, artifact, broker,
-    db::{Db, Doc, resolve, row},
+    db::{Db, Doc, find, resolve, row},
     decode, host, policy, require,
 };
-use psios_api::{ResourceRef, parse};
+use psios_api::{OciPublisherSignature, ResourceRef, parse};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -15,7 +15,7 @@ pub(crate) const TOOL: &str = "application.install_artifact";
 pub(crate) const STAGE_FORMAT: u32 = super::release_retirement::FORMAT + 1;
 pub(crate) const STAGE_SCHEMA: &str = include_str!("artifact_stage_release.sql");
 pub(crate) const STAGE_TOOL: &str = "application.stage_artifact_release";
-const MEDIA: &str = "application/vnd.psios.oci-install.v1+json";
+pub(super) const MEDIA: &str = "application/vnd.psios.oci-install.v1+json";
 const DESCRIPTOR: &str = "PsiOSLocalOciInstallV1";
 const MAX_DESCRIPTOR: usize = 64 * 1024;
 
@@ -23,6 +23,7 @@ const MAX_DESCRIPTOR: usize = 64 * 1024;
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub reference: ResourceRef,
+    pub signature: Option<OciPublisherSignature>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -30,6 +31,7 @@ pub struct Request {
 pub struct StageRequest {
     pub target: host::Target,
     pub reference: ResourceRef,
+    pub signature: Option<OciPublisherSignature>,
 }
 
 #[derive(Deserialize)]
@@ -44,6 +46,7 @@ struct Descriptor {
 struct Prepare {
     reference: ResourceRef,
     target: Option<host::Target>,
+    signature: Option<OciPublisherSignature>,
     key: String,
     delegation_id: String,
     deadline_at: Option<String>,
@@ -99,6 +102,20 @@ pub(crate) fn stage_source(
     Ok(source)
 }
 
+pub(crate) fn add_source_audience(
+    db: &Db<'_>,
+    source: &Doc,
+    proof: Option<&OciPublisherSignature>,
+    audience: &mut Vec<Value>,
+) -> Result<()> {
+    audience.push(source.reference());
+    if let Some(signature) = proof {
+        let (key, _) = super::publisher::check(db, source, signature)?;
+        audience.push(key.reference());
+    }
+    Ok(())
+}
+
 pub(crate) fn prepare(db: &Db<'_>, actor: &str, params: &Value, tool: &str) -> Result<Value> {
     let p: Prepare = decode(params)?;
     require(
@@ -108,11 +125,14 @@ pub(crate) fn prepare(db: &Db<'_>, actor: &str, params: &Value, tool: &str) -> R
     )?;
     let grant = policy::delegation(db, actor, &p.delegation_id, tool)?;
     policy::delegation(db, actor, &grant.id, "task.submit")?;
-    let input = if let Some(target) = p.target {
+    let mut input = if let Some(target) = p.target {
         json!({"target":target,"reference":p.reference})
     } else {
         json!({"reference":p.reference})
     };
+    if let Some(signature) = &p.signature {
+        input["signature"] = json!(signature);
+    }
     let action = host::Action::parse(tool, &input)?;
     let install = specification(db, actor, &p.reference)?;
     let target = match &action {
@@ -130,6 +150,12 @@ pub(crate) fn prepare(db: &Db<'_>, actor: &str, params: &Value, tool: &str) -> R
     )?;
     let mut response =
         json!({"request":request,"source_artifact_ref":p.reference,"resource_refs":refs});
+    if let Some(signature) = &p.signature {
+        let source = source(db, actor, &p.reference)?;
+        let (key, publisher) = super::publisher::check(db, &source, signature)?;
+        response["publisher"] = json!({"identity_ref":publisher.reference(),"key_ref":key.reference(),
+            "source_trust":"PublisherVerified"});
+    }
     let preview = json!({"name":install.name,"release_version":install.release_version,
             "image_id":install.image_id,"runtime_profile_ref":db.get("oci-local")?.reference(),
             "cpu_millicores":install.cpu_millicores,"memory_max_bytes":install.memory_max_bytes,
@@ -193,14 +219,47 @@ pub(super) fn release_source(conn: &Connection, release: &Doc) -> Result<Option<
     let source = resolve(conn, reference)
         .map_err(|_| crate::err("RecoveryRequired", "release lost its exact source artifact"))?;
     require(
-        evidence.owner == release.owner
-            && source.owner == release.owner
-            && evidence.spec["application_id"] == release.body["application_id"]
+        evidence.spec["application_id"] == release.body["application_id"]
             && evidence.body["release_ref"] == release.reference()
             && artifact::is_raw(&source),
         "RecoveryRequired",
         "source evidence disagrees with its release",
     )?;
+    if evidence.owner != release.owner || source.owner != release.owner {
+        let operation = evidence.body["operation_id"].as_str().ok_or_else(|| {
+            crate::err(
+                "RecoveryRequired",
+                "cross-principal receipt has no installation operation",
+            )
+        })?;
+        let op = find(conn, operation)?.ok_or_else(|| {
+            crate::err(
+                "RecoveryRequired",
+                "cross-principal installation operation missing",
+            )
+        })?;
+        let plan = resolve(conn, &op.body["plan_ref"])?;
+        let matches_target = match plan.spec["action"].as_str() {
+            Some(STAGE_TOOL) => {
+                plan.body["allowed_effects"][0]["resource_ref"]["resource_id"]
+                    == release.body["application_id"]
+            }
+            Some(TOOL) => release.body["application_id"] == format!("app-{}", op.id),
+            _ => false,
+        };
+        require(
+            evidence.owner == policy::OWNER
+                && op.owner == policy::OWNER
+                && op.kind == "Operation"
+                && op.body["lifecycle"] == "Succeeded"
+                && plan.kind == "OperationPlan"
+                && plan.owner == policy::OWNER
+                && matches_target
+                && plan.body["preconditions"][1]["resource_ref"] == source.reference(),
+            "RecoveryRequired",
+            "cross-principal release source has no approved local authority",
+        )?;
+    }
     Ok(Some(source))
 }
 
@@ -228,6 +287,22 @@ pub(super) fn check_release_source(db: &Db<'_>, release: &Doc) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn publisher_verification(
+    db: &Db<'_>,
+    work: &host::Work,
+) -> Result<Option<super::publisher::Verification>> {
+    let (reference, signature) = match &work.action {
+        host::Action::InstallArtifact(input) => (&input.reference, &input.signature),
+        host::Action::StageArtifactRelease(input) => (&input.reference, &input.signature),
+        _ => return Ok(None),
+    };
+    let Some(signature) = signature else {
+        return Ok(None);
+    };
+    let source = source(db, &work.task.owner, reference)?;
+    super::publisher::record(db, &work.task.owner, &work.op.id, &source, signature).map(Some)
+}
+
 pub(super) fn drop_release_pin(db: &Db<'_>, release: &Doc) -> Result<Option<Value>> {
     let source = pinned_source(db.c, release)?;
     if source.is_some() {
@@ -237,6 +312,52 @@ pub(super) fn drop_release_pin(db: &Db<'_>, release: &Doc) -> Result<Option<Valu
         )?;
     }
     Ok(source.as_ref().map(Doc::reference))
+}
+
+fn catalog_receipt(tool: &str) -> (&'static str, &'static str) {
+    if tool == TOOL {
+        ("ApplicationArtifactInstallation", "artifact-install")
+    } else {
+        ("ApplicationArtifactReleaseStage", "artifact-stage-release")
+    }
+}
+
+pub(super) fn recorded_release(
+    conn: &Connection,
+    op: &Doc,
+    action: &str,
+    source: &Doc,
+) -> Result<Doc> {
+    require(
+        matches!(action, TOOL | STAGE_TOOL),
+        "RecoveryRequired",
+        "unsupported release receipt operation",
+    )?;
+    let (kind, prefix) = catalog_receipt(action);
+    let receipt = find(conn, &format!("{prefix}-{}", op.id))?.ok_or_else(|| {
+        crate::err(
+            "RecoveryRequired",
+            "signed release lost its catalog receipt",
+        )
+    })?;
+    let release = resolve(conn, &receipt.body["release_ref"])?;
+    let app = resolve(conn, &receipt.body["application_ref"])?;
+    require(
+        receipt.kind == kind
+            && receipt.rev == 1
+            && receipt.owner == op.owner
+            && receipt.body["operation_id"] == op.id
+            && receipt.body["source_artifact_ref"] == source.reference()
+            && receipt.spec["application_id"] == app.id
+            && receipt.spec["release_id"] == release.id
+            && release.kind == "ApplicationRelease"
+            && release.body["application_id"] == app.id
+            && app.kind == "Application"
+            && app.owner == release.owner,
+        "RecoveryRequired",
+        "signed release disagrees with its exact catalog receipt",
+    )?;
+    Ok(release)
 }
 
 pub(crate) fn verify(conn: &Connection) -> Result<()> {
@@ -280,19 +401,12 @@ pub(super) fn retain(
     release: &Doc,
     deployment: Option<&Doc>,
 ) -> Result<Option<Value>> {
-    let (reference, kind, record) = match (&work.action, deployment) {
-        (host::Action::InstallArtifact(input), Some(_)) => (
-            &input.reference,
-            "ApplicationArtifactInstallation",
-            "artifact-install",
-        ),
-        (host::Action::StageArtifactRelease(input), None) => (
-            &input.reference,
-            "ApplicationArtifactReleaseStage",
-            "artifact-stage-release",
-        ),
+    let (reference, tool) = match (&work.action, deployment) {
+        (host::Action::InstallArtifact(input), Some(_)) => (&input.reference, TOOL),
+        (host::Action::StageArtifactRelease(input), None) => (&input.reference, STAGE_TOOL),
         _ => return Ok(None),
     };
+    let (kind, record) = catalog_receipt(tool);
     let applied = db.c.execute(
         "INSERT INTO application_artifact_pins(artifact,holder,kind)
          SELECT artifact,?3,'Release' FROM application_artifact_pins

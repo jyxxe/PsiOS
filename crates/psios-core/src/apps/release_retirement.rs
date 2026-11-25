@@ -148,10 +148,11 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
                 && app.owner == release.owner
                 && receipt.spec["application_id"] == app.id
                 && op.kind == "Operation"
-                && op.owner == release.owner
+                && (op.owner == release.owner || op.owner == crate::policy::OWNER)
                 && op.body["lifecycle"] == "Succeeded"
                 && op.body["outcome_knowledge"] == "Known"
                 && plan.kind == "OperationPlan"
+                && plan.owner == op.owner
                 && plan.spec["action"] == TOOL
                 && plan.body["allowed_effects"][0]["resource_ref"] == app.reference()
                 && plan.body["preconditions"][1]["resource_ref"] == release.reference()

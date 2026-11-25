@@ -3,7 +3,7 @@ use crate::{MAX_BACKUP_BYTES, Result, decode, host::Work, now, require};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::{fs::File, path::Path};
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -46,8 +46,17 @@ pub(super) fn verify(w: &Work) -> Result<Value> {
         // Pending clones from earlier authorities have no committed content fingerprint.
         return Ok(json!({}));
     };
-    let expected: RestoreProof = decode(expected)?;
     let root = capture_root(w)?;
+    verify_tree(&root, expected, || capture_root(w))?;
+    Ok(json!({"verified_at":now()}))
+}
+
+pub(super) fn verify_tree(
+    root: &File,
+    expected: &Value,
+    reopen: impl FnOnce() -> Result<File>,
+) -> Result<()> {
+    let expected: RestoreProof = decode(expected)?;
     let before = root.metadata()?;
     let mut capture = Capture {
         out: None,
@@ -56,7 +65,7 @@ pub(super) fn verify(w: &Work) -> Result<Value> {
         max_bytes: MAX_BACKUP_BYTES,
         check: &mut || Ok(()),
     };
-    capture.walk(&root, Path::new(""), 0)?;
+    capture.walk(root, Path::new(""), 0)?;
     let entries = capture.entries.iter().map(|(entry, meta)| {
         (
             entry,
@@ -73,6 +82,5 @@ pub(super) fn verify(w: &Work) -> Result<Value> {
         "PreconditionFailed",
         "restored volume no longer matches its verified backup tree",
     )?;
-    capture.confirm_source(&capture_root(w)?, &before)?;
-    Ok(json!({"verified_at": now()}))
+    capture.confirm_source(&reopen()?, &before)
 }

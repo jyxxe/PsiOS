@@ -1204,6 +1204,54 @@ fn backup_check_excludes_restore_and_retries_after_lost_receipt() {
 }
 
 #[test]
+fn restored_volume_cannot_publish_after_pool_revision_changes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (config, mut store) = initialized(tmp.path());
+    let create = submit(&mut store, "volume.create", json!({"name":"restore-fence"}));
+    let source = execute(&mut store, &create);
+    let backup = submit(
+        &mut store,
+        "backup.create",
+        json!({"id":source["resource_id"],"expected_resource_version":source["version"]}),
+    );
+    let backup = execute(&mut store, &backup);
+    let restore = submit(
+        &mut store,
+        "backup.restore",
+        json!({"id":backup["resource_id"],"expected_resource_version":backup["version"]}),
+    );
+    assert_eq!(claim(&mut store), restore);
+    let work = dispatch(&mut store, &restore);
+    let refused = work.perform(|event| {
+        let pool = call(&mut store, "Resource.Get", json!({"id":"local"}))?;
+        call(&mut store, "StoragePool.Configure", json!({
+            "id":"local","expected_resource_version":pool["reference"]["version"],"allocation_enabled":false,
+        }))?;
+        store.transaction("restore-checkpoint", |db| work.checkpoint(db, event))
+    });
+    assert_eq!(refused.as_ref().unwrap_err().0.code, "Fenced");
+    store
+        .transaction("restore-refusal", |db| broker::finish(db, &work, refused))
+        .unwrap();
+    let task = call(&mut store, "Task.Get", json!({"id":restore})).unwrap();
+    assert_eq!(task["lifecycle"], "Failed");
+    assert_eq!(task["outcome_knowledge"], "Known");
+    assert_eq!(
+        fs::read_dir(config.state_dir.join("volumes"))
+            .unwrap()
+            .count(),
+        1
+    );
+    let original = call(
+        &mut store,
+        "Resource.Get",
+        json!({"id":backup["resource_id"]}),
+    )
+    .unwrap();
+    assert_eq!(original["reference"], backup);
+}
+
+#[test]
 fn activation_requires_a_completed_authority_commit() {
     let tmp = tempfile::tempdir().unwrap();
     let (cfg, mut s) = initialized(tmp.path());

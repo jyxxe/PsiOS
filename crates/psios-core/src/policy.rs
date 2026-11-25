@@ -56,6 +56,7 @@ pub const TOOLS: &[&str] = &[
     "backup.verify",
     "backup.delete",
     "backup.restore",
+    storage::restore_publication::INSPECT,
     "application.install",
     "application.start",
     "application.stop",
@@ -105,6 +106,7 @@ pub fn readonly(tool: &str) -> bool {
             | "secret.mac"
             | "backup.verify"
             | storage::publication::INSPECT
+            | storage::restore_publication::INSPECT
             | "volume.read"
             | "application.health"
             | "application.logs"
@@ -153,6 +155,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | "backup.verify"
                     | storage::export::ACTION
                     | storage::publication::INSPECT
+                    | storage::restore_publication::INSPECT
                     | agent::START_SESSION
                     | workflow::START_TOOL
                     | schedule::ACTION
@@ -493,9 +496,10 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
                 || action == node::journal::TOOL
                 || action == node::RESTART_TOOL
                 || action == node::service_state::TOOL
+                || action == storage::restore_publication::INSPECT
         }) || p.tool_targets.is_some(),
         "InvalidArgument",
-        "backup export and scoped service grants require an explicit target scope",
+        "this grant action requires an explicit target scope",
     )?;
     if let Some(ids) = &p.tool_targets {
         require(

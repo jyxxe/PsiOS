@@ -144,6 +144,8 @@ pub enum Action {
     DeleteBackup(Target),
     #[serde(rename = "backup.restore")]
     Restore(Target),
+    #[serde(rename = "volume.inspect_publication")]
+    InspectRestoredVolume(Target),
     #[serde(rename = "application.stage_release")]
     Stage { target: Target, release: Install },
     #[serde(rename = "application.select_release")]
@@ -303,7 +305,7 @@ impl Action {
             Self::Restore(t) | Self::VerifyBackup(t) | Self::DeleteBackup(t) => {
                 (&t.id, Some(&t.expected_resource_version), "Backup")
             }
-            Self::InspectBackupPublication(t) => {
+            Self::InspectBackupPublication(t) | Self::InspectRestoredVolume(t) => {
                 (&t.id, Some(&t.expected_resource_version), "Operation")
             }
             Self::Install(s) => match &s.volume {
@@ -369,6 +371,10 @@ pub(crate) enum Checkpoint<'a> {
         inode: u64,
     },
     StorageDeletion(&'a storage::retirement::Location),
+    RestoredVolume {
+        receipt: &'a Value,
+        placement: &'a storage::restore_publication::Placement,
+    },
 }
 
 impl Work {
@@ -423,6 +429,9 @@ impl Work {
                     inode,
                 },
             ) => storage::publication::record(db, self, receipt, device, inode),
+            (Action::Restore(_), Checkpoint::RestoredVolume { receipt, placement }) => {
+                storage::restore_publication::record(db, self, receipt, placement)
+            }
             (
                 Action::Delete(_) | Action::DeleteBackup(_),
                 Checkpoint::StorageDeletion(location),
@@ -478,6 +487,9 @@ impl Work {
                 },
                 &mut check_capture,
             ),
+            Action::Restore(_) => storage::restore(self, |receipt, placement| {
+                checkpoint(Checkpoint::RestoredVolume { receipt, placement })
+            }),
             Action::Delete(_) | Action::DeleteBackup(_) => {
                 storage::retirement::retire(self, |location| {
                     checkpoint(Checkpoint::StorageDeletion(location))
@@ -585,10 +597,12 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
         } else {
             None
         };
-    let publication_checkpoint = if matches!(a, Action::InspectBackupPublication(_)) {
-        Some(storage::publication::pending(db, &target)?)
-    } else {
-        None
+    let publication_checkpoint = match a {
+        Action::InspectBackupPublication(_) => Some(storage::publication::pending(db, &target)?),
+        Action::InspectRestoredVolume(_) => {
+            Some(storage::restore_publication::pending(db, &target)?)
+        }
+        _ => None,
     };
     let data = if let Some(v) = &volume
         && (start_checkpoint.is_some()
@@ -625,6 +639,9 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     storage::reserve(db, &w)?;
     if matches!(w.action, Action::Backup(_)) {
         storage::publication::begin(db, &w)?;
+    }
+    if matches!(w.action, Action::Restore(_)) {
+        storage::restore_publication::begin(db, &w)?;
     }
     if storage::retirement::deletion(&w.action) {
         storage::retirement::begin(db, &w)?;

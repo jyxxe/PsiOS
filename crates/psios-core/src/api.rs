@@ -162,6 +162,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "StoragePool.Get" => storage::pool_status(db, actor, p),
         "StoragePool.Configure" => storage::pool_configure(db, actor, p),
         "Application.Configure" => apps::configure(db, actor, p),
+        "Application.ListReleases" => apps::inventory::list(db, actor, p),
         "Application.PrepareArtifactInstall" => {
             apps::artifact_install::prepare(db, actor, p, apps::artifact_install::TOOL)
         }

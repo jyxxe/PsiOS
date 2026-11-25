@@ -20,6 +20,9 @@ fn initialized(path: &Path) -> (Config, Store) {
 }
 fn call(s: &mut Store, m: &str, p: Value) -> Result<Value> {
     let token = fs::read_to_string(s.config.witness_dir.join("owner.token"))?;
+    call_as(s, m, p, token)
+}
+fn call_as(s: &mut Store, m: &str, p: Value, token: String) -> Result<Value> {
     s.request(
         rustix::process::geteuid().as_raw(),
         Request {
@@ -978,6 +981,249 @@ fn settle_oci_catalog(s: &mut Store, task: &str) -> Value {
         json!({"reference":task["result"]["artifact_refs"][0]}),
     )
     .unwrap()
+}
+
+#[test]
+fn application_release_snapshot_survives_switch_and_retirement_between_pages() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, mut s) = initialized(tmp.path());
+    let (install, artifact) = accepted_artifact_install(&mut s);
+    let installed = settle_oci_catalog(&mut s, &install);
+    let app = &installed["application_ref"];
+    let app_id = &app["resource_id"];
+    let list = "Application.ListReleases";
+    let first_request = json!({"application_id":app_id,"limit":1});
+    assert_eq!(
+        call(&mut s, list, first_request.clone())
+            .unwrap_err()
+            .0
+            .code,
+        "PermissionDenied"
+    );
+    let grant = |s: &mut Store, actor: &Value, tool: &str, scope: Value| {
+        call(
+            s,
+            "Grant.Issue",
+            json!({
+                "principal_id":actor,"actions":["task.submit","task.read",tool],
+                "tool_targets":scope,"ttl_seconds":90,"units":4,
+            }),
+        )
+        .unwrap()
+    };
+    let owner = json!("local-owner");
+    let access = grant(&mut s, &owner, apps::inventory::TOOL, json!([app_id]));
+    let target = |application: &Value| json!({"id":application["resource_id"],"expected_resource_version":application["version"]});
+    let stage = |s: &mut Store, application: &Value, version: &str| {
+        let task = submit(
+            s,
+            "application.stage_release",
+            json!({"target":target(application),"release":{
+                "name":"recovery-test","image_id":format!("sha256:{}","e".repeat(64)),
+                "argv":["/probe"],"release_version":version,"license_expression":"0BSD",
+                "cpu_millicores":200,"memory_max_bytes":33554432,"pids_max":8,"ephemeral_max_bytes":1048576,
+            }}),
+        );
+        settle_oci_catalog(s, &task)
+    };
+    let second = stage(&mut s, app, "2.0.0");
+    let third = stage(&mut s, app, "3.0.0");
+    let (other, _) = accepted_artifact_install(&mut s);
+    let other = settle_oci_catalog(&mut s, &other);
+    let other_id = &other["application_ref"]["resource_id"];
+    grant(&mut s, &owner, apps::inventory::TOOL, json!([other_id]));
+    let retire_tool = apps::release_retirement::TOOL;
+    let retire = grant(
+        &mut s,
+        &owner,
+        retire_tool,
+        json!([app_id, second["resource_id"]]),
+    );
+    let first = call(&mut s, list, first_request).unwrap();
+    assert_eq!(first["application_ref"], *app);
+    assert_eq!(first["selected_release_ref"], installed["release_ref"]);
+    assert_eq!(first["items"][0]["state"], "Selected");
+    assert_eq!(first["items"][0]["source_artifact_ref"], artifact);
+
+    let prepared = call(
+        &mut s,
+        "Task.Prepare",
+        json!({"tool":retire_tool,"key":id("retire"),
+            "delegation_id":retire["delegation_ref"]["resource_id"],
+            "input":{"target":target(app),"release_ref":second,"reason":"closed candidate"},
+        }),
+    )
+    .unwrap();
+    let retired = call(&mut s, "Task.Submit", prepared).unwrap();
+    let retired = retired["task_id"].as_str().unwrap();
+    approve(&mut s, retired);
+    let tombstone = execute(&mut s, retired);
+    let choose = submit(
+        &mut s,
+        "application.select_release",
+        json!({"target":target(app),"release_ref":third}),
+    );
+    approve(&mut s, &choose);
+    let new_app = execute(&mut s, &choose);
+    let fourth = stage(&mut s, &new_app, "4.0.0");
+    drop(s);
+    let mut s = Store::open(cfg).unwrap();
+
+    let second_request = json!({"application_id":app_id,"cursor":first["next_cursor"],"limit":1});
+    let page_two = call(&mut s, list, second_request.clone()).unwrap();
+    assert_eq!(page_two["application_ref"], *app);
+    assert_eq!(page_two["items"][0]["release_ref"], second);
+    assert_eq!(page_two["items"][0]["state"], "Staged");
+    assert!(page_two["items"][0]["retirement_ref"].is_null());
+    let page_three = call(
+        &mut s,
+        list,
+        json!({"application_id":app_id,"cursor":page_two["next_cursor"],"limit":1}),
+    )
+    .unwrap();
+    assert_eq!(page_three["items"][0]["release_ref"], third);
+    assert_eq!(page_three["items"][0]["state"], "Staged");
+    assert_eq!(page_three["complete"], true);
+
+    let fresh = call(&mut s, list, json!({"application_id":app_id})).unwrap();
+    assert_eq!(fresh["selected_release_ref"], third);
+    assert_eq!(fresh["items"][1]["retirement_ref"], tombstone);
+    assert_eq!(fresh["items"][3]["release_ref"], fourth);
+    let states: Vec<&str> = fresh["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["state"].as_str().unwrap())
+        .collect();
+    assert_eq!(states, ["Unselected", "Retired", "Selected", "Staged"]);
+
+    assert_eq!(
+        call(
+            &mut s,
+            list,
+            json!({"application_id":other_id,"cursor":first["next_cursor"]})
+        )
+        .unwrap_err()
+        .0
+        .code,
+        "CursorExpired"
+    );
+
+    call(&mut s, "Grant.Revoke", target(&access["grant_ref"])).unwrap();
+    assert_eq!(
+        call(&mut s, list, second_request.clone())
+            .unwrap_err()
+            .0
+            .code,
+        "PermissionDenied"
+    );
+    grant(&mut s, &owner, apps::inventory::TOOL, json!([app_id]));
+    assert_eq!(
+        call(&mut s, list, second_request).unwrap_err().0.code,
+        "CursorExpired"
+    );
+}
+
+#[test]
+fn agent_reads_release_inventory_only_for_its_authorized_application() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, mut s) = initialized(tmp.path());
+    let agent = call(
+        &mut s,
+        "Agent.Register",
+        json!({"name":"release-inspector"}),
+    )
+    .unwrap();
+    let token = agent["token"].as_str().unwrap();
+    let agent_call = |s: &mut Store, method: &str, params| call_as(s, method, params, token.into());
+    let install = call(&mut s,"Grant.Issue",json!({"principal_id":agent["principal_id"],"units":4,"ttl_seconds":90,
+        "actions":["application.install","task.submit","task.read"],"tool_targets":["profile-local"],
+    })).unwrap();
+    let prepared = agent_call(&mut s,"Task.Prepare",json!({"tool":"application.install","key":id("install"),
+        "delegation_id":install["delegation_ref"]["resource_id"],"input":{
+            "name":"agent-app","image_id":format!("sha256:{}","e".repeat(64)),"argv":["/probe"],"release_version":"1.0.0",
+            "license_expression":"0BSD","cpu_millicores":200,"memory_max_bytes":33554432,"pids_max":8,"ephemeral_max_bytes":1048576,
+        },
+    })).unwrap();
+    let task = agent_call(&mut s, "Task.Submit", prepared).unwrap();
+    let app = settle_oci_catalog(&mut s, task["task_id"].as_str().unwrap());
+    let input = json!({"application_id":app["resource_id"]});
+    let (other, _) = accepted_artifact_install(&mut s);
+    let other = settle_oci_catalog(&mut s, &other);
+    let foreign = json!({"application_id":other["application_ref"]["resource_id"]});
+    let tool = apps::inventory::TOOL;
+    let viewer = call(&mut s,"Grant.Issue",json!({"principal_id":agent["principal_id"],"units":4,"ttl_seconds":90,
+        "actions":[tool,"task.submit","task.read"],"tool_targets":[input["application_id"],foreign["application_id"]],
+    })).unwrap();
+    let capabilities = agent_call(&mut s, "Capability.Discover", json!({})).unwrap();
+    assert!(
+        capabilities
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|cap| cap["capability_id"] == tool && cap["availability"] == "Ready")
+    );
+    let list = "Application.ListReleases";
+    let direct = agent_call(&mut s, list, input.clone()).unwrap();
+    assert_eq!(direct["items"][0]["state"], "Selected");
+    assert_eq!(
+        agent_call(&mut s, list, foreign.clone())
+            .unwrap_err()
+            .0
+            .code,
+        "PermissionDenied"
+    );
+
+    let prepare = |s: &mut Store, input| {
+        agent_call(s,"Task.Prepare",json!({
+        "key":id("read-release"),"tool":tool,"input":input,"delegation_id":viewer["delegation_ref"]["resource_id"],
+    })).unwrap()
+    };
+    let denied = prepare(&mut s, foreign);
+    assert_eq!(
+        agent_call(&mut s, "Task.Submit", denied)
+            .unwrap_err()
+            .0
+            .code,
+        "PermissionDenied"
+    );
+    let request = prepare(&mut s, input.clone());
+    let receipt = agent_call(&mut s, "Task.Submit", request).unwrap();
+    let task = receipt["task_id"].as_str().unwrap();
+    assert_eq!(execute(&mut s, task), direct);
+    let result = agent_call(&mut s, "Task.Get", json!({"id":task})).unwrap();
+    let value = agent_call(
+        &mut s,
+        "Artifact.Read",
+        json!({"reference":result["result"]["artifact_refs"][0]}),
+    )
+    .unwrap();
+    assert_eq!(value, direct);
+
+    let request = prepare(&mut s, input);
+    let receipt = agent_call(&mut s, "Task.Submit", request).unwrap();
+    let task = receipt["task_id"].as_str().unwrap();
+    assert_eq!(claim(&mut s), task);
+    let read = dispatch(&mut s, task);
+    let sampled = read
+        .perform(|_| unreachable!("inventory is a pinned catalog read"))
+        .unwrap();
+    call(
+        &mut s,
+        "Grant.Revoke",
+        json!({"id":viewer["grant_ref"]["resource_id"],
+            "expected_resource_version":viewer["grant_ref"]["version"],
+        }),
+    )
+    .unwrap();
+    s.transaction("revoked-inventory-read", |db| {
+        broker::finish(db, &read, Ok(sampled))
+    })
+    .unwrap();
+    let result = agent_call(&mut s, "Task.Get", json!({"id":task})).unwrap();
+    assert_eq!(result["lifecycle"], "Failed");
+    assert_eq!(result["conditions"][0]["type"], "PermissionDenied");
+    assert_eq!(result["result"]["artifact_refs"], json!([]));
 }
 
 #[test]

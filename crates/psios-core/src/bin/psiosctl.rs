@@ -132,6 +132,14 @@ enum Cmd {
         #[arg(default_value = "-")]
         file: String,
     },
+    /// List the selected, staged, previous and retired releases of an application.
+    ApplicationReleases {
+        id: String,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long)]
+        limit: Option<u32>,
+    },
     /// Repair the Artifact from a previously exported, verified JSON file.
     ArtifactRepair {
         source: PathBuf,
@@ -418,6 +426,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             &delegation,
             deadline_at.as_deref(),
         )?,
+        Cmd::ApplicationReleases { id, cursor, limit } => {
+            c.application_releases(&id, cursor.as_deref(), limit)?
+        }
         Cmd::ArtifactRepair {
             source,
             file,

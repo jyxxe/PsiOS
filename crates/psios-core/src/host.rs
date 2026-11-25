@@ -158,6 +158,8 @@ pub enum Action {
     Stage { target: Target, release: Install },
     #[serde(rename = "application.stage_artifact_release")]
     StageArtifactRelease(apps::artifact_install::StageRequest),
+    #[serde(rename = "application.releases")]
+    ListAppReleases(apps::inventory::Request),
     #[serde(rename = "application.select_release")]
     Select { target: Target, release_ref: Value },
     #[serde(rename = "application.retire_release")]
@@ -217,6 +219,7 @@ impl Action {
                 )?
             }
             Self::Install(s) => apps::validate(s)?,
+            Self::ListAppReleases(request) => request.validate()?,
             Self::Stage { release, .. } => {
                 apps::validate(release)?;
                 require(
@@ -376,6 +379,7 @@ impl Action {
                 Some(&input.target.expected_resource_version),
                 "Application",
             ),
+            Self::ListAppReleases(input) => (&input.application_id, None, "Application"),
             Self::RetireRelease(input) => (
                 &input.target.id,
                 Some(&input.target.expected_resource_version),
@@ -500,6 +504,7 @@ impl Work {
             Action::VerifyVolumeFile(_)
                 | Action::InspectFileRename(_)
                 | Action::InspectProcess(_)
+                | Action::ListAppReleases(_)
                 | Action::InstallArtifact(_)
                 | Action::StageArtifactRelease(_)
                 | Action::RetireRelease(_)
@@ -702,6 +707,7 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     let inline = match &a {
         Action::Status {} => Some(status(db)?),
         Action::Mac { secret_id, message } => Some(policy::mac(db, actor, secret_id, message)?),
+        Action::ListAppReleases(input) => Some(apps::inventory::page(db, actor, input, &target)?),
         _ => None,
     };
     let rename_inspection = if matches!(a, Action::InspectFileRename(_)) {
@@ -718,6 +724,7 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
             a,
             Action::Stage { .. }
                 | Action::StageArtifactRelease(_)
+                | Action::ListAppReleases(_)
                 | Action::Select { .. }
                 | Action::Refresh(_)
                 | Action::RetireRelease(_)

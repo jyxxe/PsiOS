@@ -146,6 +146,64 @@ pub(crate) fn read_position(db: &Db<'_>, actor: &str, scope: &str, token: &str) 
     Ok(c.position)
 }
 
+pub(crate) struct ScopedSnapshot {
+    pub high: i64,
+    pub position: i64,
+    until: i64,
+}
+
+impl ScopedSnapshot {
+    pub fn open(db: &Db<'_>, actor: &str, scope: &str, token: Option<&str>) -> Result<Self> {
+        let Some(token) = token else {
+            return Ok(Self {
+                high: latest_sequence(db)?,
+                position: 0,
+                until: chrono::Utc::now().timestamp() + 600,
+            });
+        };
+        require(
+            token.len() <= 1024,
+            "CursorExpired",
+            "invalid snapshot cursor",
+        )?;
+        let cursor = Cursor::read(db, token, actor, "scoped-snapshot")?;
+        require(
+            cursor.kind == scope,
+            "CursorExpired",
+            "cursor outside authorized snapshot",
+        )?;
+        Ok(Self {
+            high: cursor.high,
+            position: cursor.position,
+            until: cursor.until,
+        })
+    }
+
+    pub fn sign(&self, db: &Db<'_>, actor: &str, scope: &str, position: i64) -> Result<String> {
+        Cursor {
+            mode: "scoped-snapshot".into(),
+            actor: actor.into(),
+            epoch: db.meta("epoch")?,
+            incarnation: db.incarnation.clone(),
+            kind: scope.into(),
+            resource: None,
+            snapshot: String::new(),
+            high: self.high,
+            position,
+            until: self.until,
+        }
+        .sign(db)
+    }
+}
+
+fn latest_sequence(db: &Db<'_>) -> Result<i64> {
+    Ok(db
+        .c
+        .query_row("SELECT COALESCE(MAX(seq),0) FROM versions", [], |r| {
+            r.get(0)
+        })?)
+}
+
 #[derive(Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 struct List {
@@ -194,11 +252,7 @@ pub fn list(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             kind: p.kind,
             resource: p.id,
             snapshot: format!("{ORDERED_SNAPSHOT_PREFIX}{}", uuid::Uuid::new_v4().simple()),
-            high: db
-                .c
-                .query_row("SELECT COALESCE(MAX(seq),0) FROM versions", [], |r| {
-                    r.get(0)
-                })?,
+            high: latest_sequence(db)?,
             position: 0,
             until: chrono::Utc::now().timestamp() + 600,
         }

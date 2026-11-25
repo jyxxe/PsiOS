@@ -70,10 +70,8 @@ def stage_from_artifact(node, app, specification):
     return receipt["release_ref"], source
 
 
-def retire_oci_release(node, app, release, artifact, uninstall=False):
+def retire_oci_release(node, app, release, artifact, allow, uninstall=False):
     tool = "application.retire_release"
-    allow = artifact_grant(node, "local-owner", ["task.submit", "task.read", tool],
-                          [app["resource_id"], release["resource_id"]])
 
     def prepare(current):
         return node.prepare(tool, {"target": target(current), "release_ref": release, "reason": "deployment removed"},
@@ -94,8 +92,6 @@ def retire_oci_release(node, app, release, artifact, uninstall=False):
     receipt = node.call("Artifact.Read", {"reference": reference})
     retired = node.call("Resource.Resolve", {"reference": receipt})["value"]
     assert retired["release_ref"] == release and retired["released_artifact_ref"] == artifact
-    node_id = node.call("Node.Get", {})["reference"]["resource_id"]
-    artifact_grant(node, "local-owner", ["artifact.withdraw", "artifact.read"], [node_id])
     node.call("Artifact.Withdraw", {"reference": artifact, "reason": "retired local OCI release"})
     assert node.call("Artifact.Get", {"reference": artifact})["availability"] == "Evicted"
     assert node.call("Resource.Resolve", {"reference": release})["reference"] == release
@@ -230,8 +226,23 @@ int main(void) {
         reverted = node.perform("application.health", target(app))["container_id"]
         assert json.loads(subprocess.check_output(docker + ["inspect", reverted]))[0]["Image"] == image_id
         app = lose_stop_receipt(node, app, reverted, volume)
-        retire_oci_release(node, app, staged, staged_artifact)
-        retire_oci_release(node, app, previous_release, source_artifact, uninstall=True)
+        node_id = node.call("Node.Get", {})["reference"]["resource_id"]
+        artifact_grant(node, "local-owner", ["artifact.withdraw", "artifact.read"], [node_id])
+        retirement = artifact_grant(node, "local-owner", ["task.submit", "task.read", "application.retire_release"],
+                                    [app_id, staged["resource_id"], previous_release["resource_id"]])
+        artifact_grant(node, "local-owner", ["application.releases"], [app_id])
+        cursor_page = node.cli(node.witness / "owner.token", "application-releases", app_id, "--limit", "1")
+        assert cursor_page["items"][0]["state"] == "Selected", cursor_page
+        assert cursor_page["selected_release_ref"] == previous_release, cursor_page
+        retire_oci_release(node, app, staged, staged_artifact, retirement)
+        retire_oci_release(node, app, previous_release, source_artifact, retirement, uninstall=True)
+        terminal_page = node.call("Application.ListReleases", {"application_id": app_id, "cursor": cursor_page["next_cursor"]})
+        assert terminal_page["items"][0]["release_ref"] == staged
+        assert terminal_page["items"][0]["state"] == "Unselected" and terminal_page["application_ref"] == app, terminal_page
+        fresh = node.call("Application.ListReleases", {"application_id": app_id})
+        assert fresh["application_lifecycle"] == "Uninstalled" and fresh["selected_release_ref"] is None
+        assert [item["state"] for item in fresh["items"]] == ["Retired", "Retired"], fresh
+        print("Queried real OCI release history before and after retirement and uninstall", flush=True)
         volume = node.get(volume["resource_id"])["reference"]
         assert node.perform("volume.read", dict(**target(volume), name="starts"))["content"] == "first\nsecond\nupgraded\nfirst\n"
         backup = node.perform("backup.create", target(volume))

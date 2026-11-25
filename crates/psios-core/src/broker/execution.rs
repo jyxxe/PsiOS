@@ -375,6 +375,7 @@ pub fn finish(db: &Db<'_>, w: &Work, result: Result<Value>) -> Result<()> {
                 if matches!(
                     w.action,
                     Action::InspectProcess(_)
+                        | Action::ListAppReleases(_)
                         | Action::InstallArtifact(_)
                         | Action::StageArtifactRelease(_)
                 ) =>

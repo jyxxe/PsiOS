@@ -187,7 +187,10 @@ pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
     if w.target.kind == "Application"
         && !matches!(
             w.action,
-            Action::Health(_) | Action::Logs(_) | Action::InspectOciInstance(_)
+            Action::Health(_)
+                | Action::Logs(_)
+                | Action::InspectOciInstance(_)
+                | Action::ListAppReleases(_)
         )
     {
         require(

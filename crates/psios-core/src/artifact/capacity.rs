@@ -21,6 +21,7 @@ fn charged(tool: &str) -> bool {
                 | "service.observe"
                 | "application.health"
                 | "application.inspect_instance"
+                | crate::apps::restore_image::INSPECT
                 | "application.refresh"
                 | "backup.inspect_publication"
                 | "volume.inspect_publication"

@@ -356,6 +356,13 @@ pub fn settlement_failed(db: &Db<'_>, w: &Work) -> Result<()> {
             "StorageUnavailable",
             "OCI archive publication did not commit",
         )
+    } else if matches!(w.action, Action::RestoreReleaseImage(_))
+        && apps::restore_image::not_dispatched(db, &w.op)?
+    {
+        err(
+            "StorageUnavailable",
+            "OCI image restore stopped before load was checkpointed",
+        )
     } else if matches!(
         w.action,
         Action::InstallArtifact(_) | Action::StageArtifactRelease(_) | Action::RetireRelease(_)

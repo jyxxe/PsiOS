@@ -38,6 +38,9 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
         let restart_undispatched = phase == "Dispatched"
             && tool == apps::restart::TOOL
             && apps::restart::not_dispatched(db, &operation(db, &t)?)?;
+        let image_undispatched = phase == "Dispatched"
+            && tool == apps::restore_image::TOOL
+            && apps::restore_image::not_dispatched(db, &operation(db, &t)?)?;
         let rename_unprepared = phase == "Dispatched"
             && tool == storage::file_move::TOOL
             && storage::file_move::not_prepared(db, &operation(db, &t)?)?;
@@ -52,6 +55,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             && !backup_unpublished
             && !restore_unpublished
             && !restart_undispatched
+            && !image_undispatched
             && !deletion_unprepared
             && !rename_unprepared
         {
@@ -80,6 +84,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             || backup_unpublished
             || restore_unpublished
             || restart_undispatched
+            || image_undispatched
             || deletion_unprepared
             || rename_unprepared
         {
@@ -100,6 +105,8 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                         "restore interrupted before volume publication was authorized"
                     } else if restart_undispatched {
                         "OCI restart interrupted before its invocation was checkpointed"
+                    } else if image_undispatched {
+                        "OCI image restore interrupted before load was checkpointed"
                     } else if activation_uncommitted {
                         "activation had not committed at restart"
                     } else if catalog_uncommitted {
@@ -291,6 +298,7 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         | Action::Backup(p) => (&p.id, &p.expected_resource_version),
         Action::ServiceRestart(p) => (&p.id, &p.expected_resource_version),
         Action::RestartApp(p) => (&p.id, &p.expected_resource_version),
+        Action::RestoreReleaseImage(p) => (&p.target.id, &p.target.expected_resource_version),
         _ => {
             return Err(err(
                 "UnsupportedCapability",
@@ -370,6 +378,16 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
                 apps::restart::INSPECT,
             )?;
             apps::restart::reconcile(db, &op, &target, &proof, &observation)?
+        }
+        Action::RestoreReleaseImage(_) => {
+            let (proof, observation) = inspected(
+                db,
+                req.evidence_ref.as_ref(),
+                &op,
+                &op,
+                apps::restore_image::INSPECT,
+            )?;
+            apps::restore_image::reconcile(db, &op, &target, &proof, &observation)?
         }
         Action::ServiceStart(_) | Action::ServiceStop(_) | Action::ServiceRestart(_) => {
             let (proof, observation) = inspected(

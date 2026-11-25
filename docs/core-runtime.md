@@ -269,13 +269,21 @@ Core 核对原会话、模型租约及决策摘要，在一个事务中提交原
 
 制品字节、`LocalOciImageCapture` 来源、`OciImageCapture` 凭据和 Task 回执在同一事务提交。归档可用独立授权的 `Artifact.ReadChunk` 分块读取并核对完整 SHA-256，回收需要独立的 `artifact.withdraw`。取消、进程中断和发布失败不会留下半成品。[真实 Docker 导出和独立重载验收](../tests/oci_capture.py)
 
-捕获会在持久提交前检查原始 tar，并记录 `restore_compatibility`。`Verified` 对应 `DockerClassicTaglessSaveV1`，要求单个无标签镜像，精确匹配配置摘要和有序未压缩层 DiffID。存在 OCI 索引时，两个视图的配置和层必须一致，且索引只直接指向一个镜像。镜像 ID 使用清单摘要、层使用压缩格式或布局不受支持时，原始捕获可保留并报告 `Unsupported`。升级到数据库格式 63 后，旧捕获标为 `Unverified`，其历史回执依旧省略此字段。证明覆盖归档结构及镜像身份。目标引擎空间检查和宿主缓存恢复仍待实现。[归档格式测试](../crates/psios-core/src/apps/restore_archive/tests.rs)
+捕获会在持久提交前检查原始 tar，并记录 `restore_compatibility`。`Verified` 对应 `DockerClassicTaglessSaveV1`，要求单个无标签镜像，精确匹配配置摘要和有序未压缩层 DiffID。存在 OCI 索引时，两个视图的配置和层必须一致，且索引只直接指向一个镜像。镜像 ID 使用清单摘要、层使用压缩格式或布局不受支持时，原始捕获可保留并报告 `Unsupported`。升级到数据库格式 63 后，旧捕获标为 `Unverified`，其历史回执依旧省略此字段。证明覆盖归档结构及镜像身份，实际恢复还会检查层元数据及目的引擎。[归档格式测试](../crates/psios-core/src/apps/restore_archive/tests.rs)
 
 ### 安装和更新时保留 OCI 归档
 
 归档声明使用 `application/vnd.psios.oci-install.v2+json`，正文为 `{"format":"PsiOSLocalOciInstallV2","install":{...},"image_archive_ref":{...}}`。`image_archive_ref` 指定已有的本机 OCI 捕获制品，必须与声明中的 `image_id` 和本机引擎看到的层摘要一致。Ed25519 签名覆盖包含归档引用的完整声明字节。安装和暂存权限须同时覆盖目标、声明、签名密钥和归档。`Application.PrepareArtifactInstall` 和 `Application.PrepareArtifactRelease` 返回同一组审批引用。
 
-已准入 Task 立即保留声明和镜像归档。提交 Release 时转交保留关系，并在不可变镜像、发布溯源和目录回执中登记归档及捕获凭据。被选择、可回退或处于待审批状态的关联版本会阻止归档回收。选择和启动前重新核验归档内容。退役会释放该版本的保留关系，其他版本仍可保留同一制品。启动仍要求 Docker 本机镜像可用，归档恢复待实现。[真实 OCI 安装、暂存与退役验收](../tests/oci.py)
+已准入 Task 立即保留声明和镜像归档。提交 Release 时转交保留关系，并在不可变镜像、发布溯源和目录回执中登记归档及捕获凭据。被选择、可回退或处于待审批状态的关联版本会阻止归档回收。选择和启动前重新核验归档内容。退役会释放该版本的保留关系，其他版本仍可保留同一制品。启动仍要求 Docker 本机镜像可用。[真实 OCI 安装、暂存与退役验收](../tests/oci.py)
+
+### 恢复已保留的 OCI 镜像
+
+本机所有者可通过 `Task.Prepare` 和 `Task.Submit` 提交 `application.restore_release_image`。输入包含应用的 `target`、精确的 `release_ref`、`image_archive_ref`、`publisher_key_ref` 和 `expected_engine_id`。委托需要限定在应用、版本、V2 声明、签名密钥、归档和本机 Node。恢复需要独立的 Node 范围 `artifact.read` 授权和所有者审批。镜像已存在时，任务返回已知的 `PreconditionFailed` 并跳过导入。
+
+该能力使用 Linux amd64 Docker Engine API v1.44 的经典 `overlay2` 或 `vfs` 镜像存储。服务复核仍有效的签名以及保留归档的完整字节，从核验过的镜像配置和层生成单镜像无标签归档，并记录两个归档的 SHA-256。恢复拒绝压缩层、稀疏层和扩展层元数据，累计层字节上限为 8 MiB。导入使用绑定同一个 Engine 的本机 Unix 连接，依赖 Docker 及其文件系统报告空间或运行错误。
+
+只有检查点提交后才向 Docker 发起一次导入。中断后，待核实的原 Operation 对应用和该引擎内的镜像保持独占。使用单独委托提交只读 `application.inspect_release_image_restore`，以原 Operation 的 `target` 为输入，并覆盖原计划资源。精确引擎上的镜像摘要及有序层 DiffID 得到确认后，可向 `Operation.Reconcile` 提供新的检查结果。镜像缺失、引擎身份变化或不匹配的结果都会保留 `OutcomeUnknown`。观察和结算原 Operation 不会重发导入。离线校验核对原检查点和结算证据。发行版本退役后，已合法回收的原始字节可只保留历史摘要和回执。[真实 Docker 进程中断和恢复验收](../tests/oci_restore.py)
 
 ### 从本机制品暂存新版本
 

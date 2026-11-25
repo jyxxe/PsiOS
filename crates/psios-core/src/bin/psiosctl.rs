@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use psios_api::{
-    Client, LocalInventoryModel, ResourceRef, SessionModel, StatusProvider, TaskOutputRequirement,
-    parse,
+    Client, LocalInventoryModel, OciPublisherSignature, ResourceRef, SessionModel, StatusProvider,
+    TaskOutputRequirement, parse,
 };
 use psios_core::{Config, DEFAULT_BACKUP_MAX_BYTES, MAX_BACKUP_BYTES};
 use serde_json::{Value, json};
@@ -117,6 +117,36 @@ enum Cmd {
         #[arg(long, default_value_t = 600)]
         ttl_seconds: u32,
     },
+    /// Register an Ed25519 public key for an existing publisher principal.
+    ArtifactPublisherKeyRegister {
+        principal_id: String,
+        /// Standard Base64 of exactly 32 raw public key bytes.
+        #[arg(long)]
+        public_key_base64: String,
+    },
+    /// Revoke a publisher key at its current resource revision.
+    ArtifactPublisherKeyRevoke {
+        id: String,
+        #[arg(long)]
+        revision: String,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Prepare a Task to install an uploaded OCI declaration.
+    ArtifactPrepareInstall {
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        delegation: String,
+        #[arg(long)]
+        deadline_at: Option<String>,
+        /// JSON file containing key_ref and signature_base64.
+        #[arg(long, value_name = "FILE")]
+        signature: Option<PathBuf>,
+        /// JSON Artifact ResourceRef from a file or stdin.
+        #[arg(default_value = "-")]
+        file: String,
+    },
     /// Prepare a Task to stage an uploaded OCI declaration for an existing application.
     ArtifactPrepareRelease {
         /// JSON Application ResourceRef from a file.
@@ -128,6 +158,9 @@ enum Cmd {
         delegation: String,
         #[arg(long)]
         deadline_at: Option<String>,
+        /// JSON file containing key_ref and signature_base64.
+        #[arg(long, value_name = "FILE")]
+        signature: Option<PathBuf>,
         /// JSON Artifact ResourceRef from a file or stdin.
         #[arg(default_value = "-")]
         file: String,
@@ -222,11 +255,14 @@ enum Cmd {
     },
 }
 fn input(path: &str) -> Result<Value, Box<dyn std::error::Error>> {
-    let reader: Box<dyn Read> = if path == "-" {
-        Box::new(std::io::stdin())
+    if path == "-" {
+        read_json(std::io::stdin())
     } else {
-        Box::new(fs::File::open(path)?)
-    };
+        read_json(fs::File::open(path)?)
+    }
+}
+
+fn read_json(reader: impl Read) -> Result<Value, Box<dyn std::error::Error>> {
     let mut bytes = vec![];
     reader
         .take(psios_api::MAX_FRAME as u64 + 1)
@@ -235,6 +271,18 @@ fn input(path: &str) -> Result<Value, Box<dyn std::error::Error>> {
         return Err("input exceeds frame limit".into());
     }
     Ok(parse(&bytes)?)
+}
+
+fn detached_signature(path: &Path) -> Result<OciPublisherSignature, Box<dyn std::error::Error>> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err("expected a regular publisher signature file".into());
+    }
+    serde_json::from_value(read_json(file)?)
+        .map_err(|_| "expected publisher signature fields key_ref and signature_base64".into())
 }
 
 fn model_provider(
@@ -413,19 +461,51 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 &mut source,
             )?)?
         }
+        Cmd::ArtifactPublisherKeyRegister {
+            principal_id,
+            public_key_base64,
+        } => serde_json::to_value(
+            c.register_artifact_publisher_key(&principal_id, &public_key_base64)?,
+        )?,
+        Cmd::ArtifactPublisherKeyRevoke {
+            id,
+            revision,
+            reason,
+        } => serde_json::to_value(c.revoke_artifact_publisher_key(&id, &revision, &reason)?)?,
+        Cmd::ArtifactPrepareInstall {
+            key,
+            delegation,
+            deadline_at,
+            signature,
+            file,
+        } => {
+            let signature = signature.as_deref().map(detached_signature).transpose()?;
+            c.prepare_artifact_install(
+                &serde_json::from_value(input(&file)?)?,
+                &key,
+                &delegation,
+                deadline_at.as_deref(),
+                signature.as_ref(),
+            )?
+        }
         Cmd::ArtifactPrepareRelease {
             application,
             key,
             delegation,
             deadline_at,
+            signature,
             file,
-        } => c.prepare_artifact_release(
-            &serde_json::from_value(input(&application)?)?,
-            &serde_json::from_value(input(&file)?)?,
-            &key,
-            &delegation,
-            deadline_at.as_deref(),
-        )?,
+        } => {
+            let signature = signature.as_deref().map(detached_signature).transpose()?;
+            c.prepare_artifact_release_with_signature(
+                &serde_json::from_value(input(&application)?)?,
+                &serde_json::from_value(input(&file)?)?,
+                &key,
+                &delegation,
+                deadline_at.as_deref(),
+                signature.as_ref(),
+            )?
+        }
         Cmd::ApplicationReleases { id, cursor, limit } => {
             c.application_releases(&id, cursor.as_deref(), limit)?
         }
@@ -466,5 +546,38 @@ fn main() {
     if let Err(e) = run() {
         eprintln!("{e}");
         std::process::exit(1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detached_signatures_require_bounded_regular_json() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let key = json!({"resource_id":"oci-key-test","version":"r1","digest":psios_api::sha256(b"test")});
+        let valid = json!({"key_ref":key,"signature_base64":"opaque"});
+        fs::write(file.path(), serde_json::to_vec(&valid).unwrap()).unwrap();
+        let signature = detached_signature(file.path()).unwrap();
+        assert_eq!(serde_json::to_value(signature).unwrap(), valid);
+
+        fs::write(
+            file.path(),
+            format!(
+                r#"{{"key_ref":{key},"signature_base64":"first","signature_base64":"second"}}"#
+            ),
+        )
+        .unwrap();
+        assert!(detached_signature(file.path()).is_err());
+
+        file.as_file()
+            .set_len(psios_api::MAX_FRAME as u64 + 1)
+            .unwrap();
+        assert_eq!(
+            detached_signature(file.path()).unwrap_err().to_string(),
+            "input exceeds frame limit"
+        );
+        assert!(detached_signature(Path::new("/dev/null")).is_err());
     }
 }

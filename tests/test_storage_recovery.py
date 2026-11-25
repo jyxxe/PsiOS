@@ -1,4 +1,5 @@
 """Process loss during real disk copies, before a new resource can be published."""
+from contextlib import closing
 import hashlib
 import os
 import resource
@@ -12,27 +13,54 @@ from support import Failure, Node, target
 
 
 class StorageRecoveryTests(unittest.TestCase):
-    limit = 2 * 1024 * 1024
+    copy_limit = 8 * 1024 * 1024
+    source_size = copy_limit + 1024 * 1024
 
     def setUp(self):
-        self.n = Node("target/debug")
+        self.n = Node(os.getenv("PSIOS_TEST_BIN_DIR", "target/debug"))
         self.addCleanup(self.n.close)
         self.volumes = self.n.state / "volumes"
         self.backups = self.n.state / "backups"
         self.volume = self.n.perform("volume.create", {"name": "transaction-source"})
         self.source = self.volumes / self.volume["resource_id"] / "data" / "record"
-        self.source.write_bytes(b"pre-publication filesystem recovery\n" * 128000)
+        pattern = b"pre-publication filesystem recovery\n"
+        repetitions, tail = divmod(self.source_size, len(pattern))
+        with self.source.open("wb") as file:
+            file.write(pattern * repetitions)
+            file.write(pattern[:tail])
         with self.source.open("rb") as file:
             self.digest = hashlib.file_digest(file, "sha256").hexdigest()
         self.backup = self.n.perform("backup.create", target(self.volume))
 
     def interrupt_copy(self, tool, reference, parent, incomplete):
-        resource.prlimit(self.n.process.pid, resource.RLIMIT_FSIZE, (self.limit, self.limit))
+        def authority_file_sizes():
+            return {path.name: path.stat().st_size for path in self.n.state.glob("state.db*")}
+
+        # RLIMIT_FSIZE also covers SQLite's WAL. Close the setup connection to clear
+        # its WAL, and leave room for the fixture's admission and dispatch writes.
+        self.n.stop()
+        self.n.start()
+        sizes = authority_file_sizes()
+        self.assertTrue(sizes and all(size < self.copy_limit // 2 for size in sizes.values()), sizes)
+
+        resource.prlimit(self.n.process.pid, resource.RLIMIT_FSIZE, (self.copy_limit, self.copy_limit))
         task_id = self.n.submit(tool, target(reference))
         self.assertEqual(self.n.process.wait(20), -signal.SIGXFSZ)
+        sizes = authority_file_sizes()
+        self.assertTrue(all(size < self.copy_limit for size in sizes.values()), sizes)
         stages = list(parent.glob(".stage-*"))
-        self.assertEqual(len(stages), 1)
-        self.assertEqual((stages[0] / incomplete).stat().st_size, self.limit)
+        self.assertEqual(len(stages), 1, sizes)
+        partial = stages[0] / incomplete
+        self.assertEqual(partial.stat().st_size, self.copy_limit)
+        with self.source.open("rb") as source, partial.open("rb") as copied:
+            self.assertEqual(hashlib.sha256(source.read(self.copy_limit)).hexdigest(),
+                             hashlib.file_digest(copied, "sha256").hexdigest())
+        db_url = (self.n.state / "state.db").as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(db_url, uri=True)) as database:
+            dispatched = database.execute("""SELECT q.phase, o.body->>'lifecycle', o.body->>'outcome_knowledge'
+                FROM queue q JOIN current o ON o.kind='Operation' AND o.spec->>'task_id'=q.task
+                WHERE q.task=?""", (task_id,)).fetchone()
+        self.assertEqual(dispatched, ("Dispatched", "Running", "InFlight"))
         return task_id, stages[0]
 
     def assert_unpublished_restore(self, task_id):

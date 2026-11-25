@@ -10,6 +10,7 @@ from support import Failure, Node, key, target
 from oci_recovery import check_kernel_limits, lose_start_receipt, lose_stop_receipt
 from oci_restart import verify_restart
 from test_artifact_install import MEDIA, TOOL as ARTIFACT_INSTALL, grant as artifact_grant, prepare as prepare_artifact, publish_install
+from test_oci_publisher import local_signature
 from test_session_output import generate_artifact
 
 
@@ -53,15 +54,17 @@ def stage_from_artifact(node, app, specification):
     source = generate_artifact(node, "local-owner", None, declaration, MEDIA)
     provenance = node.call("Artifact.Get", {"reference": source})["resource"]["spec"]["source"]
     assert provenance["kind"] == "LocalSessionOutput" and provenance["session_ref"]["resource_id"]
+    signature, _, publisher = local_signature(node, source)
+    signer = signature["key_ref"]
     allow = artifact_grant(node, "local-owner", ["task.submit", "task.read", "application.stage_artifact_release"],
-                          [app["resource_id"], source["resource_id"]])
-    app_file = node.base / "stage-application.json"
-    source_file = node.base / "stage-artifact.json"
-    app_file.write_text(json.dumps(app))
-    source_file.write_text(json.dumps(source))
+                          [app["resource_id"], source["resource_id"], signer["resource_id"]])
+    app_file, source_file, signature_file = (node.base / f"{name}.json" for name in ("app-ref", "source-ref", "signature"))
+    for path, value in [(app_file, app), (source_file, source), (signature_file, signature)]:
+        path.write_text(json.dumps(value))
     preview = node.cli(node.witness / "owner.token", "artifact-prepare-release", "--application", app_file,
-                       "--delegation", allow["delegation_ref"]["resource_id"], "--key", key(), source_file)
-    assert preview["resource_refs"] == [app, source], preview
+                       "--delegation", allow["delegation_ref"]["resource_id"], "--key", key(),
+                       "--signature", signature_file, source_file)
+    assert preview["resource_refs"] == [app, source, signer], preview
     accepted = node.call("Task.Submit", preview["request"])["task_id"]
     assert node.wait(accepted)["lifecycle"] == "WaitingApproval"
     settled = node.wait(accepted, autoapprove=True)
@@ -70,8 +73,15 @@ def stage_from_artifact(node, app, specification):
     receipt = node.call("Artifact.Read", {"reference": reference})
     evidence = node.call("Resource.Resolve", {"reference": receipt["stage_ref"]})["value"]
     assert evidence["source_artifact_ref"] == source and evidence["application_ref"] == app
-    print("Staged a newer real OCI release from a verified model session output", flush=True)
-    return receipt["release_ref"], source
+    release = node.call("Resource.Resolve", {"reference": receipt["release_ref"]})["value"]
+    assert release["publisher_identity_ref"]["resource_id"] == publisher["principal_id"]
+    specification = node.call("Resource.Resolve", {"reference": release["release_spec_ref"]})["value"]
+    trust = specification["provenance"]
+    assert trust["source_trust"] == "PublisherVerified" and source in trust["source_refs"]
+    evidence = node.call("Resource.Resolve", {"reference": trust["trust_evidence_or_admission_policy_ref"]})["value"]
+    assert evidence["signature"] == signature and evidence["artifact_ref"] == source
+    print("Staged a real OCI release from a signed model session output", flush=True)
+    return receipt["release_ref"], source, signer
 
 
 def retire_oci_release(node, app, release, artifact, allow, uninstall=False):
@@ -185,7 +195,7 @@ int main(void) {
         assert upgraded_image != spec["image_id"]
         release = dict(spec, image_id=upgraded_image, release_version="2.0.0", environment={"TEST_NAME": "upgraded"})
         del release["volume"]
-        staged, staged_artifact = stage_from_artifact(node, app, release)
+        staged, staged_artifact, signing_key = stage_from_artifact(node, app, release)
         assert node.get(app_id)["resource"]["spec"]["release_ref"] == previous_release
         agent = node.call("Agent.Register", {"name": "installer"})
         grant = node.call("Grant.Issue", dict(principal_id=agent["principal_id"], actions=["task.submit","task.read","application.install"],
@@ -216,6 +226,7 @@ int main(void) {
         app = node.perform("application.start", target(app))
         changed_cid = node.perform("application.health", target(app))["container_id"]
         assert json.loads(subprocess.check_output(docker + ["inspect", changed_cid]))[0]["Image"] == upgraded_image
+        node.call("Artifact.PublisherKey.Revoke", {**target(signing_key), "reason": "end of publisher trust"})
         subprocess.run(docker + ["kill", changed_cid], check=True, stdout=subprocess.DEVNULL)
         app = node.perform("application.refresh", target(app))
         observed = node.get(app_id)["value"]
@@ -225,6 +236,9 @@ int main(void) {
         node.start()
         assert node.get(app_id)["value"]["readiness"] == "NotReady"
         app = node.perform("application.stop", target(app))
+        restart_denied = node.wait(node.submit("application.start", target(app)), autoapprove=True)
+        assert (restart_denied["lifecycle"], restart_denied["outcome_knowledge"], restart_denied["conditions"][0]["type"]) == (
+            "Failed", "NotStarted", "PermissionDenied"), restart_denied
         app = node.perform("application.select_release", dict(target=target(app), release_ref=previous_release))
         app = lose_start_receipt(node, app, volume, previous_binaries)
         reverted = node.perform("application.health", target(app))["container_id"]

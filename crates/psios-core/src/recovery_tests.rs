@@ -983,6 +983,215 @@ fn settle_oci_catalog(s: &mut Store, task: &str) -> Value {
     .unwrap()
 }
 
+fn install_agent_app(s: &mut Store, agent: &Value, name: &str) -> Value {
+    let token = agent["token"].as_str().unwrap();
+    let allow = call(s,"Grant.Issue",json!({"principal_id":agent["principal_id"],"units":4,"ttl_seconds":90,
+        "actions":["application.install","task.submit","task.read"],"tool_targets":["profile-local"],
+    })).unwrap();
+    let prepared = call_as(s,"Task.Prepare",json!({"tool":"application.install","key":id("install"),
+        "delegation_id":allow["delegation_ref"]["resource_id"],"input":{
+            "name":name,"image_id":format!("sha256:{}","e".repeat(64)),"argv":["/probe"],"release_version":"1.0.0",
+            "license_expression":"0BSD","cpu_millicores":200,"memory_max_bytes":33554432,"pids_max":8,"ephemeral_max_bytes":1048576,
+        },
+    }),token.into()).unwrap();
+    let task = call_as(s, "Task.Submit", prepared, token.into()).unwrap();
+    settle_oci_catalog(s, task["task_id"].as_str().unwrap())
+}
+
+#[test]
+fn publisher_verification_persists_after_revocation_and_fences_new_launches() {
+    use ring::{
+        rand::SystemRandom,
+        signature::{Ed25519KeyPair, KeyPair},
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, mut s) = initialized(tmp.path());
+    let (unsigned, source) = accepted_artifact_install(&mut s);
+    let unused = call(&mut s, "Resource.Get", json!({"id":unsigned})).unwrap()["reference"].clone();
+    call(
+        &mut s,
+        "Task.Cancel",
+        json!({"id":unused["resource_id"],"expected_resource_version":unused["version"]}),
+    )
+    .unwrap();
+    let publisher = call(&mut s, "Agent.Register", json!({"name":"local-signer"})).unwrap();
+    let private = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+    let keys = Ed25519KeyPair::from_pkcs8(private.as_ref()).unwrap();
+    let registration = call(
+        &mut s,
+        "Artifact.PublisherKey.Register",
+        json!({"principal_id":publisher["principal_id"],
+        "public_key_base64":STANDARD.encode(keys.public_key().as_ref())}),
+    )
+    .unwrap();
+    let signing_key = &registration["reference"];
+    let uploaded = call(&mut s, "Artifact.Get", json!({"reference":source})).unwrap();
+    let specification = &uploaded["resource"]["spec"];
+    let statement = psios_api::canonical(
+        &json!({"domain":"psios/local-oci-declaration-signature/1",
+            "artifact_digest":source["digest"],"declared_media_type":specification["declared_media_type"],
+            "size_bytes":specification["size_bytes"],
+        }),
+    );
+    let signature = json!({"key_ref":signing_key,"signature_base64":STANDARD.encode(keys.sign(&statement).as_ref())});
+    let permit = call(
+        &mut s,
+        "Grant.Issue",
+        json!({"principal_id":"local-owner","units":2,"ttl_seconds":90,
+            "actions":["task.submit","task.read",apps::artifact_install::TOOL],
+            "tool_targets":["profile-local",source["resource_id"],signing_key["resource_id"]],
+        }),
+    )
+    .unwrap();
+    let draft = call(&mut s,"Application.PrepareArtifactInstall",json!({"key":id("signed-install"),
+        "reference":source,"signature":signature,"delegation_id":permit["delegation_ref"]["resource_id"],
+    })).unwrap();
+    let accepted = call(&mut s, "Task.Submit", draft["request"].clone()).unwrap();
+    let completed = settle_oci_catalog(&mut s, accepted["task_id"].as_str().unwrap());
+    let manifest = call(
+        &mut s,
+        "Resource.Resolve",
+        json!({"reference":completed["release_ref"]}),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest["value"]["publisher_identity_ref"]["resource_id"],
+        publisher["principal_id"]
+    );
+    let specification = call(
+        &mut s,
+        "Resource.Resolve",
+        json!({"reference":manifest["value"]["release_spec_ref"]}),
+    )
+    .unwrap();
+    let provenance = &specification["value"]["provenance"];
+    assert_eq!(provenance["source_trust"], "PublisherVerified");
+    assert!(
+        provenance["source_refs"]
+            .as_array()
+            .unwrap()
+            .contains(&source)
+    );
+    let evidence = call(
+        &mut s,
+        "Resource.Resolve",
+        json!({"reference":provenance["trust_evidence_or_admission_policy_ref"]}),
+    )
+    .unwrap();
+    assert_eq!(evidence["value"]["signature"], signature);
+    let app = &completed["application_ref"];
+    let managed = install_agent_app(&mut s, &publisher, "recovery-test");
+    let stage = call(&mut s,"Grant.Issue",json!({"principal_id":"local-owner","units":2,"ttl_seconds":90,
+        "actions":["task.submit","task.read",apps::artifact_install::STAGE_TOOL],
+        "tool_targets":[managed["resource_id"],source["resource_id"],signing_key["resource_id"]],
+    })).unwrap();
+    let target =
+        json!({"id":managed["resource_id"],"expected_resource_version":managed["version"]});
+    let ready = call(&mut s,"Application.PrepareArtifactRelease",json!({"key":id("signed-stage"),"reference":source,
+        "target":target,"signature":signature,"delegation_id":stage["delegation_ref"]["resource_id"],
+    })).unwrap();
+    let staged = call(&mut s, "Task.Submit", ready["request"].clone()).unwrap();
+    let staged = settle_oci_catalog(&mut s, staged["task_id"].as_str().unwrap());
+    let release = call(
+        &mut s,
+        "Resource.Resolve",
+        json!({"reference":staged["release_ref"]}),
+    )
+    .unwrap();
+    assert_eq!(
+        release["resource"]["metadata"]["owner_principal_id"],
+        publisher["principal_id"]
+    );
+    let select = submit(
+        &mut s,
+        "application.select_release",
+        json!({"target":target,"release_ref":staged["release_ref"]}),
+    );
+    approve(&mut s, &select);
+    let managed = execute(&mut s, &select);
+    s.transaction("authorize-signed-launch", |db| {
+        for public in [app, &managed] {
+            assert_eq!(
+                apps::launch_spec(db, &db.resolve(public)?, true)?.image_id,
+                format!("sha256:{}", "d".repeat(64))
+            );
+        }
+        Ok(())
+    })
+    .unwrap();
+    let select_again = submit(
+        &mut s,
+        "application.select_release",
+        json!({"target":{"id":managed["resource_id"],"expected_resource_version":managed["version"]},
+            "release_ref":staged["release_ref"]}),
+    );
+    approve(&mut s, &select_again);
+    assert_eq!(claim(&mut s), select_again);
+    let selection_work = dispatch(&mut s, &select_again);
+    let selection_receipt = selection_work.perform(|_| unreachable!("no host effect"));
+    let start = submit(
+        &mut s,
+        "application.start",
+        json!({"id":app["resource_id"],"expected_resource_version":app["version"]}),
+    );
+    approve(&mut s, &start);
+    assert_eq!(claim(&mut s), start);
+    let starting = dispatch(&mut s, &start);
+    call(
+        &mut s,
+        "Artifact.PublisherKey.Revoke",
+        json!({"id":signing_key["resource_id"],
+        "expected_resource_version":signing_key["version"],"reason":"publisher rollover"}),
+    )
+    .unwrap();
+    let denied = s.transaction("check-revoked-start", |db| {
+        starting.checkpoint(
+            db,
+            host::Checkpoint::OciStart {
+                engine: "test-engine",
+                container: "test-created-instance",
+            },
+        )
+    });
+    assert_eq!(denied.as_ref().unwrap_err().0.code, "PermissionDenied");
+    s.transaction("settle-revoked-publisher-effects", |db| {
+        assert!(db.find(&format!("oci-start-{}", starting.op.id))?.is_none());
+        broker::finish(db, &starting, denied.map(|_| Value::Null))?;
+        broker::finish(db, &selection_work, selection_receipt)
+    })
+    .unwrap();
+    for task in [&start, &select_again] {
+        let failed = call(&mut s, "Task.Get", json!({"id":task})).unwrap();
+        assert_eq!(failed["lifecycle"], "Failed", "{failed}");
+        assert_eq!(failed["outcome_knowledge"], "Known");
+        assert_eq!(failed["conditions"][0]["type"], "PermissionDenied");
+    }
+    assert_eq!(
+        call(&mut s, "Resource.Get", json!({"id":managed["resource_id"]})).unwrap()["reference"],
+        managed
+    );
+    s.transaction("verify-revoked-signer", |db| {
+        let app = db.resolve(app)?;
+        assert_eq!(
+            apps::launch_spec(db, &app, true)
+                .expect_err("revoked signer must block launch")
+                .0
+                .code,
+            "PermissionDenied"
+        );
+        assert!(apps::launch_spec(db, &app, false).is_ok());
+        apps::publisher::verify(db.c)?;
+        db.c.execute_batch("SAVEPOINT wrong_publisher")?;
+        db.c.execute("UPDATE versions SET body=json_set(body,'$.publisher_identity_ref',json(?1)) WHERE id=?2 AND rev=1",
+            rusqlite::params![db.get(policy::OWNER)?.reference().to_string(),completed["release_ref"]["resource_id"].as_str().unwrap()])?;
+        assert!(apps::publisher::verify(db.c).is_err());
+        db.c.execute_batch("ROLLBACK TO wrong_publisher; RELEASE wrong_publisher")?;
+        apps::publisher::verify(db.c)
+    })
+    .unwrap();
+}
+
 #[test]
 fn application_release_snapshot_survives_switch_and_retirement_between_pages() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1136,17 +1345,7 @@ fn agent_reads_release_inventory_only_for_its_authorized_application() {
     .unwrap();
     let token = agent["token"].as_str().unwrap();
     let agent_call = |s: &mut Store, method: &str, params| call_as(s, method, params, token.into());
-    let install = call(&mut s,"Grant.Issue",json!({"principal_id":agent["principal_id"],"units":4,"ttl_seconds":90,
-        "actions":["application.install","task.submit","task.read"],"tool_targets":["profile-local"],
-    })).unwrap();
-    let prepared = agent_call(&mut s,"Task.Prepare",json!({"tool":"application.install","key":id("install"),
-        "delegation_id":install["delegation_ref"]["resource_id"],"input":{
-            "name":"agent-app","image_id":format!("sha256:{}","e".repeat(64)),"argv":["/probe"],"release_version":"1.0.0",
-            "license_expression":"0BSD","cpu_millicores":200,"memory_max_bytes":33554432,"pids_max":8,"ephemeral_max_bytes":1048576,
-        },
-    })).unwrap();
-    let task = agent_call(&mut s, "Task.Submit", prepared).unwrap();
-    let app = settle_oci_catalog(&mut s, task["task_id"].as_str().unwrap());
+    let app = install_agent_app(&mut s, &agent, "agent-app");
     let input = json!({"application_id":app["resource_id"]});
     let (other, _) = accepted_artifact_install(&mut s);
     let other = settle_oci_catalog(&mut s, &other);

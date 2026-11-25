@@ -219,7 +219,8 @@ fn worker(s: Shared, changes: Arc<Changes>, stop: Arc<AtomicBool>, tick: Duratio
                 Ok(())
             },
         );
-        let done = state(&s)?.transaction(&correlation, |db| broker::finish(db, &work, receipt));
+        let done =
+            state(&s)?.transaction(&correlation, |db| broker::finish_host(db, &work, receipt));
         if let Err(e) = done {
             eprintln!("psiosd {} receipt commit failed: {}", work.op.id, e.0.code);
             state(&s)?.transaction(&correlation, |db| broker::settlement_failed(db, &work))?;

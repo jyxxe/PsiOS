@@ -263,6 +263,12 @@ Core 核对原会话、模型租约及决策摘要，在一个事务中提交原
 
 读取源制品需要 Node 范围的 `artifact.read`，安装委托需要 `application.install_artifact` 且覆盖制品与目标卷或 `profile-local`。Task 准入固定源摘要并创建审批计划。待审批与执行期间保留制品，安装提交时由不可变 Release 接续保留。成功回执关联 Operation、Application、Release、Deployment 和制品来源。目录提交前中断会结算为已知失败并释放 Task 的保留关系。安装得到处于 `Stopped` 的应用，通过已有 `application.start` 启动。[授权及恢复验收](../tests/test_artifact_install.py) · [真实 OCI 验收](../tests/oci.py)
 
+### 保存本机 OCI 镜像字节
+
+`application.capture_oci_image` 接受 `image_id` 和 `expected_engine_id`。本机所有者使用显式限定在当前 Node 的任务委托和 `artifact.upload` 授权，提交后再批准包含镜像和引擎身份的计划。适配器仅从配置的本机 Docker Engine 以完整镜像配置摘要导出有层的 Linux amd64 镜像，前后核对引擎身份和层摘要。归档大小最多 8 MiB，并计入现有 Node 与所有者的制品额度。
+
+制品字节、`LocalOciImageCapture` 来源、`OciImageCapture` 凭据和 Task 回执在同一事务提交。归档可用独立授权的 `Artifact.ReadChunk` 分块读取并核对完整 SHA-256；回收需要独立的 `artifact.withdraw`。取消、进程中断和发布失败不会留下半成品。现有 OCI 部署仍依赖引擎缓存。Release 对镜像归档的保留和经授权恢复是后续步骤。[真实 Docker 导出和独立重载验收](../tests/oci_capture.py)
+
 ### 从本机制品暂存新版本
 
 `Application.PrepareArtifactRelease` 接受应用的 `target`、确切制品 `reference`、`key`、`delegation_id` 和可选 `deadline_at`。制品使用相同 OCI 声明格式，要求应用名称一致并省略 `volume`。调用者需要 Node 范围的 `artifact.read`，以及同时覆盖应用与制品的 `application.stage_artifact_release` 委托。`Client::prepare_artifact_release` 和 `psiosctl artifact-prepare-release --application app-ref.json --delegation "$delegation" --key upgrade-1 artifact-ref.json` 返回新版本参数、当前选定版本及可提交的 Task 请求。

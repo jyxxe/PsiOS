@@ -27,6 +27,8 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                     | apps::artifact_install::STAGE_TOOL
                     | apps::release_retirement::TOOL
             );
+        // Export is read-only at Docker; the authority publishes the archive with its receipt.
+        let capture_uncommitted = phase == "Dispatched" && tool == apps::capture::TOOL;
         let backup_unpublished = phase == "Dispatched"
             && tool == "backup.create"
             && storage::publication::not_published(db, &operation(db, &t)?)?;
@@ -46,6 +48,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             && !read
             && !activation_uncommitted
             && !catalog_uncommitted
+            && !capture_uncommitted
             && !backup_unpublished
             && !restore_unpublished
             && !restart_undispatched
@@ -73,6 +76,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             || attempt >= 3
             || activation_uncommitted
             || catalog_uncommitted
+            || capture_uncommitted
             || backup_unpublished
             || restore_unpublished
             || restart_undispatched
@@ -100,6 +104,8 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                         "activation had not committed at restart"
                     } else if catalog_uncommitted {
                         "application catalog change had not committed at restart"
+                    } else if capture_uncommitted {
+                        "OCI archive publication had not committed at restart"
                     } else if rename_unprepared {
                         "file rename interrupted before its observation was checkpointed"
                     } else if deletion_unprepared {

@@ -66,6 +66,7 @@ pub const TOOLS: &[&str] = &[
     storage::restore_publication::INSPECT,
     "application.install",
     apps::artifact_install::TOOL,
+    apps::capture::TOOL,
     artifact::session_output::TOOL,
     "application.start",
     "application.stop",
@@ -153,6 +154,7 @@ pub fn approval(tool: &str) -> bool {
             | "backup.delete"
             | "application.install"
             | apps::artifact_install::TOOL
+            | apps::capture::TOOL
             | "application.start"
             | apps::restart::TOOL
             | "application.uninstall"
@@ -183,6 +185,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | artifact::ingress::WITHDRAW
                     | artifact::session_output::TOOL
                     | apps::artifact_install::TOOL
+                    | apps::capture::TOOL
                     | apps::artifact_install::STAGE_TOOL
                     | apps::inventory::TOOL
                     | apps::release_retirement::TOOL
@@ -521,6 +524,11 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "unregistered grant action",
     )?;
     require(
+        principal.id == OWNER || p.actions.iter().all(|action| action != apps::capture::TOOL),
+        "PermissionDenied",
+        "OCI image capture is a local-owner operation",
+    )?;
+    require(
         p.model_calls <= 1_000_000
             && p.model_lease_ms
                 .is_none_or(|limit| limit <= agent::model_time::MAX_BUDGET_MS)
@@ -545,6 +553,7 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
                     || action == artifact::ingress::WITHDRAW
                     || action == artifact::session_output::TOOL
                     || action == apps::artifact_install::TOOL
+                    || action == apps::capture::TOOL
                     || action == apps::artifact_install::STAGE_TOOL
                     || action == apps::inventory::TOOL
                     || action == apps::release_retirement::TOOL

@@ -300,7 +300,7 @@ fn submit_with_origin(
     let audience = a.audience(db, actor, &s["delegation_ref"], &target)?;
     db.cfg.check_admission_space()?;
     let requirements = dependencies::requirements(&input)?;
-    let recovery = admission::select(db, &a, &target, !requirements.is_empty())?;
+    let recovery = admission::select(db, actor, &a, &target, !requirements.is_empty())?;
     let budget = field(&s["budget_ref"], "resource_id");
     if recovery.is_some() {
         require(

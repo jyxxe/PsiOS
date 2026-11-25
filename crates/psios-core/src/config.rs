@@ -28,6 +28,8 @@ pub struct Config {
     pub socket: PathBuf,
     #[serde(default = "default_queue")]
     pub queue_limit: u32,
+    #[serde(default)]
+    pub principal_queue_limit: Option<u32>,
     #[serde(default = "default_recovery_queue")]
     pub recovery_queue_limit: u32,
     #[serde(default = "default_tick")]
@@ -135,6 +137,7 @@ impl Config {
             witness_dir: witness.into(),
             socket: path.join("api.sock"),
             queue_limit: default_queue(),
+            principal_queue_limit: None,
             recovery_queue_limit: default_recovery_queue(),
             workers: default_workers(),
             services: Vec::new(),
@@ -217,6 +220,9 @@ impl Config {
         require(
             (1..=16).contains(&self.workers)
                 && (1..=4096).contains(&self.queue_limit)
+                && self
+                    .principal_queue_limit
+                    .is_none_or(|limit| (1..=self.queue_limit).contains(&limit))
                 && self.recovery_queue_limit <= 16
                 && (5..=5000).contains(&self.tick_ms),
             "InvalidArgument",

@@ -79,7 +79,8 @@ ExecStart=/bin/sh -c 'touch {entered}; while test ! -f {completion}; do sleep .0
                 WHEN NEW.kind='HostServiceControlCheckpoint'
                 BEGIN SELECT RAISE(ABORT,'injected start checkpoint failure'); END""")
         try:
-            denied = n.wait(n.submit("service.start", target(service)), autoapprove=True)
+            denied_id = n.submit("service.start", target(service))
+            denied = n.wait(denied_id, autoapprove=True)
             assert (denied["lifecycle"], denied["outcome_knowledge"], denied["conditions"][0]["type"]) == (
                 "Failed", "NotStarted", "StorageUnavailable"), denied
             assert not entered.exists(), "systemd ran after the checkpoint was refused"
@@ -91,7 +92,8 @@ ExecStart=/bin/sh -c 'touch {entered}; while test ! -f {completion}; do sleep .0
         prior = n.wait(n.submit("service.inspect", target(service)))
         assert prior["lifecycle"] == "Succeeded", prior
         old_evidence = prior["result"]["artifact_refs"][0]
-        start = n.submit("service.start", target(service))
+        start = n.call("Task.Retry", dict(target(n.get(denied_id)["reference"]), key=key()))["task_id"]
+        assert start != denied_id and n.wait(start)["lifecycle"] == "WaitingApproval"
         n.approve(start)
         eventually(entered.exists)
         assert n.call("Task.Get", {"id": start})["outcome_knowledge"] == "InFlight"

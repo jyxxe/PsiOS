@@ -4897,5 +4897,471 @@
     ],
     "status": "NotRun",
     "implementation_status": "NotVerified"
+  },
+  {
+    "id": "AT-SHL-001",
+    "title": "首次与后续登录进入桌面",
+    "source_document": "docs/07-applications-packages-gui.md",
+    "requirement_ids": [
+      "V1-SHL-001",
+      "V1-SHL-002",
+      "V1-SHL-012"
+    ],
+    "stage": [
+      "M2"
+    ],
+    "verification_methods": [
+      "Integration"
+    ],
+    "preconditions": [
+      "完成初始化并创建具有基础应用权限的账户，记录默认启动配置。"
+    ],
+    "actions_or_fault": [
+      "首次登录，退出后再次登录；分别检查 Neon、Helium 的默认入口。"
+    ],
+    "expected": [
+      "进入桌面并提供 Dock/启动器；后续按策略恢复工作区，默认首页不是系统资源仪表盘。"
+    ],
+    "required_evidence": [
+      "源码 SHA、制品摘要、Edition/Profile、浏览器/设备/网络与配置",
+      "操作及后端状态记录、相关授权/拒绝日志、预期与实际结果；截图仅作辅助"
+    ],
+    "status": "NotRun",
+    "implementation_status": "NotVerified"
+  },
+  {
+    "id": "AT-SHL-002",
+    "title": "多窗口并排、贴靠与焦点",
+    "source_document": "docs/07-applications-packages-gui.md",
+    "requirement_ids": [
+      "V1-SHL-002",
+      "V1-SHL-003"
+    ],
+    "stage": [
+      "M2"
+    ],
+    "verification_methods": [
+      "Integration"
+    ],
+    "preconditions": [
+      "准备文件、任务中心和设置三个可用应用。"
+    ],
+    "actions_or_fault": [
+      "同时打开三者，移动、缩放、贴靠、层叠、最小化并重新聚焦。"
+    ],
+    "expected": [
+      "三个窗口可持续工作，焦点及菜单匹配活动应用，所有窗口可从 Dock/概览找回。"
+    ],
+    "required_evidence": [
+      "源码 SHA、制品摘要、Edition/Profile、浏览器/设备/网络与配置",
+      "操作及后端状态记录、相关授权/拒绝日志、预期与实际结果；截图仅作辅助"
+    ],
+    "status": "NotRun",
+    "implementation_status": "NotVerified"
+  },
+  {
+    "id": "AT-SHL-003",
+    "title": "Dock 与单实例、多实例应用",
+    "source_document": "docs/07-applications-packages-gui.md",
+    "requirement_ids": [
+      "V1-SHL-002",
+      "V1-SHL-003",
+      "V1-SHL-008"
+    ],
+    "stage": [
+      "M2"
+    ],
+    "verification_methods": [
+      "Integration"
+    ],
+    "preconditions": [
+      "注册一个单实例和一个多窗口应用，记录后端启动计数。"
+    ],
+    "actions_or_fault": [
+      "连续点击 Dock、启动器及新建窗口命令，并选择已有窗口。"
+    ],
+    "expected": [
+      "单实例聚焦已有窗口，多实例提供选择；不无意重复启动服务或创建业务操作。"
+    ],
+    "required_evidence": [
+      "源码 SHA、制品摘要、Edition/Profile、浏览器/设备/网络与配置",
+      "操作及后端状态记录、相关授权/拒绝日志、预期与实际结果；截图仅作辅助"
+    ],
+    "status": "NotRun",
+    "implementation_status": "NotVerified"
+  },
+  {
+    "id": "AT-SHL-004",
+    "title": "布局恢复不重放操作",
+    "source_document": "docs/07-applications-packages-gui.md",
+    "requirement_ids": [
+      "V1-SHL-005",
+      "V1-SHL-008"
+    ],
+    "stage": [
+      "M2"
+    ],
+    "verification_methods": [
+      "Integration",
+      "FaultInjection"
+    ],
+    "preconditions": [
+      "保存含应用对象引用的布局，包含一个运行任务和已完成写操作。"
+    ],
+    "actions_or_fault": [
+      "刷新、重新登录、缩小分辨率，再卸载一个应用并恢复布局；同时从两个标签页保存布局。"
+    ],
+    "expected": [
+      "窗口可见且对象重新鉴权；无写操作重放/任务重启；缺失应用有提示，多标签页不持续互抢焦点和布局。"
+    ],
+    "required_evidence": [
+      "源码 SHA、制品摘要、Edition/Profile、浏览器/设备/网络与配置",
+      "操作及后端状态记录、相关授权/拒绝日志、预期与实际结果；截图仅作辅助"
+    ],
+    "status": "NotRun",
+    "implementation_status": "NotVerified"
+  },
+  {
+    "id": "AT-SHL-005",
+    "title": "工作区与节点目标隔离",
+    "source_document": "docs/07-applications-packages-gui.md",
+    "requirement_ids": [
+      "V1-SHL-004",
+      "V1-SHL-005"
+    ],
+    "stage": [
+      "M2",
+      "M4"
+    ],
+    "verification_methods": [
+      "Integration",
+      "FaultInjection"
+    ],
+    "preconditions": [
+      "本地与远端节点各打开文件和终端窗口，建立两个命名工作区。"
+    ],
+    "actions_or_fault": [
+      "切换工作区、拖动窗口并改变全局浏览节点，观察现有终端的命令目标。"
+    ],
+    "expected": [
+      "只改变视图组织，现有窗口目标与授权不变，远端目标标识始终可辨认。"
+    ],
+    "required_evidence": [
+      "源码 SHA、制品摘要、Edition/Profile、浏览器/设备/网络与配置",
+      "操作及后端状态记录、相关授权/拒绝日志、预期与实际结果；截图仅作辅助"
+    ],
+    "status": "NotRun",
+    "implementation_status": "NotVerified"
+  },
+  {
+    "id": "AT-SHL-006",
+    "title": "关闭视图与退出应用分离",
+    "source_document": "docs/07-applications-packages-gui.md",
+    "requirement_ids": [
+      "V1-SHL-003",
+      "V1-SHL-009"
+    ],
+    "stage": [
+      "M2"
+    ],
+    "verification_methods": [
+      "Integration",
+      "FaultInjection"
+    ],
+    "preconditions": [
+      "准备未保存文档、持久运行任务及其任务视图。"
+    ],
+    "actions_or_fault": [
+      "尝试关闭文档并分别保存/放弃/取消；关闭及最小化任务窗口，再打开任务中心。"
+    ],
+    "expected": [
+      "未保存内容得到正确处理；关闭/最小化不取消任务；退出应用和取消任务仅经明确命令发生。"
+    ],
+    "required_evidence": [
+      "源码 SHA、制品摘要、Edition/Profile、浏览器/设备/网络与配置",
+      "操作及后端状态记录、相关授权/拒绝日志、预期与实际结果；截图仅作辅助"
+    ],
+    "status": "NotRun",
+    "implementation_status": "NotVerified"
+  },
+  {
+    "id": "AT-SHL-007",
+    "title": "文件引用与 Agent 上下文",
+    "source_document": "docs/07-applications-packages-gui.md",
+    "requirement_ids": [
+      "V1-SHL-007",
+      "V1-SHL-008"
+    ],
+    "stage": [
+      "M3"
+    ],
+    "verification_methods": [
+      "Integration"
+    ],
+    "preconditions": [
+      "准备可读文件、无权文件和两个会话，启用有界 Agent。"
+    ],
+    "actions_or_fault": [
+      "将文件拖入聊天但暂不发送，再发送请求；替换为无权资源，并保持另一个私密会话和窗口打开。"
+    ],
+    "expected": [
+      "拖入仅创建可检查引用；受理请求后按授权派发；无权引用被拒，其他窗口/会话/剪贴板不自动成为上下文。"
+    ],
+    "required_evidence": [
+      "源码 SHA、制品摘要、Edition/Profile、浏览器/设备/网络与配置",
+      "操作及后端状态记录、相关授权/拒绝日志、预期与实际结果；截图仅作辅助"
+    ],
+    "status": "NotRun",
+    "implementation_status": "NotVerified"
+  },
+  {
+    "id": "AT-SHL-008",
+    "title": "聊天、后台任务与通知事实",
+    "source_document": "docs/07-applications-packages-gui.md",
+    "requirement_ids": [
+      "V1-SHL-007",
+      "V1-SHL-009"
+    ],
+    "stage": [
+      "M3"
+    ],
+    "verification_methods": [
+      "Integration"
+    ],
+    "preconditions": [
+      "建立聊天关联的真实 Task/Run、WorkflowRun 和输出制品。"
+    ],
+    "actions_or_fault": [
+      "令聊天声称完成而后端仍运行/失败；关闭聊天，切换工作区，再从通知打开成果；分别暂停回复和取消任务。"
+    ],
+    "expected": [
+      "真实状态不被聊天覆盖；关闭视图不停止工作；通知定位来源对象，暂停回复与取消任务效果可区分。"
+    ],
+    "required_evidence": [
+      "源码 SHA、制品摘要、Edition/Profile、浏览器/设备/网络与配置",
+      "操作及后端状态记录、相关授权/拒绝日志、预期与实际结果；截图仅作辅助"
+    ],
+    "status": "NotRun",
+    "implementation_status": "NotVerified"
+  },
+  {
+    "id": "AT-SHL-009",
+    "title": "账户切换、撤权和断网",
+    "source_document": "docs/07-applications-packages-gui.md",
+    "requirement_ids": [
+      "V1-SHL-005",
+      "V1-SHL-008",
+      "V1-SHL-009"
+    ],
+    "stage": [
+      "M2",
+      "M3"
+    ],
+    "verification_methods": [
+      "Integration",
+      "FaultInjection"
+    ],
+    "preconditions": [
+      "两个账户拥有不同私密对象，保存第一账户布局与状态缓存。"
+    ],
+    "actions_or_fault": [
+      "断网、撤销授权、退出并切换账户，再恢复旧布局；观察离线任务状态。"
+    ],
+    "expected": [
+      "不泄露上一账户内容或恢复过期权限；断网明确显示状态不可确认，不把缓存冒充当前成功。"
+    ],
+    "required_evidence": [
+      "源码 SHA、制品摘要、Edition/Profile、浏览器/设备/网络与配置",
+      "操作及后端状态记录、相关授权/拒绝日志、预期与实际结果；截图仅作辅助"
+    ],
+    "status": "NotRun",
+    "implementation_status": "NotVerified"
+  },
+  {
+    "id": "AT-SHL-010",
+    "title": "NativeWeb 嵌入回退与隔离",
+    "source_document": "docs/07-applications-packages-gui.md",
+    "requirement_ids": [
+      "V1-SHL-006",
+      "V1-SHL-008"
+    ],
+    "stage": [
+      "M4"
+    ],
+    "verification_methods": [
+      "Integration",
+      "FaultInjection"
+    ],
+    "preconditions": [
+      "准备允许嵌入和明确拒绝嵌入的两种 Web 应用及不同来源。"
+    ],
+    "actions_or_fault": [
+      "分别打开应用；从第三方 frame 发送伪造来源、窗口身份或未授权命令。"
+    ],
+    "expected": [
+      "拒绝嵌入的应用提供独立入口且不删除其安全策略；消息校验拒绝越界，不共享 Shell 权限。"
+    ],
+    "required_evidence": [
+      "源码 SHA、制品摘要、Edition/Profile、浏览器/设备/网络与配置",
+      "操作及后端状态记录、相关授权/拒绝日志、预期与实际结果；截图仅作辅助"
+    ],
+    "status": "NotRun",
+    "implementation_status": "NotVerified"
+  },
+  {
+    "id": "AT-SHL-011",
+    "title": "Viewer 断开、重连和人类接管",
+    "source_document": "docs/07-applications-packages-gui.md",
+    "requirement_ids": [
+      "V1-SHL-003",
+      "V1-SHL-005",
+      "V1-SHL-006"
+    ],
+    "stage": [
+      "M4"
+    ],
+    "verification_methods": [
+      "Integration",
+      "FaultInjection"
+    ],
+    "preconditions": [
+      "启用经验证的 SingleApplication 后端、观察授权和 Agent 输入租约。"
+    ],
+    "actions_or_fault": [
+      "关闭 Viewer、重连、改变会话代次并在人类接管时保留待发送输入。"
+    ],
+    "expected": [
+      "应用与 Viewer 生命周期分离；重连重新鉴权，旧 ControlLease 不复活，人类接管按既有 GUI 规则清空旧输入。"
+    ],
+    "required_evidence": [
+      "源码 SHA、制品摘要、Edition/Profile、浏览器/设备/网络与配置",
+      "操作及后端状态记录、相关授权/拒绝日志、预期与实际结果；截图仅作辅助"
+    ],
+    "status": "NotRun",
+    "implementation_status": "NotVerified"
+  },
+  {
+    "id": "AT-SHL-012",
+    "title": "无图形后端的浏览器桌面",
+    "source_document": "docs/07-applications-packages-gui.md",
+    "requirement_ids": [
+      "V1-SHL-001",
+      "V1-SHL-006",
+      "V1-SHL-012"
+    ],
+    "stage": [
+      "M2",
+      "M4"
+    ],
+    "verification_methods": [
+      "Integration"
+    ],
+    "preconditions": [
+      "Helium/Neon 不安装 KDE、GUI Bridge 或无头 compositor，保留基础 Web 服务。"
+    ],
+    "actions_or_fault": [
+      "打开桌面、文件、任务与设置，再尝试启动需要图形后端的应用。"
+    ],
+    "expected": [
+      "Web 桌面与基础应用正常；图形应用准确说明未启用能力，不阻塞其他工作或隐式拉起完整桌面。"
+    ],
+    "required_evidence": [
+      "源码 SHA、制品摘要、Edition/Profile、浏览器/设备/网络与配置",
+      "操作及后端状态记录、相关授权/拒绝日志、预期与实际结果；截图仅作辅助"
+    ],
+    "status": "NotRun",
+    "implementation_status": "NotVerified"
+  },
+  {
+    "id": "AT-SHL-013",
+    "title": "输入法、键盘和可访问性",
+    "source_document": "docs/07-applications-packages-gui.md",
+    "requirement_ids": [
+      "V1-SHL-003",
+      "V1-SHL-011"
+    ],
+    "stage": [
+      "M2",
+      "M6"
+    ],
+    "verification_methods": [
+      "Integration"
+    ],
+    "preconditions": [
+      "固定浏览器/OS，准备中文输入法、键盘、屏幕阅读及缩放/对比度设置。"
+    ],
+    "actions_or_fault": [
+      "在组合输入中触发常见快捷键，纯键盘打开/移动/贴靠/关闭窗口，检查弹窗关闭后的焦点。"
+    ],
+    "expected": [
+      "不误触全局字符命令；核心路径无需鼠标，控件有名称和焦点，不依赖系统独占快捷键或浏览器全屏。"
+    ],
+    "required_evidence": [
+      "源码 SHA、制品摘要、Edition/Profile、浏览器/设备/网络与配置",
+      "操作及后端状态记录、相关授权/拒绝日志、预期与实际结果；截图仅作辅助"
+    ],
+    "status": "NotRun",
+    "implementation_status": "NotVerified"
+  },
+  {
+    "id": "AT-SHL-014",
+    "title": "窄屏与触控布局",
+    "source_document": "docs/07-applications-packages-gui.md",
+    "requirement_ids": [
+      "V1-SHL-004",
+      "V1-SHL-005",
+      "V1-SHL-011"
+    ],
+    "stage": [
+      "M6"
+    ],
+    "verification_methods": [
+      "Integration"
+    ],
+    "preconditions": [
+      "同一账户拥有桌面布局，准备窄屏及触控设备。"
+    ],
+    "actions_or_fault": [
+      "在窄屏打开、切换、关闭应用并处理通知，随后回到桌面设备。"
+    ],
+    "expected": [
+      "窄屏使用单应用/适合触控的切换或分屏；无需拖动过小窗口，桌面布局不被移动布局覆盖。"
+    ],
+    "required_evidence": [
+      "源码 SHA、制品摘要、Edition/Profile、浏览器/设备/网络与配置",
+      "操作及后端状态记录、相关授权/拒绝日志、预期与实际结果；截图仅作辅助"
+    ],
+    "status": "NotRun",
+    "implementation_status": "NotVerified"
+  },
+  {
+    "id": "AT-SHL-015",
+    "title": "视觉降级与多窗口资源预算",
+    "source_document": "docs/07-applications-packages-gui.md",
+    "requirement_ids": [
+      "V1-SHL-010",
+      "V1-SHL-012"
+    ],
+    "stage": [
+      "M6"
+    ],
+    "verification_methods": [
+      "Integration"
+    ],
+    "preconditions": [
+      "先冻结基准设备、浏览器、网络、工作负载及有限性能预算。"
+    ],
+    "actions_or_fault": [
+      "运行多窗口长时负载，测量首次交互、拖动/切换、内存/CPU/连接数；启用减少动效与透明度。"
+    ],
+    "expected": [
+      "按确切预算评估通过或失败，分别记录浏览器、服务端和 GUI 成本；视觉降级不损害核心窗口操作。"
+    ],
+    "required_evidence": [
+      "源码 SHA、制品摘要、Edition/Profile、浏览器/设备/网络与配置",
+      "操作及后端状态记录、相关授权/拒绝日志、预期与实际结果；截图仅作辅助"
+    ],
+    "status": "NotRun",
+    "implementation_status": "NotVerified"
   }
 ]

@@ -1,6 +1,6 @@
 {
   "document_version": "1.0.0",
-  "checked_at": "2026-11-22T09:03:58.147549+00:00",
+  "checked_at": "2026-11-25T06:55:46.229584+00:00",
   "scope": "DocumentationPackageStaticValidationOnly",
   "result": "Passed",
   "counts": {
@@ -10,20 +10,20 @@
     "negative_examples": 35,
     "digest_vectors": 5,
     "strict_json_files": 116,
-    "normative_requirements": 245,
-    "local_markdown_links": 4478,
-    "product_test_plans_not_run": 135,
-    "requirements_with_validation_plan": 245,
+    "normative_requirements": 257,
+    "local_markdown_links": 4534,
+    "product_test_plans_not_run": 150,
+    "requirements_with_validation_plan": 257,
     "proposed_adrs": 25,
-    "work_items": 26,
+    "work_items": 27,
     "document_findings": 89,
     "legacy_mapping_targets": 994,
     "legacy_definition_slices": 1953,
     "legacy_requirements": 245,
     "legacy_tests": 141,
-    "html_internal_anchors": 1890,
-    "html_document_sections": 69,
-    "archived_sources": 15
+    "html_internal_anchors": 1920,
+    "html_document_sections": 68,
+    "archived_sources": 14
   },
   "failures": [],
   "example_results": [

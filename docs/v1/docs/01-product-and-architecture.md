@@ -12,7 +12,7 @@ PsiOS 是基于 Linux 的 Agent-Native 操作系统。用户通过 CLI、KDE、W
 | Identity/Policy、Task/Event、基本卷与 OCI | 同一契约，轻量部署 | 同一契约，服务型部署 | 同一契约，桌面资源调度 |
 | 原生 Agent/第三方接入、基础 Chat/DM | 可本机运行；无模型时明确不可推理 | 可长任务运行 | 本机交互入口 |
 | 最小 Workflow API/运行器 | 可按需启动 | 可常驻 | 可按需启动 |
-| PsiOS Shell | 轻量 WebUI 入口 | Web 管理入口 | 与 KDE 并存 |
+| PsiOS Shell | 按需加载的浏览器桌面 | 面向应用与工作的浏览器桌面 | 浏览器桌面，与本机 KDE 并存 |
 | Cluster Worker 接入 | 必备能力、默认未入群 | 必备能力、默认未入群 | 必备能力、资源须显式授权 |
 | Cluster Controller、完整 Project、Studio | 可选 | 可选服务器角色 | 可选 |
 | KDE/图形会话后端 | 按需安装 | 按需无头会话 | KDE/Wayland 基线 |
@@ -26,6 +26,10 @@ PsiOS 是基于 Linux 的 Agent-Native 操作系统。用户通过 CLI、KDE、W
 **V1-BASE-003｜数据边界。** Host Storage → Storage Service → 可选 Data Services 分层。TableFS 是可选 Volume 后端；基础文件 API 不依赖 Dataset。Knowledge 是 Dataset 的授权子集/视图与派生索引；Embedding 是独立服务。主记录保留 `uid/name?/content/tag/score/vector?/extra_data?`；`extra_data` 是通用 JSON，不能收缩为评分器专有对象。
 
 **V1-BASE-004｜协作边界。** Conversation 存交流；WorkItem 存长期目标与验收条件；WorkflowRun 存编排；Task 存执行目标；Run 存尝试；Operation 存系统副作用执行事实。Agent 可主动 @、私聊和有界委托，不能以群成员身份继承发言者权限。外部 PR、CI、合并事实由其供应系统证明。
+
+PsiOS Shell 的产品定位是**类似 macOS 的浏览器桌面工作环境**。登录后进入用户桌面，以菜单栏、Dock、应用启动器、多窗口和工作区组织日常工作；文件、Agent Chat、PsiFlow、终端及应用是主要入口。系统设置、活动监视器、存储和节点管理作为独立应用提供，默认首页不采用服务器资源仪表盘或全局模块侧栏。视觉与交互要求见[第 07 章第 5 节](07-applications-packages-gui.md#5-psios-shell浏览器桌面工作环境)。
+
+Shell 的窗口层在浏览器内运行，不依赖远程桌面视频流；KDE Plasma 负责 Argon 本机原生窗口、显示和输入。远程图形应用通过可选 GUI Bridge 接入桌面。三版共享交互模型，按实际服务、权限和后端能力呈现应用。
 
 ## 2. 逻辑组件与信任边界
 
@@ -84,7 +88,7 @@ flowchart TD
 | `runtime/`、`packages/` | OCI/Flatpak适配、制品及包环境 |
 | `storage/`、`data/` | 卷/备份、TableFS、Dataset/Knowledge |
 | `network/`、`device/`、`cluster/` | 网络控制、资源和节点治理 |
-| `desktop/`、`shell/` | KDE/Portal、GUI Bridge、统一WebUI |
+| `desktop/`、`shell/` | KDE/Portal 与 GUI Bridge；浏览器桌面、Dock、应用窗口、工作区、搜索和通知 |
 | `editions/`、`images/` | 三版配置、镜像和安装介质 |
 | `tests/`、`docs/` | 契约/故障测试、设计与运维 |
 

@@ -10,6 +10,7 @@ PsiOS Shell is designed as a **macOS-like browser desktop workspace**, with a me
 
 ## Documentation
 
+- [Agent Artifacts as installable applications (design)](docs/v1/docs/07-applications-packages-gui.md#6-agent-artifacts-作为应用安装) and the [common Agent artifact interface](docs/v1/docs/09-agents-models-protocols.md#911-agent-通用产物接口)
 - [Implementation status, measured scope and remaining gaps](docs/implementation-status.md)
 - [Build and boot an independent PsiOS UEFI development disk](docs/native-disk.md)
 - [Offline inspection of a stopped node's ext4 disk image](docs/offline-rescue.md)

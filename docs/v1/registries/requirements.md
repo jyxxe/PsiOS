@@ -160,6 +160,11 @@
 | V1-SHL-010 | [V1-SHL-010：一致视觉与资源预算](../docs/07-applications-packages-gui.md) | AT-SHL-015 |
 | V1-SHL-011 | [V1-SHL-011：浏览器、无障碍与窄屏](../docs/07-applications-packages-gui.md) | AT-SHL-013, AT-SHL-014 |
 | V1-SHL-012 | [V1-SHL-012：三版一致与阶段交付](../docs/07-applications-packages-gui.md) | AT-SHL-001, AT-SHL-012, AT-SHL-015 |
+| V1-APP-012 | [V1-APP-012：产物与应用的统一映射](../docs/07-applications-packages-gui.md) | AT-AIF-001, AT-AIF-008, AT-AIF-010 |
+| V1-APP-013 | [V1-APP-013：可验证的交付描述](../docs/07-applications-packages-gui.md) | AT-AIF-001, AT-AIF-002, AT-AIF-009 |
+| V1-APP-014 | [V1-APP-014：从提交到安装的受控流程](../docs/07-applications-packages-gui.md) | AT-AIF-001, AT-AIF-003, AT-AIF-005, AT-AIF-006, AT-AIF-007 |
+| V1-APP-015 | [V1-APP-015：预览、构建与运行边界](../docs/07-applications-packages-gui.md) | AT-AIF-004, AT-AIF-005, AT-AIF-009 |
+| V1-APP-016 | [V1-APP-016：版本、保留与日常管理](../docs/07-applications-packages-gui.md) | AT-AIF-007, AT-AIF-008, AT-AIF-010 |
 | V1-TSK-001 | [V1-TSK-001（必须）：`task_id`、`run_id`、`operation_id`、`event_id`、`artifact_id` 由各自权威分配且不得复用](../docs/08-tasks-events.md) | AT-COMP-009 |
 | V1-TSK-002 | [V1-TSK-002（必须）：创建请求不携带尚未分配的 `task_id` 或 `run_id`](../docs/08-tasks-events.md) | AT-TSK-001 |
 | V1-TSK-003 | [V1-TSK-003（必须）：在一个本地事务或经过验证的等效协议中完成：提交去重判定、输入清单引用与保留关系、任务元数据容量预留、Task 记录、必要审计意图和 outbox](../docs/08-tasks-events.md) | AT-TSK-001, AT-TSK-008, AT-CORE-007 |
@@ -188,6 +193,9 @@
 | V1-AGT-010 | [V1-AGT-010（必须）：HTTP OAuth 路径与 STDIO 进程凭据路径分开实现](../docs/09-agents-models-protocols.md) | AT-AGT-004 |
 | V1-AGT-011 | [V1-AGT-011（必须）：持久映射键为 `(adapter_id, endpoint_identity, remote_tenant_scope, external_task_id)`，绑定本地 Task/Run/O…](../docs/09-agents-models-protocols.md) | AT-AGT-005 |
 | V1-AGT-012 | [V1-AGT-012（必须）：A2A 发送是否幂等依据具体服务器契约和实测，不仅依据 `messageId`](../docs/09-agents-models-protocols.md) | AT-AGT-006 |
+| V1-AGT-013 | [V1-AGT-013：共享合同与能力发现](../docs/09-agents-models-protocols.md) | AT-AIF-001, AT-AIF-002, AT-AIF-005, AT-AIF-010 |
+| V1-AGT-014 | [V1-AGT-014：提交、安装与回执合同](../docs/09-agents-models-protocols.md) | AT-AIF-001, AT-AIF-002, AT-AIF-003, AT-AIF-006, AT-AIF-009 |
+| V1-AGT-015 | [V1-AGT-015：对话入口、授权与中断恢复](../docs/09-agents-models-protocols.md) | AT-AIF-003, AT-AIF-004, AT-AIF-005, AT-AIF-006, AT-AIF-010 |
 | V1-CHAT-001 | [V1-CHAT-001（必须）：会话生命周期为 `Active / Archived / Deleting / Deleted`](../docs/10-conversations.md) | AT-CHAT-006 |
 | V1-CHAT-002 | [V1-CHAT-002（必须）：成员生命周期为 `Invited / Active / Left / Removed / Expired`](../docs/10-conversations.md) | AT-CHAT-003, AT-CHAT-006, AT-CHAT-008 |
 | V1-CHAT-003 | [V1-CHAT-003（必须）：成员变化和消息提交必须有可比较的顺序](../docs/10-conversations.md) | AT-CHAT-003 |

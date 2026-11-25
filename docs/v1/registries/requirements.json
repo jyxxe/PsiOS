@@ -123,7 +123,7 @@
     {
       "id": "V1-ARCH-001",
       "document": "docs/01-product-and-architecture.md",
-      "line": 53,
+      "line": 55,
       "heading": "V1-ARCH-001｜启动依赖为有向无环图。** Host 的设备、根卷、日志、最小本机认证和救援先就绪；Core 状态引擎与正常 Policy 之后；OCI 与普通控制器其次；模型、Agent、Chat、Workflow、Project、索引及远端观测再启动。服务管理器必须区分启动必需、运行必需、可选增强。图形或模型失败只影响相应能力，不能让节点反复重启整个系统。",
       "summary": "**V1-ARCH-001｜启动依赖为有向无环图。** Host 的设备、根卷、日志、最小本机认证和救援先就绪；Core 状态引擎与正常 Policy 之后；OCI 与普通控制器其次；模型、Agent、Chat、Workflow、Project、索引及远端观测再启动。服务管理器必须区分启动必需、运行必需、可选增强。图形或模型失败只影响相应能力，不能让节点反复重启整个系统。",
       "design_status": "Specified",
@@ -136,7 +136,7 @@
     {
       "id": "V1-ARCH-002",
       "document": "docs/01-product-and-architecture.md",
-      "line": 55,
+      "line": 57,
       "heading": "V1-ARCH-002｜一个字段一个写入权威。** 资源控制器对自己的 `status` 负责，期望状态 `spec` 的权威通过显式转交指定；各域只存其他域的受控引用及带来源修订的缓存投影，不复制第二套可独立修改的事实。源变化通过可靠 outbox/Event 发布，投影失败不能反向覆盖源。",
       "summary": "**V1-ARCH-002｜一个字段一个写入权威。** 资源控制器对自己的 `status` 负责，期望状态 `spec` 的权威通过显式转交指定；各域只存其他域的受控引用及带来源修订的缓存投影，不复制第二套可独立修改的事实。源变化通过可靠 outbox/Event 发布，投影失败不能反向覆盖源。",
       "design_status": "Specified",
@@ -149,7 +149,7 @@
     {
       "id": "V1-ARCH-003",
       "document": "docs/01-product-and-architecture.md",
-      "line": 70,
+      "line": 72,
       "heading": "V1-ARCH-003｜Core 不是所有服务常驻的集合。** Core 是兼容契约和必备基础实现。离线救援使用最小宿主工具；正常管理使用 Core API；协作、模型与增强数据服务按需启用。Helium 的资源目标通过实际进程、内存、镜像、日志、队列和空闲功耗测量确定，不能凭“轻量”给出无证据的 1 GB 或固定磁盘结论。",
       "summary": "**V1-ARCH-003｜Core 不是所有服务常驻的集合。** Core 是兼容契约和必备基础实现。离线救援使用最小宿主工具；正常管理使用 Core API；协作、模型与增强数据服务按需启用。Helium 的资源目标通过实际进程、内存、镜像、日志、队列和空闲功耗测量确定，不能凭“轻量”给出无证据的 1 GB 或固定磁盘结论。",
       "design_status": "Specified",
@@ -162,7 +162,7 @@
     {
       "id": "V1-ARCH-004",
       "document": "docs/01-product-and-architecture.md",
-      "line": 74,
+      "line": 76,
       "heading": "V1-ARCH-004｜服务失效隔离。** 未装 Data Services 返回 `ServiceNotInstalled`；后端不支持操作返回 `UnsupportedCapability`；已装但依赖故障返回 `DependencyUnavailable`。三者不可混成“成功但空列表”。通过能力发现显示服务版本、支持范围、硬限、实测 Profile 和当前可用状态。",
       "summary": "**V1-ARCH-004｜服务失效隔离。** 未装 Data Services 返回 `ServiceNotInstalled`；后端不支持操作返回 `UnsupportedCapability`；已装但依赖故障返回 `DependencyUnavailable`。三者不可混成“成功但空列表”。通过能力发现显示服务版本、支持范围、硬限、实测 Profile 和当前可用状态。",
       "design_status": "Specified",
@@ -175,7 +175,7 @@
     {
       "id": "V1-ARCH-005",
       "document": "docs/01-product-and-architecture.md",
-      "line": 95,
+      "line": 97,
       "heading": "V1-ARCH-005｜复用需逐模块验收。** 旧归档中出现 `psios-*` crate 名不表示已有 PsiOS v1 实现。先确认仓库、完整提交 SHA、license、依赖、外部地址、授权默认值、数据格式、root 权限和测试条件，再决定 reuse/adapt/rewrite/exclude。Project 文件中的压缩包只是可核验来源，不自动替代最新 Forgejo 审计。",
       "summary": "**V1-ARCH-005｜复用需逐模块验收。** 旧归档中出现 `psios-*` crate 名不表示已有 PsiOS v1 实现。先确认仓库、完整提交 SHA、license、依赖、外部地址、授权默认值、数据格式、root 权限和测试条件，再决定 reuse/adapt/rewrite/exclude。Project 文件中的压缩包只是可核验来源，不自动替代最新 Forgejo 审计。",
       "design_status": "Specified",
@@ -1697,7 +1697,7 @@
     {
       "id": "V1-APP-002",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 21,
+      "line": 23,
       "heading": "V1-APP-002：清单与生效权限",
       "summary": "### V1-APP-002：清单与生效权限",
       "design_status": "Specified",
@@ -1711,7 +1711,7 @@
     {
       "id": "V1-APP-003",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 37,
+      "line": 39,
       "heading": "V1-APP-003：隔离与运行后端",
       "summary": "### V1-APP-003：隔离与运行后端",
       "design_status": "Specified",
@@ -1724,7 +1724,7 @@
     {
       "id": "V1-APP-004",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 47,
+      "line": 49,
       "heading": "V1-APP-004：生命周期分解与可观察状态",
       "summary": "### V1-APP-004：生命周期分解与可观察状态",
       "design_status": "Specified",
@@ -1737,7 +1737,7 @@
     {
       "id": "V1-APP-005",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 62,
+      "line": 64,
       "heading": "V1-APP-005：安装、启动、停止和数据绑定",
       "summary": "### V1-APP-005：安装、启动、停止和数据绑定",
       "design_status": "Specified",
@@ -1750,7 +1750,7 @@
     {
       "id": "V1-APP-006",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 68,
+      "line": 70,
       "heading": "V1-APP-006：升级、恢复与互斥操作",
       "summary": "### V1-APP-006：升级、恢复与互斥操作",
       "design_status": "Specified",
@@ -1764,7 +1764,7 @@
     {
       "id": "V1-APP-007",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 74,
+      "line": 76,
       "heading": "V1-APP-007：卸载、共享依赖与维护",
       "summary": "### V1-APP-007：卸载、共享依赖与维护",
       "design_status": "Specified",
@@ -1777,7 +1777,7 @@
     {
       "id": "V1-APP-008",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 88,
+      "line": 90,
       "heading": "V1-APP-008：格式、目标环境和兼容等级",
       "summary": "### V1-APP-008：格式、目标环境和兼容等级",
       "design_status": "Specified",
@@ -1790,7 +1790,7 @@
     {
       "id": "V1-APP-009",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 102,
+      "line": 104,
       "heading": "V1-APP-009：导入安全与完整状态",
       "summary": "### V1-APP-009：导入安全与完整状态",
       "design_status": "Specified",
@@ -1804,7 +1804,7 @@
     {
       "id": "V1-APP-010",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 110,
+      "line": 112,
       "heading": "V1-APP-010：隔离构建、来源锁与安全重建",
       "summary": "### V1-APP-010：隔离构建、来源锁与安全重建",
       "design_status": "Specified",
@@ -1817,7 +1817,7 @@
     {
       "id": "V1-APP-011",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 118,
+      "line": 120,
       "heading": "V1-APP-011：图形与特权兼容 Profile",
       "summary": "### V1-APP-011：图形与特权兼容 Profile",
       "design_status": "Specified",
@@ -1830,7 +1830,7 @@
     {
       "id": "V1-GUI-001",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 126,
+      "line": 128,
       "heading": "V1-GUI-001：入口和对象边界",
       "summary": "### V1-GUI-001：入口和对象边界",
       "design_status": "Specified",
@@ -1843,7 +1843,7 @@
     {
       "id": "V1-GUI-002",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 146,
+      "line": 148,
       "heading": "V1-GUI-002：权限分项和实际范围",
       "summary": "### V1-GUI-002：权限分项和实际范围",
       "design_status": "Specified",
@@ -1857,7 +1857,7 @@
     {
       "id": "V1-GUI-003",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 154,
+      "line": 156,
       "heading": "V1-GUI-003：输入协议、去重与人类接管",
       "summary": "### V1-GUI-003：输入协议、去重与人类接管",
       "design_status": "Specified",
@@ -1871,7 +1871,7 @@
     {
       "id": "V1-GUI-004",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 162,
+      "line": 164,
       "heading": "V1-GUI-004：定位、布局和连接恢复",
       "summary": "### V1-GUI-004：定位、布局和连接恢复",
       "design_status": "Specified",
@@ -1884,7 +1884,7 @@
     {
       "id": "V1-GUI-005",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 168,
+      "line": 170,
       "heading": "V1-GUI-005：Portal协议和能力版本",
       "summary": "### V1-GUI-005：Portal协议和能力版本",
       "design_status": "Specified",
@@ -1897,7 +1897,7 @@
     {
       "id": "V1-GUI-006",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 176,
+      "line": 178,
       "heading": "V1-GUI-006：一次性恢复令牌和崩溃窗口",
       "summary": "### V1-GUI-006：一次性恢复令牌和崩溃窗口",
       "design_status": "Specified",
@@ -1910,7 +1910,7 @@
     {
       "id": "V1-GUI-007",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 182,
+      "line": 184,
       "heading": "V1-GUI-007：传输与资源预算",
       "summary": "### V1-GUI-007：传输与资源预算",
       "design_status": "Specified",
@@ -1923,7 +1923,7 @@
     {
       "id": "V1-GUI-008",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 190,
+      "line": 192,
       "heading": "V1-GUI-008：NativeWeb的浏览器安全边界",
       "summary": "### V1-GUI-008：NativeWeb的浏览器安全边界",
       "design_status": "Specified",
@@ -1938,7 +1938,7 @@
     {
       "id": "V1-GUI-009",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 198,
+      "line": 200,
       "heading": "V1-GUI-009：秘密、隐私和数据去向",
       "summary": "### V1-GUI-009：秘密、隐私和数据去向",
       "design_status": "Specified",
@@ -1951,7 +1951,7 @@
     {
       "id": "V1-GUI-010",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 204,
+      "line": 206,
       "heading": "V1-GUI-010：第三方与节点边界",
       "summary": "### V1-GUI-010：第三方与节点边界",
       "design_status": "Specified",
@@ -1964,7 +1964,7 @@
     {
       "id": "V1-SHL-001",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 256,
+      "line": 258,
       "heading": "V1-SHL-001：桌面优先的产品定位",
       "summary": "### V1-SHL-001：桌面优先的产品定位",
       "design_status": "Specified",
@@ -1978,7 +1978,7 @@
     {
       "id": "V1-SHL-002",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 262,
+      "line": 264,
       "heading": "V1-SHL-002：菜单栏、Dock 与应用入口",
       "summary": "### V1-SHL-002：菜单栏、Dock 与应用入口",
       "design_status": "Specified",
@@ -1993,7 +1993,7 @@
     {
       "id": "V1-SHL-003",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 278,
+      "line": 280,
       "heading": "V1-SHL-003：多窗口与独立生命周期",
       "summary": "### V1-SHL-003：多窗口与独立生命周期",
       "design_status": "Specified",
@@ -2010,7 +2010,7 @@
     {
       "id": "V1-SHL-004",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 293,
+      "line": 295,
       "heading": "V1-SHL-004：工作区与目标上下文",
       "summary": "### V1-SHL-004：工作区与目标上下文",
       "design_status": "Specified",
@@ -2024,7 +2024,7 @@
     {
       "id": "V1-SHL-005",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 299,
+      "line": 301,
       "heading": "V1-SHL-005：布局恢复与多设备",
       "summary": "### V1-SHL-005：布局恢复与多设备",
       "design_status": "Specified",
@@ -2041,7 +2041,7 @@
     {
       "id": "V1-SHL-006",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 307,
+      "line": 309,
       "heading": "V1-SHL-006：第一方 Web 与图形应用接入",
       "summary": "### V1-SHL-006：第一方 Web 与图形应用接入",
       "design_status": "Specified",
@@ -2056,7 +2056,7 @@
     {
       "id": "V1-SHL-007",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 319,
+      "line": 321,
       "heading": "V1-SHL-007：对象协作与 Agent 上下文",
       "summary": "### V1-SHL-007：对象协作与 Agent 上下文",
       "design_status": "Specified",
@@ -2070,7 +2070,7 @@
     {
       "id": "V1-SHL-008",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 327,
+      "line": 329,
       "heading": "V1-SHL-008：Shell 视图契约与隔离",
       "summary": "### V1-SHL-008：Shell 视图契约与隔离",
       "design_status": "Specified",
@@ -2087,7 +2087,7 @@
     {
       "id": "V1-SHL-009",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 341,
+      "line": 343,
       "heading": "V1-SHL-009：任务、通知与真实状态",
       "summary": "### V1-SHL-009：任务、通知与真实状态",
       "design_status": "Specified",
@@ -2102,7 +2102,7 @@
     {
       "id": "V1-SHL-010",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 349,
+      "line": 351,
       "heading": "V1-SHL-010：一致视觉与资源预算",
       "summary": "### V1-SHL-010：一致视觉与资源预算",
       "design_status": "Specified",
@@ -2115,7 +2115,7 @@
     {
       "id": "V1-SHL-011",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 357,
+      "line": 359,
       "heading": "V1-SHL-011：浏览器、无障碍与窄屏",
       "summary": "### V1-SHL-011：浏览器、无障碍与窄屏",
       "design_status": "Specified",
@@ -2129,7 +2129,7 @@
     {
       "id": "V1-SHL-012",
       "document": "docs/07-applications-packages-gui.md",
-      "line": 365,
+      "line": 367,
       "heading": "V1-SHL-012：三版一致与阶段交付",
       "summary": "### V1-SHL-012：三版一致与阶段交付",
       "design_status": "Specified",
@@ -2138,6 +2138,83 @@
         "AT-SHL-001",
         "AT-SHL-012",
         "AT-SHL-015"
+      ],
+      "verification_plan_status": "Planned"
+    },
+    {
+      "id": "V1-APP-012",
+      "document": "docs/07-applications-packages-gui.md",
+      "line": 383,
+      "heading": "V1-APP-012：产物与应用的统一映射",
+      "summary": "### V1-APP-012：产物与应用的统一映射",
+      "design_status": "Specified",
+      "implementation_status": "NotVerified",
+      "planned_test_ids": [
+        "AT-AIF-001",
+        "AT-AIF-008",
+        "AT-AIF-010"
+      ],
+      "verification_plan_status": "Planned"
+    },
+    {
+      "id": "V1-APP-013",
+      "document": "docs/07-applications-packages-gui.md",
+      "line": 396,
+      "heading": "V1-APP-013：可验证的交付描述",
+      "summary": "### V1-APP-013：可验证的交付描述",
+      "design_status": "Specified",
+      "implementation_status": "NotVerified",
+      "planned_test_ids": [
+        "AT-AIF-001",
+        "AT-AIF-002",
+        "AT-AIF-009"
+      ],
+      "verification_plan_status": "Planned"
+    },
+    {
+      "id": "V1-APP-014",
+      "document": "docs/07-applications-packages-gui.md",
+      "line": 411,
+      "heading": "V1-APP-014：从提交到安装的受控流程",
+      "summary": "### V1-APP-014：从提交到安装的受控流程",
+      "design_status": "Specified",
+      "implementation_status": "NotVerified",
+      "planned_test_ids": [
+        "AT-AIF-001",
+        "AT-AIF-003",
+        "AT-AIF-005",
+        "AT-AIF-006",
+        "AT-AIF-007"
+      ],
+      "verification_plan_status": "Planned"
+    },
+    {
+      "id": "V1-APP-015",
+      "document": "docs/07-applications-packages-gui.md",
+      "line": 423,
+      "heading": "V1-APP-015：预览、构建与运行边界",
+      "summary": "### V1-APP-015：预览、构建与运行边界",
+      "design_status": "Specified",
+      "implementation_status": "NotVerified",
+      "planned_test_ids": [
+        "AT-AIF-004",
+        "AT-AIF-005",
+        "AT-AIF-009"
+      ],
+      "verification_plan_status": "Planned"
+    },
+    {
+      "id": "V1-APP-016",
+      "document": "docs/07-applications-packages-gui.md",
+      "line": 429,
+      "heading": "V1-APP-016：版本、保留与日常管理",
+      "summary": "### V1-APP-016：版本、保留与日常管理",
+      "design_status": "Specified",
+      "implementation_status": "NotVerified",
+      "planned_test_ids": [
+        "AT-AIF-007",
+        "AT-AIF-008",
+        "AT-AIF-010"
       ],
       "verification_plan_status": "Planned"
     },
@@ -2288,7 +2365,7 @@
     {
       "id": "V1-TSK-011",
       "document": "docs/08-tasks-events.md",
-      "line": 119,
+      "line": 121,
       "heading": "V1-TSK-011（必须）**：事件信封包含 `event_id`、`event_type`、`schema_version`、来源权威、资源引用/修订、发生时间与接收时间、关联/因果 ID、必要 Task/Run ID、事件序号和授权上下文引用。时间戳不是排序权威；序号仅在声明的权威分区内可比较。正文、密钥、访问令牌不得进入面向无关订阅者的信封。",
       "summary": "**V1-TSK-011（必须）**：事件信封包含 `event_id`、`event_type`、`schema_version`、来源权威、资源引用/修订、发生时间与接收时间、关联/因果 ID、必要 Task/Run ID、事件序号和授权上下文引用。时间戳不是排序权威；序号仅在声明的权威分区内可比较。正文、密钥、访问令牌不得进入面向无关订阅者的信封。",
       "design_status": "Specified",
@@ -2302,7 +2379,7 @@
     {
       "id": "V1-TSK-012",
       "document": "docs/08-tasks-events.md",
-      "line": 123,
+      "line": 125,
       "heading": "V1-TSK-012（必须）**：列表快照返回可连续订阅的权威游标；订阅中途失效返回 `CursorExpired`，要求重新列举并从新游标恢复。分页 token 绑定查询、主体/安全域、授权代次和快照范围；不能把一次扫描的漏项伪装为删除。权限过滤在服务端进行，通知仅携必要 ID，读取正文再次授权。",
       "summary": "**V1-TSK-012（必须）**：列表快照返回可连续订阅的权威游标；订阅中途失效返回 `CursorExpired`，要求重新列举并从新游标恢复。分页 token 绑定查询、主体/安全域、授权代次和快照范围；不能把一次扫描的漏项伪装为删除。权限过滤在服务端进行，通知仅携必要 ID，读取正文再次授权。",
       "design_status": "Specified",
@@ -2315,7 +2392,7 @@
     {
       "id": "V1-TSK-013",
       "document": "docs/08-tasks-events.md",
-      "line": 125,
+      "line": 127,
       "heading": "V1-TSK-013（必须）**：定义消息大小、并发、积压字节、重试次数/总时限与退避。毒消息进入可审计隔离队列；重放须绑定原 event_id、处理器版本和已知效果记录。事件历史裁剪之前保留所需快照/检查点；不能为恢复吞吐直接越过必须处理的终态或审批事件。临时进度可按声明丢弃；关键终态、必要审计与权威变更不可使用同样策略。",
       "summary": "**V1-TSK-013（必须）**：定义消息大小、并发、积压字节、重试次数/总时限与退避。毒消息进入可审计隔离队列；重放须绑定原 event_id、处理器版本和已知效果记录。事件历史裁剪之前保留所需快照/检查点；不能为恢复吞吐直接越过必须处理的终态或审批事件。临时进度可按声明丢弃；关键终态、必要审计与权威变更不可使用同样策略。",
       "design_status": "Specified",
@@ -2329,7 +2406,7 @@
     {
       "id": "V1-TSK-014",
       "document": "docs/08-tasks-events.md",
-      "line": 129,
+      "line": 131,
       "heading": "V1-TSK-014（必须）**：父子任务共享可核算的预算树。准入先预留、运行中计量、完成后结算，失败回收只释放未消费预留；并行分支不能各自读取相同余额并全部消费。云账单有延迟时展示估计与已确认费用；已发出调用可能造成有界超支，因此限制在途调用上限和最大输出量，不能把软计费预测宣传成严格零超支。",
       "summary": "**V1-TSK-014（必须）**：父子任务共享可核算的预算树。准入先预留、运行中计量、完成后结算，失败回收只释放未消费预留；并行分支不能各自读取相同余额并全部消费。云账单有延迟时展示估计与已确认费用；已发出调用可能造成有界超支，因此限制在途调用上限和最大输出量，不能把软计费预测宣传成严格零超支。",
       "design_status": "Specified",
@@ -2343,7 +2420,7 @@
     {
       "id": "V1-TSK-015",
       "document": "docs/08-tasks-events.md",
-      "line": 131,
+      "line": 133,
       "heading": "V1-TSK-015（必须）**：Schedule 定义包括稳定 ID、修订、IANA 时区、当地触发规则、DST 重复/缺失时刻处理、错过触发的 Skip/Coalesce/BoundedCatchUp、重叠策略、截止时间和有效授权。每次逻辑触发生成稳定 `trigger_id`，绑定 Schedule 修订和逻辑触发时刻；补跑不生成重复身份。排队满时按策略拒绝或保留有界待重试意图，不能无限缓冲。修改调度从明确生效边界开始，不偷偷重解释已产生触发。",
       "summary": "**V1-TSK-015（必须）**：Schedule 定义包括稳定 ID、修订、IANA 时区、当地触发规则、DST 重复/缺失时刻处理、错过触发的 Skip/Coalesce/BoundedCatchUp、重叠策略、截止时间和有效授权。每次逻辑触发生成稳定 `trigger_id`，绑定 Schedule 修订和逻辑触发时刻；补跑不生成重复身份。排队满时按策略拒绝或保留有界待重试意图，不能无限缓冲。修改调度从明确生效边界开始，不偷偷重解释已产生触发。",
       "design_status": "Specified",
@@ -2356,7 +2433,7 @@
     {
       "id": "V1-TSK-016",
       "document": "docs/08-tasks-events.md",
-      "line": 133,
+      "line": 135,
       "heading": "V1-TSK-016（必须）**：关机先停止新接受/领取、持久化在途状态、使执行者到无写入安全点或由资源端 fencing，再释放会触发替代调度的租约。宽限到期仍无法证明隔离时进入 RecoveryRequired，不自动双写。浏览器断线、订阅断开或聊天成员退出均不自动取消任务。",
       "summary": "**V1-TSK-016（必须）**：关机先停止新接受/领取、持久化在途状态、使执行者到无写入安全点或由资源端 fencing，再释放会触发替代调度的租约。宽限到期仍无法证明隔离时进入 RecoveryRequired，不自动双写。浏览器断线、订阅断开或聊天成员退出均不自动取消任务。",
       "design_status": "Specified",
@@ -2524,6 +2601,56 @@
       "implementation_status": "NotVerified",
       "planned_test_ids": [
         "AT-AGT-006"
+      ],
+      "verification_plan_status": "Planned"
+    },
+    {
+      "id": "V1-AGT-013",
+      "document": "docs/09-agents-models-protocols.md",
+      "line": 174,
+      "heading": "V1-AGT-013：共享合同与能力发现",
+      "summary": "### V1-AGT-013：共享合同与能力发现",
+      "design_status": "Specified",
+      "implementation_status": "NotVerified",
+      "planned_test_ids": [
+        "AT-AIF-001",
+        "AT-AIF-002",
+        "AT-AIF-005",
+        "AT-AIF-010"
+      ],
+      "verification_plan_status": "Planned"
+    },
+    {
+      "id": "V1-AGT-014",
+      "document": "docs/09-agents-models-protocols.md",
+      "line": 180,
+      "heading": "V1-AGT-014：提交、安装与回执合同",
+      "summary": "### V1-AGT-014：提交、安装与回执合同",
+      "design_status": "Specified",
+      "implementation_status": "NotVerified",
+      "planned_test_ids": [
+        "AT-AIF-001",
+        "AT-AIF-002",
+        "AT-AIF-003",
+        "AT-AIF-006",
+        "AT-AIF-009"
+      ],
+      "verification_plan_status": "Planned"
+    },
+    {
+      "id": "V1-AGT-015",
+      "document": "docs/09-agents-models-protocols.md",
+      "line": 195,
+      "heading": "V1-AGT-015：对话入口、授权与中断恢复",
+      "summary": "### V1-AGT-015：对话入口、授权与中断恢复",
+      "design_status": "Specified",
+      "implementation_status": "NotVerified",
+      "planned_test_ids": [
+        "AT-AIF-003",
+        "AT-AIF-004",
+        "AT-AIF-005",
+        "AT-AIF-006",
+        "AT-AIF-010"
       ],
       "verification_plan_status": "Planned"
     },
@@ -3373,7 +3500,7 @@
     {
       "id": "V1-PLAN-003",
       "document": "docs/14-roadmap-and-decisions.md",
-      "line": 72,
+      "line": 73,
       "heading": "V1-PLAN-003｜选择必须可反驳。** 25份ADR均为 `Proposed`。其中规定的安全和一致性不变量来自正文；候选技术满足不变量的证据仍待真实实现。比较必须有可重复的环境、指标、失败注入、退出迁移成本、许可证和维护负担，不能用历史benchmark中的单个漂亮数字冻结路线。",
       "summary": "**V1-PLAN-003｜选择必须可反驳。** 25份ADR均为 `Proposed`。其中规定的安全和一致性不变量来自正文；候选技术满足不变量的证据仍待真实实现。比较必须有可重复的环境、指标、失败注入、退出迁移成本、许可证和维护负担，不能用历史benchmark中的单个漂亮数字冻结路线。",
       "design_status": "Specified",
@@ -3386,7 +3513,7 @@
     {
       "id": "V1-PLAN-004",
       "document": "docs/14-roadmap-and-decisions.md",
-      "line": 88,
+      "line": 89,
       "heading": "V1-PLAN-004｜失败有具体后果。** 无法证明旧执行端被fence时停止资源重分配；无法证明安全状态新鲜时保持隔离；无法核实外部效果时停止重放；无法实现TableFS所需持久性时使用已验证的普通文件系统+索引；图形后端无法限制输入范围时降为只读或拒绝该Profile；第三方协议缺取消/幂等时不伪造强能力。",
       "summary": "**V1-PLAN-004｜失败有具体后果。** 无法证明旧执行端被fence时停止资源重分配；无法证明安全状态新鲜时保持隔离；无法核实外部效果时停止重放；无法实现TableFS所需持久性时使用已验证的普通文件系统+索引；图形后端无法限制输入范围时降为只读或拒绝该Profile；第三方协议缺取消/幂等时不伪造强能力。",
       "design_status": "Specified",
@@ -3477,7 +3604,7 @@
     {
       "id": "V1-IF-002",
       "document": "docs/16-interface-catalog-and-glossary.md",
-      "line": 60,
+      "line": 63,
       "heading": "V1-IF-002｜计数字符串不能偷偷转number。** JSON Schema pattern只验证语法，u64上限、范围内比较和跨字段关系仍需语义校验。UI可格式化显示，但请求与存储保持原字符串或无损整数。示例故意使用`9007199254740993`检验JavaScript安全整数边界。",
       "summary": "**V1-IF-002｜计数字符串不能偷偷转number。** JSON Schema pattern只验证语法，u64上限、范围内比较和跨字段关系仍需语义校验。UI可格式化显示，但请求与存储保持原字符串或无损整数。示例故意使用`9007199254740993`检验JavaScript安全整数边界。",
       "design_status": "Specified",
@@ -3490,7 +3617,7 @@
     {
       "id": "V1-IF-003",
       "document": "docs/16-interface-catalog-and-glossary.md",
-      "line": 64,
+      "line": 67,
       "heading": "V1-IF-003｜同名状态始终限定所属对象。** Task.Cancelled、Operation.Cancelled、备份Cancelled与部署停止不是一件事；某一步完成也不能把全局恢复标为完成。生命周期、健康、可访问性、效果知识和补偿分别报告。",
       "summary": "**V1-IF-003｜同名状态始终限定所属对象。** Task.Cancelled、Operation.Cancelled、备份Cancelled与部署停止不是一件事；某一步完成也不能把全局恢复标为完成。生命周期、健康、可访问性、效果知识和补偿分别报告。",
       "design_status": "Specified",
@@ -3504,7 +3631,7 @@
     {
       "id": "V1-IF-004",
       "document": "docs/16-interface-catalog-and-glossary.md",
-      "line": 88,
+      "line": 93,
       "heading": "V1-IF-004｜结构合同不放行不可信数据。** Workflow AST还需编译/类型/权限验证，RecoverySetManifest还需认证来源与真实对象验证，ExecutionPermit还需可信在线查询或签名链验证，ApplicationManifest还需隔离构建与真实兼容测试。示例`RuntimeVerified`所需的evidence引用也只有实际证据可查时才有效。",
       "summary": "**V1-IF-004｜结构合同不放行不可信数据。** Workflow AST还需编译/类型/权限验证，RecoverySetManifest还需认证来源与真实对象验证，ExecutionPermit还需可信在线查询或签名链验证，ApplicationManifest还需隔离构建与真实兼容测试。示例`RuntimeVerified`所需的evidence引用也只有实际证据可查时才有效。",
       "design_status": "Specified",

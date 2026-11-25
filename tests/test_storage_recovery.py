@@ -3,11 +3,12 @@ import hashlib
 import os
 import resource
 import signal
+import sqlite3
 import subprocess
 import time
 import unittest
 
-from support import Node, target
+from support import Failure, Node, target
 
 
 class StorageRecoveryTests(unittest.TestCase):
@@ -34,9 +35,10 @@ class StorageRecoveryTests(unittest.TestCase):
         self.assertEqual((stages[0] / incomplete).stat().st_size, self.limit)
         return task_id, stages[0]
 
-    def assert_unknown(self, task_id):
+    def assert_unpublished_restore(self, task_id):
         task = self.n.call("Task.Get", {"id": task_id})
-        self.assertEqual((task["lifecycle"], task["outcome_knowledge"]), ("Paused", "Unknown"))
+        self.assertEqual((task["lifecycle"], task["outcome_knowledge"]), ("Failed", "Known"))
+        self.assertEqual(task["conditions"][0]["type"], "LeaseLost")
         self.assertEqual(task["result"]["artifact_refs"], [])
 
     def test_restart_reclaims_interrupted_backup_and_legacy_stage(self):
@@ -86,11 +88,15 @@ class StorageRecoveryTests(unittest.TestCase):
         with self.source.open("rb") as file:
             self.assertEqual(hashlib.file_digest(file, "sha256").hexdigest(), self.digest)
         self.assertEqual((backup / "manifest.json").read_bytes(), manifest)
-        self.assert_unknown(task)
+        self.assert_unpublished_restore(task)
         self.n.stop()
         self.n.start()
         self.assertFalse(stage.exists())
-        self.assert_unknown(task)
+        self.assert_unpublished_restore(task)
+        restored = self.n.perform("backup.restore", target(self.backup))
+        copied = self.volumes / restored["resource_id"] / "data" / "record"
+        with copied.open("rb") as file:
+            self.assertEqual(hashlib.file_digest(file, "sha256").hexdigest(), self.digest)
 
     def test_restore_write_failure_reclaims_readonly_stage_without_restart(self):
         nested = self.source.parent / "readonly"
@@ -167,6 +173,86 @@ class StorageRecoveryTests(unittest.TestCase):
         self.assertEqual(evidence["value"]["tree_digest"], spec["restore_proof"]["tree_digest"])
         self.assertEqual(evidence["value"]["volume_ref"], clone)
         self.assertEqual(evidence["value"]["backup_ref"], self.backup)
+
+    def test_restore_reconciliation_verifies_original_volume_before_cataloging(self):
+        n = self.n
+        with sqlite3.connect(n.state / "state.db", timeout=10) as database:
+            database.execute("""CREATE TRIGGER lose_restore_receipt BEFORE INSERT ON versions
+                WHEN NEW.kind='Volume' AND NEW.spec->>'storage_restore_phase'='AwaitingActivation'
+                BEGIN SELECT RAISE(ABORT, 'injected restored volume receipt loss'); END""")
+        task_id = n.submit("backup.restore", target(self.backup))
+        paused = n.wait(task_id)
+        self.assertEqual((paused["lifecycle"], paused["outcome_knowledge"]), ("Paused", "Unknown"), paused)
+        op = paused["operation_refs"][0]
+        volume_id = f"volume-{op['resource_id']}"
+        candidate = self.volumes / volume_id / "data" / "record"
+        inode = candidate.stat().st_ino
+        with self.assertRaises(Failure) as unregistered:
+            n.get(volume_id)
+        self.assertEqual(unregistered.exception.code, "NotFound")
+        n.stop(signal.SIGKILL)
+        with sqlite3.connect(n.state / "state.db", timeout=10) as database:
+            database.execute("DROP TRIGGER lose_restore_receipt")
+        n.start()
+        self.assertEqual(n.wait(task_id), paused)
+        self.assertEqual(candidate.stat().st_ino, inode)
+        refused_deletion = n.wait(n.submit("backup.delete", target(self.backup)), autoapprove=True)
+        self.assertEqual(refused_deletion["lifecycle"], "Failed")
+        self.assertEqual(refused_deletion["conditions"][0]["type"], "Conflict")
+
+        inspection = "volume.inspect_publication"
+        grant = {"principal_id": "local-owner", "units": 5, "ttl_seconds": 180,
+                 "actions": [inspection, "task.submit", "task.read"]}
+        with self.assertRaises(Failure) as unscoped:
+            n.call("Grant.Issue", grant)
+        self.assertEqual(unscoped.exception.code, "InvalidArgument")
+        allowed = n.call("Grant.Issue", {**grant, "tool_targets": [op["resource_id"]]})
+
+        def inspect():
+            request = n.prepare(inspection, target(op), delegation=allowed["delegation_ref"]["resource_id"])
+            return n.wait(n.call("Task.Submit", request)["task_id"])
+
+        first = inspect()
+        self.assertEqual(first["lifecycle"], "Succeeded", first)
+        fresh = first["result"]["artifact_refs"][0]
+        self.assertEqual(n.call("Artifact.Read", {"reference": fresh})["operation_ref"], op)
+        inspected = candidate.stat()
+        with candidate.open("r+b") as file:
+            original = file.read(1)
+            file.seek(0)
+            file.write(b"P")
+        os.utime(candidate, ns=(inspected.st_atime_ns, inspected.st_mtime_ns))
+        with self.assertRaises(Failure) as stale:
+            n.call("Operation.Reconcile", {**target(op), "evidence_ref": fresh})
+        self.assertEqual(stale.exception.code, "OutcomeUnknown")
+        rejected = inspect()
+        self.assertEqual(rejected["lifecycle"], "Failed", rejected)
+        self.assertEqual(rejected["conditions"][0]["type"], "PreconditionFailed")
+        self.assertEqual(n.wait(task_id)["outcome_knowledge"], "Unknown")
+
+        with candidate.open("r+b") as file:
+            file.write(original)
+        os.utime(candidate, ns=(inspected.st_atime_ns, inspected.st_mtime_ns))
+        renewed = inspect()
+        self.assertEqual(renewed["lifecycle"], "Succeeded", renewed)
+        reconciled = n.call("Operation.Reconcile", {
+            **target(op), "evidence_ref": renewed["result"]["artifact_refs"][0],
+        })
+        self.assertEqual(reconciled["outcome_knowledge"], "Known")
+        final = n.wait(task_id)
+        self.assertEqual(final["lifecycle"], "Succeeded", final)
+        volume = n.call("Artifact.Read", {"reference": final["result"]["artifact_refs"][0]})
+        self.assertEqual(volume["resource_id"], volume_id)
+        self.assertEqual(candidate.stat().st_ino, inode)
+        spec = n.get(volume_id)["resource"]["spec"]
+        self.assertEqual(spec["restored_from"], self.backup)
+        self.assertEqual(spec["storage_restore_phase"], "AwaitingActivation")
+        write = n.wait(n.submit("volume.write", {**target(volume), "name": "must-wait", "content": "x"}),
+                       autoapprove=True)
+        self.assertEqual(write["conditions"][0]["type"], "PreconditionFailed")
+        self.assertFalse((candidate.parent / "must-wait").exists())
+        activated = n.perform("volume.activate", target(volume))
+        self.assertEqual(n.get(activated["resource_id"])["resource"]["spec"]["storage_restore_phase"], "Activated")
 
 
 if __name__ == "__main__":

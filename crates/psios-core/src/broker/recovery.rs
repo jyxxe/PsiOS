@@ -21,6 +21,9 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
         let backup_unpublished = phase == "Dispatched"
             && tool == "backup.create"
             && storage::publication::not_published(db, &operation(db, &t)?)?;
+        let restore_unpublished = phase == "Dispatched"
+            && tool == "backup.restore"
+            && storage::restore_publication::not_published(db, &operation(db, &t)?)?;
         let deletion_unprepared = phase == "Dispatched"
             && matches!(tool, "volume.delete" | "backup.delete")
             && storage::retirement::not_prepared(db, &operation(db, &t)?)?;
@@ -28,6 +31,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             && !read
             && !activation_uncommitted
             && !backup_unpublished
+            && !restore_unpublished
             && !deletion_unprepared
         {
             close(
@@ -51,6 +55,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             || attempt >= 3
             || activation_uncommitted
             || backup_unpublished
+            || restore_unpublished
             || deletion_unprepared
         {
             close(
@@ -66,6 +71,8 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                     "LeaseLost",
                     if backup_unpublished {
                         "backup interrupted before publication was authorized"
+                    } else if restore_unpublished {
+                        "restore interrupted before volume publication was authorized"
                     } else if activation_uncommitted {
                         "activation had not committed at restart"
                     } else if deletion_unprepared {
@@ -245,6 +252,7 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         | Action::ServiceStop(p)
         | Action::Delete(p)
         | Action::DeleteBackup(p)
+        | Action::Restore(p)
         | Action::Backup(p) => (&p.id, &p.expected_resource_version),
         Action::ServiceRestart(p) => (&p.id, &p.expected_resource_version),
         _ => {
@@ -291,6 +299,16 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
                 storage::publication::INSPECT,
             )?;
             storage::publication::reconcile(db, &op, &target, &proof, &observation)?
+        }
+        Action::Restore(_) => {
+            let (proof, observation) = inspected(
+                db,
+                req.evidence_ref.as_ref(),
+                &op,
+                &op,
+                storage::restore_publication::INSPECT,
+            )?;
+            storage::restore_publication::reconcile(db, &op, &target, &proof, &observation)?
         }
         Action::ServiceStart(_) | Action::ServiceStop(_) | Action::ServiceRestart(_) => {
             let (proof, observation) = inspected(

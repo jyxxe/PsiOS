@@ -79,6 +79,10 @@ impl Stage {
         Ok((metadata.dev(), metadata.ino()))
     }
 
+    pub(super) fn parent(&self) -> &File {
+        &self.root
+    }
+
     pub(super) fn publish(mut self, name: &str) -> Result<()> {
         filename(name)?;
         let staged = self.path.file_name().unwrap();

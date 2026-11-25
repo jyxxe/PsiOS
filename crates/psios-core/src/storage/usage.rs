@@ -8,6 +8,7 @@ use crate::{
 use rustix::fs::{Dir, Mode, OFlags, open};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     fs::{File, Metadata},
     os::unix::fs::MetadataExt,
@@ -42,7 +43,7 @@ struct Usage {
 }
 
 impl Usage {
-    fn walk(&mut self, dir: &File, prefix: &str, depth: u32) -> Result<()> {
+    fn walk(&mut self, dir: &File, prefix: &str, depth: u32, entry_limit: usize) -> Result<()> {
         require(
             depth <= DEPTH_LIMIT,
             "QuotaExceeded",
@@ -59,9 +60,8 @@ impl Usage {
             if matches!(name, "." | "..") {
                 continue;
             }
-            // Include the measured root in the limit.
             require(
-                self.entries.len() < ENTRY_LIMIT - 1,
+                self.entries.len() < entry_limit,
                 "QuotaExceeded",
                 "volume usage entry limit",
             )?;
@@ -77,7 +77,7 @@ impl Usage {
                 self.directory_blocks += u128::from(meta.blocks());
                 let directory = child(&entry, ".", OFlags::RDONLY | OFlags::DIRECTORY)?;
                 self.entries.push((relative.clone(), meta));
-                self.walk(&directory, &relative, depth + 1)?;
+                self.walk(&directory, &relative, depth + 1, entry_limit)?;
             } else {
                 super::regular(&meta)?;
                 self.files += 1;
@@ -105,6 +105,43 @@ impl Usage {
 
 fn same_observation(a: &Metadata, b: &Metadata) -> bool {
     same_source(a, b) && a.blocks() == b.blocks()
+}
+
+fn stamp(meta: &Metadata) -> Value {
+    json!([
+        meta.dev(),
+        meta.ino(),
+        meta.mode(),
+        meta.uid(),
+        meta.gid(),
+        meta.nlink(),
+        meta.len(),
+        meta.mtime(),
+        meta.mtime_nsec(),
+        meta.ctime(),
+        meta.ctime_nsec()
+    ])
+}
+
+pub(super) fn fingerprint(root: &File) -> Result<String> {
+    let before = root.metadata()?;
+    let mut scan = Usage::default();
+    scan.walk(root, "", 0, super::MAX_ENTRIES)?;
+    scan.confirm(root)?;
+    require(
+        same_observation(&before, &root.metadata()?),
+        "Conflict",
+        "restored tree changed during metadata inspection",
+    )?;
+    scan.entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+    let mut digest = Sha256::new();
+    digest.update(b"psios-restore-metadata-v1\n");
+    digest.update(serde_json::to_vec(&stamp(&before))?);
+    for (path, meta) in scan.entries {
+        digest.update(b"\n");
+        digest.update(serde_json::to_vec(&json!([path, stamp(&meta)]))?);
+    }
+    Ok(format!("sha256:{:x}", digest.finalize()))
 }
 
 fn open_volume(w: &Work) -> Result<File> {
@@ -136,7 +173,8 @@ pub(super) fn measure(w: &Work, query: &Query) -> Result<Value> {
         directory_blocks: u128::from(before.blocks()),
         ..Usage::default()
     };
-    usage.walk(&dir, "", 0)?;
+    // Include the measured root in the limit.
+    usage.walk(&dir, "", 0, ENTRY_LIMIT - 1)?;
     usage.confirm(&dir)?;
     let current = subtree(&open_volume(w)?, &query.path)?;
     require(
@@ -168,7 +206,7 @@ mod tests {
         fs::write(&path, b"first").unwrap();
         let root = File::open(dir.path()).unwrap();
         let mut recorded = Usage::default();
-        recorded.walk(&root, "", 0).unwrap();
+        recorded.walk(&root, "", 0, ENTRY_LIMIT - 1).unwrap();
         recorded.confirm(&root).unwrap();
         let mut file = File::options().append(true).open(path).unwrap();
         file.write_all(b"extra").unwrap();

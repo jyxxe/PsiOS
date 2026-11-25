@@ -228,10 +228,10 @@ pub fn dispatch(db: &Db<'_>, task: &str) -> Result<Option<Work>> {
         field(&db.resolve(&t.spec["delegation_ref"])?.body, "grant_id"),
         "Grant",
     )?;
-    let effect_seconds = if tool == "backup.create" {
-        i64::from(db.cfg.backup_capture_timeout_seconds)
-    } else {
-        30
+    let effect_seconds = match tool {
+        "backup.create" => i64::from(db.cfg.backup_capture_timeout_seconds),
+        "backup.restore" => storage::restore_publication::PERMIT_MAX_SECONDS,
+        _ => 30,
     };
     let validity = [
         after(effect_seconds),

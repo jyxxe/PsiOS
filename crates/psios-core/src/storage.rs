@@ -5,6 +5,7 @@ pub mod files;
 mod intake;
 pub(crate) mod publication;
 mod restore_proof;
+pub(crate) mod restore_publication;
 pub(crate) mod retirement;
 mod staging;
 pub(crate) mod usage;
@@ -172,7 +173,11 @@ pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
     }
     Ok(())
 }
-fn create_volume(w: &Work, restore: Option<&Doc>) -> Result<Value> {
+fn create_volume(
+    w: &Work,
+    restore: Option<&Doc>,
+    checkpoint: impl FnOnce(&Value, &restore_publication::Placement) -> Result<()>,
+) -> Result<Value> {
     let vid = format!("volume-{}", w.op.id);
     let inc = format!("data-{}", w.op.id);
     let parent = w.cfg.state_dir.join("volumes");
@@ -197,15 +202,26 @@ fn create_volume(w: &Work, restore: Option<&Doc>) -> Result<Value> {
     let stats = rustix::fs::statvfs(&data).map_err(std::io::Error::from)?;
     let capacity = stats.f_blocks.saturating_mul(stats.f_frsize);
     File::open(&data)?.sync_all()?;
-    stage.publish(&vid)?;
-    Ok(json!({
+    let receipt = json!({
         "id": vid,
         "incarnation": inc,
         "device": m.dev().to_string(),
         "inode": m.ino().to_string(),
         "capacity": capacity.to_string(),
         "restore_proof": proof
-    }))
+    });
+    if restore.is_some() {
+        checkpoint(&receipt, &restore_publication::Placement::staged(&stage)?)?;
+    }
+    stage.publish(&vid)?;
+    Ok(receipt)
+}
+
+pub(crate) fn restore(
+    work: &Work,
+    checkpoint: impl FnOnce(&Value, &restore_publication::Placement) -> Result<()>,
+) -> Result<Value> {
+    create_volume(work, Some(&work.target), checkpoint)
 }
 fn child(dir: &File, name: impl rustix::path::Arg, flags: OFlags) -> Result<File> {
     // Linux openat2 rejects NONBLOCK on O_PATH descriptors.
@@ -887,9 +903,9 @@ pub fn perform(w: &Work) -> Result<Value> {
         | Action::RemoveEntry(_) => files::perform(w),
         Action::VolumeUsage(query) => usage::measure(w, query),
         Action::Activate(_) => restore_proof::verify(w),
-        Action::Create { .. } => create_volume(w, None),
-        Action::Restore(_) => create_volume(w, Some(&w.target)),
+        Action::Create { .. } => create_volume(w, None, |_, _| Ok(())),
         Action::InspectBackupPublication(_) => publication::observe(w),
+        Action::InspectRestoredVolume(_) => restore_publication::observe(w),
         Action::VerifyBackup(_) => inspect_backup(&w.cfg, &w.target, None),
         Action::Read(f) => {
             let dir = File::open(w.data.as_ref().unwrap())?;
@@ -922,36 +938,35 @@ pub fn perform(w: &Work) -> Result<Value> {
         )),
     }
 }
-pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
-    let actor = &w.task.owner;
-    match &w.action {
-        Action::Create { .. } | Action::Restore(_) => {
-            let profile = db.get(policy::PROFILE)?.reference();
-            let id = r["id"].as_str().unwrap();
-            let mut spec = json!({"device": r["device"], "inode": r["inode"], "pool_id": "local"});
-            match &w.action {
-                Action::Create { name } => spec["name"] = json!(name),
-                _ => {
-                    spec["restored_from"] = w.target.reference();
-                    spec["storage_restore_phase"] = json!("AwaitingActivation");
-                    spec["restore_proof"] = r["restore_proof"].clone();
-                }
-            }
-            let b = json!({
+fn catalog_volume(db: &Db<'_>, owner: &str, receipt: &Value, mut spec: Value) -> Result<Value> {
+    let profile = db.get(policy::PROFILE)?.reference();
+    let id = receipt["id"]
+        .as_str()
+        .ok_or_else(|| err("RecoveryRequired", "volume receipt has no identity"))?;
+    spec["device"] = receipt["device"].clone();
+    spec["inode"] = receipt["inode"].clone();
+    spec["pool_id"] = json!("local");
+    let body = json!({
                 "schema_version": VERSION,
                 "volume_id": id,
-                "data_incarnation": r["incarnation"],
+                "data_incarnation": receipt["incarnation"],
                 "pool_id": "local",
                 "access_mode": "single_node_rw",
-                "capacity_bytes": r["capacity"],
+                "capacity_bytes": receipt["capacity"],
                 "driver_profile_ref": profile,
                 "backup_policy_ref": profile,
                 "lifecycle": "Available",
                 "health": "Healthy",
                 "attachment_refs": []
-            });
-            Ok(db.create("Volume", id, actor, spec, b)?.reference())
-        }
+    });
+    Ok(db.create("Volume", id, owner, spec, body)?.reference())
+}
+
+pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
+    let actor = &w.task.owner;
+    match &w.action {
+        Action::Create { name } => catalog_volume(db, actor, r, json!({"name":name})),
+        Action::Restore(_) => restore_publication::settle(db, w, r),
         Action::Backup(_) => publication::settle(db, &w.op, &w.target, r),
         Action::Activate(_) => {
             let mut spec = w.target.spec.clone();

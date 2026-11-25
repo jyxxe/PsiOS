@@ -642,7 +642,7 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
            WHERE u.artifact_id IS NOT NULL AND NOT EXISTS(
              SELECT 1 FROM versions v WHERE v.id=u.artifact_id AND v.rev=1 AND v.kind='Artifact'
               AND v.owner=u.owner AND (v.spec->>'content_layout'=?1
-                   OR (v.spec->>'content_layout'=?2 AND u.source_kind='LocalOciImageCapture'))
+                   OR (v.spec->>'content_layout'=?2 AND v.spec->'source'->>'kind'='LocalOciImageCapture'))
               AND v.spec->>'digest'=u.digest
               AND v.spec->'source'->>'stage_id'=u.id))",
         [RAW_LAYOUT, super::files::LAYOUT],

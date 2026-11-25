@@ -232,7 +232,10 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     )?;
     let t = db.of(field(&op.spec, "task_id"), "Task")?;
     let input = db.resolve(&t.spec["input_ref"])?;
-    let action = Action::parse(field(&t.spec, "task_type"), &input.body)?;
+    let action = Action::parse(
+        field(&t.spec, "task_type"),
+        dependencies::tool_input(&input)?,
+    )?;
     let (target_id, expected) = match &action {
         Action::Write(p) => (&p.id, &p.expected_resource_version),
         Action::Append(p) => (&p.target.id, &p.target.expected_resource_version),

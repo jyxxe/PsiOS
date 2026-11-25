@@ -1,5 +1,25 @@
 use super::*;
 
+pub(super) fn request(db: &Db<'_>, actor: &str, task: &str, plan: &Doc) -> Result<Value> {
+    let id = id("approval");
+    let body = json!({
+        "schema_version": VERSION,
+        "approval_request_id": id,
+        "plan_ref": plan.reference(),
+        "plan_digest": plan.body["plan_digest"],
+        "requester_principal_id": actor,
+        "approver_policy_ref": db.get(policy::RUNTIME_PROFILE)?.reference(),
+        "status": "Pending",
+        "expires_at": plan.body["deadline_at"]
+    });
+    db.create("ApprovalRequest", &id, actor, json!({"task_id":task}), body)?;
+    db.c.execute(
+        "INSERT INTO approval_bindings(request,task) VALUES(?1,?2)",
+        params![id, task],
+    )?;
+    Ok(condition("ApprovalRequired", &id))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Decision {

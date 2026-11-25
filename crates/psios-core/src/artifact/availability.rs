@@ -20,7 +20,7 @@ struct Verification {
     max_bytes: Option<usize>,
 }
 
-fn verify_bytes(db: &Db<'_>, artifact: &Doc, remaining: &mut usize) -> Result<()> {
+pub(crate) fn verify_bytes(db: &Db<'_>, artifact: &Doc, remaining: &mut usize) -> Result<()> {
     let manifest = Manifest::read(artifact)?;
     let bytes = manifest
         .as_ref()

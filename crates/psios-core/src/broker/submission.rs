@@ -8,6 +8,8 @@ struct Prepare {
     key: String,
     delegation_id: String,
     deadline_at: Option<String>,
+    #[serde(default)]
+    requires: Vec<psios_api::TaskOutputRequirement>,
 }
 
 #[derive(Clone, Copy)]
@@ -72,7 +74,19 @@ fn prepare_with_origin(
     Action::parse(&p.tool, &p.input)?;
     let d = policy::delegation(db, actor, &p.delegation_id, "task.submit")?;
     policy::delegation(db, actor, &d.id, &p.tool)?;
-    let input = policy::intern_input(db, actor, &p.input)?;
+    let input = if p.requires.is_empty() {
+        policy::intern_input(db, actor, &p.input)?
+    } else {
+        let mut requires = p.requires;
+        dependencies::authorize(db, actor, &requires)?;
+        requires.sort_unstable_by(|a, b| a.task_id.cmp(&b.task_id));
+        policy::intern_input_kind(
+            db,
+            actor,
+            dependencies::INPUT_KIND,
+            &json!({"tool_input":p.input,"requires":requires}),
+        )?
+    };
     let origin_id = origin.id().unwrap_or(&p.key);
     let authority = origin.authority(db, actor)?;
     let mut reference = origin_ref(&authority, origin.kind(actor), origin_id);
@@ -154,7 +168,7 @@ pub(super) fn authority(db: &Db<'_>, actor: &str, s: &Value) -> Result<(Doc, Doc
     )?;
     let input = db.resolve(&s["input_ref"])?;
     require(
-        input.kind == "Input" && input.owner == actor,
+        matches!(input.kind.as_str(), "Input" | dependencies::INPUT_KIND) && input.owner == actor,
         "PermissionDenied",
         "input outside delegation",
     )?;
@@ -281,7 +295,7 @@ fn submit_with_origin(
         ));
     }
     deadline(s)?;
-    let a = Action::parse(tool, &input.body)?;
+    let a = Action::parse(tool, dependencies::tool_input(&input)?)?;
     let target = a.target(db, actor)?;
     let audience = a.audience(db, actor, &s["delegation_ref"], &target)?;
     db.cfg.check_admission_space()?;
@@ -304,6 +318,8 @@ fn submit_with_origin(
         "QuotaExceeded",
         "delegation has no available execution units",
     )?;
+    let requirements = dependencies::requirements(&input)?;
+    let ready = dependencies::ready(db, actor, &requirements)?.is_some();
     let plan = plan(db, actor, s, &audience)?;
     let task = id("task");
     let deadline_source = match source {
@@ -319,8 +335,10 @@ fn submit_with_origin(
     )?;
     let op = id("op");
     let at = now();
-    let approval = policy::approval(tool);
-    let state = if approval {
+    let approval = ready && policy::approval(tool);
+    let state = if !ready {
+        "WaitingResource"
+    } else if approval {
         "WaitingApproval"
     } else {
         "Queued"
@@ -338,26 +356,13 @@ fn submit_with_origin(
         "updated_at": at
     });
     let operation = db.create("Operation", &op, actor, json!({"task_id": task}), opbody)?;
-    let mut conditions = Vec::new();
-    if approval {
-        let req = id("approval");
-        let b = json!({
-            "schema_version": VERSION,
-            "approval_request_id": req,
-            "plan_ref": plan.reference(),
-            "plan_digest": plan.body["plan_digest"],
-            "requester_principal_id": actor,
-            "approver_policy_ref": db.get(policy::RUNTIME_PROFILE)?.reference(),
-            "status": "Pending",
-            "expires_at": plan.body["deadline_at"]
-        });
-        db.create("ApprovalRequest", &req, actor, json!({"task_id": task}), b)?;
-        db.c.execute(
-            "INSERT INTO approval_bindings(request,task) VALUES(?1,?2)",
-            params![req, task],
-        )?;
-        conditions.push(condition("ApprovalRequired", &req))
-    }
+    let conditions = if !ready {
+        vec![dependencies::waiting()]
+    } else if approval {
+        vec![approval::request(db, actor, &task, &plan)?]
+    } else {
+        Vec::new()
+    };
     let mut body = json!({
         "schema_version": VERSION,
         "task_id": task,
@@ -404,6 +409,7 @@ fn submit_with_origin(
             field(&d.body, "grant_id"),field(&plan.body,"deadline_at")
         ],
     )?;
+    dependencies::pin(db, &task, &requirements)?;
     db.audit(actor, "Task.Accept", Some(&task), "Allowed")?;
     Ok(receipt)
 }

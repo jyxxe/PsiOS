@@ -1,5 +1,8 @@
 use clap::{Parser, Subcommand};
-use psios_api::{Client, LocalInventoryModel, ResourceRef, SessionModel, StatusProvider, parse};
+use psios_api::{
+    Client, LocalInventoryModel, ResourceRef, SessionModel, StatusProvider, TaskOutputRequirement,
+    parse,
+};
 use psios_core::{Config, DEFAULT_BACKUP_MAX_BYTES, MAX_BACKUP_BYTES};
 use serde_json::{Value, json};
 use std::{
@@ -79,6 +82,9 @@ enum Cmd {
         key: String,
         #[arg(long, default_value = "owner-delegation")]
         delegation: String,
+        /// JSON array of producing Task IDs and required output digests.
+        #[arg(long, value_name = "FILE")]
+        requires: Option<String>,
         #[arg(default_value = "-")]
         file: String,
     },
@@ -324,8 +330,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             tool,
             key,
             delegation,
+            requires,
             file,
-        } => c.submit(&tool, input(&file)?, &key, &delegation)?,
+        } => {
+            let requirements: Vec<TaskOutputRequirement> = match requires {
+                Some(path) => serde_json::from_value(input(&path)?)?,
+                None => Vec::new(),
+            };
+            c.submit_with_requirements(&tool, input(&file)?, &key, &delegation, &requirements)?
+        }
         Cmd::Wait { id, seconds } => c.wait(&id, Duration::from_secs(seconds))?,
         Cmd::Artifact { file, max_bytes } => {
             let reference = serde_json::from_value(input(&file)?)?;

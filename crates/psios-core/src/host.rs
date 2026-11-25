@@ -340,7 +340,7 @@ pub fn status(db: &Db<'_>) -> Result<Value> {
         "recovery_incarnation": db.incarnation,
         "kernel_release": std::fs::read_to_string("/proc/sys/kernel/osrelease")?.trim(),
         "uptime_seconds": uptime,
-        "queue_depth": db.c.query_row("SELECT count(*) FROM queue WHERE phase IN ('Queued','Claimed','Dispatched','WaitingApproval')",[],|r|r.get::<_,u32>(0))?
+        "queue_depth": db.c.query_row("SELECT count(*) FROM queue WHERE phase IN ('Queued','Claimed','Dispatched','WaitingApproval','WaitingResource')",[],|r|r.get::<_,u32>(0))?
     }))
 }
 pub struct Work {
@@ -524,7 +524,10 @@ fn permit(
 pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Work> {
     let input = db.resolve(&task.spec["input_ref"])?;
     let actor = &task.owner;
-    let a = Action::parse(task.spec["task_type"].as_str().unwrap(), &input.body)?;
+    let a = Action::parse(
+        task.spec["task_type"].as_str().unwrap(),
+        crate::broker::dependencies::tool_input(&input)?,
+    )?;
     let target = a.target(db, actor)?;
     let audience = a.audience(db, actor, &task.spec["delegation_ref"], &target)?;
     permit(db, &task, &run, &op, &effect, &audience)?;

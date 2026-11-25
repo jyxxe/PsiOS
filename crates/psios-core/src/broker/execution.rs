@@ -8,7 +8,7 @@ fn plan_audience(plan: &Doc) -> Vec<Value> {
         .map(|p| p["resource_ref"].clone())
         .collect()
 }
-fn preflight(db: &Db<'_>, t: &Doc) -> Result<(Doc, Doc)> {
+pub(super) fn preflight(db: &Db<'_>, t: &Doc) -> Result<(Doc, Doc, Option<Vec<Value>>)> {
     agent::check_dispatch(db, t)?;
     let (_, input) = authority(db, &t.owner, &t.spec)?;
     let op = operation(db, t)?;
@@ -18,7 +18,10 @@ fn preflight(db: &Db<'_>, t: &Doc) -> Result<(Doc, Doc)> {
         "DeadlineExceeded",
         "operation deadline passed",
     )?;
-    let a = Action::parse(field(&t.spec, "task_type"), &input.body)?;
+    let a = Action::parse(
+        field(&t.spec, "task_type"),
+        dependencies::tool_input(&input)?,
+    )?;
     let target = a.target(db, &t.owner)?;
     let audience = a.audience(db, &t.owner, &t.spec["delegation_ref"], &target)?;
     require(
@@ -27,11 +30,12 @@ fn preflight(db: &Db<'_>, t: &Doc) -> Result<(Doc, Doc)> {
         "ApprovalInvalidated",
         "execution precondition changed",
     )?;
-    Ok((op, p))
+    let outputs = dependencies::ready(db, &t.owner, &dependencies::requirements(&input)?)?;
+    Ok((op, p, outputs))
 }
 pub fn claim(db: &Db<'_>) -> Result<Option<String>> {
     let pending: bool = db.c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM queue WHERE phase IN ('Queued','WaitingApproval'))",
+        "SELECT EXISTS(SELECT 1 FROM queue WHERE phase IN ('Queued','WaitingApproval','WaitingResource'))",
         [],
         |r| r.get(0),
     )?;
@@ -41,7 +45,7 @@ pub fn claim(db: &Db<'_>) -> Result<Option<String>> {
     let clock = policy::deadline::Clock::sample()?;
     let invalid:Option<(String,bool)>=db.c.query_row("WITH RECURSIVE lineage(task,did,depth) AS (
         SELECT q.task,t.spec->'delegation_ref'->>'resource_id',0 FROM queue q JOIN current t ON t.id=q.task
-        WHERE q.phase IN ('Queued','WaitingApproval') UNION ALL
+        WHERE q.phase IN ('Queued','WaitingApproval','WaitingResource') UNION ALL
         SELECT l.task,d.body->'parent_ref'->>'resource_id',l.depth+1 FROM lineage l JOIN current d ON d.id=l.did
         WHERE l.depth<4 AND d.body->'parent_ref' IS NOT NULL),
         checked AS (
@@ -79,6 +83,7 @@ pub fn claim(db: &Db<'_>) -> Result<Option<String>> {
     if !node::enabled(db)? {
         return Ok(None);
     }
+    dependencies::advance(db)?;
     let next: Option<String> =
         db.c.query_row(
             "SELECT q.task FROM queue q JOIN current t ON t.id=q.task
@@ -93,7 +98,15 @@ pub fn claim(db: &Db<'_>) -> Result<Option<String>> {
         .optional()?;
     let Some(next) = next else { return Ok(None) };
     let t = db.of(&next, "Task")?;
-    let (op, plan) = match preflight(db, &t) {
+    let (op, plan, outputs) = match preflight(db, &t).and_then(|(op, plan, outputs)| {
+        let outputs = outputs.ok_or_else(|| {
+            err(
+                "ResultUnavailable",
+                "required task outputs became unavailable before claim",
+            )
+        })?;
+        Ok((op, plan, outputs))
+    }) {
         Ok(v) => v,
         Err(e) => {
             close(db, &t, "Failed", "NotStarted", Some(&e), None)?;
@@ -123,7 +136,7 @@ pub fn claim(db: &Db<'_>) -> Result<Option<String>> {
             "lifecycle": "Running",
             "outcome_knowledge": "NotStarted",
             "input_ref": t.spec["input_ref"],
-            "execution_snapshot_ref": agent::snapshot(db,&t,&plan)?,
+            "execution_snapshot_ref": agent::snapshot(db,&t,&plan,&outputs)?,
             "output_refs": [],
             "operation_refs": [op.reference()],
             "conditions": []
@@ -145,7 +158,12 @@ pub fn dispatch(db: &Db<'_>, task: &str) -> Result<Option<Work>> {
     if phase != "Claimed" {
         return Ok(None);
     }
-    let (op, p) = preflight(db, &t)?;
+    let (op, p, outputs) = preflight(db, &t)?;
+    require(
+        outputs.is_some(),
+        "ResultUnavailable",
+        "required task outputs became unavailable before dispatch",
+    )?;
     let run = db.get(field(&t.body, "current_run_id"))?;
     let tool = field(&t.spec, "task_type");
     let target = &p.body["allowed_effects"][0]["resource_ref"];

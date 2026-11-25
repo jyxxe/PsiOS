@@ -386,6 +386,12 @@ jobs:
           git archive fa13dd4285b494416dd1928da8729b13bebe3cd3 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format39"
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format39" "$RUNNER_TEMP/psios-compatibility-target"
           python3 -B tests/task_concurrency_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
+      - name: Verify a format 40 result as a pinned Task dependency
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format40"
+          git archive 55f58a1aae907e75e337663c961c4dca34ccfa3e Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format40"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format40" "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/task_dependencies_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Stream and restore a backup larger than the default limit
         run: PSIOS_TEST_LARGE_BACKUP=1 python3 -B -m unittest discover -s tests -p test_backup_limits.py -v
       - name: Exercise a real OCI engine and persistent volume

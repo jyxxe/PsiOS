@@ -682,11 +682,14 @@ pub(crate) fn retains_result(db: &Db<'_>, task: &Doc) -> Result<bool> {
         && session.spec["context_policy"] == "LocalToolResults"
         && !matches!(state(&session), "Failed" | "Succeeded" | "Cancelled"))
 }
-pub fn snapshot(db: &Db<'_>, t: &Doc, plan: &Doc) -> Result<Value> {
+pub fn snapshot(db: &Db<'_>, t: &Doc, plan: &Doc, artifacts: &[Value]) -> Result<Value> {
     let mut b = json!({"runtime":"psios.local.task.v2","checkpoint_version":"1","input_ref":t.spec["input_ref"],
         "plan_ref":plan.reference(),"plan_digest":plan.body["plan_digest"],"tool_refs":plan.body["runtime_refs"],
         "preconditions":plan.body["preconditions"],"delegation_ref":t.spec["delegation_ref"],"budget_ref":t.spec["budget_ref"],
         "cancel_scope_id":t.spec["cancel_scope_id"],"authorization_epoch":db.meta("epoch")?,"recovery_incarnation":db.incarnation});
+    if !artifacts.is_empty() {
+        b["required_artifact_refs"] = json!(artifacts);
+    }
     if let Some(sid) = session_for_task(db, &t.id)? {
         let s = db.of(&sid, "Session")?;
         // The broker has already validated this checkpoint in preflight.

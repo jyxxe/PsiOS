@@ -75,7 +75,7 @@ pub(super) fn receipt(conn: &Connection, artifact: &Doc) -> Result<Option<Doc>> 
     Ok(Some(record))
 }
 
-pub(super) fn require_content(conn: &Connection, artifact: &Doc) -> Result<()> {
+pub(crate) fn require_content(conn: &Connection, artifact: &Doc) -> Result<()> {
     require(
         receipt(conn, artifact)?.is_none(),
         "ResultEvicted",
@@ -179,6 +179,11 @@ pub fn evict(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         !agent::retains_result(db, &task)?,
         "Conflict",
         "an active Agent session retains the task result",
+    )?;
+    require(
+        !crate::broker::dependencies::retains_result(db, &task.id)?,
+        "Conflict",
+        "an unsettled Task requires this producer's result",
     )?;
     let refs = task.body["result"]["artifact_refs"]
         .as_array()

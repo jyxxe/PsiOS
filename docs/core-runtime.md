@@ -239,6 +239,8 @@ Task 成功时返回 `session_ref`，会话记录原 Task 引用。会话进入�
 
 `Workflow.Define` 登记一份不可变的本机 Task 依赖图。每步提供 `id`、`tool`、字面量 `input` 和所依赖的 `after` 步骤 ID。当前支持 1 至 16 步，定义体最多 128 KiB。Core 检查重复 ID、悬空引用与回环，并固定当时登记的工具引用。以同一键重发相同定义会得到原引用。修改定义时使用新键。
 
+定义可指定 `max_parallel_steps`，默认 1，范围 1 至 16。已满足前置依赖的步骤在额度内各自提交普通 Task，共享同一根预算和运行期限，每个写步骤继续按原计划审批。运行回执的 `active_steps` 列出并行配置下尚未结算的步骤。已知失败或取消会停止新准入，取消其他待执行步骤，并等待在途步骤结算。若有步骤丢失结果，Workflow 暂停新准入，已提交的独立步骤继续报告结果。原步骤经对账恢复后才推进其后继。格式 38 保留已提交的串行步骤、审批和 Task 身份。[并行与故障验收](../tests/test_workflow.py) · [真实旧格式升级](../tests/workflow_parallel_upgrade.py)
+
 `Workflow.Start` 接受 `key`、`definition_ref`、`delegation_id` 和带偏移的 `deadline_at`。委托须授予 `workflow.manage`、`task.submit`、`task.read` 和各步所需工具，覆盖实际目标，且在最终截止时间内有效。每步在派发时重查原授权、预算、工具引用和目标版本。Workflow 串行释放已满足依赖的步骤，由普通 Task 执行与审批。
 
 新 WorkflowRun 在接受时保存同一内核启动内的经过时间截止点，每步 Task 继承该上限。封锁调度期间也会结算到期实例。尚未开始的实例以 `Failed/NotStarted` 和 `DeadlineExceeded` 结算，恢复调度后仍保留原回执与预算；已有在途效果按原 Task 取消和对账规则处理。格式 26 的工作流继续使用原 UTC 截止时间。跨内核启动也使用原 UTC 截止时间。[原生盘回拨验收](../tests/native_grant_deadline.py) · [格式 26 升级](../tests/workflow_deadline_upgrade.py)

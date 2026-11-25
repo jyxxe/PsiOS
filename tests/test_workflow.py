@@ -32,8 +32,11 @@ class WorkflowTests(unittest.TestCase):
         return self.node.call("Grant.Issue", dict(principal_id=actor, tool_targets=list(targets), units=units,
             actions=["workflow.manage", "task.submit", "task.read", *actions], ttl_seconds=120))
 
-    def define(self, steps, token=None):
-        return self.node.call("Workflow.Define", {"key": key(), "steps": steps}, token)
+    def define(self, steps, token=None, *, max_parallel_steps=None):
+        request = {"key": key(), "steps": steps}
+        if max_parallel_steps is not None:
+            request["max_parallel_steps"] = max_parallel_steps
+        return self.node.call("Workflow.Define", request, token)
 
     def request(self, definition, grant, deadline=30):
         return dict(key=key(), definition_ref=definition["reference"], deadline_at=timestamp(deadline),
@@ -67,6 +70,125 @@ class WorkflowTests(unittest.TestCase):
 
     def phases(self, current):
         return {step["step_id"]: step for step in current["state"]["steps"]}
+
+    def wait_active(self, instance, steps):
+        deadline = time.monotonic() + 10
+        while True:
+            current = self.fetch(instance)
+            if current["state"]["active_steps"] == steps:
+                return current
+            self.assertNotIn(current["state"]["lifecycle"], ["Succeeded", "Failed", "Cancelled"], current)
+            self.assertLess(time.monotonic(), deadline, current)
+            time.sleep(0.05)
+
+    def test_bounded_parallel_approvals_survive_a_crash_and_join_once(self):
+        n = self.node
+        volumes = [n.perform("volume.create", {"name": f"parallel-{name}"}) for name in "abc"]
+        scope = self.grant(["volume.write", "system.status"],
+                           ["profile-local", *(volume["resource_id"] for volume in volumes)], units=4)
+        steps = [step(name, "volume.write", {**target(volume), "name": "receipt", "content": name})
+                 for name, volume in zip("abc", volumes)] + [step("join", after=["a", "b", "c"])]
+        params = {"key": key(), "steps": steps, "max_parallel_steps": 2}
+        self.rejected("InvalidArgument", "Workflow.Define", dict(params, max_parallel_steps=0))
+        definition = n.call("Workflow.Define", params)
+        self.assertEqual(n.call("Workflow.Define", params), definition)
+        self.rejected("IdempotencyConflict", "Workflow.Define", dict(params, max_parallel_steps=3))
+        self.assertEqual(definition["definition"]["max_parallel_steps"], 2)
+        run = n.call("Workflow.Start", self.request(definition, scope))
+        active = self.wait_active(run, ["a", "b"])
+        entries = self.phases(active)
+        a, b = [entries[name]["task_receipt"]["task_id"] for name in "ab"]
+        self.assertEqual(active["state"]["lifecycle"], "WaitingApproval")
+        self.assertIsNone(entries["c"]["task_receipt"])
+        self.assertIsNone(entries["join"]["task_receipt"])
+        self.assertEqual(self.budget(scope), (2, 0))
+        n.stop(signal.SIGKILL)
+        n.start()
+        self.assertEqual(self.fetch(run), active)
+        self.assertEqual(self.budget(scope), (2, 0))
+
+        n.approve(b)
+        next_pair = self.wait_active(run, ["a", "c"])
+        projections = self.phases(next_pair)
+        c = projections["c"]["task_receipt"]["task_id"]
+        self.assertEqual(projections["b"]["task_receipt"]["task_id"], b)
+        self.assertEqual(projections["b"]["lifecycle"], "Succeeded")
+        self.assertIsNone(projections["join"]["task_receipt"])
+        self.assertEqual(self.budget(scope), (2, 1))
+        with ThreadPoolExecutor(max_workers=2) as callers:
+            list(callers.map(n.approve, [a, c]))
+        done = self.wait(run, "Succeeded")
+        self.assertEqual(done["state"]["active_steps"], [])
+        final = self.phases(done)
+        self.assertEqual([final[name]["task_receipt"]["task_id"] for name in "abc"], [a, b, c])
+        self.assertTrue(all(projection["lifecycle"] == "Succeeded" for projection in final.values()))
+        self.assertEqual(self.budget(scope), (0, 4))
+        for name, volume in zip("abc", volumes):
+            content = n.state / "volumes" / volume["resource_id"] / "data" / "receipt"
+            self.assertEqual(content.read_text(), name)
+
+    def test_step_rejection_cancels_parallel_sibling_approvals(self):
+        n = self.node
+        volume = n.perform("volume.create", {"name": "parallel-rejection"})
+        scope = self.grant(["volume.write"], [volume["resource_id"]], units=3)
+        definition = self.define([step(name, "volume.write", {**target(volume), "name": name, "content": name})
+                                  for name in "abc"], max_parallel_steps=2)
+        run = n.call("Workflow.Start", self.request(definition, scope))
+        active = self.wait_active(run, ["a", "b"])
+        entries = self.phases(active)
+        first = entries["a"]["task_receipt"]["task_id"]
+        sibling = entries["b"]["task_receipt"]["task_id"]
+        n.approve(first, approve=False)
+        stopped = self.wait(run, "Failed")
+        self.assertEqual(stopped["state"]["active_steps"], [])
+        self.assertEqual(n.wait(sibling)["lifecycle"], "Cancelled")
+        self.assertIsNone(self.phases(stopped)["c"]["task_receipt"])
+        self.assertEqual(self.budget(scope), (0, 0))
+        self.assertEqual(list((n.state / "volumes" / volume["resource_id"] / "data").iterdir()), [])
+
+    def test_unknown_parallel_child_fences_admission_while_a_sibling_settles(self):
+        n = self.node
+        two = [n.perform("volume.create", {"name": f"unknown-{name}"}) for name in "ab"]
+        scope = self.grant(["volume.write", "system.status"],
+                           ["profile-local", *(volume["resource_id"] for volume in two)], units=3)
+        definition = self.define([
+            step(name, "volume.write", {**target(volume), "name": "written", "content": name})
+            for name, volume in zip("ab", two)
+        ] + [step("c", after=["b"])], max_parallel_steps=2)
+        run = n.call("Workflow.Start", self.request(definition, scope))
+        entries = self.phases(self.wait_active(run, ["a", "b"]))
+        task, sibling = [entries[name]["task_receipt"]["task_id"] for name in "ab"]
+        n.stop()
+        with closing(sqlite3.connect(n.state / "state.db")) as db, db:
+            db.execute(f"""CREATE TRIGGER fail_one_branch BEFORE INSERT ON artifact_chunks
+                WHEN EXISTS(SELECT 1 FROM versions v WHERE v.id=NEW.artifact_id AND v.spec->>'task_id'='{task}')
+                BEGIN SELECT RAISE(ABORT,'test parallel receipt loss'); END""")
+        n.start()
+        n.approve(task)
+        uncertain = self.wait(run, "Blocked")
+        self.assertEqual(uncertain["state"]["reason"], "OutcomeUnknown")
+        effect = n.state / "volumes" / two[0]["resource_id"] / "data" / "written"
+        before = effect.stat()
+        self.assertEqual(effect.read_text(), "a")
+        n.approve(sibling)
+        partial = self.wait_active(run, ["a"])
+        self.assertEqual(partial["state"]["reason"], "OutcomeUnknown")
+        self.assertEqual(self.phases(partial)["b"]["lifecycle"], "Succeeded")
+        self.assertIsNone(self.phases(partial)["c"]["task_receipt"])
+
+        n.stop(signal.SIGKILL)
+        with closing(sqlite3.connect(n.state / "state.db")) as db, db:
+            db.execute("DROP TRIGGER fail_one_branch")
+        n.start()
+        self.assertEqual(self.fetch(run), partial)
+        old_operation, = n.wait(task)["operation_refs"]
+        n.call("Operation.Reconcile", target(old_operation))
+        done = self.wait(run, "Succeeded")
+        self.assertEqual(self.phases(done)["a"]["task_receipt"]["task_id"], task)
+        self.assertEqual(self.phases(done)["b"]["task_receipt"]["task_id"], sibling)
+        self.assertEqual(self.budget(scope), (0, 3))
+        after = effect.stat()
+        self.assertEqual((after.st_ino, after.st_mtime_ns), (before.st_ino, before.st_mtime_ns))
 
     def test_artifact_mapping_requires_read_scope_and_rejects_invalid_inputs(self):
         n = self.node

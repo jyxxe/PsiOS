@@ -2,7 +2,7 @@
 mod binding;
 mod condition;
 mod output;
-mod run;
+pub(crate) mod run;
 
 use crate::{
     ById, Result, broker,
@@ -83,6 +83,7 @@ impl Step {
 struct Define {
     key: String,
     steps: Vec<Step>,
+    max_parallel_steps: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -207,11 +208,21 @@ pub fn define(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     let request: Define = decode(params)?;
     label(&request.key)?;
     policy::can(db, actor, ACTION)?;
+    let parallelism = request.max_parallel_steps.unwrap_or(1);
+    require(
+        (1..=16).contains(&parallelism),
+        "InvalidArgument",
+        "workflow parallelism must be 1 to 16 steps",
+    )?;
     let id = stable_id(
         "workflow-definition",
         &json!([db.meta("authority")?, actor, request.key]),
     );
-    let bytes = canonical(&json!(request.steps));
+    let bytes = if parallelism == 1 {
+        canonical(&json!(request.steps))
+    } else {
+        canonical(&json!({"steps":request.steps,"max_parallel_steps":parallelism}))
+    };
     require(
         bytes.len() <= 128 * 1024,
         "InvalidArgument",
@@ -237,6 +248,9 @@ pub fn define(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         .unwrap_or(1);
     let steps = plan(db, request.steps)?;
     let mut spec = json!({"dsl_version": version, "definition_version": "r1", "steps": steps});
+    if parallelism > 1 {
+        spec["max_parallel_steps"] = json!(parallelism);
+    }
     spec["definition_digest"] = json!(sha256(&canonical(&spec)));
     spec["creation_digest"] = json!(creation);
     let d = db.create(
@@ -475,18 +489,29 @@ fn start_run(db: &Db<'_>, actor: &str, request: Start, origin: Option<&Doc>) -> 
         .collect();
     let mut state = json!({"lifecycle":"Ready","outcome_knowledge":"NotStarted","reason":null,
         "active_step":null,"stop_reason":null,"steps":projections});
+    let parallelism = d
+        .spec
+        .get("max_parallel_steps")
+        .map_or(Some(1), Value::as_u64)
+        .filter(|count| (1..=16).contains(count))
+        .ok_or_else(|| {
+            err(
+                "RecoveryRequired",
+                "workflow definition has invalid parallelism",
+            )
+        })? as u32;
+    if parallelism > 1 {
+        state["active_steps"] = json!([]);
+    }
     if let Some(task) = origin {
         state["origin_task_ref"] = task.reference();
     }
-    let run = db.create(
-        RUN,
-        &id,
-        actor,
-        json!({"definition_ref": d.reference(), "creation_digest": creation, "steps": steps,
-               "dsl_version": d.spec["dsl_version"],
-               "delegation_id": request.delegation_id, "deadline_at": deadline_at}),
-        state,
-    )?;
+    let mut spec = json!({"definition_ref": d.reference(), "creation_digest": creation, "steps": steps,
+        "dsl_version": d.spec["dsl_version"], "delegation_id": request.delegation_id, "deadline_at": deadline_at});
+    if parallelism > 1 {
+        spec["max_parallel_steps"] = json!(parallelism);
+    }
+    let run = db.create(RUN, &id, actor, spec, state)?;
     policy::deadline::Clock::sample()?.register_until(
         db,
         &id,
@@ -496,8 +521,8 @@ fn start_run(db: &Db<'_>, actor: &str, request: Start, origin: Option<&Doc>) -> 
     let deadline_ms = deadline.timestamp_millis()
         + i64::from(!deadline.timestamp_subsec_nanos().is_multiple_of(1_000_000));
     db.c.execute(
-        "INSERT INTO active_workflows(run,deadline_ms,ready_ms) VALUES(?1,?2,?3)",
-        params![id, deadline_ms, Utc::now().timestamp_millis()],
+        "INSERT INTO active_workflows(run,deadline_ms,ready_ms,max_parallel_steps) VALUES(?1,?2,?3,?4)",
+        params![id, deadline_ms, Utc::now().timestamp_millis(), parallelism],
     )?;
     Ok(run)
 }

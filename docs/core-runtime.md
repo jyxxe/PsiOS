@@ -171,6 +171,8 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 
 `Grant.Issue` 可提供 `tool_targets`，把工具限制在明确的资源 ID 集合中。对已绑定卷的应用启停，授权需覆盖应用和卷。通用资源读取仍按独立权限和资源所有者裁决。设置 `allow_delegation=true` 和 `max_delegation_depth` 可启用最多 4 层转授。子委托可以收窄动作、目标、期限和剩余层数，共享根预算。沿用旧配置的 Grant 保持原有的单层状态委托范围。每次派发检查完整祖先链及其主体。
 
+`Grant.Issue` 可选填 `task_concurrency`，取值 1 至 16。根授权和所有子委托共享并发上限。已领取、已派发和结果未知的 Task 占用名额。等待审批或等待派发的 Task 仍按原规则预留执行次数，其他根预算可继续派发。任务结算或解除领取后腾出名额。对结果未知的操作完成对账后，排队任务可继续执行。`Budget.Get` 给出最大、已占用、未知及剩余名额。原有预算在格式 40 升级后沿用原派发规则。[失去效果回执和跨授权派发](../tests/test_task_concurrency.py) · [格式 39 升级](../tests/task_concurrency_upgrade.py)
+
 `Secret.Rotate` 接受秘密 ID、预期修订和新值。新密文使用新随机 nonce，并将秘密身份及密钥版本纳入认证数据。轮换前接受且尚未派发的旧计划会失效。旧库中的密文可以继续使用并原地轮换。撤销的秘密不能通过轮换重新激活。
 
 新签发的 Grant 和 Delegation 同时保存绝对 UTC 截止时间与基于 Linux `CLOCK_BOOTTIME` 的时限。Core 在同一内核启动和时间命名空间内同时检查这两个条件，包括服务重启后的权限检查、队列结算和效果准入。墙钟回拨后，已经用完的经过时间仍然计入时限。变更时间命名空间时需要重新取得适用的委托。切换到另一内核启动时使用原 UTC 截止时间。格式 25 保留旧签发记录的原期限，新时限随新签发写入权威。[原生盘回拨验收](../tests/native_grant_deadline.py) · [时间命名空间验收](../tests/grant_time_namespace.py) · [格式 24 升级](../tests/grant_deadline_upgrade.py)

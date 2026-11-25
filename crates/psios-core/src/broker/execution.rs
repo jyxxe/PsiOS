@@ -83,7 +83,10 @@ pub fn claim(db: &Db<'_>) -> Result<Option<String>> {
         db.c.query_row(
             "SELECT q.task FROM queue q JOIN current t ON t.id=q.task
              LEFT JOIN dispatch_fairness f ON f.principal=t.owner
-             WHERE q.phase='Queued' ORDER BY coalesce(f.turn,0),q.stamp,q.task LIMIT 1",
+             LEFT JOIN task_concurrency c ON c.budget=q.budget
+             WHERE q.phase='Queued' AND
+               (c.maximum IS NULL OR (SELECT count(*) FROM occupied_task_slots WHERE budget=q.budget)<c.maximum)
+             ORDER BY coalesce(f.turn,0),q.stamp,q.task LIMIT 1",
             [],
             |r| r.get(0),
         )

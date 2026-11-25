@@ -90,6 +90,66 @@ fn approve(s: &mut Store, task: &str) {
 const HOST_WRITE_BARRIER: &str = "PSIOS_TEST_CRASH_STATE";
 
 #[test]
+fn a_root_budget_slot_is_held_through_claim_and_dispatch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, mut store) = initialized(tmp.path());
+    let grant = call(
+        &mut store,
+        "Grant.Issue",
+        json!({"principal_id":"local-owner","actions":["task.submit","task.read","system.status"],
+            "units":2,"ttl_seconds":90,"task_concurrency":1}),
+    )
+    .unwrap();
+    let mut submit = || {
+        let admission = call(
+            &mut store,
+            "Task.Prepare",
+            json!({"tool":"system.status","input":{},"key":id("capacity"),
+                "delegation_id":grant["delegation_ref"]["resource_id"]}),
+        )
+        .unwrap();
+        call(&mut store, "Task.Submit", admission).unwrap()["task_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let first = submit();
+    let second = submit();
+    assert_eq!(claim(&mut store), first);
+    assert!(
+        store
+            .transaction("saturated-claim", broker::claim)
+            .unwrap()
+            .is_none()
+    );
+    store
+        .transaction("release", |db| broker::release_unstarted_claim(db, &first))
+        .unwrap();
+    let budget = call(
+        &mut store,
+        "Budget.Get",
+        json!({"id":grant["budget_ref"]["resource_id"]}),
+    )
+    .unwrap();
+    assert_eq!(budget["task_concurrency_remaining"], 1);
+    assert_eq!(budget["reserved"], 2);
+
+    assert_eq!(claim(&mut store), first);
+    let running = dispatch(&mut store, &first);
+    assert!(
+        store
+            .transaction("saturated-dispatch", broker::claim)
+            .unwrap()
+            .is_none()
+    );
+    let receipt = running.perform(|_| unreachable!("system.status has no host checkpoint"));
+    store
+        .transaction("result", |db| broker::finish(db, &running, receipt))
+        .unwrap();
+    assert_eq!(claim(&mut store), second);
+}
+
+#[test]
 fn storage_deletion_interrupted_before_rename_can_settle_without_replaying() {
     for prepared in [false, true] {
         let tmp = tempfile::tempdir().unwrap();

@@ -84,11 +84,12 @@ impl Config {
                 continue;
             }
             let fs = sample(path)?;
-            require(
-                !fs.f_flag.contains(StatVfsMountFlags::RDONLY),
-                "StorageUnavailable",
-                format!("authority {name} filesystem is mounted read-only"),
-            )?;
+            if fs.f_flag.contains(StatVfsMountFlags::RDONLY) {
+                return Err(err(
+                    "StorageUnavailable",
+                    format!("authority {name} filesystem is mounted read-only"),
+                ));
+            }
             if available(&fs) < reserve.bytes {
                 return Err(retryable_exhaustion(format!(
                     "authority {name} filesystem below configured free space reserve"

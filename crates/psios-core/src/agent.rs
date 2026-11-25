@@ -384,6 +384,7 @@ fn context(db: &Db<'_>, s: &Doc, skill: &Doc, model: &Doc) -> Result<Value> {
                 "RecoveryRequired",
                 "tool artifact producer disagrees with the session task",
             )?;
+            crate::apps::log_tail::authorize_task(db, &s.owner, &t)?;
             last["local_tool_result"] =
                 artifact::read(db, &artifact, Some(maximum)).map_err(artifact::dependency_error)?;
         }

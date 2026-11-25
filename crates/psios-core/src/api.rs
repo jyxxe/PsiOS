@@ -101,7 +101,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
                 "Event.Ack" => events::ack(db, actor, p),
                 "Event.Offset" => events::offset(db, actor, p),
                 _ => {
-                    let d = if method == "Resource.Get" {
+                    let mut d = if method == "Resource.Get" {
                         let p: ById = decode(p)?;
                         db.get(&p.id)?
                     } else {
@@ -113,9 +113,13 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
                         "PermissionDenied",
                         "resource outside authorized scope",
                     )?;
+                    apps::log_tail::authorize_artifact(db, actor, &d)?;
+                    let reference = d.reference();
+                    apps::log_tail::redact_status(&d.kind, &mut d.body);
+                    apps::log_tail::redact_status(&d.kind, &mut d.spec);
+                    apps::log_tail::redact_late_receipt(db, &mut d)?;
                     let env = d.envelope(&db.meta("authority")?);
                     contract("resource-envelope", &env)?;
-                    let reference = d.reference();
                     let value = if artifact::is_json(&d) {
                         artifact::read(db, &d, Some(MAX_FRAME))?
                     } else {
@@ -147,6 +151,9 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
                 (decode::<Reference>(p)?.reference, None)
             };
             let (d, shared) = broker::result_access::resolve_artifact(db, actor, &reference)?;
+            if method != "Artifact.Get" {
+                apps::log_tail::authorize_artifact(db, actor, &d)?;
+            }
             let value = match page {
                 Some((offset, length)) => artifact::page(db, &d, offset, length)?,
                 None if method == "Artifact.Get" => artifact::retention::describe(db, &d, shared)?,

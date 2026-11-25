@@ -574,6 +574,7 @@ impl Work {
                 | Action::RetireRelease(_)
                 | Action::CaptureOciImage(_)
                 | Action::InspectReleaseImageRestore(_)
+                | Action::Logs(_)
         ) {
             self.checkpoint_authority(db)?;
         }
@@ -796,6 +797,9 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
         Action::Status {} => Some(status(db)?),
         Action::Mac { secret_id, message } => Some(policy::mac(db, actor, secret_id, message)?),
         Action::ListAppReleases(input) => Some(apps::inventory::page(db, actor, input, &target)?),
+        Action::Logs(_) if target.body["lifecycle"] == "Stopped" => {
+            Some(apps::log_tail::retained(db, &target)?)
+        }
         _ => None,
     };
     let rename_inspection = if matches!(a, Action::InspectFileRename(_)) {

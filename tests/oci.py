@@ -238,6 +238,86 @@ def retire_oci_release(node, app, release, artifact, archive, allow, uninstall=F
     print("Retired the " + ("uninstalled" if uninstall else "superseded") + " OCI release and reclaimed its source artifact", flush=True)
 
 
+def check_log_isolation(node, app, owner, install_grant, container):
+    token = owner["token"]
+    app_id = app["resource_id"]
+    tool = "application.logs"
+    artifact_grant(node, owner["principal_id"], ["resource.read", "task.read", "event.read"], [app_id])
+
+    def submit(grant):
+        request = node.prepare(tool, target(app), token=token,
+                               delegation=grant["delegation_ref"]["resource_id"])
+        return node.call("Task.Submit", request, token)["task_id"]
+
+    def read(grant):
+        task = node.wait(submit(grant))
+        assert task["lifecycle"] == "Succeeded", task
+        reference, = task["result"]["artifact_refs"]
+        return reference, node.call("Artifact.Read", {"reference": reference}, token)
+
+    denied(node, "PermissionDenied", "Task.Prepare", {"tool": tool, "input": target(app), "key": key(),
+        "delegation_id": install_grant["delegation_ref"]["resource_id"]}, token)
+    allowed = artifact_grant(node, owner["principal_id"], ["task.submit", "task.read", tool], [app_id])
+    live_ref, live = read(allowed)
+    assert live["availability"] == "Available" and live["truncated"], live
+    assert live["stdout"].endswith("probe ready\n") and len(live["stdout"].encode()) == 8192, live
+    assert live["stderr"] == "private-tail stderr\n", live
+    assert live["source"]["application_ref"] == app and live["source"]["container_id"] == container, live
+
+    original = json.loads(node.config.read_text())
+    socket = node.base / "logs-auth.sock"
+    path = f"/containers/{container}/logs?".encode()
+    node.stop()
+    with ReceiptBarrier(socket, original.get("docker_socket", "/var/run/docker.sock"),
+                        lambda request: b"GET " in request and path in request,
+                        status=b" 200 ", forward=True) as barrier:
+        serving = threading.Thread(target=barrier.serve_forever, daemon=True)
+        serving.start()
+        try:
+            node.config.write_text(json.dumps(dict(original, docker_socket=str(socket))))
+            node.start()
+            in_flight = submit(allowed)
+            assert barrier.confirmed.wait(12), "Docker did not return the live log tail"
+            node.call("Grant.Revoke", target(allowed["grant_ref"]))
+            barrier.release.set()
+            rejected = node.wait(in_flight)
+            assert rejected["lifecycle"] == "Failed" and rejected["conditions"][0]["type"] in (
+                "PermissionDenied", "Fenced"), rejected
+            assert rejected["result"]["artifact_refs"] == [], rejected
+        finally:
+            barrier.release.set()
+            barrier.shutdown()
+            serving.join(3)
+            node.stop()
+            node.config.write_text(json.dumps(original))
+            node.start()
+
+    denied(node, "PermissionDenied", "Artifact.Read", {"reference": live_ref}, token)
+    tail_page = node.call("Resource.List", {"kind": "ApplicationLogTail"}, token)
+    app = node.perform("application.stop", target(app))
+    status = node.call("Resource.Get", {"id": app_id}, token)
+    assert status["reference"] == app and "last_logs" not in status["value"], status
+    assert "private-tail stderr" not in json.dumps(status), status
+    private_id = "application-log-tail-" + status["value"]["last_stop_operation_id"]
+    denied(node, "PermissionDenied", "Resource.Get", {"id": private_id}, token)
+    assert node.call("Resource.Watch", {"cursor": tail_page["watch_start_cursor"]}, token)["events"] == []
+    assert node.call("Resource.List", {"kind": "ApplicationLogTail"}, token)["items"] == []
+    assert "private-tail stderr" not in json.dumps(node.perform("application.health", target(app)))
+    node.stop()
+    node.start()
+    allowed = artifact_grant(node, owner["principal_id"], ["task.submit", "task.read", tool], [app_id])
+    cached_ref, cached = read(allowed)
+    assert cached["availability"] == "Available" and cached["truncated"], cached
+    for field in ("stdout", "stderr", "source"):
+        assert cached[field] == live[field], (field, cached[field], live[field])
+    node.call("Grant.Revoke", target(allowed["grant_ref"]))
+    for method in ("Artifact.Read", "Resource.Resolve"):
+        denied(node, "PermissionDenied", method, {"reference": cached_ref}, token)
+    denied(node, "PermissionDenied", "Artifact.ReadChunk", {"reference": cached_ref, "offset": 0, "length": 1}, token)
+    print("Verified scoped running and retained logs, targeted revocation, and private stopped tail", flush=True)
+    return app
+
+
 def main(binaries, previous_binaries=None):
     node = Node(binaries)
     tag = "psios-acceptance:" + key()
@@ -255,6 +335,11 @@ int main(void) {
     if (!f) return 2;
     fprintf(f,"%s\\n",getenv("TEST_NAME"));
     if (fclose(f)) return 3;
+    if (getenv("TEST_LONG_LOG")) {
+        for (int i=0; i<9000; i++) fputc('x',stdout);
+        fputc('\\n',stdout);
+        fputs("private-tail stderr\\n",stderr); fflush(stderr);
+    }
     puts("probe ready"); fflush(stdout);
     for (;;) pause();
 }
@@ -330,7 +415,7 @@ int main(void) {
         agent = node.call("Agent.Register", {"name": "installer"})
         grant = node.call("Grant.Issue", dict(principal_id=agent["principal_id"], actions=["task.submit","task.read","application.install"],
             ttl_seconds=180, units=2, tool_targets=["profile-local"]))
-        isolated = dict(release, name="isolated", environment={"TEST_NAME": "isolated", "EPHEMERAL_ONLY": "1"})
+        isolated = dict(release, name="isolated", environment={"TEST_NAME": "isolated", "EPHEMERAL_ONLY": "1", "TEST_LONG_LOG": "1"})
         request = node.prepare("application.install", isolated, key(), agent["token"], grant["delegation_ref"]["resource_id"])
         accepted = node.call("Task.Submit", request, agent["token"])
         installed = node.wait(accepted["task_id"], autoapprove=True)
@@ -347,10 +432,9 @@ int main(void) {
         assert foreign["conditions"][0]["type"] == "PreconditionFailed", foreign
         other = node.perform("application.start", target(other))
         ephemeral_cid = node.perform("application.health", target(other))["container_id"]
-        assert "probe ready" in node.perform("application.logs", target(other))["stdout"]
         ephemeral = json.loads(subprocess.check_output(docker + ["inspect", ephemeral_cid]))[0]
         assert ephemeral["Mounts"] == [], ephemeral["Mounts"]
-        other = node.perform("application.stop", target(other))
+        other = check_log_isolation(node, other, agent, grant, ephemeral_cid)
         node.perform("application.uninstall", target(other))
         app = node.perform("application.select_release", dict(target=target(app), release_ref=staged))
         with corrupted_archive(node, staged_archive):
@@ -379,6 +463,8 @@ int main(void) {
         reverted = node.perform("application.health", target(app))["container_id"]
         assert json.loads(subprocess.check_output(docker + ["inspect", reverted]))[0]["Image"] == image_id
         app = lose_stop_receipt(node, app, reverted, volume)
+        unavailable = node.perform("application.logs", target(app))
+        assert unavailable["availability"] == "Unavailable" and not unavailable["stdout"], unavailable
         node_id = node.call("Node.Get", {})["reference"]["resource_id"]
         artifact_grant(node, "local-owner", ["artifact.withdraw", "artifact.read"], [node_id])
         retirement = artifact_grant(node, "local-owner", ["task.submit", "task.read", "application.retire_release"],

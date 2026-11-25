@@ -286,6 +286,7 @@ struct Capture<'a> {
     entries: Vec<(Entry, fs::Metadata)>,
     total: u64,
     max_bytes: u64,
+    check: &'a mut dyn FnMut() -> Result<()>,
 }
 // Reading can advance atime. All identity, content and permission evidence
 // used for this local backup profile must still match at publication.
@@ -302,9 +303,11 @@ fn same_source(a: &fs::Metadata, b: &fs::Metadata) -> bool {
 }
 impl Capture<'_> {
     fn walk(&mut self, dir: &File, root: &Path, depth: u32) -> Result<()> {
+        (self.check)()?;
         require(depth <= 32, "QuotaExceeded", "backup directory depth limit")?;
         let mut names = Vec::new();
         for e in Dir::read_from(dir).map_err(std::io::Error::from)? {
+            (self.check)()?;
             let e = e.map_err(std::io::Error::from)?;
             let name = e
                 .file_name()
@@ -323,6 +326,7 @@ impl Capture<'_> {
         }
         names.sort();
         for name in names {
+            (self.check)()?;
             require(
                 self.entries.len() < MAX_ENTRIES,
                 "QuotaExceeded",
@@ -393,12 +397,12 @@ impl Capture<'_> {
                     )
                     .map_err(std::io::Error::from)?;
                     let mut dst = File::from(fd);
-                    let copied = copy_captured_blob(&mut src, &mut dst, m.len())?;
+                    let copied = copy_captured_blob(&mut src, &mut dst, m.len(), self.check)?;
                     dst.sync_all()?;
                     out.check_space(std::iter::empty(), 0)?;
                     copied
                 } else {
-                    copy_captured_blob(&mut src, &mut std::io::sink(), m.len())?
+                    copy_captured_blob(&mut src, &mut std::io::sink(), m.len(), self.check)?
                 };
                 require(
                     len == m.len() && same_source(&m, &src.metadata()?),
@@ -414,13 +418,15 @@ impl Capture<'_> {
         Ok(())
     }
 
-    fn confirm_source(&self, root: &File, before: &fs::Metadata) -> Result<()> {
+    fn confirm_source(&mut self, root: &File, before: &fs::Metadata) -> Result<()> {
+        (self.check)()?;
         require(
             same_source(before, &root.metadata()?),
             "Conflict",
             "volume directory changed during backup",
         )?;
         for (entry, expected) in &self.entries {
+            (self.check)()?;
             let (parent, name) = entry_parent(root, &entry.path)?;
             let observed = child(&parent, name, OFlags::PATH)?.metadata()?;
             require(
@@ -440,8 +446,9 @@ fn copy_captured_blob(
     source: &mut File,
     output: &mut impl Write,
     size: u64,
+    check: &mut dyn FnMut() -> Result<()>,
 ) -> Result<(u64, String)> {
-    copy_hash(source, output, size).map_err(|error| {
+    copy_hash_checked(source, output, size, check).map_err(|error| {
         if error.0.code == "QuotaExceeded" {
             err("Conflict", "volume file grew during capture")
         } else {
@@ -451,10 +458,20 @@ fn copy_captured_blob(
 }
 
 pub(crate) fn copy_hash(r: &mut File, w: &mut impl Write, max: u64) -> Result<(u64, String)> {
+    copy_hash_checked(r, w, max, &mut || Ok(()))
+}
+
+fn copy_hash_checked(
+    r: &mut File,
+    w: &mut impl Write,
+    max: u64,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<(u64, String)> {
     let mut hash = Sha256::new();
     let mut buf = [0u8; 32 * 1024];
     let mut len = 0;
     loop {
+        check()?;
         let n = r.read(&mut buf)?;
         if n == 0 {
             break;
@@ -483,7 +500,9 @@ fn capture_root(w: &Work) -> Result<File> {
 pub(crate) fn backup(
     w: &Work,
     checkpoint: impl FnOnce(&Value, u64, u64) -> Result<()>,
+    check: &mut impl FnMut() -> Result<()>,
 ) -> Result<Value> {
+    check()?;
     let parent = w.cfg.state_dir.join("backups");
     let bid = format!("backup-{}", w.op.id);
     let stage = staging::create(&parent)?;
@@ -496,6 +515,7 @@ pub(crate) fn backup(
         entries: vec![],
         total: 0,
         max_bytes: w.cfg.backup_max_bytes,
+        check,
     };
     let source = capture_root(w)?;
     let before = source.metadata()?;
@@ -520,6 +540,7 @@ pub(crate) fn backup(
         "total_bytes": capture.total.to_string()
     });
     let bytes = canonical(&manifest);
+    (capture.check)()?;
     w.cfg
         .check_restore_space(stage.directory(), std::iter::once(bytes.len() as u64), 1)?;
     new_file(&stage.path().join("manifest.json"), &bytes)?;
@@ -534,6 +555,7 @@ pub(crate) fn backup(
         "entries": capture.entries.len()
     });
     let (device, inode) = stage.identity()?;
+    (capture.check)()?;
     checkpoint(&receipt, device, inode)?;
     stage.publish(&bid)?;
     Ok(receipt)
@@ -989,6 +1011,7 @@ pub fn pool_status(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "capacity_bytes": stat.f_blocks.saturating_mul(stat.f_frsize).to_string(),
         "available_bytes": stat.f_bavail.saturating_mul(stat.f_frsize).to_string(),
         "backup_max_bytes": db.cfg.backup_max_bytes.to_string(),
+        "backup_capture_timeout_seconds": db.cfg.backup_capture_timeout_seconds,
         "failure_domain": "local-filesystem",
         "hard_volume_quota": "Unsupported"
     }))
@@ -1016,7 +1039,8 @@ mod capture_tests {
             .write_all(&[b'y'; 1024])
             .unwrap();
         let mut staged = tempfile::tempfile().unwrap();
-        let refusal = copy_captured_blob(&mut source, &mut staged, reserved).unwrap_err();
+        let refusal =
+            copy_captured_blob(&mut source, &mut staged, reserved, &mut || Ok(())).unwrap_err();
         assert_eq!(refusal.0.code, "Conflict");
         assert!(staged.metadata().unwrap().len() <= reserved);
     }
@@ -1045,6 +1069,7 @@ mod capture_tests {
             entries: vec![],
             total: 0,
             max_bytes: MAX_BACKUP_BYTES,
+            check: &mut || Ok(()),
         };
         capture.walk(&root, Path::new(""), 0).unwrap();
         capture.confirm_source(&root, &before).unwrap();
@@ -1090,6 +1115,7 @@ mod capture_tests {
                 entries: vec![],
                 total: 0,
                 max_bytes: MAX_BACKUP_BYTES,
+                check: &mut || Ok(()),
             };
             capture.walk(&root, Path::new(""), 0).unwrap();
             capture.confirm_source(&root, &before).unwrap();

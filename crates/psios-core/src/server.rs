@@ -15,7 +15,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 type Shared = Arc<Mutex<Store>>;
@@ -198,9 +198,22 @@ fn worker(s: Shared, stop: Arc<AtomicBool>, tick: Duration) -> Result<()> {
             }
         };
         // SQLite and the socket remain available while an issued host operation is in flight.
-        let receipt = work.perform(|checkpoint| {
-            state(&s)?.transaction(&correlation, |db| work.checkpoint(db, checkpoint))
-        });
+        let mut check_after = Instant::now();
+        let receipt = work.perform_checked(
+            |checkpoint| state(&s)?.transaction(&correlation, |db| work.checkpoint(db, checkpoint)),
+            || {
+                crate::require(
+                    !stop.load(Ordering::Acquire),
+                    "LeaseLost",
+                    "authority stopped before backup publication",
+                )?;
+                if Instant::now() >= check_after {
+                    state(&s)?.transaction(&correlation, |db| work.check_backup_capture(db))?;
+                    check_after = Instant::now() + Duration::from_millis(100);
+                }
+                Ok(())
+            },
+        );
         let done = state(&s)?.transaction(&correlation, |db| broker::finish(db, &work, receipt));
         if let Err(e) = done {
             eprintln!("psiosd {} receipt commit failed: {}", work.op.id, e.0.code);

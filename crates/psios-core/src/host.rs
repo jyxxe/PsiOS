@@ -372,7 +372,7 @@ pub(crate) enum Checkpoint<'a> {
 }
 
 impl Work {
-    pub(crate) fn checkpoint(&self, db: &Db<'_>, event: Checkpoint<'_>) -> Result<()> {
+    fn checkpoint_authority(&self, db: &Db<'_>) -> Result<Doc> {
         let t = db.of(&self.task.id, "Task")?;
         require(
             t.body["current_run_id"] == self.run.id
@@ -386,6 +386,21 @@ impl Work {
             .action
             .audience(db, &t.owner, &t.spec["delegation_ref"], &target)?;
         permit(db, &t, &self.run, &self.op, &self.effect, &audience)?;
+        Ok(target)
+    }
+
+    pub(crate) fn check_backup_capture(&self, db: &Db<'_>) -> Result<()> {
+        require(
+            matches!(self.action, Action::Backup(_)),
+            "Fenced",
+            "capture is outside its permit",
+        )?;
+        self.checkpoint_authority(db)?;
+        Ok(())
+    }
+
+    pub(crate) fn checkpoint(&self, db: &Db<'_>, event: Checkpoint<'_>) -> Result<()> {
+        let target = self.checkpoint_authority(db)?;
         match (&self.action, event) {
             (Action::Start(_), Checkpoint::OciStart { engine, container }) => {
                 let evidence = json!({"start_operation_id":self.op.id, "effect_ref":self.effect.reference(),
@@ -394,7 +409,7 @@ impl Work {
                 db.create(
                     "OCIStartCheckpoint",
                     &format!("oci-start-{}", self.op.id),
-                    &t.owner,
+                    &self.task.owner,
                     json!({}),
                     evidence,
                 )?;
@@ -415,9 +430,18 @@ impl Work {
             _ => Err(err("Fenced", "checkpoint does not match effect")),
         }
     }
+    #[cfg(test)]
     pub(crate) fn perform(
         &self,
         checkpoint: impl FnOnce(Checkpoint<'_>) -> Result<()>,
+    ) -> Result<Value> {
+        self.perform_checked(checkpoint, || Ok(()))
+    }
+
+    pub(crate) fn perform_checked(
+        &self,
+        checkpoint: impl FnOnce(Checkpoint<'_>) -> Result<()>,
+        mut check_capture: impl FnMut() -> Result<()>,
     ) -> Result<Value> {
         if let Some(v) = &self.inline {
             return Ok(v.clone());
@@ -443,13 +467,17 @@ impl Work {
             Action::Start(_) => apps::start(self, |engine, container| {
                 checkpoint(Checkpoint::OciStart { engine, container })
             }),
-            Action::Backup(_) => storage::backup(self, |receipt, device, inode| {
-                checkpoint(Checkpoint::BackupPublication {
-                    receipt,
-                    device,
-                    inode,
-                })
-            }),
+            Action::Backup(_) => storage::backup(
+                self,
+                |receipt, device, inode| {
+                    checkpoint(Checkpoint::BackupPublication {
+                        receipt,
+                        device,
+                        inode,
+                    })
+                },
+                &mut check_capture,
+            ),
             Action::Delete(_) | Action::DeleteBackup(_) => {
                 storage::retirement::retire(self, |location| {
                     checkpoint(Checkpoint::StorageDeletion(location))

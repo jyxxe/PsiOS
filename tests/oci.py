@@ -9,6 +9,37 @@ import tarfile
 from support import Failure, Node, key, target
 from oci_recovery import check_kernel_limits, lose_start_receipt, lose_stop_receipt
 from oci_restart import verify_restart
+from test_artifact_install import TOOL as ARTIFACT_INSTALL, grant as artifact_grant, prepare as prepare_artifact, publish_install
+
+
+def install_from_artifact(node, specification):
+    node_id = node.call("Node.Get", {})["reference"]["resource_id"]
+    artifact_grant(node, "local-owner", ["artifact.upload", "artifact.read", "artifact.withdraw"], [node_id])
+    artifact = publish_install(node, specification)
+    allow = artifact_grant(node, "local-owner", ["task.submit", "task.read", ARTIFACT_INSTALL],
+                          [specification["volume"]["id"], artifact["resource_id"]])
+    ready = prepare_artifact(node, artifact, allow)
+    task_id = node.call("Task.Submit", ready["request"])["task_id"]
+    assert node.wait(task_id)["lifecycle"] == "WaitingApproval"
+    for state in ("pending installation", "retained release"):
+        if state == "retained release":
+            completed = node.wait(task_id, autoapprove=True)
+            assert completed["lifecycle"] == "Succeeded", completed
+        try:
+            node.call("Artifact.Withdraw", {"reference": artifact, "reason": state})
+        except Failure as denied:
+            assert denied.code == "Conflict", denied
+        else:
+            raise AssertionError("withdrawal bypassed the installation pin")
+    reference, = completed["result"]["artifact_refs"]
+    receipt = node.call("Artifact.Read", {"reference": reference})
+    assert receipt["source_artifact_ref"] == artifact, receipt
+    evidence = node.call("Resource.Resolve", {"reference": receipt["installation_ref"]})["value"]
+    assert evidence["deployment_ref"] == receipt["deployment_ref"]
+    assert receipt["operation_id"] == completed["operation_refs"][0]["resource_id"]
+    assert node.get(receipt["application_ref"]["resource_id"])["value"]["lifecycle"] == "Stopped"
+    print("Installed a real local OCI image from an approved uploaded declaration", flush=True)
+    return receipt["application_ref"]
 
 
 def main(binaries, previous_binaries=None):
@@ -42,7 +73,7 @@ int main(void) {
         spec = dict(image_id=image_id, name="acceptance", release_version="1.0.0", argv=["/probe"],
                     environment={"TEST_NAME": "first"}, license_expression="0BSD", volume=target(volume),
                     cpu_millicores=200, memory_max_bytes=33554432, pids_max=16, ephemeral_max_bytes=1048576)
-        app = node.perform("application.install", spec)
+        app = install_from_artifact(node, spec)
         app_id = app["resource_id"]
         app_ids.append(app_id)
         data = node.state / "volumes" / volume["resource_id"] / "data"

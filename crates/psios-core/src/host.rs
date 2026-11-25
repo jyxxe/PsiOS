@@ -162,6 +162,8 @@ pub enum Action {
     Refresh(Target),
     #[serde(rename = "application.install")]
     Install(Install),
+    #[serde(rename = "application.install_artifact")]
+    InstallArtifact(apps::artifact_install::Request),
     #[serde(rename = "application.start")]
     Start(Target),
     #[serde(rename = "application.stop")]
@@ -259,6 +261,9 @@ impl Action {
                 resources.push(volume.reference());
             }
             Self::Restore(_) => resources.push(db.of("local", "StoragePool")?.reference()),
+            Self::InstallArtifact(input) => {
+                resources.push(apps::artifact_install::source(db, actor, input)?.reference());
+            }
             _ => {}
         }
         for r in &resources {
@@ -346,10 +351,11 @@ impl Action {
                 (&t.id, Some(&t.expected_resource_version), "Operation")
             }
             Self::RestartApp(p) => (&p.id, Some(&p.expected_resource_version), "Application"),
-            Self::Install(s) => match &s.volume {
-                Some(t) => (&t.id, Some(&t.expected_resource_version), "Volume"),
-                None => return db.get(policy::PROFILE),
-            },
+            Self::Install(s) => return install_target(db, actor, s),
+            Self::InstallArtifact(input) => {
+                let install = apps::artifact_install::specification(db, actor, input)?;
+                return install_target(db, actor, &install);
+            }
             Self::Stage { target: t, .. }
             | Self::Select { target: t, .. }
             | Self::Refresh(t)
@@ -368,6 +374,17 @@ impl Action {
         Ok(d)
     }
 }
+
+pub(crate) fn install_target(db: &Db<'_>, actor: &str, install: &Install) -> Result<Doc> {
+    let Some(target) = &install.volume else {
+        return db.get(policy::PROFILE);
+    };
+    let volume = db.of(&target.id, "Volume")?;
+    policy::owned(actor, &volume)?;
+    volume.cas(&target.expected_resource_version)?;
+    Ok(volume)
+}
+
 pub fn status(db: &Db<'_>) -> Result<Value> {
     let uptime = std::fs::read_to_string("/proc/uptime")?
         .split_whitespace()
@@ -455,7 +472,10 @@ impl Work {
     pub(crate) fn check_result_publication(&self, db: &Db<'_>) -> Result<()> {
         if matches!(
             self.action,
-            Action::VerifyVolumeFile(_) | Action::InspectFileRename(_) | Action::InspectProcess(_)
+            Action::VerifyVolumeFile(_)
+                | Action::InspectFileRename(_)
+                | Action::InspectProcess(_)
+                | Action::InstallArtifact(_)
         ) {
             self.checkpoint_authority(db)?;
         }
@@ -578,6 +598,7 @@ impl Work {
             | Action::Stop(_)
             | Action::Uninstall(_)
             | Action::Install(_)
+            | Action::InstallArtifact(_)
             | Action::Health(_)
             | Action::InspectOciInstance(_)
             | Action::Logs(_) => apps::perform(self),
@@ -701,7 +722,9 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     } else {
         None
     };
-    let launch = if matches!(
+    let launch = if let Action::InstallArtifact(input) = &a {
+        Some(apps::artifact_install::specification(db, actor, input)?)
+    } else if matches!(
         a,
         Action::Start(_) | Action::RestartApp(_) | Action::InspectOciInstance(_)
     ) || start_checkpoint.is_some()
@@ -755,6 +778,7 @@ pub fn apply(db: &Db<'_>, w: &Work, receipt: &Value) -> Result<Value> {
         | Action::Select { .. }
         | Action::Refresh(_)
         | Action::Install(_)
+        | Action::InstallArtifact(_)
         | Action::Start(_)
         | Action::RestartApp(_)
         | Action::Stop(_)

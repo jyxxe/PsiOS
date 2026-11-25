@@ -246,7 +246,13 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 
 `Artifact.Publish` 重新核对全部字节后原子提交不可变引用及来源，发布重试返回原回执。可见内容的媒体类型为 `application/octet-stream`，提交者提供的媒体类型作为独立声明保留。发布前可以丢弃暂存，过期块由后台回收。读取原始字节需要 `artifact.read`。`Artifact.Withdraw` 使用额外的 `artifact.withdraw` Grant 和确切引用，回收字节并保留审计凭据。
 
-`psiosctl artifact-upload ./bundle.bin --key build-1` 和 Rust SDK 的 `Client::upload_artifact` 从已提交偏移继续，`psiosctl artifact` 使用返回的引用导出并校验原始字节。本机 Profile 提供通用产物接口的内容接收与发布，清单转换与 Deployment 安装独立演进。[中断、权限、配额和损坏验收](../tests/test_artifact_ingress.py) · [格式 53 升级](../tests/artifact_ingress_upgrade.py)
+`psiosctl artifact-upload ./bundle.bin --key build-1` 和 Rust SDK 的 `Client::upload_artifact` 从已提交偏移继续，`psiosctl artifact` 使用返回的引用导出并校验原始字节。安装适配器可以按固定引用读取已发布制品。[中断、权限、配额和损坏验收](../tests/test_artifact_ingress.py) · [格式 53 升级](../tests/artifact_ingress_upgrade.py)
+
+### 从本机制品准备 OCI 安装
+
+本机适配器读取 `application/vnd.psios.oci-install.v1+json` 制品。正文是 `{"format":"PsiOSLocalOciInstallV1","install":{...}}`，其中 `install` 使用 `application.install` 的字段，指定已存在的 OCI 镜像配置摘要、绝对入口、资源限制和可选卷版本。`Application.PrepareArtifactInstall` 接受 `reference`、`key`、`delegation_id` 和可选 `deadline_at`，返回可供 `Task.Submit` 使用的请求及具体部署参数。
+
+读取源制品需要 Node 范围的 `artifact.read`，安装委托需要 `application.install_artifact` 且覆盖制品与目标卷或 `profile-local`。Task 准入固定源摘要并创建审批计划。待审批与执行期间保留制品，安装提交时由不可变 Release 接续保留。成功回执关联 Operation、Application、Release、Deployment 和制品来源。目录提交前中断会结算为已知失败并释放 Task 的保留关系。安装得到处于 `Stopped` 的应用，通过已有 `application.start` 启动。[授权及恢复验收](../tests/test_artifact_install.py) · [真实 OCI 验收](../tests/oci.py)
 
 ## 任务调度
 

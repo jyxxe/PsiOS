@@ -201,9 +201,9 @@ class WorkerWakeTests(unittest.TestCase):
         self.addCleanup(node.close)
         ref = node.call("Node.Get", {})["reference"]
         node.call("Node.Configure", {"expected_resource_version": ref["version"], "scheduling": "Cordoned"})
-        deadline = datetime.now(timezone.utc) + timedelta(seconds=3)
+        deadline = (datetime.now(timezone.utc) + timedelta(seconds=3)).isoformat().replace("+00:00", "Z")
         request = node.call("Task.Prepare", {"tool": "system.status", "input": {}, "key": key(),
-                            "delegation_id": "owner-delegation", "deadline_at": deadline.isoformat()})
+                            "delegation_id": "owner-delegation", "deadline_at": deadline})
         task = node.call("Task.Submit", request)["task_id"]
         self.assertEqual(node.call("Task.Get", {"id": task})["lifecycle"], "Queued")
         result = node.call("Task.Wait", {"id": task, "timeout_ms": 8500})

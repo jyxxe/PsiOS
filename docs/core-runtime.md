@@ -267,7 +267,13 @@ Core 核对原会话、模型租约及决策摘要，在一个事务中提交原
 
 `application.capture_oci_image` 接受 `image_id` 和 `expected_engine_id`。本机所有者使用显式限定在当前 Node 的任务委托和 `artifact.upload` 授权，提交后再批准包含镜像和引擎身份的计划。适配器仅从配置的本机 Docker Engine 以完整镜像配置摘要导出有层的 Linux amd64 镜像，前后核对引擎身份和层摘要。归档大小最多 8 MiB，并计入现有 Node 与所有者的制品额度。
 
-制品字节、`LocalOciImageCapture` 来源、`OciImageCapture` 凭据和 Task 回执在同一事务提交。归档可用独立授权的 `Artifact.ReadChunk` 分块读取并核对完整 SHA-256；回收需要独立的 `artifact.withdraw`。取消、进程中断和发布失败不会留下半成品。现有 OCI 部署仍依赖引擎缓存。Release 对镜像归档的保留和经授权恢复是后续步骤。[真实 Docker 导出和独立重载验收](../tests/oci_capture.py)
+制品字节、`LocalOciImageCapture` 来源、`OciImageCapture` 凭据和 Task 回执在同一事务提交。归档可用独立授权的 `Artifact.ReadChunk` 分块读取并核对完整 SHA-256，回收需要独立的 `artifact.withdraw`。取消、进程中断和发布失败不会留下半成品。[真实 Docker 导出和独立重载验收](../tests/oci_capture.py)
+
+### 安装和更新时保留 OCI 归档
+
+归档声明使用 `application/vnd.psios.oci-install.v2+json`，正文为 `{"format":"PsiOSLocalOciInstallV2","install":{...},"image_archive_ref":{...}}`。`image_archive_ref` 指定已有的本机 OCI 捕获制品，必须与声明中的 `image_id` 和本机引擎看到的层摘要一致。Ed25519 签名覆盖包含归档引用的完整声明字节。安装和暂存权限须同时覆盖目标、声明、签名密钥和归档。`Application.PrepareArtifactInstall` 和 `Application.PrepareArtifactRelease` 返回同一组审批引用。
+
+已准入 Task 立即保留声明和镜像归档。提交 Release 时转交保留关系，并在不可变镜像、发布溯源和目录回执中登记归档及捕获凭据。被选择、可回退或处于待审批状态的关联版本会阻止归档回收。选择和启动前重新核验归档内容。退役会释放该版本的保留关系，其他版本仍可保留同一制品。启动仍要求 Docker 本机镜像可用，归档恢复待实现。[真实 OCI 安装、暂存与退役验收](../tests/oci.py)
 
 ### 从本机制品暂存新版本
 

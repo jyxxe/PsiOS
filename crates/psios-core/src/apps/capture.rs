@@ -261,6 +261,28 @@ fn verify_one(conn: &Connection, artifact: &Doc, proof: &Doc) -> Result<()> {
     verify_receipt(conn, &operation, &effect, artifact, proof)
 }
 
+pub(super) fn require_archive(conn: &Connection, artifact: &Doc, image_id: &str) -> Result<Doc> {
+    use rusqlite::OptionalExtension;
+    require(
+        artifact::is_raw(artifact) && artifact.spec["source"]["kind"] == SOURCE,
+        "PreconditionFailed",
+        "installation archive must come from a captured local OCI image",
+    )?;
+    let proof_id: String = conn.query_row(
+        "SELECT c.proof FROM oci_image_captures c JOIN artifact_uploads u ON u.artifact_id=c.artifact
+         WHERE c.artifact=?1 AND u.source_kind=?2",
+        params![artifact.id, SOURCE], |row| row.get(0),
+    ).optional()?.ok_or_else(|| err("RecoveryRequired", "OCI archive capture provenance is unavailable"))?;
+    let proof = existing(conn, &proof_id)?;
+    verify_one(conn, artifact, &proof)?;
+    require(
+        proof.body["image"]["config_digest"] == image_id,
+        "PreconditionFailed",
+        "captured OCI image does not match its declaration",
+    )?;
+    Ok(proof)
+}
+
 pub(crate) fn verify(conn: &Connection) -> Result<()> {
     let inconsistent: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM artifact_uploads u WHERE u.source_kind=?1 AND NOT EXISTS(

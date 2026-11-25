@@ -279,6 +279,8 @@ impl Action {
                 let source = apps::artifact_install::source(db, actor, &input.reference)?;
                 apps::artifact_install::add_source_audience(
                     db,
+                    actor,
+                    delegation,
                     &source,
                     input.signature.as_ref(),
                     &mut resources,
@@ -291,6 +293,8 @@ impl Action {
                 let source = apps::artifact_install::stage_source(db, actor, input, primary)?;
                 apps::artifact_install::add_source_audience(
                     db,
+                    actor,
+                    delegation,
                     &source,
                     input.signature.as_ref(),
                     &mut resources,

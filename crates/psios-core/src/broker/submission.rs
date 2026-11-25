@@ -412,7 +412,7 @@ fn submit_with_origin(
         admission::bind(db, &t, operation)?;
     }
     artifact::capacity::reserve(db, &t, tool)?;
-    apps::artifact_install::acquire(db, &t, &a)?;
+    apps::artifact_install::acquire(db, &t, &a, &audience)?;
     dependencies::pin(db, &t, &requirements)?;
     db.audit(actor, "Task.Accept", Some(&task), "Allowed")?;
     Ok(receipt)

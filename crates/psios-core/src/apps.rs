@@ -14,6 +14,7 @@ pub(crate) mod capture;
 mod cgroup;
 pub(crate) mod inventory;
 pub(crate) mod publisher;
+pub(crate) mod release_archive;
 pub(crate) mod release_retirement;
 pub(crate) mod restart;
 
@@ -201,6 +202,7 @@ pub fn launch_spec(db: &Db<'_>, app: &Doc, authorizing_start: bool) -> Result<In
 pub(crate) fn check_selected_publisher(db: &Db<'_>, app: &Doc) -> Result<()> {
     let release = db.resolve(&app.spec["release_ref"])?;
     let spec = db.resolve(&release.body["release_spec_ref"])?;
+    artifact_install::check_release_source(db, &release)?;
     publisher::check_launch(db, &release, &spec)
 }
 
@@ -555,8 +557,10 @@ pub fn start(w: &Work, checkpoint: impl FnOnce(&str, &str) -> Result<()>) -> Res
         "engine changed after container creation",
     )?;
     if let Err(denial) = checkpoint(&engine.id, &cid) {
-        if denial.0.code == "PermissionDenied"
-            && e.discard_unstarted(w, &cid, &engine.id).unwrap_or(false)
+        if matches!(
+            denial.0.code.as_str(),
+            "PermissionDenied" | "RecoveryRequired" | "ResultEvicted"
+        ) && e.discard_unstarted(w, &cid, &engine.id).unwrap_or(false)
         {
             return Err(denial);
         }
@@ -832,11 +836,14 @@ fn record_release(
     let release = id("release");
     let specid = id("release-spec");
     let profile = db.get("oci-local")?.reference();
-    let image = db.record(
-        "OCIImage",
-        owner,
-        json!({"config_digest": s.image_id, "inspection": r, "source": "local-engine"}),
-    )?;
+    let archive = artifact_install::work_archive(db, work)?;
+    let mut image = json!({"config_digest": s.image_id, "inspection": r, "source": "local-engine"});
+    if let Some(archive) = &archive {
+        archive.check_image(r)?;
+        image["image_archive_ref"] = archive.artifact.reference();
+        image["image_capture_ref"] = archive.proof.reference();
+    }
+    let image = db.record("OCIImage", owner, image)?;
     let mut sources = vec![image.reference()];
     let (publisher, source_trust, admission) =
         match artifact_install::publisher_verification(db, work)? {
@@ -860,6 +867,10 @@ fn record_release(
                 .reference(),
             ),
         };
+    if let Some(archive) = archive {
+        sources.push(archive.artifact.reference());
+        sources.push(archive.proof.reference());
+    }
     let license=db.record("LicenseMaterial",owner,json!({"declared_by": owner, "expression": s.license_expression, "verification": "Unverified"}))?.reference();
     let build = db
         .record(

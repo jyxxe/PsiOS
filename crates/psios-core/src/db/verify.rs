@@ -143,6 +143,9 @@ pub(super) fn check_artifacts(conn: &Connection, identity: &DatabaseIdentity) ->
     if identity.database_format >= crate::apps::capture::FORMAT {
         crate::apps::capture::verify(conn)?;
     }
+    if identity.database_format >= crate::apps::release_archive::FORMAT {
+        crate::apps::release_archive::verify(conn)?;
+    }
     Ok(())
 }
 

@@ -100,15 +100,22 @@ pub(crate) fn candidate(db: &Db<'_>, app: &Doc, input: &Request) -> Result<Doc> 
 
 pub(super) fn retire(db: &Db<'_>, work: &crate::host::Work, input: &Request) -> Result<Value> {
     let release = candidate(db, &work.target, input)?;
+    let declaration = super::artifact_install::release_source(db.c, &release)?;
+    let archive = super::release_archive::check_release_pin(db.c, &release, declaration.as_ref())?;
     let source = super::artifact_install::drop_release_pin(db, &release)?;
+    super::release_archive::unpin(db, "Release", &release.id)?;
+    let mut body = json!({"application_ref":work.target.reference(),"release_ref":release.reference(),
+        "operation_id":work.op.id,"retired_at":now(),"reason":input.reason,
+        "released_artifact_ref":source});
+    if let Some(archive) = archive {
+        body["released_archive_ref"] = archive.artifact.reference();
+    }
     let retirement = db.create(
         KIND,
         &receipt_id(&release.id),
         &release.owner,
         json!({"application_id":work.target.id,"release_id":release.id}),
-        json!({"application_ref":work.target.reference(),"release_ref":release.reference(),
-               "operation_id":work.op.id,"retired_at":now(),"reason":input.reason,
-               "released_artifact_ref":source}),
+        body,
     )?;
     db.audit(
         &work.task.owner,
@@ -143,6 +150,7 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
         let plan = resolve(conn, &op.body["plan_ref"])
             .map_err(|_| crate::err("RecoveryRequired", "retirement lost its operation plan"))?;
         let source = super::artifact_install::release_source(conn, &release)?;
+        let archive = super::release_archive::recorded(conn, &release, source.as_ref())?;
         require(
             app.kind == "Application"
                 && app.owner == release.owner
@@ -157,7 +165,9 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
                 && plan.body["allowed_effects"][0]["resource_ref"] == app.reference()
                 && plan.body["preconditions"][1]["resource_ref"] == release.reference()
                 && receipt.body["released_artifact_ref"]
-                    == json!(source.as_ref().map(Doc::reference)),
+                    == json!(source.as_ref().map(Doc::reference))
+                && receipt.body["released_archive_ref"]
+                    == json!(archive.as_ref().map(|archive| archive.artifact.reference())),
             "RecoveryRequired",
             "retirement receipt disagrees with its plan or source",
         )?;

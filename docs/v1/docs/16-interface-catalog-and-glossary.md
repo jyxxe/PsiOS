@@ -27,6 +27,9 @@
 | Backup.Capture/Restore/Export | 资源清单、一致性、密钥引用、恢复计划 | 认证清单、数据验证和独立激活状态 | 05、06 |
 | Dataset.Put/Query/View/Index | 版本记录、受限查询、授权、水位 | 精确/全文/近似语义、当前权限过滤、来源版本 | 06 |
 | Package.Recognize/Import/Build | 隔离输入、来源证明、ABI/Profile | Imported制品与依赖快照；RuntimeVerified另需实测 | 07 |
+| Artifact.Stage/Publish（拟定） | 内容/固定来源、版本化交付描述、认证与幂等身份 | 经核验的不可变 Artifact 引用；上传成功不代表安装 | 07 §6、09 §9.11 |
+| Application.PlanInstall/Install（拟定） | 固定制品/运行清单、目标及预期版本、计划与授权 | Operation 及 Application/Release/Deployment；规划不隐式构建 | 07 §6、09 §9.11 |
+| Operation.Get / Resource.Get/Watch（安装结果） | 原操作身份、授权引用与游标 | 持久进度、效果知识、安装/运行状态及恢复条件 | 02、07、09 |
 | GUI.Create/Stream/AcquireInput/Stop | 会话、Portal批准、Viewer/Agent权限 | DisplayStream、ControlLease、范围和撤权证据 | 07 |
 | Model.Resolve/Invoke | 模型Profile、外发政策、预算、输入引用 | 本次执行快照、用量、受控输出；模型不能批准自己 | 09 |
 | Node.Enroll/Drain/Fence | 节点身份、资源委托、恢复世代 | 逐资源写权和状态；不可把心跳超时当已停机 | 12 |
@@ -85,6 +88,8 @@ Task、Run、Operation和WorkflowRun的`Succeeded`均要求`outcome_knowledge=Kn
 
 ApplicationManifest必须通过release_spec_ref固定完整ApplicationReleaseSpec；后者包含执行、生命周期、身份、权限请求、资源硬限、许可/来源、依赖及备份范围。解析所有必要引用、验证对应类型与当前权限后才可形成Deployment，不能把发布元数据投影当作完整运行配置。
 
+Agent 通用产物接口尚未包含独立的交付描述或安装请求 Schema；第 07/09 章字段表是设计约束，拟定方法不能作为现有可调用 API 宣传。WI-028 需补齐能力发现、消息 Schema、正反例、限额和版本映射后启用，不改变现有严格 Manifest/ReleaseSpec 的字段含义或把未知字段塞入通用 `spec`。
+
 **V1-IF-004｜结构合同不放行不可信数据。** Workflow AST还需编译/类型/权限验证，RecoverySetManifest还需认证来源与真实对象验证，ExecutionPermit还需可信在线查询或签名链验证，ApplicationManifest还需隔离构建与真实兼容测试。示例`RuntimeVerified`所需的evidence引用也只有实际证据可查时才有效。
 
 JSON读取必须在进入常见字典解析前拒绝重复键；默认“保留最后一个值”会丢掉攻击证据。Schema不知道输入曾经有重复键，必须由入口解析器先处理。任意JSON数据还需限制深度、长度和数值精度Profile；不支持的精度明确拒绝，不能先损坏数值再假装精确查询。
@@ -105,6 +110,9 @@ JSON读取必须在进入常见字典解析前拒绝重复键；默认“保留�
 | OCI | 制品/运行标准族；采用OCI不自动提供所需的宿主/租户隔离 |
 | Portal / EIS | 桌面授权/输入机制；支持范围、版本、用户会话与真实撤权行为必须实测 |
 | NativeWeb | 应用已有的Web入口，经安全origin/会话边界接入；不等于GUI远程像素流 |
+| Agent 通用产物接口 | 原生/第三方 Agent 共享的产物交付与应用化合同；协议 Adapter 不拥有额外授权 |
+| 可安装 Artifact | 可经受控适配生成完整运行清单的不可变产物；上传、预览和安装状态分别记录 |
+| Artifact 应用化 | 将固定产物交给已有 Application/Release/Deployment 生命周期，并建立独立保留与数据绑定 |
 | TableFS | 可选统一文件命名空间与Catalog后端；派生索引不成为文件存在性的第二权威 |
 | Knowledge | Dataset授权视图与必要索引，不是无来源的另一份原文数据库 |
 

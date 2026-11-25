@@ -166,3 +166,36 @@ M3 至少完成一个真实独立第三方实现与原生 Agent 的同类工具�
 ### 9.10.5 增量验收计划（均 NotRun）
 
 重复/乱序事件不增殖 Task；同一 PR Review 被原 Task/Worker 接续且重新检查成员权限；Agent A→B→A 的循环因根预算和跳数停止；恶意评论诱导越权被 Tool Gateway 拦截；两个 Worker 抢占时旧租约无法写入；Router 死亡和模型离线不重放已确认副作用；已发生外部写入但回执丢失保持 `OutcomeUnknown` 并对账；撤权按实际 RevocationMode 截断后续能力。M3 测单机，M4 才验证跨节点与 Forgejo/CI 闭环。沿用现有 AT-TSK、AT-AGT、AT-CHAT、AT-WFL、AT-CORE 分类，待正式注册新用例后才分配独立测试 ID。
+
+## 9.11 Agent 通用产物接口
+
+本节定义原生与第三方 Agent 共用的产物提交、应用化和结果查询能力，使“生成 Artifacts → 安装为 PsiOS 应用”成为标准工作路径。接口独立于模型提供者、Agent 框架及聊天客户端，应用语义见 [第 07 章第 6 节](07-applications-packages-gui.md#6-agent-artifacts-作为应用安装)。这是设计要求，尚未声明新增方法已经可调用。
+
+### V1-AGT-013：共享合同与能力发现
+
+接入沿用 System API、Tool & Capability Gateway、Principal 和 Task/Operation 权威。原生 Runtime、第三方 Adapter、CLI/SDK 及远程 Agent 使用相同资源引用和授权裁决；不要求所有 Agent 运行于本机，也不要求模型输出某家平台的私有格式。MCP/A2A/ACP 等只作为按版本验证的传输/交互适配，不能凭“支持 MCP”宣称已支持应用安装。
+
+能力发现分别公开接入合同版本、可接收产物/包格式、构建与预览能力、运行 Profile、上传/解包限额、支持的安装/更新/回退操作、幂等查询与保留期限。客户端在提交前检查能力，未知版本和必需字段不得静默忽略；支持读取 Artifact 不意味着支持外部提交或安装。三版使用同一合同，远程接入须另验证认证、租户和出口边界。
+
+### V1-AGT-014：提交、安装与回执合同
+
+下表为拟定的**逻辑操作**，不是已部署的 HTTP 路由或现有 CLI 命令。传输绑定、消息 Schema、有限数值上限和错误合同按第 16 章及 WI-028 冻结；复用既有接口时须明确能力版本和适配范围，不改变旧客户端含义。
+
+| 逻辑操作 | 输入与权限边界 | 权威输出 |
+|---|---|---|
+| `Artifact.Stage / Publish` | 内容/固定来源、交付描述、认证上下文和幂等身份；只授权上传/发布产物 | 暂存句柄或经完整核验的 Artifact 引用；失败不产生可安装的半成品 |
+| `Application.PlanInstall` | 固定 Artifact/Manifest/ReleaseSpec、目标、预期版本及运行意图 | OperationPlan、权限/资源/数据差异、构建依赖和阻塞原因；不执行安装 |
+| `Application.Install` | 固定计划引用、幂等键、目标前提及当前有效授权/所需审批 | 持久接受的 Operation 和最终 Application/Release/Deployment 引用；接受与成功分开 |
+| `Operation.Get / Resource.Get / Watch` | 原 Operation 或授权资源引用、游标 | 安装进度、实际状态、错误、结果引用及恢复条件 |
+
+若 PlanInstall 发现需要构建，返回构建要求；构建以独立受限 Task 执行并发布新 Artifact 后重新规划，不能在“规划”调用中隐式运行任意构建脚本。更新/回退/卸载复用 Application 生命周期的受控操作，不另设 Agent 专用安装数据库。
+
+外部来源关联键至少区分 `(adapter_id, endpoint_identity, remote_tenant_scope, external_artifact_id, external_version)`，并绑定认证本地安全域、内容摘要及本地引用；远端无版本时以核验的内容摘要区分版本。同一外部 ID 内容变化不能覆盖旧引用，其他租户不能通过相同 ID 或摘要取得内容。上传、构建、安装各自的幂等身份和回执分别持久化；生成任务完成不能替代安装 Operation 成功。
+
+### V1-AGT-015：对话入口、授权与中断恢复
+
+Agent 结果可以附“预览”“安装为应用”“查看来源/权限”“打开已安装应用”等结构化动作。动作只携带受控引用和意图，用户点击后仍由平台解析当前身份、目标和策略；聊天中的按钮、文本或第三方返回值不能签发 ApprovalDecision。已有有效预授权覆盖的安装可以连续完成，不要求每一阶段重复确认；超出范围时返回结构化授权请求。
+
+会话断开、模型停止或 Agent 更换不取消已持久接受的安装。恢复方按原幂等身份查询 Operation/Deployment，重新检查权限、输入摘要和取消状态；未知结果保持 Unknown，不把连接错误等同于安装失败，也不自动扩大权限换路径执行。取消须明确已经提交的应用、残留资源和是否还需独立卸载，不能声称撤销对话就撤销应用或用户数据。
+
+初始验证必须至少包含一个原生 Agent 和一个独立第三方 Agent，以同类产物完成受限安装，并验证同样的拒绝、断线及恢复语义；单独演示“生成网页”或“返回一个链接”不满足通用接口验收。新增计划见 `AT-AIF-001`～`010`，实施由 WI-028 跟踪，全部为 `NotVerified / NotRun`。

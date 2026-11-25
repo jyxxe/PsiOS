@@ -134,11 +134,25 @@ pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
                 r.get(0)
             })
             .optional()?;
+        if matches!(
+            w.action,
+            Action::RestartApp(_) | Action::InspectOciInstance(_)
+        ) {
+            require(
+                holder.as_deref() == Some(w.target.id.as_str()),
+                "RecoveryRequired",
+                "running application volume attachment hold is unavailable",
+            )?;
+        }
         if let Some(h) = holder {
             require(
                 matches!(
                     w.action,
-                    Action::Stop(_) | Action::Health(_) | Action::Logs(_)
+                    Action::Stop(_)
+                        | Action::Health(_)
+                        | Action::Logs(_)
+                        | Action::RestartApp(_)
+                        | Action::InspectOciInstance(_)
                 ) && h == w.target.id
                     || w.start_checkpoint.as_ref().is_some_and(|c| {
                         c.body["start_operation_id"] == h && c.body["volume_ref"] == v.reference()
@@ -161,7 +175,12 @@ pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
         }
     }
     // Serialize mutations of an app even when it has no data volume.
-    if w.target.kind == "Application" && !matches!(w.action, Action::Health(_) | Action::Logs(_)) {
+    if w.target.kind == "Application"
+        && !matches!(
+            w.action,
+            Action::Health(_) | Action::Logs(_) | Action::InspectOciInstance(_)
+        )
+    {
         require(
             db.c.execute(
                 "INSERT OR IGNORE INTO holds VALUES(?1,?2)",

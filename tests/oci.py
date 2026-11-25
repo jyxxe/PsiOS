@@ -8,6 +8,7 @@ import tarfile
 
 from support import Failure, Node, key, target
 from oci_recovery import check_kernel_limits, lose_start_receipt, lose_stop_receipt
+from oci_restart import verify_restart
 
 
 def main(binaries, previous_binaries=None):
@@ -146,7 +147,8 @@ int main(void) {
         assert restored["resource_id"] != volume["resource_id"]
         assert node.perform("volume.read", dict(**target(restored), name="starts"))["content"] == "first\nsecond\nupgraded\nfirst\n"
         node.perform("volume.activate", target(restored))
-        print("PASS live OCI lifecycle, bind and ephemeral-only isolation, release rollback, external exit, recovery rejects swap drift, SIGKILL after engine start and removal, fenced volume and verified backup restore")
+        verify_restart(node, docker, spec, app_ids)
+        print("PASS live OCI lifecycle, scoped restart, isolated execution, release rollback, external exit, receipt recovery, volume holds and verified backup restore")
     finally:
         for app_id in app_ids:
             ids = subprocess.check_output(docker + ["ps", "-aq", "--filter", "label=io.psios.application=" + app_id], text=True).split()

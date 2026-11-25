@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, process::Command};
 
 mod cgroup;
+pub(crate) mod restart;
 
 fn environment(env: &BTreeMap<String, String>) -> Result<()> {
     require(
@@ -208,7 +209,7 @@ pub fn preflight(db: &Db<'_>, w: &Work) -> Result<()> {
             "PreconditionFailed",
             "application must be stopped",
         )?,
-        Action::Stop(_) => require(
+        Action::Stop(_) | Action::RestartApp(_) | Action::InspectOciInstance(_) => require(
             w.target.body["lifecycle"] == "Running",
             "PreconditionFailed",
             "application has no active deployment",
@@ -220,8 +221,10 @@ pub fn preflight(db: &Db<'_>, w: &Work) -> Result<()> {
         )?,
         _ => {}
     }
-    if matches!(w.action, Action::Start(_))
-        && let Some(v) = &w.volume
+    if matches!(
+        w.action,
+        Action::Start(_) | Action::RestartApp(_) | Action::InspectOciInstance(_)
+    ) && let Some(v) = &w.volume
     {
         require(
             w.target.spec["data_incarnation"] == v.body["data_incarnation"],
@@ -689,6 +692,7 @@ fn logs(e: &Engine<'_>, id: &str) -> Result<Value> {
 pub fn perform(w: &Work) -> Result<Value> {
     let e = Engine(&w.cfg);
     match &w.action {
+        Action::InspectOciInstance(_) => restart::observe(w),
         Action::Install(s) | Action::Stage { release: s, .. } => e.image(&s.image_id),
         Action::Select { release_ref, .. } => Ok(json!({"release_ref":release_ref})),
         Action::Health(_) if w.start_checkpoint.is_some() => {
@@ -1037,6 +1041,7 @@ pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
             Ok(db.status(&w.target, b)?.reference())
         }
         Action::Start(_) => started(db, &w.target, &w.op.id, w.volume.as_ref(), r),
+        Action::RestartApp(_) => restart::settle(db, &w.op, &w.target, r),
         Action::Stop(_) => stopped(db, &w.target, &w.op.id, w.volume.as_ref(), &r["last_logs"]),
         Action::Uninstall(_) => {
             let deployment = db.resolve(&w.target.spec["deployment_ref"])?;

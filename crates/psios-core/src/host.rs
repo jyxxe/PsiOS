@@ -90,6 +90,8 @@ pub enum Action {
     RoutingRules(node::network::RuleQuery),
     #[serde(rename = "node.network_probe")]
     NetworkProbe(Target),
+    #[serde(rename = "node.observe_network_probe")]
+    ObserveNetworkProbe(Target),
     #[serde(rename = "node.devices")]
     Devices {},
     #[serde(rename = "node.block_layout")]
@@ -333,7 +335,9 @@ impl Action {
             Self::Status {} => return db.get(policy::PROFILE),
             Self::StartAgentSession(blueprint) => return blueprint.model(db),
             Self::StartWorkflow(blueprint) => return blueprint.definition(db, actor),
-            Self::NetworkProbe(target) => return node::network::probe::target(db, target),
+            Self::NetworkProbe(target) | Self::ObserveNetworkProbe(target) => {
+                return node::network::probe::target(db, target);
+            }
             Self::PublishSessionSummary(_) => return db.of(&db.meta("authority")?, "Node"),
             Self::CaptureOciImage(request) => {
                 apps::capture::authorize(db, actor)?;
@@ -579,6 +583,7 @@ impl Work {
                     | Action::RenameFile(_)
                     | Action::InspectFileRename(_)
                     | Action::CaptureOciImage(_)
+                    | Action::ObserveNetworkProbe(_)
             ),
             "Fenced",
             "host data operation is outside its permit",
@@ -597,6 +602,7 @@ impl Work {
             Action::VerifyVolumeFile(_)
                 | Action::InspectFileRename(_)
                 | Action::InspectProcess(_)
+                | Action::ObserveNetworkProbe(_)
                 | Action::ListAppReleases(_)
                 | Action::InstallArtifact(_)
                 | Action::StageArtifactRelease(_)
@@ -749,6 +755,9 @@ impl Work {
             Action::RestartApp(request) => apps::restart::run(self, request, |before| {
                 checkpoint(Checkpoint::OciRestart(before))
             }),
+            Action::ObserveNetworkProbe(_) => {
+                node::network::probe::perform_checked(self, &mut check_streaming)
+            }
             Action::Stop(_) => apps::stop::run(self, checkpoint),
             Action::ContinueOciStop(_) => apps::stop::cleanup(self, checkpoint),
             Action::RestoreReleaseImage(_) => apps::restore_image::run(self, |dispatch| {
@@ -985,6 +994,7 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
 }
 pub fn apply(db: &Db<'_>, w: &Work, receipt: &Value) -> Result<Value> {
     match w.action {
+        Action::ObserveNetworkProbe(_) => node::network::probe::state::publish(db, w, receipt),
         Action::ServiceObserve(_) => node::service_state::publish(db, w, receipt),
         Action::ServiceStart(_) | Action::ServiceStop(_) | Action::ServiceRestart(_) => {
             node::apply(db, w, receipt)

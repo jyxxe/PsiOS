@@ -69,6 +69,126 @@ fn execute(s: &mut Store, task: &str) -> Value {
     )
     .unwrap()
 }
+
+#[test]
+fn network_probe_projection_fences_older_receipts_and_rolls_back_with_task_result() {
+    use std::os::unix::fs::MetadataExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = Config::local(&tmp.path().join("core"));
+    let endpoint = "127.0.0.1:9".parse().unwrap();
+    cfg.network_probes.push(crate::config::NetworkProbeConfig {
+        name: "projection-test".into(),
+        endpoint,
+        timeout_ms: 100,
+        dns: None,
+    });
+    Store::init(&cfg).unwrap();
+    let mut store = Store::open(cfg).unwrap();
+    let listing = call(&mut store, "Resource.List", json!({"kind":"NetworkProbe"})).unwrap();
+    let probe = &listing["items"][0];
+    let state_id = format!("state-{}", probe["resource_id"].as_str().unwrap());
+    let tool = node::network::probe::state::TOOL;
+    let grant = call(
+        &mut store,
+        "Grant.Issue",
+        json!({
+            "principal_id":"local-owner","actions":["task.submit","task.read",tool],
+            "tool_targets":[probe["resource_id"]],"ttl_seconds":120,"units":8,
+        }),
+    )
+    .unwrap();
+    let enqueue = |store: &mut Store| {
+        let ready = call(store, "Task.Prepare", json!({
+            "tool":tool,"key":id("probe"),"delegation_id":grant["delegation_ref"]["resource_id"],
+            "input":{"id":probe["resource_id"],"expected_resource_version":probe["version"]},
+        })).unwrap();
+        call(store, "Task.Submit", ready).unwrap()["task_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let sample = |work: &Work, tcp: &str| {
+        let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap();
+        let namespace = fs::metadata("/proc/self/ns/net").unwrap().ino().to_string();
+        json!({
+            "target_ref":work.target.reference(),"boot_id":boot_id.trim(),"network_namespace_inode":namespace,
+            "observed_at":now(),"observation":{"endpoint":endpoint,"dns":null,"tcp":{"status":tcp}},
+        })
+    };
+    let original = enqueue(&mut store);
+    assert_eq!(claim(&mut store), original);
+    let old = dispatch(&mut store, &original);
+    let latest = enqueue(&mut store);
+    assert_eq!(claim(&mut store), latest);
+    let new = dispatch(&mut store, &latest);
+    store
+        .transaction("settle-new-probe", |db| {
+            broker::finish(db, &new, Ok(sample(&new, "Connected")))
+        })
+        .unwrap();
+    let get_state =
+        |store: &mut Store| call(store, "Resource.Get", json!({"id":state_id})).unwrap();
+    let healthy = get_state(&mut store);
+    assert_eq!(healthy["value"]["lifecycle"], "Healthy");
+    store
+        .transaction("settle-stale-probe", |db| {
+            broker::finish(db, &old, Ok(sample(&old, "Refused")))
+        })
+        .unwrap();
+    assert_eq!(get_state(&mut store)["reference"], healthy["reference"]);
+    let stale = call(&mut store, "Task.Get", json!({"id":original})).unwrap();
+    let result = call(
+        &mut store,
+        "Artifact.Read",
+        json!({"reference":stale["result"]["artifact_refs"][0]}),
+    )
+    .unwrap();
+    assert_eq!(result["projection"], "Superseded");
+
+    let outage = enqueue(&mut store);
+    assert_eq!(claim(&mut store), outage);
+    let outage = dispatch(&mut store, &outage);
+    store
+        .transaction("inject-probe-receipt-write-failure", |db| {
+            db.c.execute_batch(
+                "CREATE TEMP TRIGGER fail_probe_receipt BEFORE INSERT ON versions
+            WHEN NEW.kind='Artifact' BEGIN SELECT RAISE(ABORT,'probe receipt rolled back'); END",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        store
+            .transaction("abort-probe-settlement", |db| broker::finish(
+                db,
+                &outage,
+                Ok(sample(&outage, "Refused"))
+            ))
+            .is_err()
+    );
+    assert_eq!(get_state(&mut store)["reference"], healthy["reference"]);
+    store
+        .transaction("remove-probe-receipt-write-failure", |db| {
+            db.c.execute_batch("DROP TRIGGER fail_probe_receipt")?;
+            node::network::probe::state::verify(db.c)
+        })
+        .unwrap();
+    store
+        .transaction("commit-probe-settlement", |db| {
+            broker::finish(db, &outage, Ok(sample(&outage, "Refused")))
+        })
+        .unwrap();
+    let unhealthy = get_state(&mut store);
+    assert_eq!(unhealthy["value"]["lifecycle"], "Unhealthy");
+    assert_eq!(unhealthy["value"]["reason"], "TcpRefused");
+    store
+        .transaction("verify-probe-provenance", |db| {
+            node::network::probe::state::verify(db.c)
+        })
+        .unwrap();
+}
+
 fn approve(s: &mut Store, task: &str) {
     let t = call(s, "Task.Get", json!({"id": task})).unwrap();
     let r = call(

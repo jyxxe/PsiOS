@@ -459,6 +459,7 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                         | Action::StageArtifactRelease(_)
                         | Action::Logs(_)
                         | Action::Stop(_)
+                        | Action::ObserveNetworkProbe(_)
                 ) =>
             {
                 json!({"code":"Fenced"})
@@ -537,6 +538,9 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                 }),
                 &body,
             )?;
+            if matches!(w.action, Action::ObserveNetworkProbe(_)) {
+                node::network::probe::state::bind_result(db, w, &body, &a)?;
+            }
             artifact::capacity::retain(db, &t, &a)?;
             close(
                 db,

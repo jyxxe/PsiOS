@@ -230,6 +230,7 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         | Action::ServiceStart(p)
         | Action::ServiceStop(p)
         | Action::Backup(p) => (&p.id, &p.expected_resource_version),
+        Action::ServiceRestart(p) => (&p.id, &p.expected_resource_version),
         _ => {
             return Err(err(
                 "UnsupportedCapability",
@@ -259,7 +260,7 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
             )?;
             storage::publication::reconcile(db, &op, &target, &proof, &observation)?
         }
-        Action::ServiceStart(_) | Action::ServiceStop(_) => {
+        Action::ServiceStart(_) | Action::ServiceStop(_) | Action::ServiceRestart(_) => {
             let (proof, observation) = inspected(
                 db,
                 req.evidence_ref.as_ref(),
@@ -267,10 +268,10 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
                 &target,
                 "service.inspect",
             )?;
-            let wanted = if matches!(action, Action::ServiceStart(_)) {
-                "active"
-            } else {
+            let wanted = if matches!(action, Action::ServiceStop(_)) {
                 "inactive"
+            } else {
+                "active"
             };
             require(
                 observation["unit"] == target.spec["unit"]
@@ -280,9 +281,20 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
                 "OutcomeUnknown",
                 "observation does not confirm this service postcondition",
             )?;
+            let evidence = if let Action::ServiceRestart(request) = &action {
+                require(
+                    node::restarted(&observation, request),
+                    "OutcomeUnknown",
+                    "observation does not confirm a new invocation on the approved boot",
+                )?;
+                json!({"observation_ref":proof.reference(),"conclusion":"ObservedNewInvocation",
+                    "previous_invocation_id":request.expected_invocation_id,"active_invocation_id":observation["invocation_id"]})
+            } else {
+                json!({"observation_ref":proof.reference(),"conclusion":"ObservedPostcondition"})
+            };
             (
                 json!({"service_ref":node::observed_effect(db,&target,&op.id,&observation)?.reference(),"observation":observation}),
-                json!({"observation_ref":proof.reference(),"conclusion":"ObservedPostcondition"}),
+                evidence,
             )
         }
         Action::Start(_) | Action::Stop(_) => {

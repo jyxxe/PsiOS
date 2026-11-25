@@ -122,6 +122,10 @@ Core 可选地先向该目标指定的解析器发出 TCP DNS 请求。按端点
 
 制品包含固定服务引用、采集时间和可核验的日志游标。消息按 UTF-8 或 Base64 返回，每条最多 4096 字节，无法表示的消息标为 `Omitted`。`journalctl` 不可用、权限不足导致查询失败或执行超时返回 `DependencyUnavailable`。总输出超限时减小 `limit` 后重新提交。升级到格式 34 会安装能力描述，已有授权范围继续由原授权记录决定。[真实日志与格式升级验收](../tests/service_journal.py) · [journalctl 官方手册](https://www.freedesktop.org/software/systemd/man/latest/journalctl.html)
 
+`service.restart` 需要目标 HostService 上单独授予的权限、当前资源版本和审批。将 `service.inspect` 的 `boot_id`、`invocation_id` 作为输入的 `expected_boot_id`、`expected_invocation_id`。执行前核对已批准的运行实例和配置定义，只对仍处于活跃状态的单元执行 `systemctl try-restart`。成功回执包含在同一次 Linux 启动中核验的新调用代次。
+
+丢失回执时，服务占用保留到对账完成。使用派发后最新的 `service.inspect` 制品作为 `Operation.Reconcile` 的证据。对账核验原配置和启动 ID，确认新代次已处于活跃状态，记录旧、新调用身份。期间保持原任务及幂等记录。格式 35 安装独立的重启能力。[真实重启与崩溃恢复验收](../tests/service_restart.py)
+
 ## 卷文件与应用版本
 
 | Task 工具 | 参数与行为 |

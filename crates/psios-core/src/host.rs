@@ -18,6 +18,26 @@ pub struct Target {
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ServiceRestart {
+    pub id: String,
+    pub expected_resource_version: String,
+    pub expected_boot_id: String,
+    pub expected_invocation_id: String,
+}
+
+impl ServiceRestart {
+    fn validate(&self) -> Result<()> {
+        require(
+            uuid::Uuid::parse_str(&self.expected_boot_id)
+                .is_ok_and(|id| !id.is_nil() && id.to_string() == self.expected_boot_id)
+                && node::valid_invocation(&self.expected_invocation_id),
+            "InvalidArgument",
+            "restart requires a Linux boot identity and a systemd invocation identity",
+        )
+    }
+}
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileAccess {
     pub id: String,
     pub expected_resource_version: String,
@@ -86,6 +106,8 @@ pub enum Action {
     ServiceStart(Target),
     #[serde(rename = "service.stop")]
     ServiceStop(Target),
+    #[serde(rename = "service.restart")]
+    ServiceRestart(ServiceRestart),
     #[serde(rename = "secret.mac")]
     Mac { secret_id: String, message: String },
     #[serde(rename = "volume.files")]
@@ -157,6 +179,7 @@ impl Action {
             Self::RoutingRules(q) => q.validate()?,
             Self::BlockLayout(q) => q.validate()?,
             Self::ServiceLogs(q) => q.validate()?,
+            Self::ServiceRestart(restart) => restart.validate()?,
             Self::Create { name } => label(name)?,
             Self::Read(f) => storage::filename(&f.name)?,
             Self::VolumeUsage(query) => query.validate()?,
@@ -237,6 +260,9 @@ impl Action {
             }
             Self::ServiceLogs(q) => {
                 return node::service_target(db, &q.id, &q.expected_resource_version);
+            }
+            Self::ServiceRestart(r) => {
+                return node::service_target(db, &r.id, &r.expected_resource_version);
             }
             Self::Create { .. } => return db.get("local"),
             Self::Mac { secret_id, .. } => (secret_id, None, "Secret"),
@@ -392,6 +418,7 @@ impl Work {
             | Action::ServiceLogs(_)
             | Action::ServiceStart(_)
             | Action::ServiceStop(_)
+            | Action::ServiceRestart(_)
             | Action::Inventory {}
             | Action::Pressure {}
             | Action::Processes(_)
@@ -558,7 +585,9 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
 }
 pub fn apply(db: &Db<'_>, w: &Work, receipt: &Value) -> Result<Value> {
     match w.action {
-        Action::ServiceStart(_) | Action::ServiceStop(_) => node::apply(db, w, receipt),
+        Action::ServiceStart(_) | Action::ServiceStop(_) | Action::ServiceRestart(_) => {
+            node::apply(db, w, receipt)
+        }
         Action::Stage { .. }
         | Action::Select { .. }
         | Action::Refresh(_)

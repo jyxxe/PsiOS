@@ -13,6 +13,52 @@ fn existing(conn: &Connection, identity: &Value) -> Result<Doc> {
     find(conn, id)?.ok_or_else(|| err("RecoveryRequired", "OCI restore proof resource is missing"))
 }
 
+fn approved_effect(conn: &Connection, op: &Doc, task: &Doc, binding: &Binding) -> Result<()> {
+    let plan = resolve(conn, &op.body["plan_ref"])?;
+    let effect = resolve(conn, &op.body["effect_refs"][0])?;
+    let permit = resolve(conn, &effect.spec["permit_ref"])?;
+    let permit_binding = resolve(conn, &permit.body["auth_proof"]["record_ref"])?;
+    let decision = resolve(conn, &permit.body["decision_ref"])?;
+    let approval_use = existing(conn, &json!(format!("use-{}", decision.id)))?;
+    let audience = json!(binding.audience());
+    require(
+        plan.kind == "OperationPlan"
+            && plan.owner == op.owner
+            && plan.body["requester_principal_id"] == op.owner
+            && effect.kind == "Effect"
+            && effect.owner == op.owner
+            && effect.body["operation_id"] == op.id
+            && effect.body["action"] == TOOL
+            && effect.body["resource_ref"] == json!(binding.application_ref)
+            && permit.kind == "ExecutionPermit"
+            && permit.owner == op.owner
+            && permit.body["operation_id"] == op.id
+            && permit.body["effect_id"] == effect.id
+            && permit.body["plan_digest"] == plan.body["plan_digest"]
+            && permit.body["authorization_ref"] == task.spec["delegation_ref"]
+            && permit.body["audience_resource_refs"] == audience
+            && permit_binding.kind == "PermitBinding"
+            && permit_binding.owner == op.owner
+            && permit_binding.body["permit_id"] == permit.id
+            && permit_binding.body["audience_resource_refs"] == audience
+            && decision.kind == "ApprovalDecision"
+            && decision.owner == op.owner
+            && decision.body["decision"] == "Approved"
+            && decision.body["use_limit"] == "SingleOperation"
+            && decision.body["approver_principal_id"] == policy::OWNER
+            && decision.body["plan_digest"] == plan.body["plan_digest"]
+            && decision.body["preconditions"] == plan.body["preconditions"]
+            && approval_use.kind == "ApprovalUse"
+            && approval_use.owner == op.owner
+            && approval_use.body["decision_ref"] == decision.reference()
+            && approval_use.body["operation_id"] == op.id
+            && approval_use.body["plan_digest"] == plan.body["plan_digest"]
+            && approval_use.body["binding_status"] == "Bound",
+        "RecoveryRequired",
+        "OCI restore effect disagrees with its bound approval or permit",
+    )
+}
+
 fn confirmed_checkpoint(
     conn: &Connection,
     op: &Doc,
@@ -219,19 +265,17 @@ fn normalized_digest<'a>(
     let computed = match cache.entry(archive.id.clone()) {
         Entry::Occupied(entry) => entry.into_mut(),
         Entry::Vacant(entry) => {
-            let digest = if artifact::retention::receipt(conn, archive)?.is_some() {
-                None
-            } else {
-                let bytes = artifact::checkpoint_bytes(
-                    conn,
-                    archive,
-                    artifact::ingress::MAX_BYTES as usize,
-                )?;
-                Some(sha256(&restore_archive::canonical_load(
-                    &bytes,
+            let digest = match artifact::checkpoint_bytes(
+                conn,
+                archive,
+                artifact::ingress::MAX_BYTES as usize,
+            ) {
+                Err(failure) if failure.0.code == "ResultEvicted" => None,
+                bytes => Some(sha256(&restore_archive::canonical_load(
+                    &bytes?,
                     &binding.image_id,
                     &binding.diff_ids,
-                )?))
+                )?)),
             };
             entry.insert(digest)
         }
@@ -262,6 +306,7 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
             "RecoveryRequired",
             "OCI restore intent disagrees with captured bytes or original task identity",
         )?;
+        approved_effect(conn, &op, &task, &binding)?;
         let phase = queue_phase(conn, &task, &op)?;
         let active = matches!(phase.as_str(), "Dispatched" | "Unknown");
         let checkpoint = find(conn, &checkpoint_id(&op.id))?;

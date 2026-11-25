@@ -205,17 +205,18 @@ pub fn evict(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
             "RecoveryRequired",
             "task result refers to a foreign artifact",
         )?;
-        let retained: bool = db.c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM versions WHERE kind='RecoveryEvidence'
-               AND json_extract(body,'$.evidence.observation_ref.resource_id')=?1)",
-            [&artifact.id],
-            |row| row.get(0),
+        let mut evidence = db.c.prepare(
+            "SELECT * FROM versions WHERE kind='RecoveryEvidence'
+               AND json_extract(body,'$.evidence.observation_ref.resource_id')=?1",
         )?;
-        require(
-            !retained,
-            "Conflict",
-            "an Operation retains this artifact as reconciliation evidence",
-        )?;
+        for record in evidence.query_map([&artifact.id], crate::db::row)? {
+            require(
+                task.spec["task_type"] == "service.inspect"
+                    && crate::node::service_control::releases_inspection(db, &artifact, &record?)?,
+                "Conflict",
+                "an Operation retains this artifact as reconciliation evidence",
+            )?;
+        }
         let manifest = Manifest::read(&artifact)?.ok_or_else(|| {
             err(
                 "UnsupportedCapability",

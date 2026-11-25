@@ -156,6 +156,9 @@ ExecStart=/bin/sh {starter}
         with sqlite3.connect(database, timeout=10) as db:
             db.execute("DELETE FROM holds WHERE holder=?", (operation["resource_id"],))
         verify_failure(b"expected exclusive service hold")
+        startup = subprocess.run(node.daemon + ["serve"], capture_output=True, timeout=15)
+        assert startup.returncode and b"RecoveryRequired" in startup.stderr, startup
+        assert b"psiosd ready" not in startup.stderr, startup
         with sqlite3.connect(database, timeout=10) as db:
             db.execute("INSERT INTO holds(volume,holder) VALUES(?,?)", (service_id, operation["resource_id"]))
         subprocess.run(node.daemon + ["verify"], check=True, capture_output=True, timeout=15)

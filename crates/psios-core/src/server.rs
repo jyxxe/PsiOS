@@ -388,7 +388,10 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     db.reclaim_oci_archives()?;
     let (listener, _endpoint) = bind(&cfg.socket)?;
     crate::storage::reclaim_on_startup(&cfg);
-    db.transaction("restart-recovery", broker::recover)?;
+    db.transaction("restart-recovery", |db| {
+        crate::node::service_control::verify_active_holds(db)?;
+        broker::recover(db)
+    })?;
     let changes = db.changes.clone();
     let db = Arc::new(Mutex::new(db));
     let mut workers = Vec::new();

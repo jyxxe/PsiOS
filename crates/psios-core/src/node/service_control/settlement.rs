@@ -362,3 +362,35 @@ pub(super) fn verify_confirmation(conn: &Connection, state: &State<'_>) -> Resul
     }
     Ok(true)
 }
+
+pub(crate) fn releases_inspection(db: &Db<'_>, artifact: &Doc, evidence: &Doc) -> Result<bool> {
+    if evidence.kind != "RecoveryEvidence"
+        || evidence.rev != 1
+        || evidence.body["evidence"]["observation_ref"] != artifact.reference()
+        || !evidence.body["evidence"]["checkpoint_ref"].is_object()
+    {
+        return Ok(false);
+    }
+    let original = db.resolve(&evidence.body["operation_ref"])?;
+    let op = db.of(&original.id, "Operation")?;
+    let effect = db.resolve(&op.body["effect_refs"][0])?;
+    let Some(control) = Control::from_tool(&effect.body["action"]) else {
+        return Ok(false);
+    };
+    if op.body["outcome_knowledge"] != "Known" || effect.body["phase"] != "EffectReconciled" {
+        return Ok(false);
+    }
+    let Some(intent) = intent(db.c, &op)? else {
+        return Ok(false);
+    };
+    let target = db.resolve(&intent.body["service_ref"])?;
+    let Some(saved) = checkpoint(db.c, &op, &intent, &target, control)? else {
+        return Ok(false);
+    };
+    let state = verify_state(db.c, &op, &intent, &target, Some(&saved))?;
+    if !verify_confirmation(db.c, &state)? {
+        return Ok(false);
+    }
+    let confirmation = db.of(&confirmation_id(&op.id), CONFIRMATION)?;
+    Ok(confirmation.body["reconciliation_evidence_ref"] == evidence.reference())
+}

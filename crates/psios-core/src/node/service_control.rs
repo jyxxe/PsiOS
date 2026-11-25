@@ -3,7 +3,7 @@ use super::*;
 use crate::db::{find, resolve, row};
 use rusqlite::{Connection, params};
 mod settlement;
-pub(crate) use settlement::record_settlement;
+pub(crate) use settlement::{record_settlement, releases_inspection};
 
 pub(crate) const FORMAT: u32 = agent::inference::FORMAT + 1;
 const EPOCH: &str = "host-service-control-epoch";
@@ -675,6 +675,38 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
         "RecoveryRequired",
         "systemd dispatch evidence contains unbound records",
     )
+}
+
+pub(crate) fn verify_active_holds(db: &Db<'_>) -> Result<()> {
+    let mut active = db.c.prepare(
+        "SELECT t.id,t.owner,q.operation,q.phase FROM queue q JOIN current t ON t.id=q.task
+         WHERE q.phase IN ('Dispatched','Unknown') AND t.kind='Task'
+           AND t.spec->>'task_type' IN ('service.start','service.stop','service.restart')",
+    )?;
+    let mut rows = active.query([])?;
+    while let Some(record) = rows.next()? {
+        let task: String = record.get(0)?;
+        let owner: String = record.get(1)?;
+        let id: String = record.get(2)?;
+        let phase: String = record.get(3)?;
+        let op = db.of(&id, "Operation")?;
+        require(
+            op.owner == owner
+                && op.spec["task_id"] == task
+                && op.body["outcome_knowledge"]
+                    == if phase == "Dispatched" {
+                        "InFlight"
+                    } else {
+                        "Unknown"
+                    },
+            "RecoveryRequired",
+            "systemd operation disagrees with its active queue entry",
+        )?;
+        let (effect, _) = original_effect(db.c, &op)?;
+        let service = db.resolve(&effect.body["resource_ref"])?;
+        held(db, &service, &op)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

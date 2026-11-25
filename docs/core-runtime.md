@@ -133,7 +133,7 @@ Core 可选地先向该目标指定的解析器发出 TCP DNS 请求。按端点
 
 格式 69 起，`service.start`、`service.stop` 和 `service.restart` 的派发意图绑定原 Operation、Plan、Run、Effect、执行许可、批准记录及受管服务修订。Core 再次核对审批和授权，在同一事务持久化调用前采样及 `EffectStarted`，随后执行 `systemctl`。调用前检查点未提交的中断会以 `NotStarted` 结算并释放服务占用。检查点已提交且结果未知时，保留原 Operation 和服务占用，等待独立观测。正常结算和对账都返回 `checkpoint_ref`，并保存独立于制品保留期限的结算证据。
 
-调用前与结算时的采样记录配置摘要、预期状态、systemd 配置的管理范围、UID 及 Linux 启动 ID。两次采样的管理范围、UID 和启动 ID 必须一致。重启证据还须含有效的新调用代次。系统重新启动或管理范围与 UID 改变后，旧操作保持待核实。持有宿主权限的程序仍可改变服务，回执记录 Core 实际看到的状态。已在格式 69 前派发的操作沿用原对账要求。[检查点拒绝和进程中断验收](../tests/service_restart.py)
+调用前与结算时的采样记录配置摘要、预期状态、systemd 配置的管理范围、UID 及 Linux 启动 ID。两次采样的管理范围、UID 和启动 ID 必须一致。重启证据还须含有效的新调用代次。系统重新启动或管理范围与 UID 改变后，旧操作保持待核实。持有宿主权限的程序仍可改变服务，回执记录 Core 实际看到的状态。Core 在启动调度器前核对未结算服务操作的排他占用。所有引用同一 `service.inspect` 制品的对账都已持久确认并通过校验时，管理员可回收该检查制品的数据。已在格式 69 前派发的操作沿用原对账和制品保留要求。[检查点拒绝和进程中断验收](../tests/service_restart.py)
 
 `service.observe` 将指定 HostService 的实际运行状态写入 `HostServiceState`。显式授予目标服务上的 `service.observe`、`task.submit` 和 `task.read`，输入使用 HostService 的 `id` 和 `expected_spec_generation`。结果包含固定 `service_state_ref` 和本次观测。控制操作更新 HostService 的当前修订后，同一配置代次仍可继续采样。采样确认规格和 Linux 启动一致，按持久派发顺序发布，重复状态保持同一观察资源修订。
 

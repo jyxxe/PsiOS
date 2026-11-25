@@ -27,6 +27,9 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
         let restart_undispatched = phase == "Dispatched"
             && tool == apps::restart::TOOL
             && apps::restart::not_dispatched(db, &operation(db, &t)?)?;
+        let rename_unprepared = phase == "Dispatched"
+            && tool == storage::file_move::TOOL
+            && storage::file_move::not_prepared(db, &operation(db, &t)?)?;
         let deletion_unprepared = phase == "Dispatched"
             && matches!(tool, "volume.delete" | "backup.delete")
             && storage::retirement::not_prepared(db, &operation(db, &t)?)?;
@@ -37,6 +40,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             && !restore_unpublished
             && !restart_undispatched
             && !deletion_unprepared
+            && !rename_unprepared
         {
             close(
                 db,
@@ -62,6 +66,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             || restore_unpublished
             || restart_undispatched
             || deletion_unprepared
+            || rename_unprepared
         {
             close(
                 db,
@@ -82,6 +87,8 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                         "OCI restart interrupted before its invocation was checkpointed"
                     } else if activation_uncommitted {
                         "activation had not committed at restart"
+                    } else if rename_unprepared {
+                        "file rename interrupted before its observation was checkpointed"
                     } else if deletion_unprepared {
                         "storage deletion interrupted before its identity was prepared"
                     } else {
@@ -254,6 +261,7 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     let (target_id, expected) = match &action {
         Action::Write(p) => (&p.id, &p.expected_resource_version),
         Action::Append(p) => (&p.target.id, &p.target.expected_resource_version),
+        Action::RenameFile(p) => (&p.target.id, &p.target.expected_resource_version),
         Action::Start(p)
         | Action::Stop(p)
         | Action::ServiceStart(p)
@@ -318,6 +326,21 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
                 storage::restore_publication::INSPECT,
             )?;
             storage::restore_publication::reconcile(db, &op, &target, &proof, &observation)?
+        }
+        Action::RenameFile(_) => {
+            let (proof, observation) = inspected(
+                db,
+                req.evidence_ref.as_ref(),
+                &op,
+                &op,
+                storage::file_move::INSPECT,
+            )?;
+            let (applied, result, evidence) =
+                storage::file_move::reconcile(db, &op, &target, &proof, &observation)?;
+            if !applied {
+                reason = Some(err("LeaseLost", "the approved rename did not take effect"));
+            }
+            (result, evidence)
         }
         Action::RestartApp(_) => {
             let (proof, observation) = inspected(

@@ -101,7 +101,7 @@ pub fn validate(a: &Action) -> Result<()> {
         _ => Ok(()),
     }
 }
-fn parent(root: &File, path: &str) -> Result<(File, String)> {
+pub(super) fn parent(root: &File, path: &str) -> Result<(File, String)> {
     let (dir, leaf) = path.rsplit_once('/').unwrap_or(("", path));
     let dir = if dir.is_empty() {
         root.try_clone()?

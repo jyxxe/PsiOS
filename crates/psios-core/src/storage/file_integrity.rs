@@ -1,6 +1,6 @@
 //! Bounded file observations for a pinned volume data incarnation.
-use super::{child, files, registered_root, regular};
-use crate::{Result, err, host::Target, host::Work, require};
+use super::{child, files, registered_root, regular, volume_dir};
+use crate::{Config, Result, db::Doc, err, host::Target, host::Work, require};
 use psios_api::digest;
 use rustix::fs::{Mode, OFlags, open};
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,7 @@ use std::{
 pub(crate) const TOOL: &str = "volume.verify_file";
 pub(crate) const FORMAT: u32 = 48;
 const DEFAULT_BYTES: u64 = 32 * 1024 * 1024;
-const MAX_BYTES: u64 = 256 * 1024 * 1024;
+pub(super) const MAX_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,22 +35,25 @@ impl Query {
             "file inspection limit must be between 1 byte and 256 MiB",
         )?;
         require(
-            self.expected_digest.as_deref().is_none_or(|sum| {
-                sum.strip_prefix("sha256:").is_some_and(|hex| {
-                    hex.len() == 64
-                        && hex
-                            .bytes()
-                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-                })
-            }),
+            self.expected_digest.as_deref().is_none_or(sha256_format),
             "InvalidArgument",
             "expected file digest must be lowercase SHA-256",
         )
     }
 }
 
-#[derive(PartialEq, Eq, Serialize)]
-struct Revision {
+pub(super) fn sha256_format(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+
+#[derive(Clone, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Revision {
     device: String,
     inode: String,
     mode: String,
@@ -72,13 +75,19 @@ impl Revision {
             changed: [m.ctime().to_string(), m.ctime_nsec().to_string()],
         }
     }
+
+    pub(super) fn same_after_rename(&self, after: &Self) -> bool {
+        self.device == after.device
+            && self.inode == after.inode
+            && self.mode == after.mode
+            && self.links == after.links
+            && self.size_bytes == after.size_bytes
+            && self.modified == after.modified
+    }
 }
 
-fn volume_root(work: &Work) -> Result<File> {
-    let path = work
-        .data
-        .as_ref()
-        .ok_or_else(|| err("RecoveryRequired", "volume data path missing"))?;
+pub(super) fn volume_root(config: &Config, volume: &Doc) -> Result<File> {
+    let path = volume_dir(config, volume)?;
     let root = File::from(
         open(
             path,
@@ -87,22 +96,29 @@ fn volume_root(work: &Work) -> Result<File> {
         )
         .map_err(std::io::Error::from)?,
     );
-    registered_root(&work.target, &root.metadata()?)?;
+    registered_root(volume, &root.metadata()?)?;
     Ok(root)
 }
 
-pub(crate) fn verify(
-    work: &Work,
-    q: &Query,
+pub(super) fn revision(root: &File, path: &str) -> Result<Revision> {
+    let entry = child(root, path, OFlags::PATH)?;
+    let metadata = entry.metadata()?;
+    regular(&metadata)?;
+    Ok(Revision::from(&metadata))
+}
+
+pub(super) fn capture(
+    root: &File,
+    path: &str,
+    max_bytes: u64,
     check: &mut impl FnMut() -> Result<()>,
-) -> Result<Value> {
+) -> Result<(Revision, String)> {
     check()?;
-    let root = volume_root(work)?;
-    let entry = child(&root, &q.path, OFlags::PATH)?;
+    let entry = child(root, path, OFlags::PATH)?;
     let first = entry.metadata()?;
     regular(&first)?;
     require(
-        first.len() <= q.max_bytes.unwrap_or(DEFAULT_BYTES),
+        first.len() <= max_bytes,
         "QuotaExceeded",
         "file exceeds the requested inspection byte limit",
     )?;
@@ -138,24 +154,23 @@ pub(crate) fn verify(
         remaining -= bytes as u64;
     }
     check()?;
-    let rebound = child(&volume_root(work)?, &q.path, OFlags::PATH)?;
     require(
-        revision == Revision::from(&file.metadata()?)
-            && revision == Revision::from(&rebound.metadata()?),
+        revision == Revision::from(&file.metadata()?) && revision == self::revision(root, path)?,
         "PreconditionFailed",
         "file identity or content changed during verification",
     )?;
-    let sum = format!("sha256:{:x}", hasher.finalize());
-    require(
-        q.expected_digest
-            .as_ref()
-            .is_none_or(|expected| *expected == sum),
-        "PreconditionFailed",
-        "file content digest does not match the request",
-    )?;
+    Ok((revision, format!("sha256:{:x}", hasher.finalize())))
+}
+
+pub(super) fn observation(
+    volume: &Doc,
+    path: &str,
+    revision: &Revision,
+    content_digest: &str,
+) -> Result<Value> {
     let mut observation = json!({
-        "volume_ref": work.target.reference(), "data_incarnation": work.target.body["data_incarnation"],
-        "path": q.path, "revision": revision, "content_digest": sum,
+        "volume_ref": volume.reference(), "data_incarnation": volume.body["data_incarnation"],
+        "path": path, "revision": revision, "content_digest": content_digest,
     });
     observation["observation_digest"] = json!(digest(
         "volume-file-observation",
@@ -163,4 +178,27 @@ pub(crate) fn verify(
         &observation
     )?);
     Ok(observation)
+}
+
+pub(crate) fn verify(
+    work: &Work,
+    q: &Query,
+    check: &mut impl FnMut() -> Result<()>,
+) -> Result<Value> {
+    let root = volume_root(&work.cfg, &work.target)?;
+    let (captured, sum) = capture(&root, &q.path, q.max_bytes.unwrap_or(DEFAULT_BYTES), check)?;
+    let current = volume_root(&work.cfg, &work.target)?;
+    require(
+        captured == revision(&current, &q.path)?,
+        "PreconditionFailed",
+        "volume file path changed during verification",
+    )?;
+    require(
+        q.expected_digest
+            .as_ref()
+            .is_none_or(|expected| *expected == sum),
+        "PreconditionFailed",
+        "file content digest does not match the request",
+    )?;
+    observation(&work.target, &q.path, &captured, &sum)
 }

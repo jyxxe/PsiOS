@@ -436,6 +436,12 @@ jobs:
           git archive 215a0aa648f42c1e264f2fc02926e0246401224d Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format48"
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format48" "$RUNNER_TEMP/psios-compatibility-target"
           python3 -B tests/volume_read_holds_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
+      - name: Reuse a format 49 file observation in an approved rename
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format49"
+          git archive 006c3993fe566e25987bda7a8c6ca950077312cd Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format49"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format49" "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/volume_file_rename_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Stream and restore a backup larger than the default limit
         run: PSIOS_TEST_LARGE_BACKUP=1 python3 -B -m unittest discover -s tests -p test_backup_limits.py -v
       - name: Exercise a real OCI engine and persistent volume

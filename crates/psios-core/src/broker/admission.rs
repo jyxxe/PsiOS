@@ -76,6 +76,9 @@ fn linked_operation(db: &Db<'_>, action: &Action, target: &Doc) -> Result<Option
     let (operation, eligible_effects): (Option<String>, &[&str]) = match action {
         Action::InspectBackupPublication(_) => (Some(target.id.clone()), &["backup.create"]),
         Action::InspectRestoredVolume(_) => (Some(target.id.clone()), &["backup.restore"]),
+        Action::InspectFileRename(_) => {
+            (Some(target.id.clone()), &[crate::storage::file_move::TOOL])
+        }
         Action::Health(_) => (
             held_operation(db, target)?,
             &["application.start", "application.stop"],

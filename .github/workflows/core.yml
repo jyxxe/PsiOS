@@ -374,6 +374,12 @@ jobs:
           git archive df89efe4ab528f87c682b0c502d838310bba14d3 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format37"
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format37" "$RUNNER_TEMP/psios-compatibility-target"
           python3 -B tests/workflow_parallel_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
+      - name: Preserve a waiting deletion approval across storage retirement migration
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format38"
+          git archive c18939fee9e6729cedad33aa5fe500da8cf98a0c Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format38"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format38" "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/storage_retirement_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Stream and restore a backup larger than the default limit
         run: PSIOS_TEST_LARGE_BACKUP=1 python3 -B -m unittest discover -s tests -p test_backup_limits.py -v
       - name: Exercise a real OCI engine and persistent volume

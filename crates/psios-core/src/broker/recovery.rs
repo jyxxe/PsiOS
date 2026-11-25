@@ -21,7 +21,15 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
         let backup_unpublished = phase == "Dispatched"
             && tool == "backup.create"
             && storage::publication::not_published(db, &operation(db, &t)?)?;
-        if phase == "Dispatched" && !read && !activation_uncommitted && !backup_unpublished {
+        let deletion_unprepared = phase == "Dispatched"
+            && matches!(tool, "volume.delete" | "backup.delete")
+            && storage::retirement::not_prepared(db, &operation(db, &t)?)?;
+        if phase == "Dispatched"
+            && !read
+            && !activation_uncommitted
+            && !backup_unpublished
+            && !deletion_unprepared
+        {
             close(
                 db,
                 &t,
@@ -43,6 +51,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             || attempt >= 3
             || activation_uncommitted
             || backup_unpublished
+            || deletion_unprepared
         {
             close(
                 db,
@@ -59,6 +68,8 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                         "backup interrupted before publication was authorized"
                     } else if activation_uncommitted {
                         "activation had not committed at restart"
+                    } else if deletion_unprepared {
+                        "storage deletion interrupted before its identity was prepared"
                     } else {
                         "run interrupted"
                     },
@@ -229,6 +240,8 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         | Action::Stop(p)
         | Action::ServiceStart(p)
         | Action::ServiceStop(p)
+        | Action::Delete(p)
+        | Action::DeleteBackup(p)
         | Action::Backup(p) => (&p.id, &p.expected_resource_version),
         Action::ServiceRestart(p) => (&p.id, &p.expected_resource_version),
         _ => {
@@ -249,7 +262,23 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         "RecoveryRequired",
         "original exclusive hold or target revision unavailable",
     )?;
+    let mut reason = None;
     let (result, proof_details) = match action {
+        Action::Delete(_) | Action::DeleteBackup(_) => {
+            require(
+                req.evidence_ref.is_none(),
+                "InvalidArgument",
+                "storage deletion reconciliation reads the prepared directory directly",
+            )?;
+            let (completed, result, evidence) = storage::retirement::reconcile(db, &op, &target)?;
+            if !completed {
+                reason = Some(err(
+                    "LeaseLost",
+                    "approved storage deletion did not take effect",
+                ));
+            }
+            (result, evidence)
+        }
         Action::Backup(_) => {
             let (proof, observation) = inspected(
                 db,
@@ -399,15 +428,21 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     )?;
     let state = if t.body["lifecycle"] == "Cancelled" {
         "Cancelled"
+    } else if reason.is_some() {
+        "Failed"
     } else {
         "Succeeded"
     };
-    close(db, &t, state, "Known", None, Some(&artifact))?;
+    close(db, &t, state, "Known", reason.as_ref(), Some(&artifact))?;
     db.audit(
         actor,
         "Operation.Reconcile",
         Some(&op.id),
-        "ObservedPostcondition",
+        if reason.is_some() {
+            "ObservedNotApplied"
+        } else {
+            "ObservedPostcondition"
+        },
     )?;
     Ok(db.get(&op.id)?.body)
 }

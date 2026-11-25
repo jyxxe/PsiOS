@@ -117,6 +117,15 @@ fn close(
         params![t.id, if unknown { "Unknown" } else { "Done" }],
     )?;
     let op = operation(db, t)?;
+    if !unknown
+        && state != "Succeeded"
+        && matches!(
+            t.spec["task_type"].as_str(),
+            Some("volume.delete" | "backup.delete")
+        )
+    {
+        storage::retirement::abandon(db, &op)?;
+    }
     let mut effects = op.body["effect_refs"].clone();
     if let Some(r) = effects.as_array_mut().and_then(|a| a.last_mut()) {
         let e = db.get(field(r, "resource_id"))?;

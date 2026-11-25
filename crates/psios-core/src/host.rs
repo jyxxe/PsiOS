@@ -368,6 +368,7 @@ pub(crate) enum Checkpoint<'a> {
         device: u64,
         inode: u64,
     },
+    StorageDeletion(&'a storage::retirement::Location),
 }
 
 impl Work {
@@ -407,6 +408,10 @@ impl Work {
                     inode,
                 },
             ) => storage::publication::record(db, self, receipt, device, inode),
+            (
+                Action::Delete(_) | Action::DeleteBackup(_),
+                Checkpoint::StorageDeletion(location),
+            ) => storage::retirement::prepare(db, self, location),
             _ => Err(err("Fenced", "checkpoint does not match effect")),
         }
     }
@@ -445,6 +450,11 @@ impl Work {
                     inode,
                 })
             }),
+            Action::Delete(_) | Action::DeleteBackup(_) => {
+                storage::retirement::retire(self, |location| {
+                    checkpoint(Checkpoint::StorageDeletion(location))
+                })
+            }
             Action::Stage { .. }
             | Action::Select { .. }
             | Action::Refresh(_)
@@ -584,6 +594,9 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     storage::reserve(db, &w)?;
     if matches!(w.action, Action::Backup(_)) {
         storage::publication::begin(db, &w)?;
+    }
+    if storage::retirement::deletion(&w.action) {
+        storage::retirement::begin(db, &w)?;
     }
     apps::preflight(db, &w)?;
     Ok(w)

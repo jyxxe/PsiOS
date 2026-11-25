@@ -1,4 +1,4 @@
-use crate::{Config, Result, Store, broker, err, schedule, workflow};
+use crate::{Config, Result, Store, broker, err, schedule, storage::retirement, workflow};
 use psios_api::{ApiError, Request, id, parse, read_frame, write_frame};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use serde_json::{Value, json};
@@ -225,6 +225,32 @@ fn timer(s: Shared, stop: Arc<AtomicBool>) -> Result<()> {
     Ok(())
 }
 
+fn reclaim_storage(s: Shared, stop: Arc<AtomicBool>, config: Config) -> Result<()> {
+    while !stop.load(Ordering::Acquire) {
+        let correlation = id("storage-reclaim");
+        let ready = state(&s)?.transaction(&correlation, retirement::next);
+        let delay = match ready {
+            Ok(Some(job)) if !stop.load(Ordering::Acquire) => {
+                let result = job.reclaim(&config);
+                match state(&s)?.transaction(&correlation, |db| job.finish(db, result)) {
+                    Ok(()) => Duration::from_millis(50),
+                    Err(error) => {
+                        eprintln!("psiosd storage reclamation receipt: {}", error.0.code);
+                        Duration::from_secs(1)
+                    }
+                }
+            }
+            Ok(_) => Duration::from_secs(1),
+            Err(error) => {
+                eprintln!("psiosd storage reclamation admission: {}", error.0.code);
+                Duration::from_secs(1)
+            }
+        };
+        thread::park_timeout(delay);
+    }
+    Ok(())
+}
+
 struct Endpoint<'a> {
     path: &'a Path,
     _lock: File,
@@ -298,6 +324,12 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
         let scheduling = db.clone();
         let shutdown = stop.clone();
         workers.push(thread::Builder::new().spawn(move || timer(scheduling, shutdown))?);
+        let cleanup = db.clone();
+        let shutdown = stop.clone();
+        let storage = cfg.clone();
+        workers.push(
+            thread::Builder::new().spawn(move || reclaim_storage(cleanup, shutdown, storage))?,
+        );
         let tick = Duration::from_millis(cfg.tick_ms);
         for _ in 0..cfg.workers {
             let running = db.clone();

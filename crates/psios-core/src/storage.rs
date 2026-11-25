@@ -5,6 +5,7 @@ pub mod files;
 mod intake;
 pub(crate) mod publication;
 mod restore_proof;
+pub(crate) mod retirement;
 mod staging;
 pub(crate) mod usage;
 use crate::{
@@ -811,19 +812,17 @@ fn inspect_members(
     Ok(report)
 }
 // Names are resolved beneath a pinned directory. A nested mount is never traversed.
-fn remove_contents(dir: &File, depth: usize, staging: bool) -> Result<()> {
+fn remove_contents(dir: &File, depth: usize) -> Result<()> {
     require(depth < 128, "QuotaExceeded", "delete depth limit")?;
-    if staging {
-        let meta = dir.metadata()?;
-        require(
-            meta.uid() == rustix::process::geteuid().as_raw(),
-            "PermissionDenied",
-            "staged directory ownership changed",
-        )?;
-        // A restore can have applied a captured read-only mode before it stopped.
-        if meta.mode() & 0o700 != 0o700 {
-            dir.set_permissions(Permissions::from_mode(0o700))?;
-        }
+    let meta = dir.metadata()?;
+    require(
+        meta.uid() == rustix::process::geteuid().as_raw(),
+        "PermissionDenied",
+        "storage cleanup directory ownership changed",
+    )?;
+    // A restored directory can have retained a captured read-only mode.
+    if meta.mode() & 0o700 != 0o700 {
+        dir.set_permissions(Permissions::from_mode(0o700))?;
     }
     for entry in Dir::read_from(dir).map_err(std::io::Error::from)? {
         let entry = entry.map_err(std::io::Error::from)?;
@@ -834,7 +833,7 @@ fn remove_contents(dir: &File, depth: usize, staging: bool) -> Result<()> {
         let st = statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).map_err(std::io::Error::from)?;
         let flags = if FileType::from_raw_mode(st.st_mode) == FileType::Directory {
             let subdir = child(dir, name, OFlags::DIRECTORY | OFlags::RDONLY)?;
-            remove_contents(&subdir, depth + 1, staging)?;
+            remove_contents(&subdir, depth + 1)?;
             AtFlags::REMOVEDIR
         } else {
             AtFlags::empty()
@@ -870,14 +869,6 @@ pub fn perform(w: &Work) -> Result<Value> {
         Action::Restore(_) => create_volume(w, Some(&w.target)),
         Action::InspectBackupPublication(_) => publication::observe(w),
         Action::VerifyBackup(_) => inspect_backup(&w.cfg, &w.target, None),
-        Action::DeleteBackup(_) => {
-            let (parent, dir) = open_backup(&w.cfg, &w.target.id)?;
-            read_manifest(&open_manifest(&dir)?, &w.target.body["manifest_digest"])?;
-            remove_contents(&dir, 0, false).map_err(unknown)?;
-            rustix::fs::unlinkat(&parent, &w.target.id, AtFlags::REMOVEDIR).map_err(unknown)?;
-            parent.sync_all().map_err(unknown)?;
-            Ok(json!({"removed": true}))
-        }
         Action::Read(f) => {
             let dir = File::open(w.data.as_ref().unwrap())?;
             let file = child(&dir, &f.name, OFlags::RDONLY)?;
@@ -902,15 +893,6 @@ pub fn perform(w: &Work) -> Result<Value> {
             }
             replace(&path, f.content.as_bytes()).map_err(unknown)?;
             Ok(json!({"name": f.name, "digest": sha256(f.content.as_bytes())}))
-        }
-        Action::Delete(_) => {
-            let root = w.data.as_ref().unwrap().parent().unwrap();
-            remove_contents(&File::open(root)?, 0, false).map_err(unknown)?;
-            fs::remove_dir(root).map_err(unknown)?;
-            File::open(root.parent().unwrap())?
-                .sync_all()
-                .map_err(unknown)?;
-            Ok(json!({}))
         }
         _ => Err(err(
             "UnsupportedCapability",
@@ -970,23 +952,10 @@ pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
                 .update(&w.target, spec, w.target.body.clone())?
                 .reference())
         }
-        Action::DeleteBackup(_) => {
-            let mut b = w.target.body.clone();
-            b["lifecycle"] = json!("Deleted");
-            b["deleted_at"] = json!(now());
-            Ok(db.status(&w.target, b)?.reference())
-        }
-        Action::Delete(_)
-        | Action::Write(_)
-        | Action::Append(_)
-        | Action::MakeDir(_)
-        | Action::RemoveEntry(_) => {
-            let mut b = w.target.body.clone();
-            if matches!(w.action, Action::Delete(_)) {
-                b["lifecycle"] = json!("Deleted")
-            }
-            Ok(json!({"volume_ref": db.status(&w.target,b)?.reference(), "receipt": r}))
-        }
+        Action::DeleteBackup(_) | Action::Delete(_) => retirement::settle(db, &w.op, &w.target, r),
+        Action::Write(_) | Action::Append(_) | Action::MakeDir(_) | Action::RemoveEntry(_) => Ok(
+            json!({"volume_ref": db.status(&w.target,w.target.body.clone())?.reference(), "receipt": r}),
+        ),
         _ => Ok(r.clone()),
     }
 }

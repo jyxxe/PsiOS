@@ -123,7 +123,7 @@ fn check_entry(root: &File, name: impl rustix::path::Arg, dir: &File) -> Result<
 
 fn discard(root: &File, name: impl rustix::path::Arg + Copy, dir: &File) -> Result<()> {
     check_entry(root, name, dir)?;
-    remove_contents(dir, 0, true)?;
+    remove_contents(dir, 0)?;
     unlinkat(root, name, AtFlags::REMOVEDIR).map_err(std::io::Error::from)?;
     Ok(())
 }

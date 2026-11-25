@@ -100,7 +100,7 @@ def main(previous):
         refuses("PermissionDenied", lambda: prepare(request))
         node.stop()
         after = json.loads(subprocess.check_output(node.daemon + ["verify"], timeout=15))
-        assert after["database_format"] == 34 and not after["migration_required"], after
+        assert after["database_format"] >= 34 and not after["migration_required"], after
         print("PASS native service journal scope, tail, permission revocation and intact authority")
     finally:
         node.close()

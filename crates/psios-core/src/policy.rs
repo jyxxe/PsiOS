@@ -34,6 +34,7 @@ pub const TOOLS: &[&str] = &[
     node::journal::TOOL,
     "service.start",
     "service.stop",
+    node::RESTART_TOOL,
     "volume.files",
     "volume.usage",
     "volume.mkdir",
@@ -118,6 +119,7 @@ pub fn approval(tool: &str) -> bool {
             | "application.select_release"
             | "service.start"
             | "service.stop"
+            | node::RESTART_TOOL
             | "volume.activate"
             | "volume.delete"
             | "backup.delete"
@@ -140,6 +142,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | "node.route_lookup"
                     | node::network::probe::TOOL
                     | node::journal::TOOL
+                    | node::RESTART_TOOL
                     | "node.routing_rules"
                     | "node.mounts"
                     | node::pressure::TOOL
@@ -464,12 +467,13 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "invalid budget or TTL",
     )?;
     require(
-        !p.actions
-            .iter()
-            .any(|action| action == storage::export::ACTION || action == node::journal::TOOL)
-            || p.tool_targets.is_some(),
+        !p.actions.iter().any(|action| {
+            action == storage::export::ACTION
+                || action == node::journal::TOOL
+                || action == node::RESTART_TOOL
+        }) || p.tool_targets.is_some(),
         "InvalidArgument",
-        "backup export and service log grants require an explicit target scope",
+        "backup export, service log and service restart grants require an explicit target scope",
     )?;
     if let Some(ids) = &p.tool_targets {
         require(

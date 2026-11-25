@@ -7,12 +7,14 @@ pub mod pressure;
 use crate::{
     config::Manager,
     db::{Db, Doc},
-    host::{Action, Work},
+    host::{Action, ServiceRestart, Work},
     policy, *,
 };
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, fs, path::Path, process::Command};
+
+pub(crate) const RESTART_TOOL: &str = "service.restart";
 
 fn upsert(db: &Db<'_>, kind: &str, id: &str, spec: Value, body: Value) -> Result<Doc> {
     match db.get(id) {
@@ -243,6 +245,17 @@ fn configured_service(w: &Work) -> Result<&crate::config::ServiceConfig> {
         .ok_or_else(|| err("PermissionDenied", "service no longer configured"))
 }
 
+pub(crate) fn valid_invocation(value: &str) -> bool {
+    uuid::Uuid::parse_str(value).is_ok_and(|id| !id.is_nil() && id.simple().to_string() == value)
+}
+
+pub(crate) fn restarted(observation: &Value, request: &ServiceRestart) -> bool {
+    observation["boot_id"] == request.expected_boot_id
+        && observation["invocation_id"]
+            .as_str()
+            .is_some_and(|id| id != request.expected_invocation_id && valid_invocation(id))
+}
+
 fn service(w: &Work) -> Result<Value> {
     let cfg = configured_service(w)?;
     let manager = if cfg.manager == Manager::User {
@@ -298,15 +311,26 @@ fn service(w: &Work) -> Result<Value> {
             "PreconditionFailed",
             "unit identity unavailable or aliased",
         )?;
+        let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
         Ok(
-            json!({"unit":cfg.unit,"active_state":props.get("ActiveState"),"sub_state":props.get("SubState"),
+            json!({"unit":cfg.unit,"boot_id":boot.trim(),"active_state":props.get("ActiveState"),"sub_state":props.get("SubState"),
           "definition_digest":psios_api::sha256(&command("cat",&[],false)?),"needs_reload":props.get("NeedDaemonReload")!=Some(&"no"),"main_pid":props.get("MainPID"),"invocation_id":props.get("InvocationID"),"observed_at":now()}),
         )
     };
     let before = inspect()?;
-    let (verb, desired) = match w.action {
+    let (verb, desired) = match &w.action {
         Action::ServiceStart(_) => ("start", "active"),
         Action::ServiceStop(_) => ("stop", "inactive"),
+        Action::ServiceRestart(request) => {
+            require(
+                before["active_state"] == "active"
+                    && before["boot_id"] == request.expected_boot_id
+                    && before["invocation_id"] == request.expected_invocation_id,
+                "PreconditionFailed",
+                "the approved active service invocation changed",
+            )?;
+            ("try-restart", "active")
+        }
         _ => return Ok(before),
     };
     require(
@@ -330,6 +354,13 @@ fn service(w: &Work) -> Result<Value> {
         "OutcomeUnknown",
         "unit did not confirm requested state",
     )?;
+    if let Action::ServiceRestart(request) = &w.action {
+        require(
+            restarted(&observed, request),
+            "OutcomeUnknown",
+            "unit did not confirm a new invocation on the approved boot",
+        )?;
+    }
     Ok(observed)
 }
 pub fn perform(w: &Work) -> Result<Value> {
@@ -356,7 +387,10 @@ pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
             "PreconditionFailed",
             "service is not registered",
         )?;
-        if matches!(w.action, Action::ServiceStart(_) | Action::ServiceStop(_)) {
+        if matches!(
+            w.action,
+            Action::ServiceStart(_) | Action::ServiceStop(_) | Action::ServiceRestart(_)
+        ) {
             require(
                 w.target.spec["allow_control"] == true,
                 "PermissionDenied",

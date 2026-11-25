@@ -120,6 +120,7 @@ pub fn get(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     }
     Ok(
         json!({"reference":d.reference(),"state":d.body,"queue":groups,
+        "admission":broker::admission::status(db)?,
         "authority_storage":db.cfg.authority_storage()?}),
     )
 }

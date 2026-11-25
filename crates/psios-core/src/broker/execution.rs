@@ -24,6 +24,7 @@ pub(super) fn preflight(db: &Db<'_>, t: &Doc) -> Result<(Doc, Doc, Option<Vec<Va
     )?;
     let target = a.target(db, &t.owner)?;
     let audience = a.audience(db, &t.owner, &t.spec["delegation_ref"], &target)?;
+    admission::check(db, &t.id, &a, &target)?;
     require(
         target.reference() == p.body["allowed_effects"][0]["resource_ref"]
             && audience == plan_audience(&p),

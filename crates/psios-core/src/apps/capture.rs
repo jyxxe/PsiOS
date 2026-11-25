@@ -1,5 +1,5 @@
 //! Export bytes from the trusted local Docker Engine without pulling or loading an image.
-use super::{Engine, valid_image_id};
+use super::{Engine, restore_archive, valid_image_id};
 use crate::{
     Result, artifact, command,
     db::{Db, Doc, find, resolve},
@@ -7,6 +7,7 @@ use crate::{
     host::Work,
     policy, require,
 };
+use psios_api::sha256;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -64,6 +65,7 @@ pub(crate) struct Captured {
     bytes: Vec<u8>,
     image: ImageIdentity,
     engine: String,
+    compatibility: restore_archive::Compatibility,
 }
 
 pub(crate) fn authorize(db: &Db<'_>, actor: &str) -> Result<()> {
@@ -110,11 +112,13 @@ pub(crate) fn export(
         "PreconditionFailed",
         "local OCI image or Docker engine changed during capture",
     )?;
+    let compatibility = restore_archive::validate(&bytes, &image.config_digest, &image.diff_ids)?;
     check_authority()?;
     Ok(Captured {
         bytes,
         image,
         engine: id,
+        compatibility,
     })
 }
 
@@ -132,18 +136,23 @@ pub(crate) fn publish(db: &Db<'_>, work: &Work, capture: Captured) -> Result<Val
     let accepted = artifact::ingress::publish_generated(db, owner, &capture.bytes, MEDIA, source)?;
     let reference = &accepted["artifact_ref"];
     let artifact = db.resolve(reference)?;
+    let compatibility = capture.compatibility.evidence();
     let proof = db.create(
         PROOF, &proof_id, owner,
         json!({"operation_id":work.op.id}),
         json!({"artifact_ref":reference,"archive_format":ARCHIVE_FORMAT,"engine_id":capture.engine,
-            "image":capture.image,"archive_digest":artifact.spec["digest"],"size_bytes":artifact.spec["size_bytes"]}),
+            "image":capture.image,"archive_digest":artifact.spec["digest"],"size_bytes":artifact.spec["size_bytes"],
+            "restore_compatibility":compatibility}),
     )?;
     db.c.execute(
-        "INSERT INTO oci_image_captures VALUES(?1,?2)",
-        params![artifact.id, proof.id],
+        "INSERT INTO oci_image_captures(artifact,proof,restore_status) VALUES(?1,?2,?3)",
+        params![artifact.id, proof.id, capture.compatibility.status()],
     )?;
     db.audit(owner, TOOL, Some(&proof.id), "Published")?;
-    Ok(json!({"artifact_ref":reference,"capture_ref":proof.reference(),"operation_id":work.op.id}))
+    Ok(
+        json!({"artifact_ref":reference,"capture_ref":proof.reference(),"operation_id":work.op.id,
+        "restore_compatibility":compatibility}),
+    )
 }
 
 fn existing(conn: &Connection, id: &str) -> Result<Doc> {
@@ -175,7 +184,8 @@ fn verify_receipt(
             && result.spec["effect_id"] == started_effect.id
             && body["operation_id"] == operation.id
             && body["artifact_ref"] == archive.reference()
-            && body["capture_ref"] == proof.reference(),
+            && body["capture_ref"] == proof.reference()
+            && body["restore_compatibility"] == proof.body["restore_compatibility"],
         "RecoveryRequired",
         "OCI capture evidence disagrees with the settled receipt",
     )
@@ -304,6 +314,54 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
     })? {
         let (artifact, proof) = capture?;
         verify_one(conn, &existing(conn, &artifact)?, &existing(conn, &proof)?)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn verify_restore_compatibility(conn: &Connection) -> Result<()> {
+    let mut captures =
+        conn.prepare("SELECT artifact,proof,restore_status FROM oci_image_captures")?;
+    for capture in captures.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    })? {
+        let (artifact, proof, status) = capture?;
+        let proof = existing(conn, &proof)?;
+        let evidence = &proof.body["restore_compatibility"];
+        require(
+            restore_archive::Compatibility::valid_evidence(&status, evidence),
+            "RecoveryRequired",
+            "OCI capture compatibility evidence disagrees with publication",
+        )?;
+        if status == "Unverified" {
+            continue;
+        }
+        let artifact = existing(conn, &artifact)?;
+        let bytes = match artifact::checkpoint_bytes(
+            conn,
+            &artifact,
+            artifact::ingress::MAX_BYTES as usize,
+        ) {
+            // Withdrawal retains the historical capture and its compatibility receipt.
+            Err(failure) if failure.0.code == "ResultEvicted" => continue,
+            other => other?,
+        };
+        let image: ImageIdentity = decode(&proof.body["image"])?;
+        let actual = restore_archive::validate(&bytes, &image.config_digest, &image.diff_ids)
+            .map_err(|_| {
+                err(
+                    "RecoveryRequired",
+                    "OCI captured bytes no longer satisfy compatibility evidence",
+                )
+            })?;
+        require(
+            artifact.spec["digest"] == sha256(&bytes) && evidence == &actual.evidence(),
+            "RecoveryRequired",
+            "OCI captured bytes disagree with compatibility evidence",
+        )?;
     }
     Ok(())
 }

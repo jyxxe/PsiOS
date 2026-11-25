@@ -151,6 +151,12 @@ Core 可选地先向该目标指定的解析器发出 TCP DNS 请求。按端点
 
 若启动回执丢失，先运行新的 `application.health`，再向 `Operation.Reconcile` 提交该 ArtifactRef。同一引擎须确认原容器仍在运行，镜像、隔离配置和限额观测符合获准范围，Core 才会登记运行实例、挂载卷并结算原任务。容器只完成创建、已经退出、配置或读出的限额不符、引擎不可达，或中断发生在检查点写入之前时，原操作继续保留占用。旧版生成的观测须用新检查刷新后再提交对账。[真实 Docker 对账验收](../tests/oci_recovery.py)
 
+### 校验卷内文件
+
+给核验主体签发 `volume.verify_file`、`task.submit` 和 `task.read`，并在 `tool_targets` 指定 Volume ID。请求使用 `target` 内的卷 ID 与预期修订，以及相对 `path`。可选 `expected_digest` 为 SHA-256，`max_bytes` 默认 32 MiB，最高 256 MiB。结果制品包含卷和数据世代、文件 inode 及时间戳、逻辑字节数、内容摘要和整个观察的摘要。
+
+Core 通过已打开的目录和文件描述符流式校验私有普通文件。校验结束时核对原目录中的路径和文件版本，落库前复核执行许可。可在恢复卷激活前核对文件。改变文件身份、超过字节上限或撤销执行权都会得到明确结算结果。[二进制文件、路径限制、数据世代及撤权验收](../tests/test_volume_file_integrity.py)
+
 ### 重启正在运行的 OCI 实例
 
 `application.inspect_instance` 校验实际容器、发布配置、卷挂载、Linux 启动身份和有效资源限制。将结果中的 `boot_id`、`started_at` 分别作为 `expected_boot_id`、`expected_started_at`，连同应用 ID 与当前修订提交 `application.restart`。两项能力均需显式授权。应用绑定卷时，授权目标同时包含应用和卷。

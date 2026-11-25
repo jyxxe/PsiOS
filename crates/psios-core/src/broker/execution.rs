@@ -384,6 +384,12 @@ pub fn finish(db: &Db<'_>, w: &Work, result: Result<Value>) -> Result<()> {
         close(db, &t, "Cancelled", "Known", None, None)?;
         return Ok(());
     }
+    let result = result.and_then(|receipt| {
+        if matches!(w.action, Action::VerifyVolumeFile(_)) {
+            w.check_streaming(db)?;
+        }
+        Ok(receipt)
+    });
     match result {
         Ok(receipt) => {
             let body = host::apply(db, w, &receipt)?;

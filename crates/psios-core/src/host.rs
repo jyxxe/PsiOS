@@ -116,6 +116,8 @@ pub enum Action {
     Files(storage::files::Page),
     #[serde(rename = "volume.usage")]
     VolumeUsage(storage::usage::Query),
+    #[serde(rename = "volume.verify_file")]
+    VerifyVolumeFile(storage::file_integrity::Query),
     #[serde(rename = "volume.read_chunk")]
     Chunk(storage::files::ReadChunk),
     #[serde(rename = "volume.append")]
@@ -221,6 +223,9 @@ impl Action {
             _ => {}
         }
         storage::files::validate(&a)?;
+        if let Self::VerifyVolumeFile(query) = &a {
+            query.validate()?;
+        }
         Ok(a)
     }
     /// The primary target is first. A mounted volume and allocation pool are independent policy subjects.
@@ -288,6 +293,11 @@ impl Action {
                 "Volume",
             ),
             Self::VolumeUsage(p) => (
+                &p.target.id,
+                Some(&p.target.expected_resource_version),
+                "Volume",
+            ),
+            Self::VerifyVolumeFile(p) => (
                 &p.target.id,
                 Some(&p.target.expected_resource_version),
                 "Volume",
@@ -408,11 +418,11 @@ impl Work {
         Ok(target)
     }
 
-    pub(crate) fn check_backup_capture(&self, db: &Db<'_>) -> Result<()> {
+    pub(crate) fn check_streaming(&self, db: &Db<'_>) -> Result<()> {
         require(
-            matches!(self.action, Action::Backup(_)),
+            matches!(self.action, Action::Backup(_) | Action::VerifyVolumeFile(_)),
             "Fenced",
-            "capture is outside its permit",
+            "host data operation is outside its permit",
         )?;
         self.checkpoint_authority(db)?;
         Ok(())
@@ -466,7 +476,7 @@ impl Work {
     pub(crate) fn perform_checked(
         &self,
         checkpoint: impl FnOnce(Checkpoint<'_>) -> Result<()>,
-        mut check_capture: impl FnMut() -> Result<()>,
+        mut check_streaming: impl FnMut() -> Result<()>,
     ) -> Result<Value> {
         if let Some(v) = &self.inline {
             return Ok(v.clone());
@@ -501,8 +511,11 @@ impl Work {
                         inode,
                     })
                 },
-                &mut check_capture,
+                &mut check_streaming,
             ),
+            Action::VerifyVolumeFile(query) => {
+                storage::file_integrity::verify(self, query, &mut check_streaming)
+            }
             Action::Restore(_) => storage::restore(self, |receipt, placement| {
                 checkpoint(Checkpoint::RestoredVolume { receipt, placement })
             }),

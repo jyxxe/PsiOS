@@ -66,6 +66,7 @@ pub const TOOLS: &[&str] = &[
     storage::restore_publication::INSPECT,
     "application.install",
     apps::artifact_install::TOOL,
+    artifact::session_output::TOOL,
     "application.start",
     "application.stop",
     apps::restart::TOOL,
@@ -180,6 +181,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | artifact::ingress::UPLOAD
                     | artifact::ingress::READ
                     | artifact::ingress::WITHDRAW
+                    | artifact::session_output::TOOL
                     | apps::artifact_install::TOOL
                     | apps::artifact_install::STAGE_TOOL
                     | apps::inventory::TOOL
@@ -541,6 +543,7 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
                     || action == artifact::ingress::UPLOAD
                     || action == artifact::ingress::READ
                     || action == artifact::ingress::WITHDRAW
+                    || action == artifact::session_output::TOOL
                     || action == apps::artifact_install::TOOL
                     || action == apps::artifact_install::STAGE_TOOL
                     || action == apps::inventory::TOOL

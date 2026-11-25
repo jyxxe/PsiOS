@@ -140,7 +140,7 @@ fn valid_digest(value: &str) -> bool {
     })
 }
 
-fn valid_media_type(value: &str) -> bool {
+pub(super) fn valid_media_type(value: &str) -> bool {
     value.len() <= 96
         && value.split_once('/').is_some_and(|(kind, subtype)| {
             [kind, subtype].into_iter().all(|part| {
@@ -339,8 +339,51 @@ fn scan_chunks(
 pub(crate) fn publish(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     authorize(db, actor, UPLOAD)?;
     let p: StageId = decode(params)?;
-    let mut stage = owned(db, actor, &p.stage_id)?;
+    publish_stage(db, actor, &p.stage_id, None)
+}
+
+pub(super) fn publish_generated(
+    db: &Db<'_>,
+    actor: &str,
+    bytes: &[u8],
+    media: &str,
+    provenance: Value,
+) -> Result<Value> {
+    require(
+        !bytes.is_empty() && bytes.len() <= CHUNK_BYTES,
+        "QuotaExceeded",
+        "generated content exceeds one upload chunk",
+    )?;
+    let staged = stage(
+        db,
+        actor,
+        &json!({
+            "key":id("generated-output"),"size_bytes":bytes.len(),"digest":sha256(bytes),
+            "declared_media_type":media,"ttl_seconds":120,
+        }),
+    )?;
+    let stage_id = staged["stage_id"].as_str().ok_or_else(|| {
+        err(
+            "RecoveryRequired",
+            "generated artifact stage has no identity",
+        )
+    })?;
+    put(
+        db,
+        actor,
+        &json!({"stage_id":stage_id,"offset":0,"data_base64":STANDARD.encode(bytes)}),
+    )?;
+    publish_stage(db, actor, stage_id, Some(provenance))
+}
+
+fn publish_stage(db: &Db<'_>, actor: &str, stage_id: &str, source: Option<Value>) -> Result<Value> {
+    let mut stage = owned(db, actor, stage_id)?;
     if stage.artifact.is_some() {
+        require(
+            source.is_none(),
+            "Conflict",
+            "generated artifact stage is already published",
+        )?;
         return response(db, &stage);
     }
     require_open(db, &stage)?;
@@ -363,12 +406,23 @@ pub(crate) fn publish(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value>
     )?;
     authorize(db, actor, UPLOAD)?;
     require_open(db, &stage)?;
+    let mut source = source.unwrap_or_else(|| json!({"kind":"LocalSubmission"}));
+    source["principal_id"] = json!(actor);
+    source["stage_id"] = json!(stage.id);
+    let kind = source["kind"].as_str().ok_or_else(|| {
+        err(
+            "RecoveryRequired",
+            "generated artifact source has no provenance kind",
+        )
+    })?;
     let artifact = db.create(
-        "Artifact", &id("artifact"), actor,
+        "Artifact",
+        &id("artifact"),
+        actor,
         json!({
             "content_layout":RAW_LAYOUT,"media_type":"application/octet-stream",
             "declared_media_type":stage.declared_media_type,"size_bytes":stage.size.to_string(),
-            "digest":stage.digest,"source":{"kind":"LocalSubmission","principal_id":actor,"stage_id":stage.id},
+            "digest":stage.digest,"source":source,
         }),
         json!({"chunk_digests":digests}),
     )?;
@@ -384,8 +438,8 @@ pub(crate) fn publish(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value>
     )?;
     stage.artifact = Some(artifact.id);
     db.c.execute(
-        "UPDATE artifact_uploads SET state='Published',artifact_id=?2 WHERE id=?1",
-        params![stage.id, stage.artifact],
+        "UPDATE artifact_uploads SET state='Published',artifact_id=?2,source_kind=?3 WHERE id=?1",
+        params![stage.id, stage.artifact, kind],
     )?;
     db.c.execute(
         "DELETE FROM artifact_upload_chunks WHERE upload_id=?1",

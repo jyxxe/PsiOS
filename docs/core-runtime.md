@@ -251,6 +251,12 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 
 `psiosctl artifact-upload ./bundle.bin --key build-1` 和 Rust SDK 的 `Client::upload_artifact` 从已提交偏移继续，`psiosctl artifact` 使用返回的引用导出并校验原始字节。安装适配器可以按固定引用读取已发布制品。[中断、权限、配额和损坏验收](../tests/test_artifact_ingress.py) · [格式 53 升级](../tests/artifact_ingress_upgrade.py)
 
+### 发布模型会话的最终输出
+
+`artifact.publish_session_summary` Task 接受成功会话的确切 `session_ref` 及声明的 `media_type`。允许的会话必须有经认证模型确认的最终摘要，原始 UTF-8 最多 64 KiB。调用者需要具备对会话的读取权、Node 范围的 `artifact.upload`，以及同时覆盖 Node 与会话的发布工具授权。
+
+Core 核对原会话、模型租约及决策摘要，在一个事务中提交原始字节、来源、Task 结果和 Operation 回执。产物以 `LocalSessionOutput` 记录会话、模型、Skill、Provider 和发布任务的关联。下载与回收继续使用各自的制品权限。模型给出的媒体类型按声明处理。作为 OCI 应用使用时，仍经过已有的安装或新版本准备、策略审批和运行校验。[会话发布与故障验收](../tests/test_session_output.py)
+
 ### 从本机制品准备 OCI 安装
 
 本机适配器读取 `application/vnd.psios.oci-install.v1+json` 制品。正文是 `{"format":"PsiOSLocalOciInstallV1","install":{...}}`，其中 `install` 使用 `application.install` 的字段，指定已存在的 OCI 镜像配置摘要、绝对入口、资源限制和可选卷版本。`Application.PrepareArtifactInstall` 接受 `reference`、`key`、`delegation_id` 和可选 `deadline_at`，返回可供 `Task.Submit` 使用的请求及具体部署参数。

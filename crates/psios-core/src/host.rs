@@ -170,6 +170,8 @@ pub enum Action {
     Install(Install),
     #[serde(rename = "application.install_artifact")]
     InstallArtifact(apps::artifact_install::Request),
+    #[serde(rename = "artifact.publish_session_summary")]
+    PublishSessionSummary(artifact::session_output::Request),
     #[serde(rename = "application.start")]
     Start(Target),
     #[serde(rename = "application.stop")]
@@ -220,6 +222,7 @@ impl Action {
             }
             Self::Install(s) => apps::validate(s)?,
             Self::ListAppReleases(request) => request.validate()?,
+            Self::PublishSessionSummary(request) => request.validate()?,
             Self::Stage { release, .. } => {
                 apps::validate(release)?;
                 require(
@@ -273,6 +276,9 @@ impl Action {
                 resources
                     .push(apps::artifact_install::source(db, actor, &input.reference)?.reference());
             }
+            Self::PublishSessionSummary(input) => {
+                resources.push(artifact::session_output::source(db, actor, input)?.reference());
+            }
             Self::StageArtifactRelease(input) => {
                 resources.push(
                     apps::artifact_install::stage_source(db, actor, input, primary)?.reference(),
@@ -295,6 +301,7 @@ impl Action {
             Self::StartAgentSession(blueprint) => return blueprint.model(db),
             Self::StartWorkflow(blueprint) => return blueprint.definition(db, actor),
             Self::NetworkProbe(target) => return node::network::probe::target(db, target),
+            Self::PublishSessionSummary(_) => return db.of(&db.meta("authority")?, "Node"),
             Self::Processes(_)
             | Self::InspectProcess(_)
             | Self::Interfaces(_)

@@ -48,6 +48,7 @@ def main(previous, previous_format):
         assert "application.retire_release" not in owner["actions"], owner
         assert "application.stage_artifact_release" not in owner["actions"], owner
         assert "application.releases" not in owner["actions"], owner
+        assert "artifact.publish_session_summary" not in owner["actions"], owner
         node.call("Task.Cancel", target(node.get(job)["reference"]))
         assert node.call("Artifact.Withdraw", withdrawal)["withdrawal_ref"]
         node.stop()

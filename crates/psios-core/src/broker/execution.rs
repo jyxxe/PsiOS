@@ -319,8 +319,8 @@ pub fn dispatch(db: &Db<'_>, task: &str) -> Result<Option<Work>> {
     db.c.execute("UPDATE budgets SET reserved=reserved-1,spent=spent+1 WHERE id=(SELECT budget FROM queue WHERE task=?1)",[&t.id])?;
     db.c.execute("UPDATE queue SET phase='Dispatched' WHERE task=?1", [&t.id])?;
     db.audit(&t.owner, tool, Some(&work.op.id), "Dispatched")?;
-    // Authority-only effects publish the admitted child and the parent Task
-    // receipt together, before the worker can cross a host boundary.
+    // Authority-only effects publish their state and Task receipt together
+    // before the worker can cross a host boundary.
     let receipt = match &work.action {
         Action::StartAgentSession(blueprint) => {
             Some(agent::open_for_task(db, &work.task, blueprint)?)
@@ -331,6 +331,9 @@ pub fn dispatch(db: &Db<'_>, task: &str) -> Result<Option<Work>> {
             blueprint,
             field(&p.body, "deadline_at"),
         )?),
+        Action::PublishSessionSummary(input) => {
+            Some(artifact::session_output::publish(db, &work, input)?)
+        }
         _ => None,
     };
     if let Some(receipt) = receipt {

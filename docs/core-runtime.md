@@ -187,6 +187,8 @@ Core 通过已打开的目录和文件描述符流式校验私有普通文件。
 
 若停止操作丢失回执，Core 保留原 Application 占用和卷挂载记录。使用 `application.health` 核实原容器。若容器已退出但仍存在，本机所有者可用显式授予的 `application.continue_stop` 提交清理，授权目标应包含应用及其挂载卷。提交参数为 `target`（应用 ID 与当前修订）、`operation_ref`（原未知 Operation）和 `evidence_ref`（新健康检查制品）。
 
+Rust SDK 的 `Client::prepare_oci_stop_continuation` 与 `psiosctl application-prepare-stop-continuation --key KEY --delegation ID request.json` 接收包含 `application_ref`、`operation_ref` 和 `evidence_ref` 的固定资源引用。返回的请求可提交给 `Task.Submit`，并使用系统现有的单次审批。
+
 审批后，Core 重新核对容器身份和退出状态，仅对原容器执行非强制删除。普通队列饱和时，可使用恢复准入。删除回执丢失时，先用新的健康检查确认原容器已移除，再对账清理 Operation。原停止操作也要提交明确确认容器已移除的健康检查制品，完成对账后才释放占用。若 Docker 无法确认删除结果，操作继续保留未知状态。恢复路径的停止日志标记为不可用。[真实 Docker 回执丢失验收](../tests/oci_recovery.py)
 
 调用前核对的 `StartedAt` 来自 Docker 的实例观测。Docker 提供按完整容器 ID 的非强制删除，但不支持将该时间戳作为删除条件。对 PsiOS 托管实例的生命周期写入须通过 Core 串行执行。其他可信宿主服务直接写入 Docker 时，须先协调相关实例的操作。

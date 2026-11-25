@@ -207,6 +207,18 @@ enum Cmd {
         #[arg(default_value = "-")]
         file: String,
     },
+    /// Prepare removal of a verified stopped OCI container. Submit and approve separately.
+    ApplicationPrepareStopContinuation {
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        delegation: String,
+        #[arg(long)]
+        deadline_at: Option<String>,
+        /// JSON with application_ref, operation_ref and evidence_ref, from a file or stdin.
+        #[arg(default_value = "-")]
+        file: String,
+    },
     /// List the selected, staged, previous and retired releases of an application.
     ApplicationReleases {
         id: String,
@@ -589,6 +601,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             deadline_at,
             file,
         } => c.prepare_release_image_restore_inspection(
+            &serde_json::from_value(input(&file)?)?,
+            &key,
+            &delegation,
+            deadline_at.as_deref(),
+        )?,
+        Cmd::ApplicationPrepareStopContinuation {
+            key,
+            delegation,
+            deadline_at,
+            file,
+        } => c.prepare_oci_stop_continuation(
             &serde_json::from_value(input(&file)?)?,
             &key,
             &delegation,

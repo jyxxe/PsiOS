@@ -382,7 +382,11 @@ def continue_after_lost_stop(node, app, volume, *, lose_removal):
                     "units": 1, "ttl_seconds": 120})["delegation_ref"]["resource_id"]
                 refusal("PermissionDenied", lambda: node.call("Task.Submit", request(exit_ref, limited_scope)))
             refusal("OutcomeUnknown", lambda: node.call("Task.Submit", request(stale)))
-            submitted = request(exit_ref)
+            manifest = node.base / f"{name}-continuation.json"
+            manifest.write_text(json.dumps({"application_ref": app, "operation_ref": original,
+                                            "evidence_ref": exit_ref}))
+            submitted = node.cli(node.witness / "owner.token", "application-prepare-stop-continuation",
+                                 "--key", key(), "--delegation", grant, str(manifest))
             cleanup = node.call("Task.Submit", submitted)["task_id"]
             assert node.get(f"recovery-admission-{cleanup}")["value"]["unresolved_operation_ref"] == original
             waiting = node.wait(cleanup)

@@ -461,6 +461,9 @@ impl Store {
                 if ver < agent::inference::FORMAT {
                     db.c.execute_batch(agent::inference::SCHEMA)?;
                 }
+                if ver < node::service_control::FORMAT {
+                    node::service_control::migrate(db)?;
+                }
                 if ver < apps::stop::FORMAT {
                     apps::stop::migrate(db)?;
                 }

@@ -1,6 +1,6 @@
 # 实现与验证进度
 
-截至 2026-11-24，PsiOS 单节点 Core 提供独立的 Linux amd64 静态二进制，以及供 Ubuntu 24.04 宿主使用的可选 .deb 包。Alpine 用户空间用于验证 Core 独立运行。Ubuntu Minimal QEMU 开发环境用于验证 systemd 和虚拟机引导。独立的 UEFI 开发盘可直接从 GPT 启动，断网使用本机账户与 CLI，将节点状态保存在 ext4，并用第三分区持久保存用户主目录。可用构建回执核对运行清单与 EFI 制品，启动时先检查 Core 及引导脚本摘要。CLI 和本机 Agent 都通过同一权威执行任务。PsiOS 原生镜像基底仍由 ADR-01 跟踪，Helium、Neon、Argon 的 EditionReady 验收尚待完成。[独立运行](core-local.md#portable-amd64-core) · [基底决策](v1/adr/ADR-001.md) · [启动验收](../tests/qemu_boot.py) · [独立开发盘](native-disk.md)
+截至 2026-11-26，PsiOS 单节点 Core 提供独立的 Linux amd64 静态二进制，以及供 Ubuntu 24.04 宿主使用的可选 .deb 包。Alpine 用户空间用于验证 Core 独立运行。Ubuntu Minimal QEMU 开发环境用于验证 systemd 和虚拟机引导。独立的 UEFI 开发盘可直接从 GPT 启动，断网使用本机账户与 CLI，将节点状态保存在 ext4，并用第三分区持久保存用户主目录。可用构建回执核对运行清单与 EFI 制品，启动时先检查 Core 及引导脚本摘要。CLI 和本机 Agent 都通过同一权威执行任务。PsiOS 原生镜像基底仍由 ADR-01 跟踪，Helium、Neon、Argon 的 EditionReady 验收尚待完成。[独立运行](core-local.md#portable-amd64-core) · [基底决策](v1/adr/ADR-001.md) · [启动验收](../tests/qemu_boot.py) · [独立开发盘](native-disk.md)
 
 | 领域 | 已实现并验证的范围 | 部分支持、待开发或待取得的证据 |
 | --- | --- | --- |
@@ -11,12 +11,22 @@
 | Agent 与协作 | 本机提供独立 Agent 和 Provider 身份、版本化 Skill、绑定 Linux 启动身份与挂起计时的模型租约、持久多轮 Session、受权工具派发与取消。已通过 SmolLM2 在禁网 CPU 环境派发真实盘点 Task。已验证 Provider 报告的输入和输出 Token 随决策结算到原调用记录，支持崩溃重放。Provider 可用私有暂存目录，在工作进程丢失响应后交付原决策。显式入队的 Session 可由独立 Provider 按 Model 持续领取。现有定时触发可借助明确授权的 Task 原子创建会话并保留起源。已验证领取竞争、撤权、租约过期和响应中断后的事务恢复。定向信号支持幂等发送、等待、重投、条件确认和一次性触发会话。 本机 PsiFlow 支持不可变的字面量 Task 依赖图、基于固定任务制品的条件选择和已选分支汇合。 支持将前驱的制品字符串固化为普通 Task 输入，已验证重启保留审批内容、越权和超长拒绝，以及原生盘断电后保留输入引用。分支与前驱回执可随进程重启和断电恢复。 新 WorkflowRun 的步骤继承原经过时间窗口。原生来宾真实回拨和同次启动重启后，过期实例保留未执行回执且未占用预算。已验证审批后重启、取消、撤权、队列压力及实际写入丢回执时阻塞后继并经对账恢复。本机私聊支持邀请、成员授权、持久文本、去重和已读位点。已验证丢发送回执、进程故障、撤权、跨会话游标与容量压力。本机多人房间使用同一消息账本，支持邀请、加入后历史、移除、退出、所有权交接和有效期内恢复归档，已验证成员撤销与发送竞争、重新加入及现有私聊原地升级。 | 按外部认证事件触发会话、云模型适配与计费、完整 Service Bus、群聊线程、订阅投递与跨协议桥接、并行编排与补偿、Project 和 Computer Use 待开发。[运行协议](core-runtime.md) · [Provider 队列验收](../tests/test_model_queue.py) · [多主体测试](../tests/test_runtime.py) |
 | 用户交互与集群 | 本机 CLI、Rust SDK 和无需模型的传统系统管理入口可用。CLI 与 SDK 可按固定版本分块导出任务制品并核对完整摘要，已验证超过单帧上限的结果。两台独立虚机已验证会生成不同的身份。共享 PsiOS Shell 提供本机一次性配对，在浏览器查看授权节点状态、存储余量和任务列表及详情。 可核对任务制品的固定版本及完整摘要，并预览 64 KiB 内的 JSON。 | macOS 式浏览器桌面的菜单栏、Dock、多窗口、工作区和布局恢复待开发；现有本机查询入口仅是初始实现。[Shell 设计](v1/docs/07-applications-packages-gui.md#5-psios-shell浏览器桌面工作环境)。Shell 远程接入及管理操作、Argon KDE 与 GUI Bridge、节点加入和退出、跨节点路由、租约共识及故障接管待开发。[本机 Shell](core-local.md#本机-psios-shell) · [集群规范](v1/docs/12-cluster-coordination.md) |
 
-## Agent Artifacts 应用化进度（2026-11-25）
+## Agent Artifacts 应用化进度
 
 - 本机授权主体可分块暂存和发布通用字节，按提交偏移继续中断的上传。下载核对原始摘要，回收需要独立权限。原生 Agent 的成功模型会话可以将最终摘要发布为带模型、Skill、Provider 和租约来源的制品。已验证断线、重启、重复请求、配额、授权撤销及事务失败。[上传验收](../tests/test_artifact_ingress.py) · [模型输出发布验收](../tests/test_session_output.py)
 - `PsiOSLocalOciInstallV1` 适配器可从固定制品准备本机镜像安装或新版本暂存。批准后由 Docker 验证并运行镜像。实际验收覆盖模型输出生成声明、切换和回滚、退役后回收字节，以及持久卷和备份恢复。Agent 可按应用授权读取版本历史。[OCI 端到端验收](../tests/oci.py) · [应用与制品接口](core-runtime.md#从本机制品准备-oci-安装)
-- 本机所有者可以登记和撤销 Ed25519 发布者公钥，从指定 Docker 引擎按完整摘要捕获镜像。签名 V2 声明将归档纳入安装及暂存审批，任务和 Release 持有归档，退役后可按引用关系回收。真实 Docker 验收覆盖签名验证、撤销、归档损坏时拒绝启动及清理已创建容器。经单次审批可把有效归档导入经典 Linux amd64 Docker 缓存。强杀验收确认原导入请求及检查点可独立核实并结算，缺失观测保持未知，进程重启后禁止重放。首个镜像归档上限为 8 MiB，容量错误由引擎报告。[签名与版本验收](../tests/oci.py) · [归档与恢复验收](../tests/oci_restore.py)
+- 本机所有者可以登记和撤销 Ed25519 发布者公钥，从指定 Docker 引擎按完整摘要捕获镜像。签名 V2 声明将归档纳入安装及暂存审批，任务和 Release 持有归档，退役后可按引用关系回收。真实 Docker 验收覆盖签名验证、撤销、归档损坏时拒绝启动及清理已创建容器。经单次审批可把有效归档导入经典 Linux amd64 Docker 缓存。强杀验收确认原导入请求及检查点可独立核实并结算，缺失观测保持未知，进程重启后禁止重放。[签名与版本验收](../tests/oci.py) · [归档与恢复验收](../tests/oci_restore.py)
+- 镜像归档支持文件上的有界流式捕获、分块读取、独立核验和精确摘要恢复。默认单次上限为 8 MiB。管理员可在节点设定更高上限，每次捕获经审批可使用最多 32 MiB。派发按批准容量预留节点级临时空间。真实 Docker 验收覆盖两次 16 MiB 捕获并发、第三次保留审批等待、普通任务继续执行，以及取消释放容量后推进原请求。[较大归档](../tests/oci_capacity.py) · [并发暂存](../tests/oci_capture_staging.py) · [独立救援](offline-rescue.md)
 - WI-028 的 `AT-AIF-001`～`010` 产品验收仍待执行。缺口包括完整跨 Agent 产物接口、外部 Agent 从产物提交到安装的联合验收、OCI 以外的适配器、浏览器隔离交互预览、注册表或远端来源信任链，以及通用应用发布和更新流程。[通用产物接口](v1/docs/09-agents-models-protocols.md#911-agent-通用产物接口) · [应用化设计](v1/docs/07-applications-packages-gui.md#6-agent-artifacts-作为应用安装)
+
+## Agent 会话与模型结算
+
+- 会话可按配置将最近的有界工具结果纳入模型上下文。Core 在原模型租约上固定会话修订、上下文摘要与实际制品引用。已验证升级保留旧租约、内容过期后的授权修复、截断和引用模式。[模型上下文](../tests/agent_context_upgrade.py) · [结果材料验收](../tests/test_agent_tool_context.py)
+- 模型版本可启用严格结算。Provider 报告请求发送前失败或结果未知，Core 保留原租约和结算修订。确认未发送时，所有者可按原会话修订和剩余预算恢复。发送后失联或 Provider 进程终止时，会话停止自动重新推理。已通过真实 Unix socket HTTP 传输、响应丢失、进程强杀和旧租约升级验收。云提供者独立提供的幂等键、计费对账和多节点接管待开发。[API 验收](../tests/test_model_inference.py) · [Provider 传输验收](../tests/test_model_provider_outcome.py)
+
+## 受管服务调用与恢复
+
+- 格式 69 在调用 systemd 前将批准、一次性使用、原操作和服务修订绑定到持久检查点。检查点失败时未发出宿主命令，可经重新审批重试。已提交检查点但丢失回执时保留服务占用，允许以同次 Linux 启动及相同管理器范围和 UID 的新观测结算。已用真实用户 systemd 验证启停、重启、检查点写入失败、守护进程强杀，以及格式 34 和 68 的在途启动跨升级。其他宿主管理员可独立改变 unit，Core 的回执记录已核实的状态。[启动与停止](../tests/services.py) · [重启与核验](../tests/service_restart.py) · [在途升级](../tests/service_dispatch_upgrade.py)
 
 ## 如何复核
 

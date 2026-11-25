@@ -345,7 +345,7 @@ pub fn dispatch(db: &Db<'_>, task: &str) -> Result<Option<Work>> {
             "operation_id": op.id,
             "resource_ref": target,
             "action": tool,
-            "phase": "EffectStarted",
+            "phase": if node::service_control::is_tool(tool) { "PermitBound" } else { "EffectStarted" },
             "outcome_knowledge": "InFlight",
             "evidence_refs": []
         }),
@@ -416,6 +416,13 @@ pub fn settlement_failed(db: &Db<'_>, w: &Work) -> Result<()> {
             "StorageUnavailable",
             "OCI stop or cleanup did not reach its command checkpoint",
         )
+    } else if node::service_control::is_control(&w.action)
+        && node::service_control::not_dispatched(db, &db.of(&w.op.id, "Operation")?)?
+    {
+        err(
+            "StorageUnavailable",
+            "systemd control stopped before invocation was checkpointed",
+        )
     } else if matches!(
         w.action,
         Action::InstallArtifact(_) | Action::StageArtifactRelease(_) | Action::RetireRelease(_)
@@ -474,11 +481,21 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
         return Ok(());
     }
     let cancelled = t.body["lifecycle"] == "Cancelling";
+    let service_started = if node::service_control::is_control(&w.action) {
+        Some(node::service_control::worker_started(db, w, &t)?)
+    } else {
+        None
+    };
     if cancelled && matches!(w.action, Action::Activate(_) | Action::CaptureOciImage(_)) {
         close(db, &t, "Cancelled", "Known", None, None)?;
         return Ok(());
     }
     let result = result.and_then(|output| {
+        require(
+            service_started != Some(false),
+            "Fenced",
+            "systemd result has no committed invocation",
+        )?;
         w.check_result_publication(db)?;
         match &output {
             host::Output::Receipt(receipt) => artifact::capacity::check_result(db, &t, receipt)?,
@@ -514,7 +531,16 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
             )?;
         }
         Err(e) => {
-            let unknown = e.0.code == "OutcomeUnknown";
+            let service_undispatched = service_started == Some(false);
+            let e = if service_started == Some(true) && e.0.code != "OutcomeUnknown" {
+                err(
+                    "OutcomeUnknown",
+                    "unable to settle the checkpointed systemd invocation",
+                )
+            } else {
+                e
+            };
+            let unknown = !service_undispatched && e.0.code == "OutcomeUnknown";
             close(
                 db,
                 &t,
@@ -525,7 +551,13 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                 } else {
                     "Failed"
                 },
-                if unknown { "Unknown" } else { "Known" },
+                if unknown {
+                    "Unknown"
+                } else if service_undispatched {
+                    "NotStarted"
+                } else {
+                    "Known"
+                },
                 Some(&e),
                 None,
             )?;

@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 pub(crate) const TOOL: &str = "application.continue_stop";
-pub(crate) const FORMAT: u32 = 70;
+pub(crate) const FORMAT: u32 = crate::node::service_control::FORMAT + 1;
 const SCHEMA: &str = "CREATE TABLE oci_stop_cleanups (
     original TEXT PRIMARY KEY, cleanup TEXT NOT NULL UNIQUE
 ) STRICT;";

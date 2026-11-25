@@ -242,6 +242,37 @@ fn rejects_unrecognized_oci_fields_and_annotations() {
 }
 
 #[test]
+fn outer_header_formats_must_have_one_interpretation() {
+    let archive = |mut header: Header| {
+        header.set_path("fixture").unwrap();
+        header.set_mode(0o644);
+        header.set_size(1);
+        header.set_cksum();
+        let mut out = Builder::new(Vec::new());
+        out.append(&header, &b"x"[..]).unwrap();
+        out.into_inner().unwrap()
+    };
+    for header in [Header::new_old(), Header::new_ustar(), Header::new_gnu()] {
+        let bytes = archive(header);
+        assert!(Members::read(&bytes).is_ok());
+    }
+
+    let mut other_version = Header::new_ustar();
+    other_version.as_ustar_mut().unwrap().version = *b"01";
+    let mut star = Header::new_ustar();
+    star.as_mut_bytes()[508..].copy_from_slice(b"tar\0");
+    let mut malformed_gnu = Header::new_gnu();
+    malformed_gnu.as_gnu_mut().unwrap().atime = *b"not numeric\0";
+    let mut extended_numeric = Header::new_gnu();
+    extended_numeric.as_old_mut().uid[0] = 0x80;
+    for header in [other_version, star, malformed_gnu, extended_numeric] {
+        let bytes = archive(header);
+        let error = validate(&bytes, "", &[]).unwrap_err();
+        assert!(error.0.message.contains("ambiguous format"), "{error}");
+    }
+}
+
+#[test]
 fn rejects_invalid_paths_duplicate_entries_extra_archive_data_and_limits() {
     let invalid_paths = [
         "/absolute",

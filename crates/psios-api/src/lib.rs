@@ -53,7 +53,7 @@ impl ApiError {
             "QueueFull" => "SameRequestAfterBackoff",
             "CursorExpired" => "Resynchronize",
             "AuthenticationRequired" => "Reauthenticate",
-            "DependencyUnavailable" => "DependencyReady",
+            "DependencyUnavailable" | "ResultUnavailable" => "DependencyReady",
             _ => "Never",
         };
         Self {

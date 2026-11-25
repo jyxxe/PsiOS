@@ -68,6 +68,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Session.RetryTask" => agent::retry_task(db, actor, p),
         "Session.Extend" => agent::extend(db, actor, p),
         "Session.Get" => agent::get(db, actor, p),
+        "Session.Resume" => agent::resume(db, actor, p),
         "Session.History" => agent::history(db, actor, p),
         "Session.Cancel" => agent::cancel(db, actor, p),
         "Agent.Register" => policy::register(db, actor, p),

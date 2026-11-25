@@ -218,6 +218,29 @@ pub fn history(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
        .query_map([&s.id],|r|Ok(json!({"task_id":r.get::<_,String>(0)?,"turn":r.get::<_,u32>(1)?,"attempt":r.get::<_,u32>(2)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(json!({"session_ref":s.reference(),"turns":turns,"tasks":tasks}))
 }
+pub fn resume(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
+    let p: Conditional = decode(p)?;
+    let session = db.of(&p.id, "Session")?;
+    policy::owned(actor, &session)?;
+    session.cas(&p.expected_resource_version)?;
+    require(
+        state(&session) == "Paused"
+            && artifact::is_content_unavailable(
+                session.body["pause_reason"].as_str().unwrap_or_default(),
+            ),
+        "PreconditionFailed",
+        "session is not waiting for tool result content",
+    )?;
+    let (_, skill, model) = deps(db, &session)?;
+    context(db, &session, &skill, &model)?;
+    let mut body = session.body.clone();
+    body["lifecycle"] = json!("AwaitingModel");
+    body.as_object_mut().unwrap().remove("pause_reason");
+    let updated = db.status(&session, body)?;
+    db.audit(actor, "Session.Resume", Some(&session.id), "Resumed")?;
+    Ok(response(&updated))
+}
+
 pub fn cancel(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let p: Conditional = decode(p)?;
     let s = db.of(&p.id, "Session")?;
@@ -263,6 +286,9 @@ fn context(db: &Db<'_>, s: &Doc, skill: &Doc, model: &Doc) -> Result<Value> {
             "tool result owner changed",
         )?;
         last = json!({"task_id":tid,"tool":t.spec["task_type"],"lifecycle":t.body["lifecycle"],"result":t.body["result"]});
+        if s.spec["context_policy"] == "LocalToolResults" && t.body["lifecycle"] == "Succeeded" {
+            artifact::require_task_result(&t.body["result"])?;
+        }
         if s.spec["context_policy"] == "LocalToolResults"
             && let Some(reference) = t.body["result"]["artifact_refs"].get(0)
         {
@@ -275,13 +301,20 @@ fn context(db: &Db<'_>, s: &Doc, skill: &Doc, model: &Doc) -> Result<Value> {
                     .as_str()
                     .unwrap(),
             )?;
-            let artifact = db.resolve(reference)?;
+            let artifact = db.resolve(reference).map_err(artifact::dependency_error)?;
             require(
                 artifact.owner == s.owner && artifact.kind == "Artifact",
                 "PermissionDenied",
                 "foreign tool result",
             )?;
-            last["local_tool_result"] = artifact::read(db, &artifact, None)?;
+            require(
+                artifact.spec["task_id"] == t.id
+                    && artifact.spec["run_id"] == t.body["current_run_id"],
+                "RecoveryRequired",
+                "tool artifact producer disagrees with the session task",
+            )?;
+            last["local_tool_result"] =
+                artifact::read(db, &artifact, None).map_err(artifact::dependency_error)?;
         }
     }
     let v = json!({"session_id":s.id,"goal":s.spec["goal"],"skill_ref":s.spec["skill_ref"],"model_ref":s.spec["model_ref"],

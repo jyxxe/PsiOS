@@ -1,4 +1,6 @@
-use crate::{Config, Result, Store, broker, err, schedule, storage::retirement, workflow};
+use crate::{
+    Config, Result, Store, broker, err, schedule, storage::retirement, watch::Changes, workflow,
+};
 use psios_api::{ApiError, Request, id, parse, read_frame, write_frame};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use serde_json::{Value, json};
@@ -170,18 +172,21 @@ fn dispatch_when_active(
     }
     store.transaction(correlation, |db| broker::dispatch(db, task))
 }
-fn worker(s: Shared, stop: Arc<AtomicBool>, tick: Duration) -> Result<()> {
+fn worker(s: Shared, changes: Arc<Changes>, stop: Arc<AtomicBool>, tick: Duration) -> Result<()> {
     while !stop.load(Ordering::Acquire) {
         let correlation = id("scheduler");
-        let task = {
+        let (task, generation) = {
             let mut store = state(&s)?;
             if stop.load(Ordering::Acquire) {
                 break;
             }
-            store.transaction(&correlation, broker::claim)?
+            // Sample under the same authority lock as the claim. A commit
+            // after an empty claim must be visible before this worker sleeps.
+            let generation = changes.seq();
+            (store.transaction(&correlation, broker::claim)?, generation)
         };
         let Some(task) = task else {
-            thread::park_timeout(tick);
+            changes.wait_for_work(generation, tick, &stop);
             continue;
         };
         let dispatch = {
@@ -329,6 +334,7 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     let (listener, _endpoint) = bind(&cfg.socket)?;
     crate::storage::reclaim_on_startup(&cfg);
     db.transaction("restart-recovery", broker::recover)?;
+    let changes = db.changes.clone();
     let db = Arc::new(Mutex::new(db));
     let mut workers = Vec::new();
     // Withhold the authority from workers until every required thread exists.
@@ -346,8 +352,11 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
         let tick = Duration::from_millis(cfg.tick_ms);
         for _ in 0..cfg.workers {
             let running = db.clone();
+            let committed = changes.clone();
             let shutdown = stop.clone();
-            workers.push(thread::Builder::new().spawn(move || worker(running, shutdown, tick))?);
+            workers.push(
+                thread::Builder::new().spawn(move || worker(running, committed, shutdown, tick))?,
+            );
         }
         Ok(())
     })();
@@ -413,7 +422,7 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
         }
     }
     stop.store(true, Ordering::Release);
-    state(&db)?.changes.notify();
+    changes.notify_shutdown();
     for worker in &workers {
         worker.thread().unpark();
     }

@@ -13,6 +13,7 @@ use std::{
 pub(crate) struct Changes {
     generation: Mutex<u64>,
     ready: Condvar,
+    work: Condvar,
     waiting: AtomicUsize,
 }
 impl Changes {
@@ -20,8 +21,13 @@ impl Changes {
         let mut seq = self.generation.lock().unwrap_or_else(|p| p.into_inner());
         *seq = seq.wrapping_add(1);
         self.ready.notify_all();
+        self.work.notify_one();
     }
-    fn seq(&self) -> u64 {
+    pub fn notify_shutdown(&self) {
+        self.notify();
+        self.work.notify_all();
+    }
+    pub fn seq(&self) -> u64 {
         *self.generation.lock().unwrap_or_else(|p| p.into_inner())
     }
     fn wait_for_change(&self, previous: u64, left: Duration) {
@@ -29,6 +35,17 @@ impl Changes {
         drop(
             self.ready
                 .wait_timeout_while(lock, left, |n| *n == previous)
+                .unwrap_or_else(|p| p.into_inner()),
+        );
+    }
+
+    pub fn wait_for_work(&self, previous: u64, timeout: Duration, stop: &AtomicBool) {
+        let lock = self.generation.lock().unwrap_or_else(|p| p.into_inner());
+        drop(
+            self.work
+                .wait_timeout_while(lock, timeout, |n| {
+                    *n == previous && !stop.load(Ordering::Acquire)
+                })
                 .unwrap_or_else(|p| p.into_inner()),
         );
     }

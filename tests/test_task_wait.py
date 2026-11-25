@@ -1,5 +1,6 @@
 """Verify blocking task reads, current grants and bounded wait admission."""
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import select
@@ -163,3 +164,48 @@ class TaskWaitTests(unittest.TestCase):
             reply = self.receipt(stream)
         self.assertEqual(reply["result"], node.call("Task.Get", {"id": task}))
         self.assertEqual(reply["result"]["lifecycle"], "Cancelled")
+
+
+class WorkerWakeTests(unittest.TestCase):
+    def test_committed_submission_and_enable_wake_workers_before_the_fallback_tick(self):
+        node = Node(os.getenv("PSIOS_TEST_BIN_DIR", "target/debug"), tick_ms=5000)
+        self.addCleanup(node.close)
+
+        def scheduling(mode):
+            ref = node.call("Node.Get", {})["reference"]
+            node.call("Node.Configure", {"expected_resource_version": ref["version"], "scheduling": mode})
+
+        def settle(task):
+            return node.call("Task.Wait", {"id": task, "timeout_ms": 2000})
+
+        time.sleep(0.15)
+        accepted = node.submit("system.status", {})
+        direct = settle(accepted)
+        self.assertEqual(direct["lifecycle"], "Succeeded", direct)
+
+        scheduling("Cordoned")
+        batch = [node.submit("system.status", {}) for _ in range(6)]
+        self.assertEqual([node.call("Task.Get", {"id": task})["lifecycle"] for task in batch],
+                         ["Queued"] * len(batch))
+        node.stop()
+        node.start()
+        time.sleep(0.15)
+        scheduling("Enabled")
+        with ThreadPoolExecutor(max_workers=len(batch)) as waiters:
+            completed = list(waiters.map(settle, batch))
+        self.assertEqual([task["lifecycle"] for task in completed], ["Succeeded"] * len(batch), completed)
+        self.assertEqual([task["task_id"] for task in completed], batch)
+
+    def test_parked_workers_still_settle_time_only_expiry(self):
+        node = Node(os.getenv("PSIOS_TEST_BIN_DIR", "target/debug"), tick_ms=4000)
+        self.addCleanup(node.close)
+        ref = node.call("Node.Get", {})["reference"]
+        node.call("Node.Configure", {"expected_resource_version": ref["version"], "scheduling": "Cordoned"})
+        deadline = (datetime.now(timezone.utc) + timedelta(seconds=3)).isoformat().replace("+00:00", "Z")
+        request = node.call("Task.Prepare", {"tool": "system.status", "input": {}, "key": key(),
+                            "delegation_id": "owner-delegation", "deadline_at": deadline})
+        task = node.call("Task.Submit", request)["task_id"]
+        self.assertEqual(node.call("Task.Get", {"id": task})["lifecycle"], "Queued")
+        result = node.call("Task.Wait", {"id": task, "timeout_ms": 8500})
+        self.assertEqual((result["lifecycle"], result["outcome_knowledge"], result["conditions"][0]["type"]),
+                         ("Failed", "NotStarted", "DeadlineExceeded"), result)

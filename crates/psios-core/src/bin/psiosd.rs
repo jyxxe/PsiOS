@@ -34,6 +34,9 @@ enum Cmd {
         /// Parent directory for the temporary verification copy (defaults to TMPDIR).
         #[arg(long)]
         scratch_dir: Option<PathBuf>,
+        /// Run and verify the normal migration on that disposable copy.
+        #[arg(long)]
+        rehearse_migration: bool,
     },
     /// Capture a verified database checkpoint from a stopped authority.
     Checkpoint {
@@ -141,9 +144,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::Verify {
             max_copy_mib,
             scratch_dir,
+            rehearse_migration,
         } => {
             let scratch = scratch_dir.unwrap_or_else(std::env::temp_dir);
-            let report = Store::verify(&cfg()?, &scratch, u64::from(max_copy_mib) * 1024 * 1024)?;
+            let cfg = cfg()?;
+            let max_bytes = u64::from(max_copy_mib) * 1024 * 1024;
+            let report = if rehearse_migration {
+                Store::rehearse_migration(&cfg, &scratch, max_bytes)?
+            } else {
+                Store::verify(&cfg, &scratch, max_bytes)?
+            };
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Cmd::Checkpoint {

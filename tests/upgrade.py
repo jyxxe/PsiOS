@@ -1,5 +1,7 @@
 """Upgrade an actual PR #1 state and witness in place, including accepted but unexecuted work."""
 import argparse
+from contextlib import closing
+import hashlib
 import json
 from pathlib import Path
 import signal
@@ -7,6 +9,11 @@ import sqlite3
 import subprocess
 
 from support import Failure, Node, target
+
+
+def authority_contents(node):
+    files = (file for root in (node.state, node.witness) for file in root.rglob("*") if file.is_file())
+    return {file: (file.stat().st_mtime_ns, hashlib.sha256(file.read_bytes()).digest()) for file in files}
 
 
 def main(previous):
@@ -34,8 +41,29 @@ def main(previous):
         report = json.loads(subprocess.check_output([binary, "--config", n.config, "verify"]))
         assert report["database_format"] == 1 and report["migration_required"], report
         assert report["node_id"] == authority
-        with sqlite3.connect(n.state / "state.db") as db:
+        original = authority_contents(n)
+        scratch = n.base / "rehearsal"
+        scratch.mkdir(mode=0o700)
+        rehearsed = json.loads(subprocess.check_output([binary, "--config", n.config, "verify",
+            "--rehearse-migration", "--scratch-dir", scratch], timeout=20))
+        migration = rehearsed.pop("migration_rehearsal")
+        assert rehearsed == report and migration["status"] == "Verified", rehearsed
+        assert migration["source_format"] == 1 and migration["target_format"] > 1, migration
+        assert authority_contents(n) == original and not list(scratch.iterdir())
+        with closing(sqlite3.connect(n.state / "state.db")) as db, db:
             assert db.execute("PRAGMA user_version").fetchone() == (1,)
+            db.execute("CREATE INDEX versions_origin_seq ON versions(seq)")
+        # An integral, witnessed database can still be incompatible with a new DDL step.
+        conflicting = authority_contents(n)
+        clean = json.loads(subprocess.check_output([binary, "--config", n.config, "verify"], timeout=20))
+        assert clean["database_format"] == 1 and clean["sqlite_integrity"] == "Verified", clean
+        failed = subprocess.run([binary, "--config", n.config, "verify", "--rehearse-migration",
+            "--scratch-dir", scratch], capture_output=True, timeout=20)
+        assert failed.returncode != 0 and not failed.stdout, failed
+        assert b"migration rehearsal failed" in failed.stderr and b"StorageUnavailable" in failed.stderr, failed
+        assert authority_contents(n) == conflicting and not list(scratch.iterdir())
+        with closing(sqlite3.connect(n.state / "state.db")) as db, db:
+            db.execute("DROP INDEX versions_origin_seq")
         n.daemon[0] = binary
         n.config.write_text(json.dumps(base))
         n.start()
@@ -68,7 +96,7 @@ def main(previous):
         assert n.call("Budget.Get", {"id": g["budget_ref"]["resource_id"]}, credential)["model_calls_maximum"] == 0
         n.stop()
         upgraded = json.loads(subprocess.check_output(n.daemon + ["verify"], timeout=15))
-        assert upgraded["database_format"] > report["database_format"], upgraded
+        assert upgraded["database_format"] == migration["target_format"], upgraded
         assert not upgraded["migration_required"] and upgraded["node_id"] == authority, upgraded
         with sqlite3.connect(n.state / "state.db") as db:
             assert db.execute("PRAGMA user_version").fetchone() == (upgraded["database_format"],)
@@ -76,7 +104,7 @@ def main(previous):
         assert old.returncode != 0 and b"SchemaVersionUnsupported" in old.stderr
         n.start()
         assert n.perform("node.inventory", {})["boot_id"]
-        print("PASS upgrade from PR #1 binary, credentials, queue, approval, data, dedup, restricted scope and downgrade refusal")
+        print("PASS private migration rehearsal and upgrade from PR #1 binary with credentials, queue, data and downgrade refusal")
     finally:
         n.close()
 

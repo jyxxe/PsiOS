@@ -80,11 +80,15 @@ stage=service-identity
 printf 'psioscheck:x:%s:%s::/:/bin/sh\n' "$SERVICE_UID" "$SERVICE_GID" >> /etc/passwd
 printf 'psioscheck:x:%s:\n' "$SERVICE_GID" >> /etc/group
 stage=authority-rejected
+mode=
+if [ "${REHEARSE:-0}" = 1 ]; then mode=--rehearse-migration; fi
 if ! "$bb" su -s /bin/sh psioscheck -c \
-    "exec /psiosd --config /rescue.json verify --scratch-dir /scratch --max-copy-mib $COPY_MIB" \
+    "SQLITE_TMPDIR=/scratch exec /psiosd --config /rescue.json verify --scratch-dir /scratch --max-copy-mib $COPY_MIB $mode" \
     > /report 2>/diagnostic; then
-    for code in QuotaExceeded PermissionDenied RecoveryRequired SchemaVersionUnsupported StorageUnavailable Conflict; do
-        if "$bb" grep -q "$code" /diagnostic; then stage=authority-$code; break; fi
+    prefix=authority
+    if "$bb" grep -q 'migration rehearsal failed' /diagnostic; then prefix=migration-rehearsal; fi
+    for code in QuotaExceeded PermissionDenied RecoveryRequired SchemaVersionUnsupported StorageUnavailable Conflict InvalidArgument; do
+        if "$bb" grep -q "$code" /diagnostic; then stage=$prefix-$code; break; fi
     done
     exit 1
 fi

@@ -46,9 +46,8 @@ impl Predicate {
     }
 
     pub(super) fn evaluate(&self, db: &Db<'_>, run: &Doc, source: &Value) -> Result<Value> {
-        let artifact = output::artifact(db, run, source, &self.step)?;
-        let value = artifact
-            .body
+        let (artifact, body) = output::artifact(db, run, source, &self.step)?;
+        let value = body
             .pointer(&self.pointer)
             .ok_or_else(|| err("PreconditionFailed", "workflow condition value is absent"))?;
         let selected = match &self.equals {

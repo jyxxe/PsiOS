@@ -1,5 +1,5 @@
 use crate::{
-    Result,
+    Result, artifact,
     db::{Db, Doc},
     err, require,
 };
@@ -19,7 +19,7 @@ pub(super) fn validate_pointer(pointer: &str) -> Result<()> {
     )
 }
 
-pub(super) fn artifact(db: &Db<'_>, run: &Doc, source: &Value, step: &str) -> Result<Doc> {
+pub(super) fn artifact(db: &Db<'_>, run: &Doc, source: &Value, step: &str) -> Result<(Doc, Value)> {
     let task = db.resolve(&source["task_ref"])?;
     require(
         source["step_id"] == step
@@ -51,5 +51,6 @@ pub(super) fn artifact(db: &Db<'_>, run: &Doc, source: &Value, step: &str) -> Re
         "RecoveryRequired",
         "workflow artifact does not belong to its source Task",
     )?;
-    Ok(artifact)
+    let body = artifact::read(db, &artifact, None)?;
+    Ok((artifact, body))
 }

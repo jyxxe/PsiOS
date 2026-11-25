@@ -61,9 +61,8 @@ pub(super) fn pin(
             .iter()
             .find(|status| status["step_id"] == source.step)
             .ok_or_else(|| err("RecoveryRequired", "workflow input predecessor is missing"))?;
-        let artifact = output::artifact(db, run, predecessor, &source.step)?;
-        let value = artifact
-            .body
+        let (artifact, body) = output::artifact(db, run, predecessor, &source.step)?;
+        let value = body
             .pointer(&source.pointer)
             .filter(|value| value.is_string())
             .ok_or_else(|| {

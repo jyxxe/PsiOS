@@ -87,7 +87,7 @@ enum Cmd {
         #[arg(long, default_value_t = 30)]
         seconds: u64,
     },
-    /// Verify and write the canonical JSON for an Artifact reference from a file or stdin.
+    /// Verify and write stored JSON bytes for an Artifact reference from a file or stdin.
     Artifact {
         #[arg(default_value = "-")]
         file: String,

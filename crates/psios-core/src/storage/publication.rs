@@ -214,10 +214,10 @@ pub(crate) fn reconcile(
     op: &Doc,
     volume: &Doc,
     observation: &Doc,
+    proof: &Value,
 ) -> Result<(Value, Value)> {
     let c = recorded(db, op, volume)?;
     let receipt = &c.body["receipt"];
-    let proof = &observation.body;
     require(
         proof["operation_ref"] == op.reference()
             && proof["checkpoint_ref"] == c.reference()

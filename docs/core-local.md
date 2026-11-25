@@ -48,13 +48,15 @@ ctl wait "$task" > "$workdir/task.json"
 jq '{reference: .result.artifact_refs[0]}' "$workdir/task.json" | ctl call Artifact.Read
 ```
 
-结果也可导出为与 Artifact 引用摘要一致的规范化 JSON。`ctl artifact` 接受任务回执中的固定版本引用，在输出前核对完整 SHA-256。命令默认最多读取 8 MiB，可用 `--max-bytes` 按调用方需要调整。
+结果也可导出为持久存储的原始 JSON 字节。`ctl artifact` 接受任务回执中的固定版本引用，在输出前核对完整 SHA-256。命令默认最多读取 8 MiB，可用 `--max-bytes` 按调用方需要调整。
 
 ```bash
 jq -e '.result.artifact_refs[0]' "$workdir/task.json" | ctl artifact > "$workdir/result.json"
 ```
 
 `Artifact.ReadChunk` 接受 `reference`、以字节计的 `offset` 和 `length`，单块长度为 1 至 131072。返回 `data_base64`、`offset`、`total_bytes` 以及到末尾时为 `null` 的 `next_offset`。各次请求都检查当时的读取权限与制品归属。Rust SDK 的 `Client::artifact_bytes` 可在指定字节上限内合并分块并验证摘要。该入口已用超出单帧上限的真实内核盘点结果验收。[端到端网络制品测试](../tests/test_network.py)
+
+从数据库格式 30 开始，新制品的字节分块与产生它的任务结算在同一 SQLite 事务内提交。分页仅读取请求范围内的块并核对各块摘要。停服执行 `psiosd verify` 时会再核对全部新制品的完整字节摘要。原有内联制品继续使用已签发的引用和原导出字节。只读任务提交结果失败时释放占用，报告存储错误。写操作的回执提交失败时保留原占用，等待核实副作用。[制品存储验收](../tests/test_artifact.py) · [格式 29 升级验收](../tests/artifact_upgrade.py)
 
 `kill -TERM "$daemon_pid"` 请求关闭。再次使用同一目录启动会恢复队列、保留原任务身份和已接受回执。系统服务的打包、首次初始化及升级见[宿主安装指南](host-package.md)。打包单元使用 `/usr/bin/psiosd`。使用过手工单元的主机，迁移前须检查本机单元覆盖和旧二进制路径。服务单元与配置示例使用 `psios` 用户、`/run/psios/api.sock`、`/var/lib/psios` 和独立的 `/var/lib/psios.witness`。[systemd 单元](../contrib/systemd/psiosd.service) · [配置示例](../contrib/systemd/core.json)
 

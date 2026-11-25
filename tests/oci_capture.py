@@ -142,6 +142,8 @@ def main(binaries):
         proof = n.call("Resource.Resolve", {"reference": receipt["capture_ref"]})["value"]
         assert proof["artifact_ref"] == raw and proof["archive_format"] == "DockerImageArchiveV1"
         assert proof["engine_id"] == engine and proof["image"]["config_digest"] == image_id
+        compatible = {"status": "Verified", "profile": "DockerClassicTaglessSaveV1"}
+        assert proof["restore_compatibility"] == receipt["restore_compatibility"] == compatible, proof
         denied(n, "PermissionDenied", "Artifact.ReadChunk", {"reference": raw, "offset": 0, "length": 1})
         remove = {"reference": raw, "reason": "completed standalone capture acceptance"}
         denied(n, "PermissionDenied", "Artifact.Withdraw", remove)
@@ -212,12 +214,17 @@ def main(binaries):
         n.stop()
         subprocess.run(n.daemon + ["verify"], check=True, capture_output=True, timeout=15)
         with sqlite3.connect(n.state / "state.db") as db:
-            pin = db.execute("SELECT artifact,proof FROM oci_image_captures").fetchone()
+            pin = db.execute("SELECT artifact,proof,restore_status FROM oci_image_captures").fetchone()
             db.execute("DELETE FROM oci_image_captures")
         corrupt = subprocess.run(n.daemon + ["verify"], capture_output=True, timeout=15)
         assert corrupt.returncode != 0 and b"OCI capture provenance index is inconsistent" in corrupt.stderr, corrupt
         with sqlite3.connect(n.state / "state.db") as db:
-            db.execute("INSERT INTO oci_image_captures VALUES(?,?)", pin)
+            db.execute("INSERT INTO oci_image_captures VALUES(?,?,?)", pin)
+            db.execute("UPDATE oci_image_captures SET restore_status='Unverified'")
+        downgraded = subprocess.run(n.daemon + ["verify"], capture_output=True, timeout=15)
+        assert downgraded.returncode != 0 and b"OCI capture compatibility evidence disagrees" in downgraded.stderr, downgraded
+        with sqlite3.connect(n.state / "state.db") as db:
+            db.execute("UPDATE oci_image_captures SET restore_status=?", (pin[2],))
         subprocess.run(n.daemon + ["verify"], check=True, capture_output=True, timeout=15)
         print("PASS approved Docker exact-ID capture, real reload, quotas, cancellation, revocation and restart")
     finally:

@@ -269,6 +269,8 @@ Core 核对原会话、模型租约及决策摘要，在一个事务中提交原
 
 制品字节、`LocalOciImageCapture` 来源、`OciImageCapture` 凭据和 Task 回执在同一事务提交。归档可用独立授权的 `Artifact.ReadChunk` 分块读取并核对完整 SHA-256，回收需要独立的 `artifact.withdraw`。取消、进程中断和发布失败不会留下半成品。[真实 Docker 导出和独立重载验收](../tests/oci_capture.py)
 
+捕获会在持久提交前检查原始 tar，并记录 `restore_compatibility`。`Verified` 对应 `DockerClassicTaglessSaveV1`，要求单个无标签镜像，精确匹配配置摘要和有序未压缩层 DiffID。存在 OCI 索引时，两个视图的配置和层必须一致，且索引只直接指向一个镜像。镜像 ID 使用清单摘要、层使用压缩格式或布局不受支持时，原始捕获可保留并报告 `Unsupported`。升级到数据库格式 63 后，旧捕获标为 `Unverified`，其历史回执依旧省略此字段。证明覆盖归档结构及镜像身份。目标引擎空间检查和宿主缓存恢复仍待实现。[归档格式测试](../crates/psios-core/src/apps/restore_archive/tests.rs)
+
 ### 安装和更新时保留 OCI 归档
 
 归档声明使用 `application/vnd.psios.oci-install.v2+json`，正文为 `{"format":"PsiOSLocalOciInstallV2","install":{...},"image_archive_ref":{...}}`。`image_archive_ref` 指定已有的本机 OCI 捕获制品，必须与声明中的 `image_id` 和本机引擎看到的层摘要一致。Ed25519 签名覆盖包含归档引用的完整声明字节。安装和暂存权限须同时覆盖目标、声明、签名密钥和归档。`Application.PrepareArtifactInstall` 和 `Application.PrepareArtifactRelease` 返回同一组审批引用。

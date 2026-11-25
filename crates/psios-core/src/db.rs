@@ -191,7 +191,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     Ok(bytes)
 }
 // Older writers cannot dispatch workflow steps with pinned input mappings.
-pub(super) const CURRENT_FORMAT: u32 = node::service_state::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = agent::model_time::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -382,6 +382,9 @@ impl Store {
                 }
                 if ver < node::service_state::FORMAT {
                     db.c.execute_batch(node::service_state::SCHEMA)?;
+                }
+                if ver < agent::model_time::FORMAT {
+                    db.c.execute_batch(agent::model_time::SCHEMA)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

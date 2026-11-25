@@ -1,6 +1,7 @@
 //! The local runtime coordinates model decisions with (and never independently executes) broker Tasks.
 mod lease;
 pub mod mail;
+pub(crate) mod model_time;
 mod queue;
 mod registry;
 use crate::{
@@ -332,7 +333,7 @@ pub fn claim(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let s = db.of(&p.session_id, "Session")?;
     let dependencies = provider(db, &s, actor)?;
     let (_, skill, model) = &dependencies;
-    let clock = lease::BootClock::sample()?;
+    let clock = lease::Clock::sample()?;
     if let Some(previous) = replay_claim(db, &s, skill, model, &clock, &p.key)? {
         return Ok(previous);
     }
@@ -350,7 +351,7 @@ pub fn claim(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     require(has_turn(&s), "QuotaExceeded", "session turn limit reached")?;
     let ctx = context(db, &s, skill, model)?;
     allocate_turn(db, &s, &dependencies, &clock, &p.key, false, ctx)?
-        .ok_or_else(|| err("QuotaExceeded", "root model call budget exhausted"))
+        .map_err(model_time::ClaimRefusal::error)
 }
 
 fn lease_info(lease: &str, expires: &str, turn: u32, ctx: Value, recovered: bool) -> Value {
@@ -363,7 +364,7 @@ fn replay_claim(
     s: &Doc,
     skill: &Doc,
     model: &Doc,
-    clock: &lease::BootClock,
+    clock: &lease::Clock,
     key: &str,
 ) -> Result<Option<Value>> {
     let previous: Option<(String, String, u32, Option<Value>)> = db.c.query_row(
@@ -386,7 +387,7 @@ fn replay_claim(
     Ok(Some(lease_info(&lease, &until, turn, ctx, true)))
 }
 
-fn model_has_slot(db: &Db<'_>, clock: &lease::BootClock, model: &Doc) -> Result<bool> {
+fn model_has_slot(db: &Db<'_>, clock: &lease::Clock, model: &Doc) -> Result<bool> {
     let active = lease::model_slots(db, clock, &model.id)?;
     Ok(u64::from(active) < model.spec["max_in_flight"].as_u64().unwrap_or(4))
 }
@@ -395,29 +396,28 @@ fn has_turn(s: &Doc) -> bool {
     s.body["turn"].as_u64().unwrap() < s.body["max_turns"].as_u64().unwrap()
 }
 
-// None is returned only if the root budget refused the reservation. Other
-// errors roll back the authority transaction, including the call charge.
+// Budget pressure is a scheduling decision. Persistence errors roll back the
+// lease, the call charge and the time reservation together.
 fn allocate_turn(
     db: &Db<'_>,
     s: &Doc,
     dependencies: &(Doc, Doc, Doc),
-    clock: &lease::BootClock,
+    clock: &lease::Clock,
     key: &str,
     queued: bool,
     ctx: Value,
-) -> Result<Option<Value>> {
+) -> Result<std::result::Result<Value, model_time::ClaimRefusal>> {
     let (d, _, m) = dependencies;
-    if db.c.execute(
-        "UPDATE model_budgets SET used=used+1 WHERE budget=?1 AND used<maximum",
-        [d.body["budget_ref"]["resource_id"].as_str().unwrap()],
-    )? == 0
-    {
-        return Ok(None);
-    }
+    let budget = d.body["budget_ref"]["resource_id"].as_str().unwrap();
+    let configured_ms = m.spec["lease_seconds"].as_i64().unwrap() * 1000;
+    let window = match model_time::window(db, budget, clock, configured_ms)? {
+        Ok(window) => window,
+        Err(refusal) => return Ok(Err(refusal)),
+    };
     let turn = s.body["turn"].as_u64().unwrap() as u32 + 1;
     let lease = id("model-call");
-    let seconds = m.spec["lease_seconds"].as_i64().unwrap();
-    let until = after(seconds);
+    let until = (chrono::Utc::now() + chrono::Duration::milliseconds(window.millis))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     db.c.execute(
         "INSERT INTO session_turns(session,turn,lease,claim_key,expires,boot_id,deadline_boot_ms,queue_model)
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
@@ -427,23 +427,28 @@ fn allocate_turn(
             lease,
             key,
             until,
-            clock.boot_id,
-            clock.millis + seconds * 1000,
+            clock.boot.boot_id,
+            clock.boot.millis + window.millis,
             queued.then_some(&m.id),
         ],
     )?;
+    window.charge(db, clock, budget, &lease)?;
     let mut b = s.body.clone();
     b["lifecycle"] = json!("ModelInFlight");
     b["turn"] = json!(turn);
     b["current_lease"] = json!(lease);
     b["lease_until"] = json!(until);
-    let usage = db.record("ModelUsage", &s.owner, json!({
+    let mut usage = json!({
         "session_id": s.id, "call_id": lease, "model_ref": m.reference(), "budget_ref": d.body["budget_ref"],
         "input_bytes": canonical(&ctx).len(), "reserved_calls": 1, "issued_at": now()
-    }))?;
+    });
+    if window.metered {
+        usage["reserved_lease_ms"] = json!(window.millis);
+    }
+    let usage = db.record("ModelUsage", &s.owner, usage)?;
     b["current_usage_ref"] = usage.reference();
     db.status(s, b)?;
-    Ok(Some(lease_info(&lease, &until, turn, ctx, false)))
+    Ok(Ok(lease_info(&lease, &until, turn, ctx, false)))
 }
 
 #[derive(Deserialize)]
@@ -469,7 +474,8 @@ fn settle_usage(
     model: &Doc,
     actor: &str,
     call: &str,
-    tokens: ModelTokenUsage,
+    tokens: Option<ModelTokenUsage>,
+    elapsed_ms: Option<i64>,
 ) -> Result<Value> {
     let usage = if let Some(reference) = s.body.get("current_usage_ref") {
         db.resolve(reference)?
@@ -499,23 +505,30 @@ fn settle_usage(
                 .is_none_or(|r| *r == s.body["budget_ref"])
             && usage.body["session_id"] == s.id
             && usage.body["model_ref"] == model.reference()
-            && usage.body.get("reported_tokens").is_none(),
+            && usage.body.get("reported_tokens").is_none()
+            && usage.body.get("authority_elapsed_lease_ms").is_none(),
         "RecoveryRequired",
         "model reservation mismatch",
     )?;
     let mut body = usage.body.clone();
     body["budget_ref"] = s.body["budget_ref"].clone();
-    body["reported_tokens"] = json!(tokens);
-    body["measurement_source"] = json!("ProviderReported");
-    body["provider_principal_id"] = json!(actor);
-    body["reported_at"] = json!(now());
+    if let Some(tokens) = tokens {
+        body["reported_tokens"] = json!(tokens);
+        body["measurement_source"] = json!("ProviderReported");
+        body["provider_principal_id"] = json!(actor);
+        body["reported_at"] = json!(now());
+    }
+    if let Some(elapsed) = elapsed_ms {
+        body["authority_elapsed_lease_ms"] = json!(elapsed);
+        body["lease_measurement_source"] = json!("LinuxBoottime");
+    }
     Ok(db.status(&usage, body)?.reference())
 }
 
 pub fn respond(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let p: Respond = decode(p)?;
     let s = db.of(&p.session_id, "Session")?;
-    let (_, skill, model) = provider(db, &s, actor)?;
+    let (delegation, skill, model) = provider(db, &s, actor)?;
     let bytes = canonical(&p.decision);
     require(
         bytes.len() as u64 <= model.spec["max_output_bytes"].as_u64().unwrap(),
@@ -541,10 +554,11 @@ pub fn respond(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         )?;
         return Ok(receipt);
     }
+    let clock = lease::Clock::sample()?;
     require(
         state(&s) == "ModelInFlight"
             && s.body["current_lease"] == p.lease_id
-            && lease::BootClock::sample()?.current(db, &s)?,
+            && clock.current(db, &s)?,
         "Fenced",
         "model response outside current lease",
     )?;
@@ -582,10 +596,23 @@ pub fn respond(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             b["reason"] = json!(reason);
         }
     }
-    let usage_ref = p
-        .usage
-        .map(|tokens| settle_usage(db, &s, &model, actor, &p.lease_id, tokens))
-        .transpose()?;
+    let budget = delegation.body["budget_ref"]["resource_id"]
+        .as_str()
+        .unwrap();
+    let elapsed = model_time::settle(db, &clock, &p.lease_id, budget)?;
+    let usage_ref = if p.usage.is_some() || elapsed.is_some() {
+        Some(settle_usage(
+            db,
+            &s,
+            &model,
+            actor,
+            &p.lease_id,
+            p.usage,
+            elapsed,
+        )?)
+    } else {
+        None
+    };
     b["current_lease"] = Value::Null;
     b.as_object_mut().unwrap().remove("current_usage_ref");
     let saved = db.status(&s, b)?;

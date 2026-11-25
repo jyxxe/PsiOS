@@ -6,6 +6,7 @@ import signal
 import subprocess
 import time
 
+from model_time_upgrade import open_lease
 from support import Failure, Node
 
 
@@ -27,6 +28,11 @@ def exercise(binaries):
 
         original = grant()
         identity = status(original)
+        model_limit = 16_000
+        agent_token, provider_token, budget, claim, lease = open_lease(node, model_limit)
+        response = {"session_id": claim["session_id"], "lease_id": lease["lease_id"],
+                    "decision": {"action": "finish", "summary": "original clock"}}
+        assert node.call("Budget.Get", budget, agent_token)["model_lease_ms_charged"] == model_limit
         node.stop()
         pidfile = node.base / "namespace-pid"
         wrapper = subprocess.Popen(["unshare", "--time", "--fork", "--kill-child=TERM", "--boottime", "30",
@@ -54,6 +60,13 @@ def exercise(binaries):
             else:
                 raise AssertionError("old grant was used under a different clock")
             assert status(grant()) == identity
+            try:
+                node.call("Model.Respond", response, provider_token)
+            except Failure as error:
+                assert error.code in ("PermissionDenied", "Fenced"), error
+            else:
+                raise AssertionError("metered lease accepted time from another namespace")
+            assert node.call("Budget.Get", budget, agent_token)["model_lease_ms_charged"] == model_limit
         finally:
             if wrapper.poll() is None:
                 if pid is not None:
@@ -71,7 +84,12 @@ def exercise(binaries):
                     raise
         node.start()
         assert status(original) == identity
-        print("PASS authority survives a namespace restart; only matching clock evidence authorizes the old grant")
+        receipt = node.call("Model.Respond", response, provider_token)
+        usage = node.call("Resource.Resolve", {"reference": receipt["usage_ref"]})["value"]
+        elapsed = usage["authority_elapsed_lease_ms"]
+        assert 1 <= elapsed < model_limit
+        assert node.call("Budget.Get", budget, agent_token)["model_lease_ms_charged"] == elapsed
+        print("PASS authority preserves grants and settles model time only under the original clock")
     finally:
         node.close()
 

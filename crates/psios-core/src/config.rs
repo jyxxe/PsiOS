@@ -30,6 +30,8 @@ pub struct Config {
     pub queue_limit: u32,
     #[serde(default)]
     pub principal_queue_limit: Option<u32>,
+    #[serde(default)]
+    pub read_result_bytes_per_principal: Option<i64>,
     #[serde(default = "default_recovery_queue")]
     pub recovery_queue_limit: u32,
     #[serde(default = "default_tick")]
@@ -138,6 +140,7 @@ impl Config {
             socket: path.join("api.sock"),
             queue_limit: default_queue(),
             principal_queue_limit: None,
+            read_result_bytes_per_principal: None,
             recovery_queue_limit: default_recovery_queue(),
             workers: default_workers(),
             services: Vec::new(),
@@ -216,6 +219,13 @@ impl Config {
             (1..=86_400).contains(&self.backup_capture_timeout_seconds),
             "InvalidArgument",
             "backup capture timeout must be between 1 and 86400 seconds",
+        )?;
+        require(
+            self.read_result_bytes_per_principal.is_none_or(|limit| {
+                (artifact::capacity::RESERVATION..=1024 * 1024 * 1024 * 1024).contains(&limit)
+            }),
+            "InvalidArgument",
+            "read result quota must be between 4 MiB and 1 TiB",
         )?;
         require(
             (1..=16).contains(&self.workers)

@@ -1,6 +1,6 @@
 //! A full ordinary queue must leave room to verify its unresolved effects.
 use crate::{
-    Empty, Result,
+    Empty, Result, artifact,
     db::{Db, Doc},
     decode, err,
     host::Action,
@@ -55,10 +55,14 @@ pub(crate) fn principal(db: &Db<'_>, actor: &str, params: &Value) -> Result<Valu
     let _: Empty = decode(params)?;
     policy::can(db, actor, "task.submit")?;
     let limit = db.cfg.principal_queue_limit.unwrap_or(db.cfg.queue_limit);
-    Ok(json!({
+    let mut view = json!({
         "principal_id":actor,
         "ordinary":{"used":principal_ordinary(db, actor)?,"limit":limit},
-    }))
+    });
+    if let Some(byte_limit) = db.cfg.read_result_bytes_per_principal {
+        view["read_results"] = artifact::capacity::principal(db, actor, byte_limit)?;
+    }
+    Ok(view)
 }
 
 fn held_operation(db: &Db<'_>, target: &Doc) -> Result<Option<String>> {

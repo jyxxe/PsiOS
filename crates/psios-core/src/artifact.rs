@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 pub(crate) mod availability;
+pub(crate) mod capacity;
 pub(crate) mod repair;
 pub(crate) mod retention;
 

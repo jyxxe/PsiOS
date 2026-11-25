@@ -1804,3 +1804,29 @@ fn file_rename_recovery_distinguishes_unprepared_and_witnessed_original() {
     assert_eq!(execute(&mut store, &read)["content"], "stable bytes");
     assert!(!data.join("after").exists());
 }
+
+#[test]
+fn result_byte_ceiling_checks_json_encoding_before_publication() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = Config::local(&directory.path().join("bounded"));
+    config.read_result_bytes_per_principal = Some(artifact::capacity::RESERVATION);
+    Store::init(&config).unwrap();
+    let mut store = Store::open(config).unwrap();
+    let task = submit(&mut store, "system.status", json!({}));
+    assert_eq!(claim(&mut store), task);
+    let work = dispatch(&mut store, &task);
+    let bytes = "\0".repeat(artifact::capacity::RESERVATION as usize / 6);
+    store
+        .transaction("large-read-result", |db| {
+            broker::finish(db, &work, Ok(json!({"bytes":bytes})))
+        })
+        .unwrap();
+    let state = call(&mut store, "Task.Get", json!({"id":task})).unwrap();
+    assert_eq!(state["lifecycle"], "Failed");
+    assert_eq!(state["outcome_knowledge"], "Known");
+    assert_eq!(state["conditions"][0]["type"], "QuotaExceeded");
+    assert_eq!(state["result"]["artifact_refs"], json!([]));
+    let usage = call(&mut store, "Task.Admission", json!({})).unwrap();
+    assert_eq!(usage["read_results"]["retained_bytes"], "0");
+    assert_eq!(usage["read_results"]["reserved_bytes"], "0");
+}

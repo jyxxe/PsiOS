@@ -125,7 +125,8 @@ impl Client {
                 return Err(ApiError::new("DeadlineExceeded", "upload key expired").into());
             }
             Some("Withdrawn") => {
-                return Err(ApiError::new("ResultEvicted", "published upload was withdrawn").into());
+                let withdrawn = ApiError::new("ResultEvicted", "published upload was withdrawn");
+                return Err(withdrawn.into());
             }
             Some("Discarded") => {
                 return Err(ApiError::new("PreconditionFailed", "upload key was discarded").into());

@@ -462,7 +462,7 @@ impl Store {
                     db.c.execute_batch(agent::inference::SCHEMA)?;
                 }
                 if ver < apps::stop::FORMAT {
-                    db.c.execute_batch(apps::stop::SCHEMA)?;
+                    apps::stop::migrate(db)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

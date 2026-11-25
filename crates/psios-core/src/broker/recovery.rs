@@ -1,6 +1,7 @@
 use super::*;
 
 pub fn recover(db: &Db<'_>) -> Result<()> {
+    apps::stop::verify_active(db.c)?;
     let active = db
         .c
         .prepare("SELECT task,phase,attempt FROM queue WHERE phase IN ('Claimed','Dispatched')")?
@@ -40,7 +41,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             && apps::restart::not_dispatched(db, &operation(db, &t)?)?;
         let stop_undispatched = phase == "Dispatched"
             && matches!(tool, "application.stop" | apps::stop::TOOL)
-            && apps::stop::not_dispatched(db, &operation(db, &t)?, tool == apps::stop::TOOL)?;
+            && apps::stop::not_dispatched(db, &operation(db, &t)?)?;
         let image_undispatched = phase == "Dispatched"
             && tool == apps::restore_image::TOOL
             && apps::restore_image::not_dispatched(db, &operation(db, &t)?)?;

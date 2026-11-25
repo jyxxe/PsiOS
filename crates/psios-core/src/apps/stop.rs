@@ -7,16 +7,20 @@ use crate::{
     host::{Checkpoint, Target, Work},
     require,
 };
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 pub(crate) const TOOL: &str = "application.continue_stop";
 pub(crate) const FORMAT: u32 = 70;
-pub(crate) const SCHEMA: &str = "CREATE TABLE oci_stop_cleanups (
+const SCHEMA: &str = "CREATE TABLE oci_stop_cleanups (
     original TEXT PRIMARY KEY, cleanup TEXT NOT NULL UNIQUE
 ) STRICT;";
 
+mod verification;
+pub(crate) use verification::{verify, verify_active};
+
+const EPOCH: &str = "oci-stop-checkpoint-epoch";
 const INTENT: &str = "OCIStopIntent";
 const STOP: &str = "OCIStopDispatch";
 const REMOVE: &str = "OCIStopRemoval";
@@ -38,10 +42,15 @@ pub(crate) struct Prepared {
     started_at: String,
 }
 
-fn original_app_binding(db: &Db<'_>, app: &Doc, op: &Doc, volume: Option<&Doc>) -> Result<Value> {
-    let instance = db.resolve(&app.body["instance_ref"])?;
-    let plan = db.resolve(&op.body["plan_ref"])?;
-    let held: bool = db.c.query_row(
+fn original_app_binding(
+    conn: &Connection,
+    app: &Doc,
+    op: &Doc,
+    volume: Option<&Doc>,
+) -> Result<Value> {
+    let instance = crate::db::resolve(conn, &app.body["instance_ref"])?;
+    let plan = crate::db::resolve(conn, &op.body["plan_ref"])?;
+    let held: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM holds WHERE volume=?1 AND holder=?2)",
         params![app.id, op.id],
         |row| row.get(0),
@@ -66,8 +75,8 @@ fn original_app_binding(db: &Db<'_>, app: &Doc, op: &Doc, volume: Option<&Doc>) 
         "original OCI stop identity or exclusive application hold is missing",
     )?;
     let attachment = if let Some(v) = volume {
-        let attachment = db.resolve(&v.body["attachment_refs"][0])?;
-        let held: bool = db.c.query_row(
+        let attachment = crate::db::resolve(conn, &v.body["attachment_refs"][0])?;
+        let held: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM holds WHERE volume=?1 AND holder=?2)",
             params![v.id, app.id],
             |row| row.get(0),
@@ -122,14 +131,26 @@ fn id(kind: &str, operation: &str) -> String {
 
 fn bound(doc: &Doc, kind: &str, op: &Doc) -> bool {
     doc.kind == kind
-        && doc.rev == 1
+        && (kind == INTENT || doc.rev == 1)
         && doc.owner == op.owner
         && doc.spec["operation_id"] == op.id
         && doc.body["plan_ref"] == op.body["plan_ref"]
         && doc.body["effect_id"] == op.body["effect_refs"][0]["resource_id"]
 }
 
-fn create(db: &Db<'_>, work: &Work, kind: &str, mut body: Value) -> Result<()> {
+pub(crate) fn migrate(db: &Db<'_>) -> Result<()> {
+    db.c.execute_batch(SCHEMA)?;
+    db.create(
+        "OCIStopCheckpointEpoch",
+        EPOCH,
+        crate::policy::SYSTEM,
+        json!({}),
+        json!({"format":FORMAT}),
+    )?;
+    Ok(())
+}
+
+fn create(db: &Db<'_>, work: &Work, kind: &str, mut body: Value) -> Result<Doc> {
     body["plan_ref"] = work.op.body["plan_ref"].clone();
     body["effect_id"] = json!(work.effect.id);
     db.create(
@@ -138,21 +159,39 @@ fn create(db: &Db<'_>, work: &Work, kind: &str, mut body: Value) -> Result<()> {
         &work.op.owner,
         json!({"operation_id":work.op.id}),
         body,
-    )?;
+    )
+}
+
+fn start_intent(db: &Db<'_>, work: &Work, mut body: Value) -> Result<()> {
+    body["operation_ref"] = work.op.reference();
+    body["effect_ref"] = work.effect.reference();
+    body["run_ref"] = work.run.reference();
+    create(db, work, INTENT, body)?;
+    Ok(())
+}
+
+fn advance(db: &Db<'_>, work: &Work, intent: &Doc, kind: &str, body: Value) -> Result<()> {
+    let checkpoint = create(db, work, kind, body)?;
+    let mut state = intent.body.clone();
+    state[if kind == REMOVE {
+        "removal_ref"
+    } else {
+        "dispatch_ref"
+    }] = checkpoint.reference();
+    db.status(intent, state)?;
     Ok(())
 }
 
 pub(crate) fn begin(db: &Db<'_>, work: &Work) -> Result<()> {
-    let binding = original_app_binding(db, &work.target, &work.op, work.volume.as_ref())?;
-    create(db, work, INTENT, json!({"binding":binding}))
+    let binding = original_app_binding(db.c, &work.target, &work.op, work.volume.as_ref())?;
+    start_intent(db, work, json!({"binding":binding}))
 }
 
-pub(crate) fn not_dispatched(db: &Db<'_>, op: &Doc, cleanup: bool) -> Result<bool> {
-    let Some(intent) = db.find(&id(INTENT, &op.id))? else {
+pub(crate) fn not_dispatched(db: &Db<'_>, op: &Doc) -> Result<bool> {
+    let Some(intent) = verification::intent(db.c, op, verification::epoch(db.c)?)? else {
         return Ok(false);
     };
-    let boundary = if cleanup { CLEANUP } else { STOP };
-    Ok(bound(&intent, INTENT, op) && db.find(&id(boundary, &op.id))?.is_none())
+    Ok(intent.dispatch.is_none())
 }
 
 fn read_checkpoint(db: &Db<'_>, kind: &str, op: &Doc) -> Result<Doc> {
@@ -275,7 +314,7 @@ pub(crate) fn run(
 }
 
 pub(crate) fn record(db: &Db<'_>, work: &Work, sample: &Value, removing: bool) -> Result<()> {
-    let binding = original_app_binding(db, &work.target, &work.op, work.volume.as_ref())?;
+    let binding = original_app_binding(db.c, &work.target, &work.op, work.volume.as_ref())?;
     let intent = read_checkpoint(db, INTENT, &work.op)?;
     require(
         intent.body["binding"] == binding && exact_instance(&binding, sample),
@@ -298,9 +337,10 @@ pub(crate) fn record(db: &Db<'_>, work: &Work, sample: &Value, removing: bool) -
             "OCI stop checkpoint is missing invocation identity",
         )?;
     }
-    create(
+    advance(
         db,
         work,
+        &intent,
         if removing { REMOVE } else { STOP },
         json!({"binding":binding,"observation":sample}),
     )
@@ -330,10 +370,22 @@ pub(crate) fn prepare(db: &Db<'_>, app: &Doc, request: &Request) -> Result<Prepa
         .as_str()
         .map(|id| db.of(id, "Volume"))
         .transpose()?;
-    let binding = original_app_binding(db, app, &original, volume.as_ref())?;
-    let checkpoint = read_checkpoint(db, STOP, &original)?;
+    let binding = original_app_binding(db.c, app, &original, volume.as_ref())?;
+    let intent =
+        verification::intent(db.c, &original, verification::epoch(db.c)?)?.ok_or_else(|| {
+            err(
+                "RecoveryRequired",
+                "legacy OCI stop has no continuation checkpoint",
+            )
+        })?;
+    let checkpoint = intent.dispatch.ok_or_else(|| {
+        err(
+            "RecoveryRequired",
+            "original OCI stop dispatch checkpoint is missing",
+        )
+    })?;
     require(
-        db.find(&id(REMOVE, &original.id))?.is_none(),
+        intent.removal.is_none(),
         "OutcomeUnknown",
         "original OCI removal may have been sent; reconcile its absence before proceeding",
     )?;
@@ -426,7 +478,7 @@ pub(crate) fn begin_cleanup(db: &Db<'_>, work: &Work, prepared: &Prepared) -> Re
         "Conflict",
         "the unresolved stop already has an active removal continuation",
     )?;
-    create(db, work, INTENT, json!({"custody":custody(prepared)}))
+    start_intent(db, work, json!({"custody":custody(prepared)}))
 }
 
 pub(crate) fn record_cleanup(
@@ -445,9 +497,10 @@ pub(crate) fn record_cleanup(
         "Fenced",
         "OCI cleanup lost its exact removal authority",
     )?;
-    create(
+    advance(
         db,
         work,
+        &intent,
         CLEANUP,
         json!({"custody":custody(&prepared),"observation":sample}),
     )
@@ -503,10 +556,12 @@ pub(crate) fn original_ready(db: &Db<'_>, app: &Doc, op: &Doc, volume: Option<&D
     )?;
     // Retain the existing absence-only reconciliation path for in-flight
     // stop operations from before OCIStopIntent was introduced.
-    if db.find(&id(INTENT, &op.id))?.is_some() {
-        let binding = original_app_binding(db, app, op, volume)?;
+    if let Some(intent) = verification::intent(db.c, op, verification::epoch(db.c)?)? {
+        let binding = original_app_binding(db.c, app, op, volume)?;
         require(
-            read_checkpoint(db, STOP, op)?.body["binding"] == binding,
+            intent
+                .dispatch
+                .is_some_and(|checkpoint| checkpoint.body["binding"] == binding),
             "RecoveryRequired",
             "original OCI stop checkpoint identity changed",
         )?;
@@ -520,7 +575,8 @@ pub(crate) fn settle_cleanup(db: &Db<'_>, work: &Work, observed: &Value) -> Resu
         .as_ref()
         .ok_or_else(|| err("Fenced", "OCI stop cleanup input unavailable"))?;
     let recorded = read_checkpoint(db, CLEANUP, &work.op)?;
-    let binding = original_app_binding(db, &work.target, &prepared.original, work.volume.as_ref())?;
+    let binding =
+        original_app_binding(db.c, &work.target, &prepared.original, work.volume.as_ref())?;
     require(
         active(db, &prepared.original.id)?.as_deref() == Some(work.op.id.as_str())
             && prepared.binding == binding
@@ -546,7 +602,7 @@ pub(crate) fn reconcile_cleanup(
         .as_str()
         .map(|id| db.of(id, "Volume"))
         .transpose()?;
-    let binding = original_app_binding(db, app, &original, volume.as_ref())?;
+    let binding = original_app_binding(db.c, app, &original, volume.as_ref())?;
     let prepared = &recorded.body["custody"];
     require(
         active(db, &original.id)?.as_deref() == Some(op.id.as_str())

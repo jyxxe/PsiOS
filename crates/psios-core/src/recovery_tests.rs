@@ -1126,6 +1126,133 @@ fn settle_oci_catalog(s: &mut Store, task: &str) -> Value {
     .unwrap()
 }
 
+#[test]
+fn oci_stop_recovery_rejects_missing_and_mismatched_active_custody() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_, mut store) = initialized(directory.path());
+    let (install, _) = accepted_artifact_install(&mut store);
+    let installed = settle_oci_catalog(&mut store, &install);
+    let target = |reference: &Value| {
+        json!({
+            "id":reference["resource_id"],"expected_resource_version":reference["version"],
+        })
+    };
+    let start = submit(
+        &mut store,
+        "application.start",
+        target(&installed["application_ref"]),
+    );
+    approve(&mut store, &start);
+    assert_eq!(claim(&mut store), start);
+    let start = dispatch(&mut store, &start);
+    let container = "a".repeat(64);
+    let running = json!({"engine_id":"oci-test-engine","container_id":container,
+        "process_running":true,"observed_at":now()});
+    let app = store
+        .transaction("start-fixture", |db| {
+            start.checkpoint(
+                db,
+                host::Checkpoint::OciStart {
+                    engine: "oci-test-engine",
+                    container: &container,
+                },
+            )?;
+            broker::finish(db, &start, Ok(running))?;
+            Ok(db.of(&start.target.id, "Application")?.reference())
+        })
+        .unwrap();
+    let stop_task = submit(&mut store, "application.stop", target(&app));
+    assert_eq!(claim(&mut store), stop_task);
+    let stop = dispatch(&mut store, &stop_task);
+    let before = json!({"engine_id":"oci-test-engine","container_id":container,
+        "start_operation_id":start.op.id,"started_at":"2026-11-25T12:00:00Z",
+        "docker_state":"running","process_running":true,"runtime_state":"Running"});
+    store
+        .transaction("stop-checkpoint", |db| {
+            stop.checkpoint(db, host::Checkpoint::OciStop(&before))
+        })
+        .unwrap();
+    store.transaction("recover-stop", broker::recover).unwrap();
+    let stopped = call(&mut store, "Task.Get", json!({"id":stop_task})).unwrap();
+    assert_eq!(stopped["outcome_knowledge"], "Unknown");
+    let original = &stopped["operation_refs"][0];
+    let health = submit(&mut store, "application.health", target(&app));
+    assert_eq!(claim(&mut store), health);
+    let work = dispatch(&mut store, &health);
+    let mut exited = before;
+    exited["docker_state"] = json!("exited");
+    exited["process_running"] = json!(false);
+    exited["runtime_state"] = json!("Exited");
+    exited["exit_confirmed"] = json!(true);
+    store
+        .transaction("observe-exit", |db| {
+            broker::finish(db, &work, Ok(exited.clone()))
+        })
+        .unwrap();
+    let health = call(&mut store, "Task.Get", json!({"id":health})).unwrap();
+    let tool = apps::stop::TOOL;
+    let grant = call(
+        &mut store,
+        "Grant.Issue",
+        json!({
+            "principal_id":"local-owner","actions":["task.submit","task.read",tool],
+            "tool_targets":[app["resource_id"]],"ttl_seconds":90,"units":2,
+        }),
+    )
+    .unwrap();
+    let request = call(&mut store, "Task.Prepare", json!({
+        "tool":tool,"key":id("cleanup"),"delegation_id":grant["delegation_ref"]["resource_id"],
+        "input":{"target":target(&app),"operation_ref":original,"evidence_ref":health["result"]["artifact_refs"][0]},
+    })).unwrap();
+    let cleanup = call(&mut store, "Task.Submit", request).unwrap();
+    let cleanup = cleanup["task_id"].as_str().unwrap();
+    approve(&mut store, cleanup);
+    assert_eq!(claim(&mut store), cleanup);
+    let work = dispatch(&mut store, cleanup);
+    store
+        .transaction("remove-checkpoint", |db| {
+            work.checkpoint(db, host::Checkpoint::OciStopCleanup(&exited))
+        })
+        .unwrap();
+    store
+        .transaction("recover-removal", broker::recover)
+        .unwrap();
+
+    store
+        .transaction("validate-damaged-active-oci-stop", |db| {
+            apps::stop::verify(db.c)?;
+            for (statement, resource) in [
+                (
+                    "DELETE FROM oci_stop_cleanups WHERE cleanup=?1",
+                    work.op.id.clone(),
+                ),
+                (
+                    "UPDATE oci_stop_cleanups SET original='unrelated-stop' WHERE cleanup=?1",
+                    work.op.id.clone(),
+                ),
+                (
+                    "DELETE FROM versions WHERE id=?1",
+                    format!("oci-stop-intent-{}", stop.op.id),
+                ),
+                (
+                    "DELETE FROM versions WHERE id=?1",
+                    format!("oci-stop-cleanup-dispatch-{}", work.op.id),
+                ),
+                ("DELETE FROM holds WHERE volume=?1", start.target.id.clone()),
+            ] {
+                db.c.execute_batch("SAVEPOINT corrupt_oci_stop")?;
+                assert!(db.c.execute(statement, [&resource])? >= 1);
+                let failure =
+                    broker::recover(db).expect_err("startup must reject damaged OCI stop custody");
+                assert_eq!(failure.0.code, "RecoveryRequired", "{statement}");
+                assert!(apps::stop::verify(db.c).is_err(), "{statement}");
+                db.c.execute_batch("ROLLBACK TO corrupt_oci_stop; RELEASE corrupt_oci_stop")?;
+            }
+            apps::stop::verify(db.c)
+        })
+        .unwrap();
+}
+
 fn install_agent_app(s: &mut Store, agent: &Value, name: &str) -> Value {
     let token = agent["token"].as_str().unwrap();
     let allow = call(s,"Grant.Issue",json!({"principal_id":agent["principal_id"],"units":4,"ttl_seconds":90,

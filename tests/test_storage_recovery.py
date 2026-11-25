@@ -6,7 +6,6 @@ import resource
 import signal
 import sqlite3
 import subprocess
-import time
 import unittest
 
 from support import Failure, Node, target
@@ -126,41 +125,46 @@ class StorageRecoveryTests(unittest.TestCase):
         with copied.open("rb") as file:
             self.assertEqual(hashlib.file_digest(file, "sha256").hexdigest(), self.digest)
 
-    def test_restore_write_failure_reclaims_readonly_stage_without_restart(self):
+    def test_restore_checkpoint_failure_reclaims_readonly_stage_without_restart(self):
         nested = self.source.parent / "readonly"
         nested.mkdir(mode=0o700)
-        with (nested / "large").open("wb") as file:
-            file.truncate(32 * 1024 * 1024)
+        payload = b"retained payload\n"
+        (nested / "payload").write_bytes(payload)
         nested.chmod(0o555)
         backup = self.n.perform("backup.create", target(self.volume))
-        task_id = self.n.submit("backup.restore", target(backup))
-        stop_at = time.monotonic() + 15
-        while True:
-            partial = next(self.volumes.glob(".stage-*/data/readonly/large"), None)
-            if partial is not None:
-                break
-            self.assertLess(time.monotonic(), stop_at, "restore stage did not appear")
-            time.sleep(0.001)
+        previous = sorted(self.volumes.iterdir())
+        daemon_pid = self.n.process.pid
+        with closing(sqlite3.connect(self.n.state / "state.db", timeout=10)) as database:
+            # The checkpoint follows content verification, restored modes and sync,
+            # and precedes the rename that would make the restored volume final.
+            with database:
+                database.execute("""CREATE TRIGGER lose_restore_checkpoint BEFORE INSERT ON versions
+                    WHEN NEW.kind='RestorePublicationCheckpoint'
+                    BEGIN SELECT RAISE(ABORT, 'injected restore checkpoint failure'); END""")
+            try:
+                task_id = self.n.submit("backup.restore", target(backup))
+                failed = self.n.wait(task_id)
+            finally:
+                with database:
+                    database.execute("DROP TRIGGER lose_restore_checkpoint")
 
-        self.n.process.send_signal(signal.SIGSTOP)
-        try:
-            _, stopped = os.waitpid(self.n.process.pid, os.WUNTRACED)
-            self.assertTrue(os.WIFSTOPPED(stopped))
-            stage = partial.parents[2]
-            self.assertTrue(partial.exists())
-            # The real new-file write after copying and applying restored modes must fail.
-            (stage / "identity").touch(exist_ok=False)
-        finally:
-            self.n.process.send_signal(signal.SIGCONT)
-        failed = self.n.wait(task_id)
         self.assertEqual((failed["lifecycle"], failed["outcome_knowledge"]), ("Failed", "Known"))
-        self.assertEqual(failed["conditions"][0]["type"], "StorageUnavailable", failed)
-        self.assertEqual(list(self.volumes.glob(".stage-*")), [])
+        condition = failed["conditions"][0]
+        self.assertEqual((condition["type"], condition["message"]),
+                         ("StorageUnavailable", "state database error"), failed)
+        self.assertEqual(failed["result"]["artifact_refs"], [])
+        operation = failed["operation_refs"][0]["resource_id"]
+        self.assertEqual(self.n.get(f"restore-intent-{operation}")["value"]["backup_ref"], backup)
+        with self.assertRaises(Failure) as missing:
+            self.n.get(f"restore-publication-{operation}")
+        self.assertEqual(missing.exception.code, "NotFound")
+        self.assertEqual(sorted(self.volumes.iterdir()), previous)
         self.assertIsNone(self.n.process.poll())
         restored = self.n.perform("backup.restore", target(backup))
         data = self.volumes / restored["resource_id"] / "data" / "readonly"
+        self.assertEqual(self.n.process.pid, daemon_pid)
         self.assertEqual(data.stat().st_mode & 0o777, 0o555)
-        self.assertEqual((data / "large").stat().st_size, 32 * 1024 * 1024)
+        self.assertEqual((data / "payload").read_bytes(), payload)
 
     def test_activation_verifies_restored_tree_after_restart_and_backup_deletion(self):
         clone = self.n.perform("backup.restore", target(self.backup))

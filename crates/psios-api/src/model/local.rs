@@ -1,12 +1,15 @@
 //! A local, structured inventory provider over a UID-checked Unix socket.
-use super::{ModelDecision, ModelOutput, ModelTokenUsage, SessionModel};
+use super::{
+    ModelDecision, ModelInferenceFailure, ModelInferenceOutcome, ModelOutput, ModelTokenUsage,
+    SessionModel,
+};
 use crate::{ApiError, ApiResult, ResourceRef, invalid, parse};
 use http_body_util::{BodyExt, Full};
 use hyper::{Request, StatusCode, body::Bytes, client::conn::http1};
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{path::PathBuf, time::Duration};
+use std::{cell::Cell, path::PathBuf, time::Duration};
 use tokio::net::UnixStream;
 
 const TOOLS: [&str; 3] = ["node.inventory", "node.devices", "system.status"];
@@ -70,7 +73,7 @@ impl LocalInventoryModel {
         Ok(())
     }
 
-    async fn infer(&self, body: Vec<u8>) -> ApiResult<Value> {
+    async fn infer(&self, body: Vec<u8>, may_have_started: &Cell<bool>) -> ApiResult<Value> {
         // This transport has no DNS, TCP, proxy, redirect or cloud fallback.
         let socket = UnixStream::connect(&self.socket)
             .await
@@ -93,6 +96,8 @@ impl LocalInventoryModel {
             .header("content-type", "application/json")
             .body(Full::new(Bytes::from(body)))
             .map_err(|_| invalid("invalid model request"))?;
+        // From this point the peer may consume the POST even if the HTTP exchange fails.
+        may_have_started.set(true);
         let reply = sender
             .send_request(request)
             .await
@@ -115,13 +120,8 @@ impl LocalInventoryModel {
         }
         parse(&bytes)
     }
-}
 
-impl SessionModel for LocalInventoryModel {
-    fn decide(&self, context: &Value) -> ApiResult<ModelDecision> {
-        Ok(self.decide_with_usage(context)?.decision)
-    }
-    fn decide_with_usage(&self, context: &Value) -> ApiResult<ModelOutput> {
+    fn attempt(&self, context: &Value, may_have_started: &Cell<bool>) -> ApiResult<ModelOutput> {
         self.validate()?;
         if context["model_ref"] != json!(self.model_ref) {
             return Err(ApiError::new(
@@ -179,7 +179,7 @@ impl SessionModel for LocalInventoryModel {
             .block_on(async {
                 tokio::time::timeout(
                     Duration::from_millis(u64::from(self.timeout_ms)),
-                    self.infer(bytes),
+                    self.infer(bytes, may_have_started),
                 )
                 .await
             })
@@ -188,6 +188,30 @@ impl SessionModel for LocalInventoryModel {
             decision: decode_decision(&response, &self.model_alias, tools)?,
             usage: decode_usage(&response["usage"])?,
         })
+    }
+}
+
+impl SessionModel for LocalInventoryModel {
+    fn decide(&self, context: &Value) -> ApiResult<ModelDecision> {
+        Ok(self.decide_with_usage(context)?.decision)
+    }
+
+    fn decide_with_usage(&self, context: &Value) -> ApiResult<ModelOutput> {
+        self.decide_with_outcome(context)
+            .map_err(|failure| failure.error)
+    }
+
+    fn decide_with_outcome(&self, context: &Value) -> Result<ModelOutput, ModelInferenceFailure> {
+        let may_have_started = Cell::new(false);
+        self.attempt(context, &may_have_started)
+            .map_err(|error| ModelInferenceFailure {
+                outcome: if may_have_started.get() {
+                    ModelInferenceOutcome::Unknown
+                } else {
+                    ModelInferenceOutcome::NotStarted
+                },
+                error,
+            })
     }
 }
 
@@ -296,6 +320,10 @@ mod tests {
             ),
             (
                 r#"{"action":"finish","summary":"x","extra":1}"#,
+                "InvalidArgument",
+            ),
+            (
+                r#"{"action":"provider_failure","outcome":"NotStarted"}"#,
                 "InvalidArgument",
             ),
         ] {

@@ -190,7 +190,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = apps::capture::CAPACITY_FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = agent::inference::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -457,6 +457,9 @@ impl Store {
                 }
                 if ver < artifact::files::FORMAT {
                     db.c.execute_batch(artifact::files::SCHEMA)?;
+                }
+                if ver < agent::inference::FORMAT {
+                    db.c.execute_batch(agent::inference::SCHEMA)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

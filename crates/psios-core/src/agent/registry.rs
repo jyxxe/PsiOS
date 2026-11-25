@@ -20,6 +20,7 @@ struct Model {
     max_output_bytes: u32,
     lease_seconds: u32,
     max_in_flight: Option<u32>,
+    inference_outcome_policy: Option<inference::Policy>,
 }
 pub(super) fn stable(kind: &str, parts: Value) -> String {
     let digest = sha256(&canonical(&parts));
@@ -91,6 +92,11 @@ pub fn skill(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
 pub fn model(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     policy::admin(actor)?;
     let m: Model = decode(p)?;
+    require(
+        p.get("inference_outcome_policy").is_none() || m.inference_outcome_policy.is_some(),
+        "InvalidArgument",
+        "inference outcome policy must select a supported policy",
+    )?;
     label(&m.name)?;
     label(&m.revision)?;
     policy::active(db, &m.provider_principal_id)?;

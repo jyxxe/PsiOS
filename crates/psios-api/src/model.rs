@@ -2,7 +2,7 @@
 mod journal;
 #[cfg(feature = "local-inference")]
 mod local;
-use crate::{ApiError, ApiResult, Client};
+use crate::{ApiError, ApiResult, Client, ResourceRef};
 #[cfg(feature = "local-inference")]
 pub use local::LocalInventoryModel;
 use serde::{Deserialize, Serialize};
@@ -28,6 +28,29 @@ pub struct ModelOutput {
     pub usage: Option<ModelTokenUsage>,
 }
 
+/// Outcome knowledge from the provider transport, separate from model output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelInferenceOutcome {
+    NotStarted,
+    Unknown,
+}
+
+#[derive(Debug)]
+pub struct ModelInferenceFailure {
+    pub outcome: ModelInferenceOutcome,
+    pub error: Box<ApiError>,
+}
+
+/// Settlement of an authenticated provider's failed attempt for an exact lease.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelFailureReport {
+    pub session_id: String,
+    pub model_ref: ResourceRef,
+    pub lease_id: String,
+    pub outcome: ModelInferenceOutcome,
+}
+
 pub trait SessionModel {
     fn decide(&self, context: &Value) -> ApiResult<ModelDecision>;
 
@@ -36,6 +59,15 @@ pub trait SessionModel {
             decision: self.decide(context)?,
             usage: None,
         })
+    }
+
+    /// Only report `NotStarted` when the transport knows inference could not have started.
+    fn decide_with_outcome(&self, context: &Value) -> Result<ModelOutput, ModelInferenceFailure> {
+        self.decide_with_usage(context)
+            .map_err(|error| ModelInferenceFailure {
+                outcome: ModelInferenceOutcome::Unknown,
+                error,
+            })
     }
 }
 #[derive(Serialize, Deserialize)]
@@ -48,9 +80,52 @@ struct DecisionRequest {
     usage: Option<ModelTokenUsage>,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum Delivery {
+    Decision(DecisionRequest),
+    Failure(ModelFailureReport),
+}
+
+impl Delivery {
+    fn lease_id(&self) -> &str {
+        match self {
+            Self::Decision(request) => &request.lease_id,
+            Self::Failure(report) => &report.lease_id,
+        }
+    }
+
+    fn session_id(&self) -> &str {
+        match self {
+            Self::Decision(request) => &request.session_id,
+            Self::Failure(report) => &report.session_id,
+        }
+    }
+
+    fn format(&self) -> u32 {
+        match self {
+            Self::Decision(request) => {
+                if request.usage.is_some() {
+                    2
+                } else {
+                    1
+                }
+            }
+            Self::Failure(_) => 3,
+        }
+    }
+
+    fn method(&self) -> &'static str {
+        match self {
+            Self::Decision(_) => "Model.Respond",
+            Self::Failure(_) => "Model.ReportFailure",
+        }
+    }
+}
+
 enum Turn {
     Completed(Value),
-    Decided(DecisionRequest),
+    Deliver(Delivery),
 }
 
 impl Client {
@@ -61,19 +136,25 @@ impl Client {
         provider: &(impl SessionModel + ?Sized),
     ) -> ApiResult<Turn> {
         let claim = self.call("Model.Claim", json!({"session_id":session,"key":key}))?;
-        Self::decide_claim(session, claim, provider)
+        Self::decide_claim(session, claim, provider, None)
     }
 
     fn decide_claim(
         session: &str,
         claim: Value,
         provider: &(impl SessionModel + ?Sized),
+        expected_model: Option<&ResourceRef>,
     ) -> ApiResult<Turn> {
         if let Some(receipt) = claim.get("completed") {
             return Ok(Turn::Completed(receipt.clone()));
         }
         if claim["recovered"] == true {
-            return Err(ApiError::new("OutcomeUnknown","provider call may have started; submit the retained decision or wait for a new lease").into());
+            let message = if claim["inference_outcome_policy"] == "Strict" {
+                "provider call may have started. Recover a retained delivery for this lease"
+            } else {
+                "provider call may have started. Submit the retained decision or wait for a new lease"
+            };
+            return Err(ApiError::new("OutcomeUnknown", message).into());
         }
         let lease_id = claim["lease_id"]
             .as_str()
@@ -90,23 +171,67 @@ impl Client {
         {
             return Err(crate::invalid("model lease context digest differs"));
         }
-        let output = provider.decide_with_usage(&claim["context"])?;
-        Ok(Turn::Decided(DecisionRequest {
+        let context = &claim["context"];
+        let output = match claim.get("inference_outcome_policy") {
+            Some(policy) if policy == "Strict" => {
+                let model_ref: ResourceRef =
+                    serde_json::from_value(context["model_ref"].clone())
+                        .map_err(|_| crate::invalid("strict model lease has no model reference"))?;
+                if expected_model.is_some_and(|expected| expected != &model_ref) {
+                    return Err(crate::invalid(
+                        "strict model lease belongs to another model",
+                    ));
+                }
+                match provider.decide_with_outcome(context) {
+                    Ok(output) => output,
+                    Err(failure) => {
+                        return Ok(Turn::Deliver(Delivery::Failure(ModelFailureReport {
+                            session_id: session.to_owned(),
+                            model_ref,
+                            lease_id,
+                            outcome: failure.outcome,
+                        })));
+                    }
+                }
+            }
+            None => provider.decide_with_usage(context)?,
+            Some(_) => {
+                return Err(ApiError::new(
+                    "UnsupportedCapability",
+                    "unsupported model inference outcome policy",
+                )
+                .into());
+            }
+        };
+        Ok(Turn::Deliver(Delivery::Decision(DecisionRequest {
             session_id: session.to_owned(),
             lease_id,
             decision: output.decision,
             usage: output
                 .usage
                 .filter(|_| claim["usage_format"] == "tokens.v1"),
-        }))
+        })))
     }
 
-    fn send_decision(&self, decision: &DecisionRequest) -> ApiResult<Value> {
-        let request = json!(decision);
-        match self.call("Model.Respond", request.clone()) {
-            Err(e) if e.code == "DependencyUnavailable" => self.call("Model.Respond", request),
+    fn send_delivery(&self, delivery: &Delivery) -> ApiResult<Value> {
+        let method = delivery.method();
+        let request = json!(delivery);
+        match self.call(method, request.clone()) {
+            Err(e) if e.code == "DependencyUnavailable" => self.call(method, request),
             other => other,
         }
+    }
+
+    /// Submit an outcome for an adapter coordinating its own provider transport.
+    pub fn report_model_failure(&self, report: ModelFailureReport) -> ApiResult<Value> {
+        self.send_delivery(&Delivery::Failure(report))
+    }
+
+    pub fn resume_session(&self, session: &str, revision: &str) -> ApiResult<Value> {
+        self.call(
+            "Session.Resume",
+            json!({"id":session,"expected_resource_version":revision}),
+        )
     }
 
     pub fn model_turn(
@@ -117,7 +242,7 @@ impl Client {
     ) -> ApiResult<Value> {
         match self.decide_turn(session, key, provider)? {
             Turn::Completed(receipt) => Ok(receipt),
-            Turn::Decided(decision) => self.send_decision(&decision),
+            Turn::Deliver(delivery) => self.send_delivery(&delivery),
         }
     }
 }
@@ -163,5 +288,52 @@ impl SessionModel for NodeSurvey {
                 });
             Ok(ModelDecision::Finish { summary })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn only_a_fresh_strict_claim_invokes_the_provider_and_reports_its_failure() {
+        struct Offline(Cell<u32>);
+        impl SessionModel for Offline {
+            fn decide(&self, _: &Value) -> ApiResult<ModelDecision> {
+                self.0.set(self.0.get() + 1);
+                Err(ApiError::new("DependencyUnavailable", "fixture unavailable").into())
+            }
+        }
+        let provider = Offline(Cell::new(0));
+        let model = ResourceRef {
+            resource_id: "model-fixture".into(),
+            version: "r1".into(),
+            digest: crate::sha256(b"fixture"),
+        };
+        let mut claim = json!({"lease_id":"lease-fixture","recovered":true,
+            "context":{"session_id":"session-fixture","model_ref":model},
+            "inference_outcome_policy":"Strict"});
+        assert!(matches!(
+            Client::decide_claim("session-fixture", claim.clone(), &provider, Some(&model)),
+            Err(error) if error.code == "OutcomeUnknown"
+        ));
+        assert_eq!(provider.0.get(), 0);
+        claim["recovered"] = json!(false);
+        let pending =
+            Client::decide_claim("session-fixture", claim.clone(), &provider, Some(&model));
+        assert!(
+            matches!(pending, Ok(Turn::Deliver(Delivery::Failure(report)))
+            if report.model_ref == model && report.outcome == ModelInferenceOutcome::Unknown)
+        );
+        claim
+            .as_object_mut()
+            .unwrap()
+            .remove("inference_outcome_policy");
+        assert!(matches!(
+            Client::decide_claim("session-fixture", claim, &provider, None),
+            Err(error) if error.code == "DependencyUnavailable"
+        ));
+        assert_eq!(provider.0.get(), 2);
     }
 }

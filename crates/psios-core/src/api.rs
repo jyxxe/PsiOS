@@ -45,10 +45,10 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Skill.Retire" => agent::retire(db, actor, p, "Skill"),
         "Model.Register" => agent::model(db, actor, p),
         "Model.Retire" => agent::retire(db, actor, p, "Model"),
-        "Model.Claim" => agent::claim(db, actor, p),
         "Model.ClaimNext" => agent::claim_next(db, actor, p),
         "Model.ClaimStatus" => agent::claim_status(db, actor, p),
         "Model.Respond" => agent::respond(db, actor, p),
+        "Model.ReportFailure" => agent::inference::report(db, actor, p),
         "Mailbox.Bind" => agent::mail::bind(db, actor, p),
         "Mailbox.Close" => agent::mail::close(db, actor, p),
         "Mailbox.Read" => agent::mail::read(db, actor, p),
@@ -239,6 +239,15 @@ impl Store {
             let job = self.prepare_export(peer, &r)?;
             return self.finish_export(peer, &r, job.read());
         }
+        if r.method == "Model.Claim" {
+            return self.authorized_request(peer, &r, |db, actor| {
+                let claimed = agent::claim(db, actor, &r.params)?;
+                if claimed.is_ok() {
+                    db.audit(actor, "Model.Claim", None, "Allowed")?;
+                }
+                Ok(claimed)
+            })?;
+        }
         self.authorized_request(peer, &r, |db, actor| {
             let method = r.method.as_str();
             let out = invoke(db, actor, method, &r.params)?;
@@ -249,7 +258,6 @@ impl Store {
                     | "Skill.Retire"
                     | "Model.Register"
                     | "Model.Retire"
-                    | "Model.Claim"
                     | "Model.Respond"
                     | "Mailbox.Bind"
                     | "Mailbox.Close"

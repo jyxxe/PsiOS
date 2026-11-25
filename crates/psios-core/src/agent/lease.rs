@@ -5,8 +5,10 @@ impl Clock {
     pub(super) fn current(&self, db: &Db<'_>, session: &Doc) -> Result<bool> {
         Ok(db.c.query_row(
             "SELECT EXISTS(SELECT 1 FROM session_turns t LEFT JOIN model_lease_times a ON a.lease=t.lease
+             LEFT JOIN model_inference_leases i ON i.lease=t.lease
              WHERE t.session=?1 AND t.lease=?2 AND t.receipt IS NULL AND t.boot_id=?3
-               AND t.deadline_boot_ms>?4 AND (a.lease IS NULL OR a.time_ns=?5))",
+               AND t.deadline_boot_ms>?4 AND (a.lease IS NULL OR a.time_ns=?5)
+               AND (i.lease IS NULL OR (i.status='Pending' AND i.time_ns=?5)))",
             params![
                 session.id,
                 session.body["current_lease"].as_str(),
@@ -33,8 +35,11 @@ fn outstanding(
         "SELECT count(*) FROM session_turns st JOIN current s ON s.id=st.session
          JOIN current d ON d.id=s.spec->>'delegation_id' JOIN current m ON m.id=s.spec->'model_ref'->>'resource_id'
          LEFT JOIN model_lease_times a ON a.lease=st.lease
+         LEFT JOIN model_inference_leases i ON i.lease=st.lease
          WHERE st.receipt IS NULL AND (m.id=?1 OR d.body->>'grant_id'=?2 OR m.spec->>'provider_principal_id'=?3)
-         AND CASE WHEN ?4 IS NULL THEN 1 WHEN st.boot_id=?4 AND (a.lease IS NULL OR a.time_ns=?6) THEN st.deadline_boot_ms>?5
+         AND i.status IS NOT 'NotStarted'
+         AND CASE WHEN ?4 IS NULL THEN 1 WHEN st.boot_id=?4 AND (a.lease IS NULL OR a.time_ns=?6)
+                  AND (i.lease IS NULL OR i.time_ns=?6) THEN st.deadline_boot_ms>?5
                   ELSE julianday(st.expires)>julianday('now') END",
         params![model, grant, provider, clock.map(|c| &c.boot.boot_id), clock.map(|c| c.boot.millis), clock.map(|c| &c.time_ns)],
         |r| r.get(0),

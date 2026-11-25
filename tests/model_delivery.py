@@ -30,7 +30,7 @@ def interrupt_delivery(node, token_file, session, key, directory, *, committed, 
 
 
 @contextmanager
-def interrupt_worker_delivery(node, token_file, args, *, committed, timeout=10):
+def interrupt_worker_delivery(node, token_file, args, *, committed, timeout=10, method="Model.Respond"):
     endpoint = node.base / "delivery.sock"
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
         listener.bind(str(endpoint))
@@ -44,7 +44,7 @@ def interrupt_worker_delivery(node, token_file, args, *, committed, timeout=10):
                     with peer:
                         peer.settimeout(10)
                         request = frame(peer)
-                        decision = json.loads(request[4:])["method"] == "Model.Respond"
+                        decision = json.loads(request[4:])["method"] == method
                         if not decision or committed:
                             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as upstream:
                                 upstream.settimeout(10)

@@ -2,7 +2,7 @@
 use super::{Engine, restore_archive, valid_image_id};
 use crate::{
     Config, Result, artifact, command,
-    db::{Db, Doc, find, resolve},
+    db::{Db, Doc, find, resolve, row},
     decode, err,
     host::Work,
     policy, require,
@@ -18,6 +18,7 @@ pub(crate) const FORMAT: u32 = super::publisher::FORMAT + 1;
 pub(crate) const CAPACITY_FORMAT: u32 = artifact::files::FORMAT + 1;
 pub(crate) const SCHEMA: &str = include_str!("capture.sql");
 pub(crate) const TOOL: &str = "application.capture_oci_image";
+pub(crate) const STAGING_BYTES: u32 = artifact::ingress::OWNER_BYTES;
 const SOURCE: &str = "LocalOciImageCapture";
 const PROOF: &str = "OciImageCapture";
 const MEDIA: &str = "application/vnd.psios.docker-image.v1+tar";
@@ -61,6 +62,32 @@ impl Request {
             "approved archive limit exceeds the configured OCI capture ceiling",
         )
     }
+}
+
+pub(crate) fn staging_bytes(db: &Db<'_>, task: &Doc) -> Result<u32> {
+    require(
+        task.kind == "Task" && task.owner == policy::OWNER && task.spec["task_type"] == TOOL,
+        "RecoveryRequired",
+        "OCI capture reservation has an invalid task identity",
+    )?;
+    let input = db.resolve(&task.spec["input_ref"])?;
+    let request: Request = decode(crate::broker::dependencies::tool_input(&input)?)?;
+    request.validate()?;
+    Ok(request.max_archive_bytes)
+}
+
+/// The broker owns these reservations. Claimed work counts even before its
+/// host permit exists. A cancelled in-flight capture counts until settlement.
+pub(crate) fn reserved_staging_bytes(db: &Db<'_>) -> Result<u64> {
+    let mut statement = db.c.prepare_cached(
+        "SELECT t.* FROM queue q JOIN current t ON t.id=q.task
+         WHERE q.phase IN ('Claimed','Dispatched') AND t.spec->>'task_type'=?1",
+    )?;
+    let mut reserved = 0u64;
+    for task in statement.query_map([TOOL], row)? {
+        reserved += u64::from(staging_bytes(db, &task?)?);
+    }
+    Ok(reserved)
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]

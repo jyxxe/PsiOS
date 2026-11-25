@@ -538,6 +538,8 @@ jobs:
         run: python3 -B tests/oci_restore.py
       - name: Verify explicitly approved larger capture and detached checkpoint through real Docker restore
         run: python3 -B tests/oci_capacity.py
+      - name: Keep approved captures queued while real Docker saves occupy the staging budget
+        run: python3 -B tests/oci_capture_staging.py
 
   host-package:
     runs-on: ubuntu-24.04

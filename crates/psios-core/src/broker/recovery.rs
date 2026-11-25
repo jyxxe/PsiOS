@@ -206,7 +206,13 @@ pub fn release_unstarted_claim(db: &Db<'_>, task: &str) -> Result<()> {
     )
 }
 
-fn requeue(db: &Db<'_>, task: &Doc, op: &Doc, knowledge: &str, conditions: Value) -> Result<()> {
+pub(super) fn requeue(
+    db: &Db<'_>,
+    task: &Doc,
+    op: &Doc,
+    knowledge: &str,
+    conditions: Value,
+) -> Result<()> {
     let run = db.get(field(&task.body, "current_run_id"))?;
     let mut state = run.body.clone();
     state["operation_refs"] = json!([op.reference()]);

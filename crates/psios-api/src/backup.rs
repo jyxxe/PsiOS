@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{
-    io::Write,
+    io::{Read, Seek, SeekFrom, Write},
     thread,
     time::{Duration, Instant},
 };
@@ -42,8 +42,56 @@ impl Client {
         max_bytes: u64,
         output: &mut impl Write,
     ) -> ApiResult<BackupMemberReceipt> {
+        self.stream_backup_member(backup, member, max_bytes, output, 0, Sha256::new())
+    }
+
+    /// Continue a private staging file and authenticate its entire prefix and suffix.
+    /// The caller must hold the staging file exclusively through verification.
+    pub fn resume_backup_member(
+        &self,
+        backup: &ResourceRef,
+        member: BackupMember,
+        max_bytes: u64,
+        output: &mut (impl Read + Write + Seek),
+    ) -> ApiResult<BackupMemberReceipt> {
+        let staging_error = |error| {
+            ApiError::new(
+                "DependencyUnavailable",
+                format!("could not read backup staging file: {error}"),
+            )
+        };
+        let offset = output.seek(SeekFrom::End(0)).map_err(staging_error)?;
+        if offset > max_bytes {
+            return Err(ApiError::new(
+                "QuotaExceeded",
+                "staged backup member exceeds client byte limit",
+            )
+            .into());
+        }
+        output.seek(SeekFrom::Start(0)).map_err(staging_error)?;
         let mut hash = Sha256::new();
-        let mut offset = 0;
+        let mut buffer = [0u8; 32 * 1024];
+        let mut remaining = offset;
+        while remaining > 0 {
+            let len = remaining.min(buffer.len() as u64) as usize;
+            output
+                .read_exact(&mut buffer[..len])
+                .map_err(staging_error)?;
+            hash.update(&buffer[..len]);
+            remaining -= len as u64;
+        }
+        self.stream_backup_member(backup, member, max_bytes, output, offset, hash)
+    }
+
+    fn stream_backup_member(
+        &self,
+        backup: &ResourceRef,
+        member: BackupMember,
+        max_bytes: u64,
+        output: &mut impl Write,
+        mut offset: u64,
+        mut hash: Sha256,
+    ) -> ApiResult<BackupMemberReceipt> {
         let mut identity = None;
         let invalid = || ApiError::new("RecoveryRequired", "invalid backup export chunk sequence");
         loop {

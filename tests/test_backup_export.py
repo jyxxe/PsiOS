@@ -4,8 +4,11 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
+import shutil
+import signal
 import stat
 import subprocess
+import time
 import unittest
 
 from support import Failure, Node, target
@@ -19,24 +22,27 @@ class BackupExportTests(unittest.TestCase):
         self.addCleanup(node.close)
         self.output = node.base / "exports"
         self.output.mkdir(mode=0o700)
-        volume = node.perform("volume.create", {"name": "export-source"})
+        self.volume = node.perform("volume.create", {"name": "export-source"})
         self.contents = {"nested/empty": b"", "nested/binary": bytes(range(256)) * 1100}
-        tree = node.state / "volumes" / volume["resource_id"] / "data"
-        (tree / "nested").mkdir()
+        self.tree = node.state / "volumes" / self.volume["resource_id"] / "data"
+        (self.tree / "nested").mkdir()
         for name, data in self.contents.items():
-            (tree / name).write_bytes(data)
-            (tree / name).chmod(0o640)
-        self.backup = node.perform("backup.create", target(volume))
-        self.source = node.state / "backups" / self.backup["resource_id"]
-        self.manifest = (self.source / "manifest.json").read_bytes()
-        self.index = next(i for i, e in enumerate(json.loads(self.manifest)["entries"]) if e["path"] == "nested/binary")
+            (self.tree / name).write_bytes(data)
+            (self.tree / name).chmod(0o640)
         self.reference = node.base / "reference.json"
-        self.reference.write_text(json.dumps(self.backup))
         self.agent = node.call("Agent.Register", {"name": "backup-export-reader"})
         self.token = node.base / "export.token"
         self.token.touch(mode=0o600)
         self.token.write_text(self.agent["token"])
+        self.create_backup()
+
+    def create_backup(self):
+        self.backup = self.node.perform("backup.create", target(self.volume))
         self.scope = self.backup["resource_id"]
+        self.source = self.node.state / "backups" / self.scope
+        self.manifest = (self.source / "manifest.json").read_bytes()
+        self.index = next(i for i, e in enumerate(json.loads(self.manifest)["entries"]) if e["path"] == "nested/binary")
+        self.reference.write_text(json.dumps(self.backup))
 
     def grant(self, *ids):
         request = {"principal_id": self.agent["principal_id"], "actions": ["backup.export"],
@@ -52,10 +58,17 @@ class BackupExportTests(unittest.TestCase):
     def member(self):
         return {"kind": "Blob", "index": self.index}
 
-    def export(self, output):
-        return subprocess.run([self.node.binaries / "psiosctl", "--socket", self.node.socket,
-            "--token-file", self.token, "backup-export", "--output", output, self.reference],
-            capture_output=True, text=True, timeout=30)
+    def export_args(self, output, *flags):
+        return [self.node.binaries / "psiosctl", "--socket", self.node.socket,
+            "--token-file", self.token, "backup-export", "--output", output, *flags, self.reference]
+
+    def export(self, output, *flags):
+        return subprocess.run(self.export_args(output, *flags), capture_output=True, text=True, timeout=45)
+
+    def stage_for(self, output):
+        identity = sha(json.dumps(["psios-backup-export-v1", output.name, self.backup],
+                                  sort_keys=True, separators=(",", ":")).encode()).split(":", 1)[1]
+        return output.parent / f".psios-backup-export-{identity}"
 
     def test_version_scoped_export_and_repeat_authorization(self):
         node = self.node
@@ -149,6 +162,85 @@ class BackupExportTests(unittest.TestCase):
             self.read(token=token)
         self.assertEqual(deleted.exception.code, "PreconditionFailed")
 
+    def test_interrupted_export_resumes_verified_prefix_and_rechecks_grant(self):
+        node = self.node
+        data = bytes(range(256)) * (8 * 1024 * 1024 // 256)
+        (self.tree / "nested/binary").write_bytes(data)
+        self.create_backup()
+        grant = self.grant(self.scope)
+        out = self.output / "resumable"
+        blob = f"blob-{self.index}"
+        first = subprocess.Popen(self.export_args(out, "--resume"), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            deadline = time.monotonic() + 30
+            prefix = None
+            while first.poll() is None and time.monotonic() < deadline:
+                prefix = next(self.output.glob(f".psios-backup-export-*/{blob}"), None)
+                if prefix and prefix.stat().st_size >= 1024 * 1024:
+                    break
+                time.sleep(0.015)
+            else:
+                self.fail("export did not leave a partial staged member")
+            first.send_signal(signal.SIGSTOP)
+            concurrent = self.export(out, "--resume")
+            self.assertNotEqual(concurrent.returncode, 0)
+            self.assertIn("Conflict", concurrent.stderr)
+        finally:
+            if first.poll() is None:
+                first.kill()
+            first.communicate(timeout=10)
+        self.assertEqual(first.returncode, -signal.SIGKILL)
+        self.assertFalse(out.exists())
+        saved = prefix.read_bytes()
+        self.assertLess(len(saved), len(data))
+        self.assertEqual(saved, data[:len(saved)])
+        inode = prefix.stat().st_ino
+
+        node.call("Grant.Revoke", target(grant["grant_ref"]))
+        denied = self.export(out, "--resume")
+        self.assertNotEqual(denied.returncode, 0)
+        self.assertIn("PermissionDenied", denied.stderr)
+        self.assertEqual(prefix.read_bytes(), saved)
+        self.grant(self.scope)
+
+        # Clone the interrupted stage under a second output identity and damage its prefix.
+        other = self.output / "repaired"
+        damaged = self.stage_for(other)
+        shutil.copytree(prefix.parent, damaged)
+        with (damaged / blob).open("r+b") as staged:
+            staged.write(b"\xff")
+
+        offset = int(node.call("Audit.List", {"limit": 128})[-1]["seq"])
+        resumed = self.export(out, "--resume")
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        audit = node.call("Audit.List", {"after": offset, "limit": 128})
+        reads = [row for row in audit if row["method"] == "Backup.Export" and row["decision"] == "Allowed"
+                 and row["resource"] == self.scope]
+        full_blob_chunks = len(data) // (128 * 1024)
+        self.assertLessEqual(len(reads), full_blob_chunks - len(saved) // (128 * 1024) + 3)
+        self.assertEqual(sha((out / blob).read_bytes()), sha(data))
+        self.assertEqual((out / blob).stat().st_ino, inode)
+        self.assertFalse(prefix.parent.exists())
+
+        repaired = self.export(other, "--resume")
+        self.assertEqual(repaired.returncode, 0, repaired.stderr)
+        self.assertEqual(sha((other / blob).read_bytes()), sha(data))
+        self.assertEqual(list(sorted(self.output.iterdir())), [other, out])
+
+        repeated = self.export(out, "--resume")
+        self.assertEqual(repeated.returncode, 0, repeated.stderr)
+        first_report = json.loads(resumed.stdout)
+        repeated_report = json.loads(repeated.stdout)
+        self.assertGreaterEqual(repeated_report.pop("verified_at"), first_report.pop("verified_at"))
+        self.assertEqual(repeated_report, first_report)
+        with (out / blob).open("r+b") as published:
+            published.write(b"\xff")
+        refused = self.export(out, "--resume")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertEqual((out / blob).stat().st_ino, inode)
+        with (out / blob).open("rb") as published:
+            self.assertEqual(published.read(1), b"\xff")
+
     @unittest.skipUnless(os.getenv("PSIOS_TEST_EXPORT_TARGET"), "requires a bounded export filesystem")
     def test_export_capacity_failure_removes_staging(self):
         self.grant(self.scope)
@@ -157,6 +249,29 @@ class BackupExportTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("QuotaExceeded", result.stderr)
         self.assertEqual(list(target_root.iterdir()), [])
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_EXPORT_RESUME_TARGET"), "requires a bounded export filesystem")
+    def test_resumed_preflight_accounts_for_allocated_prefix(self):
+        out = Path(os.environ["PSIOS_TEST_EXPORT_RESUME_TARGET"]) / "resumed-at-capacity"
+        data = bytes(range(256)) * (4 * 1024 * 1024 // 256)
+        (self.tree / "nested/binary").write_bytes(data)
+        self.create_backup()
+        self.grant(self.scope)
+        staging = self.stage_for(out)
+        staging.mkdir(mode=0o700)
+        blob = f"blob-{self.index}"
+        prefix = staging / blob
+        prefix.touch(mode=0o600)
+        prefix.write_bytes(data[:len(data) // 2])
+        fs = os.statvfs(staging)
+        self.assertLess(len(data) // 2, fs.f_bavail * fs.f_frsize)
+        self.assertLess(fs.f_bavail * fs.f_frsize, len(data))
+        full = self.export(out)
+        self.assertNotEqual(full.returncode, 0)
+        self.assertIn("QuotaExceeded", full.stderr)
+        resumed = self.export(out, "--resume")
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertEqual(sha((out / blob).read_bytes()), sha(data))
 
 
 if __name__ == "__main__":

@@ -49,6 +49,8 @@ mkdir -m 700 exports
 psiosctl backup-export --output exports/backup-id backup-ref.json
 ```
 
+传输可能中断时，可从第一次导出起加上 `--resume`。客户端在私有父目录下保存暂存数据，恢复时使用同一个输出名、同一固定版本的 Backup 引用和有效授权。接续传输从已有字节开始，完整校验前缀和新增内容，再原子发布目录。对已经发布的目标再次执行时，命令重新取得授权清单并核验现有副本。
+
 恢复时的 `MANIFEST_DIGEST` 来自独立记录。使用独立归档中的 `psiosd`，在 Linux 上直接检查副本。
 
 ```bash

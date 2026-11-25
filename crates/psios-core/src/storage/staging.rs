@@ -15,6 +15,7 @@ pub(super) struct Stage {
     dir: File,
     path: PathBuf,
     published: bool,
+    retain_on_failure: bool,
 }
 
 pub(super) fn create(parent: &Path) -> Result<Stage> {
@@ -36,6 +37,31 @@ pub(super) fn create(parent: &Path) -> Result<Stage> {
         dir,
         path,
         published: false,
+        retain_on_failure: false,
+    })
+}
+
+pub(super) fn resume(parent: &Path, name: &str) -> Result<Stage> {
+    private_dir(parent, false)?;
+    filename(name)?;
+    let root = File::open(parent)?;
+    let path = parent.join(name);
+    private_dir(&path, true)?;
+    let dir = child(&root, name, OFlags::RDONLY | OFlags::DIRECTORY)?;
+    dir.try_lock().map_err(|_| {
+        err(
+            "Conflict",
+            "backup export is already using this staging directory",
+        )
+    })?;
+    check_entry(&root, name, &dir)?;
+    root.sync_all()?;
+    Ok(Stage {
+        root,
+        dir,
+        path,
+        published: false,
+        retain_on_failure: true,
     })
 }
 
@@ -74,7 +100,7 @@ impl Stage {
 
 impl Drop for Stage {
     fn drop(&mut self) {
-        if !self.published {
+        if !self.published && !self.retain_on_failure {
             let name = self.path.file_name().unwrap();
             let removed = discard(&self.root, name, &self.dir)
                 .and_then(|()| self.root.sync_all().map_err(Into::into));

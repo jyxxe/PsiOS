@@ -5363,5 +5363,354 @@
     ],
     "status": "NotRun",
     "implementation_status": "NotVerified"
+  },
+  {
+    "id": "AT-AIF-001",
+    "title": "原生与第三方 Agent 产物安装闭环",
+    "source_document": "docs/07-applications-packages-gui.md",
+    "requirement_ids": [
+      "V1-APP-012",
+      "V1-APP-013",
+      "V1-APP-014",
+      "V1-AGT-013",
+      "V1-AGT-014"
+    ],
+    "stage": [
+      "M3"
+    ],
+    "verification_methods": [
+      "Integration"
+    ],
+    "preconditions": [
+      "固定原生 Agent 和至少一个独立第三方 Agent 的版本、适配器及认证；准备相同静态 Web 与 OCI 产物、可用运行 Profile 和有限授权。"
+    ],
+    "actions_or_fault": [
+      "分别发现能力、提交内容、取得固定引用并规划安装；通过同一权限路径安装后从 Shell 启动器打开。",
+      "关闭生成会话及模型，检查应用仍可用；分别观察上传、安装和启动回执。"
+    ],
+    "expected": [
+      "两类 Agent 使用同一 Artifact/Application/Deployment 权威和权限裁决，无需手工重打包；静态 Web 具有完整 ReleaseSpec。",
+      "Task 成功、产物发布、安装成功与运行健康分别记录；应用独立于生成会话，普通非应用附件不自动安装。"
+    ],
+    "required_evidence": [
+      "源码 SHA、Agent/Adapter/协议与 Runtime/Profile 版本、产物/清单/计划摘要及目标 Edition",
+      "原始请求与持久回执、权限裁决、Operation/Deployment/保留关系及故障前后记录（脱敏）",
+      "逐项预期/实际结果和内容校验；截图或模型描述不替代后端证据"
+    ],
+    "status": "NotRun",
+    "implementation_status": "NotVerified"
+  },
+  {
+    "id": "AT-AIF-002",
+    "title": "合同、清单及外部产物身份校验",
+    "source_document": "docs/09-agents-models-protocols.md",
+    "requirement_ids": [
+      "V1-APP-013",
+      "V1-AGT-013",
+      "V1-AGT-014"
+    ],
+    "stage": [
+      "M0",
+      "M3"
+    ],
+    "verification_methods": [
+      "Contract",
+      "Integration"
+    ],
+    "preconditions": [
+      "准备已冻结请求/响应 Schema、两个端点/租户及同名外部产物；内容摘要、Manifest 和 ReleaseSpec 可独立核对。"
+    ],
+    "actions_or_fault": [
+      "提交未知合同版本、遗漏 ReleaseSpec、错误摘要/尺寸/入口、未知权限字段及不支持的必需 Profile。",
+      "在不同租户复用外部 ID，在同一 ID 下提交变化的内容或伪造本地 Run/发布者；尝试跨域按摘要读取。"
+    ],
+    "expected": [
+      "请求按明确错误拒绝，不忽略关键字段，不把临时 URL 或半上传内容变成安装引用。",
+      "外部端点/租户/版本与认证安全域共同隔离关联；内容变化产生新引用，自报身份不能取得权利，摘要相同不产生跨域访问。"
+    ],
+    "required_evidence": [
+      "源码 SHA、Agent/Adapter/协议与 Runtime/Profile 版本、产物/清单/计划摘要及目标 Edition",
+      "原始请求与持久回执、权限裁决、Operation/Deployment/保留关系及故障前后记录（脱敏）",
+      "逐项预期/实际结果和内容校验；截图或模型描述不替代后端证据"
+    ],
+    "status": "NotRun",
+    "implementation_status": "NotVerified"
+  },
+  {
+    "id": "AT-AIF-003",
+    "title": "重复提交与并发安装",
+    "source_document": "docs/09-agents-models-protocols.md",
+    "requirement_ids": [
+      "V1-APP-014",
+      "V1-AGT-014",
+      "V1-AGT-015"
+    ],
+    "stage": [
+      "M3"
+    ],
+    "verification_methods": [
+      "Integration",
+      "FaultInjection"
+    ],
+    "preconditions": [
+      "同一应用的当前资源版本已固定；上传、构建与安装分别配置幂等命名空间和回执保留窗口。"
+    ],
+    "actions_or_fault": [
+      "丢弃安装接受回执后以同键同摘要重试和查询；再以同键不同摘要重试。",
+      "从两个客户端以同一预期版本更新，并在幂等记录过期后查询原请求。"
+    ],
+    "expected": [
+      "同请求返回原 Operation，不产生重复部署；不同摘要冲突被拒绝，过期不解释为从未执行。",
+      "应用版本条件写仅允许符合前提的提交，失败方重新规划，不覆盖另一客户端结果。"
+    ],
+    "required_evidence": [
+      "源码 SHA、Agent/Adapter/协议与 Runtime/Profile 版本、产物/清单/计划摘要及目标 Edition",
+      "原始请求与持久回执、权限裁决、Operation/Deployment/保留关系及故障前后记录（脱敏）",
+      "逐项预期/实际结果和内容校验；截图或模型描述不替代后端证据"
+    ],
+    "status": "NotRun",
+    "implementation_status": "NotVerified"
+  },
+  {
+    "id": "AT-AIF-004",
+    "title": "恶意 Web 预览与桥接隔离",
+    "source_document": "docs/07-applications-packages-gui.md",
+    "requirement_ids": [
+      "V1-APP-015",
+      "V1-AGT-015"
+    ],
+    "stage": [
+      "M3"
+    ],
+    "verification_methods": [
+      "Integration"
+    ],
+    "preconditions": [
+      "Shell 登录一个有管理权限的用户；准备含恶意脚本、伪造安装按钮及跨 origin 消息的 Web 产物。"
+    ],
+    "actions_or_fault": [
+      "预览时尝试读取 Shell Cookie/令牌、注入父 DOM、访问其他应用、调用 Secret/设备/写工具和向未授权地址外发。",
+      "安装后再次伪造 postMessage 的身份、origin、会话和能力，并通过正文声称已经审批。"
+    ],
+    "expected": [
+      "预览及正式运行按已验证隔离 Profile 限制，平台桥接拒绝不匹配调用；无秘密或跨应用数据泄露。",
+      "结构化动作只表达意图，不生成授权；预览默认权限不扩展，未安装 KDE/GUI 流不影响受支持的 Web 路径。"
+    ],
+    "required_evidence": [
+      "源码 SHA、Agent/Adapter/协议与 Runtime/Profile 版本、产物/清单/计划摘要及目标 Edition",
+      "原始请求与持久回执、权限裁决、Operation/Deployment/保留关系及故障前后记录（脱敏）",
+      "逐项预期/实际结果和内容校验；截图或模型描述不替代后端证据"
+    ],
+    "status": "NotRun",
+    "implementation_status": "NotVerified"
+  },
+  {
+    "id": "AT-AIF-005",
+    "title": "预授权、权限扩大与中途撤权",
+    "source_document": "docs/09-agents-models-protocols.md",
+    "requirement_ids": [
+      "V1-APP-014",
+      "V1-APP-015",
+      "V1-AGT-013",
+      "V1-AGT-015"
+    ],
+    "stage": [
+      "M3"
+    ],
+    "verification_methods": [
+      "Integration",
+      "FaultInjection"
+    ],
+    "preconditions": [
+      "一个主体仅有上传权，另一个有范围明确的安装预授权；准备需要新增网络/设备权限的更新。"
+    ],
+    "actions_or_fault": [
+      "分别执行上传后安装、已授权范围内完整安装、扩大权限更新及仅凭聊天文本的授权请求。",
+      "在构建、安装提交及启动前撤销权限或替换计划所指内容。"
+    ],
+    "expected": [
+      "上传权不自动包含安装/运行权；有效预授权内无需逐步重复审批，超范围动作进入结构化裁决。",
+      "内容/计划变化和撤权被重新检查，不能以旧批准执行新权限；其他协议入口不能绕过相同拒绝。"
+    ],
+    "required_evidence": [
+      "源码 SHA、Agent/Adapter/协议与 Runtime/Profile 版本、产物/清单/计划摘要及目标 Edition",
+      "原始请求与持久回执、权限裁决、Operation/Deployment/保留关系及故障前后记录（脱敏）",
+      "逐项预期/实际结果和内容校验；截图或模型描述不替代后端证据"
+    ],
+    "status": "NotRun",
+    "implementation_status": "NotVerified"
+  },
+  {
+    "id": "AT-AIF-006",
+    "title": "安装中断、取消与未知结果对账",
+    "source_document": "docs/09-agents-models-protocols.md",
+    "requirement_ids": [
+      "V1-APP-014",
+      "V1-AGT-014",
+      "V1-AGT-015"
+    ],
+    "stage": [
+      "M3"
+    ],
+    "verification_methods": [
+      "Integration",
+      "FaultInjection"
+    ],
+    "preconditions": [
+      "安装流程具有持久阶段、所有权清单和可查询 Operation；准备断线、强杀及取消注入点。"
+    ],
+    "actions_or_fault": [
+      "在暂存、发布后、Deployment 准备、版本切换前后及回执发送前中断；随后更换 Agent 并以原身份查询。",
+      "在上述阶段请求取消，并模拟无法确定版本提交结果及 Shell 入口索引失败。"
+    ],
+    "expected": [
+      "恢复从原 Operation 和实际资源对账，不盲重装或重复副作用；未完成上传不发布成功引用。",
+      "Unknown 保留且阻塞危险重试；取消如实列出已安装应用/残留，清理仅触及本操作资源，入口可重建而不重装。"
+    ],
+    "required_evidence": [
+      "源码 SHA、Agent/Adapter/协议与 Runtime/Profile 版本、产物/清单/计划摘要及目标 Edition",
+      "原始请求与持久回执、权限裁决、Operation/Deployment/保留关系及故障前后记录（脱敏）",
+      "逐项预期/实际结果和内容校验；截图或模型描述不替代后端证据"
+    ],
+    "status": "NotRun",
+    "implementation_status": "NotVerified"
+  },
+  {
+    "id": "AT-AIF-007",
+    "title": "有状态更新与回退边界",
+    "source_document": "docs/07-applications-packages-gui.md",
+    "requirement_ids": [
+      "V1-APP-014",
+      "V1-APP-016"
+    ],
+    "stage": [
+      "M4"
+    ],
+    "verification_methods": [
+      "Integration",
+      "FaultInjection"
+    ],
+    "preconditions": [
+      "同一应用准备两个不可变 Release、用户卷、恢复点及可逆和不可逆两种数据 Schema 迁移。"
+    ],
+    "actions_or_fault": [
+      "生成新产物并更新，在健康检查失败或迁移完成后尝试回退；同时提交第二个迁移。"
+    ],
+    "expected": [
+      "新产物不覆盖旧字节；升级按授权和数据兼容前提切换，失败保留可恢复旧版本。",
+      "数据不兼容时不能仅退旧代码并报告成功；恢复或前向修复需有验证依据，互斥操作不能并行写同一数据域。"
+    ],
+    "required_evidence": [
+      "源码 SHA、Agent/Adapter/协议与 Runtime/Profile 版本、产物/清单/计划摘要及目标 Edition",
+      "原始请求与持久回执、权限裁决、Operation/Deployment/保留关系及故障前后记录（脱敏）",
+      "逐项预期/实际结果和内容校验；截图或模型描述不替代后端证据"
+    ],
+    "status": "NotRun",
+    "implementation_status": "NotVerified"
+  },
+  {
+    "id": "AT-AIF-008",
+    "title": "会话清理、制品 GC 与卸载",
+    "source_document": "docs/07-applications-packages-gui.md",
+    "requirement_ids": [
+      "V1-APP-012",
+      "V1-APP-016"
+    ],
+    "stage": [
+      "M3"
+    ],
+    "verification_methods": [
+      "Integration",
+      "FaultInjection"
+    ],
+    "preconditions": [
+      "两个应用共享部分制品，另有恢复 pin；生成 Task 和会话使用较短保留窗口。"
+    ],
+    "actions_or_fault": [
+      "清理任务/会话、使源 URL 失效并触发 GC，然后重启应用；注入实际制品损坏。",
+      "卸载一个应用并分别申请保留/删除用户数据，再回收无引用内容。"
+    ],
+    "expected": [
+      "安装前建立独立且可验证的内容保留；任务清理不破坏应用或共享/恢复依赖，实际损坏明确阻塞而非改用 latest。",
+      "卸载默认保留用户数据，删除需独立授权；只有无其他引用和 pin 的制品才可回收。"
+    ],
+    "required_evidence": [
+      "源码 SHA、Agent/Adapter/协议与 Runtime/Profile 版本、产物/清单/计划摘要及目标 Edition",
+      "原始请求与持久回执、权限裁决、Operation/Deployment/保留关系及故障前后记录（脱敏）",
+      "逐项预期/实际结果和内容校验；截图或模型描述不替代后端证据"
+    ],
+    "status": "NotRun",
+    "implementation_status": "NotVerified"
+  },
+  {
+    "id": "AT-AIF-009",
+    "title": "隔离构建、恶意包与依赖锁",
+    "source_document": "docs/07-applications-packages-gui.md",
+    "requirement_ids": [
+      "V1-APP-013",
+      "V1-APP-015",
+      "V1-AGT-014"
+    ],
+    "stage": [
+      "M3",
+      "M4"
+    ],
+    "verification_methods": [
+      "Integration",
+      "FaultInjection"
+    ],
+    "preconditions": [
+      "准备源码目录、锁定工具链/依赖和有限构建预算，以及路径穿越、链接逃逸、压缩炸弹和可变依赖 URL 的反例。"
+    ],
+    "actions_or_fault": [
+      "调用 PlanInstall 检查需要构建的产物；在独立 Task 中构建并记录输入/输出，尝试获取宿主秘密、访问未授权网络及超限解包。",
+      "在离线或依赖内容变化时重试，并中断构建后继续安装。"
+    ],
+    "expected": [
+      "规划只报告构建要求，不执行脚本；构建在受限环境运行，危险条目、超限和未授权出口被拒绝。",
+      "固定依赖与最终摘要可追踪，缺失/变化内容阻塞；不完整构建不进入安装，不能把本地摘要当发布者认证。"
+    ],
+    "required_evidence": [
+      "源码 SHA、Agent/Adapter/协议与 Runtime/Profile 版本、产物/清单/计划摘要及目标 Edition",
+      "原始请求与持久回执、权限裁决、Operation/Deployment/保留关系及故障前后记录（脱敏）",
+      "逐项预期/实际结果和内容校验；截图或模型描述不替代后端证据"
+    ],
+    "status": "NotRun",
+    "implementation_status": "NotVerified"
+  },
+  {
+    "id": "AT-AIF-010",
+    "title": "三版能力发现与支持范围",
+    "source_document": "docs/09-agents-models-protocols.md",
+    "requirement_ids": [
+      "V1-APP-012",
+      "V1-APP-016",
+      "V1-AGT-013",
+      "V1-AGT-015"
+    ],
+    "stage": [
+      "M3",
+      "M4"
+    ],
+    "verification_methods": [
+      "Integration"
+    ],
+    "preconditions": [
+      "准备 Helium/Neon/Argon 的确切 Profile；至少一个无 KDE/GUI 后端节点、一个不支持目标 Runtime 的节点及远程适配场景。"
+    ],
+    "actions_or_fault": [
+      "从 CLI/SDK 和 Shell 查询并安装受支持的产物；尝试未支持格式、Runtime、远程目标、回退操作及只读 Artifact 接口。"
+    ],
+    "expected": [
+      "三版共享资源与权限合同，能力发现如实列出版本、限额和操作范围；静态 Web 不以 GUI 后端为硬依赖。",
+      "不支持明确拒绝，不回落到任意 root shell；CLI 成功不冒充 UI 验收，只读能力不冒充通用提交/安装支持。"
+    ],
+    "required_evidence": [
+      "源码 SHA、Agent/Adapter/协议与 Runtime/Profile 版本、产物/清单/计划摘要及目标 Edition",
+      "原始请求与持久回执、权限裁决、Operation/Deployment/保留关系及故障前后记录（脱敏）",
+      "逐项预期/实际结果和内容校验；截图或模型描述不替代后端证据"
+    ],
+    "status": "NotRun",
+    "implementation_status": "NotVerified"
   }
 ]

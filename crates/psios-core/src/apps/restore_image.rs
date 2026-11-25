@@ -11,10 +11,11 @@ use crate::{
     host::{Target, Work},
     now, policy, require,
 };
-use psios_api::{ResourceRef, sha256};
+use psios_api::ResourceRef;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::fs::File;
 pub(crate) use verification::verify;
 
 pub(crate) const TOOL: &str = "application.restore_release_image";
@@ -148,17 +149,20 @@ pub(crate) fn audience(
 
 pub(crate) struct Prepared {
     binding: Binding,
-    bytes: Vec<u8>,
+    archive: File,
 }
 
 pub(crate) fn prepare(db: &Db<'_>, app: &Doc, request: &Request) -> Result<Prepared> {
     let (binding, archive) = source(db, app, request)?;
-    let bytes = artifact::checkpoint_bytes(
-        db.c,
-        &archive.artifact,
-        artifact::ingress::MAX_BYTES as usize,
-    )?;
-    Ok(Prepared { binding, bytes })
+    let (archive, _) = engine::seal_file(|output| {
+        artifact::copy_verified_raw(
+            db.c,
+            &archive.artifact,
+            artifact::ingress::MAX_BYTES as usize,
+            output,
+        )
+    })?;
+    Ok(Prepared { binding, archive })
 }
 
 fn intent_id(op: &str) -> String {
@@ -341,13 +345,15 @@ fn unknown() -> crate::Error {
 pub(crate) fn run(work: &Work, checkpoint: impl FnOnce(&Dispatch) -> Result<()>) -> Result<Value> {
     let prepared = work.restore_image.as_ref().ok_or_else(missing_input)?;
     let binding = &prepared.binding;
-    let bytes =
-        restore_archive::canonical_load(&prepared.bytes, &binding.image_id, &binding.diff_ids)?;
-    let dispatch = Dispatch {
-        normalized_digest: sha256(&bytes),
-    };
-    let input = engine::Input::seal(&bytes)?;
-    drop(bytes);
+    let (input, normalized_digest) = engine::Input::seal(|output| {
+        restore_archive::write_load(
+            &prepared.archive,
+            output,
+            &binding.image_id,
+            &binding.diff_ids,
+        )
+    })?;
+    let dispatch = Dispatch { normalized_digest };
     engine::runtime()?.block_on(async {
         let mut peer = engine::Connection::open(&work.cfg.docker_socket).await?;
         peer.identity(&binding.engine_id).await?;

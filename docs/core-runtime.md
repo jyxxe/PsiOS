@@ -269,7 +269,7 @@ Core 核对原会话、模型租约及决策摘要，在一个事务中提交原
 
 `application.capture_oci_image` 接受 `image_id` 和 `expected_engine_id`。本机所有者使用显式限定在当前 Node 的任务委托和 `artifact.upload` 授权，提交后再批准包含镜像和引擎身份的计划。适配器仅从配置的本机 Docker Engine 以完整镜像配置摘要导出有层的 Linux amd64 镜像，前后核对引擎身份和层摘要。归档大小最多 8 MiB，并计入现有 Node 与所有者的制品额度。
 
-制品字节、`LocalOciImageCapture` 来源、`OciImageCapture` 凭据和 Task 回执在同一事务提交。归档可用独立授权的 `Artifact.ReadChunk` 分块读取并核对完整 SHA-256，回收需要独立的 `artifact.withdraw`。取消、进程中断和发布失败不会留下半成品。[真实 Docker 导出和独立重载验收](../tests/oci_capture.py)
+导出前按归档上限检查状态盘的块和 inode 余量。Docker 的输出分块写入状态目录的私有匿名文件，同时计算原始摘要。Core 按 tar 成员的偏移和长度读取该文件，再分块提交制品字节、`LocalOciImageCapture` 来源、`OciImageCapture` 凭据和 Task 回执。它们仍在同一个事务中提交。归档可用独立授权的 `Artifact.ReadChunk` 分块读取并核对完整 SHA-256，回收需要独立的 `artifact.withdraw`。取消、进程中断或发布失败会释放暂存文件，未完成的制品不会发布。[真实 Docker 导出和独立重载验收](../tests/oci_capture.py)
 
 捕获会在持久提交前检查原始 tar，并记录 `restore_compatibility`。`Verified` 对应 `DockerClassicTaglessSaveV1`，要求单个无标签镜像，精确匹配配置摘要和有序未压缩层 DiffID。外层 tar 支持两种读取器能一致解释的 V7、USTAR 和 GNU 普通文件或目录。库间解释歧义或标签会阻止发布。存在 OCI 索引时，两个视图的配置和层必须一致，且索引只直接指向一个镜像。镜像 ID 使用清单摘要、层使用压缩格式或布局不受支持时，原始捕获可保留并报告 `Unsupported`。升级到数据库格式 63 后，旧捕获标为 `Unverified`，其历史回执依旧省略此字段。证明覆盖归档结构及镜像身份，实际恢复还会检查层元数据及目的引擎。[归档格式测试](../crates/psios-core/src/apps/restore_archive/tests.rs)
 
@@ -285,7 +285,7 @@ Core 核对原会话、模型租约及决策摘要，在一个事务中提交原
 
 `psiosctl application-prepare-image-restore --key restore-1 --delegation "$restore_delegation" restore.json` 从文件读取 `application_ref`、`release_ref`、`image_archive_ref`、`publisher_key_ref` 和 `expected_engine_id`。`psiosctl application-prepare-image-restore-inspection --key inspect-1 --delegation "$inspection_delegation" operation-ref.json` 读取待核实的原 Operation 引用。两个命令均输出可通过 `psiosctl call Task.Submit` 提交的 JSON。Core 按应用或 Operation 的 ID 和版本解析目标，在受理时绑定完整资源引用。Rust SDK 提供 `Client::prepare_release_image_restore` 和 `Client::prepare_release_image_restore_inspection`，沿用同一 Task 流程。
 
-该能力使用 Linux amd64 Docker Engine API v1.44 的经典 `overlay2` 或 `vfs` 镜像存储。服务复核仍有效的签名以及保留归档的完整字节，从核验过的镜像配置和层生成单镜像无标签归档，并记录两个归档的 SHA-256。恢复拒绝压缩层、稀疏层和扩展层元数据，累计层字节上限为 8 MiB。导入使用绑定同一个 Engine 的本机 Unix 连接，依赖 Docker 及其文件系统报告空间或运行错误。
+该能力使用 Linux amd64 Docker Engine API v1.44 的经典 `overlay2` 或 `vfs` 镜像存储。服务复核仍有效的签名以及保留归档的完整字节，将核验过的镜像配置和层分块写入单镜像无标签归档。导入前封印文件描述符并记录两个归档的 SHA-256。恢复拒绝压缩层、稀疏层和扩展层元数据，累计层字节上限为 8 MiB。导入使用绑定同一个 Engine 的本机 Unix 连接，依赖 Docker 及其文件系统报告空间或运行错误。
 
 只有检查点提交后才向 Docker 发起一次导入。中断后，待核实的原 Operation 对应用和该引擎内的镜像保持独占。使用单独委托提交只读 `application.inspect_release_image_restore`，以原 Operation 的 `target` 为输入，并覆盖原计划资源。精确引擎上的镜像摘要及有序层 DiffID 得到确认后，可向 `Operation.Reconcile` 提供新的检查结果。镜像缺失、引擎身份变化或不匹配的结果都会保留 `OutcomeUnknown`。观察和结算原 Operation 不会重发导入。离线校验核对原检查点和结算证据。发行版本退役后，已合法回收的原始字节可只保留历史摘要和回执。[真实 Docker 进程中断和恢复验收](../tests/oci_restore.py)
 

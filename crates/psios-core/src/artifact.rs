@@ -8,6 +8,7 @@ use psios_api::{canonical, id, sha256};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 
 pub(crate) mod availability;
 pub(crate) mod capacity;
@@ -152,15 +153,22 @@ impl<'a> Manifest<'a> {
     }
 
     fn verify(&self, conn: &Connection) -> Result<()> {
+        self.verify_into(conn, &mut io::sink()).map(|_| ())
+    }
+
+    fn verify_into(&self, conn: &Connection, output: &mut impl Write) -> Result<usize> {
         let mut digest = Sha256::new();
         for index in 0..self.chunks.len() {
-            digest.update(self.chunk(conn, index)?);
+            let bytes = self.chunk(conn, index)?;
+            digest.update(&bytes);
+            output.write_all(&bytes)?;
         }
         require(
             format!("sha256:{:x}", digest.finalize()) == self.digest,
             "RecoveryRequired",
             "artifact content digest mismatch",
-        )
+        )?;
+        Ok(self.size)
     }
 
     fn original_bytes(&self, conn: &Connection, max_bytes: Option<usize>) -> Result<Vec<u8>> {
@@ -215,6 +223,14 @@ pub(crate) fn checkpoint_bytes(
 }
 
 pub(crate) fn verify_raw_bytes(conn: &Connection, artifact: &Doc, max_bytes: usize) -> Result<()> {
+    copy_verified_raw(conn, artifact, max_bytes, &mut io::sink()).map(|_| ())
+}
+
+fn raw_manifest<'a>(
+    conn: &Connection,
+    artifact: &'a Doc,
+    max_bytes: usize,
+) -> Result<Manifest<'a>> {
     retention::require_content(conn, artifact)?;
     let manifest = Manifest::read(artifact)?
         .filter(|_| is_raw(artifact))
@@ -224,7 +240,85 @@ pub(crate) fn verify_raw_bytes(conn: &Connection, artifact: &Doc, max_bytes: usi
         "QuotaExceeded",
         "opaque artifact exceeds verification limit",
     )?;
-    manifest.verify(conn)
+    Ok(manifest)
+}
+
+/// Copy verified bytes in one pass. Publish or use the private destination only on success.
+pub(crate) fn copy_verified_raw(
+    conn: &Connection,
+    artifact: &Doc,
+    max_bytes: usize,
+    output: &mut impl Write,
+) -> Result<usize> {
+    raw_manifest(conn, artifact, max_bytes)?.verify_into(conn, output)
+}
+
+/// Read one immutable checked manifest under the caller's retained database snapshot.
+pub(crate) struct VerifiedRaw<'a> {
+    conn: &'a Connection,
+    manifest: Manifest<'a>,
+    position: usize,
+    cached: Option<(usize, Vec<u8>)>,
+}
+
+/// Check the aggregate content digest before returning a bounded reader.
+pub(crate) fn open_verified_raw<'a>(
+    conn: &'a Connection,
+    artifact: &'a Doc,
+    max_bytes: usize,
+) -> Result<VerifiedRaw<'a>> {
+    let manifest = raw_manifest(conn, artifact, max_bytes)?;
+    manifest.verify(conn)?;
+    Ok(VerifiedRaw {
+        conn,
+        manifest,
+        position: 0,
+        cached: None,
+    })
+}
+
+impl Read for VerifiedRaw<'_> {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        if output.is_empty() || self.position == self.manifest.size {
+            return Ok(0);
+        }
+        let index = self.position / CHUNK_BYTES;
+        if self
+            .cached
+            .as_ref()
+            .is_none_or(|(cached, _)| *cached != index)
+        {
+            self.cached = None;
+            let chunk = self.manifest.chunk(self.conn, index).map_err(|error| {
+                if error.0.code == "RecoveryRequired" {
+                    io::Error::new(io::ErrorKind::InvalidData, error)
+                } else {
+                    io::Error::other(error)
+                }
+            })?;
+            self.cached = Some((index, chunk));
+        }
+        let bytes = &self.cached.as_ref().expect("loaded chunk").1[self.position % CHUNK_BYTES..];
+        let count = bytes.len().min(output.len());
+        output[..count].copy_from_slice(&bytes[..count]);
+        self.position += count;
+        Ok(count)
+    }
+}
+
+impl Seek for VerifiedRaw<'_> {
+    fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+        let position = match from {
+            SeekFrom::Start(offset) => i128::from(offset),
+            SeekFrom::Current(offset) => self.position as i128 + i128::from(offset),
+            SeekFrom::End(offset) => self.manifest.size as i128 + i128::from(offset),
+        };
+        self.position = usize::try_from(position)
+            .ok()
+            .filter(|position| *position <= self.manifest.size)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "seek outside artifact"))?;
+        Ok(self.position as u64)
+    }
 }
 
 pub fn page(db: &Db<'_>, artifact: &Doc, offset: usize, length: usize) -> Result<Value> {
@@ -289,6 +383,104 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
 mod tests {
     use super::*;
     use crate::{Config, Store, policy};
+
+    #[test]
+    fn raw_reader_checks_bounds_aggregate_digest_chunks_and_retention() {
+        let temporary = tempfile::tempdir().unwrap();
+        let config = Config::local(&temporary.path().join("state"));
+        Store::init(&config).unwrap();
+        let mut store = Store::open(config).unwrap();
+        store
+            .transaction("verify-raw-reader", |db| {
+                let node = db.meta("authority")?;
+                policy::grant(
+                    db,
+                    policy::OWNER,
+                    &json!({"principal_id":policy::OWNER,
+                    "actions":[ingress::UPLOAD, ingress::WITHDRAW],"tool_targets":[node],
+                    "units":2,"ttl_seconds":60}),
+                )?;
+                let mut bytes = vec![0x51; CHUNK_BYTES];
+                bytes.extend([0x2a; 8]);
+                let upload = ingress::publish_generated(
+                    db,
+                    policy::OWNER,
+                    &bytes,
+                    "application/octet-stream",
+                    json!({"kind":"LocalSubmission"}),
+                )?;
+                let reference = &upload["artifact_ref"];
+                let artifact = db.resolve(reference)?;
+
+                assert!(
+                    matches!(open_verified_raw(db.c, &artifact, bytes.len() - 1),
+                    Err(error) if error.0.code == "QuotaExceeded")
+                );
+                let mut different_digest = artifact.clone();
+                different_digest.spec["digest"] = json!(sha256(b"different archive"));
+                assert!(
+                    matches!(open_verified_raw(db.c, &different_digest, bytes.len()),
+                    Err(error) if error.0.code == "RecoveryRequired")
+                );
+
+                let mut file = tempfile::tempfile_in(temporary.path())?;
+                assert_eq!(
+                    copy_verified_raw(db.c, &artifact, bytes.len(), &mut file)?,
+                    bytes.len()
+                );
+                file.rewind()?;
+                let mut copied = Vec::new();
+                file.read_to_end(&mut copied)?;
+                assert_eq!(copied, bytes);
+
+                let mut reader = open_verified_raw(db.c, &artifact, bytes.len())?;
+                assert_eq!(reader.seek(SeekFrom::End(-9))?, (CHUNK_BYTES - 1) as u64);
+                let mut sample = [0; 9];
+                reader.read_exact(&mut sample)?;
+                assert_eq!(sample.as_slice(), &bytes[CHUNK_BYTES - 1..]);
+                assert_eq!(reader.read(&mut sample)?, 0);
+                for invalid in [
+                    SeekFrom::Start(u64::MAX),
+                    SeekFrom::Current(i64::MIN),
+                    SeekFrom::End(1),
+                ] {
+                    assert_eq!(
+                        reader.seek(invalid).unwrap_err().kind(),
+                        io::ErrorKind::InvalidInput
+                    );
+                    assert_eq!(reader.stream_position()?, bytes.len() as u64);
+                }
+
+                db.c.execute(
+                    "UPDATE artifact_chunks SET payload=zeroblob(length(payload))
+                    WHERE artifact_id=?1 AND chunk_index=0",
+                    [&artifact.id],
+                )?;
+                reader.rewind()?;
+                assert_eq!(
+                    reader.read(&mut sample).unwrap_err().kind(),
+                    io::ErrorKind::InvalidData
+                );
+                let mut discarded = io::sink();
+                assert_eq!(
+                    copy_verified_raw(db.c, &artifact, bytes.len(), &mut discarded)
+                        .unwrap_err()
+                        .0
+                        .code,
+                    "RecoveryRequired"
+                );
+
+                ingress::withdraw(
+                    db,
+                    policy::OWNER,
+                    &json!({"reference":reference,"reason":"test withdrawal"}),
+                )?;
+                assert!(matches!(open_verified_raw(db.c, &artifact, bytes.len()),
+                    Err(error) if error.0.code == "ResultEvicted"));
+                Ok(())
+            })
+            .unwrap();
+    }
 
     #[test]
     fn stored_json_preserves_large_integer_values_and_hashes_the_original_bytes() {

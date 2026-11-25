@@ -47,6 +47,7 @@ pub const TOOLS: &[&str] = &[
     "volume.append",
     "volume.remove_entry",
     "application.stage_release",
+    apps::inventory::TOOL,
     apps::artifact_install::STAGE_TOOL,
     "application.select_release",
     apps::release_retirement::TOOL,
@@ -120,6 +121,7 @@ pub fn readonly(tool: &str) -> bool {
             | storage::file_move::INSPECT
             | "volume.read_chunk"
             | "application.refresh"
+            | apps::inventory::TOOL
             | "secret.mac"
             | "backup.verify"
             | storage::publication::INSPECT
@@ -180,6 +182,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | artifact::ingress::WITHDRAW
                     | apps::artifact_install::TOOL
                     | apps::artifact_install::STAGE_TOOL
+                    | apps::inventory::TOOL
                     | apps::release_retirement::TOOL
                     | node::block::TOOL
                     | "backup.verify"
@@ -270,7 +273,7 @@ fn install_tools(db: &Db<'_>, profile: &Value) -> Result<()> {
             "profile_ref": profile,
             "revocation_capabilities": ["GateOnly"],
             "effect_limitations": [if readonly(tool){"Returned bytes cannot be recalled"}else{"An already dispatched effect requires a receipt"}],
-            "availability": if tool.starts_with("application."){"Degraded"}else{"Ready"},
+            "availability": if tool.starts_with("application.") && *tool != apps::inventory::TOOL {"Degraded"}else{"Ready"},
             "implementation_status": "ImplementedUnverified"
         });
         db.create(
@@ -540,6 +543,7 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
                     || action == artifact::ingress::WITHDRAW
                     || action == apps::artifact_install::TOOL
                     || action == apps::artifact_install::STAGE_TOOL
+                    || action == apps::inventory::TOOL
                     || action == apps::release_retirement::TOOL
                     || action == node::journal::TOOL
                     || action == node::process::TOOL

@@ -143,6 +143,7 @@ Core 可选地先向该目标指定的解析器发出 TCP DNS 请求。按端点
 | volume.read_chunk | `target, path, offset, limit`。取回 Base64 数据、块摘要、下一偏移和 EOF。可以从待激活的恢复卷读取。 |
 | application.stage_release | `target` 指应用，`release` 使用安装参数，省略 volume。依据本机 OCI 摘要生成属于同一应用的清单和不可变 Release，保留当前部署。 |
 | application.stage_artifact_release | `target, reference`。在应用和制品范围内批准新的不可变 Release，继承现有应用的卷绑定。制品保留和来源凭据随版本提交。 |
+| application.releases | `application_id`、可选 `cursor, limit`。在授予的应用范围内分页读取版本及选定状态。 |
 | application.select_release | `target, release_ref`。应用停止时经审批切换至选定 Release，生成新部署。选回已有版本使用相同接口。卷数据世代保持连续，应用层数据库迁移须另外协调。 |
 | application.retire_release | `target, release_ref, reason`。经审批退役当前无部署使用的 Release，保留审计记录并释放源制品保留关系。 |
 | application.refresh | 应用 ID 和预期修订。把引擎观测写回 Application 和 RuntimeInstance。进程意外退出时记录 Exited 和 NotReady，并保留现场及数据占用，直到显式停止清理。 |
@@ -267,6 +268,10 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 通过 Task 工具 `application.retire_release` 提交应用当前版本 `target`、确切 `release_ref` 和原因。Grant 必须覆盖应用和 Release，审批绑定这两项引用。仍有应用或 Deployment 使用的版本会被拒绝。切换后可退役已替代的版本，卸载后也可退役最后一次部署的版本。
 
 退役提交后，原 Release 及 `ApplicationReleaseRetirement` 凭据仍可查询。启动和版本选择检查退役状态，待执行的旧回滚同样受此约束。退役会原子释放 Release 对本机制品的保留关系。没有其他保留者时，有权主体可另行调用 `Artifact.Withdraw` 回收字节。持久卷和备份延续各自的生命周期。[真实 OCI 验收](../tests/oci.py) · [格式 55 安装任务升级验收](../tests/release_retirement_upgrade.py)
+
+### 查询应用版本历史
+
+持有应用范围 `application.releases` Grant 的主体可以使用 `Application.ListReleases`、`Client::application_releases` 或 `psiosctl application-releases APP_ID`。Agent 也可通过同名 Task 工具发起查询并取回常规任务产物。分页固定第一次查询时的 Application 修订和已提交版本，按创建顺序返回 `Selected`、`Staged`、`Unselected` 或 `Retired`，并附带可用的源制品和退役引用。返回的 `next_cursor` 可由同一主体在同一应用范围内继续使用，有效期为十分钟。授权代际更新后需要重新查询。读取制品正文须独立具备制品读取权限。
 
 ## 任务调度
 

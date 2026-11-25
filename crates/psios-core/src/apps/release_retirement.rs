@@ -33,7 +33,7 @@ impl Request {
     }
 }
 
-fn receipt_id(release: &str) -> String {
+pub(super) fn receipt_id(release: &str) -> String {
     format!("retired-{release}")
 }
 

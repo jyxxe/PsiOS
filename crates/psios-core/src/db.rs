@@ -190,7 +190,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = apps::artifact_install::STAGE_FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = apps::inventory::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -430,6 +430,9 @@ impl Store {
                 }
                 if ver < apps::artifact_install::STAGE_FORMAT {
                     db.c.execute_batch(apps::artifact_install::STAGE_SCHEMA)?;
+                }
+                if ver < apps::inventory::FORMAT {
+                    db.c.execute_batch(apps::inventory::SCHEMA)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

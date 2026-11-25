@@ -225,6 +225,19 @@ impl Client {
             .cloned()
             .ok_or_else(|| invalid("missing result"))
     }
+    /// Read a fixed application release history page. Reuse the next cursor for continuation.
+    pub fn application_releases(
+        &self,
+        application_id: &str,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> ApiResult<Value> {
+        self.call(
+            "Application.ListReleases",
+            json!({"application_id":application_id,"cursor":cursor,"limit":limit}),
+        )
+    }
+
     /// Prepare an approval-bound local OCI release for an exact application revision.
     pub fn prepare_artifact_release(
         &self,

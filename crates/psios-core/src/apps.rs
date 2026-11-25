@@ -11,6 +11,7 @@ use std::{collections::BTreeMap, process::Command};
 
 pub(crate) mod artifact_install;
 mod cgroup;
+pub(crate) mod inventory;
 pub(crate) mod release_retirement;
 pub(crate) mod restart;
 

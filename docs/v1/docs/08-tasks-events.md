@@ -112,6 +112,8 @@ Run 生命周期为 `Created / Running / WaitingInput / WaitingApproval / Waitin
 
 **V1-TSK-010（必须）**：大结果先上传到隔离暂存位置，验证大小、内容摘要和安全域，再提交不可变 Artifact 引用。成功状态提交与引用生效之间须有恢复协议；不可将尚未完成上传的 URL 标为成功。结果包含版本、媒体类型、长度、校验值、生产 Task/Run/Operation、保留关系和访问条件。
 
+可安装的 Agent 产物按[第 07 章第 6 节](07-applications-packages-gui.md#6-agent-artifacts-作为应用安装)进入应用生命周期：产物生成/发布 Task 的成功与安装 Operation 的成功分别记录。已安装应用建立独立制品保留关系，不能随生成任务或会话的结果清理而失效；通用提交及恢复合同见[第 09 章第 9.11 节](09-agents-models-protocols.md#911-agent-通用产物接口)。
+
 结果状态使用 `Pending / NoneExpected / Available / Evicted / Unavailable`。`NoneExpected` 仅用于合同已声明不产生结果制品的任务，不是错误造成丢失；`Available`须能按当前权限解析所列制品；`Evicted`保留清理时间、原因和允许查询的摘要；`Unavailable`表示暂时无法取得且无已回收证明。历史用语`NotProduced`仅在可证实原合同无结果时迁移为NoneExpected。正文回收后任务元数据、防重放墓碑和必须保留的审批证据独立处理；可信历史Succeeded不因结果后来不可取而改写，依赖缺失结果的步骤必须阻塞。日志、截图、模型输出和结果资产各自设保留规则。跨安全域复用内容地址不能绕过所有权与解密边界。
 
 ## 8.7 Event outbox、inbox 与订阅

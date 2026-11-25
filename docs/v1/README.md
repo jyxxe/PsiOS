@@ -8,17 +8,19 @@ v1是文档版本；当前没有宣称软件已发布、最新仓库已审计、
 
 当前 Shell 方向为类似 macOS 的浏览器桌面；规范见[第 07 章第 5 节](docs/07-applications-packages-gui.md#5-psios-shell浏览器桌面工作环境)。新增桌面能力尚待实现与验收，修订历史见[CHANGELOG](CHANGELOG.md)。
 
+Agent 可经通用接口交付 Artifacts 并安装为受管理应用；设计见[应用第 6 节](docs/07-applications-packages-gui.md#6-agent-artifacts-作为应用安装)及[Agent 第 9.11 节](docs/09-agents-models-protocols.md#911-agent-通用产物接口)。WI-028 跟踪接口冻结与实现，新增产品验收仍为 NotRun。GitHub 当前文档为唯一规范权威，原始 ZIP 仅为历史快照。
+
 ## 本包包含什么
 
 | 内容 | 实际数量/范围 |
 |---|---|
 | 独立规范章节 | 17章，含架构、共同合同、安全、恢复、存储、应用、Agent、Chat、Workflow、集群、发布、路线和词典 |
-| v1规范条款 | 257条，唯一ID与验证计划可追踪 |
+| v1规范条款 | 265条，唯一ID与验证计划可追踪 |
 | 问题修正记录 | 89项：P0=40、P1=45、P2=4；均为规范层修正 |
 | 机器合同 | 33份JSON Schema；关键请求严格拒绝未知字段 |
 | 正反样例 | 35个正例、35个反例，另有摘要向量 |
-| 产品验证计划 | 150个具体场景，全部NotRun；文档/治理与真实运行验证区分 |
-| ADR / 工作项 / 操作手册 | 25份Proposed ADR、27个WI工作项、6份可执行顺序明确的runbook |
+| 产品验证计划 | 160个具体场景，全部NotRun；文档/治理与真实运行验证区分 |
+| ADR / 工作项 / 操作手册 | 25份Proposed ADR、28个WI工作项、6份可执行顺序明确的runbook |
 | 历史迁移 | 245个旧要求、141个旧测试均有文档去向 |
 | 规划资料 | PsiOS 设计草案、Space 规划及验收记录；公开技术规范另见参考资料清单 |
 

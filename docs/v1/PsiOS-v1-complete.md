@@ -19,17 +19,19 @@ v1是文档版本；当前没有宣称软件已发布、最新仓库已审计、
 
 当前 Shell 方向为类似 macOS 的浏览器桌面；规范见[第 07 章第 5 节](docs/07-applications-packages-gui.md#5-psios-shell浏览器桌面工作环境)。新增桌面能力尚待实现与验收，修订历史见[CHANGELOG](CHANGELOG.md)。
 
+Agent 可经通用接口交付 Artifacts 并安装为受管理应用；设计见[应用第 6 节](docs/07-applications-packages-gui.md#6-agent-artifacts-作为应用安装)及[Agent 第 9.11 节](docs/09-agents-models-protocols.md#911-agent-通用产物接口)。WI-028 跟踪接口冻结与实现，新增产品验收仍为 NotRun。GitHub 当前文档为唯一规范权威，原始 ZIP 仅为历史快照。
+
 ## 本包包含什么
 
 | 内容 | 实际数量/范围 |
 |---|---|
 | 独立规范章节 | 17章，含架构、共同合同、安全、恢复、存储、应用、Agent、Chat、Workflow、集群、发布、路线和词典 |
-| v1规范条款 | 257条，唯一ID与验证计划可追踪 |
+| v1规范条款 | 265条，唯一ID与验证计划可追踪 |
 | 问题修正记录 | 89项：P0=40、P1=45、P2=4；均为规范层修正 |
 | 机器合同 | 33份JSON Schema；关键请求严格拒绝未知字段 |
 | 正反样例 | 35个正例、35个反例，另有摘要向量 |
-| 产品验证计划 | 150个具体场景，全部NotRun；文档/治理与真实运行验证区分 |
-| ADR / 工作项 / 操作手册 | 25份Proposed ADR、27个WI工作项、6份可执行顺序明确的runbook |
+| 产品验证计划 | 160个具体场景，全部NotRun；文档/治理与真实运行验证区分 |
+| ADR / 工作项 / 操作手册 | 25份Proposed ADR、28个WI工作项、6份可执行顺序明确的runbook |
 | 历史迁移 | 245个旧要求、141个旧测试均有文档去向 |
 | 规划资料 | PsiOS 设计草案、Space 规划及验收记录；公开技术规范另见参考资料清单 |
 
@@ -139,6 +141,13 @@ python tools/validate_package.py
 - 新增 WI-027 与 AT-SHL-001～015；同步产品架构、路线、ADR-16 体验约束、接口词典和实际实现差距。
 - 重新生成当前需求索引、场景阅读版、完整 Markdown、离线 HTML、校验报告与 MANIFEST；原始分段 ZIP 不覆盖，依然是 2026-11-22 封存交付。
 - 文档版本保持 1.0.0，当前 GitHub 修订以提交 SHA 标识；新增桌面实现为 NotVerified、产品验收为 NotRun，静态检查不代表软件能力完成。
+
+## Agent 通用接口与 Artifacts 应用化（2026-11-25）
+
+- 新增 V1-APP-012～016、V1-AGT-013～015：统一产物交付、清单适配、受控安装、隔离预览、版本管理及独立制品保留。
+- 说明能力发现、拟定逻辑操作、来源关联、幂等回执、预授权与断线恢复；复用 Application/Release/Deployment、Task/Operation 和现有权限模型。
+- 新增 WI-028 与 AT-AIF-001～010，优先静态 Web/OCI；接入消息 Schema、运行实现和验收仍待完成。
+- 同步架构、接口目录、任务结果边界、实现差距及派生文档；明确 GitHub 当前文档为唯一权威，历史 ZIP 保持不变。文档版本为 1.0.0，新增功能为 NotVerified/NotRun。
 
 
 ---
@@ -462,7 +471,7 @@ MANIFEST.sha256逐项记录除自身外所有交付文件的SHA-256；ZIP内部�
 
 ## 6. 文档包与项目的关系
 
-本包是交付文件，不自动创建 Forgejo Issue、修改仓库、上传原生 Project 文件或覆盖 Space 页面。原 Project 与 Space 的 v0.6 内容在被明确替换前仍是旧资料；后续使用应把本包 README 和完整文档作为 v1 入口，历史文件保留在 archive 范围。任何导入后的修订都应重新生成索引、全文、校验清单与 ZIP，防止再次出现同版本不同内容。
+GitHub 仓库中的当前文档是 PsiOS 规范的唯一权威来源；原 Project/Space 导入材料仅作为历史证据保留在 archive，不作为现行规范，也不再向 Space 创建或同步项目文档。后续修订直接更新 GitHub 分章及关联登记表，并重新生成索引、全文、HTML、校验报告和清单；同一文档版本内的修订以提交 SHA 区分。`docs/releases/` 的原始分段 ZIP 保持历史交付身份；如另行发布修订包，须使用独立交付标识，不能覆盖旧快照或声称它包含新增条款。
 
 
 ---
@@ -501,6 +510,8 @@ PsiOS 是基于 Linux 的 Agent-Native 操作系统。用户通过 CLI、KDE、W
 PsiOS Shell 的产品定位是**类似 macOS 的浏览器桌面工作环境**。登录后进入用户桌面，以菜单栏、Dock、应用启动器、多窗口和工作区组织日常工作；文件、Agent Chat、PsiFlow、终端及应用是主要入口。系统设置、活动监视器、存储和节点管理作为独立应用提供，默认首页不采用服务器资源仪表盘或全局模块侧栏。视觉与交互要求见[第 07 章第 5 节](docs/07-applications-packages-gui.md#5-psios-shell浏览器桌面工作环境)。
 
 Shell 的窗口层在浏览器内运行，不依赖远程桌面视频流；KDE Plasma 负责 Argon 本机原生窗口、显示和输入。远程图形应用通过可选 GUI Bridge 接入桌面。三版共享交互模型，按实际服务、权限和后端能力呈现应用。
+
+Agent 产物应用化是统一应用模型的设计目标：原生或第三方 Agent 通过通用接口交付 Artifacts，PsiOS 完成清单适配、权限裁决和受控安装，用户即可在应用启动器打开。Artifact 内容、ApplicationRelease 运行合同、Deployment 与用户数据各自管理，应用不依赖原生成会话存活；详见[第 07 章第 6 节](docs/07-applications-packages-gui.md#6-agent-artifacts-作为应用安装)及[第 09 章第 9.11 节](docs/09-agents-models-protocols.md#911-agent-通用产物接口)。此增补不表示接口或安装体验已经实现。
 
 ## 2. 逻辑组件与信任边界
 
@@ -1647,6 +1658,8 @@ Go/No-Go 要使用同一硬件、内核、工作负载及持久性设置，对�
 | `PackageImport` | 第三方包识别、解析、验证、构建和集成操作 | 产物进入 Application，不成为第二套应用权威 |
 | `PackageEnvironment` | 目标发行版用户空间、ABI、包数据库、基础层及重建记录 | 不等同于宿主发行版，不拥有宿主包管理权 |
 
+Agent 生成的可安装产物沿用以上对象：Artifact 保存不可变内容，ApplicationRelease 描述如何运行，Deployment 记录安装结果。通用接入与应用化规则见本章第 6 节及 [Agent 第 9.11 节](docs/09-agents-models-protocols.md#911-agent-通用产物接口)。
+
 ### V1-APP-002：清单与生效权限
 
 清单必须用版本化 Schema 校验，并保存以下内容：
@@ -2003,6 +2016,66 @@ M0 冻结视图合同与交互原型；M2 建立桌面、菜单栏、Dock、启�
 
 原 `APP-T01～05`、`PKG-T01～05`、`CU-T01～07`、`GUI-T01～06`、`XAT-09/24～29/42/45` 持续有效，上述场景细化其失败条件。若后端无法兑现控制范围或及时撤权，必须收缩发布Profile并公开限制；不以“以后完善”宣称当前已经安全支持。
 
+## 6. Agent Artifacts 作为应用安装
+
+本节为 2026-11-25 的设计增补：用户可以将原生或第三方 Agent 生成的网页、交互工具、仪表盘及服务，以 Artifacts 形式直接提交给 PsiOS 并安装为应用，无需手工重新制作另一套应用包。这里的 Artifacts 是 PsiOS 的通用产物概念，不绑定某个模型供应商或聊天客户端的同名功能。新增接入合同尚待冻结和实现，验收为 `NotRun`。
+
+### V1-APP-012：产物与应用的统一映射
+
+可安装产物必须经 Adapter 生成或校验完整 ApplicationManifest 和 ApplicationReleaseSpec，再进入已有 Application/Release/Deployment 生命周期。Artifact 是不可变内容；“安装为应用”是为这些内容建立受管理的运行、权限、入口与数据绑定，不把聊天附件自身变成执行权威。普通报告、图片和数据集仍可只保存为 Artifact，不因上传成功自动安装。
+
+| 产物 | 应用化方式 | 支持边界 |
+|---|---|---|
+| HTML/CSS/JavaScript、已构建 Web 目录 | 固定入口与全部依赖，适配为 `NativeWeb` 应用 | 提供受控静态服务/运行 Profile 和隔离 origin；无需 KDE 或 GUI 视频流 |
+| 前后端应用、CLI、后台服务、OCI 镜像 | 固定运行环境、入口与镜像/依赖摘要，适配为 OCI 等已支持 Runtime | 后端及资源/权限限制须实际可用；不是把源码直接当可执行文件 |
+| 源码、脚本或项目目录 | 在隔离构建 Task 中生成可安装 Artifact，保留输入和构建记录 | 锁定工具链与依赖；不在宿主或 Shell 页面执行安装脚本 |
+| Workflow、Skill 或普通文件 | 经对应已支持的受控执行器及应用封装，或保持原生资源/附件 | 未提供对应适配时明确不可安装；不把 Workflow/Skill 注册等同于应用安装 |
+
+静态 Web 应用也必须满足现有 ReleaseSpec 的执行要求，例如绑定受控静态服务及其入口；不得因没有自带后端而省略 ReleaseSpec 或放宽现有 Schema。产物来源与底层 `package_format` 分开记录，不为“Agent 生成”新增一套运行时或权限体系。安装后应用独立于生成它的 Agent、模型会话和聊天连接运行。
+
+### V1-APP-013：可验证的交付描述
+
+提交可以携带已有 Artifact 引用，也可以上传内容后取得引用。文件目录必须按固定打包规则形成完整包，或提供有摘要的文件索引；每个条目有规范化相对路径、媒体类型、字节数和内容摘要。应用的主 `artifact_ref` 固定完整包/索引，依赖逐项固定引用，不能只提交一段 HTML 和随后任意变化的远端依赖。
+
+| 描述项 | 设计要求 |
+|---|---|
+| 合同与格式 | 接入合同版本、产物格式及 Adapter/Profile 版本；与文档版本、模型版本分开 |
+| 内容 | `artifact_ref` 使用既有 `{resource_id, version, digest}`；摘要覆盖完整原始字节，尺寸/媒体类型由接收端核验 |
+| 应用清单 | 固定 Manifest 引用；其 `release_spec_ref` 固定完整运行合同；运行 Profile、入口、依赖和声明权限必须相互一致 |
+| 来源 | 认证提交主体、安全域、生产 Task/Run/Operation（存在时）、源版本、构建记录、许可及签名/信任判断 |
+| 外部关联 | 适配器、端点身份、远端租户及产物/任务 ID；作为来源关联，不接受自报本地主体或伪造本地 Run |
+| 呈现与数据 | 名称、图标、应用入口及打开类型遵守 Shell 合同；持久卷、配置、SecretRef 与不可变内容分离 |
+
+以上为待冻结的接入描述语义，不向现有严格 Schema 随意塞入未定义字段。新描述的 JSON Schema、请求/响应样例、大小与文件数上限、错误映射和兼容规则由 WI-028 完成后才可发布接口。Agent 可以生成清单；服务端必须解析并独立验证，不能把模型声称“安全”“已授权”或自报发布者作为证据。
+
+### V1-APP-014：从提交到安装的受控流程
+
+用户路径为“生成产物 → 查看/预览 → 安装为应用 → 从应用启动器打开”。在已有授权范围内，Agent 也可通过同一接口完成安装，无需用户下载、改包和重新上传。预览可选且必须隔离；预览不是安装前必须执行不可信代码的步骤。
+
+1. **暂存与发布：** 接收端限制上传和解包资源，核验内容、来源、安全域及依赖，持久提交 Artifact 后返回固定引用。暂存回执、流式预览和生成 Task 成功都不表示应用已安装。
+2. **安装计划：** 解析 Manifest/ReleaseSpec、适配/构建结果、目标应用与节点、权限差异、资源、数据卷及启动意图，形成固定摘要的 OperationPlan；明确新装、更新和是否启动。
+3. **授权裁决：** 在有效 Grant/Delegation 和预授权策略范围内自动继续；仅对超出范围或政策要求的动作请求审批。上传权、预览权、安装权与运行时工具/数据访问权分别裁决，安装不能隐含取得发布商店或跨用户共享权限。
+4. **准备与提交：** 由 Application 控制器执行第 1 节的安装状态机，先保留全部必需制品，再准备 Deployment、绑定数据并提交应用版本选择。更新使用预期资源版本；权限扩大或输入/计划变化需重新裁决。
+5. **入口与结果：** 返回 `operation_id`、Application/Release/Deployment 引用及实际状态；Shell 按权威状态展示安装、启动和健康。入口索引失败可重建，不能触发重复安装或伪造运行成功。
+
+所有有副作用请求使用第 02 章的认证作用域、请求摘要和幂等规则。同键同摘要复用原回执，同键不同摘要拒绝；响应丢失先查询原 Operation。安装提交前后崩溃、取消或撤权都按实际已发生效果恢复；无法确定是否提交时保留 Unknown 并对账，不用新 ID 盲重装。能力/版本不支持时明确拒绝，不自动退化为任意宿主命令。
+
+### V1-APP-015：预览、构建与运行边界
+
+上传解析与解包沿用 APP-009 的隔离、路径校验及有限预算；源码构建沿用 APP-010，固定依赖并限制网络，不携带生产秘密。远端 URL 只是获取线索，必须经授权获取并核验固定内容，不能把临时下载地址作为永久运行依赖；跨安全域取内容仍需独立授权。
+
+HTML/JavaScript 预览和正式运行遵守 GUI-008 与 SHL-008：使用隔离 origin/沙箱与明确 CSP，不能以内联脚本或同源 DOM 注入 Shell，也不能读取 Shell Cookie、令牌或其他应用数据。预览默认无平台写能力、Secret、设备和任意出站访问；扩大范围须有明确政策授权。与平台交互通过受控桥接，校验调用者、origin、会话、消息 Schema 和具体能力，不能以伪造 `postMessage` 取得宿主权限。模型输出中的下载、执行或授权要求均按不可信内容处理。
+
+### V1-APP-016：版本、保留与日常管理
+
+安装后的应用统一支持打开、停止、更新、版本查询、可支持范围内的回退与卸载，并记录生成来源；Agent 修改产物生成新 Artifact/Release，不覆盖当前部署引用的字节。新版本经验证、授权和健康检查后切换，保留旧版本及必要恢复材料；有状态回退仍须验证数据 Schema，不能把退旧代码当作数据已经恢复。
+
+Application/Deployment 对运行包、完整运行清单及必需依赖建立独立保留关系，在安装提交前取得，在卸载/替换且不再需要恢复时按策略释放。生成 Task、Conversation、临时预览或远端下载链接过期不能连带删除已安装应用；仅记录引用而未保证内容可取不算完成安装。缺失或损坏内容按真实可用性阻塞启动，不临时改用同名最新版本。
+
+卸载默认保留用户持久数据，删除数据是独立授权动作；仅回收无其他使用者及恢复 pin 的制品。Helium、Neon、Argon 共用同一接入和生命周期合同，按已安装 Runtime/Profile 报告支持范围。初始交付优先静态 Web 与已有 OCI 路径；有状态迁移和其他产物类型逐项加入验收。
+
+新增验收 `AT-AIF-001`～`010` 覆盖上述应用化路径及第 09 章通用接口；具体计划统一维护于[测试注册表](registries/test-cases.json)，所有新增产品结果均为 `NotRun`。
+
 
 ---
 
@@ -2121,6 +2194,8 @@ Run 生命周期为 `Created / Running / WaitingInput / WaitingApproval / Waitin
 ## 8.6 结果与 Artifact
 
 **V1-TSK-010（必须）**：大结果先上传到隔离暂存位置，验证大小、内容摘要和安全域，再提交不可变 Artifact 引用。成功状态提交与引用生效之间须有恢复协议；不可将尚未完成上传的 URL 标为成功。结果包含版本、媒体类型、长度、校验值、生产 Task/Run/Operation、保留关系和访问条件。
+
+可安装的 Agent 产物按[第 07 章第 6 节](docs/07-applications-packages-gui.md#6-agent-artifacts-作为应用安装)进入应用生命周期：产物生成/发布 Task 的成功与安装 Operation 的成功分别记录。已安装应用建立独立制品保留关系，不能随生成任务或会话的结果清理而失效；通用提交及恢复合同见[第 09 章第 9.11 节](docs/09-agents-models-protocols.md#911-agent-通用产物接口)。
 
 结果状态使用 `Pending / NoneExpected / Available / Evicted / Unavailable`。`NoneExpected` 仅用于合同已声明不产生结果制品的任务，不是错误造成丢失；`Available`须能按当前权限解析所列制品；`Evicted`保留清理时间、原因和允许查询的摘要；`Unavailable`表示暂时无法取得且无已回收证明。历史用语`NotProduced`仅在可证实原合同无结果时迁移为NoneExpected。正文回收后任务元数据、防重放墓碑和必须保留的审批证据独立处理；可信历史Succeeded不因结果后来不可取而改写，依赖缺失结果的步骤必须阻塞。日志、截图、模型输出和结果资产各自设保留规则。跨安全域复用内容地址不能绕过所有权与解密边界。
 
@@ -2341,6 +2416,39 @@ M3 至少完成一个真实独立第三方实现与原生 Agent 的同类工具�
 ### 9.10.5 增量验收计划（均 NotRun）
 
 重复/乱序事件不增殖 Task；同一 PR Review 被原 Task/Worker 接续且重新检查成员权限；Agent A→B→A 的循环因根预算和跳数停止；恶意评论诱导越权被 Tool Gateway 拦截；两个 Worker 抢占时旧租约无法写入；Router 死亡和模型离线不重放已确认副作用；已发生外部写入但回执丢失保持 `OutcomeUnknown` 并对账；撤权按实际 RevocationMode 截断后续能力。M3 测单机，M4 才验证跨节点与 Forgejo/CI 闭环。沿用现有 AT-TSK、AT-AGT、AT-CHAT、AT-WFL、AT-CORE 分类，待正式注册新用例后才分配独立测试 ID。
+
+## 9.11 Agent 通用产物接口
+
+本节定义原生与第三方 Agent 共用的产物提交、应用化和结果查询能力，使“生成 Artifacts → 安装为 PsiOS 应用”成为标准工作路径。接口独立于模型提供者、Agent 框架及聊天客户端，应用语义见 [第 07 章第 6 节](docs/07-applications-packages-gui.md#6-agent-artifacts-作为应用安装)。这是设计要求，尚未声明新增方法已经可调用。
+
+### V1-AGT-013：共享合同与能力发现
+
+接入沿用 System API、Tool & Capability Gateway、Principal 和 Task/Operation 权威。原生 Runtime、第三方 Adapter、CLI/SDK 及远程 Agent 使用相同资源引用和授权裁决；不要求所有 Agent 运行于本机，也不要求模型输出某家平台的私有格式。MCP/A2A/ACP 等只作为按版本验证的传输/交互适配，不能凭“支持 MCP”宣称已支持应用安装。
+
+能力发现分别公开接入合同版本、可接收产物/包格式、构建与预览能力、运行 Profile、上传/解包限额、支持的安装/更新/回退操作、幂等查询与保留期限。客户端在提交前检查能力，未知版本和必需字段不得静默忽略；支持读取 Artifact 不意味着支持外部提交或安装。三版使用同一合同，远程接入须另验证认证、租户和出口边界。
+
+### V1-AGT-014：提交、安装与回执合同
+
+下表为拟定的**逻辑操作**，不是已部署的 HTTP 路由或现有 CLI 命令。传输绑定、消息 Schema、有限数值上限和错误合同按第 16 章及 WI-028 冻结；复用既有接口时须明确能力版本和适配范围，不改变旧客户端含义。
+
+| 逻辑操作 | 输入与权限边界 | 权威输出 |
+|---|---|---|
+| `Artifact.Stage / Publish` | 内容/固定来源、交付描述、认证上下文和幂等身份；只授权上传/发布产物 | 暂存句柄或经完整核验的 Artifact 引用；失败不产生可安装的半成品 |
+| `Application.PlanInstall` | 固定 Artifact/Manifest/ReleaseSpec、目标、预期版本及运行意图 | OperationPlan、权限/资源/数据差异、构建依赖和阻塞原因；不执行安装 |
+| `Application.Install` | 固定计划引用、幂等键、目标前提及当前有效授权/所需审批 | 持久接受的 Operation 和最终 Application/Release/Deployment 引用；接受与成功分开 |
+| `Operation.Get / Resource.Get / Watch` | 原 Operation 或授权资源引用、游标 | 安装进度、实际状态、错误、结果引用及恢复条件 |
+
+若 PlanInstall 发现需要构建，返回构建要求；构建以独立受限 Task 执行并发布新 Artifact 后重新规划，不能在“规划”调用中隐式运行任意构建脚本。更新/回退/卸载复用 Application 生命周期的受控操作，不另设 Agent 专用安装数据库。
+
+外部来源关联键至少区分 `(adapter_id, endpoint_identity, remote_tenant_scope, external_artifact_id, external_version)`，并绑定认证本地安全域、内容摘要及本地引用；远端无版本时以核验的内容摘要区分版本。同一外部 ID 内容变化不能覆盖旧引用，其他租户不能通过相同 ID 或摘要取得内容。上传、构建、安装各自的幂等身份和回执分别持久化；生成任务完成不能替代安装 Operation 成功。
+
+### V1-AGT-015：对话入口、授权与中断恢复
+
+Agent 结果可以附“预览”“安装为应用”“查看来源/权限”“打开已安装应用”等结构化动作。动作只携带受控引用和意图，用户点击后仍由平台解析当前身份、目标和策略；聊天中的按钮、文本或第三方返回值不能签发 ApprovalDecision。已有有效预授权覆盖的安装可以连续完成，不要求每一阶段重复确认；超出范围时返回结构化授权请求。
+
+会话断开、模型停止或 Agent 更换不取消已持久接受的安装。恢复方按原幂等身份查询 Operation/Deployment，重新检查权限、输入摘要和取消状态；未知结果保持 Unknown，不把连接错误等同于安装失败，也不自动扩大权限换路径执行。取消须明确已经提交的应用、残留资源和是否还需独立卸载，不能声称撤销对话就撤销应用或用户数据。
+
+初始验证必须至少包含一个原生 Agent 和一个独立第三方 Agent，以同类产物完成受限安装，并验证同样的拒绝、断线及恢复语义；单独演示“生成网页”或“返回一个链接”不满足通用接口验收。新增计划见 `AT-AIF-001`～`010`，实施由 WI-028 跟踪，全部为 `NotVerified / NotRun`。
 
 
 ---
@@ -2934,6 +3042,7 @@ claim/lease绑定boot_id及本次启动的截止语义；休眠期限规则按03
 | WI-025 | P1/M6 | 精确Profile端到端验收、兼容矩阵、签名发布、SBOM与密钥恢复 | WI-012、017–024；仅选定范围 |
 | WI-026 | P1/M0–M6 | 维护规范/迁移映射/ADR/风险台账，检查实现与宣传一致 | 持续；每次范围或合同变更触发 |
 | WI-027 | P1/M0、M2–M4、M6 | Shell 浏览器桌面、Dock、多窗口、工作区、对象协作、可访问性与恢复 | WI-003、004、008；Chat/PsiFlow/GUI 接入按已启用范围依赖 WI-016、015、020 |
+| WI-028 | P1/M0、M3、M4 | Agent 通用产物接口、Artifacts 安装为应用、隔离预览、更新回退与制品保留 | WI-003、004、007、008、013、014；Shell/包导入/跨节点按支持范围依赖 WI-027、021、018 |
 
 表中优先级是首轮工程排序，不把M4全部工作提前阻塞M1。每项负责人目前只指定角色，未指派真实个人。没有在外部Issue系统创建工单或修改仓库。
 
@@ -2986,6 +3095,18 @@ WI-027 的功能与视图边界以 [V1-SHL-001～012](docs/07-applications-packa
 | M6 | 键盘/输入法、屏幕阅读、窄屏和有限资源矩阵 | AT-SHL-013～015；记录浏览器、设备、网络、预算与确切制品 |
 
 当前实现与新增目标的差距由仓库的实现状态文档记录；本规范的桌面能力均无本次产品验收证据，仍为 NotVerified/NotRun。已有本机 Shell 查询能力可作为实现起点，但不能替代多窗口工作闭环的验收。
+
+## 9. Agent 产物应用化实施切片
+
+WI-028 由 Application/Artifact、Agent Adapter、Identity 和 Shell 维护者共同负责，具体人员待指派；行为合同见 [APP-012～016](docs/07-applications-packages-gui.md#6-agent-artifacts-作为应用安装)及 [AGT-013～015](docs/09-agents-models-protocols.md#911-agent-通用产物接口)。复用既有 Application、Task/Operation、Artifact 与授权权威，不建立独立的 Agent 应用商店或安装状态数据库。
+
+| 阶段 | 可交付范围 | 启用门槛 |
+|---|---|---|
+| M0 | 冻结接入描述、逻辑操作的 JSON Schema/样例、版本与错误映射、有限资源预算 | 对齐现有 Manifest/ReleaseSpec、ResourceRef 和幂等合同；相关 ADR 05/06/09/16/19 仍按采用范围审查 |
+| M3 | 原生和至少一个第三方 Agent 提交静态 Web/OCI 产物，经同一权限路径安装；Shell 提供预览、安装和打开入口 | AT-AIF-001～006、008～010 的单机范围；查回执、崩溃恢复、撤权和应用保留通过才可宣称支持 |
+| M4 | 按 Profile 扩展有状态更新回退、其他构建/包适配和远程目标，验证三版实际支持范围 | AT-AIF-007 及全部适用场景；跨节点沿用既有租约/fencing，未验证格式明确不支持 |
+
+CLI/SDK 的接入可先于完整 Shell 体验，但不能据此宣称 UI 路径完成。已有 OCI 安装或任务 Artifact 读取能力不能代替通用产物上传、清单适配及端到端应用化验收。全部新增产品场景为 NotRun。
 
 
 ---
@@ -3120,6 +3241,9 @@ RPO按实际故障与恢复集测量；仅恢复旧备份时不得声称“Accep
 | Backup.Capture/Restore/Export | 资源清单、一致性、密钥引用、恢复计划 | 认证清单、数据验证和独立激活状态 | 05、06 |
 | Dataset.Put/Query/View/Index | 版本记录、受限查询、授权、水位 | 精确/全文/近似语义、当前权限过滤、来源版本 | 06 |
 | Package.Recognize/Import/Build | 隔离输入、来源证明、ABI/Profile | Imported制品与依赖快照；RuntimeVerified另需实测 | 07 |
+| Artifact.Stage/Publish（拟定） | 内容/固定来源、版本化交付描述、认证与幂等身份 | 经核验的不可变 Artifact 引用；上传成功不代表安装 | 07 §6、09 §9.11 |
+| Application.PlanInstall/Install（拟定） | 固定制品/运行清单、目标及预期版本、计划与授权 | Operation 及 Application/Release/Deployment；规划不隐式构建 | 07 §6、09 §9.11 |
+| Operation.Get / Resource.Get/Watch（安装结果） | 原操作身份、授权引用与游标 | 持久进度、效果知识、安装/运行状态及恢复条件 | 02、07、09 |
 | GUI.Create/Stream/AcquireInput/Stop | 会话、Portal批准、Viewer/Agent权限 | DisplayStream、ControlLease、范围和撤权证据 | 07 |
 | Model.Resolve/Invoke | 模型Profile、外发政策、预算、输入引用 | 本次执行快照、用量、受控输出；模型不能批准自己 | 09 |
 | Node.Enroll/Drain/Fence | 节点身份、资源委托、恢复世代 | 逐资源写权和状态；不可把心跳超时当已停机 | 12 |
@@ -3178,6 +3302,8 @@ Task、Run、Operation和WorkflowRun的`Succeeded`均要求`outcome_knowledge=Kn
 
 ApplicationManifest必须通过release_spec_ref固定完整ApplicationReleaseSpec；后者包含执行、生命周期、身份、权限请求、资源硬限、许可/来源、依赖及备份范围。解析所有必要引用、验证对应类型与当前权限后才可形成Deployment，不能把发布元数据投影当作完整运行配置。
 
+Agent 通用产物接口尚未包含独立的交付描述或安装请求 Schema；第 07/09 章字段表是设计约束，拟定方法不能作为现有可调用 API 宣传。WI-028 需补齐能力发现、消息 Schema、正反例、限额和版本映射后启用，不改变现有严格 Manifest/ReleaseSpec 的字段含义或把未知字段塞入通用 `spec`。
+
 **V1-IF-004｜结构合同不放行不可信数据。** Workflow AST还需编译/类型/权限验证，RecoverySetManifest还需认证来源与真实对象验证，ExecutionPermit还需可信在线查询或签名链验证，ApplicationManifest还需隔离构建与真实兼容测试。示例`RuntimeVerified`所需的evidence引用也只有实际证据可查时才有效。
 
 JSON读取必须在进入常见字典解析前拒绝重复键；默认“保留最后一个值”会丢掉攻击证据。Schema不知道输入曾经有重复键，必须由入口解析器先处理。任意JSON数据还需限制深度、长度和数值精度Profile；不支持的精度明确拒绝，不能先损坏数值再假装精确查询。
@@ -3198,6 +3324,9 @@ JSON读取必须在进入常见字典解析前拒绝重复键；默认“保留�
 | OCI | 制品/运行标准族；采用OCI不自动提供所需的宿主/租户隔离 |
 | Portal / EIS | 桌面授权/输入机制；支持范围、版本、用户会话与真实撤权行为必须实测 |
 | NativeWeb | 应用已有的Web入口，经安全origin/会话边界接入；不等于GUI远程像素流 |
+| Agent 通用产物接口 | 原生/第三方 Agent 共享的产物交付与应用化合同；协议 Adapter 不拥有额外授权 |
+| 可安装 Artifact | 可经受控适配生成完整运行清单的不可变产物；上传、预览和安装状态分别记录 |
+| Artifact 应用化 | 将固定产物交给已有 Application/Release/Deployment 生命周期，并建立独立保留与数据绑定 |
 | TableFS | 可选统一文件命名空间与Catalog后端；派生索引不成为文件存在性的第二权威 |
 | Knowledge | Dataset授权视图与必要索引，不是无来源的另一份原文数据库 |
 
@@ -5516,7 +5645,7 @@ Task/Operation 已 Failed、Cancelled 或执行进程已退出，均不能证明
 
 # 验收与文档审查计划
 
-**文档基线：** PsiOS v1，2026-11-22。这里定义需要执行的验证计划，不是结果报告。当前 **150 个场景全部为 `NotRun`，实现状态全部为 `NotVerified`**。当前 257 条规范要求均有明确验证去向；这表示计划覆盖，不表示实现满足或测试通过。没有确切代码、运行环境和实际证据时，不能把文档存在、JSON 可解析或示例验证成功写成产品通过。
+**文档基线：** PsiOS v1，2026-11-22。这里定义需要执行的验证计划，不是结果报告。当前 **160 个场景全部为 `NotRun`，实现状态全部为 `NotVerified`**。当前 265 条规范要求均有明确验证去向；这表示计划覆盖，不表示实现满足或测试通过。没有确切代码、运行环境和实际证据时，不能把文档存在、JSON 可解析或示例验证成功写成产品通过。
 
 ## 文件与权威
 
@@ -5543,8 +5672,11 @@ AT-COMP-001～021 补充原 114 项没有完整覆盖的领域与治理检查。
 | AT-CORE | 20 | 多权威之间的完整故障链 |
 | AT-COMP | 21 | 全要求补充：平台、原生路径、安全、UX、运维与治理 |
 | AT-SHL | 15 | 浏览器桌面、窗口、工作区、对象协作、恢复与可访问性 |
+| AT-AIF | 10 | Agent 产物交付、应用安装、隔离预览、授权、版本与恢复 |
 
 2026-11-25 增加 AT-SHL-001～015，覆盖 V1-SHL-001～012；所有新增产品场景仍为 NotRun，不使用当前本机状态页的既有测试替代完整桌面验证。
+
+2026-11-25 增加 AT-AIF-001～010，覆盖 V1-APP-012～016 和 V1-AGT-013～015；接入合同及产品实现仍待完成，全部新增产品结果为 NotRun。
 
 ## 注册记录的精确定义
 
@@ -5650,7 +5782,7 @@ M0 用于合同和竞态模型/初始实现夹具，M1 用于宿主与独立救�
 
 # 完整验收与审查场景
 
-本文件从 [统一注册表](registries/test-cases.json) 展开。150 个场景均为 **NotRun / NotVerified**；覆盖 257 条规范要求的验证计划，不表示这些要求已经通过。DocumentReview 是待执行的文档/证据审查；Contract、Integration、FaultInjection、Hardware 是所列实现或平台验证。以下前置条件、操作和结果均为计划，不是实际记录。执行与证据规则见 [验收说明](acceptance/README.md)。
+本文件从 [统一注册表](registries/test-cases.json) 展开。160 个场景均为 **NotRun / NotVerified**；覆盖 265 条规范要求的验证计划，不表示这些要求已经通过。DocumentReview 是待执行的文档/证据审查；Contract、Integration、FaultInjection、Hardware 是所列实现或平台验证。以下前置条件、操作和结果均为计划，不是实际记录。执行与证据规则见 [验收说明](acceptance/README.md)。
 
 ## SEC-V1
 
@@ -9889,6 +10021,286 @@ M0 用于合同和竞态模型/初始实现夹具，M1 用于宿主与独立救�
 - 源码 SHA、制品摘要、Edition/Profile、浏览器/设备/网络与配置
 - 操作及后端状态记录、相关授权/拒绝日志、预期与实际结果；截图仅作辅助
 
+## AT-AIF
+
+### AT-AIF-001｜原生与第三方 Agent 产物安装闭环
+
+- **主规范：** [docs/07-applications-packages-gui.md](docs/07-applications-packages-gui.md)
+- **要求：** `V1-APP-012`、`V1-APP-013`、`V1-APP-014`、`V1-AGT-013`、`V1-AGT-014`
+- **阶段：** M3
+- **验证方式：** Integration
+- **状态：** NotRun；实现 NotVerified
+
+**前置条件**
+
+- 固定原生 Agent 和至少一个独立第三方 Agent 的版本、适配器及认证；准备相同静态 Web 与 OCI 产物、可用运行 Profile 和有限授权。
+
+**操作、审查步骤或故障注入**
+
+1. 分别发现能力、提交内容、取得固定引用并规划安装；通过同一权限路径安装后从 Shell 启动器打开。
+2. 关闭生成会话及模型，检查应用仍可用；分别观察上传、安装和启动回执。
+
+**通过条件及结论边界**
+
+- 两类 Agent 使用同一 Artifact/Application/Deployment 权威和权限裁决，无需手工重打包；静态 Web 具有完整 ReleaseSpec。
+- Task 成功、产物发布、安装成功与运行健康分别记录；应用独立于生成会话，普通非应用附件不自动安装。
+
+**必要证据**
+
+- 源码 SHA、Agent/Adapter/协议与 Runtime/Profile 版本、产物/清单/计划摘要及目标 Edition
+- 原始请求与持久回执、权限裁决、Operation/Deployment/保留关系及故障前后记录（脱敏）
+- 逐项预期/实际结果和内容校验；截图或模型描述不替代后端证据
+
+### AT-AIF-002｜合同、清单及外部产物身份校验
+
+- **主规范：** [docs/09-agents-models-protocols.md](docs/09-agents-models-protocols.md)
+- **要求：** `V1-APP-013`、`V1-AGT-013`、`V1-AGT-014`
+- **阶段：** M0、M3
+- **验证方式：** Contract、Integration
+- **状态：** NotRun；实现 NotVerified
+
+**前置条件**
+
+- 准备已冻结请求/响应 Schema、两个端点/租户及同名外部产物；内容摘要、Manifest 和 ReleaseSpec 可独立核对。
+
+**操作、审查步骤或故障注入**
+
+1. 提交未知合同版本、遗漏 ReleaseSpec、错误摘要/尺寸/入口、未知权限字段及不支持的必需 Profile。
+2. 在不同租户复用外部 ID，在同一 ID 下提交变化的内容或伪造本地 Run/发布者；尝试跨域按摘要读取。
+
+**通过条件及结论边界**
+
+- 请求按明确错误拒绝，不忽略关键字段，不把临时 URL 或半上传内容变成安装引用。
+- 外部端点/租户/版本与认证安全域共同隔离关联；内容变化产生新引用，自报身份不能取得权利，摘要相同不产生跨域访问。
+
+**必要证据**
+
+- 源码 SHA、Agent/Adapter/协议与 Runtime/Profile 版本、产物/清单/计划摘要及目标 Edition
+- 原始请求与持久回执、权限裁决、Operation/Deployment/保留关系及故障前后记录（脱敏）
+- 逐项预期/实际结果和内容校验；截图或模型描述不替代后端证据
+
+### AT-AIF-003｜重复提交与并发安装
+
+- **主规范：** [docs/09-agents-models-protocols.md](docs/09-agents-models-protocols.md)
+- **要求：** `V1-APP-014`、`V1-AGT-014`、`V1-AGT-015`
+- **阶段：** M3
+- **验证方式：** Integration、FaultInjection
+- **状态：** NotRun；实现 NotVerified
+
+**前置条件**
+
+- 同一应用的当前资源版本已固定；上传、构建与安装分别配置幂等命名空间和回执保留窗口。
+
+**操作、审查步骤或故障注入**
+
+1. 丢弃安装接受回执后以同键同摘要重试和查询；再以同键不同摘要重试。
+2. 从两个客户端以同一预期版本更新，并在幂等记录过期后查询原请求。
+
+**通过条件及结论边界**
+
+- 同请求返回原 Operation，不产生重复部署；不同摘要冲突被拒绝，过期不解释为从未执行。
+- 应用版本条件写仅允许符合前提的提交，失败方重新规划，不覆盖另一客户端结果。
+
+**必要证据**
+
+- 源码 SHA、Agent/Adapter/协议与 Runtime/Profile 版本、产物/清单/计划摘要及目标 Edition
+- 原始请求与持久回执、权限裁决、Operation/Deployment/保留关系及故障前后记录（脱敏）
+- 逐项预期/实际结果和内容校验；截图或模型描述不替代后端证据
+
+### AT-AIF-004｜恶意 Web 预览与桥接隔离
+
+- **主规范：** [docs/07-applications-packages-gui.md](docs/07-applications-packages-gui.md)
+- **要求：** `V1-APP-015`、`V1-AGT-015`
+- **阶段：** M3
+- **验证方式：** Integration
+- **状态：** NotRun；实现 NotVerified
+
+**前置条件**
+
+- Shell 登录一个有管理权限的用户；准备含恶意脚本、伪造安装按钮及跨 origin 消息的 Web 产物。
+
+**操作、审查步骤或故障注入**
+
+1. 预览时尝试读取 Shell Cookie/令牌、注入父 DOM、访问其他应用、调用 Secret/设备/写工具和向未授权地址外发。
+2. 安装后再次伪造 postMessage 的身份、origin、会话和能力，并通过正文声称已经审批。
+
+**通过条件及结论边界**
+
+- 预览及正式运行按已验证隔离 Profile 限制，平台桥接拒绝不匹配调用；无秘密或跨应用数据泄露。
+- 结构化动作只表达意图，不生成授权；预览默认权限不扩展，未安装 KDE/GUI 流不影响受支持的 Web 路径。
+
+**必要证据**
+
+- 源码 SHA、Agent/Adapter/协议与 Runtime/Profile 版本、产物/清单/计划摘要及目标 Edition
+- 原始请求与持久回执、权限裁决、Operation/Deployment/保留关系及故障前后记录（脱敏）
+- 逐项预期/实际结果和内容校验；截图或模型描述不替代后端证据
+
+### AT-AIF-005｜预授权、权限扩大与中途撤权
+
+- **主规范：** [docs/09-agents-models-protocols.md](docs/09-agents-models-protocols.md)
+- **要求：** `V1-APP-014`、`V1-APP-015`、`V1-AGT-013`、`V1-AGT-015`
+- **阶段：** M3
+- **验证方式：** Integration、FaultInjection
+- **状态：** NotRun；实现 NotVerified
+
+**前置条件**
+
+- 一个主体仅有上传权，另一个有范围明确的安装预授权；准备需要新增网络/设备权限的更新。
+
+**操作、审查步骤或故障注入**
+
+1. 分别执行上传后安装、已授权范围内完整安装、扩大权限更新及仅凭聊天文本的授权请求。
+2. 在构建、安装提交及启动前撤销权限或替换计划所指内容。
+
+**通过条件及结论边界**
+
+- 上传权不自动包含安装/运行权；有效预授权内无需逐步重复审批，超范围动作进入结构化裁决。
+- 内容/计划变化和撤权被重新检查，不能以旧批准执行新权限；其他协议入口不能绕过相同拒绝。
+
+**必要证据**
+
+- 源码 SHA、Agent/Adapter/协议与 Runtime/Profile 版本、产物/清单/计划摘要及目标 Edition
+- 原始请求与持久回执、权限裁决、Operation/Deployment/保留关系及故障前后记录（脱敏）
+- 逐项预期/实际结果和内容校验；截图或模型描述不替代后端证据
+
+### AT-AIF-006｜安装中断、取消与未知结果对账
+
+- **主规范：** [docs/09-agents-models-protocols.md](docs/09-agents-models-protocols.md)
+- **要求：** `V1-APP-014`、`V1-AGT-014`、`V1-AGT-015`
+- **阶段：** M3
+- **验证方式：** Integration、FaultInjection
+- **状态：** NotRun；实现 NotVerified
+
+**前置条件**
+
+- 安装流程具有持久阶段、所有权清单和可查询 Operation；准备断线、强杀及取消注入点。
+
+**操作、审查步骤或故障注入**
+
+1. 在暂存、发布后、Deployment 准备、版本切换前后及回执发送前中断；随后更换 Agent 并以原身份查询。
+2. 在上述阶段请求取消，并模拟无法确定版本提交结果及 Shell 入口索引失败。
+
+**通过条件及结论边界**
+
+- 恢复从原 Operation 和实际资源对账，不盲重装或重复副作用；未完成上传不发布成功引用。
+- Unknown 保留且阻塞危险重试；取消如实列出已安装应用/残留，清理仅触及本操作资源，入口可重建而不重装。
+
+**必要证据**
+
+- 源码 SHA、Agent/Adapter/协议与 Runtime/Profile 版本、产物/清单/计划摘要及目标 Edition
+- 原始请求与持久回执、权限裁决、Operation/Deployment/保留关系及故障前后记录（脱敏）
+- 逐项预期/实际结果和内容校验；截图或模型描述不替代后端证据
+
+### AT-AIF-007｜有状态更新与回退边界
+
+- **主规范：** [docs/07-applications-packages-gui.md](docs/07-applications-packages-gui.md)
+- **要求：** `V1-APP-014`、`V1-APP-016`
+- **阶段：** M4
+- **验证方式：** Integration、FaultInjection
+- **状态：** NotRun；实现 NotVerified
+
+**前置条件**
+
+- 同一应用准备两个不可变 Release、用户卷、恢复点及可逆和不可逆两种数据 Schema 迁移。
+
+**操作、审查步骤或故障注入**
+
+1. 生成新产物并更新，在健康检查失败或迁移完成后尝试回退；同时提交第二个迁移。
+
+**通过条件及结论边界**
+
+- 新产物不覆盖旧字节；升级按授权和数据兼容前提切换，失败保留可恢复旧版本。
+- 数据不兼容时不能仅退旧代码并报告成功；恢复或前向修复需有验证依据，互斥操作不能并行写同一数据域。
+
+**必要证据**
+
+- 源码 SHA、Agent/Adapter/协议与 Runtime/Profile 版本、产物/清单/计划摘要及目标 Edition
+- 原始请求与持久回执、权限裁决、Operation/Deployment/保留关系及故障前后记录（脱敏）
+- 逐项预期/实际结果和内容校验；截图或模型描述不替代后端证据
+
+### AT-AIF-008｜会话清理、制品 GC 与卸载
+
+- **主规范：** [docs/07-applications-packages-gui.md](docs/07-applications-packages-gui.md)
+- **要求：** `V1-APP-012`、`V1-APP-016`
+- **阶段：** M3
+- **验证方式：** Integration、FaultInjection
+- **状态：** NotRun；实现 NotVerified
+
+**前置条件**
+
+- 两个应用共享部分制品，另有恢复 pin；生成 Task 和会话使用较短保留窗口。
+
+**操作、审查步骤或故障注入**
+
+1. 清理任务/会话、使源 URL 失效并触发 GC，然后重启应用；注入实际制品损坏。
+2. 卸载一个应用并分别申请保留/删除用户数据，再回收无引用内容。
+
+**通过条件及结论边界**
+
+- 安装前建立独立且可验证的内容保留；任务清理不破坏应用或共享/恢复依赖，实际损坏明确阻塞而非改用 latest。
+- 卸载默认保留用户数据，删除需独立授权；只有无其他引用和 pin 的制品才可回收。
+
+**必要证据**
+
+- 源码 SHA、Agent/Adapter/协议与 Runtime/Profile 版本、产物/清单/计划摘要及目标 Edition
+- 原始请求与持久回执、权限裁决、Operation/Deployment/保留关系及故障前后记录（脱敏）
+- 逐项预期/实际结果和内容校验；截图或模型描述不替代后端证据
+
+### AT-AIF-009｜隔离构建、恶意包与依赖锁
+
+- **主规范：** [docs/07-applications-packages-gui.md](docs/07-applications-packages-gui.md)
+- **要求：** `V1-APP-013`、`V1-APP-015`、`V1-AGT-014`
+- **阶段：** M3、M4
+- **验证方式：** Integration、FaultInjection
+- **状态：** NotRun；实现 NotVerified
+
+**前置条件**
+
+- 准备源码目录、锁定工具链/依赖和有限构建预算，以及路径穿越、链接逃逸、压缩炸弹和可变依赖 URL 的反例。
+
+**操作、审查步骤或故障注入**
+
+1. 调用 PlanInstall 检查需要构建的产物；在独立 Task 中构建并记录输入/输出，尝试获取宿主秘密、访问未授权网络及超限解包。
+2. 在离线或依赖内容变化时重试，并中断构建后继续安装。
+
+**通过条件及结论边界**
+
+- 规划只报告构建要求，不执行脚本；构建在受限环境运行，危险条目、超限和未授权出口被拒绝。
+- 固定依赖与最终摘要可追踪，缺失/变化内容阻塞；不完整构建不进入安装，不能把本地摘要当发布者认证。
+
+**必要证据**
+
+- 源码 SHA、Agent/Adapter/协议与 Runtime/Profile 版本、产物/清单/计划摘要及目标 Edition
+- 原始请求与持久回执、权限裁决、Operation/Deployment/保留关系及故障前后记录（脱敏）
+- 逐项预期/实际结果和内容校验；截图或模型描述不替代后端证据
+
+### AT-AIF-010｜三版能力发现与支持范围
+
+- **主规范：** [docs/09-agents-models-protocols.md](docs/09-agents-models-protocols.md)
+- **要求：** `V1-APP-012`、`V1-APP-016`、`V1-AGT-013`、`V1-AGT-015`
+- **阶段：** M3、M4
+- **验证方式：** Integration
+- **状态：** NotRun；实现 NotVerified
+
+**前置条件**
+
+- 准备 Helium/Neon/Argon 的确切 Profile；至少一个无 KDE/GUI 后端节点、一个不支持目标 Runtime 的节点及远程适配场景。
+
+**操作、审查步骤或故障注入**
+
+1. 从 CLI/SDK 和 Shell 查询并安装受支持的产物；尝试未支持格式、Runtime、远程目标、回退操作及只读 Artifact 接口。
+
+**通过条件及结论边界**
+
+- 三版共享资源与权限合同，能力发现如实列出版本、限额和操作范围；静态 Web 不以 GUI 后端为硬依赖。
+- 不支持明确拒绝，不回落到任意 root shell；CLI 成功不冒充 UI 验收，只读能力不冒充通用提交/安装支持。
+
+**必要证据**
+
+- 源码 SHA、Agent/Adapter/协议与 Runtime/Profile 版本、产物/清单/计划摘要及目标 Edition
+- 原始请求与持久回执、权限裁决、Operation/Deployment/保留关系及故障前后记录（脱敏）
+- 逐项预期/实际结果和内容校验；截图或模型描述不替代后端证据
+
 
 ---
 
@@ -10101,6 +10513,11 @@ M0 用于合同和竞态模型/初始实现夹具，M1 用于宿主与独立救�
 | V1-SHL-010 | [V1-SHL-010：一致视觉与资源预算](docs/07-applications-packages-gui.md) | AT-SHL-015 |
 | V1-SHL-011 | [V1-SHL-011：浏览器、无障碍与窄屏](docs/07-applications-packages-gui.md) | AT-SHL-013, AT-SHL-014 |
 | V1-SHL-012 | [V1-SHL-012：三版一致与阶段交付](docs/07-applications-packages-gui.md) | AT-SHL-001, AT-SHL-012, AT-SHL-015 |
+| V1-APP-012 | [V1-APP-012：产物与应用的统一映射](docs/07-applications-packages-gui.md) | AT-AIF-001, AT-AIF-008, AT-AIF-010 |
+| V1-APP-013 | [V1-APP-013：可验证的交付描述](docs/07-applications-packages-gui.md) | AT-AIF-001, AT-AIF-002, AT-AIF-009 |
+| V1-APP-014 | [V1-APP-014：从提交到安装的受控流程](docs/07-applications-packages-gui.md) | AT-AIF-001, AT-AIF-003, AT-AIF-005, AT-AIF-006, AT-AIF-007 |
+| V1-APP-015 | [V1-APP-015：预览、构建与运行边界](docs/07-applications-packages-gui.md) | AT-AIF-004, AT-AIF-005, AT-AIF-009 |
+| V1-APP-016 | [V1-APP-016：版本、保留与日常管理](docs/07-applications-packages-gui.md) | AT-AIF-007, AT-AIF-008, AT-AIF-010 |
 | V1-TSK-001 | [V1-TSK-001（必须）：`task_id`、`run_id`、`operation_id`、`event_id`、`artifact_id` 由各自权威分配且不得复用](docs/08-tasks-events.md) | AT-COMP-009 |
 | V1-TSK-002 | [V1-TSK-002（必须）：创建请求不携带尚未分配的 `task_id` 或 `run_id`](docs/08-tasks-events.md) | AT-TSK-001 |
 | V1-TSK-003 | [V1-TSK-003（必须）：在一个本地事务或经过验证的等效协议中完成：提交去重判定、输入清单引用与保留关系、任务元数据容量预留、Task 记录、必要审计意图和 outbox](docs/08-tasks-events.md) | AT-TSK-001, AT-TSK-008, AT-CORE-007 |
@@ -10129,6 +10546,9 @@ M0 用于合同和竞态模型/初始实现夹具，M1 用于宿主与独立救�
 | V1-AGT-010 | [V1-AGT-010（必须）：HTTP OAuth 路径与 STDIO 进程凭据路径分开实现](docs/09-agents-models-protocols.md) | AT-AGT-004 |
 | V1-AGT-011 | [V1-AGT-011（必须）：持久映射键为 `(adapter_id, endpoint_identity, remote_tenant_scope, external_task_id)`，绑定本地 Task/Run/O…](docs/09-agents-models-protocols.md) | AT-AGT-005 |
 | V1-AGT-012 | [V1-AGT-012（必须）：A2A 发送是否幂等依据具体服务器契约和实测，不仅依据 `messageId`](docs/09-agents-models-protocols.md) | AT-AGT-006 |
+| V1-AGT-013 | [V1-AGT-013：共享合同与能力发现](docs/09-agents-models-protocols.md) | AT-AIF-001, AT-AIF-002, AT-AIF-005, AT-AIF-010 |
+| V1-AGT-014 | [V1-AGT-014：提交、安装与回执合同](docs/09-agents-models-protocols.md) | AT-AIF-001, AT-AIF-002, AT-AIF-003, AT-AIF-006, AT-AIF-009 |
+| V1-AGT-015 | [V1-AGT-015：对话入口、授权与中断恢复](docs/09-agents-models-protocols.md) | AT-AIF-003, AT-AIF-004, AT-AIF-005, AT-AIF-006, AT-AIF-010 |
 | V1-CHAT-001 | [V1-CHAT-001（必须）：会话生命周期为 `Active / Archived / Deleting / Deleted`](docs/10-conversations.md) | AT-CHAT-006 |
 | V1-CHAT-002 | [V1-CHAT-002（必须）：成员生命周期为 `Invited / Active / Left / Removed / Expired`](docs/10-conversations.md) | AT-CHAT-003, AT-CHAT-006, AT-CHAT-008 |
 | V1-CHAT-003 | [V1-CHAT-003（必须）：成员变化和消息提交必须有可比较的顺序](docs/10-conversations.md) | AT-CHAT-003 |

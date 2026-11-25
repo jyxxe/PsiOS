@@ -13,6 +13,12 @@ PsiOS Shell 定位为类似 macOS 的浏览器桌面工作环境：菜单栏、D
 
 本次同步当前分章、需求与测试登记表、合订本、HTML 和校验清单。`docs/releases/` 中的原始分段 ZIP 保持原始交付身份；当前 GitHub 树按当前 MANIFEST 与静态检查报告核验，产品新增验收仍为 NotRun。
 
+## Agent 通用接口与 Artifacts 应用化（2026-11-25）
+
+原生与第三方 Agent 可按统一合同提交产物，经固定内容、清单校验及权限裁决后，直接安装为受管理的 PsiOS 应用，并通过 Shell 应用启动器打开。详见[应用第 6 节](v1/docs/07-applications-packages-gui.md#6-agent-artifacts-作为应用安装)、[Agent 第 9.11 节](v1/docs/09-agents-models-protocols.md#911-agent-通用产物接口)和 [WI-028 实施路线](v1/docs/14-roadmap-and-decisions.md#9-agent-产物应用化实施切片)。初始目标为静态 Web 与已有 OCI 路径，新增消息 Schema 和运行实现待完成；通用接口及其产品验收为 NotVerified/NotRun。
+
+本次同步当前需求/测试/工作项登记、合订本、HTML 和静态校验报告，保持文档版本 1.0.0，以 GitHub 提交区分修订；原始分段 ZIP 仍为 2026-11-22 的历史封存交付。
+
 ## Start here
 
 - [v1 complete documentation index](v1/README.md)

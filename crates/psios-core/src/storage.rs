@@ -159,6 +159,7 @@ pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
                 matches!(
                     w.action,
                     Action::Stop(_)
+                        | Action::ContinueOciStop(_)
                         | Action::Health(_)
                         | Action::Logs(_)
                         | Action::RestartApp(_)
@@ -189,6 +190,7 @@ pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
         && !matches!(
             w.action,
             Action::Health(_)
+                | Action::ContinueOciStop(_)
                 | Action::Logs(_)
                 | Action::InspectOciInstance(_)
                 | Action::ListAppReleases(_)

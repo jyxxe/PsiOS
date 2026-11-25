@@ -182,6 +182,8 @@ pub enum Action {
     Start(Target),
     #[serde(rename = "application.stop")]
     Stop(Target),
+    #[serde(rename = "application.continue_stop")]
+    ContinueOciStop(apps::stop::Request),
     #[serde(rename = "application.restart")]
     RestartApp(apps::restart::Request),
     #[serde(rename = "application.inspect_instance")]
@@ -272,7 +274,11 @@ impl Action {
                 resources.push(blueprint.skill(db)?.reference());
                 resources.extend(blueprint.fallback_models(db)?.iter().map(Doc::reference));
             }
-            Self::Start(_) | Self::Stop(_) | Self::RestartApp(_) | Self::InspectOciInstance(_)
+            Self::Start(_)
+            | Self::Stop(_)
+            | Self::ContinueOciStop(_)
+            | Self::RestartApp(_)
+            | Self::InspectOciInstance(_)
                 if primary.spec["volume_id"].is_string() =>
             {
                 let volume = db.of(primary.spec["volume_id"].as_str().unwrap(), "Volume")?;
@@ -408,6 +414,14 @@ impl Action {
                 (&t.id, Some(&t.expected_resource_version), "Operation")
             }
             Self::RestartApp(p) => (&p.id, Some(&p.expected_resource_version), "Application"),
+            Self::ContinueOciStop(p) => {
+                policy::admin(actor)?;
+                (
+                    &p.target.id,
+                    Some(&p.target.expected_resource_version),
+                    "Application",
+                )
+            }
             Self::RestoreReleaseImage(p) => {
                 policy::admin(actor)?;
                 artifact::ingress::authorize(db, actor, artifact::ingress::READ)?;
@@ -498,6 +512,7 @@ pub struct Work {
     pub volume: Option<Doc>,
     pub(crate) restore_image: Option<apps::restore_image::Prepared>,
     pub(crate) restore_image_inspection: Option<apps::restore_image::Recorded>,
+    pub(crate) stop_cleanup: Option<apps::stop::Prepared>,
 }
 pub(crate) enum Output {
     Receipt(Value),
@@ -519,6 +534,9 @@ pub(crate) enum Checkpoint<'a> {
         placement: &'a storage::restore_publication::Placement,
     },
     OciRestart(&'a Value),
+    OciStop(&'a Value),
+    OciStopRemoval(&'a Value),
+    OciStopCleanup(&'a Value),
     OciImageRestore(&'a apps::restore_image::Dispatch),
     FileRename(&'a storage::file_move::Witness),
 }
@@ -616,6 +634,15 @@ impl Work {
                 apps::check_selected_publisher(db, &target)?;
                 apps::restart::record(db, self, request, before)
             }
+            (Action::Stop(_), Checkpoint::OciStop(before)) => {
+                apps::stop::record(db, self, before, false)
+            }
+            (Action::Stop(_), Checkpoint::OciStopRemoval(exited)) => {
+                apps::stop::record(db, self, exited, true)
+            }
+            (Action::ContinueOciStop(request), Checkpoint::OciStopCleanup(exited)) => {
+                apps::stop::record_cleanup(db, self, request, exited)
+            }
             (Action::RestoreReleaseImage(request), Checkpoint::OciImageRestore(dispatch)) => {
                 apps::restore_image::record(db, self, &target, request, dispatch)
             }
@@ -629,14 +656,14 @@ impl Work {
     #[cfg(test)]
     pub(crate) fn perform(
         &self,
-        checkpoint: impl FnOnce(Checkpoint<'_>) -> Result<()>,
+        checkpoint: impl FnMut(Checkpoint<'_>) -> Result<()>,
     ) -> Result<Value> {
         self.perform_receipt(checkpoint, || Ok(()))
     }
 
     pub(crate) fn perform_checked(
         &self,
-        checkpoint: impl FnOnce(Checkpoint<'_>) -> Result<()>,
+        checkpoint: impl FnMut(Checkpoint<'_>) -> Result<()>,
         mut check_streaming: impl FnMut() -> Result<()>,
     ) -> Result<Output> {
         if let Action::CaptureOciImage(request) = &self.action {
@@ -649,7 +676,7 @@ impl Work {
 
     fn perform_receipt(
         &self,
-        checkpoint: impl FnOnce(Checkpoint<'_>) -> Result<()>,
+        mut checkpoint: impl FnMut(Checkpoint<'_>) -> Result<()>,
         mut check_streaming: impl FnMut() -> Result<()>,
     ) -> Result<Value> {
         if let Some(v) = &self.inline {
@@ -704,6 +731,8 @@ impl Work {
             Action::RestartApp(request) => apps::restart::run(self, request, |before| {
                 checkpoint(Checkpoint::OciRestart(before))
             }),
+            Action::Stop(_) => apps::stop::run(self, checkpoint),
+            Action::ContinueOciStop(_) => apps::stop::cleanup(self, checkpoint),
             Action::RestoreReleaseImage(_) => apps::restore_image::run(self, |dispatch| {
                 checkpoint(Checkpoint::OciImageRestore(dispatch))
             }),
@@ -717,7 +746,6 @@ impl Work {
             | Action::StageArtifactRelease(_)
             | Action::Select { .. }
             | Action::Refresh(_)
-            | Action::Stop(_)
             | Action::Uninstall(_)
             | Action::Install(_)
             | Action::InstallArtifact(_)
@@ -848,7 +876,11 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
         && (start_checkpoint.is_some()
             || !matches!(
                 a,
-                Action::Stop(_) | Action::Logs(_) | Action::Health(_) | Action::Uninstall(_)
+                Action::Stop(_)
+                    | Action::ContinueOciStop(_)
+                    | Action::Logs(_)
+                    | Action::Health(_)
+                    | Action::Uninstall(_)
             )) {
         policy::owned(actor, v)?;
         Some(storage::volume_dir(db.cfg, v)?)
@@ -881,6 +913,11 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     } else {
         None
     };
+    let stop_cleanup = if let Action::ContinueOciStop(request) = &a {
+        Some(apps::stop::prepare(db, &target, request)?)
+    } else {
+        None
+    };
     let w = Work {
         start_checkpoint,
         publication_checkpoint,
@@ -897,6 +934,7 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
         volume,
         restore_image,
         restore_image_inspection,
+        stop_cleanup,
     };
     node::reserve(db, &w)?;
     storage::reserve(db, &w)?;
@@ -908,6 +946,12 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     }
     if matches!(w.action, Action::RestartApp(_)) {
         apps::restart::begin(db, &w)?;
+    }
+    if matches!(w.action, Action::Stop(_)) {
+        apps::stop::begin(db, &w)?;
+    }
+    if let Some(prepared) = &w.stop_cleanup {
+        apps::stop::begin_cleanup(db, &w, prepared)?;
     }
     if let Some(image) = &w.restore_image {
         apps::restore_image::begin(db, &w, image)?;
@@ -928,6 +972,7 @@ pub fn apply(db: &Db<'_>, w: &Work, receipt: &Value) -> Result<Value> {
             node::apply(db, w, receipt)
         }
         Action::RestoreReleaseImage(_) => apps::restore_image::settle(db, w, receipt),
+        Action::ContinueOciStop(_) => apps::stop::settle_cleanup(db, w, receipt),
         Action::Stage { .. }
         | Action::StageArtifactRelease(_)
         | Action::Select { .. }

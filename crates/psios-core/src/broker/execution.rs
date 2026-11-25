@@ -409,6 +409,13 @@ pub fn settlement_failed(db: &Db<'_>, w: &Work) -> Result<()> {
             "StorageUnavailable",
             "OCI image restore stopped before load was checkpointed",
         )
+    } else if matches!(w.action, Action::Stop(_) | Action::ContinueOciStop(_))
+        && apps::stop::not_dispatched(db, &w.op, matches!(w.action, Action::ContinueOciStop(_)))?
+    {
+        err(
+            "StorageUnavailable",
+            "OCI stop or cleanup did not reach its command checkpoint",
+        )
     } else if matches!(
         w.action,
         Action::InstallArtifact(_) | Action::StageArtifactRelease(_) | Action::RetireRelease(_)

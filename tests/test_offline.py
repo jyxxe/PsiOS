@@ -35,6 +35,7 @@ class OfflineVerification(unittest.TestCase):
     def test_crash_wal_and_pending_witness(self):
         n = self.n
         self.verify(error="Conflict")
+        self.verify("--rehearse-migration", error="Conflict")
         node = n.call("Node.Get", {})["reference"]["resource_id"]
         n.call("Agent.Register", {"name": "before-crash"})
         n.stop(signal.SIGKILL)
@@ -64,6 +65,12 @@ class OfflineVerification(unittest.TestCase):
         token, nxt = n.witness / "owner.token", n.witness / "owner.next"
         token.rename(nxt)
         self.assertEqual(self.verify()["owner_rotation"], "PendingPromotion")
+        original = self.contents()
+        report = self.verify("--rehearse-migration")
+        self.assertEqual(report["migration_rehearsal"], {
+            "status": "Verified", "source_format": report["database_format"],
+            "target_format": report["database_format"]})
+        self.assertEqual(self.contents(), original)
         self.assertFalse(token.exists())
         nxt.rename(token)
         nxt.write_text("unused-rotation")
@@ -75,6 +82,7 @@ class OfflineVerification(unittest.TestCase):
         # A private copy of this enlarged database must respect the operator's cap.
         os.truncate(n.state / "state.db", 2 * 1024 * 1024)
         self.verify("--max-copy-mib", "1", error="QuotaExceeded")
+        self.verify("--rehearse-migration", "--max-copy-mib", "1", error="QuotaExceeded")
         lock = n.state / "daemon.lock"
         lock.unlink()
         self.verify(error="StorageUnavailable")

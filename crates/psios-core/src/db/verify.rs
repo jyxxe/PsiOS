@@ -1,5 +1,9 @@
-use super::{StateLock, Store, checked_head, open_regular};
-use crate::{Config, Result, artifact, config::private_dir, err, policy, require};
+use super::{CURRENT_FORMAT, StateLock, Store, checked_head, open_regular, witness_bytes};
+use crate::{
+    Config, Result, artifact,
+    config::{new_file, private_dir},
+    err, policy, require,
+};
 use psios_api::sha256;
 use rusqlite::{Connection, OpenFlags, params};
 use serde::{Deserialize, Serialize};
@@ -196,6 +200,14 @@ pub(super) fn verified_witness(
 
 impl Store {
     pub fn verify(cfg: &Config, scratch: &Path, max_bytes: u64) -> Result<Value> {
+        Self::verify_copy(cfg, scratch, max_bytes, false)
+    }
+
+    pub fn rehearse_migration(cfg: &Config, scratch: &Path, max_bytes: u64) -> Result<Value> {
+        Self::verify_copy(cfg, scratch, max_bytes, true)
+    }
+
+    fn verify_copy(cfg: &Config, scratch: &Path, max_bytes: u64, rehearse: bool) -> Result<Value> {
         let _lock = lock_offline(cfg)?;
         let parent = scratch_parent(scratch)?;
         outside_authority(cfg, &parent)?;
@@ -203,14 +215,68 @@ impl Store {
             .prefix("psios-verify-")
             .permissions(Permissions::from_mode(0o700))
             .tempdir_in(parent)?;
-        let bytes = copy_database(&cfg.state_dir, tmp.path(), max_bytes)?;
-        let (copy, identity) = checked_copy(tmp.path())?;
+        let state = tmp.path().join("state");
+        private_dir(&state, true)?;
+        let bytes = copy_database(&cfg.state_dir, &state, max_bytes)?;
+        let (copy, identity) = checked_copy(&state)?;
         let (witness, rotation) = verified_witness(&copy, cfg)?;
         check_artifacts(&copy, &identity)?;
-        Ok(
-            json!({"node_id":identity.node_id, "database_format":identity.database_format, "migration_required":identity.database_format < super::CURRENT_FORMAT,
+        drop(copy);
+        let mut report = json!({"node_id":identity.node_id, "database_format":identity.database_format, "migration_required":identity.database_format < CURRENT_FORMAT,
             "sqlite_integrity":"Verified","foreign_keys":"Verified","witness":witness,
-            "owner_rotation":rotation,"copied_bytes":bytes}),
-        )
+            "owner_rotation":rotation,"copied_bytes":bytes});
+        if rehearse {
+            let witness = tmp.path().join("witness");
+            private_dir(&witness, true)?;
+            for (name, limit) in [
+                ("head", 4096),
+                ("keys", 64),
+                ("owner.token", 128),
+                ("owner.next", 128),
+            ] {
+                let path = cfg.witness_dir.join(name);
+                if (name == "owner.next"
+                    || (name == "owner.token" && rotation == "PendingPromotion"))
+                    && let Err(e) = fs::symlink_metadata(&path)
+                    && e.kind() == ErrorKind::NotFound
+                {
+                    continue;
+                }
+                new_file(&witness.join(name), &witness_bytes(&path, limit)?)?;
+            }
+            let mut rehearsal = cfg.clone();
+            rehearsal.state_dir = state;
+            rehearsal.witness_dir = witness;
+            rehearsal.socket = tmp.path().join("unused-api.sock");
+            rehearsal.docker_socket = tmp.path().join("unused-docker.sock");
+            report["migration_rehearsal"] = run_rehearsal(rehearsal, &identity).map_err(|e| {
+                err(
+                    e.0.code.as_str(),
+                    format!("migration rehearsal failed: {}", e.0.message),
+                )
+            })?;
+        }
+        Ok(report)
     }
+}
+
+fn run_rehearsal(cfg: Config, before: &DatabaseIdentity) -> Result<Value> {
+    // Store::open finalizes pending witness writes and executes the production migration.
+    // Its paths lead only to the temporary clone. No server, broker or effect recovery starts.
+    drop(Store::open(cfg.clone())?);
+    let (copy, after) = checked_copy(&cfg.state_dir)?;
+    let (witness, rotation) = verified_witness(&copy, &cfg)?;
+    require(
+        after.database_format == CURRENT_FORMAT
+            && after.node_id == before.node_id
+            && after.recovery_incarnation == before.recovery_incarnation
+            && witness == "Confirmed"
+            && rotation == "None",
+        "RecoveryRequired",
+        "migrated copy did not preserve the verified authority",
+    )?;
+    check_artifacts(&copy, &after)?;
+    Ok(
+        json!({"status":"Verified", "source_format":before.database_format, "target_format":after.database_format}),
+    )
 }

@@ -165,6 +165,30 @@ enum Cmd {
         #[arg(default_value = "-")]
         file: String,
     },
+    /// Prepare the Task to restore a signed release image. Submit and approve it separately.
+    ApplicationPrepareImageRestore {
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        delegation: String,
+        #[arg(long)]
+        deadline_at: Option<String>,
+        /// JSON with application_ref, release_ref, image_archive_ref, publisher_key_ref and expected_engine_id.
+        #[arg(default_value = "-")]
+        file: String,
+    },
+    /// Prepare a read-only inspection of an unresolved image restore operation.
+    ApplicationPrepareImageRestoreInspection {
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        delegation: String,
+        #[arg(long)]
+        deadline_at: Option<String>,
+        /// JSON ResourceRef for the original Operation, from a file or stdin.
+        #[arg(default_value = "-")]
+        file: String,
+    },
     /// List the selected, staged, previous and retired releases of an application.
     ApplicationReleases {
         id: String,
@@ -506,6 +530,28 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 signature.as_ref(),
             )?
         }
+        Cmd::ApplicationPrepareImageRestore {
+            key,
+            delegation,
+            deadline_at,
+            file,
+        } => c.prepare_release_image_restore(
+            &serde_json::from_value(input(&file)?)?,
+            &key,
+            &delegation,
+            deadline_at.as_deref(),
+        )?,
+        Cmd::ApplicationPrepareImageRestoreInspection {
+            key,
+            delegation,
+            deadline_at,
+            file,
+        } => c.prepare_release_image_restore_inspection(
+            &serde_json::from_value(input(&file)?)?,
+            &key,
+            &delegation,
+            deadline_at.as_deref(),
+        )?,
         Cmd::ApplicationReleases { id, cursor, limit } => {
             c.application_releases(&id, cursor.as_deref(), limit)?
         }

@@ -161,11 +161,15 @@ def main(binaries):
                "actions": actions, "tool_targets": scope, "units": 8, "ttl_seconds": 180})
         incomplete = grant(node, owner, actions, [item for item in scope if item != archive["resource_id"]])
         allowed = grant(node, owner, actions, scope)
-        request = dict(target=target(app), release_ref=release, image_archive_ref=archive,
+        request = dict(application_ref=app, release_ref=release, image_archive_ref=archive,
                        publisher_key_ref=signer, expected_engine_id=engine_id)
+        owner_token = node.witness / "owner.token"
 
         def prepare(input_value, permission=allowed):
-            return node.prepare(RESTORE, input_value, delegation=permission["delegation_ref"]["resource_id"])
+            path = node.base / "restore-request.json"
+            path.write_text(json.dumps(input_value))
+            return node.cli(owner_token, "application-prepare-image-restore", "--key", key(),
+                            "--delegation", permission["delegation_ref"]["resource_id"], path)
 
         def submit(req):
             return node.call("Task.Submit", req)["task_id"]
@@ -263,10 +267,13 @@ def main(binaries):
         node.call("Artifact.PublisherKey.Revoke", {**target(signer), "reason": "verification of historical restore"})
         recovery = grant(node, owner, ["task.submit", "task.read", INSPECT],
                          [operation["resource_id"], *scope])
+        operation_path = node.base / "restore-operation.json"
+        operation_path.write_text(json.dumps(operation))
 
         def inspect_after_loss():
-            recovery_task_id = submit(node.prepare(INSPECT, target(operation),
-                delegation=recovery["delegation_ref"]["resource_id"]))
+            prepared = node.cli(owner_token, "application-prepare-image-restore-inspection", "--key", key(),
+                                "--delegation", recovery["delegation_ref"]["resource_id"], operation_path)
+            recovery_task_id = submit(prepared)
             inspected = node.wait(recovery_task_id)
             assert inspected["lifecycle"] == "Succeeded", inspected
             admission = node.get(f"recovery-admission-{recovery_task_id}")["value"]

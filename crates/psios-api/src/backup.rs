@@ -1,7 +1,7 @@
 use crate::{ApiError, ApiResult, Client, MAX_ARTIFACT_CHUNK, ResourceRef};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     io::{Read, Seek, SeekFrom, Write},
@@ -30,6 +30,18 @@ pub struct BackupChunk {
 pub struct BackupMemberReceipt {
     pub bytes: u64,
     pub digest: String,
+}
+
+fn verification_progress(error: &ApiError) -> Option<(u64, u64)> {
+    if error.code != "QuotaExceeded" || error.retry_condition != "SameRequestAfterBackoff" {
+        return None;
+    }
+    let details = error.details.as_ref()?;
+    let verified = details
+        .get("backup_verified_bytes")
+        .and_then(Value::as_u64)?;
+    let total = details.get("backup_member_bytes").and_then(Value::as_u64)?;
+    (verified > 0 && verified < total).then_some((verified, total))
 }
 
 impl Client {
@@ -96,10 +108,29 @@ impl Client {
         let invalid = || ApiError::new("RecoveryRequired", "invalid backup export chunk sequence");
         loop {
             let requested = json!({"reference":backup,"member":member,"offset":offset,"length":MAX_ARTIFACT_CHUNK});
-            let deadline = Instant::now() + Duration::from_secs(3);
+            let backoff_limit = Duration::from_secs(3);
+            let mut deadline = Instant::now() + backoff_limit;
+            let mut verified = 0;
             let raw = loop {
                 match self.call("Backup.Export", requested.clone()) {
-                    Err(error) if error.retryable && Instant::now() < deadline => {
+                    Err(error) if error.retryable => {
+                        if let Some((bytes, total)) = verification_progress(&error) {
+                            if total > max_bytes {
+                                return Err(ApiError::new(
+                                    "QuotaExceeded",
+                                    "backup member exceeds client byte limit",
+                                )
+                                .into());
+                            }
+                            if bytes > verified {
+                                verified = bytes;
+                                deadline = Instant::now() + backoff_limit;
+                                continue;
+                            }
+                        }
+                        if Instant::now() >= deadline {
+                            return Err(error);
+                        }
                         thread::sleep(Duration::from_millis(50));
                     }
                     response => break response?,

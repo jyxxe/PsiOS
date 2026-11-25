@@ -70,6 +70,25 @@ class BackupExportTests(unittest.TestCase):
                                   sort_keys=True, separators=(",", ":")).encode()).split(":", 1)[1]
         return output.parent / f".psios-backup-export-{identity}"
 
+    def expand_backup(self, mib):
+        chunk = bytes(range(256)) * (128 * 1024 // 256)
+        with (self.tree / "nested/binary").open("wb") as source:
+            for _ in range(mib * 8):
+                source.write(chunk)
+        self.create_backup()
+        return chunk
+
+    def verification_progress(self, exception, size):
+        detail = exception.args[0]
+        self.assertEqual(exception.code, "QuotaExceeded")
+        self.assertTrue(detail["retryable"])
+        self.assertEqual(detail["retry_condition"], "SameRequestAfterBackoff")
+        self.assertEqual(detail["details"]["backup_member_bytes"], size)
+        prefix = detail["details"]["backup_verified_bytes"]
+        self.assertGreater(prefix, 0)
+        self.assertLess(prefix, size)
+        return prefix
+
     def test_version_scoped_export_and_repeat_authorization(self):
         node = self.node
         token = self.agent["token"]
@@ -240,6 +259,66 @@ class BackupExportTests(unittest.TestCase):
         self.assertEqual((out / blob).stat().st_ino, inode)
         with (out / blob).open("rb") as published:
             self.assertEqual(published.read(1), b"\xff")
+
+    def test_large_verification_interleaves_with_another_backup_and_authorization(self):
+        smaller = self.backup
+        smaller_member = self.member()
+        size = 40 * 1024 * 1024
+        data = self.expand_backup(40)
+        grant = self.grant(self.scope, smaller["resource_id"])
+        token = self.agent["token"]
+        with self.assertRaises(Failure) as first:
+            self.read(member=self.member(), token=token)
+        previous = self.verification_progress(first.exception, size)
+
+        self.node.call("Grant.Revoke", target(grant["grant_ref"]))
+        with self.assertRaises(Failure) as denied:
+            self.read(member=self.member(), token=token)
+        self.assertEqual(denied.exception.code, "PermissionDenied")
+        self.grant(self.scope, smaller["resource_id"])
+
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            scope = self.read(reference=smaller, member=smaller_member, token=token)
+            self.assertEqual(base64.b64decode(scope["data_base64"]), data)
+            try:
+                first_chunk = self.read(member=self.member(), token=token)
+                break
+            except Failure as error:
+                progress = self.verification_progress(error, size)
+                self.assertGreater(progress, previous)
+                previous = progress
+        else:
+            self.fail("verification did not advance to the first authorized data chunk")
+        self.assertEqual(base64.b64decode(first_chunk["data_base64"]), data)
+        for offset in range(128 * 1024, 512 * 1024, 128 * 1024):
+            self.read(reference=smaller, member=smaller_member, token=token)
+            page = self.read(member=self.member(), offset=offset, token=token)
+            self.assertEqual(base64.b64decode(page["data_base64"]), data)
+
+    def test_changed_prefix_is_rechecked_during_partial_verification(self):
+        size = 32 * 1024 * 1024
+        self.expand_backup(32)
+        self.grant(self.scope)
+        token = self.agent["token"]
+        with self.assertRaises(Failure) as interrupted:
+            self.read(member=self.member(), token=token)
+        self.verification_progress(interrupted.exception, size)
+
+        blob = self.source / f"blob-{self.index}"
+        original = blob.stat()
+        with blob.open("r+b") as stored:
+            stored.write(b"\xff")
+        os.utime(blob, ns=(original.st_atime_ns, original.st_mtime_ns))
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            with self.assertRaises(Failure) as next_attempt:
+                self.read(member=self.member(), token=token)
+            if next_attempt.exception.code == "PreconditionFailed":
+                self.assertIn("integrity", str(next_attempt.exception))
+                return
+            self.verification_progress(next_attempt.exception, size)
+        self.fail("verification never rejected the changed prefix")
 
     @unittest.skipUnless(os.getenv("PSIOS_TEST_EXPORT_TARGET"), "requires a bounded export filesystem")
     def test_export_capacity_failure_removes_staging(self):

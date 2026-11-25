@@ -1,4 +1,6 @@
 //! Authorized, revision-pinned reads of the native backup directory format.
+mod integrity;
+
 use super::{
     BackupManifest, MAX_ENTRIES, MAX_MANIFEST, child, copy_hash, detached, file_sizes,
     inspect_detached_backup_with_limit, open_backup, open_manifest, regular, same_source, staging,
@@ -11,6 +13,8 @@ use crate::{
     decode, err, policy, require,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
+pub(crate) use integrity::Cache;
+use integrity::MemberIntegrity;
 use psios_api::{
     BackupChunk, BackupMember, BackupMemberReceipt, Client, MAX_ARTIFACT_CHUNK, ResourceRef,
     canonical, sha256,
@@ -23,18 +27,14 @@ use std::{
     io::{BufReader, ErrorKind, Read, Seek, SeekFrom, sink},
     os::unix::fs::{FileExt, MetadataExt},
     path::Path,
-    sync::{Arc, Mutex, TryLockError},
+    sync::Arc,
 };
 
 pub(crate) const ACTION: &str = "backup.export";
 pub(crate) const METHOD: &str = "Backup.Export";
 const RESUME_PREFIX: &str = ".psios-backup-export-";
 
-#[derive(Default)]
-pub(crate) struct Cache(Option<Index>);
-
 struct Index {
-    reference: ResourceRef,
     directory: Metadata,
     manifest: Metadata,
     digest: String,
@@ -55,7 +55,7 @@ struct Entry {
     bytes: u64,
     digest: Option<String>,
     #[serde(skip)]
-    verified: Option<Metadata>,
+    integrity: MemberIntegrity,
 }
 
 #[derive(Deserialize)]
@@ -71,12 +71,11 @@ pub(crate) struct Job {
     config: Config,
     backup: Doc,
     request: ReadMember,
-    cache: Arc<Mutex<Cache>>,
+    cache: Arc<Cache>,
 }
 
 fn index(
     backup: &Doc,
-    reference: &ResourceRef,
     directory: &Metadata,
     manifest: &mut File,
     metadata: &Metadata,
@@ -106,7 +105,6 @@ fn index(
         "backup manifest disagrees with authority",
     )?;
     Ok(Index {
-        reference: reference.clone(),
         directory: directory.clone(),
         manifest: metadata.clone(),
         digest,
@@ -156,7 +154,7 @@ impl Entry {
         let Some(digest) = &self.digest else {
             return Err(err("NotFound", "backup member is a directory"));
         };
-        let mut file = child(root, format!("blob-{index}"), OFlags::RDONLY)?;
+        let file = child(root, format!("blob-{index}"), OFlags::RDONLY)?;
         let metadata = file.metadata()?;
         regular(&metadata)?;
         require(
@@ -169,21 +167,8 @@ impl Entry {
             "InvalidArgument",
             "offset beyond backup member",
         )?;
-        if self
-            .verified
-            .as_ref()
-            .is_none_or(|previous| !same_source(previous, &metadata))
-        {
-            let (bytes, actual) = copy_hash(&mut file, &mut sink(), self.bytes)?;
-            require(
-                bytes == self.bytes
-                    && actual == *digest
-                    && same_source(&metadata, &file.metadata()?),
-                "PreconditionFailed",
-                "backup member integrity failed",
-            )?;
-            self.verified = Some(metadata.clone());
-        }
+        self.integrity
+            .verify(&file, &metadata, self.bytes, digest)?;
         chunk(&file, &metadata, digest, offset, length)
     }
 }
@@ -212,12 +197,7 @@ fn authorize(db: &Db<'_>, actor: &str, request: &ReadMember) -> Result<Doc> {
     Ok(backup)
 }
 
-pub(crate) fn prepare(
-    db: &Db<'_>,
-    actor: &str,
-    params: &Value,
-    cache: Arc<Mutex<Cache>>,
-) -> Result<Job> {
+pub(crate) fn prepare(db: &Db<'_>, actor: &str, params: &Value, cache: Arc<Cache>) -> Result<Job> {
     let request = decode(params)?;
     let backup = authorize(db, actor, &request)?;
     Ok(Job {
@@ -243,37 +223,20 @@ pub(crate) fn finish(
 
 impl Job {
     pub(crate) fn read(self) -> Result<BackupChunk> {
-        let mut cache = self.cache.try_lock().map_err(|error| match error {
-            TryLockError::WouldBlock => {
-                let mut error = err("QuotaExceeded", "backup export reader is busy");
-                error.0.retryable = true;
-                error.0.retry_condition = "SameRequestAfterBackoff".into();
-                error
-            }
-            TryLockError::Poisoned(_) => {
-                err("RecoveryRequired", "backup export reader was interrupted")
-            }
-        })?;
         let request = self.request;
+        let slot = self.cache.checkout(&request.reference)?;
+        let mut cached = slot.try_lock().map_err(integrity::lock_error)?;
         let (_, root) = open_backup(&self.config, &self.backup.id)?;
         let directory = root.metadata()?;
         let mut manifest = open_manifest(&root)?;
         let metadata = manifest.metadata()?;
-        if cache.0.as_ref().is_none_or(|index| {
-            index.reference != request.reference
-                || !same_source(&index.directory, &directory)
-                || !same_source(&index.manifest, &metadata)
+        if cached.as_ref().is_none_or(|index| {
+            !same_source(&index.directory, &directory) || !same_source(&index.manifest, &metadata)
         }) {
-            cache.0 = None;
-            cache.0 = Some(index(
-                &self.backup,
-                &request.reference,
-                &directory,
-                &mut manifest,
-                &metadata,
-            )?);
+            *cached = None;
+            *cached = Some(index(&self.backup, &directory, &mut manifest, &metadata)?);
         }
-        let index = cache.0.as_mut().unwrap();
+        let index = cached.as_mut().unwrap();
         let reply = match request.member {
             BackupMember::Manifest => chunk(
                 &manifest,

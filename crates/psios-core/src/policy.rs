@@ -60,6 +60,8 @@ pub const TOOLS: &[&str] = &[
     "application.install",
     "application.start",
     "application.stop",
+    apps::restart::TOOL,
+    apps::restart::INSPECT,
     "application.uninstall",
     "application.health",
     "application.logs",
@@ -109,6 +111,7 @@ pub fn readonly(tool: &str) -> bool {
             | storage::restore_publication::INSPECT
             | "volume.read"
             | "application.health"
+            | apps::restart::INSPECT
             | "application.logs"
     )
 }
@@ -129,6 +132,7 @@ pub fn approval(tool: &str) -> bool {
             | "backup.delete"
             | "application.install"
             | "application.start"
+            | apps::restart::TOOL
             | "application.uninstall"
     )
 }
@@ -156,6 +160,8 @@ fn bootstrap_actions() -> Vec<String> {
                     | storage::export::ACTION
                     | storage::publication::INSPECT
                     | storage::restore_publication::INSPECT
+                    | apps::restart::TOOL
+                    | apps::restart::INSPECT
                     | agent::START_SESSION
                     | workflow::START_TOOL
                     | schedule::ACTION
@@ -497,6 +503,8 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
                 || action == node::RESTART_TOOL
                 || action == node::service_state::TOOL
                 || action == storage::restore_publication::INSPECT
+                || action == apps::restart::TOOL
+                || action == apps::restart::INSPECT
         }) || p.tool_targets.is_some(),
         "InvalidArgument",
         "this grant action requires an explicit target scope",

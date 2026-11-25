@@ -158,6 +158,10 @@ pub enum Action {
     Start(Target),
     #[serde(rename = "application.stop")]
     Stop(Target),
+    #[serde(rename = "application.restart")]
+    RestartApp(apps::restart::Request),
+    #[serde(rename = "application.inspect_instance")]
+    InspectOciInstance(Target),
     #[serde(rename = "application.uninstall")]
     Uninstall(Target),
     #[serde(rename = "application.health")]
@@ -174,6 +178,7 @@ impl Action {
         )?;
         let a: Self = decode(&json!({"tool": tool, "input": input}))?;
         match &a {
+            Self::RestartApp(request) => request.validate()?,
             Self::StartAgentSession(blueprint) => blueprint.validate()?,
             Self::StartWorkflow(blueprint) => blueprint.validate()?,
             Self::Processes(p) => p.validate()?,
@@ -229,7 +234,9 @@ impl Action {
         let mut resources = vec![primary.reference()];
         match self {
             Self::StartAgentSession(blueprint) => resources.push(blueprint.skill(db)?.reference()),
-            Self::Start(_) | Self::Stop(_) if primary.spec["volume_id"].is_string() => {
+            Self::Start(_) | Self::Stop(_) | Self::RestartApp(_) | Self::InspectOciInstance(_)
+                if primary.spec["volume_id"].is_string() =>
+            {
                 let volume = db.of(primary.spec["volume_id"].as_str().unwrap(), "Volume")?;
                 policy::owned(actor, &volume)?;
                 resources.push(volume.reference());
@@ -308,6 +315,7 @@ impl Action {
             Self::InspectBackupPublication(t) | Self::InspectRestoredVolume(t) => {
                 (&t.id, Some(&t.expected_resource_version), "Operation")
             }
+            Self::RestartApp(p) => (&p.id, Some(&p.expected_resource_version), "Application"),
             Self::Install(s) => match &s.volume {
                 Some(t) => (&t.id, Some(&t.expected_resource_version), "Volume"),
                 None => return db.get(policy::PROFILE),
@@ -317,6 +325,7 @@ impl Action {
             | Self::Refresh(t)
             | Self::Start(t)
             | Self::Stop(t)
+            | Self::InspectOciInstance(t)
             | Self::Uninstall(t)
             | Self::Health(t)
             | Self::Logs(t) => (&t.id, Some(&t.expected_resource_version), "Application"),
@@ -375,6 +384,7 @@ pub(crate) enum Checkpoint<'a> {
         receipt: &'a Value,
         placement: &'a storage::restore_publication::Placement,
     },
+    OciRestart(&'a Value),
 }
 
 impl Work {
@@ -431,6 +441,9 @@ impl Work {
             ) => storage::publication::record(db, self, receipt, device, inode),
             (Action::Restore(_), Checkpoint::RestoredVolume { receipt, placement }) => {
                 storage::restore_publication::record(db, self, receipt, placement)
+            }
+            (Action::RestartApp(request), Checkpoint::OciRestart(before)) => {
+                apps::restart::record(db, self, request, before)
             }
             (
                 Action::Delete(_) | Action::DeleteBackup(_),
@@ -490,6 +503,9 @@ impl Work {
             Action::Restore(_) => storage::restore(self, |receipt, placement| {
                 checkpoint(Checkpoint::RestoredVolume { receipt, placement })
             }),
+            Action::RestartApp(request) => apps::restart::run(self, request, |before| {
+                checkpoint(Checkpoint::OciRestart(before))
+            }),
             Action::Delete(_) | Action::DeleteBackup(_) => {
                 storage::retirement::retire(self, |location| {
                     checkpoint(Checkpoint::StorageDeletion(location))
@@ -502,6 +518,7 @@ impl Work {
             | Action::Uninstall(_)
             | Action::Install(_)
             | Action::Health(_)
+            | Action::InspectOciInstance(_)
             | Action::Logs(_) => apps::perform(self),
             _ => storage::perform(self),
         }
@@ -615,7 +632,11 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     } else {
         None
     };
-    let launch = if matches!(a, Action::Start(_)) || start_checkpoint.is_some() {
+    let launch = if matches!(
+        a,
+        Action::Start(_) | Action::RestartApp(_) | Action::InspectOciInstance(_)
+    ) || start_checkpoint.is_some()
+    {
         Some(apps::launch_spec(db, &target)?)
     } else {
         None
@@ -643,6 +664,9 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     if matches!(w.action, Action::Restore(_)) {
         storage::restore_publication::begin(db, &w)?;
     }
+    if matches!(w.action, Action::RestartApp(_)) {
+        apps::restart::begin(db, &w)?;
+    }
     if storage::retirement::deletion(&w.action) {
         storage::retirement::begin(db, &w)?;
     }
@@ -660,6 +684,7 @@ pub fn apply(db: &Db<'_>, w: &Work, receipt: &Value) -> Result<Value> {
         | Action::Refresh(_)
         | Action::Install(_)
         | Action::Start(_)
+        | Action::RestartApp(_)
         | Action::Stop(_)
         | Action::Health(_)
         | Action::Logs(_)

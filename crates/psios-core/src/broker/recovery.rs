@@ -24,6 +24,9 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
         let restore_unpublished = phase == "Dispatched"
             && tool == "backup.restore"
             && storage::restore_publication::not_published(db, &operation(db, &t)?)?;
+        let restart_undispatched = phase == "Dispatched"
+            && tool == apps::restart::TOOL
+            && apps::restart::not_dispatched(db, &operation(db, &t)?)?;
         let deletion_unprepared = phase == "Dispatched"
             && matches!(tool, "volume.delete" | "backup.delete")
             && storage::retirement::not_prepared(db, &operation(db, &t)?)?;
@@ -32,6 +35,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             && !activation_uncommitted
             && !backup_unpublished
             && !restore_unpublished
+            && !restart_undispatched
             && !deletion_unprepared
         {
             close(
@@ -56,6 +60,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             || activation_uncommitted
             || backup_unpublished
             || restore_unpublished
+            || restart_undispatched
             || deletion_unprepared
         {
             close(
@@ -73,6 +78,8 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                         "backup interrupted before publication was authorized"
                     } else if restore_unpublished {
                         "restore interrupted before volume publication was authorized"
+                    } else if restart_undispatched {
+                        "OCI restart interrupted before its invocation was checkpointed"
                     } else if activation_uncommitted {
                         "activation had not committed at restart"
                     } else if deletion_unprepared {
@@ -255,6 +262,7 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         | Action::Restore(p)
         | Action::Backup(p) => (&p.id, &p.expected_resource_version),
         Action::ServiceRestart(p) => (&p.id, &p.expected_resource_version),
+        Action::RestartApp(p) => (&p.id, &p.expected_resource_version),
         _ => {
             return Err(err(
                 "UnsupportedCapability",
@@ -309,6 +317,16 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
                 storage::restore_publication::INSPECT,
             )?;
             storage::restore_publication::reconcile(db, &op, &target, &proof, &observation)?
+        }
+        Action::RestartApp(_) => {
+            let (proof, observation) = inspected(
+                db,
+                req.evidence_ref.as_ref(),
+                &op,
+                &target,
+                apps::restart::INSPECT,
+            )?;
+            apps::restart::reconcile(db, &op, &target, &proof, &observation)?
         }
         Action::ServiceStart(_) | Action::ServiceStop(_) | Action::ServiceRestart(_) => {
             let (proof, observation) = inspected(

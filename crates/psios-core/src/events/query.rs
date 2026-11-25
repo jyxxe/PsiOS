@@ -17,7 +17,10 @@ pub(super) enum View {
 pub(super) fn selection(cursor: &Cursor, view: View, limit: u32) -> (String, Vec<Value>) {
     let origins = matches!(view, View::Snapshot) && cursor.orders_by_creation();
     let mut arguments = vec![cursor.position.into(), i64::from(limit).into()];
-    let mut conditions = String::from("v.seq > ?1");
+    let mut conditions = format!(
+        "v.seq > ?1 AND v.kind <> '{}'",
+        crate::apps::log_tail::PRIVATE_KIND
+    );
     let resource = cursor.resource.as_ref().map(|id| {
         arguments.push(id.clone().into());
         let position = arguments.len();

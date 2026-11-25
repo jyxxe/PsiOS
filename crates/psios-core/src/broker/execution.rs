@@ -443,6 +443,8 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                         | Action::ListAppReleases(_)
                         | Action::InstallArtifact(_)
                         | Action::StageArtifactRelease(_)
+                        | Action::Logs(_)
+                        | Action::Stop(_)
                 ) =>
             {
                 json!({"code":"Fenced"})

@@ -620,6 +620,8 @@ impl Db<'_> {
         self.update(d, d.spec.clone(), body)
     }
     fn insert(&self, mut d: Doc) -> Result<Doc> {
+        apps::log_tail::redact_status(&d.kind, &mut d.body);
+        apps::log_tail::redact_status(&d.kind, &mut d.spec);
         let (schema, version) = match d.kind.as_str() {
             "Task" => ("task", "task_revision"),
             "Run" => ("run", ""),

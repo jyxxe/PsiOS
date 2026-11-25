@@ -356,7 +356,8 @@ pub fn admin(actor: &str) -> Result<()> {
     )
 }
 pub fn visible(actor: &str, d: &Doc) -> bool {
-    actor == OWNER || d.owner == actor || d.owner == SYSTEM
+    d.kind != apps::log_tail::PRIVATE_KIND
+        && (actor == OWNER || d.owner == actor || d.owner == SYSTEM)
 }
 pub fn owned(actor: &str, d: &Doc) -> Result<()> {
     require(

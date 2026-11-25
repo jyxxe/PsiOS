@@ -265,6 +265,12 @@ Core 核对原会话、模型租约及决策摘要，在一个事务中提交原
 
 读取源制品需要 Node 范围的 `artifact.read`，安装委托需要 `application.install_artifact` 且覆盖制品与目标卷或 `profile-local`。Task 准入固定源摘要并创建审批计划。待审批与执行期间保留制品，安装提交时由不可变 Release 接续保留。成功回执关联 Operation、Application、Release、Deployment 和制品来源。目录提交前中断会结算为已知失败并释放 Task 的保留关系。安装得到处于 `Stopped` 的应用，通过已有 `application.start` 启动。[授权及恢复验收](../tests/test_artifact_install.py) · [真实 OCI 验收](../tests/oci.py)
 
+### 读取 OCI 应用日志
+
+`application.logs` 继续接收应用 ID 和预期修订。Core 在采集前后核对 Docker Engine 和完整容器 ID，并检查应用、实例与原启动 Operation 的绑定。每次读取请求最多 64 行，每路输出保留末尾最多 8192 个 UTF-8 字节，超限时返回 `truncated`。回执记录来源和采集时间。正常停止时保留一次私有尾部，守护进程重启后仍可读取。没有可靠尾部时返回 `availability: "Unavailable"`。
+
+提交日志任务和读取其制品正文都需要当前目标应用的 `application.logs` 授权。应用状态、健康和刷新回执及资源事件只提供运行信息。旧应用状态仍可按原引用解析，公开视图会省略历史日志正文。执行中失去授权的日志任务不会发布该次采集结果。[运行、停止和撤权验收](../tests/oci.py)
+
 ### 保存本机 OCI 镜像字节
 
 `application.capture_oci_image` 接受 `image_id`、`expected_engine_id` 和可选的整数 `max_archive_bytes`。本机所有者使用显式限定在当前 Node 的任务委托和 `artifact.upload` 授权，提交后再批准包含镜像、引擎和原始输入的计划。省略上限时，任务固定使用 8 MiB，配置提高后也沿用该值。适配器从配置的本机 Docker Engine 以完整镜像配置摘要导出有层的 Linux amd64 镜像，前后核对引擎身份和层摘要。

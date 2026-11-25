@@ -162,6 +162,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "StoragePool.Get" => storage::pool_status(db, actor, p),
         "StoragePool.Configure" => storage::pool_configure(db, actor, p),
         "Application.Configure" => apps::configure(db, actor, p),
+        "Application.PrepareArtifactInstall" => apps::artifact_install::prepare(db, actor, p),
         "Schedule.Create" => schedule::create(db, actor, p),
         "Schedule.Get" => schedule::get(db, actor, p, "Schedule"),
         "Schedule.TriggerGet" => schedule::get(db, actor, p, "ScheduleTrigger"),

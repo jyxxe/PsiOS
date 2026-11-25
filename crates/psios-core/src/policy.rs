@@ -62,6 +62,7 @@ pub const TOOLS: &[&str] = &[
     "backup.restore",
     storage::restore_publication::INSPECT,
     "application.install",
+    apps::artifact_install::TOOL,
     "application.start",
     "application.stop",
     apps::restart::TOOL,
@@ -144,6 +145,7 @@ pub fn approval(tool: &str) -> bool {
             | "volume.delete"
             | "backup.delete"
             | "application.install"
+            | apps::artifact_install::TOOL
             | "application.start"
             | apps::restart::TOOL
             | "application.uninstall"
@@ -172,6 +174,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | artifact::ingress::UPLOAD
                     | artifact::ingress::READ
                     | artifact::ingress::WITHDRAW
+                    | apps::artifact_install::TOOL
                     | node::block::TOOL
                     | "backup.verify"
                     | storage::file_integrity::TOOL
@@ -529,6 +532,7 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
                     || action == artifact::ingress::UPLOAD
                     || action == artifact::ingress::READ
                     || action == artifact::ingress::WITHDRAW
+                    || action == apps::artifact_install::TOOL
                     || action == node::journal::TOOL
                     || action == node::process::TOOL
                     || action == node::RESTART_TOOL

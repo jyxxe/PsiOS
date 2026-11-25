@@ -348,7 +348,12 @@ pub fn dispatch_failed(db: &Db<'_>, task: &str, e: &Error) -> Result<()> {
 }
 
 pub fn settlement_failed(db: &Db<'_>, w: &Work) -> Result<()> {
-    let reason = if policy::readonly(field(&w.task.spec, "task_type")) {
+    let reason = if matches!(w.action, Action::InstallArtifact(_)) {
+        err(
+            "StorageUnavailable",
+            "installation catalog transaction did not commit",
+        )
+    } else if policy::readonly(field(&w.task.spec, "task_type")) {
         err("StorageUnavailable", "read result could not be committed")
     } else {
         err("OutcomeUnknown", "effect result could not be committed")
@@ -363,7 +368,14 @@ pub fn finish(db: &Db<'_>, w: &Work, result: Result<Value>) -> Result<()> {
         || w.run.body["recovery_incarnation"] != db.incarnation
     {
         let receipt = match result {
-            Ok(_) if matches!(w.action, Action::InspectProcess(_)) => json!({"code":"Fenced"}),
+            Ok(_)
+                if matches!(
+                    w.action,
+                    Action::InspectProcess(_) | Action::InstallArtifact(_)
+                ) =>
+            {
+                json!({"code":"Fenced"})
+            }
             Ok(value) => json!({"receipt": value}),
             Err(e) => json!({"code": e.0.code}),
         };

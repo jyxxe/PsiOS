@@ -9,6 +9,7 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, process::Command};
 
+pub(crate) mod artifact_install;
 mod cgroup;
 pub(crate) mod restart;
 
@@ -694,6 +695,17 @@ pub fn perform(w: &Work) -> Result<Value> {
     match &w.action {
         Action::InspectOciInstance(_) => restart::observe(w),
         Action::Install(s) | Action::Stage { release: s, .. } => e.image(&s.image_id),
+        Action::InstallArtifact(_) => e.image(
+            &w.launch
+                .as_ref()
+                .ok_or_else(|| {
+                    err(
+                        "RecoveryRequired",
+                        "artifact installation specification missing",
+                    )
+                })?
+                .image_id,
+        ),
         Action::Select { release_ref, .. } => Ok(json!({"release_ref":release_ref})),
         Action::Health(_) if w.start_checkpoint.is_some() => {
             observe_start(w, &e, w.start_checkpoint.as_ref().unwrap())
@@ -905,23 +917,25 @@ fn install(db: &Db<'_>, w: &Work, s: &Install, r: &Value) -> Result<Value> {
         "volume_id": deploy_spec["volume_id"],
         "data_incarnation": deploy_spec["data_incarnation"]
     });
-    Ok(db
-        .create(
-            "Application",
-            &app,
-            owner,
-            spec,
-            json!({
-                "lifecycle": "Stopped",
-                "desired_state": "Stopped",
-                "runtime_state": "Absent",
-                "health": "Unknown",
-                "readiness": "NotReady",
-                "last_logs": null,
-                "observed_at": now()
-            }),
-        )?
-        .reference())
+    let application = db.create(
+        "Application",
+        &app,
+        owner,
+        spec,
+        json!({
+            "lifecycle": "Stopped",
+            "desired_state": "Stopped",
+            "runtime_state": "Absent",
+            "health": "Unknown",
+            "readiness": "NotReady",
+            "last_logs": null,
+            "observed_at": now()
+        }),
+    )?;
+    Ok(
+        artifact_install::retain(db, w, &application, &release, &deploy)?
+            .unwrap_or_else(|| application.reference()),
+    )
 }
 fn attachment(db: &Db<'_>, app: &Doc, op_id: &str, v: &Doc, start: bool) -> Result<Value> {
     let mut b = v.body.clone();
@@ -1000,6 +1014,17 @@ pub fn stopped(
 pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
     match &w.action {
         Action::Install(s) => install(db, w, s, r),
+        Action::InstallArtifact(_) => install(
+            db,
+            w,
+            w.launch.as_ref().ok_or_else(|| {
+                err(
+                    "RecoveryRequired",
+                    "artifact installation specification missing",
+                )
+            })?,
+            r,
+        ),
         Action::Stage { release, .. } => {
             let staged = record_release(
                 db,

@@ -870,6 +870,90 @@ fn lost_read_gets_new_claim_and_late_receipt_is_fenced() {
     assert_eq!(run["claim_epoch"], "2");
 }
 #[test]
+fn interrupted_oci_artifact_inspection_releases_the_uncommitted_install_pin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (cfg, mut s) = initialized(tmp.path());
+    let node = call(&mut s, "Node.Get", json!({})).unwrap();
+    let artifact_grant = call(&mut s, "Grant.Issue", json!({
+        "principal_id":"local-owner","actions":["artifact.upload","artifact.read","artifact.withdraw"],
+        "tool_targets":[node["reference"]["resource_id"]],"units":4,"ttl_seconds":90,
+    })).unwrap();
+    assert!(artifact_grant["grant_ref"].is_object());
+    let bytes = serde_json::to_vec(&json!({
+        "format":"PsiOSLocalOciInstallV1","install":{
+            "name":"recovery-test","image_id":format!("sha256:{}","d".repeat(64)),
+            "release_version":"1.0.0","argv":["/probe"],"license_expression":"0BSD",
+            "cpu_millicores":200,"memory_max_bytes":33554432,"pids_max":8,"ephemeral_max_bytes":1048576,
+        },
+    })).unwrap();
+    let stage = call(
+        &mut s,
+        "Artifact.Stage",
+        json!({
+            "key":"interrupted-install","size_bytes":bytes.len(),"digest":psios_api::sha256(&bytes),
+            "declared_media_type":"application/vnd.psios.oci-install.v1+json","ttl_seconds":120,
+        }),
+    )
+    .unwrap();
+    call(
+        &mut s,
+        "Artifact.Stage.PutChunk",
+        json!({"stage_id":stage["stage_id"],
+        "offset":0,"data_base64":STANDARD.encode(bytes)}),
+    )
+    .unwrap();
+    let published = call(
+        &mut s,
+        "Artifact.Publish",
+        json!({"stage_id":stage["stage_id"]}),
+    )
+    .unwrap();
+    let reference = published["artifact_ref"].clone();
+    let tool = apps::artifact_install::TOOL;
+    let grant = call(
+        &mut s,
+        "Grant.Issue",
+        json!({"principal_id":"local-owner",
+        "actions":["task.submit","task.read",tool],"ttl_seconds":90,"units":2,
+        "tool_targets":["profile-local",reference["resource_id"]]}),
+    )
+    .unwrap();
+    let prepared = call(&mut s,"Application.PrepareArtifactInstall",json!({
+        "reference":reference,"key":id("install"),"delegation_id":grant["delegation_ref"]["resource_id"],
+    })).unwrap();
+    let accepted = call(&mut s, "Task.Submit", prepared["request"].clone()).unwrap();
+    let task = accepted["task_id"].as_str().unwrap();
+    approve(&mut s, task);
+    assert_eq!(claim(&mut s), task);
+    let work = dispatch(&mut s, task);
+    assert!(matches!(work.action, host::Action::InstallArtifact(_)));
+    let unfinished = call(&mut s, "Task.Get", json!({"id":task})).unwrap();
+    assert_eq!(unfinished["outcome_knowledge"], "InFlight");
+    let withdraw = json!({"reference":reference,"reason":"recovered uncommitted install"});
+    assert_eq!(
+        call(&mut s, "Artifact.Withdraw", withdraw.clone())
+            .unwrap_err()
+            .0
+            .code,
+        "Conflict"
+    );
+    drop(s);
+    let mut s = Store::open(cfg).unwrap();
+    s.transaction("recover", broker::recover).unwrap();
+    let failed = call(&mut s, "Task.Get", json!({"id":task})).unwrap();
+    assert_eq!(failed["lifecycle"], "Failed");
+    assert_eq!(failed["outcome_knowledge"], "Known");
+    assert_eq!(failed["conditions"][0]["type"], "LeaseLost");
+    assert!(
+        call(&mut s, "Resource.List", json!({"kind":"Application"})).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(call(&mut s, "Artifact.Withdraw", withdraw).unwrap()["withdrawal_ref"].is_object());
+}
+
+#[test]
 fn revoked_process_observation_cannot_publish_an_artifact_or_a_late_body() {
     let tmp = tempfile::tempdir().unwrap();
     let (_, mut store) = initialized(tmp.path());

@@ -572,6 +572,11 @@ pub(crate) fn withdraw(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value
         )?;
         return Ok(json!({"withdrawal_ref":receipt.reference(),"artifact_ref":p.reference}));
     }
+    require(
+        !crate::apps::artifact_install::pinned(db, &artifact.id)?,
+        "Conflict",
+        "artifact is retained by an installation or an immutable release",
+    )?;
     let manifest = super::Manifest::read(&artifact)?
         .ok_or_else(|| err("RecoveryRequired", "artifact manifest unavailable"))?;
     let count = db.c.execute(

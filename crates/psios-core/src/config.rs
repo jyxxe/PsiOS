@@ -8,6 +8,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub const DEFAULT_BACKUP_MAX_BYTES: u64 = 256 * 1024 * 1024;
+pub const MAX_BACKUP_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
+
+fn default_backup_max_bytes() -> u64 {
+    DEFAULT_BACKUP_MAX_BYTES
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -28,6 +35,8 @@ pub struct Config {
     pub docker_socket: PathBuf,
     #[serde(default)]
     pub authority_reserve: AuthorityReserve,
+    #[serde(default = "default_backup_max_bytes")]
+    pub backup_max_bytes: u64,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -120,6 +129,7 @@ impl Config {
             tick_ms: default_tick(),
             docker_socket: default_docker(),
             authority_reserve: AuthorityReserve::default(),
+            backup_max_bytes: DEFAULT_BACKUP_MAX_BYTES,
         }
     }
     pub fn load(path: &Path) -> Result<Self> {
@@ -180,6 +190,11 @@ impl Config {
             "invalid service allowlist or missing control definition digest",
         )?;
         node::network::probe::validate(&self.network_probes)?;
+        require(
+            (1..=MAX_BACKUP_BYTES).contains(&self.backup_max_bytes),
+            "InvalidArgument",
+            "backup maximum must be between 1 byte and 1 TiB",
+        )?;
         require(
             (1..=16).contains(&self.workers)
                 && (1..=4096).contains(&self.queue_limit)

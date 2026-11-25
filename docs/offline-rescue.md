@@ -61,9 +61,13 @@ rescue-core/psiosd verify-backup --directory /media/backup/backup-id \
 
 工具核验清单摘要、成员集合、路径结构、各文件长度和完整内容。配置、数据库和见证可以留在离线的原节点。恢复前检查目标的空闲数据块与 inode，将数据写入私有暂存目录，通过核验并刷盘后以拒绝覆盖的原子改名发布。恢复保持文件和目录模式以及清单中记录的修改时间，所有权取自恢复账户。恢复结果是普通目录。[脱离权威的恢复验收](../tests/test_detached_backup.py)
 
+导出与脱机核验默认限制 256 MiB 负载。使用 `psiosctl backup-export --max-bytes BYTES` 和 `psiosd verify-backup --max-bytes BYTES` 可提高该次操作的上限。服务端按原清单流式核对已存备份，输出前检查容量与文件摘要。[大备份验收](../tests/test_backup_limits.py)
+
 ### 导入新节点并恢复到新卷
 
 在已初始化的接收节点停止 `psiosd`，以该节点服务账户运行 `import-backup`。来源为 PsiOS 单卷备份的 `backup-export` 目录，摘要使用独立可信记录。导入核验原清单和所有数据块，将副本写入接收节点的私有备份存储，随后发布新节点可查询的 `Backup` 引用。原备份 ID、源卷引用和数据代次保留为来源信息。本地授予后续任务与导出权限。
+
+服务配置中的 `backup_max_bytes` 适用于新建备份和导入，默认 268435456 字节，范围 1 字节至 1 TiB。`StoragePool.Get` 可查询当前配置。恢复已登记备份时使用原清单中的长度和摘要。
 
 ```bash
 psiosd --config /etc/psios/core.json import-backup \

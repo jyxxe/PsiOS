@@ -4,7 +4,7 @@ use super::{
     file_sizes, inspect_members, open_backup, staging, validate_members,
 };
 use crate::{
-    Config, Result, Store,
+    Config, MAX_BACKUP_BYTES, Result, Store,
     config::new_file,
     db::{Db, Doc},
     decode, err, label, policy, require,
@@ -71,7 +71,7 @@ impl Intake {
             "invalid backup source reference digest",
         )?;
         label(&origin.data_incarnation)?;
-        let declared = validate_members(manifest)?;
+        let declared = validate_members(manifest, MAX_BACKUP_BYTES)?;
         require(
             manifest.total_bytes == declared.to_string(),
             "PreconditionFailed",
@@ -126,6 +126,7 @@ impl Intake {
             &archive.manifest,
             &json!(self.manifest_digest),
             None,
+            MAX_BACKUP_BYTES,
         )?;
         archive.confirm()
     }
@@ -287,6 +288,13 @@ impl Store {
             info.verify_published(&path, None)?;
             return Ok(receipt(&backup, true));
         }
+        require(
+            info.bytes
+                .parse::<u64>()
+                .is_ok_and(|bytes| bytes <= store.config.backup_max_bytes),
+            "QuotaExceeded",
+            "backup exceeds the local import byte limit",
+        )?;
         match fs::symlink_metadata(&path) {
             Ok(_) => {
                 return Err(err(

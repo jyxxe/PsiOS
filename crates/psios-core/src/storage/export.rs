@@ -1,10 +1,11 @@
 //! Authorized, revision-pinned reads of the native backup directory format.
 use super::{
-    BackupManifest, MAX_BACKUP, MAX_ENTRIES, MAX_MANIFEST, child, copy_hash, detached,
-    inspect_detached_backup, open_backup, open_manifest, regular, same_source, staging,
+    BackupManifest, MAX_ENTRIES, MAX_MANIFEST, child, copy_hash, detached, file_sizes,
+    inspect_detached_backup_with_limit, open_backup, open_manifest, regular, same_source, staging,
+    validate_members,
 };
 use crate::{
-    Config, Result,
+    Config, DEFAULT_BACKUP_MAX_BYTES, MAX_BACKUP_BYTES, Result,
     db::{Db, Doc},
     decode, err, policy, require,
 };
@@ -86,7 +87,7 @@ fn index(
         serde_json::from_reader(BufReader::new((&mut *manifest).take(MAX_MANIFEST + 1)))?;
     let total = parsed.entries.iter().try_fold(0u64, |sum, entry| {
         sum.checked_add(entry.bytes)
-            .filter(|sum| *sum <= MAX_BACKUP)
+            .filter(|sum| *sum <= MAX_BACKUP_BYTES)
     });
     require(
         same_source(metadata, &manifest.metadata()?)
@@ -294,6 +295,20 @@ impl Job {
 
 /// Export an authority-pinned backup to a new directory beneath a private parent.
 pub fn download_backup(client: &Client, backup: &ResourceRef, output: &Path) -> Result<Value> {
+    download_backup_with_limit(client, backup, output, DEFAULT_BACKUP_MAX_BYTES)
+}
+
+pub fn download_backup_with_limit(
+    client: &Client,
+    backup: &ResourceRef,
+    output: &Path,
+    max_bytes: u64,
+) -> Result<Value> {
+    require(
+        (1..=MAX_BACKUP_BYTES).contains(&max_bytes),
+        "InvalidArgument",
+        "invalid backup export byte limit",
+    )?;
     let (parent, name) = detached::output_parent(None, output)?;
     let stage = staging::create(&parent)?;
     let create_file = |name: &str| {
@@ -312,24 +327,13 @@ pub fn download_backup(client: &Client, backup: &ResourceRef, output: &Path) -> 
         stage.path().join("manifest.json"),
     )?))?;
     require(
-        manifest.backup_id == backup.resource_id && manifest.entries.len() <= MAX_ENTRIES,
+        manifest.backup_id == backup.resource_id,
         "PreconditionFailed",
-        "export manifest identity or entry limit mismatch",
+        "export manifest identity disagrees with the pinned backup",
     )?;
-    let files = manifest
-        .entries
-        .iter()
-        .filter(|entry| entry.digest.is_some());
-    let lengths = files.clone().map(|entry| entry.bytes);
-    require(
-        lengths
-            .clone()
-            .try_fold(0u64, u64::checked_add)
-            .is_some_and(|total| total <= MAX_BACKUP),
-        "QuotaExceeded",
-        "backup export exceeds 256 MiB",
-    )?;
-    crate::db::check_restore_capacity(stage.directory(), lengths, files.count() as u64, 0)?;
+    validate_members(&manifest, max_bytes)?;
+    let sizes = file_sizes(&manifest);
+    crate::db::check_restore_capacity(stage.directory(), sizes.clone(), sizes.count() as u64, 0)?;
     for (index, entry) in manifest.entries.iter().enumerate() {
         if let Some(expected) = &entry.digest {
             let mut file = create_file(&format!("blob-{index}"))?;
@@ -347,7 +351,8 @@ pub fn download_backup(client: &Client, backup: &ResourceRef, output: &Path) -> 
             file.sync_all()?;
         }
     }
-    let mut report = inspect_detached_backup(stage.path(), &receipt.digest, None)?;
+    let mut report =
+        inspect_detached_backup_with_limit(stage.path(), &receipt.digest, None, max_bytes)?;
     stage.publish(name)?;
     report["backup_ref"] = json!(backup);
     report["exported_directory"] = json!(parent.join(name).display().to_string());

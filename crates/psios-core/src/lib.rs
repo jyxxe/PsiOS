@@ -19,14 +19,14 @@ mod storage;
 mod watch;
 mod workflow;
 
-pub use config::{AuthorityReserve, Config};
+pub use config::{AuthorityReserve, Config, DEFAULT_BACKUP_MAX_BYTES, MAX_BACKUP_BYTES};
 pub use db::Store;
 use psios_api::ApiError;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::fmt;
-pub use storage::export::download_backup;
-pub use storage::inspect_detached_backup;
+pub use storage::export::{download_backup, download_backup_with_limit};
+pub use storage::{inspect_detached_backup, inspect_detached_backup_with_limit};
 
 #[derive(Debug)]
 pub struct Error(pub Box<ApiError>);

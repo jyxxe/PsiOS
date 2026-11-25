@@ -385,7 +385,10 @@ pub fn finish(db: &Db<'_>, w: &Work, result: Result<Value>) -> Result<()> {
         return Ok(());
     }
     let result = result.and_then(|receipt| {
-        if matches!(w.action, Action::VerifyVolumeFile(_)) {
+        if matches!(
+            w.action,
+            Action::VerifyVolumeFile(_) | Action::InspectFileRename(_)
+        ) {
             w.check_streaming(db)?;
         }
         Ok(receipt)

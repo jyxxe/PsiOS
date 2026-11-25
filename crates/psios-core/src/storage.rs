@@ -2,6 +2,7 @@
 mod detached;
 pub(crate) mod export;
 pub(crate) mod file_integrity;
+pub(crate) mod file_move;
 pub mod files;
 mod intake;
 pub(crate) mod publication;
@@ -85,6 +86,10 @@ pub fn volume_dir(cfg: &Config, d: &Doc) -> Result<PathBuf> {
     Ok(data)
 }
 pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
+    // The proof observes an original exclusive hold verified by host::work.
+    if matches!(w.action, Action::InspectFileRename(_)) {
+        return Ok(());
+    }
     if matches!(w.action, Action::Create { .. } | Action::Restore(_)) {
         require(
             db.get("local")?.body["allocation_enabled"] == true,
@@ -1013,7 +1018,11 @@ pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
                 .reference())
         }
         Action::DeleteBackup(_) | Action::Delete(_) => retirement::settle(db, &w.op, &w.target, r),
-        Action::Write(_) | Action::Append(_) | Action::MakeDir(_) | Action::RemoveEntry(_) => Ok(
+        Action::Write(_)
+        | Action::Append(_)
+        | Action::MakeDir(_)
+        | Action::RemoveEntry(_)
+        | Action::RenameFile(_) => Ok(
             json!({"volume_ref": db.status(&w.target,w.target.body.clone())?.reference(), "receipt": r}),
         ),
         _ => Ok(r.clone()),

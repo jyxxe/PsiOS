@@ -118,6 +118,10 @@ pub enum Action {
     VolumeUsage(storage::usage::Query),
     #[serde(rename = "volume.verify_file")]
     VerifyVolumeFile(storage::file_integrity::Query),
+    #[serde(rename = "volume.rename_file")]
+    RenameFile(storage::file_move::Request),
+    #[serde(rename = "volume.inspect_rename")]
+    InspectFileRename(Target),
     #[serde(rename = "volume.read_chunk")]
     Chunk(storage::files::ReadChunk),
     #[serde(rename = "volume.append")]
@@ -223,8 +227,10 @@ impl Action {
             _ => {}
         }
         storage::files::validate(&a)?;
-        if let Self::VerifyVolumeFile(query) = &a {
-            query.validate()?;
+        match &a {
+            Self::VerifyVolumeFile(query) => query.validate()?,
+            Self::RenameFile(request) => request.validate()?,
+            _ => {}
         }
         Ok(a)
     }
@@ -302,6 +308,11 @@ impl Action {
                 Some(&p.target.expected_resource_version),
                 "Volume",
             ),
+            Self::RenameFile(p) => (
+                &p.target.id,
+                Some(&p.target.expected_resource_version),
+                "Volume",
+            ),
             Self::Chunk(p) => (
                 &p.target.id,
                 Some(&p.target.expected_resource_version),
@@ -325,7 +336,9 @@ impl Action {
             Self::Restore(t) | Self::VerifyBackup(t) | Self::DeleteBackup(t) => {
                 (&t.id, Some(&t.expected_resource_version), "Backup")
             }
-            Self::InspectBackupPublication(t) | Self::InspectRestoredVolume(t) => {
+            Self::InspectBackupPublication(t)
+            | Self::InspectRestoredVolume(t)
+            | Self::InspectFileRename(t) => {
                 (&t.id, Some(&t.expected_resource_version), "Operation")
             }
             Self::RestartApp(p) => (&p.id, Some(&p.expected_resource_version), "Application"),
@@ -398,6 +411,7 @@ pub(crate) enum Checkpoint<'a> {
         placement: &'a storage::restore_publication::Placement,
     },
     OciRestart(&'a Value),
+    FileRename(&'a storage::file_move::Witness),
 }
 
 impl Work {
@@ -420,7 +434,13 @@ impl Work {
 
     pub(crate) fn check_streaming(&self, db: &Db<'_>) -> Result<()> {
         require(
-            matches!(self.action, Action::Backup(_) | Action::VerifyVolumeFile(_)),
+            matches!(
+                self.action,
+                Action::Backup(_)
+                    | Action::VerifyVolumeFile(_)
+                    | Action::RenameFile(_)
+                    | Action::InspectFileRename(_)
+            ),
             "Fenced",
             "host data operation is outside its permit",
         )?;
@@ -454,6 +474,9 @@ impl Work {
             ) => storage::publication::record(db, self, receipt, device, inode),
             (Action::Restore(_), Checkpoint::RestoredVolume { receipt, placement }) => {
                 storage::restore_publication::record(db, self, receipt, placement)
+            }
+            (Action::RenameFile(request), Checkpoint::FileRename(before)) => {
+                storage::file_move::record(db, self, request, before)
             }
             (Action::RestartApp(request), Checkpoint::OciRestart(before)) => {
                 apps::restart::record(db, self, request, before)
@@ -516,6 +539,13 @@ impl Work {
             Action::VerifyVolumeFile(query) => {
                 storage::file_integrity::verify(self, query, &mut check_streaming)
             }
+            Action::RenameFile(request) => storage::file_move::rename(
+                self,
+                request,
+                |before| checkpoint(Checkpoint::FileRename(before)),
+                &mut check_streaming,
+            ),
+            Action::InspectFileRename(_) => storage::file_move::inspect(self, &mut check_streaming),
             Action::Restore(_) => storage::restore(self, |receipt, placement| {
                 checkpoint(Checkpoint::RestoredVolume { receipt, placement })
             }),
@@ -609,7 +639,14 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
         Action::Mac { secret_id, message } => Some(policy::mac(db, actor, secret_id, message)?),
         _ => None,
     };
-    let volume = if target.kind == "Volume" {
+    let rename_inspection = if matches!(a, Action::InspectFileRename(_)) {
+        Some(storage::file_move::pending(db, &target)?)
+    } else {
+        None
+    };
+    let volume = if let Some((volume, _)) = &rename_inspection {
+        Some(volume.clone())
+    } else if target.kind == "Volume" {
         Some(target.clone())
     } else if target.kind == "Application"
         && !matches!(
@@ -631,6 +668,7 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
             None
         };
     let publication_checkpoint = match a {
+        Action::InspectFileRename(_) => rename_inspection.map(|(_, checkpoint)| checkpoint),
         Action::InspectBackupPublication(_) => Some(storage::publication::pending(db, &target)?),
         Action::InspectRestoredVolume(_) => {
             Some(storage::restore_publication::pending(db, &target)?)
@@ -682,6 +720,9 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     }
     if matches!(w.action, Action::RestartApp(_)) {
         apps::restart::begin(db, &w)?;
+    }
+    if matches!(w.action, Action::RenameFile(_)) {
+        storage::file_move::begin(db, &w)?;
     }
     if storage::retirement::deletion(&w.action) {
         storage::retirement::begin(db, &w)?;

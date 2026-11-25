@@ -1697,3 +1697,110 @@ fn detached_volume_readers_overlap_and_fence_writes_through_recovery() {
         .unwrap();
     assert_eq!(fs::read_to_string(file).unwrap(), "updated");
 }
+
+#[test]
+fn file_rename_recovery_distinguishes_unprepared_and_witnessed_original() {
+    let root = tempfile::tempdir().unwrap();
+    let (config, mut store) = initialized(root.path());
+    let create = submit(&mut store, "volume.create", json!({"name":"rename-source"}));
+    let volume = execute(&mut store, &create);
+    let data = config
+        .state_dir
+        .join("volumes")
+        .join(volume["resource_id"].as_str().unwrap())
+        .join("data");
+    fs::write(data.join("before"), "stable bytes").unwrap();
+    let target = json!({"id":volume["resource_id"],"expected_resource_version":volume["version"]});
+    let grant = call(
+        &mut store,
+        "Grant.Issue",
+        json!({"principal_id":policy::OWNER,"actions":["task.submit","task.read","volume.verify_file","volume.rename_file"],
+        "tool_targets":[volume["resource_id"]],"units":6,"ttl_seconds":120}),
+    )
+    .unwrap();
+    let scoped = |store: &mut Store, tool: &str, input: Value, grant: &Value| {
+        let request = call(
+            store,
+            "Task.Prepare",
+            json!({"tool":tool,"input":input,"delegation_id":grant["delegation_ref"]["resource_id"],"key":id("key")}),
+        )
+        .unwrap();
+        call(store, "Task.Submit", request).unwrap()["task_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let hashed = scoped(
+        &mut store,
+        "volume.verify_file",
+        json!({"target":target,"path":"before"}),
+        &grant,
+    );
+    let proof = execute(&mut store, &hashed);
+    let input = json!({"target":target,"source":"before","destination":"after","expected_observation_digest":proof["observation_digest"]});
+
+    let early = scoped(&mut store, "volume.rename_file", input.clone(), &grant);
+    approve(&mut store, &early);
+    assert_eq!(claim(&mut store), early);
+    drop(dispatch(&mut store, &early));
+    drop(store);
+    let mut store = Store::open(config).unwrap();
+    store
+        .transaction("recover-unprepared-rename", broker::recover)
+        .unwrap();
+    let failed = call(&mut store, "Task.Get", json!({"id":early})).unwrap();
+    assert_eq!(failed["lifecycle"], "Failed");
+    assert_eq!(failed["outcome_knowledge"], "Known");
+    assert_eq!(failed["conditions"][0]["type"], "LeaseLost");
+    assert!(!data.join("after").exists());
+
+    let interrupted = scoped(&mut store, "volume.rename_file", input, &grant);
+    approve(&mut store, &interrupted);
+    assert_eq!(claim(&mut store), interrupted);
+    let work = dispatch(&mut store, &interrupted);
+    let result = work.perform(|event| {
+        store.transaction("witness-before-rename", |db| work.checkpoint(db, event))?;
+        Err(err(
+            "OutcomeUnknown",
+            "worker interrupted at the witnessed boundary",
+        ))
+    });
+    store
+        .transaction("lose-worker", |db| broker::finish(db, &work, result))
+        .unwrap();
+    let waiting = call(&mut store, "Task.Get", json!({"id":interrupted})).unwrap();
+    assert_eq!(waiting["outcome_knowledge"], "Unknown");
+    let operation = &waiting["operation_refs"][0];
+    let grant = call(
+        &mut store,
+        "Grant.Issue",
+        json!({"principal_id":policy::OWNER,"actions":["task.submit","task.read","volume.inspect_rename"],
+        "tool_targets":[operation["resource_id"]],"units":2,"ttl_seconds":120}),
+    )
+    .unwrap();
+    let inspect = scoped(
+        &mut store,
+        "volume.inspect_rename",
+        json!({"id":operation["resource_id"],"expected_resource_version":operation["version"]}),
+        &grant,
+    );
+    assert_eq!(execute(&mut store, &inspect)["placement"], "Original");
+    let evidence =
+        call(&mut store, "Task.Get", json!({"id":inspect})).unwrap()["result"]["artifact_refs"][0]
+            .clone();
+    let reconciled = call(
+        &mut store, "Operation.Reconcile",
+        json!({"id":operation["resource_id"],"expected_resource_version":operation["version"],"evidence_ref":evidence}),
+    ).unwrap();
+    assert_eq!(reconciled["outcome_knowledge"], "Known");
+    let failed = call(&mut store, "Task.Get", json!({"id":interrupted})).unwrap();
+    assert_eq!(failed["lifecycle"], "Failed");
+    assert_eq!(failed["conditions"][0]["type"], "LeaseLost");
+    let read = submit(
+        &mut store,
+        "volume.read",
+        json!({"id":volume["resource_id"],"expected_resource_version":volume["version"],"name":"before"}),
+    );
+    assert_eq!(execute(&mut store, &read)["content"], "stable bytes");
+    assert!(!data.join("after").exists());
+}

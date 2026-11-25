@@ -159,6 +159,12 @@ Core 通过已打开的目录和文件描述符流式校验私有普通文件。
 
 同一未挂载卷可同时执行文件读取、分块读取、目录列表、空间统计和文件校验。Core 为每项在途读取保存独立的持有记录。写入、备份、激活、删除和应用挂载仍要求排他访问。冲突按现有 Task 语义结算，进程恢复会清除原读取持有并按剩余预算重试。读取成功时只释放本次持有。[读写隔离与恢复验收](../crates/psios-core/src/recovery_tests.rs) · [格式 48 在途读取升级](../tests/volume_read_holds_upgrade.py)
 
+### 原子改名及对账
+
+`volume.rename_file` 在同一未挂载 Volume 内移动一个私有普通文件。请求包含卷的当前 `target`、相对 `source` 和 `destination`，以及先前 `volume.verify_file` 的 `expected_observation_digest`。需要对卷显式授予工具权限和批准本次计划。Core 重读原文件，提交包含内容摘要、inode 和目录身份的检查点，再使用 Linux 原子改名。已有目的项会使请求以 `Conflict` 结算。
+
+若实际改名后丢失回执，原 Operation 保留卷。给恢复主体授予限定于该 Operation 的 `volume.inspect_rename`，可独立检查实际目录、inode 和文件摘要。将新核验制品交给 `Operation.Reconcile`，Core 在原 Operation 上确认改名或确认仍处于原位置，再释放卷。普通队列饱和时，核验可使用恢复准入。[原子改名与回执丢失验收](../tests/test_volume_file_rename.py) · [格式 49 观测复用](../tests/volume_file_rename_upgrade.py)
+
 ### 重启正在运行的 OCI 实例
 
 `application.inspect_instance` 校验实际容器、发布配置、卷挂载、Linux 启动身份和有效资源限制。将结果中的 `boot_id`、`started_at` 分别作为 `expected_boot_id`、`expected_started_at`，连同应用 ID 与当前修订提交 `application.restart`。两项能力均需显式授权。应用绑定卷时，授权目标同时包含应用和卷。

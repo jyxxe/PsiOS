@@ -39,6 +39,8 @@ pub const TOOLS: &[&str] = &[
     "volume.files",
     "volume.usage",
     storage::file_integrity::TOOL,
+    storage::file_move::TOOL,
+    storage::file_move::INSPECT,
     "volume.mkdir",
     "volume.read_chunk",
     "volume.append",
@@ -107,6 +109,7 @@ pub fn readonly(tool: &str) -> bool {
             | "volume.files"
             | "volume.usage"
             | storage::file_integrity::TOOL
+            | storage::file_move::INSPECT
             | "volume.read_chunk"
             | "application.refresh"
             | "secret.mac"
@@ -125,6 +128,7 @@ pub fn approval(tool: &str) -> bool {
         "volume.write"
             | "volume.append"
             | "volume.remove_entry"
+            | storage::file_move::TOOL
             | "volume.mkdir"
             | "application.stage_release"
             | "application.select_release"
@@ -162,6 +166,8 @@ fn bootstrap_actions() -> Vec<String> {
                     | node::block::TOOL
                     | "backup.verify"
                     | storage::file_integrity::TOOL
+                    | storage::file_move::TOOL
+                    | storage::file_move::INSPECT
                     | storage::export::ACTION
                     | storage::publication::INSPECT
                     | storage::restore_publication::INSPECT
@@ -516,6 +522,8 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
                     || action == node::service_state::TOOL
                     || action == storage::restore_publication::INSPECT
                     || action == storage::file_integrity::TOOL
+                    || action == storage::file_move::TOOL
+                    || action == storage::file_move::INSPECT
                     || action == apps::restart::TOOL
                     || action == apps::restart::INSPECT
                     || action == agent::fallback::ACTION

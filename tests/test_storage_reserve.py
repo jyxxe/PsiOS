@@ -61,16 +61,23 @@ class StorageReserveTests(unittest.TestCase):
             node.call("Node.Configure", {"expected_resource_version": current["version"], "scheduling": mode})
 
         volume = node.perform("volume.create", {"name": "reserve-test"})
-        for name, contents in (("record", "before"), ("removable", "old")):
-            volume = node.perform("volume.write", {**target(volume), "name": name,
-                                                    "content": contents})["volume_ref"]
+        volume = node.perform("volume.write", {**target(volume), "name": "record",
+                                               "content": "before"})["volume_ref"]
+        # Independent volumes keep the control read and cleanup from taking a
+        # hold or advancing the revision of the contested write target.
+        readable = node.perform("volume.create", {"name": "reserve-read"})
+        readable = node.perform("volume.write", {**target(readable), "name": "record",
+                                                 "content": "readable"})["volume_ref"]
+        removable = node.perform("volume.create", {"name": "reserve-remove"})
+        removable = node.perform("volume.write", {**target(removable), "name": "record",
+                                                  "content": "removable"})["volume_ref"]
         directory = node.state / "volumes" / volume["resource_id"] / "data"
         self.assertEqual(node.state.stat().st_dev, node.witness.stat().st_dev)
         self.assertEqual(directory.stat().st_dev, node.witness.stat().st_dev)
         previous = sorted(node.state.joinpath("volumes").iterdir())
 
         scheduling("Cordoned")
-        queued_read = node.submit("volume.read", {**target(volume), "name": "record"})
+        queued_read = node.submit("volume.read", {**target(readable), "name": "record"})
         queued_create = node.submit("volume.create", {"name": "blocked-volume"})
         changes = [
             ("volume.write", {**target(volume), "name": "record", "content": "x"}),
@@ -86,7 +93,7 @@ class StorageReserveTests(unittest.TestCase):
             self.assertEqual(node.wait(task)["lifecycle"], "WaitingApproval")
             node.approve(task)
             approved.append(task)
-        cleanup = node.submit("volume.remove_entry", {"target": target(volume), "path": "removable"})
+        cleanup = node.submit("volume.remove_entry", {"target": target(removable), "path": "record"})
         self.assertEqual(node.wait(cleanup)["lifecycle"], "WaitingApproval")
         node.approve(cleanup)
         fresh = node.prepare("volume.create", {"name": "same-request-after-pressure"})
@@ -94,7 +101,7 @@ class StorageReserveTests(unittest.TestCase):
         node.stop()
         state_floor = floor - 8 if bounded else 0
         reserve = {"state_inodes": state_floor, "witness_inodes": floor}
-        node.config.write_text(json.dumps({**original, "authority_reserve": reserve}))
+        node.config.write_text(json.dumps({**original, "workers": 1, "authority_reserve": reserve}))
         node.start()
         blockers = node.base / "test-allocated-inodes"
         if bounded:
@@ -125,13 +132,15 @@ class StorageReserveTests(unittest.TestCase):
         read = node.wait(queued_read)
         self.assertEqual(read["lifecycle"], "Succeeded", read)
         self.assertEqual(node.call("Artifact.Read", {"reference": read["result"]["artifact_refs"][0]})["content"],
-                         "before")
+                         "readable")
         for task_id in [queued_create, *approved]:
             task = node.wait(task_id)
             self.assertEqual((task["lifecycle"], task["outcome_knowledge"], task["conditions"][0]["type"]),
                              ("Failed", "Known", "QuotaExceeded"), task)
             self.assertIn("destination inodes", task["conditions"][0]["message"])
         self.assertEqual(node.wait(cleanup)["lifecycle"], "Succeeded")
+        removed = node.state / "volumes" / removable["resource_id"] / "data" / "record"
+        self.assertFalse(removed.exists())
         self.assertEqual((directory / "record").read_text(), "before")
         self.assertEqual(sorted(path.name for path in directory.iterdir()), ["record"])
         self.assertEqual(sorted(node.state.joinpath("volumes").iterdir()), previous)

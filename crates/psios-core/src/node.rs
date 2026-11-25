@@ -1,5 +1,6 @@
 //! Linux observation and the operator's explicit systemd allowlist.
 pub mod block;
+pub mod journal;
 mod mounts;
 pub mod network;
 pub mod pressure;
@@ -220,16 +221,30 @@ fn devices() -> Result<Value> {
     items.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     Ok(json!({"devices":items,"observed_at":now()}))
 }
-fn service(w: &Work) -> Result<Value> {
-    let cfg = w
-        .cfg
+pub(crate) fn service_target(db: &Db<'_>, id: &str, revision: &str) -> Result<Doc> {
+    let service = db.of(id, "HostService")?;
+    service.cas(revision)?;
+    require(
+        service.body["lifecycle"] == "Registered",
+        "PreconditionFailed",
+        "unregistered system unit",
+    )?;
+    Ok(service)
+}
+
+fn configured_service(w: &Work) -> Result<&crate::config::ServiceConfig> {
+    w.cfg
         .services
         .iter()
         .find(|s| {
             w.target.spec["unit"] == s.unit
                 && serde_json::to_value(s).is_ok_and(|v| v == w.target.spec)
         })
-        .ok_or_else(|| err("PermissionDenied", "service no longer configured"))?;
+        .ok_or_else(|| err("PermissionDenied", "service no longer configured"))
+}
+
+fn service(w: &Work) -> Result<Value> {
+    let cfg = configured_service(w)?;
     let manager = if cfg.manager == Manager::User {
         "--user"
     } else {
@@ -330,6 +345,7 @@ pub fn perform(w: &Work) -> Result<Value> {
         Action::Devices {} => devices(),
         Action::BlockLayout(query) => block::observe(w, query),
         Action::Mounts {} => mounts::observe(),
+        Action::ServiceLogs(query) => journal::read(w, query),
         _ => service(w),
     }
 }
@@ -340,7 +356,7 @@ pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
             "PreconditionFailed",
             "service is not registered",
         )?;
-        if !matches!(w.action, Action::ServiceInspect(_)) {
+        if matches!(w.action, Action::ServiceStart(_) | Action::ServiceStop(_)) {
             require(
                 w.target.spec["allow_control"] == true,
                 "PermissionDenied",

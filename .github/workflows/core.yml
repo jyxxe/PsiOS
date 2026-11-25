@@ -334,6 +334,16 @@ jobs:
           sudo systemctl start "user@$(id -u).service"
           export XDG_RUNTIME_DIR="/run/user/$(id -u)"
           python3 tests/services.py
+      - name: Install the scoped service journal tool and read real journal records
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format33"
+          git archive 192fc3b1d4bbf1c17b4d6f3c977f00bfd2e62c33 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format33"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format33" "$RUNNER_TEMP/psios-compatibility-target"
+          sudo mkdir -p /var/log/journal
+          sudo systemd-tmpfiles --create --prefix=/var/log/journal
+          sudo journalctl --flush
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          python3 -B tests/service_journal.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Exercise a real OCI engine and persistent volume
         run: PSIOS_TEST_OCI_KERNEL_LIMITS=1 python3 tests/oci.py
 

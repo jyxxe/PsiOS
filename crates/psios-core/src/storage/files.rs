@@ -170,10 +170,11 @@ fn read(root: &File, p: &ReadChunk) -> Result<Value> {
               "data_base64":STANDARD.encode(&b),"digest":sha256(&b)}),
     )
 }
-fn append(root: &File, p: &Append) -> Result<Value> {
+fn append(config: &Config, root: &File, p: &Append) -> Result<Value> {
     let bytes = p.bytes()?;
     let (dir, name) = parent(root, &p.path)?;
     let mut f = if p.offset == 0 {
+        config.check_managed_space(&dir, std::iter::once(bytes.len() as u64), 1)?;
         let fd = openat2(
             &dir,
             name.as_str(),
@@ -198,6 +199,7 @@ fn append(root: &File, p: &Append) -> Result<Value> {
             "Conflict",
             "append offset does not match current length",
         )?;
+        config.check_managed_space(&f, std::iter::once(bytes.len() as u64), 0)?;
         f
     };
     f.write_all(&bytes).map_err(unknown)?;
@@ -236,13 +238,15 @@ pub fn perform(w: &Work) -> Result<Value> {
             .as_ref()
             .ok_or_else(|| err("PreconditionFailed", "volume not mounted"))?,
     )?;
+    registered_root(&w.target, &root.metadata()?)?;
     match &w.action {
         Action::Files(p) => list(&root, p),
         Action::Chunk(p) => read(&root, p),
-        Action::Append(p) => append(&root, p),
+        Action::Append(p) => append(&w.cfg, &root, p),
         Action::MakeDir(p) | Action::RemoveEntry(p) => {
             let (dir, name) = parent(&root, &p.path)?;
             if matches!(w.action, Action::MakeDir(_)) {
+                w.cfg.check_managed_space(&dir, std::iter::empty(), 1)?;
                 mkdirat(&dir, name.as_str(), Mode::RWXU).map_err(std::io::Error::from)?;
             } else {
                 let st = statat(&dir, name.as_str(), AtFlags::SYMLINK_NOFOLLOW)

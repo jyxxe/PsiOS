@@ -28,13 +28,15 @@
 
 ### 权威存储余量
 
-`psiosctl node` 的 `authority_storage` 显示 state 和 witness 所在文件系统的容量、普通进程可用字节和 inode、配置阈值及观测时间。部署可在 Core 配置中分别设置 `authority_reserve.state_bytes` 与 `authority_reserve.witness_bytes`。默认值为零，仅观测余量。
+`psiosctl node` 的 `authority_storage` 显示 state 和 witness 所在文件系统的容量、普通进程可用字节和 inode、配置阈值、只读挂载状态及观测时间。部署可分别配置字节和 inode 阈值，旧配置省略的新字段默认为零。
 
 ```json
-{"authority_reserve":{"state_bytes":16777216,"witness_bytes":2097152}}
+{"authority_reserve":{"state_bytes":16777216,"witness_bytes":2097152,"state_inodes":128,"witness_inodes":32}}
 ```
 
-任一已配置文件系统低于阈值时，新任务、新输入和新模型租约返回可退避重试的 `QuotaExceeded`。幂等重复请求仍返回原回执，已接受任务继续运行、结算或取消。压力期间的准入拒绝直接返回给调用方，节约原来的持久审计空间。容量采样用于准入，物理空间仍由宿主文件系统共享。可用空间恢复后，当前守护进程重新接受请求。[容量与任务回收测试](../tests/test_platform.py) · [模型租约结算测试](../tests/test_runtime.py)
+任一已配置文件系统低于阈值时，新任务、新输入和新模型租约返回可退避重试的 `QuotaExceeded`。文件系统未报告可用的 inode 计数时，`available_inodes` 为 `null`，启用 inode 阈值的准入返回 `UnsupportedCapability`。幂等重复请求仍返回原回执，已接受的读取、删除、结算和取消仍可继续。压力期间的准入拒绝直接返回给调用方，节约原来的持久审计空间。可用空间恢复后，当前守护进程重新接受请求。[容量与任务回收测试](../tests/test_platform.py) · [模型租约结算测试](../tests/test_runtime.py) · [Linux statvfs 手册](https://man7.org/linux/man-pages/man3/statvfs.3.html)
+
+创建卷、备份和恢复，以及向未挂载卷分配文件或目录时，Core 在写入前按实际目标文件系统重新核对字节和 inode。状态与见证位于同一文件系统时，分别应用两者中较高的字节和 inode 阈值。原子替换在旧文件仍存在时计入临时文件的空间和 inode。核对根据 Linux 实时余量处理新分配，宿主进程、容器及并发分配仍共享资源，真实写入错误按原效果结算规则处理。[真实 extents 与 inode 压力验收](../tests/test_storage_reserve.py)
 
 ### Linux 资源压力与守护进程 cgroup
 

@@ -350,7 +350,7 @@ pub fn dispatch_failed(db: &Db<'_>, task: &str, e: &Error) -> Result<()> {
 pub fn settlement_failed(db: &Db<'_>, w: &Work) -> Result<()> {
     let reason = if matches!(
         w.action,
-        Action::InstallArtifact(_) | Action::RetireRelease(_)
+        Action::InstallArtifact(_) | Action::StageArtifactRelease(_) | Action::RetireRelease(_)
     ) {
         err(
             "StorageUnavailable",
@@ -374,7 +374,9 @@ pub fn finish(db: &Db<'_>, w: &Work, result: Result<Value>) -> Result<()> {
             Ok(_)
                 if matches!(
                     w.action,
-                    Action::InspectProcess(_) | Action::InstallArtifact(_)
+                    Action::InspectProcess(_)
+                        | Action::InstallArtifact(_)
+                        | Action::StageArtifactRelease(_)
                 ) =>
             {
                 json!({"code":"Fenced"})

@@ -1,4 +1,4 @@
-"""Keep a real format 55 pending installation pinned through the retirement upgrade."""
+"""Keep a pending installation pinned through catalog upgrades."""
 import argparse
 import json
 from pathlib import Path
@@ -18,7 +18,7 @@ def still_pinned(node, request):
         raise AssertionError("pending installation lost its source pin")
 
 
-def main(previous):
+def main(previous, previous_format):
     node = Node(previous)
     try:
         node_id = node.call("Node.Get", {})["reference"]["resource_id"]
@@ -38,7 +38,7 @@ def main(previous):
         node.stop(signal.SIGKILL)
         node.daemon[0] = str(Path("target/debug/psiosd").absolute())
         prior = json.loads(subprocess.check_output(node.daemon + ["verify"], timeout=15))
-        assert prior["database_format"] == 55 and prior["migration_required"], prior
+        assert prior["database_format"] == previous_format and prior["migration_required"], prior
         node.start()
         observed = node.call("Task.Get", {"id": job})
         assert observed == before, observed
@@ -46,13 +46,14 @@ def main(previous):
         still_pinned(node, withdrawal)
         owner = node.get("owner-delegation")["value"]
         assert "application.retire_release" not in owner["actions"], owner
+        assert "application.stage_artifact_release" not in owner["actions"], owner
         node.call("Task.Cancel", target(node.get(job)["reference"]))
         assert node.call("Artifact.Withdraw", withdrawal)["withdrawal_ref"]
         node.stop()
         after = json.loads(subprocess.check_output(node.daemon + ["verify"], timeout=15))
-        assert after["database_format"] >= 56 and not after["migration_required"], after
+        assert after["database_format"] > previous_format and not after["migration_required"], after
         assert prior["node_id"] == after["node_id"] == node_id
-        print("PASS format 55 pending installation preserved its original approval, receipt and artifact pin across retirement upgrade")
+        print(f"PASS format {previous_format} pending installation preserved its approval, receipt and pin across catalog upgrade")
     finally:
         node.close()
 
@@ -60,4 +61,6 @@ def main(previous):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--previous-bin", required=True)
-    main(parser.parse_args().previous_bin)
+    parser.add_argument("--previous-format", type=int, default=55)
+    args = parser.parse_args()
+    main(args.previous_bin, args.previous_format)

@@ -225,6 +225,21 @@ impl Client {
             .cloned()
             .ok_or_else(|| invalid("missing result"))
     }
+    /// Prepare an approval-bound local OCI release for an exact application revision.
+    pub fn prepare_artifact_release(
+        &self,
+        application: &ResourceRef,
+        artifact: &ResourceRef,
+        key: &str,
+        delegation_id: &str,
+        deadline_at: Option<&str>,
+    ) -> ApiResult<Value> {
+        self.call("Application.PrepareArtifactRelease", json!({
+            "target":{"id":application.resource_id,"expected_resource_version":application.version},
+            "reference":artifact,"key":key,"delegation_id":delegation_id,"deadline_at":deadline_at,
+        }))
+    }
+
     pub fn submit(
         &self,
         tool: &str,

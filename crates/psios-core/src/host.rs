@@ -6,11 +6,11 @@ use crate::{
     policy, storage, *,
 };
 use psios_api::VERSION;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Target {
     pub id: String,
@@ -156,6 +156,8 @@ pub enum Action {
     InspectRestoredVolume(Target),
     #[serde(rename = "application.stage_release")]
     Stage { target: Target, release: Install },
+    #[serde(rename = "application.stage_artifact_release")]
+    StageArtifactRelease(apps::artifact_install::StageRequest),
     #[serde(rename = "application.select_release")]
     Select { target: Target, release_ref: Value },
     #[serde(rename = "application.retire_release")]
@@ -265,7 +267,13 @@ impl Action {
             }
             Self::Restore(_) => resources.push(db.of("local", "StoragePool")?.reference()),
             Self::InstallArtifact(input) => {
-                resources.push(apps::artifact_install::source(db, actor, input)?.reference());
+                resources
+                    .push(apps::artifact_install::source(db, actor, &input.reference)?.reference());
+            }
+            Self::StageArtifactRelease(input) => {
+                resources.push(
+                    apps::artifact_install::stage_source(db, actor, input, primary)?.reference(),
+                );
             }
             Self::RetireRelease(input) => {
                 resources
@@ -360,9 +368,14 @@ impl Action {
             Self::RestartApp(p) => (&p.id, Some(&p.expected_resource_version), "Application"),
             Self::Install(s) => return install_target(db, actor, s),
             Self::InstallArtifact(input) => {
-                let install = apps::artifact_install::specification(db, actor, input)?;
+                let install = apps::artifact_install::specification(db, actor, &input.reference)?;
                 return install_target(db, actor, &install);
             }
+            Self::StageArtifactRelease(input) => (
+                &input.target.id,
+                Some(&input.target.expected_resource_version),
+                "Application",
+            ),
             Self::RetireRelease(input) => (
                 &input.target.id,
                 Some(&input.target.expected_resource_version),
@@ -488,6 +501,7 @@ impl Work {
                 | Action::InspectFileRename(_)
                 | Action::InspectProcess(_)
                 | Action::InstallArtifact(_)
+                | Action::StageArtifactRelease(_)
                 | Action::RetireRelease(_)
         ) {
             self.checkpoint_authority(db)?;
@@ -606,6 +620,7 @@ impl Work {
                 })
             }
             Action::Stage { .. }
+            | Action::StageArtifactRelease(_)
             | Action::Select { .. }
             | Action::Refresh(_)
             | Action::Stop(_)
@@ -702,6 +717,7 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
         && !matches!(
             a,
             Action::Stage { .. }
+                | Action::StageArtifactRelease(_)
                 | Action::Select { .. }
                 | Action::Refresh(_)
                 | Action::RetireRelease(_)
@@ -739,16 +755,22 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     } else {
         None
     };
-    let launch = if let Action::InstallArtifact(input) = &a {
-        Some(apps::artifact_install::specification(db, actor, input)?)
-    } else if matches!(
-        a,
-        Action::Start(_) | Action::RestartApp(_) | Action::InspectOciInstance(_)
-    ) || start_checkpoint.is_some()
-    {
-        Some(apps::launch_spec(db, &target)?)
-    } else {
-        None
+    let launch = match &a {
+        Action::InstallArtifact(input) => Some(apps::artifact_install::specification(
+            db,
+            actor,
+            &input.reference,
+        )?),
+        Action::StageArtifactRelease(input) => Some(apps::artifact_install::specification(
+            db,
+            actor,
+            &input.reference,
+        )?),
+        Action::Start(_) | Action::RestartApp(_) | Action::InspectOciInstance(_) => {
+            Some(apps::launch_spec(db, &target)?)
+        }
+        _ if start_checkpoint.is_some() => Some(apps::launch_spec(db, &target)?),
+        _ => None,
     };
     let w = Work {
         start_checkpoint,
@@ -792,6 +814,7 @@ pub fn apply(db: &Db<'_>, w: &Work, receipt: &Value) -> Result<Value> {
             node::apply(db, w, receipt)
         }
         Action::Stage { .. }
+        | Action::StageArtifactRelease(_)
         | Action::Select { .. }
         | Action::Refresh(_)
         | Action::Install(_)

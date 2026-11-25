@@ -1,4 +1,4 @@
-//! Adapt an immutable local OCI installation declaration into the existing broker.
+//! Adapt immutable local OCI declarations into the application catalog.
 use crate::{
     Result, artifact, broker,
     db::{Db, Doc, resolve, row},
@@ -12,6 +12,9 @@ use serde_json::{Value, json};
 pub(crate) const FORMAT: u32 = artifact::ingress::FORMAT + 1;
 pub(crate) const SCHEMA: &str = include_str!("artifact_install.sql");
 pub(crate) const TOOL: &str = "application.install_artifact";
+pub(crate) const STAGE_FORMAT: u32 = super::release_retirement::FORMAT + 1;
+pub(crate) const STAGE_SCHEMA: &str = include_str!("artifact_stage_release.sql");
+pub(crate) const STAGE_TOOL: &str = "application.stage_artifact_release";
 const MEDIA: &str = "application/vnd.psios.oci-install.v1+json";
 const DESCRIPTOR: &str = "PsiOSLocalOciInstallV1";
 const MAX_DESCRIPTOR: usize = 64 * 1024;
@@ -19,6 +22,13 @@ const MAX_DESCRIPTOR: usize = 64 * 1024;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
+    pub reference: ResourceRef,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StageRequest {
+    pub target: host::Target,
     pub reference: ResourceRef,
 }
 
@@ -33,14 +43,15 @@ struct Descriptor {
 #[serde(deny_unknown_fields)]
 struct Prepare {
     reference: ResourceRef,
+    target: Option<host::Target>,
     key: String,
     delegation_id: String,
     deadline_at: Option<String>,
 }
 
-pub(crate) fn source(db: &Db<'_>, actor: &str, input: &Request) -> Result<Doc> {
+pub(crate) fn source(db: &Db<'_>, actor: &str, reference: &ResourceRef) -> Result<Doc> {
     artifact::ingress::authorize(db, actor, artifact::ingress::READ)?;
-    let doc = db.resolve(&json!(input.reference))?;
+    let doc = db.resolve(&json!(reference))?;
     policy::owned(actor, &doc)?;
     require(
         artifact::is_raw(&doc) && doc.spec["declared_media_type"] == MEDIA,
@@ -51,9 +62,8 @@ pub(crate) fn source(db: &Db<'_>, actor: &str, input: &Request) -> Result<Doc> {
     Ok(doc)
 }
 
-pub(crate) fn specification(db: &Db<'_>, actor: &str, input: &Request) -> Result<host::Install> {
-    let doc = source(db, actor, input)?;
-    let bytes = artifact::checkpoint_bytes(db.c, &doc, MAX_DESCRIPTOR)?;
+fn read_descriptor(db: &Db<'_>, source: &Doc) -> Result<host::Install> {
+    let bytes = artifact::checkpoint_bytes(db.c, source, MAX_DESCRIPTOR)?;
     let descriptor: Descriptor = decode(&parse(&bytes)?)?;
     require(
         descriptor.format == DESCRIPTOR,
@@ -64,45 +74,88 @@ pub(crate) fn specification(db: &Db<'_>, actor: &str, input: &Request) -> Result
     Ok(descriptor.install)
 }
 
-pub(crate) fn prepare(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
-    let p: Prepare = decode(params)?;
-    let grant = policy::delegation(db, actor, &p.delegation_id, TOOL)?;
-    policy::delegation(db, actor, &grant.id, "task.submit")?;
-    let input = Request {
-        reference: p.reference,
-    };
-    let install = specification(db, actor, &input)?;
-    let target = host::install_target(db, actor, &install)?;
-    let refs = host::Action::InstallArtifact(input.clone()).audience(
-        db,
-        actor,
-        &grant.reference(),
-        &target,
+pub(crate) fn specification(
+    db: &Db<'_>,
+    actor: &str,
+    reference: &ResourceRef,
+) -> Result<host::Install> {
+    read_descriptor(db, &source(db, actor, reference)?)
+}
+
+pub(crate) fn stage_source(
+    db: &Db<'_>,
+    actor: &str,
+    input: &StageRequest,
+    target: &Doc,
+) -> Result<Doc> {
+    let source = source(db, actor, &input.reference)?;
+    let release = read_descriptor(db, &source)?;
+    require(
+        release.volume.is_none(),
+        "InvalidArgument",
+        "staged release inherits the application volume",
     )?;
+    super::stage_precondition(target, &release)?;
+    Ok(source)
+}
+
+pub(crate) fn prepare(db: &Db<'_>, actor: &str, params: &Value, tool: &str) -> Result<Value> {
+    let p: Prepare = decode(params)?;
+    require(
+        (tool == STAGE_TOOL) == p.target.is_some(),
+        "InvalidArgument",
+        "preparation for a staged release requires an application target",
+    )?;
+    let grant = policy::delegation(db, actor, &p.delegation_id, tool)?;
+    policy::delegation(db, actor, &grant.id, "task.submit")?;
+    let input = if let Some(target) = p.target {
+        json!({"target":target,"reference":p.reference})
+    } else {
+        json!({"reference":p.reference})
+    };
+    let action = host::Action::parse(tool, &input)?;
+    let install = specification(db, actor, &p.reference)?;
+    let target = match &action {
+        host::Action::StageArtifactRelease(_) => action.target(db, actor)?,
+        _ => host::install_target(db, actor, &install)?,
+    };
+    let refs = action.audience(db, actor, &grant.reference(), &target)?;
     let request = broker::prepare(
         db,
         actor,
         &json!({
-            "tool":TOOL,"input":{"reference":input.reference},"key":p.key,
+            "tool":tool,"input":input,"key":p.key,
             "delegation_id":grant.id,"deadline_at":p.deadline_at,
         }),
     )?;
-    Ok(json!({
-        "request":request,"source_artifact_ref":input.reference,"resource_refs":refs,
-        "deployment":{"name":install.name,"release_version":install.release_version,
+    let mut response =
+        json!({"request":request,"source_artifact_ref":p.reference,"resource_refs":refs});
+    let preview = json!({"name":install.name,"release_version":install.release_version,
             "image_id":install.image_id,"runtime_profile_ref":db.get("oci-local")?.reference(),
             "cpu_millicores":install.cpu_millicores,"memory_max_bytes":install.memory_max_bytes,
             "pids_max":install.pids_max,"ephemeral_max_bytes":install.ephemeral_max_bytes,
-            "argv":install.argv,"environment":install.environment,"license_expression":install.license_expression,
-            "desired_state":"Stopped"},
-    }))
+            "argv":install.argv,"environment":install.environment,"license_expression":install.license_expression});
+    if tool == STAGE_TOOL {
+        response["release"] = preview;
+        response["application_ref"] = target.reference();
+        response["selected_release_ref"] = target.spec["release_ref"].clone();
+    } else {
+        response["deployment"] = preview;
+        response["deployment"]["desired_state"] = json!("Stopped");
+    }
+    Ok(response)
 }
 
 pub(crate) fn acquire(db: &Db<'_>, task: &Doc, action: &host::Action) -> Result<()> {
-    if let host::Action::InstallArtifact(input) = action {
+    let reference = match action {
+        host::Action::InstallArtifact(input) => Some(&input.reference),
+        host::Action::StageArtifactRelease(input) => Some(&input.reference),
+        _ => None,
+    };
+    if let Some(reference) = reference {
         db.c.execute(
             "INSERT INTO application_artifact_pins(artifact,holder,kind) VALUES(?1,?2,'Task')",
-            params![input.reference.resource_id, task.id],
+            params![reference.resource_id, task.id],
         )?;
     }
     Ok(())
@@ -124,11 +177,11 @@ pub(crate) fn pinned(db: &Db<'_>, artifact: &str) -> Result<bool> {
     )?)
 }
 
-pub(super) fn release_source(conn: &Connection, release: &Doc) -> Result<Option<Value>> {
+pub(super) fn release_source(conn: &Connection, release: &Doc) -> Result<Option<Doc>> {
     let evidence = conn
         .query_row(
-            "SELECT * FROM versions WHERE kind='ApplicationArtifactInstallation'
-         AND rev=1 AND spec->>'release_id'=?1",
+            "SELECT * FROM versions WHERE kind IN ('ApplicationArtifactInstallation','ApplicationArtifactReleaseStage')
+             AND rev=1 AND spec->>'release_id'=?1",
             [&release.id],
             row,
         )
@@ -137,12 +190,8 @@ pub(super) fn release_source(conn: &Connection, release: &Doc) -> Result<Option<
         return Ok(None);
     };
     let reference = &evidence.body["source_artifact_ref"];
-    let source = resolve(conn, reference).map_err(|_| {
-        crate::err(
-            "RecoveryRequired",
-            "installation lost its exact source artifact",
-        )
-    })?;
+    let source = resolve(conn, reference)
+        .map_err(|_| crate::err("RecoveryRequired", "release lost its exact source artifact"))?;
     require(
         evidence.owner == release.owner
             && source.owner == release.owner
@@ -150,33 +199,44 @@ pub(super) fn release_source(conn: &Connection, release: &Doc) -> Result<Option<
             && evidence.body["release_ref"] == release.reference()
             && artifact::is_raw(&source),
         "RecoveryRequired",
-        "installation source evidence disagrees with its release",
+        "source evidence disagrees with its release",
     )?;
-    Ok(Some(reference.clone()))
+    Ok(Some(source))
 }
 
-pub(super) fn drop_release_pin(db: &Db<'_>, release: &Doc) -> Result<Option<Value>> {
-    let source = release_source(db.c, release)?;
-    let held: Option<String> =
-        db.c.query_row(
+fn pinned_source(conn: &Connection, release: &Doc) -> Result<Option<Doc>> {
+    let source = release_source(conn, release)?;
+    let held: Option<String> = conn
+        .query_row(
             "SELECT artifact FROM application_artifact_pins WHERE kind='Release' AND holder=?1",
             [&release.id],
             |r| r.get(0),
         )
         .optional()?;
     require(
-        source.as_ref().and_then(|r| r["resource_id"].as_str()) == held.as_deref()
-            && source.is_some() == held.is_some(),
+        source.as_ref().map(|r| r.id.as_str()) == held.as_deref(),
         "RecoveryRequired",
         "release source disagrees with its artifact retention pin",
     )?;
-    if held.is_some() {
+    Ok(source)
+}
+
+pub(super) fn check_release_source(db: &Db<'_>, release: &Doc) -> Result<()> {
+    if let Some(source) = pinned_source(db.c, release)? {
+        artifact::checkpoint_bytes(db.c, &source, MAX_DESCRIPTOR)?;
+    }
+    Ok(())
+}
+
+pub(super) fn drop_release_pin(db: &Db<'_>, release: &Doc) -> Result<Option<Value>> {
+    let source = pinned_source(db.c, release)?;
+    if source.is_some() {
         db.c.execute(
             "DELETE FROM application_artifact_pins WHERE kind='Release' AND holder=?1",
             [&release.id],
         )?;
     }
-    Ok(source)
+    Ok(source.as_ref().map(Doc::reference))
 }
 
 pub(crate) fn verify(conn: &Connection) -> Result<()> {
@@ -186,10 +246,10 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
              FROM queue q JOIN current t ON t.id=q.task AND t.kind='Task'
              LEFT JOIN versions i ON i.id=t.spec->'input_ref'->>'resource_id'
                   AND ('r'||i.rev)=t.spec->'input_ref'->>'version'
-            WHERE q.phase<>'Done' AND t.spec->>'task_type'=?1
+            WHERE q.phase<>'Done' AND t.spec->>'task_type' IN (?1,?2)
            UNION ALL
            SELECT e.body->'source_artifact_ref'->>'resource_id', e.spec->>'release_id', 'Release'
-             FROM versions e WHERE e.kind='ApplicationArtifactInstallation' AND e.rev=1
+             FROM versions e WHERE e.kind IN ('ApplicationArtifactInstallation','ApplicationArtifactReleaseStage') AND e.rev=1
                 AND NOT EXISTS(SELECT 1 FROM versions r WHERE r.id='retired-'||(e.spec->>'release_id')
                    AND r.kind='ApplicationReleaseRetirement' AND r.rev=1)
          ) SELECT
@@ -203,7 +263,7 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
                          WHERE u.artifact_id=p.artifact AND u.state='Published')
                        OR (p.kind='Release' AND NOT EXISTS(SELECT 1 FROM versions v
                          WHERE v.id=p.holder AND v.kind='ApplicationRelease' AND v.rev=1)))",
-        [TOOL],
+        [TOOL, STAGE_TOOL],
         |r| r.get(0),
     )?;
     require(
@@ -218,33 +278,50 @@ pub(super) fn retain(
     work: &host::Work,
     application: &Doc,
     release: &Doc,
-    deployment: &Doc,
+    deployment: Option<&Doc>,
 ) -> Result<Option<Value>> {
-    let host::Action::InstallArtifact(input) = &work.action else {
-        return Ok(None);
+    let (reference, kind, record) = match (&work.action, deployment) {
+        (host::Action::InstallArtifact(input), Some(_)) => (
+            &input.reference,
+            "ApplicationArtifactInstallation",
+            "artifact-install",
+        ),
+        (host::Action::StageArtifactRelease(input), None) => (
+            &input.reference,
+            "ApplicationArtifactReleaseStage",
+            "artifact-stage-release",
+        ),
+        _ => return Ok(None),
     };
     let applied = db.c.execute(
         "INSERT INTO application_artifact_pins(artifact,holder,kind)
          SELECT artifact,?3,'Release' FROM application_artifact_pins
           WHERE artifact=?1 AND holder=?2 AND kind='Task'",
-        params![input.reference.resource_id, work.task.id, release.id],
+        params![reference.resource_id, work.task.id, release.id],
     )?;
     require(
         applied == 1,
         "RecoveryRequired",
-        "installation lost its artifact retention pin",
+        "application catalog change lost its artifact retention pin",
     )?;
-    let result = json!({"application_ref":application.reference(),"release_ref":release.reference(),
-        "deployment_ref":deployment.reference(),"source_artifact_ref":input.reference,
+    let mut result = json!({"application_ref":application.reference(),"release_ref":release.reference(),
+        "source_artifact_ref":reference,
         "operation_id":work.op.id});
+    if let Some(deployment) = deployment {
+        result["deployment_ref"] = deployment.reference();
+    }
     let evidence = db.create(
-        "ApplicationArtifactInstallation",
-        &format!("artifact-install-{}", work.op.id),
+        kind,
+        &format!("{record}-{}", work.op.id),
         &work.task.owner,
         json!({"application_id":application.id,"release_id":release.id}),
         result.clone(),
     )?;
-    let mut result = result;
-    result["installation_ref"] = evidence.reference();
+    let key = if deployment.is_some() {
+        "installation_ref"
+    } else {
+        "stage_ref"
+    };
+    result[key] = evidence.reference();
     Ok(Some(result))
 }

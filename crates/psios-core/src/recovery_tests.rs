@@ -90,6 +90,108 @@ fn approve(s: &mut Store, task: &str) {
 const HOST_WRITE_BARRIER: &str = "PSIOS_TEST_CRASH_STATE";
 
 #[test]
+fn storage_deletion_interrupted_before_rename_can_settle_without_replaying() {
+    for prepared in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (config, mut store) = initialized(tmp.path());
+        let create = submit(
+            &mut store,
+            "volume.create",
+            json!({"name":"delete-recovery"}),
+        );
+        let volume = execute(&mut store, &create);
+        let deletion =
+            json!({"id":volume["resource_id"],"expected_resource_version":volume["version"]});
+        let directory = config
+            .state_dir
+            .join("volumes")
+            .join(volume["resource_id"].as_str().unwrap());
+        let content = directory.join("data/payload");
+        fs::write(&content, b"keep until an authorized rename").unwrap();
+        let task = submit(&mut store, "volume.delete", deletion.clone());
+        approve(&mut store, &task);
+        assert_eq!(claim(&mut store), task);
+        let work = dispatch(&mut store, &task);
+        if prepared {
+            let interrupted = work.perform(|event| {
+                store.transaction("prepare-deletion", |db| work.checkpoint(db, event))?;
+                Err(err(
+                    "OutcomeUnknown",
+                    "test stopped before irreversible rename",
+                ))
+            });
+            assert_eq!(interrupted.unwrap_err().0.code, "OutcomeUnknown");
+        }
+        drop(store);
+        let mut reopened = Store::open(config.clone()).unwrap();
+        reopened.transaction("restart", broker::recover).unwrap();
+        let snapshot = call(&mut reopened, "Task.Get", json!({"id":task})).unwrap();
+        let op = &snapshot["operation_refs"][0];
+        if prepared {
+            assert_eq!(snapshot["outcome_knowledge"], "Unknown");
+            call(
+                &mut reopened,
+                "Operation.Reconcile",
+                json!({"id":op["resource_id"],"expected_resource_version":op["version"]}),
+            )
+            .unwrap();
+        }
+        let settled = call(&mut reopened, "Task.Get", json!({"id":task})).unwrap();
+        assert_eq!(settled["lifecycle"], "Failed");
+        assert_eq!(settled["outcome_knowledge"], "Known");
+        assert_eq!(settled["conditions"][0]["type"], "LeaseLost");
+        assert_eq!(
+            fs::read(&content).unwrap(),
+            b"keep until an authorized rename"
+        );
+        let retirement_id = format!("storage-retirement-{}", work.op.id);
+        let record = call(&mut reopened, "Resource.Get", json!({"id":retirement_id})).unwrap();
+        assert_eq!(record["value"]["lifecycle"], "NotApplied");
+        assert!(
+            reopened
+                .transaction("no-cleanup", storage::retirement::next)
+                .unwrap()
+                .is_none()
+        );
+
+        let retried = submit(&mut reopened, "volume.delete", deletion);
+        approve(&mut reopened, &retried);
+        let receipt = execute(&mut reopened, &retried);
+        assert_eq!(receipt["volume_ref"]["resource_id"], volume["resource_id"]);
+        assert!(!directory.exists());
+        let job = reopened
+            .transaction("inspect-cleanup", storage::retirement::next)
+            .unwrap()
+            .unwrap();
+        let parent = directory.parent().unwrap();
+        let retired = parent.join(
+            receipt["receipt"]["retirement_ref"]["resource_id"]
+                .as_str()
+                .unwrap()
+                .replacen("storage-retirement-", ".retired-", 1),
+        );
+        let protected = parent.join("fixture-original");
+        fs::rename(&retired, &protected).unwrap();
+        crate::config::private_dir(&retired, true).unwrap();
+        fs::write(retired.join("sentinel"), b"foreign directory").unwrap();
+        let refused = job.reclaim(&config).err().unwrap();
+        assert_eq!(refused.0.code, "PreconditionFailed");
+        assert_eq!(
+            fs::read(retired.join("sentinel")).unwrap(),
+            b"foreign directory"
+        );
+        fs::remove_file(retired.join("sentinel")).unwrap();
+        fs::remove_dir(&retired).unwrap();
+        fs::rename(&protected, &retired).unwrap();
+        let result = job.reclaim(&config);
+        reopened
+            .transaction("settle-cleanup", |db| job.finish(db, result))
+            .unwrap();
+        assert!(!retired.exists());
+    }
+}
+
+#[test]
 fn elapsed_approval_is_refused_before_the_queue_sweep() {
     let tmp = tempfile::tempdir().unwrap();
     let (_, mut store) = initialized(tmp.path());

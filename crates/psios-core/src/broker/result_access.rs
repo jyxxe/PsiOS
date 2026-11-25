@@ -85,8 +85,12 @@ pub(crate) fn get(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
 
 pub(crate) fn resolve_artifact(db: &Db<'_>, actor: &str, reference: &Value) -> Result<(Doc, bool)> {
     let read_owned = || -> Result<(Doc, bool)> {
-        policy::can(db, actor, "task.read")?;
         let artifact = db.resolve(reference)?;
+        if artifact::is_raw(&artifact) {
+            artifact::ingress::authorize(db, actor, artifact::ingress::READ)?;
+        } else {
+            policy::can(db, actor, "task.read")?;
+        }
         require(
             artifact.kind == "Artifact",
             "InvalidArgument",
@@ -106,6 +110,11 @@ pub(crate) fn resolve_artifact(db: &Db<'_>, actor: &str, reference: &Value) -> R
         )
     };
     let artifact = db.find(&r.resource_id)?.ok_or_else(denied)?;
+    if artifact::is_raw(&artifact) {
+        artifact::ingress::authorize(db, actor, artifact::ingress::READ)?;
+        policy::owned(actor, &artifact)?;
+        return Ok((db.resolve(reference)?, false));
+    }
     if reads_owned(db, actor, &artifact)? {
         require(
             artifact.kind == "Artifact",

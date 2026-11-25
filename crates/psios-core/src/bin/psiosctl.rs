@@ -99,12 +99,23 @@ enum Cmd {
     TaskResults {
         id: String,
     },
-    /// Verify and write stored JSON bytes for an Artifact reference from a file or stdin.
+    /// Verify and write stored bytes for an Artifact reference from a file or stdin.
     Artifact {
         #[arg(default_value = "-")]
         file: String,
         #[arg(long, default_value_t = 8 * 1024 * 1024)]
         max_bytes: usize,
+    },
+    /// Stage, verify and publish a local file as an opaque Artifact.
+    ArtifactUpload {
+        source: PathBuf,
+        /// Reuse the same key and source to resume a previous attempt.
+        #[arg(long)]
+        key: String,
+        #[arg(long, default_value = "application/octet-stream")]
+        declared_media_type: String,
+        #[arg(long, default_value_t = 600)]
+        ttl_seconds: u32,
     },
     /// Repair the Artifact from a previously exported, verified JSON file.
     ArtifactRepair {
@@ -364,6 +375,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let reference = serde_json::from_value(input(&file)?)?;
             std::io::stdout().write_all(&c.artifact_bytes(&reference, max_bytes)?)?;
             return Ok(());
+        }
+        Cmd::ArtifactUpload {
+            source,
+            key,
+            declared_media_type,
+            ttl_seconds,
+        } => {
+            let mut source = fs::File::open(source)?;
+            serde_json::to_value(c.upload_artifact(
+                &key,
+                &declared_media_type,
+                ttl_seconds,
+                &mut source,
+            )?)?
         }
         Cmd::ArtifactRepair {
             source,

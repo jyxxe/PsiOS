@@ -121,6 +121,9 @@ pub(super) fn check_artifacts(conn: &Connection, identity: &DatabaseIdentity) ->
     if identity.database_format >= artifact::FORMAT {
         artifact::verify(conn)?;
     }
+    if identity.database_format >= artifact::ingress::FORMAT {
+        artifact::ingress::verify(conn)?;
+    }
     Ok(())
 }
 

@@ -460,6 +460,12 @@ jobs:
           git archive ebcdd16fe384ad7af3a9b95f8130966686a22ae9 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format52"
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format52" "$RUNNER_TEMP/psios-compatibility-target"
           python3 -B tests/process_observation_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
+      - name: Ingest opaque bytes after upgrading a format 53 authority with JSON results
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format53"
+          git archive 0180eebaaf8fef0785f221c06ee1174541880398 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format53"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format53" "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/artifact_ingress_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Stream and restore a backup larger than the default limit
         run: PSIOS_TEST_LARGE_BACKUP=1 python3 -B -m unittest discover -s tests -p test_backup_limits.py -v
       - name: Exercise a real OCI engine and persistent volume

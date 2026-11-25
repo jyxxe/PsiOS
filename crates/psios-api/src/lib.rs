@@ -3,7 +3,7 @@ mod artifact;
 mod backup;
 mod client;
 mod model;
-pub use artifact::ArtifactRepairReceipt;
+pub use artifact::{ArtifactRepairReceipt, ArtifactUploadReceipt};
 pub use backup::{BackupChunk, BackupMember, BackupMemberReceipt};
 pub use model::*;
 mod json;

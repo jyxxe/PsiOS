@@ -93,6 +93,10 @@ enum Cmd {
         #[arg(long, default_value_t = 30)]
         seconds: u64,
     },
+    /// Read a Task's available result references and status.
+    TaskResults {
+        id: String,
+    },
     /// Verify and write stored JSON bytes for an Artifact reference from a file or stdin.
     Artifact {
         #[arg(default_value = "-")]
@@ -340,6 +344,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             c.submit_with_requirements(&tool, input(&file)?, &key, &delegation, &requirements)?
         }
         Cmd::Wait { id, seconds } => c.wait(&id, Duration::from_secs(seconds))?,
+        Cmd::TaskResults { id } => c.task_results(&id)?,
         Cmd::Artifact { file, max_bytes } => {
             let reference = serde_json::from_value(input(&file)?)?;
             std::io::stdout().write_all(&c.artifact_bytes(&reference, max_bytes)?)?;

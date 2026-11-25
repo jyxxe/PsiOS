@@ -5,6 +5,7 @@ mod execution;
 mod history;
 pub(crate) use history::{archive, history};
 mod recovery;
+pub(crate) mod result_access;
 mod submission;
 
 use crate::{

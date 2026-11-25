@@ -30,7 +30,12 @@ pub(super) fn preflight(db: &Db<'_>, t: &Doc) -> Result<(Doc, Doc, Option<Vec<Va
         "ApprovalInvalidated",
         "execution precondition changed",
     )?;
-    let outputs = dependencies::ready(db, &t.owner, &dependencies::requirements(&input)?)?;
+    let outputs = dependencies::ready(
+        db,
+        &t.owner,
+        &dependencies::requirements(&input)?,
+        Some(&t.id),
+    )?;
     Ok((op, p, outputs))
 }
 pub fn claim(db: &Db<'_>) -> Result<Option<String>> {
@@ -45,20 +50,26 @@ pub fn claim(db: &Db<'_>) -> Result<Option<String>> {
     let clock = policy::deadline::Clock::sample()?;
     let invalid:Option<(String,bool)>=db.c.query_row("WITH RECURSIVE lineage(task,did,depth) AS (
         SELECT q.task,t.spec->'delegation_ref'->>'resource_id',0 FROM queue q JOIN current t ON t.id=q.task
-        WHERE q.phase IN ('Queued','WaitingApproval','WaitingResource') UNION ALL
+        WHERE q.phase IN ('Queued','WaitingApproval','WaitingResource')
+        UNION ALL
+        SELECT q.task,input.read_delegation,0 FROM task_dependencies input JOIN queue q ON q.task=input.task
+        WHERE input.read_delegation IS NOT NULL AND q.phase IN ('Queued','WaitingApproval','WaitingResource')
+        UNION ALL
         SELECT l.task,d.body->'parent_ref'->>'resource_id',l.depth+1 FROM lineage l JOIN current d ON d.id=l.did
         WHERE l.depth<4 AND d.body->'parent_ref' IS NOT NULL),
         checked AS (
           SELECT q.task,
-            julianday(q.valid_until)<=julianday('now') OR EXISTS(
+            julianday(q.valid_until)<=julianday('now')
+              OR julianday(d.body->>'valid_until')<=julianday('now')
+              OR julianday(g.spec->>'valid_until')<=julianday('now') OR EXISTS(
               SELECT 1 FROM authorization_deadlines elapsed
-              WHERE elapsed.resource IN (q.task,q.grant_id,l.did) AND elapsed.boot_id=?1
+              WHERE elapsed.resource IN (q.task,g.id,l.did) AND elapsed.boot_id=?1
                 AND (elapsed.time_ns!=?2 OR elapsed.deadline_boot_ms<=?3)
             ) AS expired,
             g.body->>'lifecycle'!='Active' OR d.body->>'lifecycle'!='Active'
               OR p.body->>'lifecycle'!='Active' AS revoked
           FROM lineage l JOIN queue q ON q.task=l.task JOIN current d ON d.id=l.did
-            JOIN current p ON p.id=d.owner JOIN current g ON g.id=q.grant_id
+            JOIN current p ON p.id=d.owner JOIN current g ON g.id=d.body->>'grant_id'
         )
         SELECT task,expired FROM checked WHERE expired OR revoked LIMIT 1",
         params![clock.boot.boot_id,clock.time_ns,clock.boot.millis],

@@ -50,6 +50,9 @@ pub fn decide(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "Conflict",
         "task is no longer waiting",
     )?;
+    if p.approve {
+        dependencies::check_approval(db, &t)?;
+    }
     let plan = db.resolve(&req.body["plan_ref"])?;
     let decision = id("decision");
     let evidence = db.record(

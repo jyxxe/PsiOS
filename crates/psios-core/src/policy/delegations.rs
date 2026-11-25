@@ -129,8 +129,10 @@ pub fn delegate(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             action.as_str(),
             "system.status" | "task.submit" | "task.read" | "resource.read" | "event.read"
         );
-        let extended = matches!(action.as_str(), "session.run" | "mail.send")
-            || TOOLS.contains(&action.as_str());
+        let extended = matches!(
+            action.as_str(),
+            "session.run" | "mail.send" | broker::result_access::ACTION
+        ) || TOOLS.contains(&action.as_str());
         require(
             shared || (maximum.is_some() && extended),
             "PermissionDenied",

@@ -83,7 +83,7 @@ pub(crate) fn require_content(conn: &Connection, artifact: &Doc) -> Result<()> {
     )
 }
 
-pub fn describe(db: &Db<'_>, artifact: &Doc) -> Result<Value> {
+pub fn describe(db: &Db<'_>, artifact: &Doc, shared: bool) -> Result<Value> {
     let record = receipt(db.c, artifact)?;
     let resource = artifact.envelope(&db.meta("authority")?);
     contract("resource-envelope", &resource)?;
@@ -91,7 +91,7 @@ pub fn describe(db: &Db<'_>, artifact: &Doc) -> Result<Value> {
         "reference":artifact.reference(), "resource":resource,
         "availability": if record.is_some() { "Evicted" } else { "Available" },
         "repair_chunk_bytes": (record.is_none() && stored_digest(artifact).is_some()).then_some(CHUNK_BYTES),
-        "retention": record.as_ref().map(view)
+        "retention": record.as_ref().filter(|_| !shared).map(view)
     }))
 }
 

@@ -114,6 +114,11 @@ impl Client {
         }
     }
 
+    /// Read result status and exact artifact references for an authorized Task.
+    pub fn task_results(&self, task: &str) -> ApiResult<Value> {
+        self.call("Task.Results", json!({"id": task}))
+    }
+
     /// Retrieve and verify an immutable JSON artifact, with a caller-supplied byte limit.
     pub fn artifact_bytes(&self, reference: &ResourceRef, max_bytes: usize) -> ApiResult<Vec<u8>> {
         let mut bytes = Vec::new();

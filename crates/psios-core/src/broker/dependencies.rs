@@ -1,5 +1,5 @@
 //! Output dependencies are pinned in the immutable Task input before admission.
-use super::{approval, close, condition, execution, field};
+use super::{approval, close, condition, execution, field, result_access};
 use crate::{
     Result, artifact,
     db::{Db, Doc},
@@ -28,7 +28,6 @@ pub(super) fn authorize(
         "InvalidArgument",
         "too many required task outputs",
     )?;
-    policy::can(db, actor, "task.read")?;
     let mut sources = BTreeSet::new();
     for item in requirements {
         label(&item.task_id)?;
@@ -43,7 +42,8 @@ pub(super) fn authorize(
             "InvalidArgument",
             "a required output needs a unique producing Task and SHA-256 digest",
         )?;
-        policy::owned(actor, &db.of(&item.task_id, "Task")?)?;
+        let producer = result_access::producer(db, actor, &item.task_id)?;
+        result_access::authorize(db, actor, &producer)?;
     }
     Ok(())
 }
@@ -76,15 +76,16 @@ pub(super) fn ready(
     db: &Db<'_>,
     actor: &str,
     requirements: &[TaskOutputRequirement],
+    admitted: Option<&str>,
 ) -> Result<Option<Vec<Value>>> {
-    if requirements.is_empty() {
-        return Ok(Some(Vec::new()));
-    }
-    policy::can(db, actor, "task.read")?;
     let mut outputs = Vec::with_capacity(requirements.len());
     for item in requirements {
-        let producer = db.of(&item.task_id, "Task")?;
-        policy::owned(actor, &producer)?;
+        let producer = result_access::producer(db, actor, &item.task_id)?;
+        if let Some(task) = admitted {
+            check_read(db, actor, task, &producer)?;
+        } else {
+            result_access::authorize(db, actor, &producer)?;
+        }
         if producer.body["outcome_knowledge"] == "Unknown" {
             continue;
         }
@@ -135,11 +136,34 @@ pub(super) fn ready(
     Ok(Some(outputs.iter().map(Doc::reference).collect()))
 }
 
-pub(super) fn pin(db: &Db<'_>, task: &str, requirements: &[TaskOutputRequirement]) -> Result<()> {
+fn check_read(db: &Db<'_>, actor: &str, task: &str, producer: &Doc) -> Result<()> {
+    let delegation =
+        db.c.query_row(
+            "SELECT read_delegation FROM task_dependencies WHERE task=?1 AND producer=?2",
+            params![task, producer.id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .ok_or_else(|| err("RecoveryRequired", "task result retention pin missing"))?;
+    result_access::check(db, actor, producer, delegation.as_deref())
+}
+
+pub(super) fn check_approval(db: &Db<'_>, task: &Doc) -> Result<()> {
+    let input = db.resolve(&task.spec["input_ref"])?;
+    for item in requirements(&input)? {
+        let producer = result_access::producer(db, &task.owner, &item.task_id)?;
+        check_read(db, &task.owner, &task.id, &producer)?;
+    }
+    Ok(())
+}
+
+pub(super) fn pin(db: &Db<'_>, task: &Doc, requirements: &[TaskOutputRequirement]) -> Result<()> {
     for item in requirements {
+        let producer = result_access::producer(db, &task.owner, &item.task_id)?;
+        let delegation = result_access::authorize(db, &task.owner, &producer)?;
         db.c.execute(
-            "INSERT INTO task_dependencies VALUES(?1,?2)",
-            params![task, item.task_id],
+            "INSERT INTO task_dependencies(task,producer,read_delegation) VALUES(?1,?2,?3)",
+            params![task.id, item.task_id, delegation.map(|doc| doc.id)],
         )?;
     }
     Ok(())

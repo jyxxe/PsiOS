@@ -193,7 +193,13 @@ pub(super) fn observe(work: &Work) -> Result<Value> {
         &c.body["source_ref"],
         receipt,
     )?;
-    let mut report = inspect_members(&root, &manifest, &receipt["manifest_digest"], None)?;
+    let mut report = inspect_members(
+        &root,
+        &manifest,
+        &receipt["manifest_digest"],
+        None,
+        crate::MAX_BACKUP_BYTES,
+    )?;
     require(
         before == file_set(&root)?.0,
         "PreconditionFailed",

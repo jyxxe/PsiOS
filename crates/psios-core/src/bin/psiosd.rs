@@ -1,5 +1,8 @@
 use clap::{Parser, Subcommand};
-use psios_core::{Config, Store, inspect_detached_backup, server};
+use psios_core::{
+    Config, DEFAULT_BACKUP_MAX_BYTES, MAX_BACKUP_BYTES, Store, inspect_detached_backup_with_limit,
+    server,
+};
 use std::{
     fs::File,
     io::{Read, Write, stdin, stdout},
@@ -65,6 +68,9 @@ enum Cmd {
         /// New output directory under a private, operator-owned parent.
         #[arg(long)]
         restore_to: Option<PathBuf>,
+        /// Maximum total payload bytes to verify or restore.
+        #[arg(long, default_value_t = DEFAULT_BACKUP_MAX_BYTES, value_parser = clap::value_parser!(u64).range(1..=MAX_BACKUP_BYTES))]
+        max_bytes: u64,
     },
     /// Register a verified detached backup with a stopped local authority.
     ImportBackup {
@@ -179,9 +185,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             directory,
             manifest_digest,
             restore_to,
+            max_bytes,
         } => {
-            let report =
-                inspect_detached_backup(&directory, &manifest_digest, restore_to.as_deref())?;
+            let report = inspect_detached_backup_with_limit(
+                &directory,
+                &manifest_digest,
+                restore_to.as_deref(),
+                max_bytes,
+            )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Cmd::ImportBackup {

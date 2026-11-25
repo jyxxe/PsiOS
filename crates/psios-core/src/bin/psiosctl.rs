@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use psios_api::{Client, LocalInventoryModel, ResourceRef, SessionModel, StatusProvider, parse};
-use psios_core::Config;
+use psios_core::{Config, DEFAULT_BACKUP_MAX_BYTES, MAX_BACKUP_BYTES};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -120,6 +120,9 @@ enum Cmd {
         /// JSON Backup ResourceRef from a file or stdin.
         #[arg(default_value = "-")]
         file: String,
+        /// Maximum total payload bytes to download.
+        #[arg(long, default_value_t = DEFAULT_BACKUP_MAX_BYTES, value_parser = clap::value_parser!(u64).range(1..=MAX_BACKUP_BYTES))]
+        max_bytes: u64,
     },
     Agent {
         #[arg(long)]
@@ -340,9 +343,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             revision,
             max_bytes,
         } => c.verify_task_results(&id, &revision, max_bytes)?,
-        Cmd::BackupExport { output, file } => {
+        Cmd::BackupExport {
+            output,
+            file,
+            max_bytes,
+        } => {
             let reference = serde_json::from_value(input(&file)?)?;
-            psios_core::download_backup(&c, &reference, &output)?
+            psios_core::download_backup_with_limit(&c, &reference, &output, max_bytes)?
         }
         Cmd::Agent { key, delegation } => c.execute_agent(&StatusProvider, &key, &delegation)?,
         Cmd::Validate { .. } => unreachable!(),

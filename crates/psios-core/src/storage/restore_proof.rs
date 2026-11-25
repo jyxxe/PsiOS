@@ -1,5 +1,5 @@
 use super::{BackupManifest, Capture, Entry, ModifiedTime, capture_root};
-use crate::{Result, decode, host::Work, now, require};
+use crate::{MAX_BACKUP_BYTES, Result, decode, host::Work, now, require};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -53,6 +53,7 @@ pub(super) fn verify(w: &Work) -> Result<Value> {
         out: None,
         entries: vec![],
         total: 0,
+        max_bytes: MAX_BACKUP_BYTES,
     };
     capture.walk(&root, Path::new(""), 0)?;
     let entries = capture.entries.iter().map(|(entry, meta)| {

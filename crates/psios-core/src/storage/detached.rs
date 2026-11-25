@@ -3,7 +3,7 @@ use super::{
     BackupManifest, RestoreDestination, filename, inspect_members, open_manifest, publication,
     read_manifest, staging,
 };
-use crate::{Result, err, require};
+use crate::{DEFAULT_BACKUP_MAX_BYTES, MAX_BACKUP_BYTES, Result, err, require};
 use psios_api::ResourceRef;
 use rustix::fs::{Mode, OFlags, open};
 use serde_json::{Value, json};
@@ -121,6 +121,20 @@ pub fn inspect_detached_backup(
     manifest_digest: &str,
     output: Option<&Path>,
 ) -> Result<Value> {
+    inspect_detached_backup_with_limit(directory, manifest_digest, output, DEFAULT_BACKUP_MAX_BYTES)
+}
+
+pub fn inspect_detached_backup_with_limit(
+    directory: &Path,
+    manifest_digest: &str,
+    output: Option<&Path>,
+    max_bytes: u64,
+) -> Result<Value> {
+    require(
+        (1..=MAX_BACKUP_BYTES).contains(&max_bytes),
+        "InvalidArgument",
+        "invalid detached backup byte limit",
+    )?;
     let (archive, _) = open_detached(directory, manifest_digest)?;
     let destination = output
         .map(|path| output_parent(Some(&archive.root), path))
@@ -137,6 +151,7 @@ pub fn inspect_detached_backup(
             directory: stage.directory(),
             authority: None,
         }),
+        max_bytes,
     )?;
     archive.confirm()?;
     if let Some(((parent, name), stage)) = destination.zip(stage) {

@@ -80,6 +80,7 @@ pub const COMMON: &[&str] = &[
     "event.read",
     "secret.manage",
     "session.run",
+    agent::fallback::ACTION,
     "model.serve",
     "mail.send",
     "mail.receive",
@@ -165,6 +166,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | apps::restart::INSPECT
                     | broker::result_access::ACTION
                     | agent::START_SESSION
+                    | agent::fallback::ACTION
                     | workflow::START_TOOL
                     | schedule::ACTION
                     | workflow::ACTION
@@ -512,6 +514,7 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
                     || action == storage::restore_publication::INSPECT
                     || action == apps::restart::TOOL
                     || action == apps::restart::INSPECT
+                    || action == agent::fallback::ACTION
             }))
             || p.tool_targets.is_some(),
         "InvalidArgument",

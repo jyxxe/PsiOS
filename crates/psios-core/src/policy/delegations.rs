@@ -131,7 +131,7 @@ pub fn delegate(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         );
         let extended = matches!(
             action.as_str(),
-            "session.run" | "mail.send" | broker::result_access::ACTION
+            "session.run" | "mail.send" | broker::result_access::ACTION | agent::fallback::ACTION
         ) || TOOLS.contains(&action.as_str());
         require(
             shared || (maximum.is_some() && extended),

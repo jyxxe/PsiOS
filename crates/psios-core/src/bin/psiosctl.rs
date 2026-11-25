@@ -171,6 +171,15 @@ enum Cmd {
         #[arg(long)]
         once: bool,
     },
+    /// Continue a Session on a model already authorized when the Session opened.
+    SessionUseFallback {
+        id: String,
+        #[arg(long)]
+        revision: String,
+        /// JSON Model ResourceRef from a file or stdin.
+        #[arg(default_value = "-")]
+        file: String,
+    },
     Node,
     Validate {
         contract: String,
@@ -347,6 +356,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Cmd::Wait { id, seconds } => c.wait(&id, Duration::from_secs(seconds))?,
         Cmd::TaskAdmission => c.task_admission()?,
+        Cmd::SessionUseFallback { id, revision, file } => {
+            c.use_session_fallback(&id, &revision, &serde_json::from_value(input(&file)?)?)?
+        }
         Cmd::TaskResults { id } => c.task_results(&id)?,
         Cmd::Artifact { file, max_bytes } => {
             let reference = serde_json::from_value(input(&file)?)?;

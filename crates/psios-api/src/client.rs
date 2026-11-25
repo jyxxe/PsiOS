@@ -119,6 +119,19 @@ impl Client {
         self.call("Task.Admission", json!({}))
     }
 
+    /// Hand execution to a model previously allowed by the originating Session.
+    pub fn use_session_fallback(
+        &self,
+        session: &str,
+        expected_version: &str,
+        model: &ResourceRef,
+    ) -> ApiResult<Value> {
+        self.call(
+            "Session.UseFallback",
+            json!({"id":session,"expected_resource_version":expected_version,"model_ref":model}),
+        )
+    }
+
     /// Read result status and exact artifact references for an authorized Task.
     pub fn task_results(&self, task: &str) -> ApiResult<Value> {
         self.call("Task.Results", json!({"id": task}))

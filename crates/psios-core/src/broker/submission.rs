@@ -299,17 +299,16 @@ fn submit_with_origin(
     let target = a.target(db, actor)?;
     let audience = a.audience(db, actor, &s["delegation_ref"], &target)?;
     db.cfg.check_admission_space()?;
-    let depth: u32 = db.c.query_row(
-        "SELECT count(*) FROM queue WHERE phase NOT IN ('Done')",
-        [],
-        |r| r.get(0),
-    )?;
-    require(
-        depth < db.cfg.queue_limit,
-        "QueueFull",
-        "durable queue full",
-    )?;
+    let requirements = dependencies::requirements(&input)?;
+    let recovery = admission::select(db, &a, &target, !requirements.is_empty())?;
     let budget = field(&s["budget_ref"], "resource_id");
+    if recovery.is_some() {
+        require(
+            concurrency::usage(db, budget)?.is_none_or(|slots| slots.occupied < slots.maximum),
+            "QuotaExceeded",
+            "recovery task requires an available execution slot in its root budget",
+        )?;
+    }
     require(
         db.c.execute(
             "UPDATE budgets SET reserved=reserved+1 WHERE id=?1 AND reserved+spent<maximum",
@@ -318,7 +317,6 @@ fn submit_with_origin(
         "QuotaExceeded",
         "delegation has no available execution units",
     )?;
-    let requirements = dependencies::requirements(&input)?;
     let ready = dependencies::ready(db, actor, &requirements, None)?.is_some();
     let plan = plan(db, actor, s, &audience)?;
     let task = id("task");
@@ -409,6 +407,9 @@ fn submit_with_origin(
             field(&d.body, "grant_id"),field(&plan.body,"deadline_at")
         ],
     )?;
+    if let Some(operation) = &recovery {
+        admission::bind(db, &t, operation)?;
+    }
     dependencies::pin(db, &t, &requirements)?;
     db.audit(actor, "Task.Accept", Some(&task), "Allowed")?;
     Ok(receipt)

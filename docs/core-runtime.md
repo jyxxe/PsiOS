@@ -205,6 +205,12 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 
 跨主体的 `requires` 在接受时保存实际使用的读取委托。审批、领取和派发时重新检查。撤销或到期会使尚未派发的下游释放制品保留和执行预算，包括节点处于 `Cordoned` 时。重新签发读取授权后可提交新下游。已派发的操作继续通过原 Operation 结算。授权按本机权威内的 Task ID 生效。[跨主体、撤权与到期验收](../tests/test_task_result_access.py) · [格式 44 升级](../tests/task_result_access_upgrade.py)
 
+### 队列饱和时的结果对账
+
+`queue_limit` 计入仍占用资源的未知操作。普通准入占满时，`recovery_queue_limit` 为既有未知操作的核验任务预留位置，默认 2，可设为 0 至 16。`Node.Get.admission` 返回两类占用和上限。预留准入一次只接受同一未知 Operation 的一项核验任务，并固定原 Operation 修订。可用的核验包括备份、恢复卷、OCI 启停与重启以及受管 systemd 服务。核验沿用原有工具授权、根预算和调度状态。带输出依赖的任务使用普通准入。
+
+核验任务结算或取消时释放预留。重启保留尚未结算的准入。如果目标已对账，待派发的核验任务会在领取前结束。最终对账继续使用 `Operation.Reconcile` 和核验证据。[满队列与恢复验收](../tests/test_recovery_admission.py)
+
 ## 任务调度
 
 `Schedule.Create` 为本机 Task 保存一个未来触发时间和截止时间。两者接受带时区偏移的 RFC 3339 时间并转为 UTC，触发依据节点墙钟。授予 `schedule.manage`、`task.submit`、`task.read` 及选定工具，并将权限限制在该工具的目标资源。截止时间须在委托有效期内。同一主体以相同 `key` 重发等价请求会取回原调度状态。输入、授权或时间改变时需要新键。

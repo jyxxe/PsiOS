@@ -410,6 +410,12 @@ jobs:
           git archive 302329cd83411e43fc2e175e1efb18d8160f36f1 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format44"
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format44" "$RUNNER_TEMP/psios-compatibility-target"
           python3 -B tests/task_result_access_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
+      - name: Reconcile a saturated format 45 queue after upgrading
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format45"
+          git archive a9cf8b6379bfd05b2cc698549486b40deba7af16 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format45"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format45" "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/recovery_admission_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Stream and restore a backup larger than the default limit
         run: PSIOS_TEST_LARGE_BACKUP=1 python3 -B -m unittest discover -s tests -p test_backup_limits.py -v
       - name: Exercise a real OCI engine and persistent volume

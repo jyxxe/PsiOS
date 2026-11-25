@@ -1,4 +1,5 @@
 """Actual engine acceptance for scoped OCI restart and lost receipt recovery."""
+import json
 import os
 import signal
 import sqlite3
@@ -97,7 +98,16 @@ def verify_restart(node, docker, spec, app_ids):
         assert stale.code == "OutcomeUnknown", stale
     else:
         raise AssertionError("a pre-restart inspection settled the unknown operation")
+    node.stop()
+    settings = json.loads(node.config.read_text())
+    node.config.write_text(json.dumps(dict(settings, queue_limit=1, recovery_queue_limit=1)))
+    node.start()
+    used = node.call("Node.Get", {})["admission"]
+    assert used["ordinary"] == {"used": 1, "limit": 1}, used
     observed, proof = inspect(app)
+    proof_task = node.call("Artifact.Get", {"reference": proof})["resource"]["spec"]["task_id"]
+    admission = node.get(f"recovery-admission-{proof_task}")["value"]
+    assert admission["unresolved_operation_ref"] == operation, admission
     assert observed["started_at"] == actual and observed["container_id"] == cid, observed
     recovered = node.call("Operation.Reconcile", {**target(operation), "evidence_ref": proof})
     assert recovered["outcome_knowledge"] == "Known", recovered

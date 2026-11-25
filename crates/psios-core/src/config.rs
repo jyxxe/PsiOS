@@ -28,6 +28,8 @@ pub struct Config {
     pub socket: PathBuf,
     #[serde(default = "default_queue")]
     pub queue_limit: u32,
+    #[serde(default = "default_recovery_queue")]
+    pub recovery_queue_limit: u32,
     #[serde(default = "default_tick")]
     pub tick_ms: u64,
     #[serde(default = "default_workers")]
@@ -93,6 +95,9 @@ fn default_workers() -> u32 {
 fn default_queue() -> u32 {
     256
 }
+fn default_recovery_queue() -> u32 {
+    2
+}
 fn default_tick() -> u64 {
     60
 }
@@ -130,6 +135,7 @@ impl Config {
             witness_dir: witness.into(),
             socket: path.join("api.sock"),
             queue_limit: default_queue(),
+            recovery_queue_limit: default_recovery_queue(),
             workers: default_workers(),
             services: Vec::new(),
             network_probes: Vec::new(),
@@ -211,6 +217,7 @@ impl Config {
         require(
             (1..=16).contains(&self.workers)
                 && (1..=4096).contains(&self.queue_limit)
+                && self.recovery_queue_limit <= 16
                 && (5..=5000).contains(&self.tick_ms),
             "InvalidArgument",
             "invalid scheduler limits",

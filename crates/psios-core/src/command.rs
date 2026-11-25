@@ -10,7 +10,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-fn drain(r: impl Read) -> std::io::Result<(Vec<u8>, bool)> {
+fn drain(r: impl Read, limit: usize, keep_end: bool) -> std::io::Result<(Vec<u8>, bool)> {
     let mut r = r;
     let mut kept = Vec::new();
     let mut buf = [0; 8192];
@@ -20,9 +20,16 @@ fn drain(r: impl Read) -> std::io::Result<(Vec<u8>, bool)> {
         if n == 0 {
             break;
         }
-        let take = n.min((192 * 1024usize).saturating_sub(kept.len()));
-        kept.extend_from_slice(&buf[..take]);
-        truncated |= take < n
+        truncated |= kept.len() + n > limit;
+        if keep_end {
+            let take = n.min(limit);
+            let discard = kept.len().saturating_sub(limit - take);
+            kept.drain(..discard);
+            kept.extend_from_slice(&buf[n - take..n]);
+        } else {
+            let take = n.min(limit.saturating_sub(kept.len()));
+            kept.extend_from_slice(&buf[..take]);
+        }
     }
     Ok((kept, truncated))
 }
@@ -32,11 +39,26 @@ pub struct Output {
     pub truncated: bool,
 }
 
-pub fn capture(
+pub fn capture(cmd: Command, effect: bool, adapter: &str, timeout_seconds: u64) -> Result<Output> {
+    capture_window(cmd, effect, adapter, timeout_seconds, 192 * 1024, false)
+}
+
+pub(crate) fn capture_tail(
+    cmd: Command,
+    adapter: &str,
+    timeout_seconds: u64,
+    limit: usize,
+) -> Result<Output> {
+    capture_window(cmd, false, adapter, timeout_seconds, limit, true)
+}
+
+fn capture_window(
     mut cmd: Command,
     effect: bool,
     adapter: &str,
     timeout_seconds: u64,
+    limit: usize,
+    keep_end: bool,
 ) -> Result<Output> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -49,8 +71,8 @@ pub fn capture(
     })?;
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
-    let out = thread::spawn(move || drain(stdout));
-    let errors = thread::spawn(move || drain(stderr));
+    let out = thread::spawn(move || drain(stdout, limit, keep_end));
+    let errors = thread::spawn(move || drain(stderr, limit, keep_end));
     let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
     let code = loop {
         match child.try_wait() {

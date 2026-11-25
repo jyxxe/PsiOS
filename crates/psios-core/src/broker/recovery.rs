@@ -508,7 +508,7 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
                     "OCI removal has no matching engine and instance evidence",
                 )?;
                 (
-                    apps::stopped(db, &target, &op.id, vol.as_ref(), &observation["last_logs"])?,
+                    apps::stopped(db, &target, &op.id, vol.as_ref(), None)?,
                     "RemovalConfirmed",
                 )
             };

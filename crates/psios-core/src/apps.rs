@@ -13,6 +13,7 @@ pub(crate) mod artifact_install;
 pub(crate) mod capture;
 mod cgroup;
 pub(crate) mod inventory;
+pub(crate) mod log_tail;
 pub(crate) mod publisher;
 pub(crate) mod release_archive;
 pub(crate) mod release_retirement;
@@ -262,6 +263,9 @@ pub fn preflight(db: &Db<'_>, w: &Work) -> Result<()> {
             "PreconditionFailed",
             "volume incarnation changed",
         )?;
+    }
+    if matches!(w.action, Action::Logs(_)) && w.target.body["lifecycle"] == "Running" {
+        log_tail::check_live(db, &w.target)?;
     }
     Ok(())
 }
@@ -734,16 +738,6 @@ fn observe_start(w: &Work, e: &Engine<'_>, checkpoint: &Doc) -> Result<Value> {
     )
 }
 
-fn logs(e: &Engine<'_>, id: &str) -> Result<Value> {
-    let out = e.command(&["logs", "--tail", "64", id].map(String::from), false)?;
-    // Keep result + transport encoding inside the frame even for strings consisting of control bytes.
-    let clip = |b: &[u8]| String::from_utf8_lossy(&b[..b.len().min(8192)]).into_owned();
-    Ok(json!({
-        "stdout": clip(&out.stdout),
-        "stderr": clip(&out.stderr),
-        "truncated": out.truncated||out.stdout.len()>8192||out.stderr.len()>8192
-    }))
-}
 pub fn perform(w: &Work) -> Result<Value> {
     let e = Engine(&w.cfg);
     match &w.action {
@@ -758,22 +752,17 @@ pub fn perform(w: &Work) -> Result<Value> {
             observe_start(w, &e, w.start_checkpoint.as_ref().unwrap())
         }
         Action::Uninstall(_) => Ok(json!({"data_retained": true})),
-        Action::Refresh(_) | Action::Logs(_) | Action::Health(_)
-            if w.target.body["lifecycle"] == "Stopped" =>
-        {
-            Ok(if matches!(w.action, Action::Logs(_)) {
-                w.target.body["last_logs"].clone()
-            } else {
-                json!({
-                    "process_running": false,
-                    "runtime_state": "Absent",
-                    "health": "Unknown",
-                    "readiness": "NotReady",
-                    "observed_at": now()
-                })
-            })
+        Action::Logs(_) => log_tail::capture(w, &e),
+        Action::Refresh(_) | Action::Health(_) if w.target.body["lifecycle"] == "Stopped" => {
+            Ok(json!({
+                "process_running": false,
+                "runtime_state": "Absent",
+                "health": "Unknown",
+                "readiness": "NotReady",
+                "observed_at": now()
+            }))
         }
-        Action::Refresh(_) | Action::Logs(_) | Action::Health(_) | Action::Stop(_) => {
+        Action::Refresh(_) | Action::Health(_) | Action::Stop(_) => {
             let cid = w.target.body["container_id"]
                 .as_str()
                 .ok_or_else(|| err("RecoveryRequired", "instance ID missing"))?;
@@ -782,19 +771,16 @@ pub fn perform(w: &Work) -> Result<Value> {
                 .ok_or_else(|| err("RecoveryRequired", "instance operation ID missing"))?;
             let v = match e.managed(w, cid, start_op) {
                 Ok(v) => v,
-                Err(error) if !matches!(w.action, Action::Logs(_)) && e.removed(w, cid)? => {
+                Err(_) if e.removed(w, cid)? => {
                     return Ok(
                         json!({"container_id":cid,"engine_id":w.target.body["engine_id"],
                         "start_operation_id":w.target.body["start_operation_id"],"removal_confirmed":true,
                         "process_running":false,"runtime_state":"Absent","readiness":"NotReady","health":"Unknown",
-                        "observed_at":now(),"last_logs":{"availability":"Unavailable","cause":error.0.code}}),
+                        "observed_at":now()}),
                     );
                 }
                 Err(e) => return Err(e),
             };
-            if matches!(w.action, Action::Logs(_)) {
-                return logs(&e, cid);
-            }
             if matches!(w.action, Action::Refresh(_) | Action::Health(_)) {
                 return Ok(json!({
                     "container_id": cid,
@@ -815,9 +801,9 @@ pub fn perform(w: &Work) -> Result<Value> {
                 "OutcomeUnknown",
                 "instance stop unconfirmed",
             )?;
-            let tail = logs(&e, cid).unwrap_or_else(|_| json!({"unavailable": true}));
+            let tail = log_tail::capture(w, &e).ok();
             e.command(&["rm", cid].map(String::from), true)?;
-            Ok(json!({"last_logs": tail}))
+            Ok(json!({"retained_tail": tail}))
         }
         _ => Err(err("UnsupportedCapability", "unknown OCI operation")),
     }
@@ -1007,7 +993,6 @@ fn install(db: &Db<'_>, w: &Work, s: &Install, r: &Value) -> Result<Value> {
             "runtime_state": "Absent",
             "health": "Unknown",
             "readiness": "NotReady",
-            "last_logs": null,
             "observed_at": now()
         }),
     )?;
@@ -1070,8 +1055,11 @@ pub fn stopped(
     app: &Doc,
     op_id: &str,
     volume: Option<&Doc>,
-    logs: &Value,
+    tail: Option<&Value>,
 ) -> Result<Value> {
+    if let Some(tail) = tail {
+        log_tail::retain(db, app, op_id, tail)?;
+    }
     if let Some(volume) = volume {
         attachment(db, app, op_id, volume, false)?;
     }
@@ -1087,7 +1075,7 @@ pub fn stopped(
     )?;
     let mut spec = app.spec.clone();
     spec["deployment_ref"] = deploy.reference();
-    Ok(db.update(app,spec,json!({"lifecycle":"Stopped","desired_state":"Stopped","runtime_state":"Absent","last_logs":logs,
+    Ok(db.update(app,spec,json!({"lifecycle":"Stopped","desired_state":"Stopped","runtime_state":"Absent","last_stop_operation_id":op_id,
         "health":"Unknown","readiness":"NotReady","observed_at":now()}))?.reference())
 }
 fn artifact_spec(work: &Work) -> Result<&Install> {
@@ -1148,7 +1136,13 @@ pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
         }
         Action::Start(_) => started(db, &w.target, &w.op.id, w.volume.as_ref(), r),
         Action::RestartApp(_) => restart::settle(db, &w.op, &w.target, r),
-        Action::Stop(_) => stopped(db, &w.target, &w.op.id, w.volume.as_ref(), &r["last_logs"]),
+        Action::Stop(_) => stopped(
+            db,
+            &w.target,
+            &w.op.id,
+            w.volume.as_ref(),
+            r.get("retained_tail").filter(|tail| !tail.is_null()),
+        ),
         Action::Uninstall(_) => {
             let deployment = db.resolve(&w.target.spec["deployment_ref"])?;
             let deployment = db.status(

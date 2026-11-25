@@ -84,6 +84,12 @@ impl Client {
                 "model lease context belongs to another session",
             ));
         }
+        if let Some(expected) = claim.get("context_digest")
+            && expected.as_str()
+                != Some(crate::sha256(&crate::canonical(&claim["context"])).as_str())
+        {
+            return Err(crate::invalid("model lease context digest differs"));
+        }
         let output = provider.decide_with_usage(&claim["context"])?;
         Ok(Turn::Decided(DecisionRequest {
             session_id: session.to_owned(),

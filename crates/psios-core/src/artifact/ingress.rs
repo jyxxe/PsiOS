@@ -17,7 +17,7 @@ pub(crate) const SCHEMA: &str = include_str!("ingress.sql");
 pub(crate) const UPLOAD: &str = "artifact.upload";
 pub(crate) const READ: &str = "artifact.read";
 pub(crate) const WITHDRAW: &str = "artifact.withdraw";
-const MAX_BYTES: u32 = 8 * 1024 * 1024;
+pub(crate) const MAX_BYTES: u32 = 8 * 1024 * 1024;
 const OWNER_BYTES: u32 = 32 * 1024 * 1024;
 const TOTAL_BYTES: u32 = 128 * 1024 * 1024;
 const OWNER_STAGES: u32 = 4;
@@ -152,7 +152,7 @@ pub(super) fn valid_media_type(value: &str) -> bool {
         })
 }
 
-fn check_capacity(db: &Db<'_>, actor: &str, bytes: u32) -> Result<()> {
+pub(crate) fn check_capacity(db: &Db<'_>, actor: &str, bytes: u32) -> Result<()> {
     let (total, own, total_open, owner_open, total_count, owner_count): (u32, u32, u32, u32, u32, u32) =
         db.c.query_row(
             "SELECT coalesce(sum(size_bytes),0),
@@ -283,16 +283,22 @@ pub(crate) fn put(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     db.cfg.check_admission_space()?;
     authorize(db, actor, UPLOAD)?;
     require_open(db, &stage)?;
+    append_chunk(db, &mut stage, &raw)?;
+    response(db, &stage)
+}
+
+fn append_chunk(db: &Db<'_>, stage: &mut Stage, bytes: &[u8]) -> Result<()> {
+    let index = (stage.received as usize / CHUNK_BYTES) as i64;
     db.c.execute(
         "INSERT INTO artifact_upload_chunks VALUES(?1,?2,?3,?4)",
-        params![stage.id, index, sha256(&raw), raw],
+        params![stage.id, index, sha256(bytes), bytes],
     )?;
-    stage.received += length as u32;
+    stage.received += bytes.len() as u32;
     db.c.execute(
         "UPDATE artifact_uploads SET received_bytes=?2 WHERE id=?1",
         params![stage.id, stage.received],
     )?;
-    response(db, &stage)
+    Ok(())
 }
 
 fn scan_chunks(
@@ -342,7 +348,7 @@ pub(crate) fn publish(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value>
     publish_stage(db, actor, &p.stage_id, None)
 }
 
-pub(super) fn publish_generated(
+pub(crate) fn publish_generated(
     db: &Db<'_>,
     actor: &str,
     bytes: &[u8],
@@ -350,9 +356,9 @@ pub(super) fn publish_generated(
     provenance: Value,
 ) -> Result<Value> {
     require(
-        !bytes.is_empty() && bytes.len() <= CHUNK_BYTES,
+        !bytes.is_empty() && bytes.len() <= MAX_BYTES as usize,
         "QuotaExceeded",
-        "generated content exceeds one upload chunk",
+        "generated content is outside the artifact ingress profile",
     )?;
     let staged = stage(
         db,
@@ -368,11 +374,10 @@ pub(super) fn publish_generated(
             "generated artifact stage has no identity",
         )
     })?;
-    put(
-        db,
-        actor,
-        &json!({"stage_id":stage_id,"offset":0,"data_base64":STANDARD.encode(bytes)}),
-    )?;
+    let mut stage = owned(db, actor, stage_id)?;
+    for chunk in bytes.chunks(CHUNK_BYTES) {
+        append_chunk(db, &mut stage, chunk)?;
+    }
     publish_stage(db, actor, stage_id, Some(provenance))
 }
 

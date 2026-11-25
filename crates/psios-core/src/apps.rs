@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, process::Command};
 
 pub(crate) mod artifact_install;
+pub(crate) mod capture;
 mod cgroup;
 pub(crate) mod inventory;
 pub(crate) mod publisher;
@@ -30,16 +31,20 @@ fn environment(env: &BTreeMap<String, String>) -> Result<()> {
         "invalid non-secret environment",
     )
 }
+fn valid_image_id(image: &str) -> bool {
+    image.len() == 71
+        && image.starts_with("sha256:")
+        && image[7..]
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 pub fn validate(s: &Install) -> Result<()> {
     label(&s.name)?;
     label(&s.release_version)?;
     label(&s.license_expression)?;
     require(
-        s.image_id.len() == 71
-            && s.image_id.starts_with("sha256:")
-            && s.image_id[7..]
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+        valid_image_id(&s.image_id),
         "InvalidArgument",
         "expected immutable local OCI image configuration digest",
     )?;
@@ -271,14 +276,17 @@ impl EngineProfile {
     }
 }
 impl Engine<'_> {
-    fn command(&self, args: &[String], effect: bool) -> Result<crate::command::Output> {
+    fn command_line(&self, args: &[String]) -> Command {
         let mut cmd = Command::new("/usr/bin/docker");
         cmd.env_clear()
             .env("PATH", "/usr/bin:/bin")
             .arg("--host")
             .arg(format!("unix://{}", self.0.docker_socket.display()))
             .args(args);
-        crate::command::capture(cmd, effect, "Docker", 20)
+        cmd
+    }
+    fn command(&self, args: &[String], effect: bool) -> Result<crate::command::Output> {
+        crate::command::capture(self.command_line(args), effect, "Docker", 20)
     }
     fn inspect(&self, kind: &str, id: &str) -> Result<Value> {
         let args = [kind, "inspect", "--format", "{{json .}}", id].map(String::from);

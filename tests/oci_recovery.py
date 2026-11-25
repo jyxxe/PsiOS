@@ -69,9 +69,10 @@ def kernel_limit_drift(n, app, docker, container):
 class ReceiptBarrier(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
 
-    def __init__(self, path, upstream, match_request):
+    def __init__(self, path, upstream, match_request, status=b" 204 "):
         self.upstream = upstream
         self.match_request = match_request
+        self.status = status
         self.confirmed = threading.Event()
         self.release = threading.Event()
         super().__init__(str(path), Relay)
@@ -95,7 +96,7 @@ class Relay(socketserver.BaseRequestHandler):
                         if event.fileobj is self.request:
                             request_tail = (request_tail + data)[-8192:]
                             matched |= server.match_request(request_tail)
-                        elif matched and b" 204 " in data:
+                        elif matched and server.status in data:
                             server.confirmed.set()
                             server.release.wait(20)
                             return

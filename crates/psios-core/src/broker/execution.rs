@@ -351,7 +351,12 @@ pub fn dispatch_failed(db: &Db<'_>, task: &str, e: &Error) -> Result<()> {
 }
 
 pub fn settlement_failed(db: &Db<'_>, w: &Work) -> Result<()> {
-    let reason = if matches!(
+    let reason = if matches!(w.action, Action::CaptureOciImage(_)) {
+        err(
+            "StorageUnavailable",
+            "OCI archive publication did not commit",
+        )
+    } else if matches!(
         w.action,
         Action::InstallArtifact(_) | Action::StageArtifactRelease(_) | Action::RetireRelease(_)
     ) {
@@ -368,6 +373,10 @@ pub fn settlement_failed(db: &Db<'_>, w: &Work) -> Result<()> {
 }
 
 pub fn finish(db: &Db<'_>, w: &Work, result: Result<Value>) -> Result<()> {
+    finish_host(db, w, result.map(host::Output::Receipt))
+}
+
+pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -> Result<()> {
     let t = db.get(&w.task.id)?;
     if t.body["current_run_id"] != w.run.id
         || t.body["outcome_knowledge"] != "InFlight"
@@ -385,7 +394,8 @@ pub fn finish(db: &Db<'_>, w: &Work, result: Result<Value>) -> Result<()> {
             {
                 json!({"code":"Fenced"})
             }
-            Ok(value) => json!({"receipt": value}),
+            Ok(host::Output::Receipt(value)) => json!({"receipt": value}),
+            Ok(host::Output::OciImage(_)) => json!({"code":"Fenced"}),
             Err(e) => json!({"code": e.0.code}),
         };
         db.record(
@@ -402,18 +412,24 @@ pub fn finish(db: &Db<'_>, w: &Work, result: Result<Value>) -> Result<()> {
         return Ok(());
     }
     let cancelled = t.body["lifecycle"] == "Cancelling";
-    if cancelled && matches!(w.action, Action::Activate(_)) {
+    if cancelled && matches!(w.action, Action::Activate(_) | Action::CaptureOciImage(_)) {
         close(db, &t, "Cancelled", "Known", None, None)?;
         return Ok(());
     }
-    let result = result.and_then(|receipt| {
+    let result = result.and_then(|output| {
         w.check_result_publication(db)?;
-        artifact::capacity::check_result(db, &t, &receipt)?;
-        Ok(receipt)
+        match &output {
+            host::Output::Receipt(receipt) => artifact::capacity::check_result(db, &t, receipt)?,
+            host::Output::OciImage(capture) => apps::capture::check_capacity(db, w, capture)?,
+        }
+        Ok(output)
     });
     match result {
-        Ok(receipt) => {
-            let body = host::apply(db, w, &receipt)?;
+        Ok(output) => {
+            let body = match output {
+                host::Output::Receipt(receipt) => host::apply(db, w, &receipt)?,
+                host::Output::OciImage(capture) => apps::capture::publish(db, w, capture)?,
+            };
             let a = artifact::publish(
                 db,
                 &t.owner,

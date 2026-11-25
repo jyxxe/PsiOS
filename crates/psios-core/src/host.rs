@@ -170,6 +170,8 @@ pub enum Action {
     Install(Install),
     #[serde(rename = "application.install_artifact")]
     InstallArtifact(apps::artifact_install::Request),
+    #[serde(rename = "application.capture_oci_image")]
+    CaptureOciImage(apps::capture::Request),
     #[serde(rename = "artifact.publish_session_summary")]
     PublishSessionSummary(artifact::session_output::Request),
     #[serde(rename = "application.start")]
@@ -221,6 +223,7 @@ impl Action {
                 )?
             }
             Self::Install(s) => apps::validate(s)?,
+            Self::CaptureOciImage(request) => request.validate()?,
             Self::ListAppReleases(request) => request.validate()?,
             Self::PublishSessionSummary(request) => request.validate()?,
             Self::Stage { release, .. } => {
@@ -311,6 +314,10 @@ impl Action {
             Self::StartWorkflow(blueprint) => return blueprint.definition(db, actor),
             Self::NetworkProbe(target) => return node::network::probe::target(db, target),
             Self::PublishSessionSummary(_) => return db.of(&db.meta("authority")?, "Node"),
+            Self::CaptureOciImage(_) => {
+                apps::capture::authorize(db, actor)?;
+                return db.of(&db.meta("authority")?, "Node");
+            }
             Self::Processes(_)
             | Self::InspectProcess(_)
             | Self::Interfaces(_)
@@ -461,6 +468,10 @@ pub struct Work {
     pub publication_checkpoint: Option<Doc>,
     pub volume: Option<Doc>,
 }
+pub(crate) enum Output {
+    Receipt(Value),
+    OciImage(apps::capture::Captured),
+}
 pub(crate) enum Checkpoint<'a> {
     OciStart {
         engine: &'a str,
@@ -506,6 +517,7 @@ impl Work {
                     | Action::VerifyVolumeFile(_)
                     | Action::RenameFile(_)
                     | Action::InspectFileRename(_)
+                    | Action::CaptureOciImage(_)
             ),
             "Fenced",
             "host data operation is outside its permit",
@@ -528,6 +540,7 @@ impl Work {
                 | Action::InstallArtifact(_)
                 | Action::StageArtifactRelease(_)
                 | Action::RetireRelease(_)
+                | Action::CaptureOciImage(_)
         ) {
             self.checkpoint_authority(db)?;
         }
@@ -581,10 +594,23 @@ impl Work {
         &self,
         checkpoint: impl FnOnce(Checkpoint<'_>) -> Result<()>,
     ) -> Result<Value> {
-        self.perform_checked(checkpoint, || Ok(()))
+        self.perform_receipt(checkpoint, || Ok(()))
     }
 
     pub(crate) fn perform_checked(
+        &self,
+        checkpoint: impl FnOnce(Checkpoint<'_>) -> Result<()>,
+        mut check_streaming: impl FnMut() -> Result<()>,
+    ) -> Result<Output> {
+        if let Action::CaptureOciImage(request) = &self.action {
+            return apps::capture::export(self, request, &mut check_streaming)
+                .map(Output::OciImage);
+        }
+        self.perform_receipt(checkpoint, check_streaming)
+            .map(Output::Receipt)
+    }
+
+    fn perform_receipt(
         &self,
         checkpoint: impl FnOnce(Checkpoint<'_>) -> Result<()>,
         mut check_streaming: impl FnMut() -> Result<()>,

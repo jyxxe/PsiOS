@@ -1,3 +1,5 @@
+pub(crate) mod query;
+
 use crate::{
     db::{Db, row},
     policy, *,
@@ -5,7 +7,7 @@ use crate::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use psios_api::{VERSION, contract};
 use ring::hmac;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -193,10 +195,13 @@ pub fn list(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             until: chrono::Utc::now().timestamp() + 600,
         }
     };
-    let mut docs=db.c.prepare("SELECT * FROM versions v WHERE v.seq<=?1 AND v.seq>?2 AND (?3='' OR v.kind=?3)
-      AND (?7 IS NULL OR v.id=?7)
-      AND (?4=?5 OR v.owner IN (?4,'system')) AND NOT EXISTS(SELECT 1 FROM versions w WHERE w.id=v.id AND w.seq<=?1 AND w.rev>v.rev)
-      ORDER BY v.seq LIMIT ?6")?.query_map(params![c.high,c.position,c.kind,actor,policy::OWNER,n+1,c.resource],|r|Ok((r.get::<_,i64>("seq")?,row(r)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let (sql, values) = query::selection(&c, query::View::Snapshot, n + 1);
+    let mut docs =
+        db.c.prepare_cached(&sql)?
+            .query_map(params_from_iter(values), |r| {
+                Ok((r.get::<_, i64>("seq")?, row(r)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
     let complete = docs.len() <= n as usize;
     docs.truncate(n as usize);
     if let Some(d) = docs.last() {
@@ -235,20 +240,9 @@ pub fn poll(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let n = limit(p.limit)?;
     let auth = db.meta("authority")?;
     let context = db.get(policy::PROFILE)?.reference();
-    let query = if c.resource.is_some() {
-        "SELECT * FROM versions WHERE seq>?1 AND (?2='' OR kind=?2) AND (?3=?4 OR owner IN (?3,'system')) AND id=?6 ORDER BY seq LIMIT ?5"
-    } else {
-        "SELECT * FROM versions WHERE seq>?1 AND (?2='' OR kind=?2) AND (?3=?4 OR owner IN (?3,'system')) AND ?6 IS NULL ORDER BY seq LIMIT ?5"
-    };
-    let mut stmt = db.c.prepare_cached(query)?;
-    let mut rows = stmt.query(params![
-        c.position,
-        c.kind,
-        actor,
-        policy::OWNER,
-        n,
-        c.resource
-    ])?;
+    let (sql, values) = query::selection(&c, query::View::Changes, n);
+    let mut stmt = db.c.prepare_cached(&sql)?;
+    let mut rows = stmt.query(params_from_iter(values))?;
     let mut events = Vec::new();
     while let Some(r) = rows.next()? {
         let d = row(r)?;

@@ -4,7 +4,7 @@
 
 ## 从 PR #1 升级
 
-停服并按本机恢复要求保存 state 和 witness。新版首次打开旧库时核对数据库、见证和密钥，在一次带见证的事务中升级至格式 43。格式 24 持久化工作流条件选择和汇合证据，格式 25 为新授权记录经过时间，格式 26 将同一时限机制用于新任务与执行许可，格式 27 将它用于工作流准入与步骤期限，格式 28 增加定时触发窗口的经过时间限制，格式 29 支持固化任务制品输入。格式 20 增加多人房间，格式 21 登记网络探测，格式 22 登记资源压力观测，格式 23 登记块设备布局核对。格式 17 持久化 Provider 队列，格式 18 登记备份发布观测工具，格式 19 登记会话准入工具。旧格式 1 还会迁移到多工作线程的资源和预算结构。格式 3 登记了网络接口观测，格式 4 增加备份核验。格式 5 给模型租约记录 Linux 启动身份和经过时间期限。格式 6 登记路由观测工具，仍需显式授权。格式 7 要求新恢复卷凭已记录的目录树摘要通过激活校验。升级前已经结算的模型回执可继续查询。从格式 4 或更早升级时，未结算的旧模型调用缺少启动证明，Provider 需要使用新的领取键并消耗新一轮预算。旧二进制拒绝打开超出自身支持范围的格式，软件回退需恢复升级前配对保存的 state 和 witness。离线 `psiosd verify` 报告是否需要升级，`check` 或启动服务会执行升级。已有 Agent 的权限、预算、凭据、取消墓碑、审批和任务身份按原记录保留。涉及绑定卷的新派发会检查卷版本。若旧应用启动计划缺少这个前提，需要提交新计划。
+停服并按本机恢复要求保存 state 和 witness。新版首次打开旧库时核对数据库、见证和密钥，在一次带见证的事务中升级至格式 44。格式 24 持久化工作流条件选择和汇合证据，格式 25 为新授权记录经过时间，格式 26 将同一时限机制用于新任务与执行许可，格式 27 将它用于工作流准入与步骤期限，格式 28 增加定时触发窗口的经过时间限制，格式 29 支持固化任务制品输入。格式 20 增加多人房间，格式 21 登记网络探测，格式 22 登记资源压力观测，格式 23 登记块设备布局核对。格式 17 持久化 Provider 队列，格式 18 登记备份发布观测工具，格式 19 登记会话准入工具。旧格式 1 还会迁移到多工作线程的资源和预算结构。格式 3 登记了网络接口观测，格式 4 增加备份核验。格式 5 给模型租约记录 Linux 启动身份和经过时间期限。格式 6 登记路由观测工具，仍需显式授权。格式 7 要求新恢复卷凭已记录的目录树摘要通过激活校验。升级前已经结算的模型回执可继续查询。从格式 4 或更早升级时，未结算的旧模型调用缺少启动证明，Provider 需要使用新的领取键并消耗新一轮预算。旧二进制拒绝打开超出自身支持范围的格式，软件回退需恢复升级前配对保存的 state 和 witness。离线 `psiosd verify` 报告是否需要升级，`check` 或启动服务会执行升级。已有 Agent 的权限、预算、凭据、取消墓碑、审批和任务身份按原记录保留。涉及绑定卷的新派发会检查卷版本。若旧应用启动计划缺少这个前提，需要提交新计划。
 
 ## 宿主与调度
 
@@ -12,7 +12,7 @@
 - 配置中的 `workers` 取 1 至 16，默认 4。工作线程共享事务权威，在数据库锁外等待宿主调用。调度器在有积压的主体之间轮转。同一卷、应用或服务上的冲突写入继续受持久占用保护。所有者用 `Node.Configure` 提交 Node 的 `expected_resource_version` 和 `scheduling`，取值为 `Cordoned` 或 `Enabled`。暂停领取期间可接受任务，在途工作可结算，超时及撤权仍会释放预留。
 - `Task.History` 使用 `id` 和可选 `limit`。下一页带回 `through_version` 和服务器返回的 `next_after_version`（请求字段为 `after_version`），读取同一历史区间。每个修订包含当时的 `result_availability`。`Task.Archive` 使用任务 ID 和修订，将已结算的终态移出调度表，保留幂等回执、历史、Run 和结果。当前仍需为结果及审计历史预留磁盘空间。
 - `Event.Wait` 复用 Event.Poll 的授权游标，支持 1 至 10000 毫秒的 `timeout_ms` 和可选 `limit`。`psiosctl watch CURSOR --wait-ms 5000` 可直接使用。提交后通知订阅者，等待时释放数据库锁，撤权和超时重新检查。事件、任务、信箱和模型领取共用每个守护进程的 8 个等待名额。
-- `Resource.List` 可同时按 `kind` 和精确 `id` 取得固定快照。CLI 使用 `psiosctl list Node --id NODE_ID`，SDK 使用 `Client::resource_snapshot`。将返回的 `watch_start_cursor` 传给 `Resource.Watch`、`Client::watch_resources` 或 `psiosctl watch`，只接收该筛选范围内可读的事件。可选 `timeout_ms` 启用等待。`Event.Ack` 为同一消费者保留筛选范围，`CursorExpired` 时重新取得快照。[确切资源与撤权验收](../tests/test_resource_watch.py)
+- `Resource.List` 可同时按 `kind` 和精确 `id` 取得固定快照。CLI 使用 `psiosctl list Node --id NODE_ID`，SDK 使用 `Client::resource_snapshot`。将返回的 `watch_start_cursor` 传给 `Resource.Watch`、`Client::watch_resources` 或 `psiosctl watch`，只接收该筛选范围内可读的事件。可选 `timeout_ms` 启用等待。`Event.Ack` 为同一消费者保留筛选范围，`CursorExpired` 时重新取得快照。格式 44 按资源、类型及所有者索引修订序列，按源序合并主体与系统的可见事件。原有有效游标可跨升级继续投递。[确切资源与撤权验收](../tests/test_resource_watch.py) · [已确认游标升级](../tests/indexed_events_upgrade.py)
 - `Task.Wait` 接受 Task 的 `id`、1 至 10000 毫秒的 `timeout_ms` 和可选 `after_version`。传入此前读到的 `task_revision` 可等待新修订。省略时等待 `Succeeded`、`Failed`、`Cancelled`、`Paused` 或 `WaitingApproval`。到期返回最新快照。每次唤醒均复核 `Task.Get` 的同一读取权限，连接关闭会释放名额。CLI 和 Rust SDK 的完成等待使用此接口，等待名额用完时按退避间隔读取任务。
 
 ### 块设备代次与布局核对

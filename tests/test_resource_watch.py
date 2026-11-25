@@ -73,3 +73,34 @@ class ResourceWatchTests(unittest.TestCase):
             with self.assertRaises(Failure) as denied:
                 waiting.result(timeout=3)
         self.assertEqual(denied.exception.code, "PermissionDenied")
+
+    def test_principal_pages_keep_the_snapshot_while_new_events_are_filtered(self):
+        n = self.node
+        agent, grant = n.agent(["event.read", "resource.read", "task.read", "task.submit", "system.status"])
+        token = agent["token"]
+        delegation = grant["delegation_ref"]["resource_id"]
+
+        def submit():
+            request = n.prepare("system.status", {}, token=token, delegation=delegation)
+            return n.call("Task.Submit", request, token)["task_id"]
+
+        first = submit()
+        private = n.submit("system.status", {})
+        second = submit()
+        old_second = n.get(second)["reference"]
+        before = n.call("Resource.List", {"kind": "Task", "limit": 1}, token)
+        self.assertEqual(before["items"], [n.get(first)["reference"]])
+        self.assertFalse(before["complete"])
+        n.call("Task.Cancel", target(n.get(private)["reference"]))
+        n.call("Task.Cancel", target(old_second), token)
+        latest = n.get(second)["reference"]
+        self.assertNotEqual(latest, old_second)
+
+        final = n.call("Resource.List", {"cursor": before["next_cursor"], "limit": 1}, token)
+        self.assertTrue(final["complete"])
+        self.assertEqual(final["items"], [old_second])
+        self.assertEqual(final["snapshot_id"], before["snapshot_id"])
+        changes = n.call("Resource.Watch", {"cursor": final["watch_start_cursor"], "limit": 1}, token)
+        self.assertEqual([event["resource_ref"] for event in changes["events"]], [latest])
+        after = n.call("Event.Poll", {"cursor": changes["cursor"], "limit": 1}, token)
+        self.assertEqual(after["events"], [])

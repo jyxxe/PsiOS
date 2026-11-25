@@ -506,6 +506,23 @@ jobs:
         run: PSIOS_TEST_LARGE_BACKUP=1 python3 -B -m unittest discover -s tests -p test_backup_limits.py -v
       - name: Exercise a real OCI engine and persistent volume
         run: PSIOS_TEST_OCI_KERNEL_LIMITS=1 python3 tests/oci.py
+
+  oci-archive:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Build the current and previous Core
+        run: |
+          rustup toolchain install 1.100.0 --profile minimal
+          cargo +1.100.0 build --locked --workspace
+          mkdir "$RUNNER_TEMP/psios-format60"
+          git archive 1d41b3ef3c01b67a5064725f8824fe5023c28404 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format60"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format60" "$RUNNER_TEMP/psios-compatibility-target"
+      - name: Preserve format 60 signed admission and published model output during OCI capture migration
+        run: python3 -B tests/release_retirement_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug" --previous-format 60
       - name: Capture and independently reload an exact local OCI image archive
         run: python3 -B tests/oci_capture.py
 

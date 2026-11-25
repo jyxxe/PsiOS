@@ -48,7 +48,7 @@ def capture_while_busy(node, barrier, images, engine):
         return active
 
     def staging(amount):
-        view = node.call("Node.Get", {})["admission"]["oci_capture_staging"]
+        view = node.call("Node.Get", {})["oci_capture_staging"]
         assert view == {"max_bytes": STAGING_BUDGET, "reserved_bytes": amount}, view
 
     first, _ = approve(images[0])

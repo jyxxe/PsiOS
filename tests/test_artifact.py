@@ -1,5 +1,6 @@
 """Exercise bounded reads and interrupted publication using the real authority."""
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 import hashlib
 import json
@@ -26,6 +27,11 @@ class ArtifactStorageTests(unittest.TestCase):
             **target(volume), "name": "payload", "content": self.content,
         })["volume_ref"]
         self.params = {**target(volume), "name": "payload"}
+
+    def denied(self, code, method, params, token=None):
+        with self.assertRaises(Failure) as failure:
+            self.n.call(method, params, token)
+        self.assertEqual(failure.exception.code, code, failure.exception)
 
     def read_range(self, reference, offset, length):
         page = self.n.call("Artifact.ReadChunk", dict(reference=reference, offset=offset, length=length))
@@ -153,3 +159,85 @@ class ArtifactStorageTests(unittest.TestCase):
         self.assertEqual(n.perform("volume.read", {
             **target(evidence["value"]["volume_ref"]), "name": self.params["name"],
         })["content"], "observed effect")
+        self.denied("PreconditionFailed", "Task.EvictResults", {
+            "id": tid, "expected_resource_version": restored["task_revision"], "reason": "expired",
+        })
+
+    def test_eviction_is_atomic_audited_and_preserves_task_run_and_deduplication(self):
+        n = self.n
+        submission = n.prepare("volume.read", self.params, "retention-replay")
+        tid = n.call("Task.Submit", submission)["task_id"]
+        task = n.wait(tid)
+        reference, = task["result"]["artifact_refs"]
+        artifact = {"reference": reference}
+        describe = n.call("Artifact.Get", artifact)
+        self.assertEqual(describe["availability"], "Available")
+        self.assertIsNone(describe["retention"])
+        run_args = {"id": task["current_run_id"]}
+        run = n.call("Run.Get", run_args)
+        original = n.get(tid)["reference"]
+        request = {**target(original), "reason": "expired test results"}
+        agent, _ = n.agent(["task.read", "task.submit", "resource.read"])
+        self.denied("PermissionDenied", "Task.EvictResults", request, agent["token"])
+        self.denied("PermissionDenied", "Artifact.Get", artifact, agent["token"])
+        self.denied("Conflict", "Task.EvictResults", dict(request, expected_resource_version="r1"))
+        self.denied("InvalidArgument", "Task.EvictResults", dict(request, reason=" "))
+
+        n.stop()
+        with closing(sqlite3.connect(n.state / "state.db")) as db, db:
+            db.execute("""
+                CREATE TRIGGER fail_eviction BEFORE INSERT ON versions
+                WHEN NEW.kind='TaskResultEviction' BEGIN
+                    SELECT RAISE(ABORT, 'test eviction receipt failure');
+                END
+            """)
+        n.start()
+        self.denied("StorageUnavailable", "Task.EvictResults", request)
+        self.assertEqual(n.call("Task.Get", {"id": tid}), task)
+        self.assertEqual(n.call("Artifact.Read", artifact)["content"], self.content)
+        self.assertIsNone(n.call("Artifact.Get", artifact)["retention"])
+        n.stop()
+        with closing(sqlite3.connect(n.state / "state.db")) as db, db:
+            db.execute("DROP TRIGGER fail_eviction")
+        n.start()
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            receipts = list(pool.map(lambda _: n.call("Task.EvictResults", request), range(4)))
+        receipt = receipts[0]
+        self.assertTrue(all(result == receipt for result in receipts))
+        data = receipt["eviction"]
+        self.assertEqual((data["previous_task_ref"], data["artifact_refs"]), (original, [reference]))
+        self.assertEqual(data["content_bytes_removed"], describe["resource"]["spec"]["size_bytes"])
+        self.assertEqual(n.call("Artifact.Get", artifact)["retention"], receipt)
+        self.assertEqual(n.get(tid)["reference"], data["task_ref"])
+        self.assertEqual(n.call("Resource.Resolve", {"reference": original})["value"], task)
+        self.assertEqual(n.call("Run.Get", run_args), run)
+        self.assertEqual(n.call("Task.Get", {"id": tid})["result"],
+                         {"availability": "Evicted", "artifact_refs": [reference]})
+        evictions = [entry for entry in n.call("Audit.List", {"limit": 128})
+                     if entry["method"] == "Task.EvictResults"]
+        self.assertEqual([entry["resource"] for entry in evictions if entry["decision"] == "Evicted"], [tid])
+        self.assertIn("PermissionDenied", [entry["decision"] for entry in evictions])
+
+        n.stop(signal.SIGKILL)
+        verified = subprocess.run(n.daemon + ["verify"], capture_output=True, text=True, timeout=20)
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        with closing(sqlite3.connect(n.state / "state.db")) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM artifact_chunks WHERE artifact_id=?",
+                                        (reference["resource_id"],)).fetchone(), (0,))
+        n.start()
+        self.assertEqual(n.call("Task.EvictResults", request), receipt)
+        self.denied("Conflict", "Task.EvictResults", dict(request, reason="a different reason"))
+        self.denied("ResultEvicted", "Artifact.Read", artifact)
+        self.denied("ResultEvicted", "Artifact.ReadChunk", dict(artifact, offset=0, length=1))
+        self.denied("ResultEvicted", "Resource.Resolve", artifact)
+        self.denied("PermissionDenied", "Artifact.Read", artifact, agent["token"])
+        replay = n.call("Task.Submit", submission)
+        self.assertTrue(replay["deduplicated"])
+        self.assertEqual(replay["task_id"], tid)
+        self.assertEqual(n.call("Task.Get", {"id": tid})["lifecycle"], "Succeeded")
+        cli = [n.binaries / "psiosctl", "--config", n.config, "artifact"]
+        exported = subprocess.run(cli, input=json.dumps(reference).encode(), capture_output=True, timeout=20)
+        self.assertNotEqual(exported.returncode, 0)
+        self.assertIn(b"ResultEvicted", exported.stderr)
+        self.assertEqual(exported.stdout, b"")

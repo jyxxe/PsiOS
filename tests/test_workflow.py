@@ -113,6 +113,31 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(base64.b64decode(tag), hmac.digest(key_bytes, authority.encode(), "sha256"))
         self.assertEqual(self.budget(scope), (0, 2))
 
+    def test_active_workflow_retains_its_predecessor_until_completion(self):
+        n = self.node
+        volume = n.perform("volume.create", {"name": "retained-input"})
+        scope = self.grant(["system.status", "volume.write"], ["profile-local", volume["resource_id"]], units=2)
+        write = step("write", "volume.write", {**target(volume), "name": "proof", "content": "template"},
+                     after=["source"])
+        write["inputs_from"] = {"content": {"step": "source", "pointer": "/authority_id"}}
+        definition = self.define([step("source"), write])
+        run = n.call("Workflow.Start", self.request(definition, scope))
+        phases = self.phases(self.wait(run, "WaitingApproval"))
+        source = phases["source"]["task_ref"]
+        request = {**target(source), "reason": "old observation"}
+        self.rejected("Conflict", "Task.EvictResults", request)
+        n.stop(signal.SIGKILL)
+        n.start()
+        self.rejected("Conflict", "Task.EvictResults", request)
+        write_task = phases["write"]["task_receipt"]["task_id"]
+        n.approve(write_task)
+        final = self.wait(run, "Succeeded")
+        self.assertEqual(self.budget(scope), (0, 2))
+        path = n.state / "volumes" / volume["resource_id"] / "data" / "proof"
+        self.assertEqual(path.read_text(), n.call("Principal.WhoAmI", {})["authority_id"])
+        self.assertEqual(n.call("Task.EvictResults", request)["eviction"]["previous_task_ref"], source)
+        self.assertEqual(self.fetch(run), final)
+
     def test_artifact_mapping_enforces_the_destination_tool_size_limit(self):
         n = self.node
         volume = n.perform("volume.create", {"name": "oversize-binding"})

@@ -310,6 +310,12 @@ jobs:
           git archive 1224c77918ee03e275058b120a448c391e3f02ed Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format29"
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format29" "$RUNNER_TEMP/psios-compatibility-target"
           python3 -B tests/artifact_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
+      - name: Retain and evict a chunked result published by format 30
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format30"
+          git archive b27ff36020e8b725ec4877d331932b093c4921d0 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format30"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format30" "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/artifact_retention_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Verify real systemd service control and crash reconciliation
         run: |
           sudo loginctl enable-linger "$(id -un)"

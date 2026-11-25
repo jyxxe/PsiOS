@@ -9,6 +9,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+pub(crate) mod retention;
+
 pub const FORMAT: u32 = 30;
 const LAYOUT: &str = "ChunkedJsonV1";
 // The chunk size is part of the on-disk format.
@@ -99,9 +101,22 @@ impl<'a> Manifest<'a> {
         )?;
         Ok(bytes)
     }
+
+    fn verify(&self, conn: &Connection) -> Result<()> {
+        let mut digest = Sha256::new();
+        for index in 0..self.chunks.len() {
+            digest.update(self.chunk(conn, index)?);
+        }
+        require(
+            format!("sha256:{:x}", digest.finalize()) == self.digest,
+            "RecoveryRequired",
+            "artifact content digest mismatch",
+        )
+    }
 }
 
 pub fn read(db: &Db<'_>, artifact: &Doc, max_bytes: Option<usize>) -> Result<Value> {
+    retention::require_content(db.c, artifact)?;
     let Some(manifest) = Manifest::read(artifact)? else {
         return Ok(artifact.body.clone());
     };
@@ -124,6 +139,7 @@ pub fn read(db: &Db<'_>, artifact: &Doc, max_bytes: Option<usize>) -> Result<Val
 }
 
 pub fn page(db: &Db<'_>, artifact: &Doc, offset: usize, length: usize) -> Result<Value> {
+    retention::require_content(db.c, artifact)?;
     let page_end = |size: usize| -> Result<usize> {
         require(
             offset <= size,
@@ -163,18 +179,13 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
     let mut expected_chunks = 0;
     for artifact in stmt.query_map([LAYOUT], row)? {
         let artifact = artifact?;
+        if retention::receipt(conn, &artifact)?.is_some() {
+            continue;
+        }
         let manifest = Manifest::read(&artifact)?
             .ok_or_else(|| err("RecoveryRequired", "missing artifact content manifest"))?;
-        let mut digest = Sha256::new();
-        for index in 0..manifest.chunks.len() {
-            digest.update(manifest.chunk(conn, index)?);
-            expected_chunks += 1;
-        }
-        require(
-            format!("sha256:{:x}", digest.finalize()) == manifest.digest,
-            "RecoveryRequired",
-            "artifact content digest mismatch",
-        )?;
+        manifest.verify(conn)?;
+        expected_chunks += manifest.chunks.len() as i64;
     }
     let actual_chunks: i64 =
         conn.query_row("SELECT COUNT(*) FROM artifact_chunks", [], |r| r.get(0))?;
@@ -199,7 +210,7 @@ mod tests {
         store
             .transaction("publish-integer", |db| {
                 let value = json!({"value": 9_007_199_254_740_993u64});
-                let artifact = publish(db, policy::OWNER, json!({}), &value)?;
+                let artifact = publish(db, policy::OWNER, json!({"task_id":"test-task"}), &value)?;
                 let raw = br#"{"value":9007199254740993}"#;
                 assert_eq!(artifact.reference()["digest"], sha256(raw));
                 assert_eq!(read(db, &artifact, None)?, value);

@@ -20,11 +20,37 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
-pub use run::{cancel, tick};
+pub use run::{cancel, resume, tick};
 pub const ACTION: &str = "workflow.manage";
 const MAX_STEPS: usize = 16;
 const DEFINITION: &str = "WorkflowDefinition";
 const RUN: &str = "WorkflowRun";
+
+pub(crate) fn retains_result(db: &Db<'_>, task: &Doc) -> Result<bool> {
+    let origin = &task.body["origin_ref"];
+    if origin["origin_type"] != RUN {
+        return Ok(false);
+    }
+    let id = origin["origin_id"]
+        .as_str()
+        .ok_or_else(|| err("RecoveryRequired", "workflow task lacks its run identity"))?;
+    let run = db.of(id, RUN)?;
+    let active: bool = db.c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM active_workflows WHERE run=?1)",
+        [id],
+        |row| row.get(0),
+    )?;
+    let settled = matches!(
+        run.body["lifecycle"].as_str(),
+        Some("Succeeded" | "Failed" | "Cancelled")
+    );
+    require(
+        run.owner == task.owner && active != settled,
+        "RecoveryRequired",
+        "workflow index disagrees with the producer task",
+    )?;
+    Ok(active)
+}
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

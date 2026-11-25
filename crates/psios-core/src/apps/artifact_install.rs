@@ -336,7 +336,7 @@ pub(super) fn release_source(conn: &Connection, release: &Doc) -> Result<Option<
     Ok(Some(source))
 }
 
-fn pinned_source(conn: &Connection, release: &Doc) -> Result<Option<Doc>> {
+pub(super) fn pinned_source(conn: &Connection, release: &Doc) -> Result<Option<Doc>> {
     let source = release_source(conn, release)?;
     let held: Option<String> = conn
         .query_row(

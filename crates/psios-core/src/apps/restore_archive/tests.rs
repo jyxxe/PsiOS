@@ -115,6 +115,47 @@ fn validates_tagless_legacy_tar_and_realistic_dual_manifest_archives() {
 }
 
 #[test]
+fn normalized_load_has_only_one_tagless_manifest_and_unmodified_image_members() {
+    let fixture = Fixture::new(true);
+    let bytes = fixture.tar();
+    let normalized = canonical_load(&bytes, &fixture.image, &fixture.layers).unwrap();
+    assert_ne!(normalized, bytes);
+    let members = Members::read(&normalized).unwrap();
+    assert_eq!(members.files.len(), 3);
+    assert!(members.directories.is_empty());
+    assert_eq!(
+        members.metadata("manifest.json").unwrap(),
+        json!([{"Config":blob(&fixture.image),"RepoTags":[],"Layers":[blob(&fixture.layers[0])]}])
+    );
+    for digest in [&fixture.image, &fixture.layers[0]] {
+        let path = blob(digest);
+        let actual = members.file(&path).unwrap();
+        assert_eq!(actual.digest(), digest);
+        assert_eq!(actual.bytes, fixture.members[&path]);
+    }
+    assert_eq!(
+        validate(&normalized, &fixture.image, &fixture.layers).unwrap(),
+        Compatibility::Verified,
+    );
+}
+
+#[test]
+fn normalized_load_rejects_nested_extension_records() {
+    let mut tar = Builder::new(Vec::new());
+    let data = b"26 GNU.sparse.size=999999\n";
+    let mut header = Header::new_ustar();
+    header.set_entry_type(EntryType::XHeader);
+    header.set_size(data.len() as u64);
+    tar.append_data(&mut header, "PaxHeaders/sparse", data.as_slice())
+        .unwrap();
+    let layer = tar.into_inner().unwrap();
+    assert_eq!(
+        check_inner_layer(&layer).unwrap_err().0.code,
+        "UnsupportedCapability",
+    );
+}
+
+#[test]
 fn repeated_layers_share_one_cached_member_digest() {
     let layer = encode(&BTreeMap::from([(
         "fixture".into(),
@@ -136,6 +177,10 @@ fn repeated_layers_share_one_cached_member_digest() {
         (layer_path.clone(), layer),
     ]));
     let members = Members::read(&bytes).unwrap();
+    assert_eq!(
+        canonical_load(&bytes, &id, &diff_ids).unwrap_err().0.code,
+        "QuotaExceeded",
+    );
     let member = members.file(&layer_path).unwrap();
     assert!(member.digest.get().is_none());
     assert_eq!(

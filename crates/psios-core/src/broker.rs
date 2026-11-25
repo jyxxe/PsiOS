@@ -196,6 +196,9 @@ fn close(
         ) {
             apps::artifact_install::release(db, &t.id)?;
         }
+        if t.spec["task_type"] == apps::restore_image::TOOL {
+            apps::restore_image::release(db, &op.id)?;
+        }
         storage::read_holds::release(db, &t.id)?;
         db.c.execute("DELETE FROM holds WHERE holder=?1", [&op.id])?;
     }

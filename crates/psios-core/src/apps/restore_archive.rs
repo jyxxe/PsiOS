@@ -517,6 +517,122 @@ pub(super) fn validate(bytes: &[u8], image: &str, diff_ids: &[String]) -> Result
     validate_members(&members, image, diff_ids)
 }
 
+// Produce a single classic Docker manifest from the validated members. Never pass
+// original outer tar headers or JSON alias fields to Docker's different parsers.
+pub(super) fn canonical_load(bytes: &[u8], image: &str, diff_ids: &[String]) -> Result<Vec<u8>> {
+    let limit = artifact::ingress::MAX_BYTES as usize;
+    require(
+        bytes.len() <= limit,
+        "QuotaExceeded",
+        "OCI archive exceeds restore input limit",
+    )?;
+    require(
+        !compressed(bytes),
+        "UnsupportedCapability",
+        "restore requires an uncompressed outer tar",
+    )?;
+    let members = Members::read(bytes)?;
+    require(
+        validate_members(&members, image, diff_ids)? == Compatibility::Verified,
+        "UnsupportedCapability",
+        "captured archive does not meet the classic Docker restore profile",
+    )?;
+    let manifests: Vec<DockerManifest> = decode(&members.metadata("manifest.json")?)?;
+    let docker = &manifests[0];
+    let config = members.file(&docker.config)?;
+    let config_path = format!("blobs/sha256/{}", &image[7..]);
+    let mut canonical = tar::Builder::new(Vec::new());
+    append_canonical(&mut canonical, &config_path, config.bytes)?;
+    let mut layers = Vec::with_capacity(diff_ids.len());
+    let mut seen = BTreeSet::new();
+    let mut remaining = limit;
+    for (path, diff_id) in docker.layers.iter().zip(diff_ids) {
+        let layer = members.file(path)?.bytes;
+        remaining = remaining.checked_sub(layer.len()).ok_or_else(|| {
+            err(
+                "QuotaExceeded",
+                "OCI restore layer chain exceeds the cumulative byte limit",
+            )
+        })?;
+        let path = format!("blobs/sha256/{}", &diff_id[7..]);
+        if seen.insert(diff_id) {
+            // Skip PAX, GNU sparse and other extension records that could change
+            // the effective member size in Docker's inner layer reader.
+            check_inner_layer(layer)?;
+            append_canonical(&mut canonical, &path, layer)?;
+        }
+        layers.push(path);
+    }
+    let manifest =
+        serde_json::to_vec(&json!([{"Config":config_path,"RepoTags":[],"Layers":layers}]))?;
+    append_canonical(&mut canonical, "manifest.json", &manifest)?;
+    let result = canonical.into_inner()?;
+    require(
+        result.len() <= limit,
+        "QuotaExceeded",
+        "normalized OCI archive exceeds load input limit",
+    )?;
+    Ok(result)
+}
+
+fn append_canonical(tar: &mut tar::Builder<Vec<u8>>, path: &str, data: &[u8]) -> Result<()> {
+    let mut header = tar::Header::new_ustar();
+    header.set_path(path)?;
+    header.set_size(data.len() as u64);
+    header.set_mode(0o600);
+    header.set_entry_type(tar::EntryType::Regular);
+    header.set_cksum();
+    tar.append(&header, data)?;
+    Ok(())
+}
+
+fn check_inner_layer(bytes: &[u8]) -> Result<()> {
+    let mut layer = tar::Archive::new(Cursor::new(bytes));
+    let mut position = 0usize;
+    for entry in layer.entries()?.raw(true) {
+        let entry = entry.map_err(|_| invalid("malformed OCI layer tar"))?;
+        let header = entry.header();
+        let old = header.as_old();
+        let kind = old.linkflag[0];
+        let ordinary_file = kind == b'0'
+            || kind == 0
+                && old
+                    .name
+                    .split(|v| *v == 0)
+                    .next()
+                    .is_some_and(|name| !name.is_empty() && !name.ends_with(b"/"));
+        require(
+            (ordinary_file || matches!(kind, b'1' | b'2' | b'5') && entry.size() == 0)
+                && old.size[11] == 0
+                && old.size[..11].iter().all(|v| matches!(v, b'0'..=b'7'))
+                && unambiguous_header(header),
+            "UnsupportedCapability",
+            "OCI restore layer uses unsupported tar extension or filesystem entry type",
+        )?;
+        let start = position + BLOCK;
+        require(
+            entry.raw_header_position() == position as u64
+                && entry.raw_file_position() == start as u64,
+            "PreconditionFailed",
+            "OCI layer has ambiguous tar member offsets",
+        )?;
+        let size =
+            usize::try_from(entry.size()).map_err(|_| invalid("OCI layer size overflows"))?;
+        position = start
+            .checked_add(size)
+            .filter(|end| *end <= bytes.len())
+            .ok_or_else(|| invalid("OCI layer tar member is truncated"))?
+            .next_multiple_of(BLOCK);
+    }
+    require(
+        bytes.len().is_multiple_of(BLOCK)
+            && bytes.len().saturating_sub(position) >= 2 * BLOCK
+            && bytes[position..].iter().all(|byte| *byte == 0),
+        "PreconditionFailed",
+        "OCI layer has no unambiguous tar end marker",
+    )
+}
+
 fn validate_members(
     members: &Members<'_>,
     image: &str,

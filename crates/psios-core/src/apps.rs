@@ -18,6 +18,7 @@ pub(crate) mod release_archive;
 pub(crate) mod release_retirement;
 pub(crate) mod restart;
 pub(crate) mod restore_archive;
+pub(crate) mod restore_image;
 
 fn environment(env: &BTreeMap<String, String>) -> Result<()> {
     require(

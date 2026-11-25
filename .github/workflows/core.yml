@@ -528,6 +528,8 @@ jobs:
         run: python3 -B tests/release_retirement_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug" --previous-format 60
       - name: Capture and independently reload an exact local OCI image archive
         run: python3 -B tests/oci_capture.py
+      - name: Restore a signed release archive and reconcile a real Docker request after process loss
+        run: python3 -B tests/oci_restore.py
 
   host-package:
     runs-on: ubuntu-24.04

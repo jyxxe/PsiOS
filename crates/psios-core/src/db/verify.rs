@@ -149,6 +149,9 @@ pub(super) fn check_artifacts(conn: &Connection, identity: &DatabaseIdentity) ->
     if identity.database_format >= crate::apps::restore_archive::FORMAT {
         crate::apps::capture::verify_restore_compatibility(conn)?;
     }
+    if identity.database_format >= crate::apps::restore_image::FORMAT {
+        crate::apps::restore_image::verify(conn)?;
+    }
     Ok(())
 }
 

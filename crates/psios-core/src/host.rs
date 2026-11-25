@@ -172,6 +172,10 @@ pub enum Action {
     InstallArtifact(apps::artifact_install::Request),
     #[serde(rename = "application.capture_oci_image")]
     CaptureOciImage(apps::capture::Request),
+    #[serde(rename = "application.restore_release_image")]
+    RestoreReleaseImage(apps::restore_image::Request),
+    #[serde(rename = "application.inspect_release_image_restore")]
+    InspectReleaseImageRestore(Target),
     #[serde(rename = "artifact.publish_session_summary")]
     PublishSessionSummary(artifact::session_output::Request),
     #[serde(rename = "application.start")]
@@ -199,6 +203,7 @@ impl Action {
         let a: Self = decode(&json!({"tool": tool, "input": input}))?;
         match &a {
             Self::RestartApp(request) => request.validate()?,
+            Self::RestoreReleaseImage(request) => request.validate()?,
             Self::StartAgentSession(blueprint) => blueprint.validate()?,
             Self::StartWorkflow(blueprint) => blueprint.validate()?,
             Self::Processes(p) => p.validate()?,
@@ -304,6 +309,12 @@ impl Action {
                 resources
                     .push(apps::release_retirement::candidate(db, primary, input)?.reference());
             }
+            Self::RestoreReleaseImage(input) => {
+                apps::restore_image::audience(db, primary, input, &mut resources)?;
+            }
+            Self::InspectReleaseImageRestore(_) => {
+                apps::restore_image::inspection_audience(db, primary, &mut resources)?;
+            }
             _ => {}
         }
         for r in &resources {
@@ -396,6 +407,19 @@ impl Action {
                 (&t.id, Some(&t.expected_resource_version), "Operation")
             }
             Self::RestartApp(p) => (&p.id, Some(&p.expected_resource_version), "Application"),
+            Self::RestoreReleaseImage(p) => {
+                policy::admin(actor)?;
+                artifact::ingress::authorize(db, actor, artifact::ingress::READ)?;
+                (
+                    &p.target.id,
+                    Some(&p.target.expected_resource_version),
+                    "Application",
+                )
+            }
+            Self::InspectReleaseImageRestore(p) => {
+                policy::admin(actor)?;
+                (&p.id, Some(&p.expected_resource_version), "Operation")
+            }
             Self::Install(s) => return install_target(db, actor, s),
             Self::InstallArtifact(input) => {
                 let install = apps::artifact_install::specification(db, actor, &input.reference)?;
@@ -471,6 +495,8 @@ pub struct Work {
     pub start_checkpoint: Option<Doc>,
     pub publication_checkpoint: Option<Doc>,
     pub volume: Option<Doc>,
+    pub(crate) restore_image: Option<apps::restore_image::Prepared>,
+    pub(crate) restore_image_inspection: Option<apps::restore_image::Recorded>,
 }
 pub(crate) enum Output {
     Receipt(Value),
@@ -492,6 +518,7 @@ pub(crate) enum Checkpoint<'a> {
         placement: &'a storage::restore_publication::Placement,
     },
     OciRestart(&'a Value),
+    OciImageRestore(&'a apps::restore_image::Dispatch),
     FileRename(&'a storage::file_move::Witness),
 }
 
@@ -545,6 +572,7 @@ impl Work {
                 | Action::StageArtifactRelease(_)
                 | Action::RetireRelease(_)
                 | Action::CaptureOciImage(_)
+                | Action::InspectReleaseImageRestore(_)
         ) {
             self.checkpoint_authority(db)?;
         }
@@ -585,6 +613,9 @@ impl Work {
             (Action::RestartApp(request), Checkpoint::OciRestart(before)) => {
                 apps::check_selected_publisher(db, &target)?;
                 apps::restart::record(db, self, request, before)
+            }
+            (Action::RestoreReleaseImage(request), Checkpoint::OciImageRestore(dispatch)) => {
+                apps::restore_image::record(db, self, &target, request, dispatch)
             }
             (
                 Action::Delete(_) | Action::DeleteBackup(_),
@@ -671,6 +702,10 @@ impl Work {
             Action::RestartApp(request) => apps::restart::run(self, request, |before| {
                 checkpoint(Checkpoint::OciRestart(before))
             }),
+            Action::RestoreReleaseImage(_) => apps::restore_image::run(self, |dispatch| {
+                checkpoint(Checkpoint::OciImageRestore(dispatch))
+            }),
+            Action::InspectReleaseImageRestore(_) => apps::restore_image::inspect(self),
             Action::Delete(_) | Action::DeleteBackup(_) => {
                 storage::retirement::retire(self, |location| {
                     checkpoint(Checkpoint::StorageDeletion(location))
@@ -780,6 +815,7 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
                 | Action::Select { .. }
                 | Action::Refresh(_)
                 | Action::RetireRelease(_)
+                | Action::RestoreReleaseImage(_)
         )
     {
         target.spec["volume_id"]
@@ -830,6 +866,16 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
         _ if start_checkpoint.is_some() => Some(apps::launch_spec(db, &target, false)?),
         _ => None,
     };
+    let restore_image = if let Action::RestoreReleaseImage(input) = &a {
+        Some(apps::restore_image::prepare(db, &target, input)?)
+    } else {
+        None
+    };
+    let restore_image_inspection = if matches!(a, Action::InspectReleaseImageRestore(_)) {
+        Some(apps::restore_image::pending(db, &target)?)
+    } else {
+        None
+    };
     let w = Work {
         start_checkpoint,
         publication_checkpoint,
@@ -844,6 +890,8 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
         data,
         inline,
         volume,
+        restore_image,
+        restore_image_inspection,
     };
     node::reserve(db, &w)?;
     storage::reserve(db, &w)?;
@@ -855,6 +903,9 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     }
     if matches!(w.action, Action::RestartApp(_)) {
         apps::restart::begin(db, &w)?;
+    }
+    if let Some(image) = &w.restore_image {
+        apps::restore_image::begin(db, &w, image)?;
     }
     if matches!(w.action, Action::RenameFile(_)) {
         storage::file_move::begin(db, &w)?;
@@ -871,6 +922,7 @@ pub fn apply(db: &Db<'_>, w: &Work, receipt: &Value) -> Result<Value> {
         Action::ServiceStart(_) | Action::ServiceStop(_) | Action::ServiceRestart(_) => {
             node::apply(db, w, receipt)
         }
+        Action::RestoreReleaseImage(_) => apps::restore_image::settle(db, w, receipt),
         Action::Stage { .. }
         | Action::StageArtifactRelease(_)
         | Action::Select { .. }

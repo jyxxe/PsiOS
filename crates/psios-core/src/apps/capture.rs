@@ -21,7 +21,7 @@ const PROOF: &str = "OciImageCapture";
 const MEDIA: &str = "application/vnd.psios.docker-image.v1+tar";
 const ARCHIVE_FORMAT: &str = "DockerImageArchiveV1";
 
-fn valid_engine_id(engine: &str) -> bool {
+pub(super) fn valid_engine_id(engine: &str) -> bool {
     (16..=128).contains(&engine.len()) && engine.bytes().all(|b| b.is_ascii_graphic())
 }
 

@@ -67,6 +67,8 @@ pub const TOOLS: &[&str] = &[
     "application.install",
     apps::artifact_install::TOOL,
     apps::capture::TOOL,
+    apps::restore_image::TOOL,
+    apps::restore_image::INSPECT,
     artifact::session_output::TOOL,
     "application.start",
     "application.stop",
@@ -131,6 +133,7 @@ pub fn readonly(tool: &str) -> bool {
             | "volume.read"
             | "application.health"
             | apps::restart::INSPECT
+            | apps::restore_image::INSPECT
             | "application.logs"
     )
 }
@@ -155,6 +158,7 @@ pub fn approval(tool: &str) -> bool {
             | "application.install"
             | apps::artifact_install::TOOL
             | apps::capture::TOOL
+            | apps::restore_image::TOOL
             | "application.start"
             | apps::restart::TOOL
             | "application.uninstall"
@@ -186,6 +190,8 @@ fn bootstrap_actions() -> Vec<String> {
                     | artifact::session_output::TOOL
                     | apps::artifact_install::TOOL
                     | apps::capture::TOOL
+                    | apps::restore_image::TOOL
+                    | apps::restore_image::INSPECT
                     | apps::artifact_install::STAGE_TOOL
                     | apps::inventory::TOOL
                     | apps::release_retirement::TOOL
@@ -524,9 +530,15 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "unregistered grant action",
     )?;
     require(
-        principal.id == OWNER || p.actions.iter().all(|action| action != apps::capture::TOOL),
+        principal.id == OWNER
+            || p.actions.iter().all(|action| {
+                !matches!(
+                    action.as_str(),
+                    apps::capture::TOOL | apps::restore_image::TOOL | apps::restore_image::INSPECT
+                )
+            }),
         "PermissionDenied",
-        "OCI image capture is a local-owner operation",
+        "OCI image custody operations require the local owner",
     )?;
     require(
         p.model_calls <= 1_000_000
@@ -554,6 +566,8 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
                     || action == artifact::session_output::TOOL
                     || action == apps::artifact_install::TOOL
                     || action == apps::capture::TOOL
+                    || action == apps::restore_image::TOOL
+                    || action == apps::restore_image::INSPECT
                     || action == apps::artifact_install::STAGE_TOOL
                     || action == apps::inventory::TOOL
                     || action == apps::release_retirement::TOOL

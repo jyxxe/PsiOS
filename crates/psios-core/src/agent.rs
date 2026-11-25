@@ -5,6 +5,7 @@ pub mod mail;
 pub(crate) mod model_time;
 mod queue;
 mod registry;
+pub(crate) mod tool_context;
 use crate::{
     broker,
     db::{Db, Doc},
@@ -29,6 +30,8 @@ pub(crate) struct SessionBlueprint {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     fallback_model_refs: Vec<Value>,
     context_policy: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_context_window: Option<u8>,
     max_turns: u32,
 }
 
@@ -47,6 +50,7 @@ impl SessionBlueprint {
         let _: psios_api::ResourceRef = decode(&self.skill_ref)?;
         let _: psios_api::ResourceRef = decode(&self.model_ref)?;
         session_limits(&self.goal, &self.context_policy, self.max_turns)?;
+        tool_context::validate(self.tool_context_window)?;
         fallback::validate(
             &self.model_ref,
             &self.fallback_model_refs,
@@ -82,6 +86,7 @@ struct Open {
     #[serde(default)]
     fallback_model_refs: Vec<Value>,
     context_policy: String,
+    tool_context_window: Option<u8>,
     max_turns: u32,
     #[serde(default)]
     provider_queue: bool,
@@ -141,6 +146,7 @@ fn open_session(db: &Db<'_>, actor: &str, p: &Value, origin_task: Option<&Doc>) 
     label(&o.key)?;
     label(&o.delegation_id)?;
     session_limits(&o.goal, &o.context_policy, o.max_turns)?;
+    tool_context::validate(o.tool_context_window)?;
     fallback::validate(&o.model_ref, &o.fallback_model_refs, &o.context_policy)?;
     let d = policy::delegation(db, actor, &o.delegation_id, "session.run")?;
     let mut spec = p.clone();
@@ -178,6 +184,10 @@ fn open_session(db: &Db<'_>, actor: &str, p: &Value, origin_task: Option<&Doc>) 
     }
     if !o.fallback_model_refs.is_empty() {
         state["fallback_model_refs"] = json!(o.fallback_model_refs);
+    }
+    if let Some(window) = o.tool_context_window {
+        state["tool_context_window"] = json!(window);
+        state["tool_context_refs"] = json!([]);
     }
     let session = db.create("Session", &sid, actor, spec, state)?;
     let (_, _, model) = deps(db, &session)?;
@@ -234,9 +244,17 @@ pub fn history(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let s = db.of(&p.id, "Session")?;
     policy::owned(actor, &s)?;
     policy::can(db, actor, "task.read")?;
-    let turns=db.c.prepare("SELECT turn,lease,expires,task,receipt FROM session_turns WHERE session=?1 ORDER BY turn")?
-        .query_map([&s.id],|r| Ok(json!({"turn":r.get::<_,u32>(0)?,"lease_id":r.get::<_,String>(1)?,"expires_at":r.get::<_,String>(2)?,
-          "task_id":r.get::<_,Option<String>>(3)?,"decision":r.get::<_,Option<Value>>(4)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let turns=db.c.prepare("SELECT t.turn,t.lease,t.expires,t.task,t.receipt,c.context_digest
+        FROM session_turns t LEFT JOIN model_context_snapshots c ON c.lease=t.lease
+        WHERE t.session=?1 ORDER BY t.turn")?
+        .query_map([&s.id],|r| {
+            let mut view = json!({"turn":r.get::<_,u32>(0)?,"lease_id":r.get::<_,String>(1)?,"expires_at":r.get::<_,String>(2)?,
+                "task_id":r.get::<_,Option<String>>(3)?,"decision":r.get::<_,Option<Value>>(4)?});
+            if let Some(digest) = r.get::<_,Option<String>>(5)? {
+                view["context_digest"] = json!(digest);
+            }
+            Ok(view)
+        })?.collect::<rusqlite::Result<Vec<_>>>()?;
     let tasks=db.c.prepare("SELECT task,turn,attempt FROM session_tasks WHERE session=?1 ORDER BY turn,attempt")?
        .query_map([&s.id],|r|Ok(json!({"task_id":r.get::<_,String>(0)?,"turn":r.get::<_,u32>(1)?,"attempt":r.get::<_,u32>(2)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(json!({"session_ref":s.reference(),"turns":turns,"tasks":tasks}))
@@ -305,6 +323,11 @@ fn provider(db: &Db<'_>, s: &Doc, actor: &str) -> Result<(Doc, Doc, Doc)> {
     deps(db, s)
 }
 fn context(db: &Db<'_>, s: &Doc, skill: &Doc, model: &Doc) -> Result<Value> {
+    if tool_context::enabled(s) {
+        return tool_context::build(db, s, skill, model);
+    }
+    let maximum: usize = decode(&model.spec["max_context_bytes"])?;
+    let mut context = tool_context::base(s, skill);
     let mut last = Value::Null;
     if let Some(tid) = s.body["last_task"].as_str() {
         let t = db.of(tid, "Task")?;
@@ -342,17 +365,12 @@ fn context(db: &Db<'_>, s: &Doc, skill: &Doc, model: &Doc) -> Result<Value> {
                 "tool artifact producer disagrees with the session task",
             )?;
             last["local_tool_result"] =
-                artifact::read(db, &artifact, None).map_err(artifact::dependency_error)?;
+                artifact::read(db, &artifact, Some(maximum)).map_err(artifact::dependency_error)?;
         }
     }
-    let v = json!({"session_id":s.id,"goal":s.spec["goal"],"skill_ref":s.spec["skill_ref"],"model_ref":s.spec["model_ref"],
-        "instructions":skill.spec["instructions"],"permitted_tools":skill.spec["tools"],"last_tool":last,"context_policy":s.spec["context_policy"]});
-    require(
-        canonical(&v).len() as u64 <= model.spec["max_context_bytes"].as_u64().unwrap(),
-        "QuotaExceeded",
-        "model context exceeds pinned provider limit",
-    )?;
-    Ok(v)
+    context["last_tool"] = last;
+    tool_context::bound(&context, maximum)?;
+    Ok(context)
 }
 pub fn claim(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let p: Claim = decode(p)?;
@@ -381,9 +399,20 @@ pub fn claim(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         .map_err(model_time::ClaimRefusal::error)
 }
 
-fn lease_info(lease: &str, expires: &str, turn: u32, ctx: Value, recovered: bool) -> Value {
-    json!({"lease_id":lease,"expires_at":expires,"turn":turn,"context":ctx,
-           "recovered":recovered,"usage_format":"tokens.v1"})
+fn lease_info(
+    lease: &str,
+    expires: &str,
+    turn: u32,
+    ctx: Value,
+    recovered: bool,
+    digest: Option<&str>,
+) -> Value {
+    let mut result = json!({"lease_id":lease,"expires_at":expires,"turn":turn,"context":ctx,
+                            "recovered":recovered,"usage_format":"tokens.v1"});
+    if let Some(digest) = digest {
+        result["context_digest"] = json!(digest);
+    }
+    result
 }
 
 fn replay_claim(
@@ -410,8 +439,20 @@ fn replay_claim(
         "Fenced",
         "model lease no longer current",
     )?;
-    let ctx = context(db, s, skill, model)?;
-    Ok(Some(lease_info(&lease, &until, turn, ctx, true)))
+    let (ctx, digest) = if tool_context::enabled(s) {
+        let (ctx, digest) = tool_context::replay(db, s, skill, model, &lease, turn)?;
+        (ctx, Some(digest))
+    } else {
+        (context(db, s, skill, model)?, None)
+    };
+    Ok(Some(lease_info(
+        &lease,
+        &until,
+        turn,
+        ctx,
+        true,
+        digest.as_deref(),
+    )))
 }
 
 fn model_has_slot(db: &Db<'_>, clock: &lease::Clock, model: &Doc) -> Result<bool> {
@@ -465,17 +506,32 @@ fn allocate_turn(
     b["turn"] = json!(turn);
     b["current_lease"] = json!(lease);
     b["lease_until"] = json!(until);
+    let bytes = canonical(&ctx);
+    let digest = tool_context::enabled(s).then(|| sha256(&bytes));
     let mut usage = json!({
         "session_id": s.id, "call_id": lease, "model_ref": m.reference(), "budget_ref": d.body["budget_ref"],
-        "input_bytes": canonical(&ctx).len(), "reserved_calls": 1, "issued_at": now()
+        "input_bytes": bytes.len(), "reserved_calls": 1, "issued_at": now()
     });
     if window.metered {
         usage["reserved_lease_ms"] = json!(window.millis);
     }
+    if let Some(digest) = &digest {
+        usage["context_digest"] = json!(digest);
+    }
     let usage = db.record("ModelUsage", &s.owner, usage)?;
+    if let Some(digest) = &digest {
+        tool_context::bind(db, s, &lease, &usage, digest)?;
+    }
     b["current_usage_ref"] = usage.reference();
     db.status(s, b)?;
-    Ok(Ok(lease_info(&lease, &until, turn, ctx, false)))
+    Ok(Ok(lease_info(
+        &lease,
+        &until,
+        turn,
+        ctx,
+        false,
+        digest.as_deref(),
+    )))
 }
 
 #[derive(Deserialize)]
@@ -694,6 +750,7 @@ pub fn task_closed(db: &Db<'_>, t: &Doc) -> Result<()> {
                 "Failed"
             });
         }
+        tool_context::remember(db, &s, t, &mut b)?;
         db.status(&s, b)?;
     }
     Ok(())
@@ -721,9 +778,15 @@ pub(crate) fn retains_result(db: &Db<'_>, task: &Doc) -> Result<bool> {
         "RecoveryRequired",
         "session owner disagrees with its tool task",
     )?;
-    Ok(session.body["last_task"] == task.id
-        && session.spec["context_policy"] == "LocalToolResults"
-        && !matches!(state(&session), "Failed" | "Succeeded" | "Cancelled"))
+    if session.spec["context_policy"] != "LocalToolResults"
+        || matches!(state(&session), "Failed" | "Succeeded" | "Cancelled")
+    {
+        return Ok(false);
+    }
+    if tool_context::enabled(&session) {
+        return tool_context::retained(&session, task);
+    }
+    Ok(session.body["last_task"] == task.id)
 }
 pub fn snapshot(db: &Db<'_>, t: &Doc, plan: &Doc, artifacts: &[Value]) -> Result<Value> {
     let mut b = json!({"runtime":"psios.local.task.v2","checkpoint_version":"1","input_ref":t.spec["input_ref"],
@@ -760,7 +823,7 @@ pub fn retry_task(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "PermissionDenied",
         "only session principal may retry its task",
     )?;
-    deps(db, &s)?;
+    let (_, _, model) = deps(db, &s)?;
     let previous = db.of(&req.task_id, "Task")?;
     require(
         session_for_task(db, &previous.id)?.as_deref() == Some(&s.id),
@@ -795,6 +858,8 @@ pub fn retry_task(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "QuotaExceeded",
         "turn tool retry limit exhausted",
     )?;
+    let mut b = s.body.clone();
+    tool_context::prepare_retry(db, &s, &model, &previous, turn, &mut b)?;
     let accepted = broker::retry_in_session(
         db,
         actor,
@@ -805,7 +870,6 @@ pub fn retry_task(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "INSERT INTO session_tasks VALUES(?1,?2,?3,?4)",
         params![task, s.id, turn, attempt + 1],
     )?;
-    let mut b = s.body.clone();
     b["last_task"] = json!(task);
     b["lifecycle"] = json!("WaitingTask");
     b["result"] = Value::Null;

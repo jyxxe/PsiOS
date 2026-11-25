@@ -488,6 +488,16 @@ Provider 可用 Rust SDK 的 `model_turn_durable`，或运行 `psiosctl model-st
 
 `Session.History` 返回模型轮次、子任务和尝试关系。`Session.Cancel` 关闭后续派发并取消已链接的任务。`Session.Extend` 通过 CAS 增加本次会话的轮次上限，根授权额度独立生效。对于可安全重试的失败子任务，`Session.RetryTask` 使用会话 ID、会话预期修订、原 `task_id` 和新 `key`，沿用同一模型决策，在原任务和会话历史中追加记录。未知写入继续占用原目标，等待核实。
 
+### 有界的多轮工具上下文
+
+`Session.Open` 和 `agent.session.start` 可指定 `tool_context_window`，保留最近 1 至 4 个已确认成功的工具轮次。原来的 `last_tool` 继续提供最新工具结果，`previous_tools` 从旧到新排列其余轮次，包含固定的 Task 修订、制品引用和实际尝试号。省略该字段继续使用单条上下文。普通调用、自动队列和原有的显式模型交接共用同一窗口。
+
+`LocalToolResults` 会保留活动窗口内的原制品，轮转或会话终结后允许按常规策略回收。每次领取复核原工具计划的权限范围和制品可用性，并在读取前检查剩余的模型上下文额度。失败后的 `Session.RetryTask` 会在重新准入时移除具有正式回收回执的历史制品，并重新核验余下制品。遇到缺失或损坏时，原会话保持失败状态。
+
+`ReferencesOnly` 提供原结果引用，结果中的可用性固定为任务原修订所记录的状态。通过 `Artifact.Get` 在独立授权下查询当前可用性或访问正文。
+
+格式 65 把领取时的 Session 修订、ModelUsage 与规范化上下文摘要一起提交。领取结果和 `Session.History` 提供 `context_digest`。重发领取请求时从原修订重新生成上下文，校验摘要并复核当前权限。内容缺失、检查点损坏或上下文超限会以明确原因暂停自动队列中的该会话，其他会话可继续领取。原调用额度和工具回执仍可核对。[Unix API 与进程故障验收](../tests/test_agent_tool_context.py) · [格式 64 原地升级](../tests/agent_context_upgrade.py)
+
 ### 预授权本机模型交接
 
 `Session.Open` 和 `agent.session.start` 可用 `fallback_model_refs` 固定至多三个备选 Model 修订。会话选用 `ReferencesOnly`，使用的委托须包含 `session.failover` 并在目标范围纳入主模型及每个备选模型。登记的模型须共享本机认证接口和模态。交接时再次检查所选模型修订、Provider 授权和当前上下文大小。

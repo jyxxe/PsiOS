@@ -186,6 +186,16 @@ pub fn claim_next(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
                     pause(db, &session, "ModelAuthorizationDenied")?;
                     continue;
                 }
+                Err(e)
+                    if tool_context::enabled(&session)
+                        && matches!(
+                            e.0.code.as_str(),
+                            "InvalidArgument" | "PreconditionFailed" | "RecoveryRequired"
+                        ) =>
+                {
+                    pause(db, &session, "ModelContextCheckpointInvalid")?;
+                    continue;
+                }
                 Err(e) => return Err(e),
             };
             match allocate_turn(db, &session, &dependencies, &clock, &key, true, context)? {

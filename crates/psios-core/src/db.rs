@@ -190,7 +190,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = apps::restore_image::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = agent::tool_context::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -451,6 +451,9 @@ impl Store {
                 }
                 if ver < apps::restore_image::FORMAT {
                     db.c.execute_batch(apps::restore_image::SCHEMA)?;
+                }
+                if ver < agent::tool_context::FORMAT {
+                    db.c.execute_batch(agent::tool_context::SCHEMA)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

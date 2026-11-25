@@ -1,9 +1,12 @@
 """Provider work is delivered through the real Unix API and daemon."""
+import base64
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import json
 import signal
 import socket
+import sqlite3
 import struct
 import subprocess
 import time
@@ -105,6 +108,73 @@ class ModelQueueTests(unittest.TestCase):
         self.assertEqual(self.status(manual)["session"]["turn"], 0)
         self.assertEqual(self.n.call("Budget.Get", {"id": self.grant["budget_ref"]["resource_id"]},
             self.agent["token"])["model_calls_used"], 2)
+
+    def test_missing_tool_context_pauses_one_session_and_restores_the_original_result(self):
+        n = self.n
+        session = self.open()
+        initial = self.next_turn("observe-once")
+        self.assertEqual(initial["session_id"], session["resource_id"])
+        decision = n.call("Model.Respond", {
+            "session_id": initial["session_id"], "lease_id": initial["lease_id"],
+            "decision": {"action": "tool", "tool": "node.inventory", "input": {}},
+        }, self.provider["token"])
+        tid = decision["task_id"]
+        tool = n.wait(tid)
+        reference, = tool["result"]["artifact_refs"]
+        original = n.call("Artifact.Read", {"reference": reference}, self.agent["token"])
+
+        n.stop(signal.SIGKILL)
+        with closing(sqlite3.connect(n.state / "state.db")) as db, db:
+            parts = db.execute("SELECT chunk_index,payload FROM artifact_chunks WHERE artifact_id=?",
+                               (reference["resource_id"],)).fetchall()
+            self.assertTrue(parts)
+            db.execute("DELETE FROM artifact_chunks WHERE artifact_id=?", (reference["resource_id"],))
+        n.start()
+        healthy = self.open()
+        claimed = self.next_turn("skip-missing-context")
+        self.assertEqual(claimed["session_id"], healthy["resource_id"])
+        self.finish(claimed)
+        paused = self.status(session)
+        self.assertEqual((paused["session"]["lifecycle"], paused["session"]["pause_reason"]),
+                         ("Paused", "ResultUnavailable"))
+        self.assertEqual(paused["session"]["turn"], 1)
+        self.assertIsNone(paused["session"]["current_lease"])
+        self.assertEqual(self.next_turn(), {"available": False})
+        budget = {"id": self.grant["budget_ref"]["resource_id"]}
+        self.assertEqual(n.call("Budget.Get", budget, self.agent["token"])["model_calls_used"], 2)
+        request = target(paused["reference"])
+        for params, token, code in [
+            (request, self.provider["token"], "PermissionDenied"),
+            (dict(request, expected_resource_version="r1"), self.agent["token"], "Conflict"),
+            (request, self.agent["token"], "ResultUnavailable"),
+        ]:
+            with self.subTest(code=code):
+                with self.assertRaises(Failure) as refused:
+                    n.call("Session.Resume", params, token)
+                self.assertEqual(refused.exception.code, code)
+        self.assertEqual(self.status(session), paused)
+
+        n.stop()
+        n.start()
+        self.assertEqual(self.status(session), paused)
+        chunk_bytes = n.call("Artifact.Get", {"reference": reference})["repair_chunk_bytes"]
+        for index, payload in parts:
+            response = n.call("Artifact.RepairChunk", {
+                "reference": reference, "offset": index * chunk_bytes,
+                "data_base64": base64.b64encode(payload).decode(),
+            })
+            self.assertTrue(response["repaired"])
+        resumed = n.call("Session.Resume", request, self.agent["token"])
+        self.assertEqual(resumed["session"]["lifecycle"], "AwaitingModel")
+        self.assertEqual(n.call("Budget.Get", budget, self.agent["token"])["model_calls_used"], 2)
+        claim = self.next_turn("after-repair")
+        self.assertEqual((claim["session_id"], claim["turn"]), (session["resource_id"], 2))
+        self.assertEqual(claim["context"]["last_tool"]["local_tool_result"], original)
+        self.assertEqual(self.next_turn("after-repair")["lease_id"], claim["lease_id"])
+        self.finish(claim)
+        self.assertEqual(n.call("Task.Get", {"id": tid}, self.agent["token"]), tool)
+        spent = n.call("Budget.Get", budget, self.agent["token"])
+        self.assertEqual((spent["model_calls_used"], spent["spent"]), (3, 1))
 
     def test_long_poll_rechecks_provider_and_does_not_starve_valid_sessions(self):
         peer, empty = self.new_agent(calls=0)

@@ -1,6 +1,6 @@
 use super::{ACTION, PreparedStep, RUN, binding, check_tool, run_view};
 use crate::{
-    Conditional, Result, Store, broker,
+    Conditional, Result, Store, artifact, broker,
     db::{Db, Doc},
     decode, err, node, policy, require,
 };
@@ -19,10 +19,6 @@ struct Rejection {
     run: String,
     version: String,
     step: String,
-}
-
-fn result_block(code: &str) -> bool {
-    matches!(code, "ResultEvicted" | "ResultUnavailable")
 }
 
 pub fn cancel(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
@@ -50,7 +46,7 @@ pub fn resume(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     run.cas(&request.expected_resource_version)?;
     let reason = run.body["reason"].as_str().unwrap_or_default();
     require(
-        run.body["lifecycle"] == "Blocked" && result_block(reason),
+        run.body["lifecycle"] == "Blocked" && artifact::is_content_unavailable(reason),
         "PreconditionFailed",
         "workflow is not waiting for a predecessor result",
     )?;
@@ -120,7 +116,7 @@ pub fn tick(store: &mut Store) -> Result<()> {
                 run.cas(&rejection.version)?;
                 let mut body = run.body.clone();
                 let step = progress(&mut body, &rejection.step)?;
-                if result_block(&error.0.code) {
+                if artifact::is_content_unavailable(&error.0.code) {
                     step["lifecycle"] = json!("Blocked");
                     step["reason"] = json!(error.0.code);
                     body["lifecycle"] = json!("Blocked");

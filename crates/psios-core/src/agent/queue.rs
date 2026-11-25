@@ -166,6 +166,10 @@ pub fn claim_next(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
             let (_, skill, selected) = &dependencies;
             let context = match context(db, &session, skill, selected) {
                 Ok(value) => value,
+                Err(e) if artifact::is_content_unavailable(&e.0.code) => {
+                    pause(db, &session, &e.0.code)?;
+                    continue;
+                }
                 Err(e) if e.0.code == "QuotaExceeded" => {
                     pause(db, &session, "ModelContextLimit")?;
                     continue;

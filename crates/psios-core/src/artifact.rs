@@ -1,5 +1,5 @@
 use crate::{
-    Result,
+    Error, Result,
     db::{Db, Doc, row},
     err, require,
 };
@@ -9,12 +9,42 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+pub(crate) mod repair;
 pub(crate) mod retention;
 
 pub const FORMAT: u32 = 30;
 const LAYOUT: &str = "ChunkedJsonV1";
 // The chunk size is part of the on-disk format.
 const CHUNK_BYTES: usize = 128 * 1024;
+
+pub(crate) fn is_content_unavailable(code: &str) -> bool {
+    matches!(code, "ResultEvicted" | "ResultUnavailable")
+}
+
+pub(crate) fn require_task_result(result: &Value) -> Result<()> {
+    match result["availability"].as_str() {
+        Some("Evicted") => Err(err("ResultEvicted", "required task result was evicted")),
+        Some("Unavailable") => Err(err(
+            "ResultUnavailable",
+            "required task result is unavailable",
+        )),
+        _ => Ok(()),
+    }
+}
+
+pub(crate) fn dependency_error(error: Error) -> Error {
+    if matches!(
+        error.0.code.as_str(),
+        "PreconditionFailed" | "RecoveryRequired"
+    ) {
+        err(
+            "ResultUnavailable",
+            "required artifact is unavailable or failed content verification",
+        )
+    } else {
+        error
+    }
+}
 
 pub fn stored_digest(artifact: &Doc) -> Option<&Value> {
     (artifact.kind == "Artifact" && artifact.spec["content_layout"] == LAYOUT)

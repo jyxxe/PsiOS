@@ -1,4 +1,4 @@
-use super::{Manifest, stored_digest};
+use super::{CHUNK_BYTES, Manifest, stored_digest};
 use crate::{
     Result, agent,
     db::{Db, Doc, find},
@@ -82,6 +82,7 @@ pub fn describe(db: &Db<'_>, artifact: &Doc) -> Result<Value> {
     Ok(json!({
         "reference":artifact.reference(), "resource":resource,
         "availability": if record.is_some() { "Evicted" } else { "Available" },
+        "repair_chunk_bytes": (record.is_none() && stored_digest(artifact).is_some()).then_some(CHUNK_BYTES),
         "retention": record.as_ref().map(view)
     }))
 }

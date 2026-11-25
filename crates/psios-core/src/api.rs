@@ -68,6 +68,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Session.RetryTask" => agent::retry_task(db, actor, p),
         "Session.Extend" => agent::extend(db, actor, p),
         "Session.Get" => agent::get(db, actor, p),
+        "Session.Resume" => agent::resume(db, actor, p),
         "Session.History" => agent::history(db, actor, p),
         "Session.Cancel" => agent::cancel(db, actor, p),
         "Agent.Register" => policy::register(db, actor, p),
@@ -156,6 +157,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
             let d = owned_artifact(db, actor, &p.reference)?;
             artifact::page(db, &d, p.offset, p.length)
         }
+        "Artifact.RepairChunk" => artifact::repair::chunk(db, actor, p),
         "Secret.Rotate" => policy::secret_rotate(db, actor, p),
         "Secret.Put" => policy::secret_put(db, actor, p),
         "Secret.Revoke" => policy::secret_revoke(db, actor, p),

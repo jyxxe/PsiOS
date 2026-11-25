@@ -331,6 +331,8 @@ providerctl model-worker "$workdir/model.json" --decision-dir "$workdir/worker-d
 
 API 的 `Model.ClaimNext` 接受 `model_ref` 和 `key`。`Model.WaitNext` 另接受 1 至 10000 毫秒的 `timeout_ms`。返回 `available:false` 表示暂无可领取轮次。领取按进入就绪状态的顺序执行，等待工具或人工审批期间跳过该会话。每个 Model 最多接纳 128 个自动领取会话，沿用单次租约并发限制、会话轮数和共同根预算。撤权、依赖变更或额度耗尽的会话进入带原因的暂停状态，其他会话仍可领取。
 
+使用 `LocalToolResults` 的会话在固定工具制品不可读取时暂停，记录 `ResultUnavailable` 或 `ResultEvicted`。自动领取继续服务其他会话。恢复原制品后，会话所有者用 `id` 和当前 `expected_resource_version` 调用 `Session.Resume`。服务重新检查原工具输出、Skill、Model 和委托，随后将会话放回就绪队列。模型调用额度在新轮次实际获发租约时扣除，原工具执行和回执仍可查。[缺失上下文验收](../tests/test_model_queue.py)
+
 系统在签发租约和计入预算的同一事务中保存 Model 与领取键映射。领取请求重放只能恢复该轮次。只有已落盘的决策可重发，丢失决策的轮次等到原租约失效后才可申请新的额度。Rust SDK 的 `model_next_durable` 先尝试交付已保存的决策，再领取新轮次。若原会话授权已撤销，`Model.ClaimStatus` 通过 Model、领取键和租约 ID 返回该次交付的 `Pending`、`Settled` 或 `Fenced`。该方法只返回状态，任务回执和上下文仍受原会话授权约束。每个工作进程需要独占的暂存目录。[竞争与崩溃验收](../tests/test_model_queue.py)
 
 ## 定向通知与验证

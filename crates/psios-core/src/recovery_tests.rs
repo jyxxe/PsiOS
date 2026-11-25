@@ -1,5 +1,6 @@
 use super::*;
 use crate::host::Work;
+use base64::{Engine, engine::general_purpose::STANDARD};
 use psios_api::{Request, VERSION, id};
 use serde_json::{Value, json};
 use std::{
@@ -454,16 +455,15 @@ fn workflow_resumes_a_missing_artifact_and_keeps_pinned_input_after_restart() {
         .unwrap();
     let snapshot = execute(&mut store, source);
     let source_task = call(&mut store, "Task.Get", json!({"id":source})).unwrap();
-    let artifact = source_task["result"]["artifact_refs"][0]["resource_id"]
-        .as_str()
-        .unwrap();
-    let (revision, bytes): (i64, Vec<u8>) = store
+    let reference = &source_task["result"]["artifact_refs"][0];
+    let artifact = reference["resource_id"].as_str().unwrap();
+    let bytes: Vec<u8> = store
         .transaction("simulate-missing-artifact-chunk", |db| {
             Ok(db.c.query_row(
                 "DELETE FROM artifact_chunks WHERE artifact_id=?1 AND chunk_index=0
-                 RETURNING artifact_rev,payload",
+                 RETURNING payload",
                 [artifact],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| row.get(0),
             )?)
         })
         .unwrap();
@@ -495,15 +495,13 @@ fn workflow_resumes_a_missing_artifact_and_keeps_pinned_input_after_restart() {
             .code,
         "Conflict"
     );
-    store
-        .transaction("restore-original-artifact-bytes", |db| {
-            db.c.execute(
-                "INSERT INTO artifact_chunks VALUES(?1,?2,0,?3)",
-                rusqlite::params![artifact, revision, bytes],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    let repair = call(
+        &mut store,
+        "Artifact.RepairChunk",
+        json!({"reference":reference,"offset":0,"data_base64":STANDARD.encode(bytes)}),
+    )
+    .unwrap();
+    assert_eq!(repair["repaired"], true);
     resume["expected_resource_version"] = blocked["reference"]["version"].clone();
     call(&mut store, "Workflow.Resume", resume).unwrap();
     workflow::tick(&mut store).unwrap();

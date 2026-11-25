@@ -62,7 +62,7 @@ class ArtifactStorageTests(unittest.TestCase):
             db.execute("DROP TRIGGER fail_chunk")
         self.n.start()
 
-    def test_range_crosses_chunks_and_unrelated_damage_does_not_read_other_chunks(self):
+    def test_cross_chunk_ranges_refuse_damage_and_repair_original_bytes(self):
         n = self.n
         task = n.wait(n.submit("volume.read", self.params))
         self.assertEqual((task["lifecycle"], task["result"]["availability"]), ("Succeeded", "Available"))
@@ -110,6 +110,33 @@ class ArtifactStorageTests(unittest.TestCase):
                 self.assertEqual(error.exception.code, "RecoveryRequired")
         settled = n.call("Task.Get", {"id": task["task_id"]})
         self.assertEqual((settled["lifecycle"], settled["result"]["artifact_refs"]), ("Succeeded", [reference]))
+        payload = {"reference": reference, "offset": CHUNK,
+                   "data_base64": base64.b64encode(stored[CHUNK:2 * CHUNK]).decode()}
+        reader, _ = n.agent(["task.read"])
+        self.denied("PermissionDenied", "Artifact.RepairChunk", payload, reader["token"])
+        self.denied("InvalidArgument", "Artifact.RepairChunk", dict(payload, offset=1))
+        self.denied("PreconditionFailed", "Artifact.RepairChunk",
+                    dict(payload, data_base64=base64.b64encode(bytes(CHUNK)).decode()))
+
+        source = n.base / "artifact.json"
+        repair = [n.binaries / "psiosctl", "--config", n.config, "artifact-repair", source]
+        pinned = json.dumps(reference).encode()
+        source.write_bytes(stored[:-1] + bytes([stored[-1] ^ 1]))
+        refused = subprocess.run(repair, input=pinned, capture_output=True, timeout=20)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn(b"PreconditionFailed", refused.stderr)
+        self.denied("RecoveryRequired", "Artifact.ReadChunk", {
+            "reference": reference, "offset": CHUNK, "length": 1,
+        })
+        source.write_bytes(stored)
+        restored = json.loads(subprocess.check_output(repair, input=pinned, timeout=20))
+        self.assertEqual(restored, {"reference": reference, "size_bytes": str(len(stored)), "chunks_repaired": 1})
+        self.assertEqual(n.call("Artifact.Read", {"reference": reference}), expected)
+        self.assertEqual(n.call("Artifact.RepairChunk", payload)["repaired"], False)
+        self.assertEqual(json.loads(subprocess.check_output(repair, input=pinned, timeout=20))["chunks_repaired"], 0)
+        n.stop()
+        check = subprocess.run(n.daemon + ["verify"], capture_output=True, text=True, timeout=20)
+        self.assertEqual(check.returncode, 0, check.stderr)
 
     def test_second_chunk_write_failure_rolls_back_manifest_and_success(self):
         n = self.n
@@ -170,6 +197,7 @@ class ArtifactStorageTests(unittest.TestCase):
         task = n.wait(tid)
         reference, = task["result"]["artifact_refs"]
         artifact = {"reference": reference}
+        first_chunk = n.call("Artifact.ReadChunk", dict(artifact, offset=0, length=CHUNK))["data_base64"]
         describe = n.call("Artifact.Get", artifact)
         self.assertEqual(describe["availability"], "Available")
         self.assertIsNone(describe["retention"])
@@ -231,6 +259,7 @@ class ArtifactStorageTests(unittest.TestCase):
         self.denied("ResultEvicted", "Artifact.Read", artifact)
         self.denied("ResultEvicted", "Artifact.ReadChunk", dict(artifact, offset=0, length=1))
         self.denied("ResultEvicted", "Resource.Resolve", artifact)
+        self.denied("ResultEvicted", "Artifact.RepairChunk", dict(artifact, offset=0, data_base64=first_chunk))
         self.denied("PermissionDenied", "Artifact.Read", artifact, agent["token"])
         replay = n.call("Task.Submit", submission)
         self.assertTrue(replay["deduplicated"])

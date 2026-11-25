@@ -1,7 +1,9 @@
 //! Local system API contracts, bounded framing and synchronous Rust client.
+mod artifact;
 mod backup;
 mod client;
 mod model;
+pub use artifact::ArtifactRepairReceipt;
 pub use backup::{BackupChunk, BackupMember, BackupMemberReceipt};
 pub use model::*;
 mod json;
@@ -53,7 +55,7 @@ impl ApiError {
             "QueueFull" => "SameRequestAfterBackoff",
             "CursorExpired" => "Resynchronize",
             "AuthenticationRequired" => "Reauthenticate",
-            "DependencyUnavailable" => "DependencyReady",
+            "DependencyUnavailable" | "ResultUnavailable" => "DependencyReady",
             _ => "Never",
         };
         Self {

@@ -86,6 +86,53 @@ fn safe_path(path: &str) -> bool {
         && path.split('/').all(|part| !matches!(part, "" | "." | ".."))
 }
 
+fn octal_field(bytes: &[u8]) -> bool {
+    bytes
+        .iter()
+        .copied()
+        .skip_while(|byte| *byte == b' ')
+        .skip_while(|byte| (b'0'..=b'7').contains(byte))
+        .all(|byte| matches!(byte, 0 | b' '))
+}
+
+fn zero_fill(bytes: &[u8]) -> bool {
+    bytes.iter().all(|byte| *byte == 0)
+}
+
+fn unambiguous_header(header: &tar::Header) -> bool {
+    let common = header.as_old();
+    if ![
+        common.mode.as_slice(),
+        &common.uid,
+        &common.gid,
+        &common.size,
+        &common.mtime,
+        &common.cksum,
+    ]
+    .into_iter()
+    .all(octal_field)
+    {
+        return false;
+    }
+    // Docker's Go tar reader recognizes USTAR magic without checking the version,
+    // recognizes STAR by its trailer and may read malformed GNU times as a path prefix.
+    // Admit only layouts whose path and size agree in both readers.
+    if let Some(ustar) = header.as_ustar() {
+        return octal_field(&ustar.dev_major)
+            && octal_field(&ustar.dev_minor)
+            && zero_fill(&ustar.pad);
+    }
+    if let Some(gnu) = header.as_gnu() {
+        // The old GNU extension fields follow the two timestamps at byte 369.
+        return octal_field(&gnu.dev_major)
+            && octal_field(&gnu.dev_minor)
+            && octal_field(&gnu.atime)
+            && octal_field(&gnu.ctime)
+            && zero_fill(&header.as_bytes()[369..]);
+    }
+    zero_fill(&common.pad)
+}
+
 impl<'a> Members<'a> {
     fn read(bytes: &'a [u8]) -> Result<Self> {
         require(
@@ -112,6 +159,11 @@ impl<'a> Members<'a> {
             )?;
             let entry = entry.map_err(|_| invalid("unreadable OCI tar entry"))?;
             let header = entry.header();
+            require(
+                unambiguous_header(header),
+                "PreconditionFailed",
+                "OCI tar header has ambiguous format or numeric fields",
+            )?;
             let directory = header.entry_type().is_dir();
             require(
                 directory || header.entry_type().is_file(),

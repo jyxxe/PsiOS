@@ -269,7 +269,7 @@ Core 核对原会话、模型租约及决策摘要，在一个事务中提交原
 
 制品字节、`LocalOciImageCapture` 来源、`OciImageCapture` 凭据和 Task 回执在同一事务提交。归档可用独立授权的 `Artifact.ReadChunk` 分块读取并核对完整 SHA-256，回收需要独立的 `artifact.withdraw`。取消、进程中断和发布失败不会留下半成品。[真实 Docker 导出和独立重载验收](../tests/oci_capture.py)
 
-捕获会在持久提交前检查原始 tar，并记录 `restore_compatibility`。`Verified` 对应 `DockerClassicTaglessSaveV1`，要求单个无标签镜像，精确匹配配置摘要和有序未压缩层 DiffID。存在 OCI 索引时，两个视图的配置和层必须一致，且索引只直接指向一个镜像。镜像 ID 使用清单摘要、层使用压缩格式或布局不受支持时，原始捕获可保留并报告 `Unsupported`。升级到数据库格式 63 后，旧捕获标为 `Unverified`，其历史回执依旧省略此字段。证明覆盖归档结构及镜像身份，实际恢复还会检查层元数据及目的引擎。[归档格式测试](../crates/psios-core/src/apps/restore_archive/tests.rs)
+捕获会在持久提交前检查原始 tar，并记录 `restore_compatibility`。`Verified` 对应 `DockerClassicTaglessSaveV1`，要求单个无标签镜像，精确匹配配置摘要和有序未压缩层 DiffID。外层 tar 支持两种读取器能一致解释的 V7、USTAR 和 GNU 普通文件或目录。库间解释歧义或标签会阻止发布。存在 OCI 索引时，两个视图的配置和层必须一致，且索引只直接指向一个镜像。镜像 ID 使用清单摘要、层使用压缩格式或布局不受支持时，原始捕获可保留并报告 `Unsupported`。升级到数据库格式 63 后，旧捕获标为 `Unverified`，其历史回执依旧省略此字段。证明覆盖归档结构及镜像身份，实际恢复还会检查层元数据及目的引擎。[归档格式测试](../crates/psios-core/src/apps/restore_archive/tests.rs)
 
 ### 安装和更新时保留 OCI 归档
 

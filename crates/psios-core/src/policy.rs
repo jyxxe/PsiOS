@@ -69,6 +69,7 @@ pub const TOOLS: &[&str] = &[
 pub const COMMON: &[&str] = &[
     "task.submit",
     "task.read",
+    broker::result_access::ACTION,
     schedule::ACTION,
     workflow::ACTION,
     chat::INVITE,
@@ -162,6 +163,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | storage::restore_publication::INSPECT
                     | apps::restart::TOOL
                     | apps::restart::INSPECT
+                    | broker::result_access::ACTION
                     | agent::START_SESSION
                     | workflow::START_TOOL
                     | schedule::ACTION
@@ -496,16 +498,22 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "InvalidArgument",
         "invalid budget or TTL",
     )?;
+    let reads_results = p
+        .actions
+        .iter()
+        .any(|action| action == broker::result_access::ACTION);
     require(
-        !p.actions.iter().any(|action| {
-            action == storage::export::ACTION
-                || action == node::journal::TOOL
-                || action == node::RESTART_TOOL
-                || action == node::service_state::TOOL
-                || action == storage::restore_publication::INSPECT
-                || action == apps::restart::TOOL
-                || action == apps::restart::INSPECT
-        }) || p.tool_targets.is_some(),
+        !(reads_results
+            || p.actions.iter().any(|action| {
+                action == storage::export::ACTION
+                    || action == node::journal::TOOL
+                    || action == node::RESTART_TOOL
+                    || action == node::service_state::TOOL
+                    || action == storage::restore_publication::INSPECT
+                    || action == apps::restart::TOOL
+                    || action == apps::restart::INSPECT
+            }))
+            || p.tool_targets.is_some(),
         "InvalidArgument",
         "this grant action requires an explicit target scope",
     )?;
@@ -516,7 +524,11 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             "target scope must contain 1 to 64 resource IDs",
         )?;
         for id in ids {
-            db.get(id)?;
+            if reads_results {
+                db.of(id, "Task")?;
+            } else {
+                db.get(id)?;
+            }
         }
     }
     require(
@@ -572,6 +584,8 @@ pub fn revoke(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let generation = epoch(db)?;
     let host_flight: bool=db.c.query_row("SELECT
         EXISTS(SELECT 1 FROM queue WHERE grant_id=?1 AND phase IN ('Dispatched','Unknown'))
+        OR EXISTS(SELECT 1 FROM task_dependencies input JOIN queue q ON q.task=input.task
+           JOIN current d ON d.id=input.read_delegation WHERE q.phase IN ('Dispatched','Unknown') AND d.body->>'grant_id'=?1)
         OR EXISTS(SELECT 1 FROM current a JOIN current op ON op.id=a.body->>'start_operation_id'
            JOIN current t ON t.id=op.spec->>'task_id' JOIN current d ON d.id=t.spec->'delegation_ref'->>'resource_id'
            WHERE (a.kind='HostService' OR (a.kind='Application' AND a.body->>'lifecycle'='Running')) AND d.body->>'grant_id'=?1)",

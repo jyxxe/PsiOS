@@ -109,9 +109,11 @@ class BackupCaptureControlTests(unittest.TestCase):
         span = datetime.fromisoformat(permit["not_after"]) - datetime.fromisoformat(permit["issued_at"])
         self.assertGreater(span.total_seconds(), 44)
         self.assertLessEqual(span.total_seconds(), 45)
-        self.assertEqual(n.wait(longer)["lifecycle"], "Succeeded")
+        completed = n.wait(longer)
+        self.assertEqual((completed["lifecycle"], completed["outcome_knowledge"]), ("Succeeded", "Known"), completed)
 
-        deadline = (datetime.now(timezone.utc) + timedelta(seconds=10)).isoformat().replace("+00:00", "Z")
+        # Keep this deadline below the deployment cap while allowing two real copies under CPU limits.
+        deadline = (datetime.now(timezone.utc) + timedelta(seconds=35)).isoformat().replace("+00:00", "Z")
         request = n.call("Task.Prepare", {
             "tool": "backup.create", "input": target(self.volume), "key": "requested-capture-deadline",
             "delegation_id": "owner-delegation", "deadline_at": deadline,
@@ -119,7 +121,8 @@ class BackupCaptureControlTests(unittest.TestCase):
         bounded = n.call("Task.Submit", request)["task_id"]
         self.observe_partial()
         self.assertLessEqual(datetime.fromisoformat(self.permit(bounded)["not_after"]), datetime.fromisoformat(deadline))
-        self.assertEqual(n.wait(bounded)["lifecycle"], "Succeeded")
+        completed = n.wait(bounded)
+        self.assertEqual((completed["lifecycle"], completed["outcome_knowledge"]), ("Succeeded", "Known"), completed)
 
     def test_revocation_interrupts_capture_and_invalid_window_is_rejected(self):
         n = self.n

@@ -1,5 +1,5 @@
 use crate::{
-    db::{Db, Doc, Store},
+    db::{Db, Store},
     host, policy, *,
 };
 use psios_api::{MAX_ARTIFACT_CHUNK, MAX_FRAME, Request, VERSION, contract};
@@ -19,16 +19,6 @@ struct ArtifactPage {
     length: usize,
 }
 
-fn owned_artifact(db: &Db<'_>, actor: &str, reference: &Value) -> Result<Doc> {
-    let d = db.resolve(reference)?;
-    require(
-        d.kind == "Artifact",
-        "InvalidArgument",
-        "expected result artifact",
-    )?;
-    policy::owned(actor, &d)?;
-    Ok(d)
-}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ToolCall {
@@ -134,28 +124,28 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
                 }
             }
         }
-        "Artifact.Read" => {
-            policy::can(db, actor, "task.read")?;
-            let p: Reference = decode(p)?;
-            let d = owned_artifact(db, actor, &p.reference)?;
-            artifact::read(db, &d, Some(MAX_FRAME))
-        }
-        "Artifact.Get" => {
-            policy::can(db, actor, "task.read")?;
-            let p: Reference = decode(p)?;
-            let d = owned_artifact(db, actor, &p.reference)?;
-            artifact::retention::describe(db, &d)
-        }
-        "Artifact.ReadChunk" => {
-            policy::can(db, actor, "task.read")?;
-            let p: ArtifactPage = decode(p)?;
-            require(
-                (1..=MAX_ARTIFACT_CHUNK).contains(&p.length),
-                "InvalidArgument",
-                "artifact chunk length must be 1 to 131072 bytes",
-            )?;
-            let d = owned_artifact(db, actor, &p.reference)?;
-            artifact::page(db, &d, p.offset, p.length)
+        "Artifact.Read" | "Artifact.Get" | "Artifact.ReadChunk" => {
+            let (reference, page) = if method == "Artifact.ReadChunk" {
+                let p: ArtifactPage = decode(p)?;
+                require(
+                    (1..=MAX_ARTIFACT_CHUNK).contains(&p.length),
+                    "InvalidArgument",
+                    "artifact chunk length must be 1 to 131072 bytes",
+                )?;
+                (p.reference, Some((p.offset, p.length)))
+            } else {
+                (decode::<Reference>(p)?.reference, None)
+            };
+            let (d, shared) = broker::result_access::resolve_artifact(db, actor, &reference)?;
+            let value = match page {
+                Some((offset, length)) => artifact::page(db, &d, offset, length)?,
+                None if method == "Artifact.Get" => artifact::retention::describe(db, &d, shared)?,
+                None => artifact::read(db, &d, Some(MAX_FRAME))?,
+            };
+            if shared {
+                broker::result_access::audit_read(db, actor, method, &d.id)?;
+            }
+            Ok(value)
         }
         "Artifact.RepairChunk" => artifact::repair::chunk(db, actor, p),
         "Secret.Rotate" => policy::secret_rotate(db, actor, p),
@@ -202,6 +192,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Task.History" => broker::history(db, actor, p),
         "Task.Archive" => broker::archive(db, actor, p),
         "Task.Get" => broker::get(db, actor, p, "Task"),
+        "Task.Results" => broker::result_access::get(db, actor, p),
         "Run.Get" => broker::get(db, actor, p, "Run"),
         "Operation.Reconcile" => broker::reconcile(db, actor, p),
         "Operation.Get" => broker::get(db, actor, p, "Operation"),

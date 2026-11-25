@@ -167,21 +167,33 @@ pub(super) fn tick(store: &mut Store) -> Result<()> {
             store.transaction(&correlation, |db| {
                 let schedule = db.of(&attempt.schedule, "Schedule")?;
                 schedule.cas(&attempt.version)?;
-                if error.0.code == "QueueFull" {
-                    return remember_pending(db, &schedule, &attempt.trigger);
-                }
-                let rule = decode(&schedule.spec["event"])?;
-                finish_trigger(
-                    db,
-                    &schedule,
-                    &rule,
-                    &attempt.trigger,
-                    "Rejected",
-                    Some(&error.0.code),
-                    None,
-                )
+                record_attempt_failure(db, &schedule, &attempt.trigger, &error)
             })
         }
+    }
+}
+
+fn record_attempt_failure(
+    db: &Db<'_>,
+    schedule: &Doc,
+    trigger: &Trigger,
+    error: &crate::Error,
+) -> Result<()> {
+    match error.0.code.as_str() {
+        "QueueFull" => remember_pending(db, schedule, trigger).map(|_| ()),
+        "DeadlineExceeded" => {
+            let schedule = remember_pending(db, schedule, trigger)?;
+            settle(db, &schedule, "Expired", Some("DeadlineExceeded"), None).map(|_| ())
+        }
+        reason => finish_trigger(
+            db,
+            schedule,
+            &decode(&schedule.spec["event"])?,
+            trigger,
+            "Rejected",
+            Some(reason),
+            None,
+        ),
     }
 }
 
@@ -358,15 +370,15 @@ fn require_same_event(pending: &Doc, event: &Trigger) -> Result<()> {
     )
 }
 
-fn remember_pending(db: &Db<'_>, schedule: &Doc, event: &Trigger) -> Result<()> {
+fn remember_pending(db: &Db<'_>, schedule: &Doc, event: &Trigger) -> Result<Doc> {
     if let Some(pending) = pending_trigger(db, schedule)? {
-        return require_same_event(&pending, event);
+        require_same_event(&pending, event)?;
+        return Ok(schedule.clone());
     }
     let pending = create_trigger(db, schedule, event, "Pending", None, None)?;
     let mut body = schedule.body.clone();
     body["pending_trigger_ref"] = pending.reference();
-    db.status(schedule, body)?;
-    Ok(())
+    db.status(schedule, body)
 }
 
 fn create_trigger(
@@ -476,4 +488,106 @@ fn finish_trigger(
         Some(&trigger.id),
         phase,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Config;
+    use psios_api::{Request, VERSION};
+
+    #[test]
+    fn crossing_the_admission_deadline_expires_the_selected_event() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = Config::local(&root.path().join("state"));
+        config.queue_limit = 1;
+        Store::init(&config).unwrap();
+        let token = std::fs::read_to_string(config.witness_dir.join("owner.token")).unwrap();
+        let mut store = Store::open(config).unwrap();
+        let call = |store: &mut Store, method: &str, params: Value| {
+            store
+                .request(
+                    rustix::process::geteuid().as_raw(),
+                    Request {
+                        schema_version: VERSION.into(),
+                        request_id: id("test"),
+                        method: method.into(),
+                        token: token.clone(),
+                        params,
+                    },
+                )
+                .unwrap()
+        };
+        let prepared = call(
+            &mut store,
+            "Task.Prepare",
+            json!({"key":"queue-blocker","tool":"system.status","input":{},"delegation_id":"owner-delegation"}),
+        );
+        call(&mut store, "Task.Submit", prepared);
+        let grant = call(
+            &mut store,
+            "Grant.Issue",
+            json!({"principal_id":policy::OWNER,"actions":["task.submit","task.read","resource.read",
+                "event.read","schedule.manage","system.status"],"units":2,"ttl_seconds":300,
+                "tool_targets":[policy::PROFILE]}),
+        );
+        for staged in [false, true] {
+            let node = call(&mut store, "Node.Get", json!({}))["reference"].clone();
+            let created = call(
+                &mut store,
+                "Schedule.Create",
+                json!({
+                    "key":id("schedule"),"delegation_id":grant["delegation_ref"]["resource_id"],
+                    "tool":"system.status","input":{},
+                    "event":{"source_ref":node,"condition":{"kind":"SpecChanged"},
+                             "expires_at":crate::after(120),"max_triggers":1}
+                }),
+            );
+            let cordon = call(
+                &mut store,
+                "Node.Configure",
+                json!({"expected_resource_version":node["version"],"scheduling":"Cordoned"}),
+            );
+            call(
+                &mut store,
+                "Node.Configure",
+                json!({"expected_resource_version":cordon["version"],"scheduling":"Enabled"}),
+            );
+
+            let mut rejected = None;
+            let blocked = store.transaction("queue-at-limit", |db| fire(db, &mut rejected));
+            assert_eq!(blocked.unwrap_err().0.code, "QueueFull");
+            let attempt = rejected.unwrap();
+            assert_eq!(created["reference"]["resource_id"], attempt.schedule);
+            store
+                .transaction("deadline-during-admission", |db| {
+                    let mut schedule = db.of(&attempt.schedule, "Schedule")?;
+                    if staged {
+                        schedule = remember_pending(db, &schedule, &attempt.trigger)?;
+                    }
+                    record_attempt_failure(
+                        db,
+                        &schedule,
+                        &attempt.trigger,
+                        &err("DeadlineExceeded", "task admission deadline passed"),
+                    )?;
+                    let result = db.of(&schedule.id, "Schedule")?;
+                    assert_eq!(result.body["lifecycle"], "Expired");
+                    assert!(result.body["pending_trigger_ref"].is_null());
+                    let trigger = db.resolve(&result.body["trigger_refs"][0])?;
+                    assert_eq!(trigger.id, attempt.trigger.id);
+                    assert_eq!(trigger.body["lifecycle"], "Expired");
+                    assert_eq!(trigger.body["source_event"]["resource_ref"], cordon);
+                    assert!(trigger.body["task_receipt"].is_null());
+                    let reserved = db.c.query_row(
+                        "SELECT reserved+spent FROM budgets WHERE id=?1",
+                        [grant["budget_ref"]["resource_id"].as_str().unwrap()],
+                        |row| row.get::<_, u32>(0),
+                    )?;
+                    assert_eq!(reserved, 0);
+                    Ok(())
+                })
+                .unwrap();
+        }
+    }
 }

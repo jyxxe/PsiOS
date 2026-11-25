@@ -190,7 +190,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = events::query::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = broker::result_access::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -399,6 +399,9 @@ impl Store {
                 }
                 if ver < events::query::FORMAT {
                     db.c.execute_batch(events::query::SCHEMA)?;
+                }
+                if ver < broker::result_access::FORMAT {
+                    db.c.execute_batch(broker::result_access::SCHEMA)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

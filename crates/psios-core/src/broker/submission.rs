@@ -319,7 +319,7 @@ fn submit_with_origin(
         "delegation has no available execution units",
     )?;
     let requirements = dependencies::requirements(&input)?;
-    let ready = dependencies::ready(db, actor, &requirements)?.is_some();
+    let ready = dependencies::ready(db, actor, &requirements, None)?.is_some();
     let plan = plan(db, actor, s, &audience)?;
     let task = id("task");
     let deadline_source = match source {
@@ -409,7 +409,7 @@ fn submit_with_origin(
             field(&d.body, "grant_id"),field(&plan.body,"deadline_at")
         ],
     )?;
-    dependencies::pin(db, &task, &requirements)?;
+    dependencies::pin(db, &t, &requirements)?;
     db.audit(actor, "Task.Accept", Some(&task), "Allowed")?;
     Ok(receipt)
 }

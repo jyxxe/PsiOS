@@ -199,6 +199,12 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 
 上游失败、摘要不匹配、已生效的结果回收、授权变化或截止均可让下游在派发前结束。未结算的下游保留上游制品，直到取消、失败或完成结算。修复标为不可用的上游制品后，先用 `Task.VerifyResults` 重新确认结果，再继续派发。[重启、审批与制品恢复验收](../tests/test_task_dependencies.py) · [格式 40 升级](../tests/task_dependencies_upgrade.py)
 
+### 跨主体读取和依赖
+
+管理员可为 Agent 签发 `task.results.read`，在 `tool_targets` 列出已有的生产 Task ID。读取方可用 `Task.Results`、`Client::task_results` 或 `psiosctl task-results ID` 查询生命周期、结果知识、修订、条件代码和制品引用。读取方可按原引用调用 `Artifact.Get`、`Artifact.Read` 或 `Artifact.ReadChunk`。Core 逐次核对当前授予的 Task 和制品修订，记录主体与读取目标。任务详情、历史、审批、事件以及制品修改各自沿用原授权。
+
+跨主体的 `requires` 在接受时保存实际使用的读取委托。审批、领取和派发时重新检查。撤销或到期会使尚未派发的下游释放制品保留和执行预算，包括节点处于 `Cordoned` 时。重新签发读取授权后可提交新下游。已派发的操作继续通过原 Operation 结算。授权按本机权威内的 Task ID 生效。[跨主体、撤权与到期验收](../tests/test_task_result_access.py) · [格式 44 升级](../tests/task_result_access_upgrade.py)
+
 ## 任务调度
 
 `Schedule.Create` 为本机 Task 保存一个未来触发时间和截止时间。两者接受带时区偏移的 RFC 3339 时间并转为 UTC，触发依据节点墙钟。授予 `schedule.manage`、`task.submit`、`task.read` 及选定工具，并将权限限制在该工具的目标资源。截止时间须在委托有效期内。同一主体以相同 `key` 重发等价请求会取回原调度状态。输入、授权或时间改变时需要新键。

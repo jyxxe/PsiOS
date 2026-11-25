@@ -67,8 +67,11 @@ def main(previous):
             raise AssertionError("migration widened an existing agent grant")
         assert n.call("Budget.Get", {"id": g["budget_ref"]["resource_id"]}, credential)["model_calls_maximum"] == 0
         n.stop()
+        upgraded = json.loads(subprocess.check_output(n.daemon + ["verify"], timeout=15))
+        assert upgraded["database_format"] > report["database_format"], upgraded
+        assert not upgraded["migration_required"] and upgraded["node_id"] == authority, upgraded
         with sqlite3.connect(n.state / "state.db") as db:
-            assert db.execute("PRAGMA user_version").fetchone() == (44,)
+            assert db.execute("PRAGMA user_version").fetchone() == (upgraded["database_format"],)
         old = subprocess.run([str(Path(previous) / "psiosd"), "--config", n.config, "serve"], capture_output=True)
         assert old.returncode != 0 and b"SchemaVersionUnsupported" in old.stderr
         n.start()

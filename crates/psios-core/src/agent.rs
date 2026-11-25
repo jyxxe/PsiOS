@@ -1,4 +1,5 @@
 //! The local runtime coordinates model decisions with (and never independently executes) broker Tasks.
+pub(crate) mod fallback;
 mod lease;
 pub mod mail;
 pub(crate) mod model_time;
@@ -25,6 +26,8 @@ pub(crate) struct SessionBlueprint {
     goal: String,
     skill_ref: Value,
     model_ref: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    fallback_model_refs: Vec<Value>,
     context_policy: String,
     max_turns: u32,
 }
@@ -43,11 +46,23 @@ impl SessionBlueprint {
     pub(crate) fn validate(&self) -> Result<()> {
         let _: psios_api::ResourceRef = decode(&self.skill_ref)?;
         let _: psios_api::ResourceRef = decode(&self.model_ref)?;
-        session_limits(&self.goal, &self.context_policy, self.max_turns)
+        session_limits(&self.goal, &self.context_policy, self.max_turns)?;
+        fallback::validate(
+            &self.model_ref,
+            &self.fallback_model_refs,
+            &self.context_policy,
+        )
     }
 
     pub(crate) fn model(&self, db: &Db<'_>) -> Result<Doc> {
         registry::pinned(db, &self.model_ref, "Model")
+    }
+
+    pub(crate) fn fallback_models(&self, db: &Db<'_>) -> Result<Vec<Doc>> {
+        self.fallback_model_refs
+            .iter()
+            .map(|r| registry::pinned(db, r, "Model"))
+            .collect()
     }
 
     pub(crate) fn skill(&self, db: &Db<'_>) -> Result<Doc> {
@@ -64,6 +79,8 @@ struct Open {
     delegation_id: String,
     skill_ref: Value,
     model_ref: Value,
+    #[serde(default)]
+    fallback_model_refs: Vec<Value>,
     context_policy: String,
     max_turns: u32,
     #[serde(default)]
@@ -124,6 +141,7 @@ fn open_session(db: &Db<'_>, actor: &str, p: &Value, origin_task: Option<&Doc>) 
     label(&o.key)?;
     label(&o.delegation_id)?;
     session_limits(&o.goal, &o.context_policy, o.max_turns)?;
+    fallback::validate(&o.model_ref, &o.fallback_model_refs, &o.context_policy)?;
     let d = policy::delegation(db, actor, &o.delegation_id, "session.run")?;
     let mut spec = p.clone();
     let identity = if let Some(task) = origin_task {
@@ -158,8 +176,12 @@ fn open_session(db: &Db<'_>, actor: &str, p: &Value, origin_task: Option<&Doc>) 
     if let Some(task) = origin_task {
         state["origin_task_ref"] = task.reference();
     }
+    if !o.fallback_model_refs.is_empty() {
+        state["fallback_model_refs"] = json!(o.fallback_model_refs);
+    }
     let session = db.create("Session", &sid, actor, spec, state)?;
-    deps(db, &session)?;
+    let (_, _, model) = deps(db, &session)?;
+    fallback::check_open(db, &session, &model, &o.fallback_model_refs)?;
     if let Some(r) = o.trigger_signal_ref {
         mail::consume(db, actor, &r, &session.id)?;
     }
@@ -267,14 +289,19 @@ struct Claim {
     session_id: String,
     key: String,
 }
-fn provider(db: &Db<'_>, s: &Doc, actor: &str) -> Result<(Doc, Doc, Doc)> {
-    policy::can(db, actor, "model.serve")?;
+fn provider_model(db: &Db<'_>, s: &Doc, actor: &str) -> Result<Doc> {
     let m = db.resolve(&s.spec["model_ref"])?;
     require(
-        m.spec["provider_principal_id"] == actor,
+        m.kind == "Model" && m.spec["provider_principal_id"] == actor,
         "PermissionDenied",
         "session bound to another provider",
     )?;
+    policy::can_target(db, actor, "model.serve", &m.id)?;
+    Ok(m)
+}
+
+fn provider(db: &Db<'_>, s: &Doc, actor: &str) -> Result<(Doc, Doc, Doc)> {
+    provider_model(db, s, actor)?;
     deps(db, s)
 }
 fn context(db: &Db<'_>, s: &Doc, skill: &Doc, model: &Doc) -> Result<Value> {
@@ -528,6 +555,19 @@ fn settle_usage(
 pub fn respond(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let p: Respond = decode(p)?;
     let s = db.of(&p.session_id, "Session")?;
+    if s.body["successor_ref"].is_object() {
+        provider_model(db, &s, actor)?;
+        let pending: bool = db.c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_turns WHERE session=?1 AND lease=?2 AND receipt IS NULL)",
+            params![s.id,p.lease_id],
+            |row| row.get(0),
+        )?;
+        require(
+            !pending,
+            "Fenced",
+            "the model lease was closed by a session handoff",
+        )?;
+    }
     let (delegation, skill, model) = provider(db, &s, actor)?;
     let bytes = canonical(&p.decision);
     require(
@@ -669,6 +709,9 @@ pub(crate) fn session_for_task(db: &Db<'_>, tid: &str) -> Result<Option<String>>
         .optional()?)
 }
 pub(crate) fn retains_result(db: &Db<'_>, task: &Doc) -> Result<bool> {
+    if fallback::retains_result(db, &task.id)? {
+        return Ok(true);
+    }
     let Some(id) = session_for_task(db, &task.id)? else {
         return Ok(false);
     };

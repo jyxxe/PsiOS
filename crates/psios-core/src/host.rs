@@ -233,7 +233,10 @@ impl Action {
     ) -> Result<Vec<Value>> {
         let mut resources = vec![primary.reference()];
         match self {
-            Self::StartAgentSession(blueprint) => resources.push(blueprint.skill(db)?.reference()),
+            Self::StartAgentSession(blueprint) => {
+                resources.push(blueprint.skill(db)?.reference());
+                resources.extend(blueprint.fallback_models(db)?.iter().map(Doc::reference));
+            }
             Self::Start(_) | Self::Stop(_) | Self::RestartApp(_) | Self::InspectOciInstance(_)
                 if primary.spec["volume_id"].is_string() =>
             {

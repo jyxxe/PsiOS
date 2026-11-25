@@ -98,6 +98,31 @@ class RuntimeTests(unittest.TestCase):
         budget = n.call("Budget.Get", {"id": self.grant["budget_ref"]["resource_id"]}, self.token)
         self.assertEqual(budget["model_calls_used"], 1)
 
+    def test_agent_keeps_latest_local_result_while_a_paused_session_can_resume(self):
+        n = self.n
+        sid = self.open(max_turns=1)
+        lease = self.claim(sid, "observe")
+        result = self.respond(sid, lease["lease_id"], dict(action="tool", tool="node.inventory", input={}))
+        task = n.wait(result["task_id"])
+        reference, = task["result"]["artifact_refs"]
+        body = n.call("Artifact.Read", {"reference": reference}, self.token)
+        request = {"id": task["task_id"], "expected_resource_version": task["task_revision"], "reason": "finished"}
+        paused = n.call("Session.Get", {"id": sid}, self.token)
+        self.assertEqual(paused["session"]["pause_reason"], "ModelTurnLimit")
+        self.denied("Conflict", n.call, "Task.EvictResults", request)
+        n.stop(signal.SIGKILL)
+        n.start()
+        self.denied("Conflict", n.call, "Task.EvictResults", request)
+        n.call("Session.Extend", {**target(paused["reference"]), "max_turns": 2}, self.token)
+        resumed = self.claim(sid, "consume")
+        self.assertEqual(resumed["context"]["last_tool"]["local_tool_result"], body)
+        done = self.respond(sid, resumed["lease_id"], {"action": "finish", "summary": "Inventory saved"})
+        self.assertEqual(done["lifecycle"], "Succeeded")
+        n.call("Task.EvictResults", request)
+        described = n.call("Artifact.Get", {"reference": reference}, self.token)
+        self.assertEqual(described["availability"], "Evicted")
+        self.denied("ResultEvicted", n.call, "Artifact.Read", {"reference": reference}, self.token)
+
     def test_durable_provider_delivery_survives_both_sides_of_the_response(self):
         n = self.n
         pending = n.base / "provider"

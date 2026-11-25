@@ -416,7 +416,7 @@ fn workflow_step_inherits_the_runs_elapsed_deadline() {
 }
 
 #[test]
-fn workflow_keeps_the_materialized_artifact_input_across_restart() {
+fn workflow_resumes_a_missing_artifact_and_keeps_pinned_input_after_restart() {
     let tmp = tempfile::tempdir().unwrap();
     let (cfg, mut store) = initialized(tmp.path());
     let creation = submit(&mut store, "volume.create", json!({"name":"mapped-result"}));
@@ -453,8 +453,64 @@ fn workflow_keeps_the_materialized_artifact_input_across_restart() {
         .as_str()
         .unwrap();
     let snapshot = execute(&mut store, source);
+    let source_task = call(&mut store, "Task.Get", json!({"id":source})).unwrap();
+    let artifact = source_task["result"]["artifact_refs"][0]["resource_id"]
+        .as_str()
+        .unwrap();
+    let (revision, bytes): (i64, Vec<u8>) = store
+        .transaction("simulate-missing-artifact-chunk", |db| {
+            Ok(db.c.query_row(
+                "DELETE FROM artifact_chunks WHERE artifact_id=?1 AND chunk_index=0
+                 RETURNING artifact_rev,payload",
+                [artifact],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?)
+        })
+        .unwrap();
     workflow::tick(&mut store).unwrap();
     workflow::tick(&mut store).unwrap();
+    let waiting = call(&mut store, "Workflow.Get", lookup.clone()).unwrap();
+    assert_eq!(waiting["state"]["lifecycle"], "Blocked");
+    assert_eq!(waiting["state"]["reason"], "ResultUnavailable");
+    assert!(waiting["state"]["steps"][1]["task_receipt"].is_null());
+    let mut resume = lookup.clone();
+    resume["expected_resource_version"] = waiting["reference"]["version"].clone();
+    drop(store);
+
+    let mut store = Store::open(cfg.clone()).unwrap();
+    workflow::tick(&mut store).unwrap();
+    assert_eq!(
+        call(&mut store, "Workflow.Get", lookup.clone()).unwrap(),
+        waiting
+    );
+    call(&mut store, "Workflow.Resume", resume.clone()).unwrap();
+    workflow::tick(&mut store).unwrap();
+    let blocked = call(&mut store, "Workflow.Get", lookup.clone()).unwrap();
+    assert_eq!(blocked["state"]["reason"], "ResultUnavailable");
+    assert!(blocked["state"]["steps"][1]["task_receipt"].is_null());
+    assert_eq!(
+        call(&mut store, "Workflow.Resume", resume.clone())
+            .unwrap_err()
+            .0
+            .code,
+        "Conflict"
+    );
+    store
+        .transaction("restore-original-artifact-bytes", |db| {
+            db.c.execute(
+                "INSERT INTO artifact_chunks VALUES(?1,?2,0,?3)",
+                rusqlite::params![artifact, revision, bytes],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    resume["expected_resource_version"] = blocked["reference"]["version"].clone();
+    call(&mut store, "Workflow.Resume", resume).unwrap();
+    workflow::tick(&mut store).unwrap();
+    assert_eq!(
+        call(&mut store, "Task.Get", json!({"id":source})).unwrap(),
+        source_task
+    );
     let pinned = call(&mut store, "Workflow.Get", lookup.clone()).unwrap();
     let binding = &pinned["state"]["steps"][1]["input_binding"];
     assert_eq!(
@@ -1168,6 +1224,25 @@ fn interrupted_backup_requires_verified_original_publication() {
 
     let settled = call(&mut s, "Operation.Reconcile", reconcile).unwrap();
     assert_eq!(settled["outcome_knowledge"], "Known");
+    let used = call(&mut s, "Task.Get", json!({"id":refreshed})).unwrap();
+    assert_eq!(
+        call(
+            &mut s,
+            "Task.EvictResults",
+            json!({"id":refreshed,"expected_resource_version":used["task_revision"],"reason":"expiry"}),
+        )
+        .unwrap_err()
+        .0
+        .code,
+        "Conflict"
+    );
+    let unused = call(&mut s, "Task.Get", json!({"id":inspection})).unwrap();
+    call(
+        &mut s,
+        "Task.EvictResults",
+        json!({"id":inspection,"expected_resource_version":unused["task_revision"],"reason":"expiry"}),
+    )
+    .unwrap();
     let task = call(&mut s, "Task.Get", json!({"id":backup})).unwrap();
     assert_eq!(task["lifecycle"], "Succeeded");
     let original = call(

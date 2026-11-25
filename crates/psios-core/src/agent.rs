@@ -608,6 +608,20 @@ pub(crate) fn session_for_task(db: &Db<'_>, tid: &str) -> Result<Option<String>>
         )
         .optional()?)
 }
+pub(crate) fn retains_result(db: &Db<'_>, task: &Doc) -> Result<bool> {
+    let Some(id) = session_for_task(db, &task.id)? else {
+        return Ok(false);
+    };
+    let session = db.of(&id, "Session")?;
+    require(
+        session.owner == task.owner,
+        "RecoveryRequired",
+        "session owner disagrees with its tool task",
+    )?;
+    Ok(session.body["last_task"] == task.id
+        && session.spec["context_policy"] == "LocalToolResults"
+        && !matches!(state(&session), "Failed" | "Succeeded" | "Cancelled"))
+}
 pub fn snapshot(db: &Db<'_>, t: &Doc, plan: &Doc) -> Result<Value> {
     let mut b = json!({"runtime":"psios.local.task.v2","checkpoint_version":"1","input_ref":t.spec["input_ref"],
         "plan_ref":plan.reference(),"plan_digest":plan.body["plan_digest"],"tool_refs":plan.body["runtime_refs"],

@@ -21,6 +21,10 @@ struct Rejection {
     step: String,
 }
 
+fn result_block(code: &str) -> bool {
+    matches!(code, "ResultEvicted" | "ResultUnavailable")
+}
+
 pub fn cancel(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     let request: Conditional = decode(params)?;
     policy::can(db, actor, "task.submit")?;
@@ -36,6 +40,53 @@ pub fn cancel(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         .optional()?
         .ok_or_else(|| err("Conflict", "workflow is already stopping or settled"))?;
     Ok(run_view(&stop(db, &run, task.as_deref(), "Cancelled")?))
+}
+
+pub fn resume(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
+    let request: Conditional = decode(params)?;
+    policy::can(db, actor, "task.submit")?;
+    let run = db.of(&request.id, RUN)?;
+    policy::owned(actor, &run)?;
+    run.cas(&request.expected_resource_version)?;
+    let reason = run.body["reason"].as_str().unwrap_or_default();
+    require(
+        run.body["lifecycle"] == "Blocked" && result_block(reason),
+        "PreconditionFailed",
+        "workflow is not waiting for a predecessor result",
+    )?;
+    let delegation = run.spec["delegation_id"]
+        .as_str()
+        .ok_or_else(|| err("RecoveryRequired", "workflow delegation missing"))?;
+    policy::delegation(db, &run.owner, delegation, ACTION)?;
+    policy::delegation(db, &run.owner, delegation, "task.read")?;
+    let mut body = run.body.clone();
+    let step = body["steps"]
+        .as_array_mut()
+        .and_then(|steps| {
+            steps
+                .iter_mut()
+                .find(|step| step["lifecycle"] == "Blocked" && step["reason"] == reason)
+        })
+        .ok_or_else(|| {
+            err(
+                "RecoveryRequired",
+                "workflow result wait has no blocked step",
+            )
+        })?;
+    step["lifecycle"] = json!("Pending");
+    step["reason"] = Value::Null;
+    body["lifecycle"] = json!("Ready");
+    body["reason"] = Value::Null;
+    require(
+        db.c.execute(
+            "UPDATE active_workflows SET result_blocked=0,ready_ms=?2
+             WHERE run=?1 AND task IS NULL AND stopping=0 AND result_blocked=1",
+            params![run.id, Utc::now().timestamp_millis()],
+        )? == 1,
+        "RecoveryRequired",
+        "workflow result wait has no active entry",
+    )?;
+    Ok(run_view(&db.status(&run, body)?))
 }
 
 pub fn tick(store: &mut Store) -> Result<()> {
@@ -57,6 +108,8 @@ pub fn tick(store: &mut Store) -> Result<()> {
                     | "NotFound"
                     | "UnsupportedCapability"
                     | "DeadlineExceeded"
+                    | "ResultEvicted"
+                    | "ResultUnavailable"
             ) {
                 return Err(error);
             }
@@ -67,6 +120,23 @@ pub fn tick(store: &mut Store) -> Result<()> {
                 run.cas(&rejection.version)?;
                 let mut body = run.body.clone();
                 let step = progress(&mut body, &rejection.step)?;
+                if result_block(&error.0.code) {
+                    step["lifecycle"] = json!("Blocked");
+                    step["reason"] = json!(error.0.code);
+                    body["lifecycle"] = json!("Blocked");
+                    body["reason"] = json!(error.0.code);
+                    require(
+                        db.c.execute(
+                            "UPDATE active_workflows SET result_blocked=1
+                             WHERE run=?1 AND task IS NULL AND stopping=0 AND result_blocked=0",
+                            [&run.id],
+                        )? == 1,
+                        "RecoveryRequired",
+                        "workflow result wait lacks its ready entry",
+                    )?;
+                    db.status(&run, body)?;
+                    return Ok(());
+                }
                 step["lifecycle"] = json!("Failed");
                 step["reason"] = json!(error.0.code);
                 finish(db, &run, body, "Failed", Some(&error.0.code))?;
@@ -95,8 +165,9 @@ fn advance(db: &Db<'_>, rejection: &mut Option<Rejection>) -> Result<()> {
                        ON elapsed.resource=w.run AND elapsed.boot_id=?2
              )
              SELECT w.run,w.task,w.expired FROM candidates w
-             WHERE w.expired OR w.task IS NULL OR w.task_rev != COALESCE(
-                 (SELECT rev FROM versions WHERE id=w.task ORDER BY rev DESC LIMIT 1),-1)
+             WHERE w.expired OR (w.result_blocked=0 AND
+                 (w.task IS NULL OR w.task_rev != COALESCE(
+                  (SELECT rev FROM versions WHERE id=w.task ORDER BY rev DESC LIMIT 1),-1)))
              ORDER BY w.expired DESC, (w.task IS NOT NULL) DESC, w.ready_ms,w.run LIMIT 1",
             params![stamp, clock.boot.boot_id, clock.time_ns, clock.boot.millis],
             |row| {

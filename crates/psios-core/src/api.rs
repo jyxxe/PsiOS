@@ -139,6 +139,12 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
             let d = owned_artifact(db, actor, &p.reference)?;
             artifact::read(db, &d, Some(MAX_FRAME))
         }
+        "Artifact.Get" => {
+            policy::can(db, actor, "task.read")?;
+            let p: Reference = decode(p)?;
+            let d = owned_artifact(db, actor, &p.reference)?;
+            artifact::retention::describe(db, &d)
+        }
         "Artifact.ReadChunk" => {
             policy::can(db, actor, "task.read")?;
             let p: ArtifactPage = decode(p)?;
@@ -165,6 +171,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Workflow.Start" => workflow::start(db, actor, p),
         "Workflow.Get" => workflow::get(db, actor, p, "WorkflowRun"),
         "Workflow.Cancel" => workflow::cancel(db, actor, p),
+        "Workflow.Resume" => workflow::resume(db, actor, p),
         "Conversation.OpenDirect" => chat::open(db, actor, p),
         "Conversation.OpenRoom" => chat::open_room(db, actor, p),
         "Conversation.List" => chat::list(db, actor, p),
@@ -183,6 +190,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Message.Get" => chat::get_message(db, actor, p),
         "Message.AckRead" => chat::ack(db, actor, p),
         "Task.Prepare" => broker::prepare(db, actor, p),
+        "Task.EvictResults" => artifact::retention::evict(db, actor, p),
         "Task.Submit" => broker::submit(db, actor, p, None),
         "Task.LookupSubmission" => broker::lookup(db, actor, p),
         "Task.Cancel" => broker::cancel(db, actor, p),
@@ -256,6 +264,7 @@ impl Store {
                     | "Workflow.Define"
                     | "Workflow.Start"
                     | "Workflow.Cancel"
+                    | "Workflow.Resume"
                     | "Conversation.OpenDirect"
                     | "Conversation.OpenRoom"
                     | "Conversation.Invite"

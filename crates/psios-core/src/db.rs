@@ -104,6 +104,15 @@ pub(crate) fn row(r: &Row<'_>) -> rusqlite::Result<Doc> {
         stamp: r.get("stamp")?,
     })
 }
+pub(crate) fn find(conn: &Connection, id: &str) -> Result<Option<Doc>> {
+    Ok(conn
+        .query_row(
+            "SELECT * FROM versions WHERE id=?1 ORDER BY rev DESC LIMIT 1",
+            [id],
+            row,
+        )
+        .optional()?)
+}
 fn token() -> String {
     format!(
         "{}{}",
@@ -164,7 +173,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     Ok(bytes)
 }
 // Older writers cannot dispatch workflow steps with pinned input mappings.
-pub(super) const CURRENT_FORMAT: u32 = 30;
+pub(super) const CURRENT_FORMAT: u32 = 31;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -347,6 +356,9 @@ impl Store {
                 if ver < artifact::FORMAT {
                     db.c.execute_batch(include_str!("artifact.sql"))?;
                 }
+                if ver < artifact::retention::FORMAT {
+                    db.c.execute_batch(include_str!("artifact/retention.sql"))?;
+                }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;
         }
@@ -439,14 +451,7 @@ impl Db<'_> {
             .query_row("SELECT value FROM meta WHERE key=?1", [key], |r| r.get(0))?)
     }
     pub fn find(&self, id: &str) -> Result<Option<Doc>> {
-        Ok(self
-            .c
-            .query_row(
-                "SELECT * FROM versions WHERE id=?1 ORDER BY rev DESC LIMIT 1",
-                [id],
-                row,
-            )
-            .optional()?)
+        find(self.c, id)
     }
     pub fn get(&self, id: &str) -> Result<Doc> {
         self.find(id)?

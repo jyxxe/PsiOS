@@ -823,7 +823,7 @@ pub fn retry_task(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "PermissionDenied",
         "only session principal may retry its task",
     )?;
-    deps(db, &s)?;
+    let (_, _, model) = deps(db, &s)?;
     let previous = db.of(&req.task_id, "Task")?;
     require(
         session_for_task(db, &previous.id)?.as_deref() == Some(&s.id),
@@ -858,6 +858,8 @@ pub fn retry_task(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "QuotaExceeded",
         "turn tool retry limit exhausted",
     )?;
+    let mut b = s.body.clone();
+    tool_context::prepare_retry(db, &s, &model, &previous, turn, &mut b)?;
     let accepted = broker::retry_in_session(
         db,
         actor,
@@ -868,7 +870,6 @@ pub fn retry_task(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "INSERT INTO session_tasks VALUES(?1,?2,?3,?4)",
         params![task, s.id, turn, attempt + 1],
     )?;
-    let mut b = s.body.clone();
     b["last_task"] = json!(task);
     b["lifecycle"] = json!("WaitingTask");
     b["result"] = Value::Null;

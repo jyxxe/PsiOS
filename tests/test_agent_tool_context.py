@@ -1,5 +1,6 @@
 """Exercise bounded context, lease replay, and artifact retention through the native Unix API."""
 from contextlib import closing
+import json
 import os
 import signal
 import sqlite3
@@ -74,7 +75,8 @@ class AgentToolContext(unittest.TestCase):
 
     def test_two_tools_replay_exactly_after_crash_and_release_expired_retention(self):
         n = self.node
-        session = self.open(tool_context_window=2)
+        session = self.open(tool_context_window=2, max_turns=4)
+        n.call("Session.Extend", {**target(session), "max_turns": 5}, self.agent["token"])
         first_claim = self.claim("first")
         self.assertEqual(first_claim["context"]["previous_tools"], [])
         self.assertIsNone(first_claim["context"]["last_tool"])
@@ -146,6 +148,84 @@ class AgentToolContext(unittest.TestCase):
         self.assertEqual([item["task_id"] for item in history["tasks"]], [first, second, new_task])
         self.assertEqual(history["turns"][2]["context_digest"], third["context_digest"])
         n.stop()
+        with closing(sqlite3.connect(db_path)) as c, c:
+            stored, = c.execute("SELECT session_ref FROM model_context_snapshots WHERE lease=?",
+                                (first_claim["lease_id"],)).fetchone()
+            self.assertNotEqual(json.loads(stored), session)
+            c.execute("UPDATE model_context_snapshots SET session_ref=? WHERE lease=?",
+                      (json.dumps(session), first_claim["lease_id"]))
+        invalid = subprocess.run(n.daemon + ["verify"], timeout=20, capture_output=True)
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertIn(b"model lease context disagrees with its original session and usage", invalid.stderr)
+        with closing(sqlite3.connect(db_path)) as c, c:
+            c.execute("UPDATE model_context_snapshots SET session_ref=? WHERE lease=?",
+                      (stored, first_claim["lease_id"]))
+        subprocess.run(n.daemon + ["verify"], timeout=20, check=True, capture_output=True)
+
+    def test_retry_drops_only_verified_evictions_from_the_failed_sessions_window(self):
+        n = self.node
+        self.tools.append("volume.read")
+        self.skill = n.call("Skill.Publish", {
+            "name": "retry-context", "version": "1", "source": "local-test", "license": "0BSD",
+            "instructions": "Collect two observations before reading the owned volume.", "tools": self.tools,
+        })
+        self.grant = self.grant_for(["volume.create"])
+        token = self.agent["token"]
+        delegation = self.grant["delegation_ref"]["resource_id"]
+        created = n.prepare("volume.create", {"name": "retry-context-volume"}, token=token, delegation=delegation)
+        made = n.wait(n.call("Task.Submit", created, token)["task_id"])
+        self.assertEqual(made["lifecycle"], "Succeeded", made)
+        volume, = made["result"]["artifact_refs"]
+        volume = n.call("Artifact.Read", {"reference": volume}, token)
+        volume = n.perform("volume.write", {**target(volume), "name": "record", "content": "ready"})["volume_ref"]
+        directory = n.state / "volumes" / volume["resource_id"] / "data"
+        hidden = directory.with_name("temporarily-unmounted")
+
+        session = self.open(tool_context_window=3)
+        evicted, _ = self.observe(self.claim(), self.tools[0])
+        retained, retained_ref = self.observe(self.claim(), self.tools[1])
+        lease = self.claim()
+        directory.rename(hidden)
+        try:
+            failing = self.decision(lease, {"action": "tool", "tool": "volume.read",
+                                           "input": {**target(volume), "name": "record"}})["task_id"]
+            self.assertEqual(n.wait(failing)["lifecycle"], "Failed")
+        finally:
+            hidden.rename(directory)
+        state = n.call("Session.Get", {"id": session["resource_id"]}, token)
+        self.assertEqual(state["session"]["lifecycle"], "Failed")
+        self.evict(evicted)
+        retry = {**target(state["reference"]), "task_id": failing, "key": key()}
+
+        n.stop()
+        db_path = n.state / "state.db"
+        chunk = (retained_ref["resource_id"],)
+        with closing(sqlite3.connect(db_path)) as c, c:
+            original, = c.execute("SELECT payload FROM artifact_chunks WHERE artifact_id=? AND chunk_index=0",
+                                  chunk).fetchone()
+            c.execute("UPDATE artifact_chunks SET payload=zeroblob(length(payload)) "
+                      "WHERE artifact_id=? AND chunk_index=0", chunk)
+        n.start()
+        with self.assertRaises(Failure) as unavailable:
+            n.call("Session.RetryTask", retry, token)
+        self.assertEqual(unavailable.exception.code, "ResultUnavailable")
+        self.assertEqual(n.call("Session.Get", {"id": session["resource_id"]}, token), state)
+        n.stop()
+        with closing(sqlite3.connect(db_path)) as c, c:
+            c.execute("UPDATE artifact_chunks SET payload=? WHERE artifact_id=? AND chunk_index=0",
+                      (original, *chunk))
+        n.start()
+        retried = n.call("Session.RetryTask", retry, token)["task_id"]
+        succeeded = n.wait(retried)
+        self.assertEqual(succeeded["lifecycle"], "Succeeded", succeeded)
+        self.assertEqual(n.call("Session.RetryTask", retry, token), {"task_id": retried, "deduplicated": True})
+        next_turn = self.claim()
+        previous, = next_turn["context"]["previous_tools"]
+        self.assertEqual(previous["task_id"], retained)
+        latest = next_turn["context"]["last_tool"]
+        self.assertEqual((latest["task_id"], latest["attempt"], latest["local_tool_result"]["content"]),
+                         (retried, 2, "ready"))
+        n.stop()
         subprocess.run(n.daemon + ["verify"], timeout=20, check=True, capture_output=True)
 
     def test_reference_window_preserves_order_across_explicit_scoped_model_handoff(self):
@@ -198,6 +278,24 @@ class AgentToolContext(unittest.TestCase):
         n.start()
         self.assertEqual(self.claim(), {"available": False})
         self.assertEqual(self.budget(), 1)
+
+    def test_damaged_session_context_does_not_block_another_provider_claim(self):
+        n = self.node
+        damaged = self.open(tool_context_window=2)
+        self.observe(self.claim(), self.tools[0])
+        healthy = self.open(tool_context_window=2)
+        n.stop()
+        with closing(sqlite3.connect(n.state / "state.db")) as c, c:
+            c.execute("UPDATE versions SET body=json_set(body,'$.tool_context_refs[0].source_session_id','unrelated') "
+                      "WHERE id=? AND rev=(SELECT max(rev) FROM versions WHERE id=?)",
+                      (damaged["resource_id"], damaged["resource_id"]))
+        n.start()
+        available = self.claim()
+        self.assertEqual(available["session_id"], healthy["resource_id"])
+        paused = n.call("Session.Get", {"id": damaged["resource_id"]}, self.agent["token"])
+        self.assertEqual((paused["session"]["lifecycle"], paused["session"]["pause_reason"]),
+                         ("Paused", "ModelContextCheckpointInvalid"))
+        self.assertEqual(self.budget(), 2)
 
 
 if __name__ == "__main__":

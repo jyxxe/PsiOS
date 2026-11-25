@@ -197,6 +197,67 @@ fn context_limit(model: &Doc) -> Result<usize> {
     decode(&model.spec["max_context_bytes"])
 }
 
+fn current_result(conn: &Connection, pinned: &Doc) -> Result<()> {
+    let current = find(conn, &pinned.id)?.ok_or_else(|| {
+        err(
+            "ResultUnavailable",
+            "current session tool result is unavailable",
+        )
+    })?;
+    require(
+        current.kind == "Task"
+            && current.owner == pinned.owner
+            && current.body["lifecycle"] == "Succeeded"
+            && current.body["outcome_knowledge"] == "Known"
+            && current.body["result"]["artifact_refs"] == pinned.body["result"]["artifact_refs"],
+        "RecoveryRequired",
+        "current session result differs from the pinned artifact",
+    )?;
+    artifact::require_task_result(&current.body["result"])?;
+    require(
+        current.body["result"]["availability"] == "Available",
+        "RecoveryRequired",
+        "current session result has invalid availability",
+    )
+}
+
+pub(super) fn prepare_retry(
+    db: &Db<'_>,
+    session: &Doc,
+    model: &Doc,
+    failed: &Doc,
+    turn: u32,
+    state: &mut Value,
+) -> Result<()> {
+    if !enabled(session) {
+        return Ok(());
+    }
+    let origins = origins(db.c, session)?;
+    let mut kept = Vec::new();
+    let mut remaining = context_limit(model)?;
+    for entry in entries(session)? {
+        require(
+            entry.turn < turn && entry.task_ref.resource_id != failed.id,
+            "RecoveryRequired",
+            "session retry context contains its unsuccessful turn",
+        )?;
+        let (task, artifact, plan) = source(db.c, session, &origins, &entry)?;
+        live_access(db, &session.owner, &task, &plan)?;
+        if session.spec["context_policy"] == "LocalToolResults" {
+            match artifact::retention::require_content(db.c, &artifact) {
+                Err(e) if e.0.code == "ResultEvicted" => continue,
+                other => other?,
+            }
+            current_result(db.c, &task)?;
+            artifact::availability::verify_bytes(db, &artifact, &mut remaining)
+                .map_err(artifact::dependency_error)?;
+        }
+        kept.push(entry);
+    }
+    state[HISTORY] = json!(kept);
+    Ok(())
+}
+
 pub(super) fn bound(context: &Value, maximum: usize) -> Result<()> {
     require(
         canonical(context).len() <= maximum,
@@ -252,21 +313,7 @@ fn projected(
         bound(&context, maximum)?;
         if session.spec["context_policy"] == "LocalToolResults" {
             if db.is_some() {
-                let current = find(conn, &task.id)?.ok_or_else(|| {
-                    err(
-                        "ResultUnavailable",
-                        "current session tool result is unavailable",
-                    )
-                })?;
-                require(
-                    current.kind == "Task"
-                        && current.owner == task.owner
-                        && current.body["result"]["artifact_refs"]
-                            == task.body["result"]["artifact_refs"],
-                    "RecoveryRequired",
-                    "current session result differs from the pinned artifact",
-                )?;
-                artifact::require_task_result(&current.body["result"])?;
+                current_result(conn, &task)?;
             }
             let remaining = maximum - canonical(&context).len();
             let bytes = artifact::checkpoint_bytes(conn, &artifact, remaining)
@@ -325,6 +372,19 @@ fn checkpoint(
 ) -> Result<Doc> {
     let pinned = resolve(conn, &recorded.session_ref)?;
     let usage = resolve(conn, &recorded.usage_ref)?;
+    let dispatched = conn
+        .query_row(
+            "SELECT * FROM versions WHERE id=?1 AND rev=?2",
+            params![pinned.id, pinned.rev.checked_add(1)],
+            row,
+        )
+        .optional()?
+        .ok_or_else(|| {
+            err(
+                "RecoveryRequired",
+                "model context has no adjacent dispatched session revision",
+            )
+        })?;
     let digest_valid = recorded
         .digest
         .strip_prefix("sha256:")
@@ -344,6 +404,13 @@ fn checkpoint(
                 .as_u64()
                 .and_then(|old| old.checked_add(1))
                 == Some(u64::from(turn))
+            && dispatched.kind == "Session"
+            && dispatched.owner == pinned.owner
+            && dispatched.spec == pinned.spec
+            && state(&dispatched) == "ModelInFlight"
+            && dispatched.body["turn"] == turn
+            && dispatched.body["current_lease"] == lease
+            && dispatched.body["current_usage_ref"] == recorded.usage_ref
             && digest_valid
             && usage.kind == "ModelUsage"
             && usage.owner == session.owner

@@ -202,7 +202,10 @@ pub fn bootstrap(db: &Db<'_>, token: &str) -> Result<()> {
         OWNER,
         "owner-delegation",
         bootstrap_actions(),
-        1_000_000,
+        DispatchBudget {
+            units: 1_000_000,
+            task_concurrency: None,
+        },
         86400 * 3650,
         true,
     )?;
@@ -352,26 +355,34 @@ pub(crate) fn authorized_delegation(
         "action and target require a matching active grant",
     ))
 }
+struct DispatchBudget {
+    units: u32,
+    task_concurrency: Option<u32>,
+}
+
 fn issue(
     db: &Db<'_>,
     subject: &str,
     delegation_id: &str,
     actions: Vec<String>,
-    units: u32,
+    limits: DispatchBudget,
     ttl_seconds: u32,
     allow_delegation: bool,
 ) -> Result<Value> {
     let clock = deadline::Clock::sample()?;
     let until = after(ttl_seconds.into());
-    let budget = db.record(
-        "Budget",
-        subject,
-        json!({"unit": "dispatched_run", "limit": units, "principal": subject}),
-    )?;
+    let mut spec = json!({"unit": "dispatched_run", "limit": limits.units, "principal": subject});
+    if let Some(maximum) = limits.task_concurrency {
+        spec["task_concurrency"] = json!(maximum);
+    }
+    let budget = db.record("Budget", subject, spec)?;
     db.c.execute(
         "INSERT INTO budgets(id,maximum) VALUES(?1,?2)",
-        params![budget.id, units],
+        params![budget.id, limits.units],
     )?;
+    if let Some(maximum) = limits.task_concurrency {
+        broker::concurrency::register(db, &budget.id, maximum)?;
+    }
     let grant = db.record(
         "Grant",
         subject,
@@ -439,6 +450,7 @@ struct GrantIssue {
     #[serde(default)]
     model_calls: u32,
     model_lease_ms: Option<u32>,
+    task_concurrency: Option<u32>,
     max_delegation_depth: Option<u32>,
     tool_targets: Option<Vec<String>>,
     ttl_seconds: u32,
@@ -467,6 +479,9 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         p.model_calls <= 1_000_000
             && p.model_lease_ms
                 .is_none_or(|limit| limit <= agent::model_time::MAX_BUDGET_MS)
+            && p.task_concurrency.is_none_or(|limit| {
+                (1..=broker::concurrency::MAX_TASKS_PER_BUDGET).contains(&limit)
+            })
             && (1..=1_000_000).contains(&p.units)
             && (1..=86400 * 30).contains(&p.ttl_seconds),
         "InvalidArgument",
@@ -503,17 +518,17 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         &p.principal_id,
         &id("delegation"),
         p.actions,
-        p.units,
+        DispatchBudget {
+            units: p.units,
+            task_concurrency: p.task_concurrency,
+        },
         p.ttl_seconds,
         p.allow_delegation,
     )?;
+    let budget = issued["budget_ref"]["resource_id"].as_str().unwrap();
     db.c.execute(
         "INSERT INTO model_budgets(budget,maximum,maximum_lease_ms) VALUES(?1,?2,?3)",
-        params![
-            issued["budget_ref"]["resource_id"].as_str().unwrap(),
-            p.model_calls,
-            p.model_lease_ms,
-        ],
+        params![budget, p.model_calls, p.model_lease_ms,],
     )?;
     if p.tool_targets.is_some() || p.max_delegation_depth.is_some() {
         let g = db.resolve(&issued["grant_ref"])?;
@@ -617,7 +632,7 @@ pub fn budget(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let p: ById = decode(p)?;
     let b = db.of(&p.id, "Budget")?;
     owned(actor, &b)?;
-    Ok(db.c.query_row("SELECT b.maximum,b.reserved,b.spent,coalesce(m.maximum,0),coalesce(m.used,0),m.maximum_lease_ms,m.charged_lease_ms
+    let mut budget = db.c.query_row("SELECT b.maximum,b.reserved,b.spent,coalesce(m.maximum,0),coalesce(m.used,0),m.maximum_lease_ms,m.charged_lease_ms
         FROM budgets b LEFT JOIN model_budgets m ON m.budget=b.id WHERE b.id=?1",[&b.id],|r|{
         let mut budget = json!({"maximum":r.get::<_,u32>(0)?,"reserved":r.get::<_,u32>(1)?,"spent":r.get::<_,u32>(2)?,
             "model_calls_maximum":r.get::<_,u32>(3)?,"model_calls_used":r.get::<_,u32>(4)?});
@@ -628,7 +643,14 @@ pub fn budget(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             budget["model_lease_ms_remaining"] = json!(limit - charged);
         }
         Ok(budget)
-    })?)
+    })?;
+    if let Some(slots) = broker::concurrency::usage(db, &b.id)? {
+        budget["task_concurrency_maximum"] = json!(slots.maximum);
+        budget["task_concurrency_occupied"] = json!(slots.occupied);
+        budget["task_concurrency_unknown"] = json!(slots.unknown);
+        budget["task_concurrency_remaining"] = json!(slots.maximum.saturating_sub(slots.occupied));
+    }
+    Ok(budget)
 }
 
 pub fn intern_input(db: &Db<'_>, actor: &str, input: &Value) -> Result<Doc> {

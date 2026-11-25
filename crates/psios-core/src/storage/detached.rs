@@ -14,7 +14,7 @@ use std::{
     path::Path,
 };
 
-fn expected_digest(value: &str) -> bool {
+pub(super) fn expected_digest(value: &str) -> bool {
     value.strip_prefix("sha256:").is_some_and(|digest| {
         digest.len() == 64
             && digest
@@ -53,13 +53,27 @@ pub(super) fn output_parent<'a>(
     Ok((parent, name))
 }
 
-/// Inspect an ordinary local copy of a PsiOS backup, using a trusted external manifest digest.
-/// An optional new directory is atomically published with the verified file tree.
-pub fn inspect_detached_backup(
+pub(super) struct DetachedBackup {
+    pub root: File,
+    pub manifest: BackupManifest,
+    pub source: ResourceRef,
+    before: (String, usize),
+}
+
+impl DetachedBackup {
+    pub fn confirm(&self) -> Result<()> {
+        require(
+            self.before == publication::file_set(&self.root)?,
+            "PreconditionFailed",
+            "backup file set changed during inspection",
+        )
+    }
+}
+
+pub(super) fn open_detached(
     directory: &Path,
     manifest_digest: &str,
-    output: Option<&Path>,
-) -> Result<Value> {
+) -> Result<(DetachedBackup, Vec<u8>)> {
     require(
         expected_digest(manifest_digest),
         "InvalidArgument",
@@ -75,8 +89,8 @@ pub fn inspect_detached_backup(
     );
     let digest = json!(manifest_digest);
     let before = publication::file_set(&root)?;
-    let manifest: BackupManifest =
-        serde_json::from_slice(&read_manifest(&open_manifest(&root)?, &digest)?)?;
+    let raw = read_manifest(&open_manifest(&root)?, &digest)?;
+    let manifest: BackupManifest = serde_json::from_slice(&raw)?;
     filename(&manifest.backup_id)?;
     let source: ResourceRef = serde_json::from_value(manifest.source.clone())?;
     require(
@@ -89,32 +103,47 @@ pub fn inspect_detached_backup(
         "PreconditionFailed",
         "backup file set does not match the manifest",
     )?;
+    Ok((
+        DetachedBackup {
+            root,
+            manifest,
+            source,
+            before,
+        },
+        raw,
+    ))
+}
+
+/// Inspect an ordinary local copy of a PsiOS backup, using a trusted external manifest digest.
+/// An optional new directory is atomically published with the verified file tree.
+pub fn inspect_detached_backup(
+    directory: &Path,
+    manifest_digest: &str,
+    output: Option<&Path>,
+) -> Result<Value> {
+    let (archive, _) = open_detached(directory, manifest_digest)?;
     let destination = output
-        .map(|path| output_parent(Some(&root), path))
+        .map(|path| output_parent(Some(&archive.root), path))
         .transpose()?;
     let stage = destination
         .as_ref()
         .map(|(parent, _)| staging::create(parent))
         .transpose()?;
     let mut report = inspect_members(
-        &root,
-        &manifest,
-        &digest,
+        &archive.root,
+        &archive.manifest,
+        &json!(manifest_digest),
         stage.as_ref().map(|stage| RestoreDestination {
             directory: stage.directory(),
             authority: None,
         }),
     )?;
-    require(
-        before == publication::file_set(&root)?,
-        "PreconditionFailed",
-        "backup file set changed during inspection",
-    )?;
+    archive.confirm()?;
     if let Some(((parent, name), stage)) = destination.zip(stage) {
         stage.publish(name)?;
         report["restored_directory"] = json!(parent.join(name).display().to_string());
     }
-    report["backup_id"] = json!(manifest.backup_id);
-    report["source_ref"] = json!(source);
+    report["backup_id"] = json!(archive.manifest.backup_id);
+    report["source_ref"] = json!(archive.source);
     Ok(report)
 }

@@ -183,6 +183,8 @@ Core 通过已打开的目录和文件描述符流式校验私有普通文件。
 
 重启需独立审批。Core 在调用 OCI 引擎前核对启动身份并持久记录检查点，在回执中保存同一容器和 Linux 启动下的新启动身份。未知结果保留应用与卷的操作约束。用新的观察制品对账，确认后登记在原 Task 与 Operation 下。[真实 OCI 引擎验收](../tests/oci_restart.py)
 
+格式 71 将重启检查点与原执行许可、单次批准、Run、应用及绑定卷修订关联。Core 先提交 `EffectStarted` 和检查点，再请求 Docker 重启。调用前中断以 `NotStarted` 结算并释放本次应用占用。丢失调用回执时，原 Operation 保持待核实。Core 启动前检查未结算操作的应用占用及现有卷绑定。离线核验同时核对历史应用、实例及确认记录，允许在任务归档后继续校验。格式 43 至 70 的重启沿用当时记录的证据。旧版在结算失败后可能留有缺少检查点的未知结果，仍需保持占用并等待单独核实。[检查点失效与离线验收](../tests/oci_restart.py)
+
 ### 恢复 OCI 停止操作
 
 若停止操作丢失回执，Core 保留原 Application 占用和卷挂载记录。使用 `application.health` 核实原容器。若容器已退出但仍存在，本机所有者可用显式授予的 `application.continue_stop` 提交清理，授权目标应包含应用及其挂载卷。提交参数为 `target`（应用 ID 与当前修订）、`operation_ref`（原未知 Operation）和 `evidence_ref`（新健康检查制品）。

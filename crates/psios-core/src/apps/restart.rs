@@ -15,6 +15,16 @@ use serde_json::{Value, json};
 pub(crate) const TOOL: &str = "application.restart";
 pub(crate) const INSPECT: &str = "application.inspect_instance";
 pub(crate) const FORMAT: u32 = crate::storage::restore_publication::FORMAT + 1;
+pub(crate) const CUSTODY_FORMAT: u32 = super::stop::FORMAT + 1;
+
+mod journal;
+mod settlement;
+pub(crate) use journal::verify_active;
+pub(crate) use settlement::{record_settlement, verify};
+
+pub(crate) fn migrate(db: &Db<'_>) -> Result<()> {
+    journal::migrate(db)
+}
 
 const INTENT: &str = "OCIRestartIntent";
 const CHECKPOINT: &str = "OCIRestartCheckpoint";
@@ -190,88 +200,105 @@ fn bound(doc: &Doc, kind: &str, op: &Doc) -> bool {
         && doc.body["effect_id"] == op.body["effect_refs"][0]["resource_id"]
 }
 
-fn held(db: &Db<'_>, app: &Doc, op: &Doc) -> Result<()> {
-    let held: bool = db.c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM holds WHERE volume=?1 AND holder=?2)",
-        params![app.id, op.id],
-        |row| row.get(0),
-    )?;
-    require(
-        held && app.kind == "Application",
-        "RecoveryRequired",
-        "original application restart hold is missing",
-    )
-}
-
 pub(crate) fn begin(db: &Db<'_>, work: &Work) -> Result<()> {
-    held(db, &work.target, &work.op)?;
+    let (binding, approval_use) = journal::binding(db, work)?;
     db.create(
         INTENT,
         &intent_id(&work.op.id),
         &work.op.owner,
         json!({"operation_id":work.op.id}),
         json!({"plan_ref":work.op.body["plan_ref"],"effect_id":work.effect.id,
-            "application_ref":work.target.reference()}),
+            "application_ref":work.target.reference(),"binding":binding,"approval_use_ref":approval_use,
+            "operation_ref":work.op.reference(),"effect_ref":work.effect.reference(),"run_ref":work.run.reference()}),
     )?;
     Ok(())
 }
 
 pub(crate) fn not_dispatched(db: &Db<'_>, op: &Doc) -> Result<bool> {
-    let Some(intent) = db.find(&intent_id(&op.id))? else {
-        return Ok(false);
-    };
-    let plan = db.resolve(&op.body["plan_ref"])?;
-    Ok(bound(&intent, INTENT, op)
-        && intent.body["application_ref"] == plan.body["allowed_effects"][0]["resource_ref"]
-        && db.find(&checkpoint_id(&op.id))?.is_none())
+    let record = journal::load(db.c, op, journal::epoch(db.c)?)?;
+    record.custody.holds(db.c, op, true)?;
+    Ok(record.checkpoint.is_none())
 }
 
 pub(crate) fn record(db: &Db<'_>, work: &Work, request: &Request, before: &Value) -> Result<()> {
-    held(db, &work.target, &work.op)?;
+    let record = journal::load(db.c, &work.op, journal::epoch(db.c)?)?;
+    record.custody.holds(db.c, &work.op, true)?;
     require(
-        not_dispatched(db, &work.op)?
+        record.modern
+            && record.checkpoint.is_none()
+            && record.custody.sample(before)
             && request.matches(before)
-            && before["application_ref"] == work.target.reference()
-            && before["engine_id"] == work.target.body["engine_id"]
-            && before["container_id"] == work.target.body["container_id"],
+            && before["boot_id"] == boot_id()?
+            && record.custody.app.reference() == work.target.reference()
+            && record.effect.reference() == work.effect.reference()
+            && db.of(&work.effect.id, "Effect")?.reference() == work.effect.reference()
+            && db.of(&work.op.id, "Operation")?.reference() == work.op.reference()
+            && record.task.reference() == work.task.reference()
+            && record.run.reference() == work.run.reference(),
         "Fenced",
         "restart invocation differs from its admitted intent",
     )?;
-    db.create(
+    let mut effect = work.effect.body.clone();
+    effect["phase"] = json!("EffectStarted");
+    let effect = db.status(&work.effect, effect)?;
+    let mut op = work.op.body.clone();
+    op["effect_refs"] = json!([effect.reference()]);
+    op["updated_at"] = json!(now());
+    let op = db.status(&work.op, op)?;
+    for subject in [&work.run, &work.task] {
+        let mut body = subject.body.clone();
+        body["operation_refs"] = json!([op.reference()]);
+        db.status(subject, body)?;
+    }
+    let checkpoint = db.create(
         CHECKPOINT,
         &checkpoint_id(&work.op.id),
         &work.op.owner,
         json!({"operation_id":work.op.id}),
         json!({"plan_ref":work.op.body["plan_ref"],"effect_id":work.effect.id,"before":before,
-            "volume_ref":work.volume.as_ref().map(Doc::reference)}),
+            "volume_ref":record.custody.volume.as_ref().map(Doc::reference),"intent_ref":record.intent.reference(),
+            "started_effect_ref":effect.reference(),"started_operation_ref":op.reference()}),
     )?;
+    let mut intent = record.intent.body.clone();
+    intent["checkpoint_ref"] = checkpoint.reference();
+    db.status(&record.intent, intent)?;
     Ok(())
 }
 
-fn confirmed(db: &Db<'_>, op: &Doc, app: &Doc, after: &Value) -> Result<Doc> {
-    held(db, app, op)?;
-    let checkpoint = db
-        .find(&checkpoint_id(&op.id))?
-        .ok_or_else(|| err("RecoveryRequired", "no committed OCI restart checkpoint"))?;
-    let plan = db.resolve(&op.body["plan_ref"])?;
-    let volume = app.spec["volume_id"]
-        .as_str()
-        .map(|id| db.of(id, "Volume"))
-        .transpose()?;
+pub(crate) fn worker_started(db: &Db<'_>, work: &Work, task: &Doc) -> Result<bool> {
+    let op = db.of(&work.op.id, "Operation")?;
+    let record = journal::load(db.c, &op, journal::epoch(db.c)?)?;
+    record.custody.holds(db.c, &op, true)?;
+    let started = record.checkpoint.is_some();
     require(
-        bound(&checkpoint, CHECKPOINT, op)
-            && checkpoint.body["before"]["application_ref"] == app.reference()
-            && checkpoint.body["volume_ref"] == json!(volume.as_ref().map(Doc::reference))
-            && volume.as_ref().is_none_or(|v| {
-                plan.body["preconditions"]
-                    .as_array()
-                    .is_some_and(|conditions| {
-                        conditions
-                            .iter()
-                            .any(|c| c["resource_ref"] == v.reference())
-                    })
-            })
-            && changed(&checkpoint.body["before"], after),
+        record.modern
+            && op.spec == work.op.spec
+            && op.body["plan_ref"] == work.op.body["plan_ref"]
+            && op.body["outcome_knowledge"] == "InFlight"
+            && record.task.reference() == task.reference()
+            && record.run.id == work.run.id
+            && record.effect.id == work.effect.id
+            && record.effect.spec == work.effect.spec
+            && record.effect.rev == work.effect.rev + i64::from(started)
+            && db.of(&record.effect.id, "Effect")?.reference() == record.effect.reference(),
+        "Fenced",
+        "OCI restart worker settlement differs from its current effect",
+    )?;
+    Ok(started)
+}
+
+fn confirmed(db: &Db<'_>, op: &Doc, app: &Doc, after: &Value) -> Result<Doc> {
+    let op = db.of(&op.id, "Operation")?;
+    let record = journal::load(db.c, &op, journal::epoch(db.c)?)?;
+    record.custody.holds(db.c, &op, true)?;
+    let checkpoint = record
+        .checkpoint
+        .ok_or_else(|| err("RecoveryRequired", "no committed OCI restart checkpoint"))?;
+    require(
+        record.custody.app.reference() == app.reference()
+            && record.custody.running(after)
+            && changed(&checkpoint.body["before"], after)
+            && (!record.modern || after["boot_id"] == boot_id()?),
         "OutcomeUnknown",
         "inspection does not confirm restart of the checkpointed invocation",
     )?;

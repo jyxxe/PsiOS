@@ -190,7 +190,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = apps::stop::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = apps::restart::CUSTODY_FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -466,6 +466,9 @@ impl Store {
                 }
                 if ver < apps::stop::FORMAT {
                     apps::stop::migrate(db)?;
+                }
+                if ver < apps::restart::CUSTODY_FORMAT {
+                    apps::restart::migrate(db)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

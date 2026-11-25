@@ -1175,6 +1175,92 @@ fn settle_oci_catalog(s: &mut Store, task: &str) -> Value {
 }
 
 #[test]
+fn oci_restart_custody_fences_missing_holds_and_corrupt_bound_samples() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_, mut store) = initialized(directory.path());
+    let (install, _) = accepted_artifact_install(&mut store);
+    let installed = settle_oci_catalog(&mut store, &install);
+    let app = &installed["application_ref"];
+    let task = submit(
+        &mut store,
+        "application.start",
+        json!({"id":app["resource_id"],"expected_resource_version":app["version"]}),
+    );
+    approve(&mut store, &task);
+    assert_eq!(claim(&mut store), task);
+    let start = dispatch(&mut store, &task);
+    let container = "b".repeat(64);
+    let app = store
+        .transaction("restart-fixture-start", |db| {
+            start.checkpoint(
+                db,
+                host::Checkpoint::OciStart {
+                    engine: "restart-engine",
+                    container: &container,
+                },
+            )?;
+            broker::finish(
+                db,
+                &start,
+                Ok(
+                    json!({"engine_id":"restart-engine","container_id":container,
+            "process_running":true,"observed_at":now()}),
+                ),
+            )?;
+            Ok(db.of(&start.target.id, "Application")?.reference())
+        })
+        .unwrap();
+    let grant = call(&mut store,"Grant.Issue",json!({"principal_id":"local-owner","units":4,"ttl_seconds":90,
+        "actions":["task.submit","task.read",apps::restart::TOOL],"tool_targets":[app["resource_id"]]})).unwrap();
+    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap();
+    let observed = json!({"application_ref":app,"engine_id":"restart-engine","container_id":container,
+        "start_operation_id":start.op.id,"boot_id":boot.trim(),"started_at":"2026-11-25T12:00:00Z",
+        "process_id":1,"process_running":true,"runtime_state":"Running","readiness":"Unknown","health":"Unknown",
+        "effective_limits":{"source":"DockerCgroupV1"},"observed_at":now()});
+    let task = call(
+        &mut store,
+        "Task.Prepare",
+        json!({"tool":apps::restart::TOOL,"key":id("restart-custody"),
+        "delegation_id":grant["delegation_ref"]["resource_id"],"input":{"id":app["resource_id"],
+            "expected_resource_version":app["version"],"expected_boot_id":observed["boot_id"],
+            "expected_started_at":observed["started_at"]}}),
+    )
+    .unwrap();
+    let accepted = call(&mut store, "Task.Submit", task).unwrap();
+    let task = accepted["task_id"].as_str().unwrap();
+    approve(&mut store, task);
+    assert_eq!(claim(&mut store), task);
+    let work = dispatch(&mut store, task);
+    assert_eq!(work.effect.body["phase"], "PermitBound");
+    store
+        .transaction("restart-fixture-checkpoint", |db| {
+            work.checkpoint(db, host::Checkpoint::OciRestart(&observed))?;
+            apps::restart::verify(db.c, apps::restart::CUSTODY_FORMAT)
+        })
+        .unwrap();
+
+    store
+        .transaction("restart-fixture-recover", broker::recover)
+        .unwrap();
+    let paused = call(&mut store, "Task.Get", json!({"id":task})).unwrap();
+    assert_eq!(paused["outcome_knowledge"], "Unknown");
+    store.transaction("restart-fixture-corruption", |db| {
+        apps::restart::verify(db.c,apps::restart::CUSTODY_FORMAT)?;
+        db.c.execute_batch("SAVEPOINT lost_restart_hold")?;
+        db.c.execute("DELETE FROM holds WHERE holder=?1",[&work.op.id])?;
+        assert_eq!(apps::restart::verify_active(db.c).unwrap_err().0.code,"RecoveryRequired");
+        assert_eq!(apps::restart::verify(db.c,apps::restart::CUSTODY_FORMAT).unwrap_err().0.code,"RecoveryRequired");
+        db.c.execute_batch("ROLLBACK TO lost_restart_hold; RELEASE lost_restart_hold")?;
+        db.c.execute_batch("SAVEPOINT changed_restart_sample")?;
+        db.c.execute("UPDATE versions SET body=json_set(body,'$.before.started_at','2025-11-25T12:00:00Z')
+            WHERE kind='OCIRestartCheckpoint' AND spec->>'operation_id'=?1",[&work.op.id])?;
+        assert_eq!(apps::restart::verify(db.c,apps::restart::CUSTODY_FORMAT).unwrap_err().0.code,"RecoveryRequired");
+        db.c.execute_batch("ROLLBACK TO changed_restart_sample; RELEASE changed_restart_sample")?;
+        apps::restart::verify(db.c,apps::restart::CUSTODY_FORMAT)
+    }).unwrap();
+}
+
+#[test]
 fn oci_stop_recovery_rejects_missing_and_mismatched_active_custody() {
     let directory = tempfile::tempdir().unwrap();
     let (_, mut store) = initialized(directory.path());

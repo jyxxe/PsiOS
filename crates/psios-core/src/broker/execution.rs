@@ -96,15 +96,41 @@ pub fn claim(db: &Db<'_>) -> Result<Option<String>> {
         return Ok(None);
     }
     dependencies::advance(db)?;
+    let remaining_staging_bytes = u64::from(apps::capture::STAGING_BYTES)
+        .saturating_sub(apps::capture::reserved_staging_bytes(db)?);
+    // Use the pinned input revision for eligibility. Normal preflight and the
+    // reservation check below still resolve the exact input and its digest.
+    // Invalid limits go to normal preflight so an invalid task cannot wait forever.
     let next: Option<String> =
         db.c.query_row(
-            "SELECT q.task FROM queue q JOIN current t ON t.id=q.task
-             LEFT JOIN dispatch_fairness f ON f.principal=t.owner
-             LEFT JOIN task_concurrency c ON c.budget=q.budget
-             WHERE q.phase='Queued' AND
-               (c.maximum IS NULL OR (SELECT count(*) FROM occupied_task_slots WHERE budget=q.budget)<c.maximum)
-             ORDER BY coalesce(f.turn,0),q.stamp,q.task LIMIT 1",
-            [],
+            "WITH candidates AS (
+                SELECT q.task,q.stamp,coalesce(f.turn,0) AS turn,
+                       CASE i.kind WHEN 'Input' THEN i.body
+                            WHEN 'TaskInputManifest' THEN i.body->'tool_input' END AS capture_input
+                FROM queue q JOIN current t ON t.id=q.task
+                LEFT JOIN dispatch_fairness f ON f.principal=t.owner
+                LEFT JOIN task_concurrency c ON c.budget=q.budget
+                LEFT JOIN versions i ON t.spec->>'task_type'=?1
+                     AND i.id=t.spec->'input_ref'->>'resource_id'
+                     AND ('r'||i.rev)=t.spec->'input_ref'->>'version'
+                WHERE q.phase='Queued' AND (c.maximum IS NULL OR
+                    (SELECT count(*) FROM occupied_task_slots WHERE budget=q.budget)<c.maximum)
+             ), sized AS (
+                SELECT task,stamp,turn,
+                       CASE WHEN json_type(capture_input)='object' THEN
+                           CASE WHEN json_type(capture_input,'$.max_archive_bytes') IS NULL THEN ?2
+                                WHEN json_type(capture_input,'$.max_archive_bytes')='integer'
+                                THEN capture_input->>'max_archive_bytes' END
+                       END AS bytes FROM candidates
+             ) SELECT task FROM sized
+               WHERE bytes IS NULL OR bytes<1 OR bytes>?3 OR bytes<=?4
+               ORDER BY turn,stamp,task LIMIT 1",
+            params![
+                apps::capture::TOOL,
+                storage::oci_archive::DEFAULT_CAPTURE_BYTES,
+                db.cfg.oci_capture_max_bytes,
+                remaining_staging_bytes as u32
+            ],
             |r| r.get(0),
         )
         .optional()?;
@@ -125,6 +151,11 @@ pub fn claim(db: &Db<'_>) -> Result<Option<String>> {
             return Ok(None);
         }
     };
+    if t.spec["task_type"] == apps::capture::TOOL
+        && u64::from(apps::capture::staging_bytes(db, &t)?) > remaining_staging_bytes
+    {
+        return Ok(None);
+    }
     db.c.execute("INSERT INTO dispatch_fairness(principal,turn) VALUES(?1,(SELECT coalesce(max(turn),0)+1 FROM dispatch_fairness))
         ON CONFLICT(principal) DO UPDATE SET turn=excluded.turn", [&t.owner])?;
     let epoch: u32 = db.c.query_row(
@@ -176,6 +207,21 @@ pub fn dispatch(db: &Db<'_>, task: &str) -> Result<Option<Work>> {
         "ResultUnavailable",
         "required task outputs became unavailable before dispatch",
     )?;
+    if t.spec["task_type"] == apps::capture::TOOL
+        && apps::capture::reserved_staging_bytes(db)? > u64::from(apps::capture::STAGING_BYTES)
+    {
+        recovery::requeue(
+            db,
+            &t,
+            &op,
+            "NotStarted",
+            json!([condition(
+                "QuotaExceeded",
+                "OCI capture staging capacity is occupied"
+            )]),
+        )?;
+        return Ok(None);
+    }
     let run = db.get(field(&t.body, "current_run_id"))?;
     let tool = field(&t.spec, "task_type");
     let target = &p.body["allowed_effects"][0]["resource_ref"];

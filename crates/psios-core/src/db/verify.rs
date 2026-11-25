@@ -165,6 +165,9 @@ pub(super) fn check_artifacts(
     if identity.database_format >= crate::agent::inference::FORMAT {
         crate::agent::inference::verify(conn)?;
     }
+    if identity.database_format >= crate::node::service_control::FORMAT {
+        crate::node::service_control::verify(conn)?;
+    }
     Ok(())
 }
 

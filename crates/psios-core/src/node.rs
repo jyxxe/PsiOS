@@ -5,6 +5,7 @@ mod mounts;
 pub mod network;
 pub mod pressure;
 pub mod process;
+pub(crate) mod service_control;
 pub mod service_state;
 use crate::{
     config::Manager,
@@ -210,7 +211,7 @@ pub(crate) fn restarted(observation: &Value, request: &ServiceRestart) -> bool {
             .is_some_and(|id| id != request.expected_invocation_id && valid_invocation(id))
 }
 
-fn service(w: &Work) -> Result<Value> {
+fn service(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Result<Value> {
     let cfg = configured_service(w)?;
     let manager = if cfg.manager == Manager::User {
         "--user"
@@ -276,28 +277,22 @@ fn service(w: &Work) -> Result<Value> {
             )?;
             None
         };
-        let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+        let boot = service_control::boot_id()?;
         Ok(
-            json!({"unit":cfg.unit,"boot_id":boot.trim(),"load_state":load_state,"active_state":props.get("ActiveState"),"sub_state":props.get("SubState"),
+            json!({"unit":cfg.unit,"manager":cfg.manager,"manager_uid":service_control::manager_uid(&cfg.manager),
+              "boot_id":boot,"load_state":load_state,"active_state":props.get("ActiveState"),"sub_state":props.get("SubState"),
           "definition_digest":definition,"needs_reload":props.get("NeedDaemonReload")!=Some(&"no"),"main_pid":props.get("MainPID"),"invocation_id":props.get("InvocationID"),"observed_at":now()}),
         )
     };
     let before = inspect()?;
-    let (verb, desired) = match &w.action {
-        Action::ServiceStart(_) => ("start", "active"),
-        Action::ServiceStop(_) => ("stop", "inactive"),
-        Action::ServiceRestart(request) => {
-            require(
-                before["active_state"] == "active"
-                    && before["boot_id"] == request.expected_boot_id
-                    && before["invocation_id"] == request.expected_invocation_id,
-                "PreconditionFailed",
-                "the approved active service invocation changed",
-            )?;
-            ("try-restart", "active")
-        }
-        _ => return Ok(before),
+    let Some(control) = service_control::Control::from_action(&w.action) else {
+        return Ok(before);
     };
+    require(
+        service_control::expected_invocation(&w.action, &before),
+        "PreconditionFailed",
+        "the approved active service invocation changed",
+    )?;
     require(
         cfg.allow_control,
         "PermissionDenied",
@@ -309,26 +304,18 @@ fn service(w: &Work) -> Result<Value> {
         "ApprovalInvalidated",
         "systemd definition changed or needs a reload",
     )?;
-    command(verb, &[], true)?;
+    checkpoint(&before)?;
+    command(control.verb(), &[], true)?;
     let observed =
         inspect().map_err(|_| err("OutcomeUnknown", "unit change requires reconciliation"))?;
     require(
-        observed["active_state"] == desired
-            && observed["needs_reload"] == false
-            && observed["definition_digest"] == before["definition_digest"],
+        service_control::confirms(control, &w.target, &before, &observed),
         "OutcomeUnknown",
-        "unit did not confirm requested state",
+        "unit did not confirm the checkpointed manager, boot and postcondition",
     )?;
-    if let Action::ServiceRestart(request) = &w.action {
-        require(
-            restarted(&observed, request),
-            "OutcomeUnknown",
-            "unit did not confirm a new invocation on the approved boot",
-        )?;
-    }
     Ok(observed)
 }
-pub fn perform(w: &Work) -> Result<Value> {
+pub fn perform(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Result<Value> {
     match &w.action {
         Action::Inventory {} => inventory(),
         Action::Pressure {} => pressure::observe(w),
@@ -343,7 +330,7 @@ pub fn perform(w: &Work) -> Result<Value> {
         Action::BlockLayout(query) => block::observe(w, query),
         Action::Mounts {} => mounts::observe(),
         Action::ServiceLogs(query) => journal::read(w, query),
-        _ => service(w),
+        _ => service(w, checkpoint),
     }
 }
 pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
@@ -353,10 +340,7 @@ pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
             "PreconditionFailed",
             "service is not registered",
         )?;
-        if matches!(
-            w.action,
-            Action::ServiceStart(_) | Action::ServiceStop(_) | Action::ServiceRestart(_)
-        ) {
+        if service_control::is_control(&w.action) {
             require(
                 w.target.spec["allow_control"] == true,
                 "PermissionDenied",
@@ -370,6 +354,7 @@ pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
                 "Conflict",
                 "service already has a pending operation",
             )?;
+            service_control::begin(db, w)?;
         }
     }
     Ok(())
@@ -385,7 +370,12 @@ pub fn observed_effect(db: &Db<'_>, service: &Doc, op: &str, observation: &Value
     db.status(service, b)
 }
 pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
-    Ok(json!({"service_ref":observed_effect(db,&w.target,&w.op.id,r)?.reference(),"observation":r}))
+    let checkpoint = service_control::confirmed(db, &w.op, &w.target, &w.action, r)?
+        .ok_or_else(|| err("RecoveryRequired", "new systemd result lacks a checkpoint"))?;
+    Ok(
+        json!({"service_ref":observed_effect(db,&w.target,&w.op.id,r)?.reference(),"observation":r,
+        "checkpoint_ref":checkpoint.reference()}),
+    )
 }
 pub fn enabled(db: &Db<'_>) -> Result<bool> {
     let mode:Option<String>=db.c.query_row("SELECT body->>'scheduling' FROM current WHERE kind='Node' AND id=(SELECT value FROM meta WHERE key='authority')",[],|r|r.get(0)).optional()?;

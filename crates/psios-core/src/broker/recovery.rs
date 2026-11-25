@@ -38,6 +38,9 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
         let restart_undispatched = phase == "Dispatched"
             && tool == apps::restart::TOOL
             && apps::restart::not_dispatched(db, &operation(db, &t)?)?;
+        let service_undispatched = phase == "Dispatched"
+            && node::service_control::is_tool(tool)
+            && node::service_control::not_dispatched(db, &operation(db, &t)?)?;
         let image_undispatched = phase == "Dispatched"
             && tool == apps::restore_image::TOOL
             && apps::restore_image::not_dispatched(db, &operation(db, &t)?)?;
@@ -55,6 +58,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             && !backup_unpublished
             && !restore_unpublished
             && !restart_undispatched
+            && !service_undispatched
             && !image_undispatched
             && !deletion_unprepared
             && !rename_unprepared
@@ -84,6 +88,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             || backup_unpublished
             || restore_unpublished
             || restart_undispatched
+            || service_undispatched
             || image_undispatched
             || deletion_unprepared
             || rename_unprepared
@@ -96,7 +101,11 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                 } else {
                     "Failed"
                 },
-                "Known",
+                if service_undispatched {
+                    "NotStarted"
+                } else {
+                    "Known"
+                },
                 Some(&err(
                     "LeaseLost",
                     if backup_unpublished {
@@ -105,6 +114,8 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                         "restore interrupted before volume publication was authorized"
                     } else if restart_undispatched {
                         "OCI restart interrupted before its invocation was checkpointed"
+                    } else if service_undispatched {
+                        "systemd control interrupted before its invocation was checkpointed"
                     } else if image_undispatched {
                         "OCI image restore interrupted before load was checkpointed"
                     } else if activation_uncommitted {
@@ -403,6 +414,8 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
                 &target,
                 "service.inspect",
             )?;
+            let checkpoint =
+                node::service_control::confirmed(db, &op, &target, &action, &observation)?;
             let wanted = if matches!(action, Action::ServiceStop(_)) {
                 "inactive"
             } else {
@@ -416,7 +429,7 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
                 "OutcomeUnknown",
                 "observation does not confirm this service postcondition",
             )?;
-            let evidence = if let Action::ServiceRestart(request) = &action {
+            let mut evidence = if let Action::ServiceRestart(request) = &action {
                 require(
                     node::restarted(&observation, request),
                     "OutcomeUnknown",
@@ -427,10 +440,12 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
             } else {
                 json!({"observation_ref":proof.reference(),"conclusion":"ObservedPostcondition"})
             };
-            (
-                json!({"service_ref":node::observed_effect(db,&target,&op.id,&observation)?.reference(),"observation":observation}),
-                evidence,
-            )
+            let mut result = json!({"service_ref":node::observed_effect(db,&target,&op.id,&observation)?.reference(),"observation":observation});
+            if let Some(checkpoint) = checkpoint {
+                evidence["checkpoint_ref"] = checkpoint.reference();
+                result["checkpoint_ref"] = checkpoint.reference();
+            }
+            (result, evidence)
         }
         Action::Start(_) | Action::Stop(_) => {
             let (proof, observation) = inspected(

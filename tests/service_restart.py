@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import sqlite3
 import subprocess
 import uuid
 
@@ -75,6 +76,7 @@ ExecStart=/bin/sh {starter}
             assert node.get(service_id)["reference"] == service
 
         first, _ = observed(service)
+        assert (first["manager"], first["manager_uid"]) == ("user", os.geteuid()), first
         request = dict(target(service), expected_boot_id=first["boot_id"], expected_invocation_id=first["invocation_id"])
         refuses("PermissionDenied", lambda: node.prepare("service.restart", request))
         refuses("PermissionDenied", lambda: node.prepare("service.restart", request,
@@ -98,6 +100,22 @@ ExecStart=/bin/sh {starter}
         rejected = node.wait(stale)
         assert rejected["lifecycle"] == "Failed" and rejected["conditions"][0]["type"] == "PreconditionFailed", rejected
         assert launches() == [first["invocation_id"]]
+
+        database = node.state / "state.db"
+        with sqlite3.connect(database, timeout=10) as db:
+            db.execute("""CREATE TRIGGER refuse_systemd_checkpoint BEFORE INSERT ON versions
+                WHEN NEW.kind='HostServiceControlCheckpoint'
+                BEGIN SELECT RAISE(ABORT,'injected checkpoint failure'); END""")
+        try:
+            _, refused = submit(request)
+            blocked = node.wait(refused, autoapprove=True)
+            assert (blocked["lifecycle"], blocked["outcome_knowledge"], blocked["conditions"][0]["type"]) == (
+                "Failed", "NotStarted", "StorageUnavailable"), blocked
+            assert launches() == [first["invocation_id"]], "systemctl ran after checkpoint refused"
+        finally:
+            with sqlite3.connect(database, timeout=10) as db:
+                db.execute("DROP TRIGGER refuse_systemd_checkpoint")
+
         original, restart = submit(request)
         assert node.wait(restart)["lifecycle"] == "WaitingApproval"
         assert launches() == [first["invocation_id"]]
@@ -105,6 +123,9 @@ ExecStart=/bin/sh {starter}
         completed = node.wait(restart)
         assert completed["lifecycle"] == "Succeeded", completed
         response = node.call("Artifact.Read", {"reference": completed["result"]["artifact_refs"][0]})
+        checkpoint = node.call("Resource.Resolve", {"reference": response["checkpoint_ref"]})["value"]
+        assert checkpoint["verb"] == "try-restart" and checkpoint["before"]["invocation_id"] == first["invocation_id"], checkpoint
+        assert checkpoint["before"]["manager_uid"] == os.geteuid() and checkpoint["before"]["boot_id"] == first["boot_id"], checkpoint
         second = response["observation"]["invocation_id"]
         assert second != first["invocation_id"] and launches() == [first["invocation_id"], second]
         duplicate = node.call("Task.Submit", original)
@@ -118,6 +139,9 @@ ExecStart=/bin/sh {starter}
         eventually(lambda: len(launches()) == 3)
         third = launches()[2]
         assert third not in [first["invocation_id"], second]
+        with sqlite3.connect(database, timeout=10) as db:
+            checkpoint_id, = db.execute("SELECT id FROM current WHERE kind='HostServiceControlCheckpoint' "
+                                        "ORDER BY seq DESC LIMIT 1").fetchone()
         node.stop(signal.SIGKILL)
         node.start()
         unknown = node.wait(crashing)
@@ -138,11 +162,23 @@ ExecStart=/bin/sh {starter}
         running, proof = observed(service)
         assert running["invocation_id"] == third, running
         result = node.call("Operation.Reconcile", dict(reconcile, evidence_ref=proof))
-        assert result["outcome_knowledge"] == "Known" and node.wait(crashing)["lifecycle"] == "Succeeded", result
+        recovered = node.wait(crashing)
+        assert result["outcome_knowledge"] == "Known" and recovered["lifecycle"] == "Succeeded", result
+        recovered_result = node.call("Artifact.Read", {"reference": recovered["result"]["artifact_refs"][0]})
+        assert recovered_result["checkpoint_ref"]["resource_id"] == checkpoint_id, recovered_result
         assert launches() == [first["invocation_id"], second, third]
         node.stop()
         after = json.loads(subprocess.check_output(node.daemon + ["verify"], timeout=15))
-        assert after["database_format"] >= 35 and not after["migration_required"], after
+        assert after["database_format"] >= 69 and not after["migration_required"], after
+        with sqlite3.connect(database, timeout=10) as db:
+            record, = db.execute("SELECT body FROM versions WHERE id=? AND rev=1", (checkpoint_id,)).fetchone()
+            db.execute("UPDATE versions SET body=json_set(body,'$.before.manager_uid',2999999999) WHERE id=? AND rev=1",
+                       (checkpoint_id,))
+        damaged = subprocess.run(node.daemon + ["verify"], capture_output=True, timeout=15)
+        assert damaged.returncode and b"missing or unbound checkpoint" in damaged.stderr, damaged
+        with sqlite3.connect(database, timeout=10) as db:
+            db.execute("UPDATE versions SET body=? WHERE id=? AND rev=1", (record, checkpoint_id))
+        subprocess.run(node.daemon + ["verify"], check=True, capture_output=True, timeout=15)
         print("PASS real restart, approval, boot match, durable deduplication and lost-receipt reconciliation")
     finally:
         release.touch(exist_ok=True)

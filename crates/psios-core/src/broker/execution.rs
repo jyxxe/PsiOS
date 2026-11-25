@@ -409,6 +409,13 @@ pub fn settlement_failed(db: &Db<'_>, w: &Work) -> Result<()> {
             "StorageUnavailable",
             "OCI image restore stopped before load was checkpointed",
         )
+    } else if node::service_control::is_control(&w.action)
+        && node::service_control::not_dispatched(db, &w.op)?
+    {
+        err(
+            "StorageUnavailable",
+            "systemd control stopped before invocation was checkpointed",
+        )
     } else if matches!(
         w.action,
         Action::InstallArtifact(_) | Action::StageArtifactRelease(_) | Action::RetireRelease(_)
@@ -505,7 +512,17 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
             )?;
         }
         Err(e) => {
-            let unknown = e.0.code == "OutcomeUnknown";
+            let service = node::service_control::is_control(&w.action);
+            let service_undispatched = service && node::service_control::not_dispatched(db, &w.op)?;
+            let e = if service && !service_undispatched && e.0.code != "OutcomeUnknown" {
+                err(
+                    "OutcomeUnknown",
+                    "unable to settle the checkpointed systemd invocation",
+                )
+            } else {
+                e
+            };
+            let unknown = !service_undispatched && e.0.code == "OutcomeUnknown";
             close(
                 db,
                 &t,
@@ -516,7 +533,13 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                 } else {
                     "Failed"
                 },
-                if unknown { "Unknown" } else { "Known" },
+                if unknown {
+                    "Unknown"
+                } else if service_undispatched {
+                    "NotStarted"
+                } else {
+                    "Known"
+                },
                 Some(&e),
                 None,
             )?;

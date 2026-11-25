@@ -173,7 +173,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     Ok(bytes)
 }
 // Older writers cannot dispatch workflow steps with pinned input mappings.
-pub(super) const CURRENT_FORMAT: u32 = 31;
+pub(super) const CURRENT_FORMAT: u32 = 32;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -358,6 +358,9 @@ impl Store {
                 }
                 if ver < artifact::retention::FORMAT {
                     db.c.execute_batch(include_str!("artifact/retention.sql"))?;
+                }
+                if ver < 32 {
+                    db.c.execute_batch(include_str!("schedule/resource_event.sql"))?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

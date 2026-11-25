@@ -231,14 +231,7 @@ impl Series {
         if matches!(self.overlap, Overlap::Allow) {
             return Ok(false);
         }
-        let Some(id) = schedule.body["last_task_id"].as_str() else {
-            return Ok(false);
-        };
-        let task = db.of(id, "Task")?;
-        Ok(!matches!(
-            task.body["lifecycle"].as_str(),
-            Some("Succeeded" | "Failed" | "Cancelled")
-        ) || task.body["outcome_knowledge"] == "Unknown")
+        super::previous_task_active(db, schedule)
     }
 
     pub(super) fn settle(

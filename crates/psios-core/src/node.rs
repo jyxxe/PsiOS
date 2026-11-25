@@ -4,6 +4,7 @@ pub mod journal;
 mod mounts;
 pub mod network;
 pub mod pressure;
+pub mod process;
 pub mod service_state;
 use crate::{
     config::Manager,
@@ -125,21 +126,6 @@ pub fn get(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     )
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProcessQuery {
-    pub after_pid: Option<u32>,
-    pub limit: Option<usize>,
-}
-impl ProcessQuery {
-    pub fn validate(&self) -> Result<()> {
-        require(
-            (1..=128).contains(&self.limit.unwrap_or(32)),
-            "InvalidArgument",
-            "process page limit must be 1 to 128",
-        )
-    }
-}
 fn scalar(path: impl AsRef<Path>) -> Result<String> {
     Ok(fs::read_to_string(path)?.trim().to_owned())
 }
@@ -161,48 +147,6 @@ fn inventory() -> Result<Value> {
       "architecture":std::env::consts::ARCH,"available_cpus":std::thread::available_parallelism()?.get(),
       "memory_bytes":mem,"load_average":scalar("/proc/loadavg")?.split_whitespace().take(3).collect::<Vec<_>>(),
       "observed_at":now()}),
-    )
-}
-fn processes(p: &ProcessQuery) -> Result<Value> {
-    p.validate()?;
-    let mut pids = fs::read_dir("/proc")?
-        .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<u32>().ok())
-        .filter(|pid| *pid > p.after_pid.unwrap_or(0))
-        .collect::<Vec<_>>();
-    pids.sort_unstable();
-    let mut items = Vec::new();
-    let boot = scalar("/proc/sys/kernel/random/boot_id")?;
-    let limit = p.limit.unwrap_or(32);
-    let mut last = 0;
-    let mut more = false;
-    for pid in pids {
-        if items.len() == limit {
-            more = true;
-            break;
-        }
-        // One procfs read binds comm and identity (starttime, field 22) to the same process.
-        let Ok(stat) = fs::read(format!("/proc/{pid}/stat")) else {
-            continue;
-        };
-        let stat = String::from_utf8_lossy(&stat);
-        let Some((head, tail)) = stat.rsplit_once(") ") else {
-            continue;
-        };
-        let Some((_, name)) = head.split_once('(') else {
-            continue;
-        };
-        let fields: Vec<_> = tail.split_whitespace().collect();
-        if fields.len() < 22 {
-            continue;
-        }
-        items.push(
-            json!({"pid":pid,"name":name,"state":fields[0],"parent_pid":fields[1],
-            "start_ticks":fields[19],"resident_pages":fields[21]}),
-        );
-        last = pid;
-    }
-    Ok(
-        json!({"boot_id":boot,"items":items,"next_after_pid":more.then_some(last),"observed_at":now()}),
     )
 }
 fn devices() -> Result<Value> {
@@ -391,7 +335,8 @@ pub fn perform(w: &Work) -> Result<Value> {
         Action::RouteLookup(q) => network::observe_lookup(q),
         Action::RoutingRules(q) => network::observe_rules(q, w),
         Action::NetworkProbe(_) => network::probe::perform(w),
-        Action::Processes(p) => processes(p),
+        Action::Processes(p) => process::page(&w.target.id, p),
+        Action::InspectProcess(expected) => process::inspect(&w.target.id, expected),
         Action::Devices {} => devices(),
         Action::BlockLayout(query) => block::observe(w, query),
         Action::Mounts {} => mounts::observe(),

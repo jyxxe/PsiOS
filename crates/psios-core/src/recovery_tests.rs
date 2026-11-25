@@ -870,6 +870,75 @@ fn lost_read_gets_new_claim_and_late_receipt_is_fenced() {
     assert_eq!(run["claim_epoch"], "2");
 }
 #[test]
+fn revoked_process_observation_cannot_publish_an_artifact_or_a_late_body() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, mut store) = initialized(tmp.path());
+    let pid = std::process::id();
+    let list = submit(
+        &mut store,
+        "node.processes",
+        json!({"after_pid":pid-1,"limit":1}),
+    );
+    let page = execute(&mut store, &list);
+    let process = page["items"][0]["process_ref"].clone();
+    assert_eq!(process["pid"], pid);
+    let grant = call(
+        &mut store,
+        "Grant.Issue",
+        json!({"principal_id":"local-owner","actions":["task.submit","task.read",node::process::TOOL],
+            "tool_targets":[process["node_id"]],"units":2,"ttl_seconds":90}),
+    ).unwrap();
+    let request = call(
+        &mut store,
+        "Task.Prepare",
+        json!({"tool":node::process::TOOL,"input":process,"key":id("inspect"),
+            "delegation_id":grant["delegation_ref"]["resource_id"]}),
+    )
+    .unwrap();
+    let submission = call(&mut store, "Task.Submit", request).unwrap();
+    let task = submission["task_id"].as_str().unwrap();
+    assert_eq!(claim(&mut store), task);
+    let work = dispatch(&mut store, task);
+    let observation = work
+        .perform(|_| unreachable!("observations have no effect checkpoint"))
+        .unwrap();
+    assert_eq!(observation["process_ref"], process);
+    call(
+        &mut store,
+        "Grant.Revoke",
+        json!({"id":grant["grant_ref"]["resource_id"],
+        "expected_resource_version":grant["grant_ref"]["version"]}),
+    )
+    .unwrap();
+    store
+        .transaction("finish", |db| {
+            broker::finish(db, &work, Ok(observation.clone()))
+        })
+        .unwrap();
+    let closed = call(&mut store, "Task.Get", json!({"id":task})).unwrap();
+    assert_eq!(closed["lifecycle"], "Failed");
+    assert_eq!(closed["conditions"][0]["type"], "PermissionDenied");
+    assert!(
+        closed["result"]["artifact_refs"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    store
+        .transaction("late", |db| broker::finish(db, &work, Ok(observation)))
+        .unwrap();
+    let receipts = call(&mut store, "Resource.List", json!({"kind":"LateReceipt"})).unwrap();
+    let late = call(
+        &mut store,
+        "Resource.Resolve",
+        json!({"reference":receipts["items"][0]}),
+    )
+    .unwrap();
+    assert_eq!(late["value"]["evidence"], json!({"code":"Fenced"}));
+}
+
+#[test]
 fn cancellation_after_dispatch_preserves_successful_effect() {
     let tmp = tempfile::tempdir().unwrap();
     let (_, mut s) = initialized(tmp.path());

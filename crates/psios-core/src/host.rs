@@ -97,7 +97,9 @@ pub enum Action {
     #[serde(rename = "node.mounts")]
     Mounts {},
     #[serde(rename = "node.processes")]
-    Processes(node::ProcessQuery),
+    Processes(node::process::Page),
+    #[serde(rename = "node.process_inspect")]
+    InspectProcess(node::process::Identity),
     #[serde(rename = "service.inspect")]
     ServiceInspect(Target),
     #[serde(rename = "service.observe")]
@@ -188,6 +190,7 @@ impl Action {
             Self::StartAgentSession(blueprint) => blueprint.validate()?,
             Self::StartWorkflow(blueprint) => blueprint.validate()?,
             Self::Processes(p) => p.validate()?,
+            Self::InspectProcess(p) => p.validate()?,
             Self::Interfaces(q) => q.validate()?,
             Self::Routes(q) => q.validate()?,
             Self::RouteLookup(q) => q.validate()?,
@@ -270,6 +273,7 @@ impl Action {
             Self::StartWorkflow(blueprint) => return blueprint.definition(db, actor),
             Self::NetworkProbe(target) => return node::network::probe::target(db, target),
             Self::Processes(_)
+            | Self::InspectProcess(_)
             | Self::Interfaces(_)
             | Self::Routes(_)
             | Self::RouteLookup(_)
@@ -448,6 +452,16 @@ impl Work {
         Ok(())
     }
 
+    pub(crate) fn check_result_publication(&self, db: &Db<'_>) -> Result<()> {
+        if matches!(
+            self.action,
+            Action::VerifyVolumeFile(_) | Action::InspectFileRename(_) | Action::InspectProcess(_)
+        ) {
+            self.checkpoint_authority(db)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn checkpoint(&self, db: &Db<'_>, event: Checkpoint<'_>) -> Result<()> {
         let target = self.checkpoint_authority(db)?;
         match (&self.action, event) {
@@ -514,6 +528,7 @@ impl Work {
             | Action::Inventory {}
             | Action::Pressure {}
             | Action::Processes(_)
+            | Action::InspectProcess(_)
             | Action::Interfaces(_)
             | Action::Routes(_)
             | Action::RouteLookup(_)

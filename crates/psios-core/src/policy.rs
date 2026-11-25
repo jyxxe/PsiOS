@@ -27,6 +27,7 @@ pub const TOOLS: &[&str] = &[
     node::network::probe::TOOL,
     "node.routing_rules",
     "node.processes",
+    node::process::TOOL,
     "node.devices",
     node::block::TOOL,
     "node.mounts",
@@ -100,6 +101,7 @@ pub fn readonly(tool: &str) -> bool {
             | node::network::probe::TOOL
             | "node.routing_rules"
             | "node.processes"
+            | node::process::TOOL
             | "node.devices"
             | node::block::TOOL
             | "node.mounts"
@@ -163,6 +165,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | "node.routing_rules"
                     | "node.mounts"
                     | node::pressure::TOOL
+                    | node::process::TOOL
                     | node::block::TOOL
                     | "backup.verify"
                     | storage::file_integrity::TOOL
@@ -518,6 +521,7 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             || p.actions.iter().any(|action| {
                 action == storage::export::ACTION
                     || action == node::journal::TOOL
+                    || action == node::process::TOOL
                     || action == node::RESTART_TOOL
                     || action == node::service_state::TOOL
                     || action == storage::restore_publication::INSPECT

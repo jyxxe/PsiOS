@@ -8,7 +8,8 @@
 
 ## 宿主与调度
 
-- `psiosctl node` 返回本机权威分配的 Node 身份、Linux boot ID、工作线程数、各阶段队列数量和调度模式。`node.inventory`、`node.processes` 和 `node.devices` 是独立授权的 Task 工具。进程查询支持 `after_pid` 和 `limit`。boot ID、PID 和 start ticks 共同标识一次进程实例。块设备来自 sysfs，结果和进程页都是调用时的观测。
+- `psiosctl node` 返回本机权威分配的 Node 身份、Linux boot ID、工作线程数、各阶段队列数量和调度模式。`node.inventory`、`node.processes` 和 `node.devices` 是独立授权的 Task 工具。进程列表支持 `after_pid` 和 `limit`。块设备来自 sysfs，结果和进程页都是调用时的观测。
+- `node.processes` 每项返回由 Node、boot ID、procfs 视图、PID 和 start ticks 组成的 `process_ref`。将这份引用原样用于 `node.process_inspect` 可取得该实例的状态、线程数、CPU ticks、虚拟内存和驻留页。需要单独授予 `node.process_inspect`，并将 `tool_targets` 限定到 Node。退出或不可见的进程返回 `NotFound`，身份或视图变化返回 `PreconditionFailed`。[本机进程验收](../tests/test_process_observation.py) · [Linux procfs](https://docs.kernel.org/filesystems/proc.html)
 - 配置中的 `workers` 取 1 至 16，默认 4。工作线程共享事务权威，在数据库锁外等待宿主调用。调度器在有积压的主体之间轮转。同一卷、应用或服务上的冲突写入继续受持久占用保护。所有者用 `Node.Configure` 提交 Node 的 `expected_resource_version` 和 `scheduling`，取值为 `Cordoned` 或 `Enabled`。暂停领取期间可接受任务，在途工作可结算，超时及撤权仍会释放预留。
 - `Task.History` 使用 `id` 和可选 `limit`。下一页带回 `through_version` 和服务器返回的 `next_after_version`（请求字段为 `after_version`），读取同一历史区间。每个修订包含当时的 `result_availability`。`Task.Archive` 使用任务 ID 和修订，将已结算的终态移出调度表，保留幂等回执、历史、Run 和结果。当前仍需为结果及审计历史预留磁盘空间。
 - `Event.Wait` 复用 Event.Poll 的授权游标，支持 1 至 10000 毫秒的 `timeout_ms` 和可选 `limit`。`psiosctl watch CURSOR --wait-ms 5000` 可直接使用。提交后通知订阅者，等待时释放数据库锁，撤权和超时重新检查。事件、任务、信箱和模型领取共用每个守护进程的 8 个等待名额。

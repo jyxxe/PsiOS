@@ -454,6 +454,12 @@ jobs:
           git archive a93fe94937a46702695659392d012899d17e4e3c Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format51"
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format51" "$RUNNER_TEMP/psios-compatibility-target"
           python3 -B tests/resource_snapshot_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
+      - name: Install exact process observation without enlarging format 52 grants
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format52"
+          git archive ebcdd16fe384ad7af3a9b95f8130966686a22ae9 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format52"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format52" "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/process_observation_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Stream and restore a backup larger than the default limit
         run: PSIOS_TEST_LARGE_BACKUP=1 python3 -B -m unittest discover -s tests -p test_backup_limits.py -v
       - name: Exercise a real OCI engine and persistent volume

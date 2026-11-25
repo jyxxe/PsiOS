@@ -58,8 +58,10 @@ class TaskResultAccessTests(unittest.TestCase):
 
     def test_result_and_actual_artifact_bytes_are_scoped_and_audited(self):
         n = self.n
-        first, unrelated = self.source(), self.source()
-        first_task, unrelated_task = n.wait(first), n.wait(unrelated)
+        first = self.source()
+        first_task = n.wait(first)
+        unrelated = self.source()
+        unrelated_task = n.wait(unrelated)
         reference = first_task["result"]["artifact_refs"][0]
         other_ref = unrelated_task["result"]["artifact_refs"][0]
         reader = n.call("Agent.Register", {"name": "result-reader"})
@@ -142,6 +144,7 @@ class TaskResultAccessTests(unittest.TestCase):
         budget = n.call("Budget.Get", {"id": execution["budget_ref"]["resource_id"]})
         self.assertEqual((budget["reserved"], budget["spent"]), (0, 0))
 
+        n.call("Task.Cancel", target(n.get(other)["reference"]))
         self.scheduling("Enabled")
         self.assertEqual(self.result(upstream), self.content)
         ref = n.call("Task.Results", {"id": upstream}, reader["token"])["result"]["artifact_refs"][0]

@@ -161,7 +161,7 @@ psiosctl network-trial-rollback "$OPERATION_ID" --revision "$OPERATION_REVISION"
 
 Core 在请求 NetworkManager 回退前持久记录派发，核对原检查点、设备和当前试配置。确认与回退竞争同一个操作修订和派发位置。只有该设备返回成功且 Core 重新观察到原网络配置后，原 Task 才结算为 `Cancelled / Known`，结果制品记录 `RolledBack`。回执丢失时保留原操作的未决状态和网口占用，通过授权观察核对结局。守护进程重启后沿用原检查点的恢复路径。[NetworkManager CheckpointRollback](https://networkmanager.dev/docs/api/latest/gdbus-org.freedesktop.NetworkManager.html)
 
-已保存精确检查点但丢失候选激活回执时，原操作仍可在检查点到期后通过 `network.inspect_trial` 取得回退证据。Core 复核同一个管理器和网口、检查点已消失、原配置已恢复且没有待激活的候选连接，再通过 `Operation.Reconcile` 结算原操作并释放网口。候选配置仍在运行或缺少精确检查点时，原操作继续保留未决状态。[激活回执丢失验收](../tests/network_trial_activation_recovery.py)
+原执行器已收到候选激活对象，但激活状态写入失败时，Core 会尝试独立保存这份回执。只有存在该回执时，原操作才可在检查点到期后通过 `network.inspect_trial` 取得回退证据。Core 复核同一个管理器和网口、检查点已消失、原配置已恢复且没有待激活的候选连接，再通过 `Operation.Reconcile` 结算原操作并释放网口。候选配置仍在运行、缺少精确检查点或无法证明调用已返回时，网口继续由原未决操作占用。[激活回执丢失验收](../tests/network_trial_activation_recovery.py)
 
 ### 受管 systemd 服务
 

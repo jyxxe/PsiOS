@@ -190,7 +190,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = storage::restore_publication::DISPOSAL_FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = node::service_manager::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -485,6 +485,9 @@ impl Store {
                 }
                 if ver < storage::restore_publication::DISPOSAL_FORMAT {
                     db.c.execute_batch(storage::restore_publication::DISPOSAL_SCHEMA)?;
+                }
+                if ver < node::service_manager::FORMAT {
+                    node::service_manager::migrate(db)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

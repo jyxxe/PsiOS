@@ -6,6 +6,7 @@ pub mod network;
 pub mod pressure;
 pub mod process;
 pub(crate) mod service_control;
+pub(crate) mod service_manager;
 pub mod service_state;
 use crate::{
     config::Manager,
@@ -218,7 +219,11 @@ fn service(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Result<Va
     } else {
         "--system"
     };
-    let command = |verb: &str, args: &[&str], effect: bool| -> Result<Vec<u8>> {
+    let command = |verb: &str,
+                   args: &[&str],
+                   unit: Option<&str>,
+                   effect: bool|
+     -> Result<Vec<u8>> {
         let mut cmd = Command::new("/usr/bin/systemctl");
         cmd.env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -230,10 +235,12 @@ fn service(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Result<Va
             );
         }
         cmd.args([manager, "--no-pager", "--no-ask-password", verb])
-            .args(args)
-            .arg("--")
-            .arg(&cfg.unit);
-        let out = crate::command::capture(cmd, effect, "systemd", 30)?;
+            .args(args);
+        if let Some(unit) = unit {
+            cmd.arg("--").arg(unit);
+        }
+        let out =
+            crate::command::capture(cmd, effect, "systemd", if unit.is_some() { 30 } else { 5 })?;
         require(
             !out.truncated,
             if effect {
@@ -245,10 +252,21 @@ fn service(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Result<Va
         )?;
         Ok(out.stdout)
     };
+    let unit = Some(cfg.unit.as_str());
+    let manager_sample = || -> Result<Option<String>> {
+        service_manager::parse_sample(&command(
+            "show",
+            &[service_manager::START_PROPERTY],
+            None,
+            false,
+        )?)
+    };
     let inspect = || -> Result<Value> {
+        let started = manager_sample()?;
         let bytes = command(
             "show",
             &["--property=Id,LoadState,ActiveState,SubState,MainPID,InvocationID,NeedDaemonReload"],
+            unit,
             false,
         )?;
         let mut props = BTreeMap::new();
@@ -267,7 +285,7 @@ fn service(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Result<Va
         )?;
         let load_state = props.get("LoadState").copied().unwrap_or_default();
         let definition = if load_state == "loaded" {
-            Some(psios_api::sha256(&command("cat", &[], false)?))
+            Some(psios_api::sha256(&command("cat", &[], unit, false)?))
         } else {
             require(
                 matches!(w.action, Action::ServiceObserve(_))
@@ -277,12 +295,25 @@ fn service(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Result<Va
             )?;
             None
         };
+        let final_sample = manager_sample()?;
+        require(
+            started.is_some() == final_sample.is_some(),
+            "DependencyUnavailable",
+            "systemd manager startup time was unavailable during unit observation",
+        )?;
+        require(
+            started == final_sample,
+            "PreconditionFailed",
+            "systemd manager changed during unit observation",
+        )?;
         let boot = service_control::boot_id()?;
-        Ok(
-            json!({"unit":cfg.unit,"manager":cfg.manager,"manager_uid":service_control::manager_uid(&cfg.manager),
+        let mut observation = json!({"unit":cfg.unit,"manager":cfg.manager,"manager_uid":service_control::manager_uid(&cfg.manager),
               "boot_id":boot,"load_state":load_state,"active_state":props.get("ActiveState"),"sub_state":props.get("SubState"),
-          "definition_digest":definition,"needs_reload":props.get("NeedDaemonReload")!=Some(&"no"),"main_pid":props.get("MainPID"),"invocation_id":props.get("InvocationID"),"observed_at":now()}),
-        )
+          "definition_digest":definition,"needs_reload":props.get("NeedDaemonReload")!=Some(&"no"),"main_pid":props.get("MainPID"),"invocation_id":props.get("InvocationID"),"observed_at":now()});
+        if let Some(started) = started {
+            observation[service_manager::STARTED] = json!(started);
+        }
+        Ok(observation)
     };
     let before = inspect()?;
     let Some(control) = service_control::Control::from_action(&w.action) else {
@@ -304,8 +335,29 @@ fn service(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Result<Va
         "ApprovalInvalidated",
         "systemd definition changed or needs a reload",
     )?;
+    let check_manager = || -> Result<()> {
+        let current = manager_sample()?;
+        let expected = service_manager::timestamp(&before);
+        require(
+            expected.is_some() && current.is_some(),
+            "DependencyUnavailable",
+            "systemd manager startup time is unavailable",
+        )?;
+        require(
+            expected == current.as_deref(),
+            "PreconditionFailed",
+            "systemd manager changed before unit control",
+        )
+    };
+    check_manager()?;
     checkpoint(&before)?;
-    command(control.verb(), &[], true)?;
+    check_manager().map_err(|_| {
+        err(
+            "OutcomeUnknown",
+            "checkpointed systemd manager could not be confirmed before unit control",
+        )
+    })?;
+    command(control.verb(), &[], unit, true)?;
     let observed =
         inspect().map_err(|_| err("OutcomeUnknown", "unit change requires reconciliation"))?;
     require(

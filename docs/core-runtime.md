@@ -246,6 +246,12 @@ Core 通过已打开的目录和文件描述符流式校验私有普通文件。
 
 `volume.write` 或 `volume.append` 丢失回执时，本机所有者可对原 Operation 调用 `Operation.Reconcile`。Core 在卷仍由该操作独占时读取原计划指定的文件和字节，逐项同步该文件与父目录，再核对路径和 inode 后提交结算。同步期间数据库仍可处理其他请求。任一路同步失败或文件被替换时，原 Operation 保持 `Unknown` 并保留卷占用。成功后的恢复证据包含文件修订。[SIGKILL 与 fsync 故障注入验收](../tests/test_volume_write_reconciliation.py)
 
+### 卷内目录创建和对账
+
+从数据库格式 120 起，`volume.mkdir` 在独占原 Volume、重新验证审批和期限后，在 `/data` 外的本机私有目录暂存一个空目录。Core 固定原 Volume、目的父目录、暂存区和空目录 inode，刷新目录后提交检查点，再以 `RENAME_NOREPLACE` 发布。正常成功仍返回原有的卷引用和 `receipt.path`。当前目录后端保留普通 POSIX 权限和同组 setgid 继承，拒绝需要跨组继承、默认 ACL 或继承安全标签的父目录配置。
+
+回执丢失后，本机所有者以原 Operation 的精确修订调用 `Operation.Reconcile`。Core 核验并同步原空目录及两侧父目录。原目录位于获准位置时结算成功，仍处于私有暂存区且目的位置为空时结算 `NotApplied`。两处都缺失、身份或父目录被替换、新目录出现内容或元数据不符时保留 `Unknown` 和原卷占用。结算不会重发 mkdir 或 rename。已核实未发布的私有暂存项只能用空目录删除，其他文件会保留。旧版本已派发而无检查点的操作在升级后仍保留未知结果。[实际目录发布与故障验收](../tests/test_volume_mkdir_recovery.py)
+
 ### 卷内条目删除和对账
 
 从格式 113 起，`volume.remove_entry` 在当前卷修订和原批准下记录准确的源路径与 inode，再将条目原子移入同一文件系统上的私有保留目录。源目录与保留目录完成同步后，Core 提交卷修订和逻辑删除回执。支持单链接普通文件，以及服务账户可以检查为空的目录。卷挂载或其他写入占用期间继续拒绝删除。

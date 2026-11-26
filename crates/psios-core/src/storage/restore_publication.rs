@@ -198,7 +198,7 @@ pub(crate) fn record(
                                 "receipt":receipt,"placement":placement});
     source.evidence(&mut checkpoint, &target, true);
     if matches!(source, Source::Create(_)) {
-        checkpoint["started_effect_ref"] = creation::start_effect(db, work)?;
+        checkpoint["started_effect_ref"] = work.start_host_effect(db)?.reference();
     }
     let checkpoint = db.create(
         CHECKPOINT,

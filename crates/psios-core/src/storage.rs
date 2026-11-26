@@ -1,6 +1,7 @@
 //! Single-node directory volumes. A writer or an uncertain operation retains the volume hold.
 pub(crate) mod cloning;
 mod detached;
+pub(crate) mod directory_create;
 pub(crate) mod entry_retirement;
 pub(crate) mod export;
 pub(crate) mod file_integrity;
@@ -191,6 +192,7 @@ pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
         }
         if matches!(w.action, Action::Delete(_)) {
             entry_retirement::ensure_no_pending(db, v)?;
+            directory_create::ensure_no_pending(db, v)?;
             let referenced:bool=db.c.query_row("SELECT EXISTS(SELECT 1 FROM current WHERE
               (kind='Backup' AND body->>'lifecycle'!='Deleted' AND json_extract(spec,'$.source_volume')=?1)
               OR (kind='Application' AND json_extract(spec,'$.volume_id')=?1 AND json_extract(body,'$.lifecycle')!='Uninstalled'))",[&v.id],|r|r.get(0))?;
@@ -1107,9 +1109,7 @@ fn remove_contents(dir: &File, depth: usize) -> Result<()> {
 }
 pub fn perform(w: &Work) -> Result<Value> {
     match &w.action {
-        Action::Files(_) | Action::Chunk(_) | Action::Append(_) | Action::MakeDir(_) => {
-            files::perform(w)
-        }
+        Action::Files(_) | Action::Chunk(_) | Action::Append(_) => files::perform(w),
         Action::VolumeUsage(query) => usage::measure(w, query),
         Action::Activate(_) => restore_proof::verify(w),
         Action::InspectBackupPublication(_) => publication::observe(w),
@@ -1206,7 +1206,8 @@ pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
         }
         Action::DeleteBackup(_) | Action::Delete(_) => retirement::settle(db, &w.op, &w.target, r),
         Action::RemoveEntry(request) => entry_retirement::settle(db, w, &request.path, r),
-        Action::Write(_) | Action::Append(_) | Action::MakeDir(_) | Action::RenameFile(_) => Ok(
+        Action::MakeDir(request) => directory_create::settle(db, w, &request.path, r),
+        Action::Write(_) | Action::Append(_) | Action::RenameFile(_) => Ok(
             json!({"volume_ref": db.status(&w.target,w.target.body.clone())?.reference(), "receipt": r}),
         ),
         _ => Ok(r.clone()),

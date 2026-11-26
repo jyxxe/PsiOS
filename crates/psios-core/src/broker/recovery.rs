@@ -8,6 +8,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
     node::network::trial::verify_active(db.c, crate::db::CURRENT_FORMAT)?;
     artifact::retention::delayed::verify_pending(db.c)?;
     storage::entry_retirement::verify_active(db.c)?;
+    storage::directory_create::verify_active(db.c)?;
     network_trial::recover_parked(db)?;
     let active = db
         .c
@@ -75,6 +76,9 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
         let entry_unprepared = phase == "Dispatched"
             && tool == storage::entry_retirement::TOOL
             && storage::entry_retirement::not_prepared(db, &operation(db, &t)?)?;
+        let directory_unprepared = phase == "Dispatched"
+            && tool == storage::directory_create::TOOL
+            && storage::directory_create::not_prepared(db, &operation(db, &t)?)?;
         let deletion_unprepared = phase == "Dispatched"
             && matches!(tool, "volume.delete" | "backup.delete")
             && storage::retirement::not_prepared(db, &operation(db, &t)?)?;
@@ -94,6 +98,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             && !deletion_unprepared
             && !rename_unprepared
             && !entry_unprepared
+            && !directory_unprepared
         {
             close(
                 db,
@@ -128,6 +133,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             || deletion_unprepared
             || rename_unprepared
             || entry_unprepared
+            || directory_unprepared
         {
             close(
                 db,
@@ -143,6 +149,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                     || create_undispatched
                     || trial_unstarted
                     || entry_unprepared
+                    || directory_unprepared
                     || restore_unpublished && tool == storage::restore_publication::CREATE
                 {
                     "NotStarted"
@@ -179,6 +186,8 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                         "file rename interrupted before its observation was checkpointed"
                     } else if deletion_unprepared {
                         "storage deletion interrupted before its identity was prepared"
+                    } else if directory_unprepared {
+                        "directory creation interrupted before publication was checkpointed"
                     } else {
                         "run interrupted"
                     },
@@ -361,6 +370,7 @@ pub(crate) enum ReconcileProbe {
     Network(Box<node::network::trial::Inspection>),
     VolumeFile(Box<storage::reconcile_file::Probe>),
     EntryRetirement(Box<storage::entry_retirement::Probe>),
+    DirectoryCreation(Box<storage::directory_create::Probe>),
 }
 
 pub(crate) enum ReconcileSample {
@@ -368,6 +378,7 @@ pub(crate) enum ReconcileSample {
     Network(node::network::trial::ReconcileSample),
     VolumeFile(Box<storage::reconcile_file::Sample>),
     EntryRetirement(Box<storage::entry_retirement::Sample>),
+    DirectoryCreation(Box<storage::directory_create::Sample>),
 }
 
 impl ReconcileProbe {
@@ -378,6 +389,9 @@ impl ReconcileProbe {
             Self::EntryRetirement(probe) => probe
                 .read()
                 .map(|sample| ReconcileSample::EntryRetirement(Box::new(sample))),
+            Self::DirectoryCreation(probe) => probe
+                .read()
+                .map(|sample| ReconcileSample::DirectoryCreation(Box::new(sample))),
             Self::VolumeFile(probe) => probe
                 .read()
                 .map(|file| ReconcileSample::VolumeFile(Box::new(file))),
@@ -407,6 +421,23 @@ pub(crate) fn prepare_reconcile(
         )?;
         Ok(Some(ReconcileProbe::Network(Box::new(
             node::network::trial::inspect(db, &op)?,
+        ))))
+    } else if task.spec["task_type"] == storage::directory_create::TOOL {
+        require(
+            req.evidence_ref.is_none(),
+            "InvalidArgument",
+            "directory reconciliation reads its original Volume custody directly",
+        )?;
+        let action = reconcile_action(db, &task)?;
+        let target = reconcile_target(db, &op, &action)?;
+        let Action::MakeDir(input) = action else {
+            return Err(err(
+                "RecoveryRequired",
+                "directory creation input is unavailable",
+            ));
+        };
+        Ok(Some(ReconcileProbe::DirectoryCreation(Box::new(
+            storage::directory_create::prepare_reconcile(db, &op, target, &input.path)?,
         ))))
     } else if task.spec["task_type"] == storage::entry_retirement::TOOL {
         require(
@@ -459,7 +490,9 @@ fn reconcile_target(db: &Db<'_>, op: &Doc, action: &Action) -> Result<Doc> {
     let (target_id, expected) = match action {
         Action::Write(p) => (&p.id, &p.expected_resource_version),
         Action::Append(p) => (&p.target.id, &p.target.expected_resource_version),
-        Action::RemoveEntry(p) => (&p.target.id, &p.target.expected_resource_version),
+        Action::RemoveEntry(p) | Action::MakeDir(p) => {
+            (&p.target.id, &p.target.expected_resource_version)
+        }
         Action::CloneVolume(p) => (&p.target.id, &p.target.expected_resource_version),
         Action::RenameFile(p) => (&p.target.id, &p.target.expected_resource_version),
         Action::Start(p)
@@ -572,6 +605,23 @@ pub(crate) fn reconcile(
                 storage::restore_publication::reconcile(db, &op, &target, &proof, &observation)?;
             if !applied {
                 reason = Some(err("LeaseLost", "volume was not published"));
+            }
+            (result, evidence)
+        }
+        Action::MakeDir(input) => {
+            let Some(ReconcileSample::DirectoryCreation(observation)) = sample? else {
+                return Err(err(
+                    "OutcomeUnknown",
+                    "no synced directory creation observation is available",
+                ));
+            };
+            let (applied, result, evidence) =
+                storage::directory_create::reconcile(db, &op, &target, &input.path, *observation)?;
+            if !applied {
+                reason = Some(err(
+                    "LeaseLost",
+                    "the approved directory creation did not take effect",
+                ));
             }
             (result, evidence)
         }

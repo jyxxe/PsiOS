@@ -70,34 +70,6 @@ pub(super) fn binding(conn: &Connection, op: &Doc, pool: &Doc) -> Result<Value> 
     Ok(json!({"pool_ref":pool.reference(),"name":name}))
 }
 
-pub(super) fn start_effect(db: &Db<'_>, work: &Work) -> Result<Value> {
-    let effect = db.of(&work.effect.id, "Effect")?;
-    let operation = db.of(&work.op.id, "Operation")?;
-    let task = db.of(&work.task.id, "Task")?;
-    let run = db.of(&work.run.id, "Run")?;
-    require(
-        effect.reference() == work.effect.reference()
-            && effect.body["phase"] == "PermitBound"
-            && operation.body["effect_refs"] == json!([effect.reference()])
-            && task.body["operation_refs"] == json!([operation.reference()])
-            && run.body["operation_refs"] == json!([operation.reference()]),
-        "Fenced",
-        "new volume publication permit has already been used or replaced",
-    )?;
-    let mut body = effect.body.clone();
-    body["phase"] = json!("EffectStarted");
-    let started = db.status(&effect, body)?;
-    let mut body = operation.body.clone();
-    body["effect_refs"] = json!([started.reference()]);
-    let op = db.status(&operation, body)?;
-    for doc in [run, task] {
-        let mut body = doc.body.clone();
-        body["operation_refs"] = json!([op.reference()]);
-        db.status(&doc, body)?;
-    }
-    Ok(started.reference())
-}
-
 pub(super) fn verify_started(conn: &Connection, op: &Doc, checkpoint: &Doc) -> Result<()> {
     let started = db::resolve(conn, &checkpoint.body["started_effect_ref"])?;
     let current = db::resolve(conn, &op.body["effect_refs"][0])?;

@@ -207,94 +207,6 @@ impl Custody {
     }
 }
 
-fn authorized(
-    conn: &Connection,
-    op: &Doc,
-    task: &Doc,
-    run: &Doc,
-    plan: &Doc,
-    effect: &Doc,
-) -> Result<Doc> {
-    let permit = resolve(conn, &effect.spec["permit_ref"])?;
-    let proof = resolve(conn, &permit.body["auth_proof"]["record_ref"])?;
-    let decision = resolve(conn, &permit.body["decision_ref"])?;
-    let request = resolve(conn, &decision.body["request_ref"])?;
-    let approval = historical(conn, &request.id, 2)?;
-    let used = historical(conn, &format!("use-{}", decision.id), 2)?;
-    let initial = historical(conn, &used.id, 1)?;
-    let indexed: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM approval_bindings WHERE request=?1 AND task=?2 AND decision=?3 AND operation=?4)",
-        params![request.id,task.id,decision.id,op.id], |r|r.get(0))?;
-    let audience: Vec<_> = plan.body["preconditions"]
-        .as_array()
-        .ok_or_else(|| err("RecoveryRequired", "OCI restart approval audience missing"))?
-        .iter()
-        .map(|condition| condition["resource_ref"].clone())
-        .collect();
-    require(
-        indexed
-            && plan.kind == "OperationPlan"
-            && plan.owner == op.owner
-            && plan.body["requester_principal_id"] == op.owner
-            && plan.body["purpose_ref"] == task.spec["input_ref"]
-            && plan.body["allowed_effects"][0]["action"] == TOOL
-            && plan.body["allowed_effects"][0]["resource_ref"] == effect.body["resource_ref"]
-            && permit.kind == "ExecutionPermit"
-            && permit.rev == 1
-            && permit.owner == op.owner
-            && permit.body["operation_id"] == op.id
-            && permit.body["effect_id"] == effect.id
-            && permit.body["plan_digest"] == plan.body["plan_digest"]
-            && permit.body["preconditions"] == plan.body["preconditions"]
-            && permit.body["authorization_ref"] == task.spec["delegation_ref"]
-            && permit.body["audience_resource_refs"] == json!(audience)
-            && permit.body["recovery_incarnation"] == run.body["recovery_incarnation"]
-            && proof.kind == "PermitBinding"
-            && proof.rev == 1
-            && proof.owner == op.owner
-            && proof.body["operation_id"] == op.id
-            && proof.body["effect_id"] == effect.id
-            && proof.body["permit_id"] == permit.id
-            && proof.body["claim_id"] == run.body["claim_id"]
-            && proof.body["claim_epoch"] == run.body["claim_epoch"]
-            && proof.body["plan_digest"] == plan.body["plan_digest"]
-            && proof.body["audience_resource_refs"] == permit.body["audience_resource_refs"]
-            && decision.kind == "ApprovalDecision"
-            && decision.rev == 1
-            && decision.owner == op.owner
-            && decision.body["decision"] == "Approved"
-            && decision.body["approver_principal_id"] == crate::policy::OWNER
-            && decision.body["use_limit"] == "SingleOperation"
-            && decision.body["plan_digest"] == plan.body["plan_digest"]
-            && decision.body["preconditions"] == plan.body["preconditions"]
-            && request.kind == "ApprovalRequest"
-            && request.rev == 1
-            && request.owner == op.owner
-            && request.spec["task_id"] == task.id
-            && request.body["plan_ref"] == plan.reference()
-            && request.body["status"] == "Pending"
-            && approval.kind == request.kind
-            && approval.spec == request.spec
-            && approval.owner == request.owner
-            && approval.body["status"] == "Approved"
-            && approval.body["decision_ref"] == decision.reference()
-            && used.kind == "ApprovalUse"
-            && used.owner == op.owner
-            && used.body["binding_status"] == "Bound"
-            && used.body["validity_status"] == "Valid"
-            && used.body["operation_id"] == op.id
-            && used.body["plan_digest"] == plan.body["plan_digest"]
-            && used.body["decision_ref"] == decision.reference()
-            && initial.kind == used.kind
-            && initial.owner == used.owner
-            && initial.body["binding_status"] == "Unbound"
-            && initial.body["decision_ref"] == decision.reference()
-            && initial.body["plan_digest"] == plan.body["plan_digest"],
-        "RecoveryRequired",
-        "OCI restart disagrees with the originally approved permit and run",
-    )?;
-    Ok(used)
-}
-
 pub(super) struct Journal {
     pub(super) modern: bool,
     pub(super) intent: Doc,
@@ -318,7 +230,8 @@ pub(super) fn load(conn: &Connection, op: &Doc, epoch: i64) -> Result<Journal> {
     let modern = seq > epoch;
     let issued = resolve(conn, &issued_run.body["operation_refs"][0])?;
     let plan = resolve(conn, &op.body["plan_ref"])?;
-    let approval = authorized(conn, op, &task, &issued_run, &plan, &initial)?;
+    let approval =
+        crate::broker::verify_bound_approval(conn, op, &task, &issued_run, &plan, &initial, TOOL)?;
     let custody = Custody::load(conn, &plan)?;
     let intent = needed(conn, &json!(intent_id(&op.id)))?;
     let checkpoint = find(conn, &checkpoint_id(&op.id))?;
@@ -482,7 +395,15 @@ pub(super) fn binding(db: &Db<'_>, work: &Work) -> Result<(Value, Value)> {
     let plan = db.resolve(&work.op.body["plan_ref"])?;
     let custody = Custody::load(db.c, &plan)?;
     custody.holds(db.c, &work.op, true)?;
-    let approved = authorized(db.c, &work.op, &work.task, &work.run, &plan, &work.effect)?;
+    let approved = crate::broker::verify_bound_approval(
+        db.c,
+        &work.op,
+        &work.task,
+        &work.run,
+        &plan,
+        &work.effect,
+        TOOL,
+    )?;
     Ok((custody.binding(), approved.reference()))
 }
 

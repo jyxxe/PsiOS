@@ -16,25 +16,31 @@ struct Prepare {
 #[derive(Clone, Copy)]
 enum LocalOrigin<'a> {
     Direct,
-    ClaimedModel(&'a str),
+    ClaimedModel {
+        lease: &'a str,
+        deadline_source: Option<&'a str>,
+    },
     Schedule(&'a str),
-    Workflow { run: &'a str, step_key: &'a str },
+    Workflow {
+        run: &'a str,
+        step_key: &'a str,
+    },
 }
 
 impl<'a> LocalOrigin<'a> {
     fn id(self) -> Option<&'a str> {
         match self {
             Self::Direct => None,
-            Self::ClaimedModel(id) | Self::Schedule(id) | Self::Workflow { run: id, .. } => {
-                Some(id)
-            }
+            Self::ClaimedModel { lease: id, .. }
+            | Self::Schedule(id)
+            | Self::Workflow { run: id, .. } => Some(id),
         }
     }
 
     fn kind(self, actor: &str) -> &'static str {
         match self {
-            Self::Direct | Self::ClaimedModel(_) if actor == policy::OWNER => "HumanRequest",
-            Self::Direct | Self::ClaimedModel(_) => "Service",
+            Self::Direct | Self::ClaimedModel { .. } if actor == policy::OWNER => "HumanRequest",
+            Self::Direct | Self::ClaimedModel { .. } => "Service",
             Self::Schedule(_) => "Schedule",
             Self::Workflow { .. } => "WorkflowRun",
         }
@@ -42,7 +48,7 @@ impl<'a> LocalOrigin<'a> {
 
     fn authority(self, db: &Db<'_>, actor: &str) -> Result<String> {
         match self {
-            Self::Direct | Self::ClaimedModel(_) => Ok(actor.to_owned()),
+            Self::Direct | Self::ClaimedModel { .. } => Ok(actor.to_owned()),
             _ => db.meta("authority"),
         }
     }
@@ -58,7 +64,15 @@ pub fn prepare_claimed_model(db: &Db<'_>, actor: &str, p: &Value, lease: &str) -
         "Fenced",
         "tool preparation does not belong to the model lease",
     )?;
-    prepare_with_origin(db, actor, p, LocalOrigin::ClaimedModel(lease))
+    prepare_with_origin(
+        db,
+        actor,
+        p,
+        LocalOrigin::ClaimedModel {
+            lease,
+            deadline_source: None,
+        },
+    )
 }
 pub fn prepare_scheduled(db: &Db<'_>, actor: &str, p: &Value, schedule: &str) -> Result<Value> {
     prepare_with_origin(db, actor, decode(p)?, LocalOrigin::Schedule(schedule))
@@ -339,12 +353,24 @@ pub(crate) fn submit_claimed_model_tool(
         "Fenced",
         "tool decision no longer belongs to the issued model lease",
     )?;
+    let deadline =
+        workflow::session_join::execution(db, &current, &policy::deadline::Clock::sample()?)?;
+    if let Some(deadline) = &deadline {
+        require(
+            request["deadline_at"] == *deadline,
+            "Fenced",
+            "model tool deadline does not match its owning workflow",
+        )?;
+    }
     submit_with_origin(
         db,
         &current.owner,
         request,
         None,
-        LocalOrigin::ClaimedModel(lease),
+        LocalOrigin::ClaimedModel {
+            lease,
+            deadline_source: deadline.map(|_| current.id.as_str()),
+        },
     )
 }
 
@@ -419,7 +445,7 @@ fn submit_with_origin(
     };
     let requirements = dependencies::requirements(&input)?;
     let recovery_only =
-        !matches!(source, LocalOrigin::ClaimedModel(_)) && work_admission::draining(db)?;
+        !matches!(source, LocalOrigin::ClaimedModel { .. }) && work_admission::draining(db)?;
     if !recovery_only {
         db.cfg.check_admission_space()?;
     }
@@ -460,7 +486,10 @@ fn submit_with_origin(
     let deadline_source = match source {
         LocalOrigin::Workflow { run, .. } => Some(run),
         LocalOrigin::Schedule(schedule) => Some(schedule),
-        LocalOrigin::Direct | LocalOrigin::ClaimedModel(_) => retry,
+        LocalOrigin::ClaimedModel {
+            deadline_source, ..
+        } => deadline_source,
+        LocalOrigin::Direct => retry,
     };
     policy::deadline::Clock::sample()?.register_until(
         db,

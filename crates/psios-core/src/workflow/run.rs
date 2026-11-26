@@ -1,4 +1,6 @@
-use super::{ACTION, PreparedStep, RUN, admission_delay, binding, check_tool, run_view};
+use super::{
+    ACTION, PreparedStep, RUN, admission_delay, binding, check_tool, run_view, session_join,
+};
 use crate::{
     Conditional, Result, Store, artifact, broker,
     db::{Db, Doc},
@@ -170,9 +172,14 @@ fn advance(db: &Db<'_>, rejection: &mut Option<Rejection>) -> Result<()> {
                  SELECT w.*, delay.boot_id AS deferred_boot_id, delay.time_ns AS deferred_time_ns,
                      delay.deferred_boot_ms, (w.stopping=0 AND (w.deadline_ms<=?1 OR coalesce(
                      elapsed.time_ns!=?3 OR elapsed.deadline_boot_ms<=?4,0))) AS expired,
-                     (SELECT a.task FROM active_workflow_tasks a WHERE a.run=w.run
-                      AND a.task_rev != coalesce((SELECT rev FROM versions WHERE id=a.task
-                          ORDER BY rev DESC LIMIT 1),-1) ORDER BY a.step LIMIT 1) AS changed_task
+                     (SELECT a.task FROM active_workflow_tasks a
+                        LEFT JOIN workflow_session_joins j ON j.launch_task=a.task
+                        WHERE a.run=w.run
+                          AND (a.task_rev != coalesce((SELECT rev FROM versions WHERE id=a.task
+                              ORDER BY rev DESC LIMIT 1),-1)
+                            OR (j.session IS NOT NULL AND a.session_rev IS NOT
+                                (SELECT rev FROM versions WHERE id=j.session ORDER BY rev DESC LIMIT 1)))
+                        ORDER BY a.step LIMIT 1) AS changed_task
                  FROM active_workflows w LEFT JOIN authorization_deadlines elapsed
                        ON elapsed.resource=w.run AND elapsed.boot_id=?2
                  LEFT JOIN workflow_admission_deferrals delay ON delay.run=w.run
@@ -453,7 +460,11 @@ fn record_task(
             .remove("reason");
     }
 
-    let terminal = knowledge != "Unknown" && matches!(phase, "Succeeded" | "Failed" | "Cancelled");
+    let joined = session_join::observe(db, run, task, step)?;
+    let terminal = joined.as_ref().map_or_else(
+        || knowledge != "Unknown" && matches!(phase, "Succeeded" | "Failed" | "Cancelled"),
+        |observation| observation.terminal,
+    );
     let affected = if terminal {
         db.c.execute(
             "DELETE FROM active_workflow_tasks WHERE run=?1 AND task=?2",
@@ -461,8 +472,15 @@ fn record_task(
         )?
     } else {
         db.c.execute(
-            "UPDATE active_workflow_tasks SET task_rev=?3 WHERE run=?1 AND task=?2",
-            params![run.id, task.id, task.rev],
+            "UPDATE active_workflow_tasks SET task_rev=?3,session_rev=?4 WHERE run=?1 AND task=?2",
+            params![
+                run.id,
+                task.id,
+                task.rev,
+                joined
+                    .as_ref()
+                    .map(|observation| observation.session_revision)
+            ],
         )?
     };
     require(
@@ -470,6 +488,9 @@ fn record_task(
         "RecoveryRequired",
         "workflow observation lacks the original dispatch",
     )?;
+    if let Some(observation) = joined {
+        return Ok(observation.failure);
+    }
     Ok(match (terminal, phase) {
         (true, "Failed") => Some("StepFailed"),
         (true, "Cancelled") => Some("StepCancelled"),
@@ -507,6 +528,7 @@ fn stop(db: &Db<'_>, run: &Doc, mut body: Value, reason: &str) -> Result<Doc> {
     body["stop_reason"] = json!(reason);
     for (_, id) in active_tasks(db, run)? {
         let task = broker::cancel_task(db, &db.of(&id, "Task")?)?;
+        session_join::stopped_launch(db, run, &task)?;
         record_task(db, run, &mut body, &task)?;
     }
     publish(db, run, body, Utc::now().timestamp_millis())

@@ -1849,6 +1849,135 @@ fn interval_schedule_moves_elapsed_cutoff_by_the_original_windows() {
 }
 
 #[test]
+fn workflow_cancel_between_session_launch_and_observation_stops_the_original_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, mut store) = initialized(tmp.path());
+    let provider = call(
+        &mut store,
+        "Agent.Register",
+        json!({"name":"joined-provider"}),
+    )
+    .unwrap();
+    let model = call(
+        &mut store, "Model.Register",
+        json!({"name":"joined-model","revision":"1","provider_principal_id":provider["principal_id"],
+               "inference_outcome_policy":"Strict","lease_seconds":30,"max_context_bytes":8192,
+               "max_output_bytes":2048}),
+    ).unwrap();
+    call(
+        &mut store,
+        "Grant.Issue",
+        json!({"principal_id":provider["principal_id"],"actions":["model.serve"],
+               "tool_targets":[model["resource_id"]],"units":1,"ttl_seconds":120}),
+    )
+    .unwrap();
+    let skill = call(
+        &mut store,
+        "Skill.Publish",
+        json!({"name":"joined-skill","version":"1","license":"0BSD","source":"local-test",
+               "tools":["system.status"],"instructions":"Read local status."}),
+    )
+    .unwrap();
+    let grant = call(
+        &mut store,
+        "Grant.Issue",
+        json!({"principal_id":policy::OWNER,
+               "actions":["workflow.manage","agent.session.start","session.run","task.submit",
+                          "task.read","system.status"],
+               "tool_targets":[model["resource_id"],skill["resource_id"],"profile-local"],
+               "units":3,"model_calls":2,"ttl_seconds":120}),
+    )
+    .unwrap();
+    let definition = call(
+        &mut store,
+        "Workflow.Define",
+        json!({"key":"joined-cancellation","steps":[
+            {"id":"launch","tool":"agent.session.start","after":[],"completion":"SessionTerminal",
+             "input":{"goal":"Read local status.","skill_ref":skill,"model_ref":model,
+                      "context_policy":"ReferencesOnly","max_turns":2}},
+            {"id":"after","tool":"system.status","input":{},"after":["launch"]}
+        ]}),
+    )
+    .unwrap();
+    let run = call(
+        &mut store,
+        "Workflow.Start",
+        json!({"key":"joined-cancellation","definition_ref":definition["reference"],
+               "delegation_id":grant["delegation_ref"]["resource_id"],"deadline_at":after(60)}),
+    )
+    .unwrap();
+    let run_id = run["reference"]["resource_id"].as_str().unwrap();
+    workflow::tick(&mut store).unwrap();
+    let task = claim(&mut store);
+    assert!(
+        store
+            .transaction("atomic-session-launch", |db| broker::dispatch(db, &task))
+            .unwrap()
+            .is_none()
+    );
+    let launch = call(&mut store, "Task.Get", json!({"id":task})).unwrap();
+    assert_eq!(launch["lifecycle"], "Succeeded");
+    let receipt = call(
+        &mut store,
+        "Artifact.Read",
+        json!({"reference":launch["result"]["artifact_refs"][0]}),
+    )
+    .unwrap();
+    let session = receipt["session_ref"]["resource_id"].as_str().unwrap();
+    let still_unobserved = call(&mut store, "Workflow.Get", json!({"id":run_id})).unwrap();
+    assert!(still_unobserved["state"]["steps"][0]["session_ref"].is_null());
+    let cancelled = call(
+        &mut store,
+        "Workflow.Cancel",
+        json!({"id":run_id,"expected_resource_version":still_unobserved["reference"]["version"]}),
+    )
+    .unwrap();
+    assert_eq!(cancelled["state"]["lifecycle"], "Cancelled");
+    assert_eq!(
+        cancelled["state"]["steps"][0]["session_lifecycle"],
+        "Cancelled"
+    );
+    assert!(cancelled["state"]["steps"][1]["task_receipt"].is_null());
+    let observed = call(&mut store, "Session.Get", json!({"id":session})).unwrap();
+    assert_eq!(
+        cancelled["state"]["steps"][0]["session_ref"],
+        observed["reference"]
+    );
+    let next = call_as(
+        &mut store,
+        "Model.ClaimNext",
+        json!({"model_ref":model,"key":"cancelled-before-observation"}),
+        provider["token"].as_str().unwrap().into(),
+    )
+    .unwrap();
+    assert_eq!(next, json!({"available":false}));
+    store
+        .transaction("verify-cancelled-session-launch", |db| {
+            workflow::session_join::verify(db.c)?;
+            let clock = policy::deadline::Clock::sample()?;
+            let cutoff = |resource: &str| {
+                db.c.query_row(
+            "SELECT deadline_boot_ms FROM authorization_deadlines WHERE resource=?1 AND boot_id=?2",
+            rusqlite::params![resource,clock.boot.boot_id], |row| row.get::<_,i64>(0),
+        )
+            };
+            assert!(cutoff(session)? <= cutoff(run_id)?);
+            db.c.execute_batch("SAVEPOINT lost_workflow_join")?;
+            db.c.execute(
+                "DELETE FROM workflow_session_joins WHERE session=?1",
+                [session],
+            )?;
+            assert_eq!(
+                workflow::session_join::verify(db.c).unwrap_err().0.code,
+                "RecoveryRequired"
+            );
+            db.c.execute_batch("ROLLBACK TO lost_workflow_join; RELEASE lost_workflow_join")?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
 fn workflow_step_inherits_the_runs_elapsed_deadline() {
     let tmp = tempfile::tempdir().unwrap();
     let (_, mut store) = initialized(tmp.path());

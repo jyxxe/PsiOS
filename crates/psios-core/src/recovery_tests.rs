@@ -197,7 +197,12 @@ fn network_probe_projection_fences_older_receipts_and_rolls_back_with_task_resul
 
 #[test]
 fn witnessed_unpublished_restore_reconciles_without_replaying_and_resumes_disposal() {
-    let directory = tempfile::tempdir().unwrap();
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
     let (cfg, mut store) = initialized(directory.path());
     let target = |reference: &Value| {
         json!({

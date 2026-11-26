@@ -90,8 +90,11 @@ pub fn volume_dir(cfg: &Config, d: &Doc) -> Result<PathBuf> {
     Ok(data)
 }
 pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
-    // The proof observes an original exclusive hold verified by host::work.
-    if matches!(w.action, Action::InspectFileRename(_)) {
+    // These operations use original, exact custody instead of acquiring a competing hold.
+    if matches!(
+        w.action,
+        Action::InspectFileRename(_) | Action::DiscardOciCreate(_)
+    ) {
         return Ok(());
     }
     if matches!(w.action, Action::Create { .. } | Action::Restore(_)) {

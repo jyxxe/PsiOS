@@ -1,5 +1,5 @@
 //! Recover exactly one approved release image into a classic local Docker cache.
-mod engine;
+pub(super) mod engine;
 mod verification;
 use super::{
     artifact_install, capture, publisher, release_archive, release_retirement, restore_archive,

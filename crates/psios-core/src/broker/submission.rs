@@ -407,6 +407,16 @@ fn submit_with_origin(
     } else {
         None
     };
+    let create_cleanup = if let Action::DiscardOciCreate(request) = &a {
+        require(
+            retry.is_none(),
+            "PreconditionFailed",
+            "OCI create disposal needs a newly scoped request",
+        )?;
+        Some(apps::create_recovery::admissible(db, &target, request)?)
+    } else {
+        None
+    };
     let requirements = dependencies::requirements(&input)?;
     let recovery_only =
         !matches!(source, LocalOrigin::ClaimedModel(_)) && work_admission::draining(db)?;
@@ -539,6 +549,9 @@ fn submit_with_origin(
     }
     if let Some(prepared) = &stop_cleanup {
         apps::stop::admit(db, &t, prepared)?;
+    }
+    if let Some(prepared) = &create_cleanup {
+        apps::create_recovery::admit(db, &t, prepared)?;
     }
     artifact::capacity::reserve(db, &t, tool)?;
     apps::artifact_install::acquire(db, &t, &a, &audience)?;

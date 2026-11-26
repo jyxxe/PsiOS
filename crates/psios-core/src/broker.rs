@@ -132,7 +132,12 @@ fn close(
         db.c.execute("UPDATE budgets SET reserved=reserved-1 WHERE id=(SELECT budget FROM queue WHERE task=?1)",[&t.id])?;
     }
     let unknown = knowledge == "Unknown";
-    if unknown && t.spec["task_type"] == apps::stop::TOOL {
+    if unknown
+        && matches!(
+            t.spec["task_type"].as_str(),
+            Some(apps::stop::TOOL | apps::create_recovery::CLEANUP)
+        )
+    {
         // The exclusive cleanup is still held by its recovery record. Free the
         // reserved queue slot so independent health can prove removal.
         admission::release(db, &t.id)?;
@@ -230,6 +235,12 @@ fn close(
         }
         if t.spec["task_type"] == apps::stop::TOOL {
             apps::stop::release(db, &op.id, &t.id)?;
+        }
+        if t.spec["task_type"] == apps::create_recovery::CLEANUP {
+            apps::create_recovery::close(db, &t.id)?;
+        }
+        if t.spec["task_type"] == apps::create_recovery::CREATE {
+            apps::create_recovery::release_original(db, &op.id)?;
         }
         storage::read_holds::release(db, &t.id)?;
         db.c.execute("DELETE FROM holds WHERE holder=?1", [&op.id])?;

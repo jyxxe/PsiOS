@@ -24,6 +24,8 @@ fn capacity(db: &Db<'_>) -> Result<Capacity> {
         "SELECT
             (SELECT count(*) FROM queue q WHERE q.phase<>'Done'
                 AND NOT EXISTS(SELECT 1 FROM recovery_admissions r WHERE r.task=q.task)
+                AND NOT EXISTS(SELECT 1 FROM oci_create_disposals c
+                    WHERE q.phase='Unknown' AND c.task=q.task AND c.issued=1)
                 AND NOT EXISTS(SELECT 1 FROM oci_stop_cleanups c
                     WHERE q.phase='Unknown' AND c.cleanup=q.operation)),
             (SELECT count(*) FROM recovery_admissions)",
@@ -50,6 +52,8 @@ fn principal_ordinary(db: &Db<'_>, actor: &str) -> Result<u32> {
         "SELECT count(*) FROM queue q CROSS JOIN submissions s ON s.task=q.task
          WHERE q.phase<>'Done' AND s.owner=?1
            AND NOT EXISTS(SELECT 1 FROM recovery_admissions r WHERE r.task=q.task)
+           AND NOT EXISTS(SELECT 1 FROM oci_create_disposals c
+               WHERE q.phase='Unknown' AND c.task=q.task AND c.issued=1)
            AND NOT EXISTS(SELECT 1 FROM oci_stop_cleanups c
                WHERE q.phase='Unknown' AND c.cleanup=q.operation)",
         [actor],
@@ -95,6 +99,16 @@ fn held_operation(db: &Db<'_>, target: &Doc) -> Result<Option<String>> {
 fn linked_operation(db: &Db<'_>, action: &Action, target: &Doc) -> Result<Option<Doc>> {
     let (operation, eligible_effects): (Option<String>, &[&str]) = match action {
         Action::InspectBackupPublication(_) => (Some(target.id.clone()), &["backup.create"]),
+        Action::InspectOciCreate(_) => (
+            Some(target.id.clone()),
+            &[crate::apps::create_recovery::CREATE],
+        ),
+        Action::DiscardOciCreate(request) => (
+            request.operation_ref["resource_id"]
+                .as_str()
+                .map(str::to_owned),
+            &[crate::apps::create_recovery::CREATE],
+        ),
         Action::InspectRestoredVolume(_) => (Some(target.id.clone()), &["backup.restore"]),
         Action::InspectReleaseImageRestore(_) => {
             (Some(target.id.clone()), &[crate::apps::restore_image::TOOL])
@@ -142,6 +156,11 @@ fn linked_operation(db: &Db<'_>, action: &Action, target: &Doc) -> Result<Option
     }
     let op = db.of(&id, "Operation")?;
     if let Action::ContinueOciStop(request) = action
+        && request.operation_ref != op.reference()
+    {
+        return Ok(None);
+    }
+    if let Action::DiscardOciCreate(request) = action
         && request.operation_ref != op.reference()
     {
         return Ok(None);

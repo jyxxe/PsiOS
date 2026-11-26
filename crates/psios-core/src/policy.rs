@@ -80,6 +80,8 @@ pub const TOOLS: &[&str] = &[
     apps::restore_image::INSPECT,
     artifact::session_output::TOOL,
     "application.start",
+    apps::create_recovery::INSPECT,
+    apps::create_recovery::CLEANUP,
     apps::volume_rebind::TOOL,
     "application.stop",
     apps::stop::TOOL,
@@ -162,6 +164,7 @@ pub fn readonly(tool: &str) -> bool {
             | "application.health"
             | apps::restart::INSPECT
             | apps::restore_image::INSPECT
+            | apps::create_recovery::INSPECT
             | "application.logs"
     )
 }
@@ -189,6 +192,7 @@ pub fn approval(tool: &str) -> bool {
             | apps::capture::TOOL
             | apps::restore_image::TOOL
             | "application.start"
+            | apps::create_recovery::CLEANUP
             | apps::volume_rebind::TOOL
             | apps::restart::TOOL
             | apps::stop::TOOL
@@ -244,6 +248,8 @@ fn bootstrap_actions() -> Vec<String> {
                     | storage::restore_publication::INSPECT
                     | apps::restart::TOOL
                     | apps::stop::TOOL
+                    | apps::create_recovery::INSPECT
+                    | apps::create_recovery::CLEANUP
                     | apps::restart::INSPECT
                     | broker::result_access::ACTION
                     | agent::START_SESSION
@@ -404,6 +410,8 @@ pub fn admin(actor: &str) -> Result<()> {
 }
 pub(crate) const PRIVATE_RESOURCE_KINDS: &[&str] = &[
     apps::log_tail::PRIVATE_KIND,
+    apps::create_recovery::INTENT,
+    apps::create_recovery::DISPOSAL,
     "Project",
     "Milestone",
     "WorkItem",
@@ -595,10 +603,12 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
                         | apps::restore_image::TOOL
                         | apps::restore_image::INSPECT
                         | apps::stop::TOOL
+                        | apps::create_recovery::INSPECT
+                        | apps::create_recovery::CLEANUP
                 )
             }),
         "PermissionDenied",
-        "OCI image custody and stop recovery require the local owner",
+        "OCI image custody and lifecycle recovery require the local owner",
     )?;
     require(
         p.model_calls <= 1_000_000
@@ -690,6 +700,8 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
                     || action == storage::file_move::INSPECT
                     || action == apps::restart::TOOL
                     || action == apps::stop::TOOL
+                    || action == apps::create_recovery::INSPECT
+                    || action == apps::create_recovery::CLEANUP
                     || action == apps::volume_rebind::TOOL
                     || action == apps::restart::INSPECT
                     || action == agent::fallback::ACTION

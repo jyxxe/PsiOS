@@ -347,7 +347,7 @@ pub fn dispatch(db: &Db<'_>, task: &str) -> Result<Option<Work>> {
             "operation_id": op.id,
             "resource_ref": target,
             "action": tool,
-            "phase": if node::service_control::is_tool(tool) || apps::stop::is_tool(tool) || tool == apps::restart::TOOL || tool == node::network::trial::TOOL || tool == apps::volume_rebind::TOOL { "PermitBound" } else { "EffectStarted" },
+            "phase": if node::service_control::is_tool(tool) || apps::stop::is_tool(tool) || tool == apps::restart::TOOL || tool == node::network::trial::TOOL || tool == apps::volume_rebind::TOOL || matches!(tool, apps::create_recovery::CREATE | apps::create_recovery::CLEANUP) { "PermitBound" } else { "EffectStarted" },
             "outcome_knowledge": "InFlight",
             "evidence_refs": []
         }),
@@ -494,6 +494,8 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                         | Action::Stop(_)
                         | Action::ObserveNetworkProbe(_)
                         | Action::InspectNetworkTrial(_)
+                        | Action::InspectOciCreate(_)
+                        | Action::DiscardOciCreate(_)
                 ) =>
             {
                 json!({"code":"Fenced"})
@@ -516,6 +518,13 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
         return Ok(());
     }
     let cancelled = t.body["lifecycle"] == "Cancelling";
+    let create_undispatched = matches!(w.action, Action::Start(_))
+        && apps::create_recovery::not_dispatched(db, &db.of(&w.op.id, "Operation")?)?;
+    let cleanup_started = if matches!(w.action, Action::DiscardOciCreate(_)) {
+        Some(!apps::create_recovery::cleanup_not_dispatched(db, &t)?)
+    } else {
+        None
+    };
     let rebind = matches!(w.action, Action::RebindRestoredVolume(_));
     require(
         !atomic_authority || t.body["lifecycle"] == "Running",
@@ -537,7 +546,9 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
     } else {
         None
     };
-    if cancelled && stop_started == Some(false) {
+    if cancelled
+        && (stop_started == Some(false) || create_undispatched || cleanup_started == Some(false))
+    {
         close(db, &t, "Cancelled", "NotStarted", None, None)?;
         return Ok(());
     }
@@ -550,6 +561,10 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
         return Ok(());
     }
     let result = result.and_then(|output| {
+        require(
+            !create_undispatched && cleanup_started!=Some(false),
+            "Fenced", "OCI create or cleanup result has no command checkpoint",
+        )?;
         require(
             service_started != Some(false),
             "Fenced",
@@ -615,8 +630,12 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
             let undispatched = service_started == Some(false)
                 || stop_started == Some(false)
                 || restart_started == Some(false)
+                || create_undispatched
+                || cleanup_started == Some(false)
                 || rebind;
-            let e = if stop_started == Some(true) && e.0.code != "OutcomeUnknown" {
+            let e = if (stop_started == Some(true) || cleanup_started == Some(true))
+                && e.0.code != "OutcomeUnknown"
+            {
                 err(
                     "OutcomeUnknown",
                     "unable to settle the checkpointed OCI stop or removal",

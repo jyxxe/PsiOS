@@ -12,6 +12,7 @@ import threading
 from support import Failure, Node, key, target
 from oci_recovery import ReceiptBarrier, check_kernel_limits, continue_after_lost_stop, lose_start_receipt, lose_stop_receipt
 from oci_capture import TOOL as CAPTURE, denied
+from oci_create_intent import verify_create_format_upgrade, verify_lost_create
 from oci_health import verify_image_health
 from oci_mount_observation import exercise as verify_effective_mounts
 from oci_restart import verify_restart
@@ -322,7 +323,7 @@ def check_log_isolation(node, app, owner, install_grant, container):
     return app
 
 
-def main(binaries, previous_binaries=None):
+def main(binaries, previous_binaries=None, create_recovery_only=False):
     node = Node(binaries)
     tag = "psios-acceptance:" + key()
     upgraded_tag = tag + "-upgrade"
@@ -358,6 +359,13 @@ int main(void) {
         spec = dict(image_id=image_id, name="acceptance", release_version="1.0.0", argv=["/probe"],
                     environment={"TEST_NAME": "first"}, license_expression="0BSD", volume=target(volume),
                     cpu_millicores=200, memory_max_bytes=33554432, pids_max=16, ephemeral_max_bytes=1048576)
+        if create_recovery_only:
+            for lose_removal in (False, True):
+                verify_lost_create(binaries, docker, spec, app_ids, lose_removal=lose_removal)
+            verify_lost_create(binaries, docker, spec, app_ids, externally_removed=True)
+            if prior := os.getenv("PSIOS_OCI_CREATE_PRIOR_BIN_DIR"):
+                verify_create_format_upgrade(prior, binaries, docker, spec, app_ids)
+            return
         app, source_artifact, source_archive = install_from_artifact(node, spec)
         app_id = app["resource_id"]
         app_ids.append(app_id)
@@ -546,6 +554,11 @@ int main(void) {
         verify_image_health(node, docker)
         if os.getenv("PSIOS_TEST_OCI_EFFECTIVE_MOUNTS") == "1":
             verify_effective_mounts(node, docker, spec, app_ids)
+        for lose_removal in (False, True):
+            verify_lost_create(binaries, docker, spec, app_ids, lose_removal=lose_removal)
+        verify_lost_create(binaries, docker, spec, app_ids, externally_removed=True)
+        if prior := os.getenv("PSIOS_OCI_CREATE_PRIOR_BIN_DIR"):
+            verify_create_format_upgrade(prior, binaries, docker, spec, app_ids)
         node.stop()
         subprocess.run(node.daemon + ["verify"], check=True, stdout=subprocess.DEVNULL, timeout=15)
         print("PASS live OCI lifecycle, scoped restart, isolated execution, release rollback, external exit, receipt recovery, volume holds and verified backup restore")
@@ -564,5 +577,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--bin-dir", default="target/debug")
     parser.add_argument("--previous-bin-dir", help="same database format, prior OCI evidence policy")
+    parser.add_argument("--create-recovery-only", action="store_true")
     args = parser.parse_args()
-    main(args.bin_dir, args.previous_bin_dir)
+    main(args.bin_dir, args.previous_bin_dir, args.create_recovery_only)

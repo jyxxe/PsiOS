@@ -39,6 +39,7 @@ pub const TOOLS: &[&str] = &[
     "service.inspect",
     node::service_state::TOOL,
     node::journal::TOOL,
+    node::journal::SINCE_TOOL,
     "service.start",
     "service.stop",
     node::RESTART_TOOL,
@@ -137,6 +138,7 @@ pub fn readonly(tool: &str) -> bool {
             | "service.inspect"
             | node::service_state::TOOL
             | node::journal::TOOL
+            | node::journal::SINCE_TOOL
             | "volume.files"
             | "volume.usage"
             | storage::file_integrity::TOOL
@@ -201,6 +203,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | node::network::trial::TOOL
                     | node::network::trial::INSPECT
                     | node::journal::TOOL
+                    | node::journal::SINCE_TOOL
                     | node::service_state::TOOL
                     | node::RESTART_TOOL
                     | "node.routing_rules"
@@ -636,6 +639,7 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
                     || action == apps::inventory::TOOL
                     || action == apps::release_retirement::TOOL
                     || action == node::journal::TOOL
+                    || action == node::journal::SINCE_TOOL
                     || action == node::process::TOOL
                     || action == node::RESTART_TOOL
                     || action == node::service_state::TOOL

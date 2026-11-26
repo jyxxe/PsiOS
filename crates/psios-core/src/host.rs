@@ -117,6 +117,8 @@ pub enum Action {
     ServiceObserve(node::service_state::Query),
     #[serde(rename = "service.logs")]
     ServiceLogs(node::journal::Query),
+    #[serde(rename = "service.logs_since")]
+    ServiceLogsSince(node::journal::SinceQuery),
     #[serde(rename = "service.start")]
     ServiceStart(Target),
     #[serde(rename = "service.stop")]
@@ -229,6 +231,7 @@ impl Action {
             Self::RoutingRules(q) => q.validate()?,
             Self::BlockLayout(q) => q.validate()?,
             Self::ServiceLogs(q) => q.validate()?,
+            Self::ServiceLogsSince(q) => q.validate()?,
             Self::ServiceObserve(q) => q.validate()?,
             Self::ServiceRestart(restart) => restart.validate()?,
             Self::Create { name } => label(name)?,
@@ -383,6 +386,9 @@ impl Action {
                 return node::service_target(db, &t.id, &t.expected_resource_version);
             }
             Self::ServiceLogs(q) => {
+                return node::service_target(db, &q.id, &q.expected_resource_version);
+            }
+            Self::ServiceLogsSince(q) => {
                 return node::service_target(db, &q.id, &q.expected_resource_version);
             }
             Self::ServiceObserve(q) => return q.target(db),
@@ -628,6 +634,8 @@ impl Work {
                 | Action::InspectFileRename(_)
                 | Action::InspectRestoredVolume(_)
                 | Action::InspectProcess(_)
+                | Action::ServiceLogs(_)
+                | Action::ServiceLogsSince(_)
                 | Action::ObserveNetworkProbe(_)
                 | Action::InspectNetworkTrial(_)
                 | Action::ListAssignedWork(_)
@@ -752,6 +760,7 @@ impl Work {
             Action::ServiceInspect(_)
             | Action::ServiceObserve(_)
             | Action::ServiceLogs(_)
+            | Action::ServiceLogsSince(_)
             | Action::ServiceStart(_)
             | Action::ServiceStop(_)
             | Action::ServiceRestart(_)

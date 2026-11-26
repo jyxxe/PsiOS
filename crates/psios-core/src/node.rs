@@ -350,6 +350,7 @@ pub fn perform(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Resul
         Action::BlockLayout(query) => block::observe(w, query),
         Action::Mounts {} => mounts::observe(),
         Action::ServiceLogs(query) => journal::read(w, query),
+        Action::ServiceLogsSince(query) => journal::read_since(w, query),
         _ => service(w, checkpoint),
     }
 }

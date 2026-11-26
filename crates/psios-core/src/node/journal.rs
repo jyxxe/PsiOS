@@ -3,11 +3,14 @@ use crate::{Result, config::Manager, err, host::Work, now, require};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{fs, process::Command};
+use std::{collections::BTreeSet, fs, process::Command};
 
 pub const TOOL: &str = "service.logs";
+pub const SINCE_TOOL: &str = "service.logs_since";
+pub(crate) const SINCE_FORMAT: u32 = crate::artifact::retention::delayed::FORMAT + 1;
 const MAX_ROWS: u32 = 32;
 const MAX_MESSAGE_BYTES: usize = 4096;
+const MAX_CURSOR_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -18,17 +21,50 @@ pub struct Query {
 }
 
 impl Query {
-    fn limit(&self) -> u32 {
-        self.limit.unwrap_or(16)
-    }
-
     pub fn validate(&self) -> Result<()> {
+        validate_limit(self.limit)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SinceQuery {
+    pub id: String,
+    pub expected_resource_version: String,
+    pub boot_id: String,
+    pub after_cursor: String,
+    pub limit: Option<u32>,
+}
+
+impl SinceQuery {
+    pub fn validate(&self) -> Result<()> {
+        validate_limit(self.limit)?;
         require(
-            (1..=MAX_ROWS).contains(&self.limit()),
+            uuid::Uuid::parse_str(&self.boot_id)
+                .is_ok_and(|id| !id.is_nil() && id.hyphenated().to_string() == self.boot_id),
             "InvalidArgument",
-            "service log limit must be 1 to 32 entries",
+            "service journal continuation requires a canonical Linux boot ID",
+        )?;
+        // systemd cursors are opaque; do not infer an entry or seek order from the text.
+        require(
+            valid_cursor(&self.after_cursor),
+            "InvalidArgument",
+            "service journal cursor must be bounded printable ASCII",
         )
     }
+}
+
+fn valid_cursor(cursor: &str) -> bool {
+    (1..=MAX_CURSOR_BYTES).contains(&cursor.len())
+        && cursor.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+fn validate_limit(limit: Option<u32>) -> Result<()> {
+    require(
+        (1..=MAX_ROWS).contains(&limit.unwrap_or(16)),
+        "InvalidArgument",
+        "service log limit must be 1 to 32 entries",
+    )
 }
 
 fn message(value: &Value) -> Value {
@@ -54,10 +90,27 @@ fn message(value: &Value) -> Value {
 }
 
 pub fn read(work: &Work, query: &Query) -> Result<Value> {
+    read_window(work, query.limit.unwrap_or(16), None)
+}
+
+pub fn read_since(work: &Work, query: &SinceQuery) -> Result<Value> {
+    query.validate()?;
+    read_window(work, query.limit.unwrap_or(16), Some(query))
+}
+
+fn read_window(work: &Work, limit: u32, continuation: Option<&SinceQuery>) -> Result<Value> {
     let config = configured_service(work)?;
     let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
     let boot = uuid::Uuid::parse_str(boot.trim())
         .map_err(|_| err("DependencyUnavailable", "invalid Linux boot identity"))?;
+    let boot_id = boot.hyphenated().to_string();
+    if let Some(query) = continuation {
+        require(
+            query.boot_id == boot_id,
+            "CursorExpired",
+            "service journal cursor belongs to a different Linux boot",
+        )?;
+    }
     let uid = rustix::process::geteuid().as_raw().to_string();
     let user = config.manager == Manager::User;
     let field = if user {
@@ -79,10 +132,17 @@ pub fn read(work: &Work, query: &Query) -> Result<Value> {
         "--quiet",
         "--output=json",
     ]);
-    command
-        .arg(&boot_match)
-        .arg(output_fields)
-        .arg(format!("--lines={}", query.limit()));
+    command.arg(&boot_match).arg(output_fields);
+    let max_rows = if let Some(query) = continuation {
+        let max_rows = limit + 2;
+        command
+            .arg(format!("--cursor={}", query.after_cursor))
+            .arg(format!("--lines=+{max_rows}"));
+        max_rows
+    } else {
+        command.arg(format!("--lines={limit}"));
+        limit
+    };
     command.arg("--").arg(unit_match);
     if user {
         command.arg(format!("_SYSTEMD_OWNER_UID={uid}"));
@@ -102,7 +162,7 @@ pub fn read(work: &Work, query: &Query) -> Result<Value> {
         .filter(|line| !line.is_empty())
     {
         require(
-            entries.len() < query.limit() as usize,
+            entries.len() < max_rows as usize,
             "DependencyUnavailable",
             "journal exceeded the row limit",
         )?;
@@ -121,7 +181,8 @@ pub fn read(work: &Work, query: &Query) -> Result<Value> {
             .ok_or_else(|| err("DependencyUnavailable", "invalid journal timestamp"))?;
         let cursor = row["__CURSOR"]
             .as_str()
-            .filter(|text| (1..=1024).contains(&text.len()))
+            .filter(|text| (1..=MAX_CURSOR_BYTES).contains(&text.len()))
+            .filter(|text| continuation.is_none() || valid_cursor(text))
             .ok_or_else(|| err("DependencyUnavailable", "invalid journal entry identity"))?;
         let priority = row["PRIORITY"]
             .as_str()
@@ -133,8 +194,44 @@ pub fn read(work: &Work, query: &Query) -> Result<Value> {
             "priority":priority,"pid":pid,"message":message(&row["MESSAGE"])}),
         );
     }
-    Ok(
-        json!({"service_ref":work.target.reference(), "unit":config.unit, "manager":config.manager,
-        "boot_id":boot.to_string(), "limit":query.limit(),"entries":entries,"observed_at":now()}),
-    )
+    let mut result = json!({
+        "service_ref":work.target.reference(), "unit":config.unit, "manager":config.manager,
+        "boot_id":boot_id, "limit":limit, "observed_at":now(),
+    });
+    if let Some(query) = continuation {
+        // journalctl may seek to a nearby entry if the exact one was rotated out or is out of scope.
+        // Accept only a cursor value returned by this scoped journal for the first row.
+        require(
+            entries
+                .first()
+                .is_some_and(|entry| entry["journal_cursor"] == query.after_cursor),
+            "CursorExpired",
+            "service journal cursor is no longer available in the configured scope",
+        )?;
+        let unique = {
+            let mut seen = BTreeSet::new();
+            entries.iter().all(|entry| {
+                entry["journal_cursor"]
+                    .as_str()
+                    .is_some_and(|cursor| seen.insert(cursor))
+            })
+        };
+        require(
+            unique,
+            "DependencyUnavailable",
+            "service journal returned duplicate entry identities",
+        )?;
+        entries.remove(0);
+        let has_more = entries.len() > limit as usize;
+        entries.truncate(limit as usize);
+        let next = entries
+            .last()
+            .and_then(|entry| entry["journal_cursor"].as_str())
+            .unwrap_or(&query.after_cursor);
+        result["after_cursor"] = json!(query.after_cursor);
+        result["next_cursor"] = json!(next);
+        result["has_more"] = json!(has_more);
+    }
+    result["entries"] = json!(entries);
+    Ok(result)
 }

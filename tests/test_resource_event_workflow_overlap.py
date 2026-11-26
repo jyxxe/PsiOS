@@ -405,6 +405,10 @@ class ResourceEventWorkflowOverlap(unittest.TestCase):
         change_cursor = f"UPDATE {pending_table} SET source_rev=? WHERE schedule=?"
         self.reject_persisted_change((change_cursor, (advanced, schedule_id)),
                                  (change_cursor, (index[2], schedule_id)), CURSOR_ERROR)
+        # Remove the index while no admission deferral exists to test the protected marker alone.
+        self.reject_persisted_change((f"DELETE FROM {pending_table} WHERE schedule=?", (schedule_id,)),
+                                 (f"INSERT INTO {pending_table}(schedule,source,source_rev,deadline_ms) VALUES(?,?,?,?)",
+                                  index), CURSOR_ERROR)
         self.verify_stopped()
 
         n.start()
@@ -418,9 +422,6 @@ class ResourceEventWorkflowOverlap(unittest.TestCase):
 
         self.stop()
         self.verify_stopped()
-        self.reject_persisted_change((f"DELETE FROM {pending_table} WHERE schedule=?", (schedule_id,)),
-                                 (f"INSERT INTO {pending_table}(schedule,source,source_rev,deadline_ms) VALUES(?,?,?,?)",
-                                  index), CURSOR_ERROR)
         with closing(sqlite3.connect(path, timeout=10)) as db:
             original_boot, = db.execute("SELECT boot_id FROM authorization_deadlines WHERE resource=?",
                                         (schedule_id,)).fetchone()

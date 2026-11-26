@@ -440,6 +440,39 @@ impl Store {
         })
     }
 
+    pub(crate) fn prepare_network_trial_rollback(
+        &mut self,
+        peer: u32,
+        request: &Request,
+    ) -> Result<node::network::trial::Rollback> {
+        self.authorized_request(peer, request, |db, actor| {
+            broker::prepare_network_trial_rollback(db, actor, &request.params)
+        })
+    }
+
+    pub(crate) fn authorize_network_trial_rollback(
+        &mut self,
+        peer: u32,
+        request: &Request,
+        job: &node::network::trial::Rollback,
+    ) -> Result<()> {
+        self.authorized_request(peer, request, |db, actor| {
+            broker::authorize_network_trial_rollback(db, actor, &request.params, job)
+        })
+    }
+
+    pub(crate) fn finish_network_trial_rollback(
+        &mut self,
+        peer: u32,
+        request: &Request,
+        job: &node::network::trial::Rollback,
+        result: Result<node::network::trial::RollbackReceipt>,
+    ) -> Result<Value> {
+        self.authorized_request(peer, request, |db, actor| {
+            broker::finish_network_trial_rollback(db, actor, job, result)
+        })
+    }
+
     fn authorized_request<T>(
         &mut self,
         peer: u32,

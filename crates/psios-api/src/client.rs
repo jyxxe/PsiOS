@@ -232,6 +232,14 @@ impl Client {
         )
     }
 
+    /// Request immediate rollback of this exact active network trial as the local owner.
+    pub fn rollback_network_trial(&self, id: &str, revision: &str) -> ApiResult<Value> {
+        self.call(
+            "NetworkTrial.Rollback",
+            json!({"id":id,"expected_resource_version":revision}),
+        )
+    }
+
     /// Hand execution to a model previously allowed by the originating Session.
     pub fn use_session_fallback(
         &self,

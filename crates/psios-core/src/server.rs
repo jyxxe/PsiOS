@@ -130,6 +130,15 @@ fn connection(s: &Shared, stream: &mut UnixStream, stop: &AtomicBool) -> Result<
             });
             return accepting(s, stop)?.finish_network_trial_confirm(peer, &r, &job, result);
         }
+        if r.method == "NetworkTrial.Rollback" {
+            let job = accepting(s, stop)?.prepare_network_trial_rollback(peer, &r)?;
+            let result = job.perform(|| {
+                let mut authority = accepting(s, stop)?;
+                ensure_peer_connected(stream)?;
+                authority.authorize_network_trial_rollback(peer, &r, &job)
+            });
+            return accepting(s, stop)?.finish_network_trial_rollback(peer, &r, &job, result);
+        }
         let wait: Option<(&str, WaitCondition)> = match r.method.as_str() {
             "Event.Wait" => Some(("Event.Poll", WaitCondition::Items("events"))),
             "Resource.Watch" if r.params.get("timeout_ms").is_some() => {

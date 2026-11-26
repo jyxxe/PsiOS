@@ -307,7 +307,7 @@ Rust SDK 的 `Client::prepare_oci_stop_continuation` 与 `psiosctl application-p
 
 格式 114 支持 `volume.clone`。本机所有者须持有显式限定到源 Volume ID 和本机 StoragePool `local` 的委托，并独立批准操作。输入包含源卷的 `target` 和新卷 `name`。SDK `Client::prepare_volume_clone` 和 `psiosctl volume-prepare-clone --name NAME --key KEY --delegation ID source-ref.json` 返回可提交的 Task 请求。
 
-源卷须已脱离应用且无其他写入、读取或未结算占用。Core 在源卷排他保留期间把文件直接复制到新卷，核对源文件和目录身份、字节摘要、修改时间及普通 Unix 权限。源卷与新卷分别拥有独立 ID 和数据世代，新卷记录准确的 `cloned_from`。复制使用 `backup_max_bytes` 对单次数据量的限制及本机容量保留。此能力提供已脱离的单卷崩溃一致性副本，适用于该本机目录后端。
+源卷须已脱离应用且无其他写入、读取或未结算占用。Core 在源卷排他保留期间把文件直接复制到新卷，核对源文件和目录身份、字节摘要、修改时间及普通 Unix 权限。数据根须归服务账户及其组所有，带有扩展属性、ACL 或特殊权限位的根目录会被拒绝。源卷与新卷分别拥有独立 ID 和数据世代，新卷记录准确的 `cloned_from`。复制使用 `backup_max_bytes` 对单次数据量的限制及本机容量保留。此能力提供已脱离的单卷崩溃一致性副本，适用于该本机目录后端。
 
 新卷创建后进入 `AwaitingActivation`。独立批准 `volume.activate` 会核对树摘要与元数据，核验成功后才允许写入和应用挂载。发布回执丢失时用 `volume.inspect_publication` 核对原 Operation，再用 `Operation.Reconcile` 结算。Core 只核对同一暂存目录或最终目录，在证据缺失时保留源卷占用。已核实未发布的目录由后台回收，原请求重放仍返回原结算。[克隆与容量验收](../tests/test_volume_clone.py) · [发布故障与恢复验收](../tests/test_volume_clone_recovery.py)
 

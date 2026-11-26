@@ -336,6 +336,9 @@ fn open_candidate(config: &Config, checkpoint: &Doc) -> Result<(Publication, Can
         }
     };
     let (root, data) = open_exact(&parent, name, &placement, receipt)?;
+    if checkpoint.body.get("clone_source").is_some() {
+        super::cloning::root_metadata(&data, "PreconditionFailed")?;
+    }
     // Check the alternate name after the anchored opens as well. A competing
     // or substituted directory never authorizes release of the backup hold.
     let alternate = if publication == Publication::Published {

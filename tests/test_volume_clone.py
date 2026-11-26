@@ -2,6 +2,7 @@
 
 from contextlib import closing
 import base64
+import errno
 import hashlib
 import json
 import os
@@ -214,6 +215,40 @@ class VolumeCloneTests(unittest.TestCase):
         self.assert_detached(updated, clone, "after-release")
         self.assertEqual((self.data(clone) / "keep").read_bytes(), b"survives both operations")
         self.assertFalse((self.data(clone) / "remove").exists())
+        self.verify()
+
+    def test_root_only_extended_attributes_block_clone_and_activation(self):
+        source = self.n.perform("volume.create", {"name": "clone-root-xattr"})
+        before = set(self.volumes.iterdir())
+        root = self.data(source)
+        attribute = "user.psios-clone-proof"
+        try:
+            os.setxattr(root, attribute, b"source root attribute")
+        except OSError as exc:
+            if exc.errno in (errno.ENOTSUP, errno.EOPNOTSUPP):
+                self.skipTest("local filesystem does not support user extended attributes")
+            raise
+        delegation = self.grant([source["resource_id"], "local"])
+        try:
+            _, rejected = self.submit(source, "unexpected-root-metadata", delegation)
+            self.failure(rejected, "UnsupportedCapability")
+            self.assertEqual(os.getxattr(root, attribute), b"source root attribute")
+            self.assertEqual(set(self.volumes.iterdir()), before)
+        finally:
+            os.removexattr(root, attribute)
+
+        _, pending = self.submit(source, "root-metadata-verified", delegation)
+        self.n.approve(pending)
+        clone = self.result(pending)
+        output = self.data(clone)
+        stamp = output.stat()
+        os.setxattr(output, attribute, b"added after publication")
+        self.assertEqual(output.stat().st_mtime_ns, stamp.st_mtime_ns)
+        self.failure(self.n.submit("volume.activate", target(clone)), "PreconditionFailed")
+        self.assertEqual(self.n.get(clone["resource_id"])["reference"], clone)
+        self.assertEqual(os.getxattr(output, attribute), b"added after publication")
+        os.removexattr(output, attribute)
+        self.n.perform("volume.activate", target(clone))
         self.verify()
 
     @unittest.skipUnless(os.getenv("PSIOS_TEST_CAPACITY_ALLOCATION") == "1", "requires a bounded filesystem")

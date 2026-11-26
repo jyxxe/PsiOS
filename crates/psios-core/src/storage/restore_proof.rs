@@ -84,12 +84,28 @@ pub(super) fn check_clone_proof(proof: &Value) -> Result<()> {
 }
 
 pub(super) fn verify(w: &Work) -> Result<Value> {
+    let clone = w.target.spec["cloned_from"].is_object();
+    let open = || {
+        let root = capture_root(w)?;
+        if clone {
+            super::cloning::root_metadata(&root, "PreconditionFailed")?;
+        }
+        Ok(root)
+    };
     let Some(expected) = w.target.spec.get("restore_proof") else {
+        require(
+            !clone,
+            "RecoveryRequired",
+            "volume clone lacks its captured content proof",
+        )?;
         // Pending clones from earlier authorities have no committed content fingerprint.
         return Ok(json!({}));
     };
-    let root = capture_root(w)?;
-    verify_tree(&root, expected, || capture_root(w))?;
+    if clone {
+        check_clone_proof(expected)?;
+    }
+    let root = open()?;
+    verify_tree(&root, expected, open)?;
     Ok(json!({"verified_at":now()}))
 }
 

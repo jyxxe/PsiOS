@@ -730,9 +730,21 @@ impl Work {
             "host effect is no longer current",
         )?;
         let target = self.action.target(db, &t.owner)?;
-        let audience = self
-            .action
-            .audience(db, &t.owner, &t.spec["delegation_ref"], &target)?;
+        let audience_target = if matches!(self.action, Action::ServiceObserve(_)) {
+            // A newer status of the same registered service generation may
+            // supersede this sample. Its permit still names the sampled revision.
+            require(
+                target.id == self.target.id && target.generation == self.target.generation,
+                "Fenced",
+                "registered service changed during observation",
+            )?;
+            &self.target
+        } else {
+            &target
+        };
+        let audience =
+            self.action
+                .audience(db, &t.owner, &t.spec["delegation_ref"], audience_target)?;
         permit(db, &t, &self.run, &self.op, &self.effect, &audience)?;
         Ok(target)
     }
@@ -789,6 +801,7 @@ impl Work {
                 | Action::Pressure {}
                 | Action::TrackBlockDevice(_)
                 | Action::ObserveBlockDevice(_)
+                | Action::ServiceObserve(_)
                 | Action::ServiceLogs(_)
                 | Action::ServiceLogsSince(_)
                 | Action::ServiceResources(_)

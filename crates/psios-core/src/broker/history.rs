@@ -7,15 +7,19 @@ pub(crate) fn redact_late_receipt(db: &Db<'_>, doc: &mut Doc) -> Result<()> {
     let receipt = &doc.body["evidence"]["receipt"];
     let application_logs = receipt.get("last_logs").is_some() || receipt.get("stdout").is_some();
     let service_logs = receipt.get("entries").is_some();
+    let service_observation = receipt.get("unit").is_some()
+        && receipt.get("manager").is_some()
+        && receipt.get("active_state").is_some();
     let node_pressure =
         receipt["kernel"]["source"] == "LinuxProcfs" && receipt.get("core_cgroup").is_some();
-    if !(application_logs || service_logs || node_pressure) {
+    if !(application_logs || service_logs || service_observation || node_pressure) {
         return Ok(());
     }
     let effect = db.resolve(&doc.body["effect_ref"])?;
     let sensitive = match effect.body["action"].as_str() {
         Some(apps::log_tail::TOOL | "application.stop") => application_logs,
         Some(node::journal::TOOL | node::journal::SINCE_TOOL) => service_logs,
+        Some(node::service_state::TOOL) => service_observation,
         Some(node::pressure::TOOL) => node_pressure,
         _ => false,
     };

@@ -158,6 +158,11 @@ enum Cmd {
     },
     /// Show durable Task admission usage for this principal.
     TaskAdmission,
+    /// Discard the exact prepared request in a JSON file or stdin.
+    TaskDiscardPreparation {
+        #[arg(default_value = "-")]
+        file: String,
+    },
     /// Read a Task's available result references and status.
     TaskResults {
         id: String,
@@ -931,6 +936,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Cmd::Wait { id, seconds } => c.wait(&id, Duration::from_secs(seconds))?,
         Cmd::TaskAdmission => c.task_admission()?,
+        Cmd::TaskDiscardPreparation { file } => c.discard_task_preparation(input(&file)?)?,
         Cmd::SessionUseFallback { id, revision, file } => {
             c.use_session_fallback(&id, &revision, &serde_json::from_value(input(&file)?)?)?
         }

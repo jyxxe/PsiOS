@@ -856,15 +856,24 @@ pub(crate) fn intern_input_kind(
     match db.get(&id) {
         Ok(d) => Ok(d),
         Err(e) if e.0.code == "NotFound" => {
-            db.cfg.check_admission_space()?;
-            let (count,size):(i64,i64)=db.c.query_row("SELECT count(*),coalesce(sum(length(CAST(body AS BLOB))),0) FROM versions WHERE kind IN ('Input','TaskInputManifest') AND owner=?1",[actor],|r|Ok((r.get(0)?,r.get(1)?)))?;
-            require(
-                count < 4096 && size + canonical(input).len() as i64 <= 64 * 1024 * 1024,
-                "QuotaExceeded",
-                "retained input quota exceeded",
-            )?;
+            check_input_admission(db, actor, canonical(input).len())?;
             db.create(kind, &id, actor, json!({}), input.clone())
         }
         Err(e) => Err(e),
     }
+}
+
+pub(crate) fn check_input_admission(db: &Db<'_>, actor: &str, bytes: usize) -> Result<()> {
+    db.cfg.check_admission_space()?;
+    let (count, size): (i64, i64) = db.c.query_row(
+        "SELECT count(*), coalesce(sum(length(CAST(body AS BLOB))), 0)
+         FROM versions WHERE kind IN ('Input','TaskInputManifest') AND owner=?1",
+        [actor],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    require(
+        count < 4096 && size + bytes as i64 <= 64 * 1024 * 1024,
+        "QuotaExceeded",
+        "retained input quota exceeded",
+    )
 }

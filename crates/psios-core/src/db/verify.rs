@@ -171,6 +171,9 @@ pub(super) fn check_artifacts(
     if identity.database_format >= crate::agent::late_decision::FORMAT {
         crate::agent::late_decision::verify(conn)?;
     }
+    if identity.database_format >= crate::broker::preparation::FORMAT {
+        crate::broker::preparation::verify(conn)?;
+    }
     if identity.database_format >= crate::project::FORMAT {
         crate::project::verify(conn, identity.database_format)?;
         crate::project::evidence::verify(conn)?;

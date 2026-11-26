@@ -525,6 +525,11 @@ impl Client {
         self.submit_with_requirements(tool, input, key, delegation, &[])
     }
 
+    /// Close an exact prepared request without cancelling an accepted Task.
+    pub fn discard_task_preparation(&self, request: Value) -> ApiResult<Value> {
+        self.call("Task.DiscardPreparation", request)
+    }
+
     pub fn submit_with_requirements(
         &self,
         tool: &str,

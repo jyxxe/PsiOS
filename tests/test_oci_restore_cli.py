@@ -37,11 +37,11 @@ class OciRestoreCli(unittest.TestCase):
             with self.subTest(action=action):
                 path = node.base / "restore-request.json"
                 path.write_text(json.dumps(content))
-                arguments = [command, "--key", "prepare-only", "--delegation", delegation,
+                arguments = [command, "--key", command, "--delegation", delegation,
                              "--deadline-at", deadline, path]
                 request = node.cli(token_file, *arguments)
                 self.assertEqual((request["task_type"], request["idempotency_key"], request["deadline_at"]),
-                                 (action, "prepare-only", deadline))
+                                 (action, command, deadline))
                 self.assertEqual(request["delegation_ref"], permit["delegation_ref"])
                 self.assertEqual(node.call("Resource.Resolve", {"reference": request["input_ref"]})["value"], expected)
                 self.assertEqual(node.call("Task.LookupSubmission", request)["status"], "AbsentWithinWindow")

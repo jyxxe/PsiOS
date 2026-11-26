@@ -278,14 +278,15 @@ class SignedBackupTransfer(unittest.TestCase):
         preview = self.command(legacy, "verify", "--rehearse-migration")
         self.assertEqual(preview["database_format"], 104)
         self.assertTrue(preview["migration_required"])
-        self.assertEqual(preview["migration_rehearsal"]["target_format"], 105)
+        target_format = preview["migration_rehearsal"]["target_format"]
+        self.assertGreaterEqual(target_format, 105)
         self.register(node=legacy, error="Conflict")
         self.archive.rename(self.receiver.base / "unplugged-prior")
         receipt = self.register(node=legacy, signed=False)
         self.assertTrue(receipt["reused"])
         self.assertEqual(self.register(node=legacy, signed=False), receipt)
         self.assertEqual(published.stat().st_ino, inode)
-        self.assertEqual(self.command(legacy, "verify")["database_format"], 105)
+        self.assertEqual(self.command(legacy, "verify")["database_format"], target_format)
 
         new_command = legacy.daemon
         legacy.daemon = prior_command

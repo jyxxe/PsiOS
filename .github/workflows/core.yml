@@ -396,6 +396,7 @@ jobs:
           sudo journalctl --flush
           export XDG_RUNTIME_DIR="/run/user/$(id -u)"
           python3 -B tests/service_journal.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
+          python3 -B tests/service_journal_since.py
       - name: Fence systemd controls and reconcile a live format 34 dispatch during upgrade
         run: |
           mkdir "$RUNNER_TEMP/psios-format34"

@@ -26,14 +26,18 @@ pub(crate) fn redact_status(kind: &str, body: &mut Value) {
 
 pub(crate) fn redact_late_receipt(db: &Db<'_>, doc: &mut Doc) -> Result<()> {
     let receipt = &doc.body["evidence"]["receipt"];
-    if doc.kind == "LateReceipt"
-        && (receipt.get("last_logs").is_some() || receipt.get("stdout").is_some())
-    {
+    let application_logs = receipt.get("last_logs").is_some() || receipt.get("stdout").is_some();
+    let service_logs = receipt.get("entries").is_some();
+    if doc.kind == "LateReceipt" && (application_logs || service_logs) {
         let effect = db.resolve(&doc.body["effect_ref"])?;
-        if matches!(
-            effect.body["action"].as_str(),
-            Some(TOOL | "application.stop")
-        ) {
+        let action = effect.body["action"].as_str();
+        if (application_logs && matches!(action, Some(TOOL | "application.stop")))
+            || (service_logs
+                && matches!(
+                    action,
+                    Some(crate::node::journal::TOOL | crate::node::journal::SINCE_TOOL)
+                ))
+        {
             doc.body["evidence"] = json!({"code":"Fenced"});
             doc.spec["evidence"] = doc.body["evidence"].clone();
         }

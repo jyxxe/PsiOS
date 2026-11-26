@@ -475,6 +475,8 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                 if matches!(
                     w.action,
                     Action::InspectProcess(_)
+                        | Action::ServiceLogs(_)
+                        | Action::ServiceLogsSince(_)
                         | Action::ListAppReleases(_)
                         | Action::InstallArtifact(_)
                         | Action::StageArtifactRelease(_)

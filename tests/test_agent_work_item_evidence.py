@@ -142,7 +142,7 @@ class AgentWorkItemEvidenceTests(unittest.TestCase):
         last = claim["context"]["last_tool"]
         self.assertEqual((last["task_ref"], last["result"]["artifact_refs"], last["local_tool_result"]),
                          (source, [original_artifact], observation), last)
-        inputs = self.submit_params(item, source, original_artifact)
+        inputs = self.submit_params(item, last["task_ref"], last["result"]["artifact_refs"][0])
         response = self.decision(claim, TOOL, inputs)
         for code, invalid in (("PermissionDenied", self.submit_params(other, source, original_artifact)),
                               ("Conflict", {**inputs, "expected_resource_version": "r99"})):

@@ -317,11 +317,7 @@ async fn observe(
     )
 }
 
-pub fn perform(work: &Work) -> Result<Value> {
-    perform_checked(work, &mut || Ok(()))
-}
-
-pub(crate) fn perform_checked(
+pub(crate) fn perform(
     work: &Work,
     check_authority: &mut impl FnMut() -> Result<()>,
 ) -> Result<Value> {

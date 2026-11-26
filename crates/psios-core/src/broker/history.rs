@@ -21,6 +21,7 @@ pub(crate) fn redact_late_receipt(db: &Db<'_>, doc: &mut Doc) -> Result<()> {
         Some(node::journal::TOOL | node::journal::SINCE_TOOL) => service_logs,
         Some(node::service_state::TOOL) => service_observation,
         Some(node::pressure::TOOL) => node_pressure,
+        Some(node::network::probe::TOOL | node::network::probe::state::TOOL) => true,
         Some(
             "service.inspect"
             | "volume.read"

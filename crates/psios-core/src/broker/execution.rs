@@ -508,7 +508,8 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
         )?;
         let receipt = match result {
             Ok(_)
-                if storage::read_holds::reader(&w.action)
+                if w.action.is_network_probe()
+                    || storage::read_holds::reader(&w.action)
                     || apps::is_runtime_observation(tool)
                     || matches!(
                         w.action,
@@ -526,7 +527,6 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                             | Action::StageArtifactRelease(_)
                             | Action::Logs(_)
                             | Action::Stop(_)
-                            | Action::ObserveNetworkProbe(_)
                             | Action::InspectNetworkTrial(_)
                             | Action::InspectOciCreate(_)
                             | Action::DiscardOciCreate(_)

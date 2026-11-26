@@ -22,13 +22,14 @@ def key():
 
 
 class Node:
-    def __init__(self, binaries, tick_ms=15):
+    def __init__(self, binaries=None, tick_ms=15):
         self.tmp = tempfile.TemporaryDirectory(prefix="psios-test-")
         self.base = Path(self.tmp.name)
         self.state = self.base / "state"
         self.witness = self.base / "witness"
         self.socket = self.base / "api.sock"
-        self.binaries = Path(binaries).absolute()
+        default_binaries = os.environ.get("PSIOS_TEST_BIN_DIR", "target/debug")
+        self.binaries = Path(default_binaries if binaries is None else binaries).absolute()
         self.config = self.base / "config.json"
         self.config.write_text(json.dumps(dict(state_dir=str(self.state), witness_dir=str(self.witness),
                                                socket=str(self.socket), tick_ms=tick_ms, queue_limit=64)))

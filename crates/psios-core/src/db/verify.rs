@@ -210,6 +210,9 @@ pub(super) fn check_artifacts(
     if identity.database_format >= crate::schedule::workflow_overlap::FORMAT {
         crate::schedule::workflow_overlap::verify(conn)?;
     }
+    if identity.database_format >= crate::schedule::coalescence::FORMAT {
+        crate::schedule::coalescence::verify(conn)?;
+    }
     if identity.database_format >= crate::project::FORMAT {
         crate::project::verify(conn, identity.database_format)?;
         crate::project::evidence::verify(conn)?;

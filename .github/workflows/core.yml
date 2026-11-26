@@ -780,6 +780,12 @@ jobs:
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format117" "$RUNNER_TEMP/psios-compatibility-target"
           PSIOS_VOLUME_CREATE_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
             python3 -B -m unittest discover -s tests -p test_volume_create_recovery.py -k legacy_unknown -v
+      - name: Keep the previous timed backlog while enabling coalescence
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format118"
+          git archive a33393d760fdf0b150ca799383032f8d1cea3421 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format118"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format118" "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/schedule_coalescence_upgrade.py --previous-bin-dir "$RUNNER_TEMP/psios-compatibility-target/debug"
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

@@ -162,6 +162,31 @@ mod tests {
     }
 
     #[test]
+    fn coalesces_two_eligible_instants_of_a_real_dst_fold() {
+        use crate::schedule::{coalescence::representative, due_ms, instant};
+
+        let mut calendar = ny("2026-11-01", "01:30:00", 1, Fold::Both, Gap::Reject);
+        calendar.window_seconds = 5400;
+        calendar.missed = Missed::Coalesce;
+        let windows = calendar.plan().unwrap().windows;
+        assert_eq!(windows.len(), 2);
+        let at = |value| due_ms(instant(value).unwrap());
+        assert_eq!(
+            representative(&windows, at("2026-11-01T06:29:59Z")),
+            Some(0)
+        );
+        assert_eq!(
+            representative(&windows, at("2026-11-01T06:30:00Z")),
+            Some(1)
+        );
+        assert_eq!(representative(&windows, at("2026-11-01T07:00:00Z")), None);
+        assert_eq!(
+            representative(&windows[1..], at("2026-11-01T07:00:00Z")),
+            Some(0)
+        );
+    }
+
+    #[test]
     fn skips_or_rejects_a_missing_local_time_in_a_real_zone() {
         let planned = ny("2026-03-07", "02:30:00", 3, Fold::Earlier, Gap::Skip)
             .plan()

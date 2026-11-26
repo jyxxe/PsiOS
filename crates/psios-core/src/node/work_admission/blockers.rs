@@ -137,6 +137,14 @@ pub(super) fn tasks(db: &Db<'_>, limit: u32) -> Result<BlockerPage<TaskBlocker>>
         ])?;
         let operation = entry.operation(db)?;
         let task = entry.task(db, &operation)?;
+        if task.spec["task_type"] == volume_rebind::TOOL
+            && matches!(
+                entry.phase.as_str(),
+                "Dispatched" | "WaitingInput" | "Unknown"
+            )
+        {
+            rebind_hold(db, &task, &operation, None)?;
+        }
         let knowledge = text(&operation.body, "outcome_knowledge")?;
         require(
             (entry.phase == "Unknown") == (knowledge == "Unknown"),
@@ -172,29 +180,35 @@ fn original_target(db: &Db<'_>, plan: &Doc) -> Result<Doc> {
     resolve(db, &plan.body["allowed_effects"][0]["resource_ref"])
 }
 
+fn rebind_hold(db: &Db<'_>, task: &Doc, operation: &Doc, held: Option<&Doc>) -> Result<()> {
+    let plan = original_plan(db, task, operation)?;
+    let primary = original_target(db, &plan)?;
+    let input = resolve(db, &plan.body["purpose_ref"])?;
+    require(
+        input.reference() == task.spec["input_ref"] && input.owner == task.owner,
+        "RecoveryRequired",
+        "maintenance rebind does not use its original input",
+    )?;
+    volume_rebind::verify_maintenance_hold(
+        db,
+        &primary,
+        &plan,
+        broker::dependencies::tool_input(&input)?,
+        operation,
+        held,
+    )
+}
+
 fn operation_holding(db: &Db<'_>, resource: &Doc, operation: &Doc) -> Result<Doc> {
     let entry = QueueEntry::get(db, text(&operation.spec, "task_id")?)?;
     entry.check_hold_phase(&["Dispatched", "WaitingInput", "Unknown"])?;
     let task = entry.task(db, operation)?;
-    let plan = original_plan(db, &task, operation)?;
-    let primary = original_target(db, &plan)?;
     if task.spec["task_type"] == volume_rebind::TOOL {
-        let input = resolve(db, &plan.body["purpose_ref"])?;
-        require(
-            input.reference() == task.spec["input_ref"] && input.owner == task.owner,
-            "RecoveryRequired",
-            "maintenance rebind does not use its original input",
-        )?;
-        volume_rebind::verify_maintenance_hold(
-            db,
-            &primary,
-            &plan,
-            broker::dependencies::tool_input(&input)?,
-            operation,
-            resource,
-        )?;
+        rebind_hold(db, &task, operation, Some(resource))?;
         return Ok(task);
     }
+    let plan = original_plan(db, &task, operation)?;
+    let primary = original_target(db, &plan)?;
     let direct = primary.id == resource.id && primary.kind == resource.kind;
     // Some application health/log operations hold a detached data volume
     // transiently while their plan's only target is the Application.

@@ -126,8 +126,8 @@ def run_with_maintenance_snapshot(node, task_id, app, source, restored):
                 status=b" 200 ", forward=True,
             )
             node.config.write_text(json.dumps(dict(settings, docker_socket=str(socket))))
-            node.start()
             try:
+                node.start()
                 node.approve(task_id)
                 assert barrier.confirmed.wait(10), "the Docker absence receipt did not reach the rebind barrier"
                 task = node.get(task_id)
@@ -147,16 +147,18 @@ def run_with_maintenance_snapshot(node, task_id, app, source, restored):
                 } for kind, reference in resources), key=lambda entry: entry["resource_ref"]["resource_id"])
                 assert node.call(method, query)["exclusive_holds"] == {"items": expected, "truncated": False}
 
-                # A missing part of the three-resource hold must not become partial maintenance evidence.
-                values = (restored["resource_id"], operation["resource_id"])
+                # A partial or entirely missing hold must be reported as inconsistent.
+                holds = [(reference["resource_id"], operation["resource_id"]) for _, reference in resources]
                 with closing(sqlite3.connect(node.state / "state.db", timeout=10)) as db:
-                    with db:
-                        assert db.execute("DELETE FROM holds WHERE volume=? AND holder=?", values).rowcount == 1
-                    try:
-                        denied(node, "RecoveryRequired", method, query)
-                    finally:
+                    for missing in (holds[-1:], holds):
                         with db:
-                            db.execute("INSERT INTO holds VALUES (?,?)", values)
+                            deleted = db.executemany("DELETE FROM holds WHERE volume=? AND holder=?", missing)
+                            assert deleted.rowcount == len(missing)
+                        try:
+                            denied(node, "RecoveryRequired", method, query)
+                        finally:
+                            with db:
+                                db.executemany("INSERT INTO holds VALUES (?,?)", missing)
                 assert node.call(method, query)["exclusive_holds"]["items"] == expected
                 barrier.release.set()
                 receipt = result(node, task_id)
@@ -165,6 +167,8 @@ def run_with_maintenance_snapshot(node, task_id, app, source, restored):
                     "expected_resource_version": gate["version"],
                     "mode": "Open", "reason": "the original rebind has released custody",
                 })
+                print("Verified maintenance custody for the application and both volumes, including missing holds",
+                      flush=True)
                 return receipt
             finally:
                 barrier.release.set()

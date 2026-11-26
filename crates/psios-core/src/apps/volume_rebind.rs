@@ -388,7 +388,7 @@ pub(crate) fn verify_maintenance_hold(
     plan: &Doc,
     input: &Value,
     operation: &Doc,
-    held: &Doc,
+    held: Option<&Doc>,
 ) -> Result<()> {
     let invalid = || {
         err(
@@ -423,9 +423,11 @@ pub(crate) fn verify_maintenance_hold(
             && restored.body["data_incarnation"].is_string()
             && restored.body["data_incarnation"] != source.body["data_incarnation"]
             && plan.body["preconditions"] == json!(preconditions)
-            && [app, &source, &restored]
-                .iter()
-                .any(|doc| doc.reference() == held.reference()),
+            && held.is_none_or(|held| {
+                [app, &source, &restored]
+                    .iter()
+                    .any(|doc| doc.reference() == held.reference())
+            }),
         "RecoveryRequired",
         "maintenance rebind does not hold this resource under the original plan",
     )?;

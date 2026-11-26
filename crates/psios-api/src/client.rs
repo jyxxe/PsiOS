@@ -609,6 +609,11 @@ impl Client {
             prepare["requires"] = json!(requirements);
         }
         let request = self.call("Task.Prepare", prepare)?;
+        self.submit_prepared(request)
+    }
+
+    /// Admit an exact Task.Prepare envelope, consulting its original key if the response is lost.
+    pub fn submit_prepared(&self, request: Value) -> ApiResult<Value> {
         match self.call("Task.Submit", request.clone()) {
             Err(e) if e.code == "DependencyUnavailable" => {
                 let state = self

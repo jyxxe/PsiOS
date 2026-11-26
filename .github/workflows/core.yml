@@ -41,6 +41,13 @@ jobs:
         run: |
           python3 tests/system.py
           python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Verify MCP STDIO with the official Python client
+        timeout-minutes: 3
+        run: |
+          python3 -m venv "$RUNNER_TEMP/psios-mcp"
+          "$RUNNER_TEMP/psios-mcp/bin/pip" install 'mcp==1.28.1'
+          PSIOS_TEST_MCP_SDK=1 "$RUNNER_TEMP/psios-mcp/bin/python" -B -m unittest discover -s tests \
+            -p test_mcp_stdio.py -k test_official_python_stdio_client -v
       - name: Kill a restore at its filesystem publication boundary and reconcile it
         run: |
           if ! command -v strace; then

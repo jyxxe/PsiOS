@@ -4,13 +4,19 @@ use crate::{
     db::{Db, Doc, find, row},
     decode, err, now, policy, require,
 };
-use psios_api::{ModelWorkCounts, TaskWorkCounts, WorkAdmissionMode, WorkAdmissionState};
+use psios_api::{
+    ModelWorkCounts, NodeWorkAdmissionBlockers, TaskWorkCounts, WorkAdmissionMode,
+    WorkAdmissionState,
+};
 use rusqlite::{Connection, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
+mod blockers;
+
 pub(crate) const FORMAT: u32 = super::journal::SINCE_FORMAT + 1;
+pub(crate) const BLOCKERS_FORMAT: u32 = FORMAT + 1;
 const KIND: &str = "NodeWorkAdmission";
 const ID: &str = "local-node-work-admission";
 const INITIAL_REASON: &str = "Initial local work admission";
@@ -21,6 +27,13 @@ struct Set {
     expected_resource_version: String,
     mode: WorkAdmissionMode,
     reason: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ObserveBlockers {
+    expected_resource_version: String,
+    limit: Option<u32>,
 }
 
 fn valid_reason(reason: &str) -> bool {
@@ -129,6 +142,30 @@ pub(crate) fn get(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     let _: Empty = decode(params)?;
     let (record, state) = current(db)?;
     view(db, &record, state)
+}
+
+pub(crate) fn observe_blockers(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
+    policy::admin(actor)?;
+    policy::active(db, actor)?;
+    let request: ObserveBlockers = decode(params)?;
+    let limit = request.limit.unwrap_or(16);
+    require(
+        (1..=64).contains(&limit),
+        "InvalidArgument",
+        "work admission blocker limit must be 1 to 64 per group",
+    )?;
+    let (record, _) = current(db)?;
+    record.cas(&request.expected_resource_version)?;
+    let response = NodeWorkAdmissionBlockers {
+        reference: decode(&record.reference())?,
+        observed_at: now(),
+        tasks: blockers::tasks(db, limit)?,
+        exclusive_holds: blockers::exclusive_holds(db, limit)?,
+        volume_read_holds: blockers::volume_read_holds(db, limit)?,
+        model_leases: crate::agent::work_admission_status::leases(db, limit)?,
+        model_outcomes_unknown: crate::agent::work_admission_status::unknown(db, limit)?,
+    };
+    Ok(serde_json::to_value(response)?)
 }
 
 pub(crate) fn set(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {

@@ -26,6 +26,7 @@
 ## 本机维护准入
 
 - 本机所有者可持久关闭新 Task 和模型租约准入。已接收 Task 可以继续，已有模型租约可以结算当前工具决定，有精确原操作的核验可使用恢复队列。已验证并发设置、强杀重启、已有审批、真实恢复丢回执、定时调度等待以及 Workflow 后继恢复。格式 92→93 保留原调度模式及已接受工作。服务和卷的安全交接仍依赖各模块的证据。[准入验收](../tests/test_node_work_admission.py) · [升级验收](../tests/node_work_admission_upgrade.py)
+- 所有者可按准入修订查看同一事务的 Task、独占和读取锁、模型租约及未知模型结果。已比对真实恢复、流式卷读取、Docker 卷附件、NetworkManager 确认及对账记录。格式 93→94 升级保留维护准入和在途模型租约，原期限结束后仍可核对未知结果。[阻塞快照](../tests/test_maintenance_blockers.py) · [租约验收](../tests/test_maintenance_model_blockers.py)
 
 ## 原生安装与停机更新
 

@@ -91,6 +91,23 @@ def remove_receipt_fault_after_crash(node, operation, link, checkpoint):
     node.start()
 
 
+def assert_work_blocker(node, task_id, operation, link, phase, knowledge):
+    admission = node.call("Node.WorkAdmission.Get", {})["reference"]
+    blockers = node.call("Node.WorkAdmission.Blockers", {
+        "expected_resource_version": admission["version"], "limit": 8,
+    })
+    task_ref = node.get(task_id)["reference"]
+    entry, = [item for item in blockers["tasks"]["items"] if item["task_ref"] == task_ref]
+    assert (entry["phase"], entry["operation_ref"], entry["outcome_knowledge"]) == (
+        phase, operation, knowledge,
+    ), entry
+    hold, = [item for item in blockers["exclusive_holds"]["items"] if item["resource_ref"] == link]
+    assert hold == {
+        "resource_kind": "NetworkLink", "resource_ref": link,
+        "holder_kind": "Operation", "holder_ref": operation, "task_ref": task_ref,
+    }, hold
+
+
 def exercise(node, manager):
     node.stop()
     config = json.loads(node.config.read_text())
@@ -111,6 +128,7 @@ def exercise(node, manager):
     with monitor(manager) as log:
         before, first = approved_trial(node, link, delegation)
         waiting_operation = waiting(node, first)
+        assert_work_blocker(node, first, waiting_operation, link, "WaitingInput", "InFlight")
         checkpoint = manager.only_checkpoint(CONFIRMATION_SECONDS)
         manager.assert_profile(CANDIDATE)
         challenge = node.call("NetworkTrial.Confirmation", target(waiting_operation))
@@ -165,6 +183,7 @@ def exercise(node, manager):
         ), paused
         unresolved, = paused["operation_refs"]
         assert unresolved["resource_id"] == pending["resource_id"] and unresolved != pending
+        assert_work_blocker(node, second, unresolved, link, "Unknown", "Unknown")
         rejects("Conflict", node, ROLLBACK, target(pending))
         rejects("PreconditionFailed", node, ROLLBACK, target(unresolved))
         check_contender(node, link, delegation)

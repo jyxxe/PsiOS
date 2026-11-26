@@ -409,6 +409,12 @@ enum Cmd {
         mode: WorkAdmissionCommandMode,
         reason: String,
     },
+    /// Inspect exact queued work, holds and leases at the observed admission revision.
+    NodeWorkAdmissionBlockers {
+        revision: String,
+        #[arg(long)]
+        limit: Option<u32>,
+    },
     Validate {
         contract: String,
         #[arg(default_value = "-")]
@@ -749,6 +755,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 WorkAdmissionCommandMode::Draining => WorkAdmissionMode::Draining,
             };
             serde_json::to_value(c.set_node_work_admission(&revision, mode, &reason)?)?
+        }
+        Cmd::NodeWorkAdmissionBlockers { revision, limit } => {
+            serde_json::to_value(c.node_work_admission_blockers(&revision, limit)?)?
         }
         Cmd::Whoami => c.call("Principal.WhoAmI", json!({}))?,
         Cmd::Capabilities => c.call("Capability.Discover", json!({}))?,

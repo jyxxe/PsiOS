@@ -320,6 +320,10 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 
 `Node.Configure` 的 `Cordoned` 继续独立控制派发。格式 93 升级时，独立准入模式初始值为 `Open`，原节点模式和已接受工作沿用原版本。本机准入计数用于观察 Task、恢复队列及模型状态。服务停止、卷释放及外部操作是否达到维护安全点，各自需要观测回执。[运维顺序](v1/docs/13-operations-release-governance.md) · [准入验收](../tests/test_node_work_admission.py) · [格式 92 升级](../tests/node_work_admission_upgrade.py)
 
+以准入修订调用 `Node.WorkAdmission.Blockers` 可读取同一事务内的五组样本。CLI 用 `psiosctl node-work-admission-blockers REVISION --limit 16`。每组默认最多 16 条，上限 64 条。若 `truncated` 为真，该组触及采样上限，可能还有未核对的条目。Task 优先展示未决效果和等待确认的操作。独占锁关联当前资源和持有者，正在使用卷的应用包含精确附件引用，读取锁关联卷及正在读取的 Task。恢复还未登记新卷时显示源备份的锁。
+
+模型组显示仍有效的当前租约，以及授权已失效但仍在原时限内的租约。严格租约到期而尚未结算时显示 `ElapsedPending`，已记录的未知效果继续独立可查。跨启动或计时范围变化时，残留时限使用保存的 UTC 期限估计。快照包含精确引用和采集时间，供运维确认后逐项核验。[锁与恢复验收](../tests/test_maintenance_blockers.py) · [模型租约验收](../tests/test_maintenance_model_blockers.py)
+
 ### 按主体限制块式读取结果
 
 `read_result_bytes_per_principal` 可为普通只读 Task 的块式结果设置每主体 4 MiB 至 1 TiB 的上限。接受 Task 时为本次结果预留 4 MiB。完成时按实际 JSON 字节从预留转为保留，用量和制品在同一事务提交。失败、取消及显式回收释放对应字节。设置上限后，`Task.Admission.read_results` 显示预留、保留和上限。额度吃满时，提交返回可退避重试的 `QuotaExceeded`。

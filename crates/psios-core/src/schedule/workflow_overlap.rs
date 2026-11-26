@@ -204,6 +204,23 @@ fn completed_launch(
     let original = db::resolve(conn, &body["origin_task_ref"])?;
     let issued_operation = db::resolve(conn, &original.body["operation_refs"][0])?;
     let child = state_at(conn, &opened.id, before)?;
+    let ordered: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM versions issued
+          JOIN versions opened ON opened.id=?3 AND opened.rev=1
+          JOIN versions payload ON payload.id=?4 AND payload.rev=?5
+          JOIN versions settled ON settled.id=issued.id AND settled.rev=?6
+          WHERE issued.id=?1 AND issued.rev=?2 AND issued.seq<opened.seq
+            AND opened.seq<payload.seq AND payload.seq<settled.seq)",
+        params![
+            task.id,
+            original.rev,
+            opened.id,
+            receipt.id,
+            receipt.rev,
+            task.rev
+        ],
+        |row| row.get(0),
+    )?;
     let elapsed: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM authorization_deadlines WHERE resource=?1)
           AND EXISTS(SELECT 1 FROM authorization_deadlines WHERE resource=?2)
@@ -221,6 +238,8 @@ fn completed_launch(
             && opened.spec["definition_ref"] == *definition
             && opened.spec["delegation_id"] == task.spec["delegation_ref"]["resource_id"]
             && opened.body["origin_task_ref"] == original.reference()
+            && opened.body["lifecycle"] == "Ready"
+            && opened.body["outcome_knowledge"] == "NotStarted"
             && original.kind == "Task"
             && original.id == task.id
             && original.owner == task.owner
@@ -237,6 +256,7 @@ fn completed_launch(
                 == json!({"workflow_run_ref":opened.reference(),"origin_task_ref":original.reference(),
                           "definition_ref":definition,"deadline_at":opened.spec["deadline_at"]})
             && deadline(&opened.spec["deadline_at"])? <= deadline(&plan.body["deadline_at"])?
+            && ordered
             && elapsed,
         "RecoveryRequired",
         "workflow overlap child differs from its exact launch or deadline",

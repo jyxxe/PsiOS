@@ -557,7 +557,7 @@ Core 在创建时固定 IANA 数据版本、UTC 窗口和因 `gap` 跳过的当�
 
 格式 117 为周期 `workflow.start` 提供 `overlap: "SkipWhileWorkflowActive"`，适用于 `repeat` 和 `calendar`。调度沿最近一个成功接受的触发检查原启动 Task 和确切的子 WorkflowRun。子工作流仍在运行、等待审批或结果未知时，本轮跳过且不创建 Task、不占用预算。子工作流到期时，只有已经确认的结算才解除保护。启动回执或关联无法核实时，本轮记录 `PreviousWorkflowUnverified`。
 
-跳过记录在 `Schedule.TriggerGet` 中提供 `overlap_evidence`，包含原触发、启动 Task 及已核实的回执和 WorkflowRun 修订。旧 `Skip` 仍按启动 Task 判断。使用 `Schedule.Cancel` 取消待触发的轮次，使用 `Workflow.Cancel` 管理已启动的子工作流。重叠保护作用于各自的调度。新格式由当前写入器执行，旧写入器拒绝打开。[重启、取消和实际写入验收](../tests/test_workflow_schedule_overlap.py)
+跳过记录在 `Schedule.TriggerGet` 中提供 `overlap_evidence`，包含原触发、启动 Task 及已核实的回执和 WorkflowRun 修订。旧 `Skip` 仍按启动 Task 判断。使用 `Schedule.Cancel` 取消待触发的轮次，使用 `Workflow.Cancel` 管理已启动的子工作流。重叠保护作用于各自的调度。需要等待子工作流内的 Agent 时，在该步骤启用 `SessionTerminal`。新格式由当前写入器执行，旧写入器拒绝打开。[重启、取消和实际写入验收](../tests/test_workflow_schedule_overlap.py)
 
 ### 通过调度创建 Agent 会话
 

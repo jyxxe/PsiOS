@@ -409,7 +409,7 @@ pub fn cancel(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     pause::clear(&mut b);
     let cancelled = db.status(&s, b)?;
     if let Some(task) = s.body["last_task"].as_str() {
-        broker::cancel_task(db, &db.of(task, "Task")?)?;
+        broker::cancel_task(db, actor, &db.of(task, "Task")?)?;
     }
     Ok(response(&db.get(&cancelled.id)?))
 }

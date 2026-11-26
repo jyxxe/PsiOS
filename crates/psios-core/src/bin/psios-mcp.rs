@@ -176,16 +176,8 @@ impl Adapter {
         {
             return Err((-32602, "Invalid initialize parameters"));
         }
-        let principal = self
-            .client
-            .call("Principal.WhoAmI", json!({}))
+        self.available()
             .map_err(|_| (-32001, "Cannot authenticate with local PsiOS"))?;
-        if !principal["principal_id"]
-            .as_str()
-            .is_some_and(|id| id.starts_with("principal-"))
-        {
-            return Err((-32001, "A dedicated local Agent credential is required"));
-        }
         self.phase = Phase::Initializing;
         Ok(
             json!({"protocolVersion":PROTOCOL,"capabilities":{"tools":{"listChanged":false}},
@@ -361,7 +353,8 @@ fn main() -> io::Result<()> {
         return Err(io::Error::other("select one or two distinct tools"));
     }
     let client = Client::new(options.socket, credential(&options.token_file)?)
-        .with_service_uid(options.service_uid.unwrap_or_else(|| geteuid().as_raw()));
+        .with_service_uid(options.service_uid.unwrap_or_else(|| geteuid().as_raw()))
+        .with_fail_fast_connect();
     serve(
         Adapter {
             client,

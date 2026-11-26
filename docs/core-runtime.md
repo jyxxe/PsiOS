@@ -716,7 +716,7 @@ psios-mcp --socket /run/psios/api.sock --service-uid PSIOS_UID \
 
 使用专用 `Agent.Register` 凭据，保存为调用用户拥有的私有普通文件。指定 `psiosd` 的实际数字 UID。通过 `Grant.Issue` 为该主体授予 `task.submit`、`task.read` 和希望使用的工具。`tool_targets` 必须覆盖实际目标：`system.status` 使用 `profile-local`，`node.pressure` 使用 `Node.Get` 返回的 Node ID。省略 `--tool` 时选择 `system.status`。两种工具只接受空参数。`tools/list` 核验配置指定的委托及其目标，不创建 Task 或草稿。
 
-调用使用正常的 `Task.Prepare`、`Task.Submit`、任务等候和 `Artifact.Read`，并在返回结果前重新核对指定授权。成功结果包含本地 Task ID 和受权结果。提交回执丢失时，SDK 用原始提交键查找已接受的 Task 或核对是否可重试。连接关闭或客户端取消通知不改变已经提交的只读 Task。它可在授权与 30 秒 Task 截止时间内继续，由 Core 保存结果。本地所有者可按原 Task 修订调用 `Task.Cancel`。适配器对结果等待 10 秒，Core RPC 沿用 SDK 的传输超时。每个 STDIO 连接串行处理，限制单帧 64 KiB，并按秒限制该连接的工具调用次数。
+调用使用正常的 `Task.Prepare`、`Task.Submit`、任务等候和 `Artifact.Read`，并在返回结果前重新核对指定授权。成功结果包含本地 Task ID 和受权结果。提交回执丢失时，SDK 用原始提交键查找已接受的 Task 或核对是否可重试。连接关闭或客户端取消通知不改变已经提交的只读 Task。它可在授权与 30 秒 Task 截止时间内继续，由 Core 保存结果。本地所有者可按原 Task 修订调用 `Task.Cancel`。适配器对结果等待 10 秒，Core Unix 套接字无法立即连接时返回传输错误，连接建立后沿用 SDK 的读写超时。每个 STDIO 连接串行处理，限制单帧 64 KiB，并按秒限制该连接的工具调用次数。
 
 这个接入面提供同步工具调用。MCP Tasks、跨连接调用映射和 HTTP 沿用各自的独立协议要求。[独立 STDIO 客户端、官方 Python 客户端和原 Task 验收](../tests/test_mcp_stdio.py)
 

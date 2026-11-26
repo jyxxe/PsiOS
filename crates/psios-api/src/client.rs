@@ -35,6 +35,7 @@ pub struct Client {
     socket: PathBuf,
     token: String,
     service_uid: u32,
+    fail_fast_connect: bool,
 }
 
 /// States at which a completion wait returns control to the task operator.
@@ -120,12 +121,39 @@ impl Client {
             socket: socket.as_ref().into(),
             token: token.into(),
             service_uid: rustix::process::geteuid().as_raw(),
+            fail_fast_connect: false,
         }
     }
     /// Pin the daemon UID when the SDK runs under a separate agent account.
     pub fn with_service_uid(mut self, uid: u32) -> Self {
         self.service_uid = uid;
         self
+    }
+
+    /// Return promptly when the local listener cannot accept another connection.
+    pub fn with_fail_fast_connect(mut self) -> Self {
+        self.fail_fast_connect = true;
+        self
+    }
+
+    fn connect(&self) -> std::io::Result<UnixStream> {
+        if !self.fail_fast_connect {
+            return UnixStream::connect(&self.socket);
+        }
+        use rustix::net::{
+            AddressFamily, SocketAddrUnix, SocketFlags, SocketType, connect, socket_with,
+        };
+        let address = SocketAddrUnix::new(self.socket.as_path())?;
+        let socket = socket_with(
+            AddressFamily::UNIX,
+            SocketType::STREAM,
+            SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
+            None,
+        )?;
+        connect(&socket, &address)?;
+        let stream = UnixStream::from(socket);
+        stream.set_nonblocking(false)?;
+        Ok(stream)
     }
 
     /// List a fixed snapshot and obtain its matching change cursor.
@@ -353,7 +381,8 @@ impl Client {
             token: self.token.clone(),
             params,
         };
-        let mut stream = UnixStream::connect(&self.socket)
+        let mut stream = self
+            .connect()
             .map_err(|_| ApiError::new("DependencyUnavailable", "cannot connect to psiosd"))?;
         let peer = rustix::net::sockopt::socket_peercred(&stream)
             .map_err(|_| invalid("socket peer unavailable"))?;

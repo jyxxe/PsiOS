@@ -4,6 +4,12 @@ use serde_json::{Value, json};
 
 pub(crate) fn discover(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     let request: LocalReadToolsRequest = decode(params)?;
+    let principal = db.of(actor, "Principal")?;
+    require(
+        principal.spec["principal_type"] == "Agent" && principal.body["lifecycle"] == "Active",
+        "PermissionDenied",
+        "local read tool discovery requires an active Agent principal",
+    )?;
     label(&request.delegation_id)?;
     require(
         matches!(request.tools.as_slice(), [_] | [_, _])

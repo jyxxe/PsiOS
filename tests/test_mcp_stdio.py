@@ -11,7 +11,7 @@ import subprocess
 import time
 import unittest
 
-from support import Node, target
+from support import Failure, Node, target
 
 
 PROFILE = "2025-11-25"
@@ -128,6 +128,11 @@ class McpStdioTests(unittest.TestCase):
     def test_wire_scope_revocation_budget_and_restart(self):
         status = self.grant([self.profile], units=1)
         pressure = self.grant([self.node_id])
+        with self.assertRaises(Failure) as denied_owner:
+            self.node.call("Capability.LocalReadTools", {
+                "delegation_id": "owner-delegation", "tools": ["system.status"],
+            })
+        self.assertEqual(denied_owner.exception.code, "PermissionDenied")
         client = self.wire(status)
         self.assertEqual(client.request("ping")["result"], {})
         self.assertEqual(client.request("tools/list")["error"]["code"], -32002)
@@ -156,6 +161,7 @@ class McpStdioTests(unittest.TestCase):
         self.assertEqual(exhausted["structuredContent"]["code"], "QuotaExceeded")
         self.assertEqual(len(self.tasks()), 1)
         self.node.stop(signal.SIGKILL)
+        self.assertEqual(client.request("tools/list")["error"]["code"], -32001)
         self.node.start()
         self.assertEqual(self.node.get(report["task_id"])["value"]["lifecycle"], "Succeeded")
         self.node.call("Grant.Revoke", target(status["grant_ref"]))

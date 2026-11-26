@@ -1,9 +1,10 @@
 """Compare fenced block layouts with Linux sysfs and optional real loop devices."""
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import json
 import os
 from pathlib import Path
 import signal
+import sqlite3
 import subprocess
 import time
 import unittest
@@ -41,6 +42,14 @@ def observe_trackable(node, grant, device):
     request = node.prepare(TOOL, {"major_minor": device, "trackable": True},
                            delegation=grant["delegation_ref"]["resource_id"])
     return receipt(node, node.call("Task.Submit", request)["task_id"])
+
+
+def enroll(node, sysfs, layout_grant, tracking_grant):
+    dev = (sysfs / "dev").read_text().strip()
+    sample = observe_trackable(node, layout_grant, dev)
+    task = node.prepare("node.track_block_device", {"major_minor": dev, "expected": sample["fence"]},
+                        delegation=tracking_grant["delegation_ref"]["resource_id"])
+    return receipt(node, node.call("Task.Submit", task)["task_id"])
 
 
 def receipt(node, task, token=None):
@@ -114,12 +123,7 @@ class BlockLayoutTests(unittest.TestCase):
             "actions": ["node.track_block_device", "task.submit", "task.read"], "tool_targets": [self.scope]})
 
     def enroll_for_reconciliation(self, sysfs, grant):
-        node = self.node
-        dev = (sysfs / "dev").read_text().strip()
-        sample = observe_trackable(node, self.grant, dev)
-        task = node.prepare("node.track_block_device", {"major_minor": dev, "expected": sample["fence"]},
-                            delegation=grant["delegation_ref"]["resource_id"])
-        return receipt(node, node.call("Task.Submit", task)["task_id"])
+        return enroll(self.node, sysfs, self.grant, grant)
 
     def tracked_reader(self, device):
         node = self.node
@@ -435,3 +439,92 @@ class BlockLayoutTests(unittest.TestCase):
             self.assert_exact_event_refs(cursor, [changed["reference"]])
             node.stop()
             subprocess.run([*node.daemon, "verify"], check=True, stdout=subprocess.DEVNULL, timeout=20)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_BLOCK_LOOP") == "1", "requires read-only loop fixtures")
+    def test_loop_retire_is_exact_and_keeps_live_device_reconciliation_after_sigkill(self):
+        node = self.node
+        self.enable_reconciler()
+        retired_image = node.base / "retired.raw"
+        live_image = node.base / "still-watched.raw"
+        next_image = node.base / "replacement.raw"
+        for image in (retired_image, live_image, next_image):
+            scratch_gpt(image)
+        tracker = self.tracking_delegation()
+
+        def denied(code, callback):
+            with self.assertRaises(Failure) as failure:
+                callback()
+            self.assertEqual(failure.exception.code, code, failure.exception)
+
+        def resize(image, name, mib):
+            with image.open("r+b") as disk:
+                disk.truncate(mib * 1024 * 1024)
+            subprocess.run(["losetup", "--set-capacity", Path("/dev") / name], check=True, timeout=8)
+
+        with attached(retired_image) as (name, sysfs), attached(live_image) as (live_name, live_sysfs):
+            original = self.enroll_for_reconciliation(sysfs, tracker)["device_ref"]
+            other = self.enroll_for_reconciliation(live_sysfs, tracker)["device_ref"]
+            token, delegation = self.tracked_reader(original)
+            live_token, _ = self.tracked_reader(other)
+            selector = {"kind": "BlockDevice", "id": original["resource_id"]}
+            cursor = node.call("Resource.List", selector)["watch_start_cursor"]
+            initial = self.wait_revision(original, token, "r1", "Present")
+            live_initial = self.wait_revision(other, live_token, "r1", "Present")
+            resize(retired_image, name, 18)
+            before = self.wait_revision(original, token, "r2", "Present")
+            denied("PermissionDenied", lambda: node.call("BlockDevice.Retire", target(before["reference"]), token))
+            denied("Conflict", lambda: node.call("BlockDevice.Retire", target(original)))
+            retired = node.cli(node.witness / "owner.token", "block-device-retire",
+                               original["resource_id"], "--revision", "r2")
+            self.assertEqual(retired, self.wait_revision(original, token, "r3", "Retired"))
+            self.assertEqual(retired["state"]["retired_from_ref"], before["reference"])
+            self.assertEqual(retired["state"]["identity"], initial["state"]["identity"])
+            self.assertEqual(retired["state"]["observed_at"], before["state"]["observed_at"])
+            self.assertIsNone(retired["state"]["layout_digest"])
+            self.assertEqual(node.call("Resource.Resolve", {"reference": original})["value"], initial["state"])
+            end = self.assert_exact_event_refs(cursor, [before["reference"], retired["reference"]])
+            audit = [entry for entry in node.call("Audit.List", {"limit": 128}) if
+                     entry["method"] == "BlockDevice.Retire" and entry["decision"] == "Allowed"]
+            self.assertEqual([(entry["actor"], entry["resource"]) for entry in audit],
+                             [("local-owner", original["resource_id"])])
+
+            denied("PreconditionFailed", lambda: node.call("BlockDevice.Retire", target(retired["reference"])))
+            observation = node.prepare("device.block_layout", target(retired["reference"]), token=token,
+                                       delegation=delegation)
+            denied("PreconditionFailed", lambda: node.call("Task.Submit", observation, token))
+            device = (sysfs / "dev").read_text().strip()
+            sample = observe_trackable(node, self.grant, device)
+            request = node.prepare("node.track_block_device", {"major_minor": device, "expected": sample["fence"]},
+                                   delegation=tracker["delegation_ref"]["resource_id"])
+            denied("PreconditionFailed", lambda: node.call("Task.Submit", request))
+            node.stop(signal.SIGKILL)
+            resize(retired_image, name, 20)
+            resize(live_image, live_name, 18)
+            node.start()
+            live = self.wait_revision(other, live_token, "r2", "Present")
+            self.assertNotEqual(live["state"]["layout_digest"], live_initial["state"]["layout_digest"])
+            self.assertEqual(node.call("BlockDevice.Get", {"id": original["resource_id"]}, token), retired)
+            self.assert_exact_event_refs(end, [])
+
+        with attached(next_image, name) as (_, sysfs):
+            self.assertEqual((sysfs / "dev").read_text().strip(), device)
+            replacement = self.enroll_for_reconciliation(sysfs, tracker)["device_ref"]
+            self.assertNotEqual(replacement["resource_id"], original["resource_id"])
+            denied("PermissionDenied", lambda: node.call("BlockDevice.Get", {"id": replacement["resource_id"]}, token))
+            self.assertEqual(node.call("BlockDevice.Get", {"id": original["resource_id"]}, token), retired)
+
+        node.stop()
+        verify = [*node.daemon, "verify"]
+        subprocess.run(verify, check=True, stdout=subprocess.DEVNULL, timeout=20)
+        with closing(sqlite3.connect(node.state / "state.db")) as db:
+            id_ = original["resource_id"]
+            body, = db.execute("SELECT body FROM versions WHERE id=? AND rev=3", (id_,)).fetchone()
+            db.execute("UPDATE versions SET body=json_set(body,'$.retired_from_ref',json(?)) WHERE id=? AND rev=3",
+                       (json.dumps(original), id_))
+            db.commit()
+            bad = subprocess.run(verify, text=True, capture_output=True, timeout=20)
+            self.assertNotEqual(bad.returncode, 0, bad)
+            self.assertIn("block retirement does not match its prior active revision", bad.stderr + bad.stdout)
+            db.execute("UPDATE versions SET body=? WHERE id=? AND rev=3", (body, id_))
+            db.commit()
+        subprocess.run(verify, check=True, stdout=subprocess.DEVNULL, timeout=20)

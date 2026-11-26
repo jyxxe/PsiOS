@@ -192,7 +192,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = project::review_signal::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = node::block_device::retirement::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -551,6 +551,9 @@ impl Store {
                 }
                 if ver < apps::create_recovery::FORMAT {
                     apps::create_recovery::migrate(db)?;
+                }
+                if ver < node::block_device::retirement::FORMAT {
+                    db.c.execute_batch(node::block_device::retirement::SCHEMA)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

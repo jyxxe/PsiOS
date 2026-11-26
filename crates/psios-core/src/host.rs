@@ -425,9 +425,8 @@ impl Action {
                 )
             }
             Self::PublishSessionSummary(_) => return db.of(&db.meta("authority")?, "Node"),
-            Self::TrackBlockDevice(_) => {
-                policy::admin(actor)?;
-                return db.of(&db.meta("authority")?, "Node");
+            Self::TrackBlockDevice(query) => {
+                return node::block_device::enrollment_target(db, actor, query);
             }
             Self::ObserveBlockDevice(query) => return node::block_device::target(db, actor, query),
             Self::CaptureOciImage(request) => {

@@ -1,14 +1,16 @@
 //! Periodically recheck enrolled attachments without using raw hotplug events as evidence.
-use super::{KIND, changes_state, identity, sample, state};
+use super::{KIND, changes_state, identity, sample, state, watched};
 use crate::{
     Result,
     db::{Db, Doc},
-    err,
+    require,
 };
 use rusqlite::params;
 use serde_json::Value;
 
 const BATCH_SIZE: i64 = 8;
+const PAGE: &str = "SELECT device_id,origin_seq FROM block_device_watch
+                    WHERE origin_seq>?1 AND origin_seq<=?2 ORDER BY origin_seq LIMIT ?3";
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Cursor {
@@ -25,33 +27,30 @@ pub(crate) struct Batch {
 pub(crate) fn next(db: &Db<'_>, cursor: Cursor) -> Result<(Cursor, Batch)> {
     let through = if cursor.through == 0 {
         db.c.query_row(
-            "SELECT coalesce(max(seq),0) FROM versions INDEXED BY versions_origin_kind
-             WHERE kind=?1 AND rev=1",
-            [KIND],
+            "SELECT coalesce(max(origin_seq),0) FROM block_device_watch",
+            [],
             |row| row.get(0),
         )?
     } else {
         cursor.through
     };
-    // Spend the same bounded budget on terminal history. Skipping terminal rows
-    // in SQL could scan arbitrarily many enrollments to fill one page.
-    let mut origins = db.c.prepare_cached(
-        "SELECT id,seq FROM versions INDEXED BY versions_origin_kind
-         WHERE kind=?1 AND rev=1 AND seq>?2 AND seq<=?3 ORDER BY seq LIMIT ?4",
-    )?;
+    // Pin each sweep at the current last eligible enrollment. The primary-key
+    // range excludes prior terminal histories before the eight-slot budget.
+    let mut origins = db.c.prepare_cached(PAGE)?;
     let mut devices = Vec::new();
     let mut after = through;
-    for origin in origins.query_map(params![KIND, cursor.after, through, BATCH_SIZE], |row| {
+    for origin in origins.query_map(params![cursor.after, through, BATCH_SIZE], |row| {
         Ok((row.get::<_, String>(0)?, row.get(1)?))
     })? {
         let (id, seq) = origin?;
         after = seq;
         let device = db.of(&id, KIND)?;
-        match device.body["lifecycle"].as_str() {
-            Some("Present" | "Absent") => devices.push(device),
-            Some("Replaced" | "BootEnded") => {}
-            _ => return Err(err("RecoveryRequired", "invalid block device lifecycle")),
-        }
+        require(
+            watched(&device.body),
+            "RecoveryRequired",
+            "block enrollment projection does not refer to an active device",
+        )?;
+        devices.push(device);
     }
     let next = if after < through {
         Cursor { after, through }
@@ -109,6 +108,98 @@ impl Revisions {
                 db.status(&current, body)?;
             }
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Config, node::block_device::retirement, policy};
+    use rusqlite::{Connection, StatementStatus};
+    use serde_json::json;
+    use std::path::Path;
+
+    #[test]
+    fn eligible_sweep_seeks_past_terminal_history_with_a_fixed_end() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON;")?;
+        conn.execute_batch(include_str!("../../state.sql"))?;
+        conn.execute_batch(include_str!("../../events/snapshots.sql"))?;
+        conn.execute("INSERT INTO meta VALUES('authority','node-test')", [])?;
+        let config = Config::local(Path::new("unused-block-sweep-test"));
+        let db = Db {
+            c: &conn,
+            cfg: &config,
+            keys: &[],
+            correlation: "test-sweep",
+            incarnation: "incarnation-test".to_string(),
+        };
+        let present = |id: &str| {
+            db.create(
+                KIND,
+                id,
+                policy::OWNER,
+                json!({}),
+                json!({"lifecycle":"Present"}),
+            )
+        };
+        for index in 0..256 {
+            let old = present(&format!("terminal-{index}"))?;
+            db.status(&old, json!({"lifecycle":"Replaced"}))?;
+        }
+        let original = present("pre-migration-live")?;
+        db.status(&original, json!({"lifecycle":"Absent"}))?;
+        conn.execute_batch(retirement::SCHEMA)?;
+        for index in 0..8 {
+            present(&format!("eligible-{index}"))?;
+        }
+
+        let (cursor, first) = next(&db, Cursor::default())?;
+        assert_eq!(first.devices.len(), 8);
+        assert_eq!(first.devices[0].id, original.id);
+        assert_eq!(first.devices[0].body["lifecycle"], "Absent");
+        assert_eq!(first.devices[7].id, "eligible-6");
+        let mut statement = conn.prepare(PAGE)?;
+        let rows = statement
+            .query_map(params![0, cursor.through, BATCH_SIZE], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(rows.len(), 8);
+        assert_eq!(statement.get_status(StatementStatus::FullscanStep), 0);
+        assert!(statement.get_status(StatementStatus::VmStep) < 128);
+
+        let arriving = present("after-sweep-cut")?;
+        let (rolled, final_page) = next(&db, cursor)?;
+        assert_eq!(rolled.through, 0);
+        assert_eq!(final_page.devices.len(), 1);
+        assert_eq!(final_page.devices[0].id, "eligible-7");
+
+        for device in first.devices.iter().chain(final_page.devices.iter()) {
+            db.status(device, json!({"lifecycle":"Retired"}))?;
+        }
+        let (_, upcoming) = next(&db, Cursor::default())?;
+        assert_eq!(upcoming.devices.len(), 1);
+        assert_eq!(upcoming.devices[0].id, arriving.id);
+        assert!(db.find(&original.id)?.is_some());
+        retirement::verify_projection(&conn)?;
+        conn.execute(
+            "DELETE FROM block_device_watch WHERE device_id=?1",
+            [&arriving.id],
+        )?;
+        assert_eq!(
+            retirement::verify_projection(&conn).unwrap_err().0.code,
+            "RecoveryRequired"
+        );
+        conn.execute(
+            "INSERT INTO block_device_watch SELECT seq,id FROM versions WHERE id IN (?1,?2) AND rev=1",
+            [&arriving.id, &original.id],
+        )?;
+        assert_eq!(
+            retirement::verify_projection(&conn).unwrap_err().0.code,
+            "RecoveryRequired"
+        );
         Ok(())
     }
 }

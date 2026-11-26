@@ -3276,6 +3276,81 @@ fn revoked_process_observation_cannot_publish_an_artifact_or_a_late_body() {
 }
 
 #[test]
+fn revoked_service_resource_grant_fences_the_result_and_late_receipt() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut cfg = Config::local(&directory.path().join("core"));
+    let unit = "psios-service-resource-revocation.service";
+    cfg.services.push(config::ServiceConfig {
+        unit: unit.into(),
+        manager: config::Manager::User,
+        allow_control: false,
+        definition_digest: None,
+    });
+    Store::init(&cfg).unwrap();
+    let mut store = Store::open(cfg).unwrap();
+    let id = format!("service-{unit}");
+    let service = call(&mut store, "Resource.Get", json!({"id":id})).unwrap()["reference"].clone();
+    let boot = call(&mut store, "Node.Get", json!({})).unwrap()["state"]["boot_id"].clone();
+    let tool = node::service_resources::TOOL;
+    let grant = call(
+        &mut store,
+        "Grant.Issue",
+        json!({"principal_id":policy::OWNER,
+        "actions":["task.submit","task.read",tool],"tool_targets":[id],"units":1,"ttl_seconds":90}),
+    )
+    .unwrap();
+    let request = call(
+        &mut store,
+        "Task.Prepare",
+        json!({"tool":tool,"key":"resource-revocation",
+        "delegation_id":grant["delegation_ref"]["resource_id"],
+        "input":{"id":id,"expected_resource_version":service["version"],"expected_boot_id":boot,
+        "expected_invocation_id":"11111111111111111111111111111111"}}),
+    )
+    .unwrap();
+    let submission = call(&mut store, "Task.Submit", request).unwrap();
+    let task = submission["task_id"].as_str().unwrap();
+    assert_eq!(claim(&mut store), task);
+    let work = dispatch(&mut store, task);
+    store
+        .transaction("check-service-resource-scope", |db| {
+            work.check_result_publication(db)
+        })
+        .unwrap();
+    call(
+        &mut store,
+        "Grant.Revoke",
+        json!({"id":grant["grant_ref"]["resource_id"],
+        "expected_resource_version":grant["grant_ref"]["version"]}),
+    )
+    .unwrap();
+    // Simulate the return of a sample after a real authority revocation.
+    let receipt = json!({"service_ref":service,"cgroup":{"cpu":{"usage_usec":42}}});
+    store
+        .transaction("finish-revoked-resource", |db| {
+            broker::finish(db, &work, Ok(receipt.clone()))
+        })
+        .unwrap();
+    let closed = call(&mut store, "Task.Get", json!({"id":task})).unwrap();
+    assert_eq!(closed["lifecycle"], "Failed");
+    assert_eq!(closed["conditions"][0]["type"], "PermissionDenied");
+    assert_eq!(closed["result"]["artifact_refs"], json!([]));
+    store
+        .transaction("late-revoked-resource", |db| {
+            broker::finish(db, &work, Ok(receipt))
+        })
+        .unwrap();
+    let receipts = call(&mut store, "Resource.List", json!({"kind":"LateReceipt"})).unwrap();
+    let late = call(
+        &mut store,
+        "Resource.Resolve",
+        json!({"reference":receipts["items"][0]}),
+    )
+    .unwrap();
+    assert_eq!(late["value"]["evidence"], json!({"code":"Fenced"}));
+}
+
+#[test]
 fn revoked_service_log_grants_cannot_publish_artifacts_or_late_bodies() {
     let directory = tempfile::tempdir().unwrap();
     let mut cfg = Config::local(&directory.path().join("core"));

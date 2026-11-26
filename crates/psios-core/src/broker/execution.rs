@@ -486,6 +486,7 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                         | Action::ObserveBlockDevice(_)
                         | Action::ServiceLogs(_)
                         | Action::ServiceLogsSince(_)
+                        | Action::ServiceResources(_)
                         | Action::ListAppReleases(_)
                         | Action::InstallArtifact(_)
                         | Action::StageArtifactRelease(_)

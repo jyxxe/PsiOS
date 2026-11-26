@@ -119,6 +119,8 @@ pub enum Action {
     ServiceInspect(Target),
     #[serde(rename = "service.observe")]
     ServiceObserve(node::service_state::Query),
+    #[serde(rename = "service.resources")]
+    ServiceResources(node::service_resources::Query),
     #[serde(rename = "service.logs")]
     ServiceLogs(node::journal::Query),
     #[serde(rename = "service.logs_since")]
@@ -240,6 +242,7 @@ impl Action {
             Self::ServiceLogs(q) => q.validate()?,
             Self::ServiceLogsSince(q) => q.validate()?,
             Self::ServiceObserve(q) => q.validate()?,
+            Self::ServiceResources(q) => q.validate()?,
             Self::ServiceRestart(restart) => restart.validate()?,
             Self::Create { name } => label(name)?,
             Self::Read(f) => storage::filename(&f.name)?,
@@ -428,6 +431,10 @@ impl Action {
                 return node::service_target(db, &q.id, &q.expected_resource_version);
             }
             Self::ServiceObserve(q) => return q.target(db),
+            Self::ServiceResources(q) => {
+                policy::can_target(db, actor, node::service_resources::TOOL, &q.id)?;
+                return node::service_target(db, &q.id, &q.expected_resource_version);
+            }
             Self::ServiceRestart(r) => {
                 return node::service_target(db, &r.id, &r.expected_resource_version);
             }
@@ -589,6 +596,7 @@ pub struct Work {
     pub(crate) stop_cleanup: Option<apps::stop::Prepared>,
     pub(crate) volume_rebind: Option<apps::volume_rebind::Prepared>,
     pub(crate) mount_observation_required: bool,
+    pub(crate) service_resources_node_id: Option<String>,
     network_trial_inspection: Option<node::network::trial::Inspection>,
 }
 pub(crate) enum Output {
@@ -690,6 +698,7 @@ impl Work {
                 | Action::ObserveBlockDevice(_)
                 | Action::ServiceLogs(_)
                 | Action::ServiceLogsSince(_)
+                | Action::ServiceResources(_)
                 | Action::ObserveNetworkProbe(_)
                 | Action::InspectNetworkTrial(_)
                 | Action::ListAssignedWork(_)
@@ -814,6 +823,7 @@ impl Work {
             )),
             Action::ServiceInspect(_)
             | Action::ServiceObserve(_)
+            | Action::ServiceResources(_)
             | Action::ServiceLogs(_)
             | Action::ServiceLogsSince(_)
             | Action::ServiceStart(_)
@@ -1105,6 +1115,9 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     } else {
         None
     };
+    let service_resources_node_id = matches!(a, Action::ServiceResources(_))
+        .then(|| db.meta("authority"))
+        .transpose()?;
     let w = Work {
         start_checkpoint,
         publication_checkpoint,
@@ -1125,6 +1138,7 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
         stop_cleanup,
         volume_rebind,
         mount_observation_required,
+        service_resources_node_id,
         network_trial_inspection,
     };
     node::reserve(db, &w)?;

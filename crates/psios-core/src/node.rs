@@ -8,6 +8,7 @@ pub mod pressure;
 pub mod process;
 pub(crate) mod service_control;
 pub(crate) mod service_manager;
+pub(crate) mod service_resources;
 pub mod service_state;
 pub(crate) mod work_admission;
 use crate::{
@@ -355,6 +356,7 @@ pub fn perform(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Resul
         Action::Mounts {} => mounts::observe(),
         Action::ServiceLogs(query) => journal::read(w, query),
         Action::ServiceLogsSince(query) => journal::read_since(w, query),
+        Action::ServiceResources(query) => service_resources::observe(w, query),
         _ => service(w, checkpoint),
     }
 }

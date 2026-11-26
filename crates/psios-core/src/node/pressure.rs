@@ -16,13 +16,13 @@ use std::{
 };
 
 pub const TOOL: &str = "node.pressure";
-const CONTROL_LIMIT: usize = 8192;
+pub(super) const CONTROL_LIMIT: usize = 8192;
 const VMSTAT_LIMIT: usize = 64 * 1024;
 const MEMBERSHIP_LIMIT: usize = 128 * 1024;
 
-#[derive(Serialize)]
+#[derive(Serialize, PartialEq, Eq)]
 #[serde(tag = "status", content = "value")]
-enum Reading<T> {
+pub(super) enum Reading<T> {
     Observed(T),
     Unsupported,
     Denied,
@@ -44,7 +44,7 @@ impl<T> From<io::Result<T>> for Reading<T> {
     }
 }
 
-fn text(file: File, limit: usize) -> io::Result<String> {
+pub(super) fn text(file: File, limit: usize) -> io::Result<String> {
     let mut value = String::new();
     file.take(limit as u64 + 1).read_to_string(&mut value)?;
     if value.len() > limit {
@@ -53,7 +53,7 @@ fn text(file: File, limit: usize) -> io::Result<String> {
     Ok(value)
 }
 
-fn read<T>(
+pub(super) fn read<T>(
     file: io::Result<File>,
     limit: usize,
     parse: impl FnOnce(&str) -> Option<T>,
@@ -148,31 +148,31 @@ fn counters(value: &str, keys: &[&'static str], required: &str) -> Option<Counte
     result.contains_key(required).then_some(result)
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", content = "value")]
-enum Limit {
+pub(super) enum Limit {
     Bounded(u64),
     Unbounded,
 }
 
-fn limit(text: &str) -> Option<Limit> {
+pub(super) fn limit(text: &str) -> Option<Limit> {
     match text.trim() {
         "max" => Some(Limit::Unbounded),
         value => value.parse().ok().map(Limit::Bounded),
     }
 }
 
-#[derive(Serialize)]
-struct CpuLimit {
-    quota_us: Limit,
-    period_us: u64,
+#[derive(Clone, Copy, Serialize, PartialEq, Eq)]
+pub(super) struct CpuLimit {
+    pub(super) quota_us: Limit,
+    pub(super) period_us: u64,
 }
 
-fn cpu_limit(text: &str) -> Option<CpuLimit> {
+pub(super) fn cpu_limit(text: &str) -> Option<CpuLimit> {
     let mut parts = text.split_ascii_whitespace();
     let quota_us = limit(parts.next()?)?;
     let period_us = parts.next()?.parse().ok()?;
-    (parts.next().is_none() && period_us > 0).then_some(CpuLimit {
+    (parts.next().is_none() && period_us > 0 && quota_us != Limit::Bounded(0)).then_some(CpuLimit {
         quota_us,
         period_us,
     })
@@ -194,24 +194,33 @@ fn membership() -> io::Result<PathBuf> {
     Ok(path.to_owned())
 }
 
-fn contains_daemon(group: &OwnedFd) -> io::Result<bool> {
+pub(super) fn contains_process(group: &OwnedFd, pid: u32) -> io::Result<bool> {
     // A namespace path alone can match the wrong directory on a bind mount.
     let ids = text(
         linux_cgroup::control(group, "cgroup.procs")?,
         MEMBERSHIP_LIMIT,
     )?;
-    let pid = std::process::id().to_string();
+    let pid = pid.to_string();
     Ok(ids.lines().any(|line| line == pid))
 }
 
 fn group_snapshot() -> io::Result<Value> {
+    let pid = std::process::id();
     let path = membership()?;
     let group = linux_cgroup::group(linux_cgroup::root()?, &path)?;
-    if !contains_daemon(&group)? {
+    if !contains_process(&group, pid)? {
         return Err(io::ErrorKind::Interrupted.into());
     }
-    let id = fstat(&group).map_err(io::Error::from)?;
-    let control = |name| linux_cgroup::control(&group, name);
+    let result = cgroup_snapshot(&group)?;
+    if membership()? != path || !contains_process(&group, pid)? {
+        return Err(io::ErrorKind::Interrupted.into());
+    }
+    Ok(result)
+}
+
+pub(super) fn cgroup_snapshot(group: &OwnedFd) -> io::Result<Value> {
+    let id = fstat(group).map_err(io::Error::from)?;
+    let control = |name| linux_cgroup::control(group, name);
     let group_pressure = |name| read(control(name), CONTROL_LIMIT, |text| pressure(text, true));
     let preferred_limit = |name| read(control(name), CONTROL_LIMIT, limit);
     let usage = |name| {
@@ -243,7 +252,7 @@ fn group_snapshot() -> io::Result<Value> {
     let pids_events = read(control("pids.events"), CONTROL_LIMIT, |text| {
         counters(text, &["max"], "max")
     });
-    let result = json!({
+    Ok(json!({
         "source":"LinuxCgroupV2", "device":id.st_dev.to_string(), "inode":id.st_ino.to_string(),
         "cpu": {
             "pressure":group_pressure("cpu.pressure"), "stat":cpu_stat,
@@ -258,14 +267,10 @@ fn group_snapshot() -> io::Result<Value> {
         },
         "io": {"pressure":group_pressure("io.pressure")},
         "pids": {"current":usage("pids.current"), "configured_max":preferred_limit("pids.max"), "events":pids_events}
-    });
-    if membership()? != path || !contains_daemon(&group)? {
-        return Err(io::ErrorKind::Interrupted.into());
-    }
-    Ok(result)
+    }))
 }
 
-fn boot_us() -> u128 {
+pub(super) fn boot_us() -> u128 {
     let time = clock_gettime(ClockId::Boottime);
     time.tv_sec as u128 * 1_000_000 + time.tv_nsec as u128 / 1_000
 }

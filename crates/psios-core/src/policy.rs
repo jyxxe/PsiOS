@@ -40,6 +40,7 @@ pub const TOOLS: &[&str] = &[
     "node.mounts",
     "service.inspect",
     node::service_state::TOOL,
+    node::service_resources::TOOL,
     node::journal::TOOL,
     node::journal::SINCE_TOOL,
     "service.start",
@@ -143,6 +144,7 @@ pub fn readonly(tool: &str) -> bool {
             | "node.mounts"
             | "service.inspect"
             | node::service_state::TOOL
+            | node::service_resources::TOOL
             | node::journal::TOOL
             | node::journal::SINCE_TOOL
             | "volume.files"
@@ -212,6 +214,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | node::journal::TOOL
                     | node::journal::SINCE_TOOL
                     | node::service_state::TOOL
+                    | node::service_resources::TOOL
                     | node::RESTART_TOOL
                     | "node.routing_rules"
                     | "node.mounts"
@@ -635,6 +638,7 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         .actions
         .iter()
         .any(|action| action == node::block_device::OBSERVE);
+    let observes_service_resources = p.actions.iter().any(|a| a == node::service_resources::TOOL);
     require(
         !tracks_block || principal.id == OWNER,
         "PermissionDenied",
@@ -660,6 +664,7 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             || submits_evidence
             || discovers_work
             || observes_block
+            || observes_service_resources
             || p.actions.iter().any(|action| {
                 action == storage::export::ACTION
                     || action == artifact::ingress::UPLOAD
@@ -703,6 +708,7 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         let mut includes_work_item = false;
         let mut includes_project = false;
         let mut includes_block = false;
+        let mut includes_service = false;
         for id in ids {
             if reads_results {
                 db.of(id, "Task")?;
@@ -714,6 +720,7 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
                 includes_work_item |= target.kind == "WorkItem";
                 includes_project |= target.kind == "Project";
                 includes_block |= target.kind == node::block_device::KIND;
+                includes_service |= target.kind == "HostService";
             }
         }
         require(
@@ -730,6 +737,11 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             !observes_block || includes_block,
             "InvalidArgument",
             "block layout observation requires an exact enrolled BlockDevice target",
+        )?;
+        require(
+            !observes_service_resources || includes_service,
+            "InvalidArgument",
+            "service resource observation requires an exact registered HostService target",
         )?;
     }
     require(

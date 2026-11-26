@@ -1,4 +1,6 @@
 //! Bounded procfs observations tied to a process in the local node's PID view.
+pub(super) mod custody;
+
 use crate::{Result, err, now, require};
 use rustix::{
     fd::OwnedFd,
@@ -90,25 +92,7 @@ impl Proc {
     }
 
     fn stat(&self, pid: u32) -> Result<String> {
-        let fd = openat2(
-            &self.root,
-            format!("{pid}/stat"),
-            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
-            Mode::empty(),
-            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
-        )
-        .map_err(|e| stat_error(e.into()))?;
-        let mut bytes = Vec::new();
-        File::from(fd)
-            .take(STAT_LIMIT + 1)
-            .read_to_end(&mut bytes)
-            .map_err(stat_error)?;
-        require(
-            bytes.len() as u64 <= STAT_LIMIT,
-            "QuotaExceeded",
-            "process stat record exceeds the profile",
-        )?;
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
+        read_at(&self.root, &format!("{pid}/stat"), STAT_LIMIT)
     }
 
     fn identity(&self, pid: u32, start_ticks: u64) -> Identity {
@@ -120,6 +104,32 @@ impl Proc {
             start_ticks: start_ticks.to_string(),
         }
     }
+}
+
+const BELOW: ResolveFlags = ResolveFlags::BENEATH
+    .union(ResolveFlags::NO_SYMLINKS)
+    .union(ResolveFlags::NO_XDEV);
+
+fn read_at(root: &OwnedFd, path: &str, limit: u64) -> Result<String> {
+    let fd = openat2(
+        root,
+        path,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+        BELOW,
+    )
+    .map_err(|error| stat_error(error.into()))?;
+    let mut bytes = Vec::new();
+    File::from(fd)
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(stat_error)?;
+    require(
+        bytes.len() as u64 <= limit,
+        "QuotaExceeded",
+        "procfs observation exceeds the profile",
+    )?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn stat_error(error: io::Error) -> crate::Error {

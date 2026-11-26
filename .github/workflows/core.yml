@@ -402,6 +402,15 @@ jobs:
           sudo systemctl start "user@$(id -u).service"
           export XDG_RUNTIME_DIR="/run/user/$(id -u)"
           python3 tests/services.py
+      - name: Upgrade a previous writer and verify real systemd service limits
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format107"
+          git archive 3fd99c0840b9c40b764daf31f177e37c2fb96c3a Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format107"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format107" "$RUNNER_TEMP/psios-compatibility-target"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          python3 -B tests/service_resources.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
+      - name: Keep service resource readings unavailable when cgroup is masked
+        run: sudo unshare --mount --propagation private python3 -B tests/service_resources.py --masked-system
       - name: Install the scoped service journal tool and read real journal records
         run: |
           mkdir "$RUNNER_TEMP/psios-format33"

@@ -26,6 +26,10 @@ pub(super) fn group(root: OwnedFd, path: &Path) -> io::Result<OwnedFd> {
     if path.as_os_str().is_empty() {
         return Ok(root);
     }
+    group_at(&root, path)
+}
+
+pub(super) fn group_at(root: &OwnedFd, path: &Path) -> io::Result<OwnedFd> {
     openat2(root, path, DIRECTORY, Mode::empty(), BELOW).map_err(io::Error::from)
 }
 

@@ -652,6 +652,25 @@ enum Decision {
 }
 // Older format-5 calls already have a reservation, but its reference was not
 // included in their session checkpoint. Accept only an unambiguous match.
+fn reserved_usage(db: &Db<'_>, s: &Doc, call: &str) -> Result<Doc> {
+    if let Some(reference) = s.body.get("current_usage_ref") {
+        return db.resolve(reference);
+    }
+    let ids =
+        db.c.prepare(
+            "SELECT id FROM current WHERE kind='ModelUsage' AND owner=?1
+            AND body->>'session_id'=?2 AND body->>'call_id'=?3 LIMIT 2",
+        )?
+        .query_map(params![s.owner, s.id, call], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    require(
+        ids.len() == 1,
+        "RecoveryRequired",
+        "original model reservation unavailable",
+    )?;
+    db.get(&ids[0])
+}
+
 fn settle_usage(
     db: &Db<'_>,
     s: &Doc,
@@ -661,23 +680,7 @@ fn settle_usage(
     tokens: Option<ModelTokenUsage>,
     elapsed_ms: Option<i64>,
 ) -> Result<Value> {
-    let usage = if let Some(reference) = s.body.get("current_usage_ref") {
-        db.resolve(reference)?
-    } else {
-        let ids =
-            db.c.prepare(
-                "SELECT id FROM current WHERE kind='ModelUsage' AND owner=?1
-            AND body->>'session_id'=?2 AND body->>'call_id'=?3 LIMIT 2",
-            )?
-            .query_map(params![s.owner, s.id, call], |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        require(
-            ids.len() == 1,
-            "RecoveryRequired",
-            "original model reservation unavailable",
-        )?;
-        db.get(&ids[0])?
-    };
+    let usage = reserved_usage(db, s, call)?;
     require(
         usage.kind == "ModelUsage"
             && usage.owner == s.owner

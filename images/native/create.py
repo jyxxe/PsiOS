@@ -35,6 +35,8 @@ STATIC_IPV6 = "virtio-static-ipv6"
 STATIC_DUAL = "virtio-static-dual-stack"
 STATIC_MODES = {STATIC_IPV4: "static", STATIC_IPV6: "static6", STATIC_DUAL: "dual"}
 LIMITED_SERVICE = "::respawn:/bin/sh /psios-core-cgroup serve"
+TRIAL_BOOT_MODE = "IsolatedTrial"
+TRIAL_RECEIPT_FORMAT = 7
 
 
 @dataclass(frozen=True)
@@ -86,6 +88,12 @@ class CoreLimits:
 
     def kernel_values(self):
         return f"{self.cpu_millicores * 100} {self.memory_mib * MIB} {self.pids_max}\n"
+
+
+@dataclass(frozen=True)
+class TrialInput:
+    disk_uuid: uuid.UUID
+    configuration_sha256: str
 
 
 def sha256(path):
@@ -247,7 +255,8 @@ def host_config(seed, args):
     (seed / "etc").chmod(0o755)
 
 
-def ramfs(work, args, instance, home_id, layout=Layout(), signing=None, network_profile=None, *, core_limits=None):
+def ramfs(work, args, instance, home_id, layout=Layout(), signing=None, network_profile=None, *, core_limits=None,
+          trial=None):
     base = boot_media.prepare_kernel(work, args.kernel_iso)
     (work / "bin").mkdir()
     install_core(work, args.core_archive, args.core_sha256)
@@ -261,6 +270,10 @@ def ramfs(work, args, instance, home_id, layout=Layout(), signing=None, network_
         boot_scripts.append("core-cgroup")
         (work / "psios-core-limits").write_text(core_limits.kernel_values())
         files.append("psios-core-limits")
+    if trial:
+        (work / "psios-trial-config.sha256").write_text(f"{trial.configuration_sha256}  /psios-trial-core.json\n")
+        (work / "psios-trial-disk-id").write_text(trial.disk_uuid.bytes_le.hex() + "\n")
+        files.extend(["psios-trial-config.sha256", "psios-trial-disk-id"])
     for script in boot_scripts:
         shutil.copyfile(HERE / script, work / f"psios-{script}")
     files.extend(f"psios-{script}" for script in boot_scripts)
@@ -279,6 +292,8 @@ def ramfs(work, args, instance, home_id, layout=Layout(), signing=None, network_
         inputs["network_profile"] = network_profile
     if core_limits:
         inputs["core_limits"] = asdict(core_limits)
+    if trial:
+        inputs.update(boot_mode=TRIAL_BOOT_MODE, trial_disk_uuid=str(trial.disk_uuid))
     manifest = work / "psios-deployment.json"
     manifest.write_text(json.dumps(inputs, sort_keys=True, separators=(",", ":")) + "\n")
     # BusyBox can verify the exact extracted bytes without a JSON interpreter.
@@ -375,6 +390,8 @@ def read_receipt(path):
     if len(raw) > 16 * 1024:
         raise ValueError("previous build receipt exceeds size limit")
     prior = json.loads(raw)
+    if isinstance(prior, dict) and (prior.get("format") == TRIAL_RECEIPT_FORMAT or "boot_mode" in prior):
+        raise ValueError("isolated trial disks cannot be upgrade sources; use the original stopped deployment")
     if not isinstance(prior, dict) or type(prior.get("format")) is not int or not 1 <= prior["format"] <= 6:
         raise ValueError("unsupported previous build receipt format")
     for name, pattern in (("source_commit", r"[0-9a-f]{40}"), ("efi_application_sha256", r"[0-9a-f]{64}")):
@@ -571,6 +588,7 @@ def build(args):
         work = Path(tmp)
         disk = work / "installed.raw"
         prior = None
+        trial = None
         network_profile = args.network_profile
         core_limits = args.core_limits
         signing = None
@@ -585,13 +603,19 @@ def build(args):
                 raise ValueError("a Secure Boot upgrade requires the existing signing certificate")
             instance, home_id = prior["state_uuid"], prior["home_uuid"]
             source_digest, replayed, core_config = source_snapshot(work, disk, args, prior, layout, signing)
+            if args.trial_boot:
+                trial = TrialInput(uuid.uuid4(), hashlib.sha256(core_config).hexdigest())
+                # Only the trial copy receives this identity. Its EFI payload
+                # can then refuse to open the original authority read-write.
+                boot_media.run(work, ["sfdisk", "--disk-id", disk, str(trial.disk_uuid)])
+                validate_layout(work, disk, layout)
         else:
             layout = Layout(MIN_STATE_MIB if args.state_mib is None else args.state_mib,
                             MIN_HOME_MIB if args.home_mib is None else args.home_mib)
             instance, home_id = str(uuid.uuid4()), str(uuid.uuid4())
             new_disk(work, disk, args, instance, home_id, layout)
         disk.chmod(0o600)
-        ramfs(work, args, instance, home_id, layout, signing, network_profile, core_limits=core_limits)
+        ramfs(work, args, instance, home_id, layout, signing, network_profile, core_limits=core_limits, trial=trial)
         source_commit = (work / "psios-source").read_text().strip()
         authority = verify_authority(work, disk, core_config) if prior else None
         efi = boot_media.secure_efi_application(work, CMDLINE, signing) if signing else boot_media.efi_application(work, CMDLINE)
@@ -619,6 +643,8 @@ def build(args):
             receipt["network_profile"] = network_profile
         if core_limits:
             receipt["core_limits"] = asdict(core_limits)
+        if trial:
+            receipt.update(format=TRIAL_RECEIPT_FORMAT, boot_mode=TRIAL_BOOT_MODE, trial_disk_uuid=str(trial.disk_uuid))
         if prior:
             receipt["upgrade"] = {
                 "previous_image_sha256": source_digest,
@@ -646,6 +672,7 @@ def main():
     mode.add_argument("--console-hash", type=Path, help="private file containing an operator SHA-512 crypt hash")
     mode.add_argument("--upgrade-from", type=Path, help="stopped native development disk to copy without changes")
     parser.add_argument("--previous-receipt", type=Path, help="trusted build receipt for the stopped disk")
+    parser.add_argument("--trial-boot", action="store_true", help="create an isolated non-activating EFI upgrade candidate")
     parser.add_argument("--root-console-hash", type=Path, help="optional private hash for local system administration; default locks root")
     boot_media.add_signing_arguments(parser)
     network = parser.add_mutually_exclusive_group()
@@ -679,6 +706,8 @@ def main():
         parser.error("upgrade preserves the partition sizes from its previous build receipt")
     if args.console_hash and args.previous_receipt:
         parser.error("--previous-receipt requires --upgrade-from")
+    if args.trial_boot and not args.upgrade_from:
+        parser.error("--trial-boot requires --upgrade-from")
     limits = (args.core_cpu_millicores, args.core_memory_mib, args.core_pids_max)
     args.core_limits = None
     if any(value is not None for value in limits):

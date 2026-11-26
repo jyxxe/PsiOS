@@ -1,4 +1,5 @@
 //! Single-node directory volumes. A writer or an uncertain operation retains the volume hold.
+pub(crate) mod cloning;
 mod detached;
 pub(crate) mod entry_retirement;
 pub(crate) mod export;
@@ -102,7 +103,10 @@ pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
     ) {
         return Ok(());
     }
-    if matches!(w.action, Action::Create { .. } | Action::Restore(_)) {
+    if matches!(
+        w.action,
+        Action::Create { .. } | Action::Restore(_) | Action::CloneVolume(_)
+    ) {
         require(
             db.get("local")?.body["allocation_enabled"] == true,
             "PreconditionFailed",
@@ -232,7 +236,7 @@ pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
 }
 fn create_volume(
     w: &Work,
-    restore: Option<&Doc>,
+    initialize: Option<impl FnOnce(&File) -> Result<Value>>,
     checkpoint: impl FnOnce(&Value, &restore_publication::Placement) -> Result<()>,
 ) -> Result<Value> {
     let vid = format!("volume-{}", w.op.id);
@@ -256,10 +260,11 @@ fn create_volume(
         OFlags::RDONLY | OFlags::DIRECTORY,
     )?;
     new_file(&stage.path().join("identity"), &identity)?;
-    let proof = match restore {
-        Some(backup) => inspect_backup(&w.cfg, backup, Some(&data))?["restore_proof"].clone(),
-        None => Value::Null,
-    };
+    let materialized = initialize.is_some();
+    let proof = initialize
+        .map(|fill| fill(&data))
+        .transpose()?
+        .unwrap_or(Value::Null);
     let m = data.metadata()?;
     let stats = rustix::fs::fstatvfs(&data).map_err(std::io::Error::from)?;
     let capacity = stats.f_blocks.saturating_mul(stats.f_frsize);
@@ -272,7 +277,7 @@ fn create_volume(
         "capacity": capacity.to_string(),
         "restore_proof": proof
     });
-    if restore.is_some() {
+    if materialized {
         // The restored data root must still be accessible to the authority
         // for verification, with the same identity and applied permissions.
         let current = child(
@@ -304,7 +309,13 @@ pub(crate) fn restore(
     work: &Work,
     checkpoint: impl FnOnce(&Value, &restore_publication::Placement) -> Result<()>,
 ) -> Result<Value> {
-    create_volume(work, Some(&work.target), checkpoint)
+    create_volume(
+        work,
+        Some(|data: &File| {
+            Ok(inspect_backup(&work.cfg, &work.target, Some(data))?["restore_proof"].clone())
+        }),
+        checkpoint,
+    )
 }
 fn child(dir: &File, name: impl rustix::path::Arg, flags: OFlags) -> Result<File> {
     // Linux openat2 rejects NONBLOCK on O_PATH descriptors.
@@ -380,8 +391,39 @@ struct BackupTimes {
     entries: Vec<ModifiedTime>,
 }
 
+enum CaptureOutput<'a> {
+    Archive(RestoreDestination<'a>),
+    Tree(RestoreDestination<'a>),
+}
+
+impl CaptureOutput<'_> {
+    fn destination(&self) -> &RestoreDestination<'_> {
+        match self {
+            Self::Archive(destination) | Self::Tree(destination) => destination,
+        }
+    }
+
+    fn file(&self, path: &str, index: usize) -> Result<File> {
+        let (parent, name) = match self {
+            Self::Archive(output) => (output.directory.try_clone()?, format!("blob-{index}")),
+            Self::Tree(output) => {
+                let (directory, name) = entry_parent(output.directory, path)?;
+                (directory, name.to_owned())
+            }
+        };
+        let fd = rustix::fs::openat(
+            &parent,
+            name.as_str(),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::RUSR | Mode::WUSR,
+        )
+        .map_err(std::io::Error::from)?;
+        Ok(File::from(fd))
+    }
+}
+
 struct Capture<'a> {
-    out: Option<RestoreDestination<'a>>,
+    out: Option<CaptureOutput<'a>>,
     entries: Vec<(Entry, fs::Metadata)>,
     total: u64,
     max_bytes: u64,
@@ -473,8 +515,21 @@ impl Capture<'_> {
                 digest: None,
             };
             if m.is_dir() {
+                let mut copy = None;
+                if let Some(CaptureOutput::Tree(output)) = &self.out {
+                    require_managed_root_mode(entry.mode)?;
+                    output.check_space(std::iter::empty(), 1)?;
+                    let (directory, name) = entry_parent(output.directory, rel)?;
+                    rustix::fs::mkdirat(&directory, name, Mode::RWXU)
+                        .map_err(std::io::Error::from)?;
+                    let destination = child(&directory, name, OFlags::RDONLY | OFlags::DIRECTORY)?;
+                    copy = Some((destination, entry.mode, ModifiedTime::from_metadata(&m)));
+                }
                 self.entries.push((entry, m));
-                self.walk(&src, &path, depth + 1)?
+                self.walk(&src, &path, depth + 1)?;
+                if let Some((destination, mode, time)) = copy {
+                    cloning::preserve_metadata(&destination, mode, time)?;
+                }
             } else {
                 regular(&m)?;
                 require(
@@ -483,22 +538,20 @@ impl Capture<'_> {
                     "backup exceeds its byte limit",
                 )?;
                 let (len, digest) = if let Some(out) = &self.out {
-                    out.check_space(std::iter::once(m.len()), 1)?;
-                    let fd = rustix::fs::openat(
-                        out.directory,
-                        format!("blob-{}", self.entries.len()),
-                        OFlags::WRONLY
-                            | OFlags::CREATE
-                            | OFlags::EXCL
-                            | OFlags::CLOEXEC
-                            | OFlags::NOFOLLOW,
-                        Mode::RUSR | Mode::WUSR,
-                    )
-                    .map_err(std::io::Error::from)?;
-                    let mut dst = File::from(fd);
+                    let destination = out.destination();
+                    destination.check_space(std::iter::once(m.len()), 1)?;
+                    let mut dst = out.file(rel, self.entries.len())?;
                     let copied = copy_captured_blob(&mut src, &mut dst, m.len(), self.check)?;
-                    dst.sync_all()?;
-                    out.check_space(std::iter::empty(), 0)?;
+                    if matches!(out, CaptureOutput::Tree(_)) {
+                        cloning::preserve_metadata(
+                            &dst,
+                            entry.mode,
+                            ModifiedTime::from_metadata(&m),
+                        )?;
+                    } else {
+                        dst.sync_all()?;
+                    }
+                    destination.check_space(std::iter::empty(), 0)?;
                     copied
                 } else {
                     copy_captured_blob(&mut src, &mut std::io::sink(), m.len(), self.check)?
@@ -638,10 +691,10 @@ pub(crate) fn backup(
     })?;
     let started = now();
     let mut capture = Capture {
-        out: Some(RestoreDestination {
+        out: Some(CaptureOutput::Archive(RestoreDestination {
             directory: stage.directory(),
             authority: Some(&w.cfg),
-        }),
+        })),
         entries: vec![],
         total: 0,
         max_bytes: w.cfg.backup_max_bytes,
@@ -1053,7 +1106,9 @@ pub fn perform(w: &Work) -> Result<Value> {
         }
         Action::VolumeUsage(query) => usage::measure(w, query),
         Action::Activate(_) => restore_proof::verify(w),
-        Action::Create { .. } => create_volume(w, None, |_, _| Ok(())),
+        Action::Create { .. } => {
+            create_volume(w, None::<fn(&File) -> Result<Value>>, |_, _| Ok(()))
+        }
         Action::InspectBackupPublication(_) => publication::observe(w),
         Action::InspectRestoredVolume(_) => restore_publication::observe(w),
         Action::VerifyBackup(_) => inspect_backup(&w.cfg, &w.target, None),
@@ -1121,23 +1176,24 @@ pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
     let actor = &w.task.owner;
     match &w.action {
         Action::Create { name } => catalog_volume(db, actor, r, json!({"name":name})),
-        Action::Restore(_) => restore_publication::settle(db, w, r),
+        Action::Restore(_) | Action::CloneVolume(_) => restore_publication::settle(db, w, r),
         Action::Backup(_) => publication::settle(db, &w.op, &w.target, r),
         Action::Activate(_) => {
             let mut spec = w.target.spec.clone();
             spec["storage_restore_phase"] = json!("Activated");
             if r["verified_at"].is_string() {
-                let verification = db.record(
-                    "RecoveryEvidence",
-                    actor,
-                    json!({
-                        "operation_ref": w.op.reference(),
-                        "volume_ref": w.target.reference(),
-                        "backup_ref": spec["restored_from"],
-                        "tree_digest": spec["restore_proof"]["tree_digest"],
-                        "verified_at": r["verified_at"]
-                    }),
-                )?;
+                let mut evidence = json!({
+                    "operation_ref": w.op.reference(),
+                    "volume_ref": w.target.reference(),
+                    "tree_digest": spec["restore_proof"]["tree_digest"],
+                    "verified_at": r["verified_at"]
+                });
+                if let Some(source) = spec.get("cloned_from") {
+                    evidence["cloned_from"] = source.clone();
+                } else {
+                    evidence["backup_ref"] = spec["restored_from"].clone();
+                }
+                let verification = db.record("RecoveryEvidence", actor, evidence)?;
                 spec["restore_verification_ref"] = verification.reference();
             }
             Ok(db
@@ -1233,10 +1289,10 @@ mod capture_tests {
             .unwrap();
         let before = root.metadata().unwrap();
         let mut capture = Capture {
-            out: Some(RestoreDestination {
+            out: Some(CaptureOutput::Archive(RestoreDestination {
                 directory: &out,
                 authority: None,
-            }),
+            })),
             entries: vec![],
             total: 0,
             max_bytes: MAX_BACKUP_BYTES,
@@ -1279,10 +1335,10 @@ mod capture_tests {
                 .unwrap();
             let before = root.metadata().unwrap();
             let mut capture = Capture {
-                out: Some(RestoreDestination {
+                out: Some(CaptureOutput::Archive(RestoreDestination {
                     directory: &out,
                     authority: None,
-                }),
+                })),
                 entries: vec![],
                 total: 0,
                 max_bytes: MAX_BACKUP_BYTES,

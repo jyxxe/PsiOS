@@ -287,7 +287,7 @@ pub fn dispatch(db: &Db<'_>, task: &str) -> Result<Option<Work>> {
         "Grant",
     )?;
     let effect_seconds = match tool {
-        "backup.create" | apps::volume_rebind::TOOL => {
+        "backup.create" | apps::volume_rebind::TOOL | storage::cloning::TOOL => {
             i64::from(db.cfg.backup_capture_timeout_seconds)
         }
         "backup.restore" => storage::restore_publication::PERMIT_MAX_SECONDS,

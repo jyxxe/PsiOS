@@ -171,6 +171,8 @@ pub enum Action {
     DeleteBackup(Target),
     #[serde(rename = "backup.restore")]
     Restore(Target),
+    #[serde(rename = "volume.clone")]
+    CloneVolume(storage::cloning::Input),
     #[serde(rename = "volume.inspect_publication")]
     InspectRestoredVolume(Target),
     #[serde(rename = "application.stage_release")]
@@ -249,6 +251,7 @@ impl Action {
             Self::ServiceResources(q) => q.validate()?,
             Self::ServiceRestart(restart) => restart.validate()?,
             Self::Create { name } => label(name)?,
+            Self::CloneVolume(input) => input.validate()?,
             Self::Read(f) => storage::filename(&f.name)?,
             Self::VolumeUsage(query) => query.validate()?,
             Self::Write(f) => {
@@ -358,7 +361,9 @@ impl Action {
                         .skip(1),
                 );
             }
-            Self::Restore(_) => resources.push(db.of("local", "StoragePool")?.reference()),
+            Self::Restore(_) | Self::CloneVolume(_) => {
+                resources.push(db.of("local", "StoragePool")?.reference())
+            }
             Self::InstallArtifact(input) => {
                 let source = apps::artifact_install::source(db, actor, &input.reference)?;
                 apps::artifact_install::add_source_audience(
@@ -503,6 +508,14 @@ impl Action {
             ),
             Self::Read(f) => (&f.id, Some(&f.expected_resource_version), "Volume"),
             Self::Write(f) => (&f.id, Some(&f.expected_resource_version), "Volume"),
+            Self::CloneVolume(input) => {
+                policy::admin(actor)?;
+                (
+                    &input.target.id,
+                    Some(&input.target.expected_resource_version),
+                    "Volume",
+                )
+            }
             Self::Activate(t) | Self::Delete(t) | Self::Backup(t) => {
                 (&t.id, Some(&t.expected_resource_version), "Volume")
             }
@@ -709,6 +722,7 @@ impl Work {
             matches!(
                 self.action,
                 Action::Backup(_)
+                    | Action::CloneVolume(_)
                     | Action::VerifyVolumeFile(_)
                     | Action::RenameFile(_)
                     | Action::InspectFileRename(_)
@@ -823,9 +837,10 @@ impl Work {
                     inode,
                 },
             ) => storage::publication::record(db, self, receipt, device, inode),
-            (Action::Restore(_), Checkpoint::RestoredVolume { receipt, placement }) => {
-                storage::restore_publication::record(db, self, receipt, placement)
-            }
+            (
+                Action::Restore(_) | Action::CloneVolume(_),
+                Checkpoint::RestoredVolume { receipt, placement },
+            ) => storage::restore_publication::record(db, self, receipt, placement),
             (Action::RemoveEntry(request), Checkpoint::EntryRetirement(location)) => {
                 storage::entry_retirement::prepare(db, self, &request.path, location)
             }
@@ -951,6 +966,11 @@ impl Work {
                 &mut check_streaming,
             ),
             Action::InspectFileRename(_) => storage::file_move::inspect(self, &mut check_streaming),
+            Action::CloneVolume(_) => storage::cloning::run(
+                self,
+                |receipt, placement| checkpoint(Checkpoint::RestoredVolume { receipt, placement }),
+                &mut check_streaming,
+            ),
             Action::Restore(_) => storage::restore(self, |receipt, placement| {
                 checkpoint(Checkpoint::RestoredVolume { receipt, placement })
             }),
@@ -1243,7 +1263,7 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     if matches!(w.action, Action::NetworkTrial(_)) {
         node::network::trial::begin(db, &w)?;
     }
-    if matches!(w.action, Action::Restore(_)) {
+    if matches!(w.action, Action::Restore(_) | Action::CloneVolume(_)) {
         storage::restore_publication::begin(db, &w)?;
     }
     if matches!(w.action, Action::Start(_)) {

@@ -109,7 +109,10 @@ fn linked_operation(db: &Db<'_>, action: &Action, target: &Doc) -> Result<Option
                 .map(str::to_owned),
             &[crate::apps::create_recovery::CREATE],
         ),
-        Action::InspectRestoredVolume(_) => (Some(target.id.clone()), &["backup.restore"]),
+        Action::InspectRestoredVolume(_) => (
+            Some(target.id.clone()),
+            &["backup.restore", crate::storage::cloning::TOOL],
+        ),
         Action::InspectReleaseImageRestore(_) => {
             (Some(target.id.clone()), &[crate::apps::restore_image::TOOL])
         }

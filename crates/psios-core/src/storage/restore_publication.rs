@@ -26,9 +26,16 @@ const CHECKPOINT: &str = "RestorePublicationCheckpoint";
 const NOT_APPLIED: &str = "RestorePublicationNotApplied";
 const MAX_RESTORE_STAGES: i64 = 128;
 
+pub(crate) fn is_tool(tool: &str) -> bool {
+    matches!(tool, "backup.restore" | super::cloning::TOOL)
+}
+
 mod disposal;
+mod source;
 pub(crate) use disposal::{Disposal, next_disposal, queue_disposal};
+use source::Source;
 mod verification;
+pub(crate) use verification::verify_clones;
 pub(crate) use verification::{protected_stages, verify};
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,16 +86,16 @@ fn checkpoint_id(operation: &str) -> String {
     format!("restore-publication-{operation}")
 }
 
-fn held(db: &Db<'_>, op: &Doc, backup: &Doc) -> Result<()> {
+fn held(db: &Db<'_>, op: &Doc, source: &Doc) -> Result<()> {
     let held: bool = db.c.query_row(
         "SELECT EXISTS(SELECT 1 FROM holds WHERE volume=?1 AND holder=?2)",
-        params![backup.id, op.id],
+        params![source.id, op.id],
         |r| r.get(0),
     )?;
     require(
-        held && backup.kind == "Backup",
+        held && matches!(source.kind.as_str(), "Backup" | "Volume"),
         "RecoveryRequired",
-        "original restore backup hold is missing",
+        "original volume publication source hold is missing",
     )
 }
 
@@ -105,7 +112,7 @@ pub(crate) fn begin(db: &Db<'_>, work: &Work) -> Result<()> {
     let outstanding: i64 = db.c.query_row(
         "SELECT count(*) FROM (
             SELECT 1 FROM queue q JOIN current t ON q.task=t.id
-              WHERE q.phase IN ('Dispatched','Unknown') AND t.spec->>'task_type'='backup.restore'
+              WHERE q.phase IN ('Dispatched','Unknown') AND t.spec->>'task_type' IN ('backup.restore','volume.clone')
             UNION ALL SELECT 1 FROM restore_stage_disposals LIMIT ?1
          )",
         [MAX_RESTORE_STAGES],
@@ -116,13 +123,20 @@ pub(crate) fn begin(db: &Db<'_>, work: &Work) -> Result<()> {
         "QuotaExceeded",
         "restore staging custody limit reached",
     )?;
+    let (source, target) = Source::load(db.c, &work.op)?;
+    require(
+        target.reference() == work.target.reference(),
+        "RecoveryRequired",
+        "publication source changed",
+    )?;
+    let mut body = json!({"plan_ref":work.op.body["plan_ref"],"effect_id":work.effect.id});
+    source.evidence(&mut body, &target, false);
     db.create(
         INTENT,
         &intent_id(&work.op.id),
         &work.op.owner,
         json!({"operation_id":work.op.id}),
-        json!({"plan_ref":work.op.body["plan_ref"],"effect_id":work.effect.id,
-               "backup_ref":work.target.reference()}),
+        body,
     )?;
     Ok(())
 }
@@ -131,9 +145,9 @@ pub(crate) fn not_published(db: &Db<'_>, op: &Doc) -> Result<bool> {
     let Some(intent) = db.find(&intent_id(&op.id))? else {
         return Ok(false);
     };
-    let plan = db.resolve(&op.body["plan_ref"])?;
+    let (source, target) = Source::load(db.c, op)?;
     Ok(belongs(&intent, op, INTENT)
-        && intent.body["backup_ref"] == plan.body["allowed_effects"][0]["resource_ref"]
+        && source.matches(&intent, &target, false)
         && intent.body.get("checkpoint_ref").is_none()
         && db.find(&checkpoint_id(&op.id))?.is_none())
 }
@@ -151,19 +165,32 @@ pub(crate) fn record(
         "restore publication intent is unavailable or used",
     )?;
     let intent = db.of(&intent_id(&work.op.id), INTENT)?;
-    let checkpoint = db.create(CHECKPOINT, &checkpoint_id(&work.op.id), &work.op.owner,
+    let (source, target) = Source::load(db.c, &work.op)?;
+    require(
+        target.reference() == work.target.reference(),
+        "RecoveryRequired",
+        "publication source changed before checkpoint",
+    )?;
+    source.check_receipt(&work.op, receipt)?;
+    let mut checkpoint = json!({"plan_ref":work.op.body["plan_ref"],"effect_id":work.effect.id,
+                                "receipt":receipt,"placement":placement});
+    source.evidence(&mut checkpoint, &target, true);
+    let checkpoint = db.create(
+        CHECKPOINT,
+        &checkpoint_id(&work.op.id),
+        &work.op.owner,
         json!({"operation_id":work.op.id}),
-        json!({"plan_ref":work.op.body["plan_ref"],"effect_id":work.effect.id,
-               "backup_ref":work.target.reference(),"manifest_digest":work.target.body["manifest_digest"],
-               "receipt":receipt,"placement":placement}))?;
+        checkpoint,
+    )?;
     let mut body = intent.body.clone();
     body["checkpoint_ref"] = checkpoint.reference();
     db.status(&intent, body)?;
     Ok(())
 }
 
-fn recorded(db: &Db<'_>, op: &Doc, backup: &Doc) -> Result<Doc> {
-    held(db, op, backup)?;
+fn recorded(db: &Db<'_>, op: &Doc, source: &Doc) -> Result<Doc> {
+    held(db, op, source)?;
+    let (binding, target) = Source::load(db.c, op)?;
     let checkpoint = db.find(&checkpoint_id(&op.id))?.ok_or_else(|| {
         err(
             "RecoveryRequired",
@@ -172,13 +199,14 @@ fn recorded(db: &Db<'_>, op: &Doc, backup: &Doc) -> Result<Doc> {
     })?;
     require(
         belongs(&checkpoint, op, CHECKPOINT)
-            && checkpoint.body["backup_ref"] == backup.reference()
-            && checkpoint.body["manifest_digest"] == backup.body["manifest_digest"],
+            && target.reference() == source.reference()
+            && binding.matches(&checkpoint, &target, true),
         "RecoveryRequired",
         "restore publication checkpoint does not bind the original operation and backup",
     )?;
     let intent = db.find(&intent_id(&op.id))?;
     verify_custody(op, &checkpoint, intent.as_ref())?;
+    binding.check_receipt(op, &checkpoint.body["receipt"])?;
     Ok(checkpoint)
 }
 
@@ -190,11 +218,10 @@ fn verify_custody(op: &Doc, checkpoint: &Doc, intent: Option<&Doc>) -> Result<Pl
         belongs(checkpoint, op, CHECKPOINT)
             && if named {
                 intent.is_some_and(|doc| {
-                    belongs(doc, op, INTENT)
-                        && doc.body["backup_ref"] == checkpoint.body["backup_ref"]
+                    belongs(doc, op, INTENT) && source::same_binding(doc, checkpoint)
                 }) && linked == Some(&checkpoint.reference())
             } else {
-                linked.is_none()
+                linked.is_none() && checkpoint.body.get("clone_source").is_none()
             },
         "RecoveryRequired",
         "restore staging custody disagrees with its witnessed intent",
@@ -208,19 +235,19 @@ pub(crate) fn pending(db: &Db<'_>, op: &Doc) -> Result<Doc> {
         .ok_or_else(|| err("RecoveryRequired", "operation has no task"))?;
     let task = db.of(task_id, "Task")?;
     require(
-        op.body["outcome_knowledge"] == "Unknown" && task.spec["task_type"] == "backup.restore",
+        op.body["outcome_knowledge"] == "Unknown"
+            && is_tool(task.spec["task_type"].as_str().unwrap_or_default()),
         "PreconditionFailed",
         "operation is not an unresolved volume restore",
     )?;
-    let plan = db.resolve(&op.body["plan_ref"])?;
-    let original = db.resolve(&plan.body["allowed_effects"][0]["resource_ref"])?;
-    let backup = db.of(&original.id, "Backup")?;
+    let (_, original) = Source::load(db.c, op)?;
+    let source = db.of(&original.id, &original.kind)?;
     require(
-        backup.reference() == original.reference(),
+        source.reference() == original.reference(),
         "RecoveryRequired",
-        "source backup differs from the original restore plan",
+        "publication source differs from the original plan",
     )?;
-    recorded(db, op, &backup)
+    recorded(db, op, &source)
 }
 
 struct Candidate {
@@ -401,15 +428,18 @@ pub(super) fn observe(work: &Work) -> Result<Value> {
     )
 }
 
-fn catalog(db: &Db<'_>, op: &Doc, backup: &Doc, receipt: &Value) -> Result<Value> {
+fn catalog(db: &Db<'_>, op: &Doc, source: &Doc, receipt: &Value) -> Result<Value> {
+    let (binding, target) = Source::load(db.c, op)?;
+    require(
+        target.reference() == source.reference(),
+        "RecoveryRequired",
+        "publication source changed at cataloging",
+    )?;
     catalog_volume(
         db,
         &op.owner,
         receipt,
-        json!({
-            "restored_from":backup.reference(),"storage_restore_phase":"AwaitingActivation",
-            "restore_proof":receipt["restore_proof"],
-        }),
+        binding.catalog(&target, &receipt["restore_proof"]),
     )
 }
 
@@ -432,11 +462,11 @@ pub(super) fn settle(db: &Db<'_>, work: &Work, receipt: &Value) -> Result<Value>
 pub(crate) fn reconcile(
     db: &Db<'_>,
     op: &Doc,
-    backup: &Doc,
+    source: &Doc,
     observation: &Doc,
     proof: &Value,
 ) -> Result<(bool, Value, Value)> {
-    let checkpoint = recorded(db, op, backup)?;
+    let checkpoint = recorded(db, op, source)?;
     let receipt = &checkpoint.body["receipt"];
     require(
         proof["operation_ref"] == op.reference()
@@ -462,9 +492,11 @@ pub(crate) fn reconcile(
     )?;
     let applied = publication == Publication::Published;
     let result = if applied {
-        catalog(db, op, backup, receipt)?
+        catalog(db, op, source, receipt)?
+    } else if source.kind == "Backup" {
+        json!({"backup_ref":source.reference(),"volume_id":receipt["id"],"publication":"NotApplied"})
     } else {
-        json!({"backup_ref":backup.reference(),"volume_id":receipt["id"],"publication":"NotApplied"})
+        json!({"source_volume_ref":source.reference(),"volume_id":receipt["id"],"publication":"NotApplied"})
     };
     Ok((
         applied,

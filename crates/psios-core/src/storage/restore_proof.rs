@@ -55,6 +55,34 @@ pub(super) fn from_manifest(manifest: &BackupManifest) -> Result<RestoreProof> {
     })
 }
 
+pub(super) fn from_capture(
+    entries: &[(Entry, std::fs::Metadata)],
+    root_time: ModifiedTime,
+    root_mode: u32,
+) -> Result<RestoreProof> {
+    let entries = entries
+        .iter()
+        .map(|(entry, meta)| (entry, Some(ModifiedTime::from_metadata(meta))));
+    Ok(RestoreProof {
+        tree_digest: tree_digest(entries, Some(root_time), Some(root_mode))?,
+        includes_mtime: true,
+        root_mode_unix_v1: Some(root_mode),
+    })
+}
+
+pub(super) fn check_clone_proof(proof: &Value) -> Result<()> {
+    let proof: RestoreProof = decode(proof)?;
+    require(
+        proof.includes_mtime
+            && proof
+                .root_mode_unix_v1
+                .is_some_and(|mode| mode <= 0o777 && mode & 0o500 == 0o500)
+            && super::file_integrity::sha256_format(&proof.tree_digest),
+        "RecoveryRequired",
+        "volume clone has no complete captured tree proof",
+    )
+}
+
 pub(super) fn verify(w: &Work) -> Result<Value> {
     let Some(expected) = w.target.spec.get("restore_proof") else {
         // Pending clones from earlier authorities have no committed content fingerprint.

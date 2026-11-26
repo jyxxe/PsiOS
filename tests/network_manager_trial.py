@@ -220,7 +220,7 @@ class IsolatedNetworkManager:
 
     def setup_manager(self, stack):
         etc = self.root / "etc"
-        etc.mkdir()
+        etc.mkdir(mode=0o755)
         connections = etc / "system-connections"
         connections.mkdir(mode=0o700)
         for profile in (ORIGINAL, CANDIDATE):
@@ -257,12 +257,12 @@ managed=1
         state.mkdir(mode=0o700)
         # sysfs network links are resolved in the network namespace of their mount.
         mount_private(stack, "-t", "sysfs", "-o", "ro,nodev,nosuid,noexec", "sysfs", "/sys")
-        mount_private(stack, "-t", "tmpfs", "-o", "size=8m,nodev,nosuid,noexec", "tmpfs", "/run")
+        mount_private(stack, "-t", "tmpfs", "-o", "size=8m,mode=0755,nodev,nosuid,noexec", "tmpfs", "/run")
         mount_private(stack, "--bind", etc, "/etc/NetworkManager")
         mount_private(stack, "--bind", state, "/var/lib/NetworkManager")
         if Path("/dev/rfkill").exists():
             mount_private(stack, "--bind", "/dev/null", "/dev/rfkill")
-        BUS_SOCKET.parent.mkdir()
+        BUS_SOCKET.parent.mkdir(mode=0o755)
         dbus_config = self.root / "dbus.conf"
         dbus_config.write_text(f"""<busconfig>
   <type>system</type>
@@ -333,7 +333,12 @@ managed=1
     def checkpoint(self, seconds):
         assert seconds > 0 and not self.checkpoints()
         path = scalar(self.manager_call("CheckpointCreate", "aouu", "1", self.device, str(seconds), "0"), "o")
-        assert self.checkpoints() == [path]
+        checkpoint = self.only_checkpoint(seconds)
+        assert checkpoint.path == path, checkpoint
+        return checkpoint
+
+    def only_checkpoint(self, seconds):
+        path, = self.checkpoints()
         assert objects(self.bus_property(path, f"{NM}.Checkpoint", "Devices")) == [self.device]
         assert scalar(self.bus_property(path, f"{NM}.Checkpoint", "RollbackTimeout"), "u") == str(seconds)
         created_ms = int(scalar(self.bus_property(path, f"{NM}.Checkpoint", "Created"), "x"))
@@ -446,11 +451,24 @@ def print_settings():
         }, indent=2))
 
 
+def rust_adapter_test(binary):
+    test = "node::network::managed::tests::real_network_manager_trial"
+    environment = dict(os.environ, PSIOS_NETWORK_MANAGER_ADAPTER_FIXTURE="1")
+    binary = Path(binary).resolve(strict=True)
+    with isolated_manager() as manager:
+        subprocess.run([binary, "--ignored", "--exact", test],
+                       env=environment, check=True, timeout=90)
+        assert manager.checkpoints() == []
+        manager.assert_profile(CANDIDATE)
+
+
 if __name__ == "__main__":
     if sys.argv[1:] == ["--peer"]:
         peer()
     elif sys.argv[1:] == ["--print-settings"]:
         print_settings()
+    elif len(sys.argv) == 3 and sys.argv[1] == "--rust-adapter-test":
+        rust_adapter_test(sys.argv[2])
     elif len(sys.argv) == 1:
         exercise()
     else:

@@ -23,8 +23,8 @@ class ScheduleCoalescence(unittest.TestCase):
             "actions": ["schedule.manage", "task.submit", "task.read", "system.status"],
             "tool_targets": ["profile-local"]})
 
-    def new_schedule(self, *, interval, window, count=4):
-        start = timestamp(1)
+    def new_schedule(self, *, interval, window, count=4, start_in=1):
+        start = timestamp(start_in)
         end = (datetime.fromisoformat(start) + timedelta(seconds=window)).isoformat(timespec="milliseconds")
         request = {"key": key(), "tool": "system.status", "input": {}, "run_at": start, "deadline_at": end,
             "repeat": {"interval_seconds": interval, "count": count, "missed": {"mode": "Coalesce"}, "overlap": "Allow"},
@@ -134,6 +134,17 @@ class ScheduleCoalescence(unittest.TestCase):
         self.assertEqual(report["sqlite_integrity"], "Verified", report)
         self.assertFalse(report["migration_required"], report)
 
+    def assert_recovery_required(self, command, message=None):
+        rejected = subprocess.run(self.n.daemon + [command], capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(rejected.returncode, 0, rejected)
+        self.assertIn("RecoveryRequired", rejected.stderr)
+        if message is not None:
+            self.assertIn(message, rejected.stderr)
+
+    def assert_schedule_custody_failure(self, message):
+        self.assert_recovery_required("verify", message)
+        self.assert_recovery_required("serve", message)
+
     def reject_expired_member_in_group(self, completed):
         expired, *_, representative = [ref["resource_id"] for ref in completed["state"]["trigger_refs"]]
         database = self.n.state / "state.db"
@@ -143,12 +154,71 @@ class ScheduleCoalescence(unittest.TestCase):
             changed["coalescence"]["covered_trigger_ids"][0] = expired
             db.execute("UPDATE versions SET body=? WHERE id=? AND rev=1", (json.dumps(changed), representative))
         try:
-            rejected = subprocess.run(self.n.daemon + ["verify"], capture_output=True, text=True, timeout=20)
-            self.assertNotEqual(rejected.returncode, 0, rejected)
-            self.assertIn("RecoveryRequired", rejected.stderr)
+            self.assert_recovery_required("verify")
         finally:
             with closing(sqlite3.connect(database, timeout=10)) as db, db:
                 db.execute("UPDATE versions SET body=? WHERE id=? AND rev=1", (original, representative))
+
+    def test_verify_rejects_missing_clock_and_stale_pending_index(self):
+        n = self.n
+        self.set_scheduling("Cordoned")
+        _, initial = self.new_schedule(interval=3, window=20, count=3, start_in=60)
+        schedule_id = initial["reference"]["resource_id"]
+        self.assertEqual(initial["state"]["lifecycle"], "Pending")
+        self.assertFalse(initial["state"]["trigger_refs"])
+        n.stop(signal.SIGKILL)
+        self.verify_stopped()
+
+        database = n.state / "state.db"
+        mismatch = "Coalesce schedule disagrees with its pending index"
+        insert_pending = "INSERT INTO pending_schedules(schedule,run_ms,deadline_ms) VALUES(?,?,?)"
+        with closing(sqlite3.connect(database, timeout=10)) as db, db:
+            elapsed = db.execute("""SELECT resource,boot_id,time_ns,deadline_boot_ms
+                FROM authorization_deadlines WHERE resource=?""", (schedule_id,)).fetchone()
+            pending = db.execute("""SELECT schedule,run_ms,deadline_ms
+                FROM pending_schedules WHERE schedule=?""", (schedule_id,)).fetchone()
+            self.assertIsNotNone(elapsed)
+            self.assertIsNotNone(pending)
+            deleted = db.execute("DELETE FROM authorization_deadlines WHERE resource=?", (schedule_id,))
+            self.assertEqual(deleted.rowcount, 1)
+        try:
+            self.assert_schedule_custody_failure("Coalesce schedule lost its original elapsed cutoff")
+        finally:
+            with closing(sqlite3.connect(database, timeout=10)) as db, db:
+                db.execute("""INSERT INTO authorization_deadlines(resource,boot_id,time_ns,deadline_boot_ms)
+                    VALUES(?,?,?,?)""", elapsed)
+        self.verify_stopped()
+
+        with closing(sqlite3.connect(database, timeout=10)) as db, db:
+            deleted = db.execute("DELETE FROM pending_schedules WHERE schedule=?", (schedule_id,))
+            self.assertEqual(deleted.rowcount, 1)
+        try:
+            self.assert_schedule_custody_failure(mismatch)
+        finally:
+            with closing(sqlite3.connect(database, timeout=10)) as db, db:
+                db.execute(insert_pending, pending)
+        self.verify_stopped()
+
+        n.start()
+        cancelled = n.call("Schedule.Cancel", target(initial["reference"]))
+        self.assertEqual(cancelled["state"]["lifecycle"], "Cancelled")
+        self.assertIsNone(cancelled["state"]["next"])
+        self.assertFalse(cancelled["state"]["trigger_refs"])
+        self.assertFalse(self.ids("Task"))
+        self.assertEqual(self.budget(), (0, 0))
+        n.stop(signal.SIGKILL)
+        self.verify_stopped()
+        with closing(sqlite3.connect(database, timeout=10)) as db, db:
+            db.execute(insert_pending, pending)
+        try:
+            self.assert_schedule_custody_failure(mismatch)
+        finally:
+            with closing(sqlite3.connect(database, timeout=10)) as db, db:
+                deleted = db.execute("DELETE FROM pending_schedules WHERE schedule=?", (schedule_id,))
+                self.assertEqual(deleted.rowcount, 1)
+        self.verify_stopped()
+        n.start()
+        self.assertEqual(self.state(initial), cancelled)
 
     def test_cordoned_recovery_marks_expired_windows_and_dispatches_latest_eligible_once(self):
         n = self.n

@@ -564,10 +564,14 @@ impl Store {
                 if ver < storage::restore_publication::CREATE_FORMAT {
                     storage::restore_publication::migrate_create(db)?;
                 }
+                if ver < schedule::coalescence::FORMAT {
+                    db.c.execute_batch(schedule::coalescence::SCHEMA)?;
+                }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;
         }
         store.transaction("node-config", |db| {
+            schedule::coalescence::check_active(db.c)?;
             node::work_admission::draining(db)?;
             node::sync(db)
         })?;

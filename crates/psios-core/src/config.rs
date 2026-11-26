@@ -10,6 +10,7 @@ use std::{
 
 pub const DEFAULT_BACKUP_MAX_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_BACKUP_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
+pub(crate) const MAX_QUEUE_LIMIT: u32 = 4096;
 const DEFAULT_BACKUP_CAPTURE_TIMEOUT_SECONDS: u32 = 30;
 
 fn default_backup_max_bytes() -> u64 {
@@ -332,7 +333,7 @@ impl Config {
         )?;
         require(
             (1..=16).contains(&self.workers)
-                && (1..=4096).contains(&self.queue_limit)
+                && (1..=MAX_QUEUE_LIMIT).contains(&self.queue_limit)
                 && self
                     .principal_queue_limit
                     .is_none_or(|limit| (1..=self.queue_limit).contains(&limit))

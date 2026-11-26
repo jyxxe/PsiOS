@@ -273,17 +273,19 @@ pub fn create(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     )?;
     spec["creation_digest"] = json!(creation);
     spec["request"] = request;
-    let schedule = db.create("Schedule", &id, actor, spec, body)?;
     policy::deadline::Clock::sample()?.register_until(
         db,
         &id,
         &timestamp(first.deadline_at),
         None,
     )?;
+    coalescence::bind_clock(db, &id, &mut spec)?;
+    let schedule = db.create("Schedule", &id, actor, spec, body)?;
     db.c.execute(
         "INSERT INTO pending_schedules(schedule,run_ms,deadline_ms) VALUES(?1,?2,?3)",
         params![id, due_ms(first.run_at), due_ms(first.deadline_at)],
     )?;
+    coalescence::add_pending(db, &schedule)?;
     Ok(reference(&schedule))
 }
 
@@ -341,6 +343,7 @@ fn remove_pending(db: &Db<'_>, schedule: &Doc) -> Result<()> {
         "RecoveryRequired",
         "schedule state disagrees with its pending entry",
     )?;
+    coalescence::remove_pending(db, schedule)?;
     admission_delay::clear(db, &schedule.id)
 }
 
@@ -481,6 +484,7 @@ fn fire(db: &Db<'_>, attempt: &mut Option<Attempt>) -> Result<()> {
         (id, None, Some(run_ms))
     };
     let schedule = db.of(&id, "Schedule")?;
+    coalescence::verify_pending(db.c, &schedule)?;
     let series = repeat::Series::load(&schedule)?;
     if let Some(series) = &series {
         if series.skip_outdated(db, &schedule, at, expired_through)? {

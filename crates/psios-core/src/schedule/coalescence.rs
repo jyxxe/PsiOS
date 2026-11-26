@@ -18,8 +18,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub(crate) const FORMAT: u32 = crate::storage::restore_publication::CREATE_FORMAT + 1;
+pub(crate) const SCHEMA: &str =
+    "CREATE TABLE pending_coalescing_schedules(schedule TEXT PRIMARY KEY) STRICT;";
 pub(super) const COVERED: &str = "Coalesced";
 pub(super) const REJECTED: &str = "RepresentativeRejected";
+const INDEX_ERROR: &str = "Coalesce schedule disagrees with its pending index";
+const CLOCK_ERROR: &str = "Coalesce schedule lost its original elapsed cutoff";
+
+pub(super) fn configured(spec: &Value) -> bool {
+    spec["repeat"]["missed"]["mode"] == "Coalesce"
+        || spec["calendar"]["missed"]["mode"] == "Coalesce"
+}
 
 fn invalid() -> crate::Error {
     err(
@@ -30,6 +39,181 @@ fn invalid() -> crate::Error {
 
 fn check(valid: bool) -> Result<()> {
     if valid { Ok(()) } else { Err(invalid()) }
+}
+
+fn valid_clock_scope(boot: &str, ns: &str) -> bool {
+    uuid::Uuid::parse_str(boot).is_ok_and(|id| !id.is_nil() && id.to_string() == boot)
+        && (ns == "unsupported"
+            || ns
+                .parse::<u64>()
+                .is_ok_and(|n| n != 0 && n.to_string() == ns))
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ElapsedAnchor {
+    boot_id: String,
+    time_ns: String,
+    deadline_boot_ms: i64,
+}
+
+fn registered_anchor(conn: &Connection, schedule: &str) -> Result<ElapsedAnchor> {
+    conn.query_row(
+        "SELECT boot_id,time_ns,deadline_boot_ms FROM authorization_deadlines WHERE resource=?1",
+        [schedule],
+        |r| {
+            Ok(ElapsedAnchor {
+                boot_id: r.get(0)?,
+                time_ns: r.get(1)?,
+                deadline_boot_ms: r.get(2)?,
+            })
+        },
+    )
+    .optional()?
+    .ok_or_else(|| err("RecoveryRequired", CLOCK_ERROR))
+}
+
+pub(super) fn bind_clock(db: &Db<'_>, schedule: &str, spec: &mut Value) -> Result<()> {
+    if configured(spec) {
+        let anchor = registered_anchor(db.c, schedule)?;
+        require(
+            valid_clock_scope(&anchor.boot_id, &anchor.time_ns) && anchor.deadline_boot_ms > 0,
+            "RecoveryRequired",
+            CLOCK_ERROR,
+        )?;
+        spec["coalescence_clock"] = json!(anchor);
+    }
+    Ok(())
+}
+
+fn verify_clock(conn: &Connection, schedule: &Doc, deadline_ms: i64) -> Result<()> {
+    let corrupt = || err("RecoveryRequired", CLOCK_ERROR);
+    let original: ElapsedAnchor =
+        persisted(&schedule.spec["coalescence_clock"]).map_err(|_| corrupt())?;
+    let first = schedule.spec["request"]["deadline_at"]
+        .as_str()
+        .ok_or_else(corrupt)?;
+    let first_ms = due_ms(instant(first).map_err(|_| corrupt())?);
+    let shift = deadline_ms
+        .checked_sub(first_ms)
+        .filter(|shift| *shift >= 0)
+        .ok_or_else(corrupt)?;
+    let actual = registered_anchor(conn, &schedule.id)?;
+    require(
+        valid_clock_scope(&original.boot_id, &original.time_ns)
+            && original.deadline_boot_ms > 0
+            && actual.boot_id == original.boot_id
+            && actual.time_ns == original.time_ns
+            && original.deadline_boot_ms.checked_add(shift) == Some(actual.deadline_boot_ms),
+        "RecoveryRequired",
+        CLOCK_ERROR,
+    )
+}
+
+pub(super) fn add_pending(db: &Db<'_>, schedule: &Doc) -> Result<()> {
+    if configured(&schedule.spec) {
+        db.c.execute(
+            "INSERT INTO pending_coalescing_schedules (schedule) VALUES (?1)",
+            [&schedule.id],
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn remove_pending(db: &Db<'_>, schedule: &Doc) -> Result<()> {
+    if configured(&schedule.spec) {
+        require(
+            db.c.execute(
+                "DELETE FROM pending_coalescing_schedules WHERE schedule=?1",
+                [&schedule.id],
+            )? == 1,
+            "RecoveryRequired",
+            INDEX_ERROR,
+        )?;
+    }
+    Ok(())
+}
+
+fn marked_pending(conn: &Connection, schedule: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pending_coalescing_schedules WHERE schedule=?1)",
+        [schedule],
+        |r| r.get(0),
+    )?)
+}
+
+fn verify_index(conn: &Connection, schedule: &Doc, expected: Option<(i64, i64)>) -> Result<()> {
+    let index: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT run_ms,deadline_ms FROM pending_schedules WHERE schedule=?1",
+            [&schedule.id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    require(
+        index == expected && marked_pending(conn, &schedule.id)? == expected.is_some(),
+        "RecoveryRequired",
+        INDEX_ERROR,
+    )
+}
+
+pub(super) fn verify_pending(conn: &Connection, schedule: &Doc) -> Result<()> {
+    if !configured(&schedule.spec) {
+        return Ok(());
+    }
+    require(
+        schedule.kind == "Schedule" && schedule.body["lifecycle"] == "Pending",
+        "RecoveryRequired",
+        INDEX_ERROR,
+    )?;
+    let invalid_index = || err("RecoveryRequired", INDEX_ERROR);
+    let next: Occurrence = persisted(&schedule.body["next"]).map_err(|_| invalid_index())?;
+    let start = instant(&next.run_at).map_err(|_| invalid_index())?;
+    let deadline = instant(&next.deadline_at).map_err(|_| invalid_index())?;
+    let window = Window {
+        run_at: start,
+        deadline_at: deadline,
+    };
+    require(
+        start < deadline && next == Occurrence::new(&schedule.id, next.ordinal, window),
+        "RecoveryRequired",
+        INDEX_ERROR,
+    )?;
+    let deadline = due_ms(deadline);
+    verify_index(conn, schedule, Some((due_ms(start), deadline)))?;
+    verify_clock(conn, schedule, deadline)
+}
+
+/// Validate only the bounded active indexes as part of opening the authority.
+/// A terminal Schedule is loaded here only if a stale index still names it.
+pub(crate) fn check_active(conn: &Connection) -> Result<()> {
+    let bound = i64::from(crate::config::MAX_QUEUE_LIMIT) + 1;
+    let orphan: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM
+        (SELECT schedule FROM pending_coalescing_schedules ORDER BY schedule LIMIT ?1) c
+        LEFT JOIN pending_schedules p ON p.schedule=c.schedule WHERE p.schedule IS NULL)",
+        [bound],
+        |r| r.get(0),
+    )?;
+    require(!orphan, "RecoveryRequired", INDEX_ERROR)?;
+
+    let limit = crate::config::MAX_QUEUE_LIMIT as usize;
+    let mut pending = conn.prepare("SELECT p.schedule,c.schedule IS NOT NULL FROM pending_schedules p
+        LEFT JOIN pending_coalescing_schedules c ON c.schedule=p.schedule ORDER BY p.schedule LIMIT ?1")?;
+    let rows = pending.query_map([bound], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?))
+    })?;
+    for (index, record) in rows.enumerate() {
+        require(index < limit, "RecoveryRequired", INDEX_ERROR)?;
+        let (id, marked) = record?;
+        let schedule = db::find(conn, &id)?;
+        if let Some(schedule) = schedule.filter(|doc| configured(&doc.spec)) {
+            verify_pending(conn, &schedule)?;
+        } else {
+            require(!marked, "RecoveryRequired", INDEX_ERROR)?;
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn representative(windows: &[Window], at: i64) -> Option<usize> {
@@ -108,13 +292,7 @@ impl Proof {
     fn clock(&self, conn: &Connection, schedule: &str, first: Window, last: Window) -> Result<()> {
         let sample = &self.clock;
         check(
-            uuid::Uuid::parse_str(&sample.boot_id)
-                .is_ok_and(|id| !id.is_nil() && id.to_string() == sample.boot_id)
-                && (sample.time_ns == "unsupported"
-                    || sample
-                        .time_ns
-                        .parse::<u64>()
-                        .is_ok_and(|ns| ns != 0 && ns.to_string() == sample.time_ns))
+            valid_clock_scope(&sample.boot_id, &sample.time_ns)
                 && sample.elapsed_ms >= 0
                 && sample
                     .prior_cutoff_ms
@@ -225,26 +403,20 @@ impl<'a> History<'a> {
             _ => return Err(invalid()),
         };
         let anchor_window = *windows.get(anchor).ok_or_else(invalid)?;
+        let deadline = due_ms(anchor_window.deadline_at);
         if schedule.body["lifecycle"] == "Pending" {
             let next: Occurrence = persisted(&schedule.body["next"])?;
             check(next == Occurrence::new(&schedule.id, anchor as u32 + 1, anchor_window))?;
-            let index: Option<(i64, i64)> = conn
-                .query_row(
-                    "SELECT run_ms,deadline_ms FROM pending_schedules WHERE schedule=?1",
-                    [&schedule.id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?;
-            check(
-                index
-                    == Some((
-                        due_ms(anchor_window.run_at),
-                        due_ms(anchor_window.deadline_at),
-                    )),
+            verify_index(
+                conn,
+                schedule,
+                Some((due_ms(anchor_window.run_at), deadline)),
             )?;
         } else {
             check(schedule.body["next"].is_null())?;
+            verify_index(conn, schedule, None)?;
         }
+        verify_clock(conn, schedule, deadline)?;
         let records = refs
             .iter()
             .zip(&windows)
@@ -438,6 +610,7 @@ impl<'a> History<'a> {
 }
 
 pub(crate) fn verify(conn: &Connection) -> Result<()> {
+    check_active(conn)?;
     let orphan: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM current t LEFT JOIN current s ON s.id=t.spec->>'schedule_id'
           WHERE t.kind='ScheduleTrigger' AND (t.body->'coalescence' IS NOT NULL OR t.body->'coalesced_into_trigger_id' IS NOT NULL)

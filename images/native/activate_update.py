@@ -2,12 +2,15 @@
 """Verify the first managed boot of a staged native PsiOS update."""
 
 import argparse
+from contextlib import contextmanager
+import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
 import platform
 import stat
+import struct
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -19,7 +22,8 @@ from install import (
     JOURNAL, JOURNAL_LIMIT, checked_digest, digest, lock_directory, require, save_operation,
     timestamp, valid_instant,
 )
-from stage_update import identity, open_cold_raw, require_unchanged
+from install_target import filesystem_type
+from stage_update import identity, require_unchanged
 
 
 DISK = "managed.raw"
@@ -46,14 +50,36 @@ def file_sha256(path, limit, *, flush=False):
     return value
 
 
-def source_identity(path, expected, size, previous=None):
-    with boot_media.regular_file(path) as original:
-        observed = identity(os.fstat(original.fileno()))
-        require(observed[2] == size and (previous is None or tuple(previous) == observed),
+def verify_stopped_source(path, expected):
+    require(identity(path.stat(follow_symlinks=False)) == tuple(expected),
+            "stopped source disk identity changed during the operation")
+
+
+@contextmanager
+def stopped_source(path, expected, size, previous_identity=None):
+    # QEMU uses Linux byte-range locks for its file block driver. A whole-file
+    # OFD write lock conflicts with these locks without relying on QEMU's offsets.
+    # No source descriptor is inherited by the candidate QEMU process.
+    listed = path.stat(follow_symlinks=False)
+    require(stat.S_ISREG(listed.st_mode), "stopped source must be a regular local image")
+    fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    with os.fdopen(fd, "rb") as source:
+        info = os.fstat(fd)
+        observed = identity(info)
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and not info.st_mode & 0o022
+                and info.st_nlink == 1 and filesystem_type(fd) in (b"ext4", b"xfs", b"btrfs"),
+                "stopped source must be a private, operator-owned local image")
+        require(observed == identity(listed) and observed[2] == size
+                and (previous_identity is None or tuple(previous_identity) == observed),
                 "original disk identity or size changed after planning")
-        open_cold_raw(original)
-        require_unchanged(path, original, observed, expected, "original disk")
-        return list(observed)
+        # Linux amd64 struct flock with whence=SEEK_SET, start=0 and len=0
+        # locks the entire file, including any future extension.
+        try:
+            fcntl.fcntl(fd, fcntl.F_OFD_SETLK, struct.pack("@hhqqi4x", fcntl.F_WRLCK, os.SEEK_SET, 0, 0, 0))
+        except OSError as error:
+            raise ValueError("source disk is busy or the local filesystem refused its exclusive lock") from error
+        require_unchanged(path, source, observed, expected, "original disk")
+        yield list(observed)
 
 
 def digest_json(path, expected):
@@ -167,7 +193,11 @@ def prepare(directory, work, args):
     bundle = args.stage_dir.absolute()
     original = args.source_disk.absolute()
     accepted = stage_contract(bundle, checked_digest(args.stage_receipt_sha256))
-    original_identity = source_identity(original, accepted["source_sha256"], accepted["size_bytes"])
+    with stopped_source(original, accepted["source_sha256"], accepted["size_bytes"]) as frozen:
+        return prepare_frozen(directory, work, args, accepted, bundle, original, frozen)
+
+
+def prepare_frozen(directory, work, args, accepted, bundle, original, frozen):
     with TemporaryDirectory(dir=work, prefix=".activation-inputs-") as staging_dir:
         staging = Path(staging_dir)
         for source, name, expected, maximum in (
@@ -186,10 +216,11 @@ def prepare(directory, work, args):
         "id": str(uuid.uuid4()),
         "stage_dir": str(bundle),
         "source_disk": str(original),
-        "source_identity": original_identity,
+        "source_identity": frozen,
     }
     entry = {"format": 1, "status": "BootPending", "rollback_mode": "ManualRecoveryOnly",
              "planned_at": timestamp(), "plan_digest": digest(plan), "plan": plan}
+    verify_stopped_source(original, frozen)
     save_operation(directory, entry)
     return entry
 
@@ -218,23 +249,33 @@ def activate(directory, work, args):
     size = plan["size_bytes"]
     accepted = stage_contract(bundle, plan["stage_receipt_sha256"])
     require(all(plan.get(key) == value for key, value in accepted.items()), "staged update differs from plan")
-    require(file_sha256(bundle / "candidate.raw", size) == plan["candidate_sha256"]
-            and file_sha256(disk, size) == plan["candidate_sha256"]
-            and file_sha256(code, FIRMWARE_LIMIT) == plan["firmware_code_sha256"]
-            and file_sha256(variables, FIRMWARE_LIMIT) == plan["firmware_vars_sha256"],
+    require(file_sha256(bundle / "candidate.raw", size) == plan["candidate_sha256"],
             "managed boot inputs changed after planning")
     secret = secret_at(args.root_console_password_file)
 
+    with stopped_source(original, plan["source_sha256"], size, plan["source_identity"]) as frozen:
+        return activate_frozen(directory, work, entry, original, frozen, (disk, code, variables), secret)
+
+
+def activate_frozen(directory, work, entry, original, frozen, paths, secret):
+    plan = entry["plan"]
+    disk, code, variables = paths
+    signing = plan.get("secure_boot")
+
     def issue():
-        source_identity(original, plan["source_sha256"], size, plan["source_identity"])
+        verify_stopped_source(original, frozen)
         entry.update(status="BootIssued", boot_issued_at=timestamp())
         save_operation(directory, entry)
 
-    signing = plan.get("secure_boot")
-    proof = boot_candidate(work, disk=disk, firmware_code=code, firmware_vars=variables,
-                           credential=secret, expected_node=plan["node_id"],
-                           manifest_sha256=plan["deployment_manifest_sha256"], before_launch=issue,
-                           secure_boot_required=signing is not None)
+    result = boot_candidate(work, disk=disk, firmware_code=code, firmware_vars=variables,
+                            credential=secret, expected_node=plan["node_id"],
+                            manifest_sha256=plan["deployment_manifest_sha256"], before_launch=issue,
+                            expected_artifacts={
+                                "image_sha256": plan["candidate_sha256"],
+                                "efi_code_sha256": plan["firmware_code_sha256"],
+                                "efi_vars_sha256": plan["firmware_vars_sha256"],
+                            }, secure_boot_required=signing is not None)
+    proof = result["proof"]
     require(entry["status"] == "BootIssued" and proof["node_id"] == plan["node_id"]
             and proof["deployment_manifest_sha256"] == plan["deployment_manifest_sha256"]
             and str(uuid.UUID(proof["boot_id"])) == proof["boot_id"]
@@ -242,14 +283,8 @@ def activate(directory, work, args):
             "managed launch did not prove the approved deployment")
     if signing:
         proof["secure_boot"] = {"status": "Enforced", **signing}
-    source_identity(original, plan["source_sha256"], size, plan["source_identity"])
-    readback = {
-        "disk": DISK, "efi_code": CODE, "efi_vars": VARS,
-        "image_sha256": file_sha256(disk, size, flush=True),
-        "efi_code_sha256": file_sha256(code, FIRMWARE_LIMIT),
-        "efi_vars_sha256": file_sha256(variables, FIRMWARE_LIMIT, flush=True),
-    }
-    require(readback["efi_code_sha256"] == plan["firmware_code_sha256"], "managed firmware code changed")
+    verify_stopped_source(original, frozen)
+    readback = {"disk": DISK, "efi_code": CODE, "efi_vars": VARS, **result["artifacts"]}
     entry.update(status="BootVerified", boot_verified_at=timestamp(), proof=proof, managed=readback)
     save_operation(directory, entry)
     return entry

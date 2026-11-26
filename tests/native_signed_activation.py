@@ -12,6 +12,7 @@ import tempfile
 import uuid
 
 from native_activation import Activation, JOURNAL, assert_private, managed_bytes, no_qemu, rejected
+from native_selection import exercise_selection
 from native_disk import REPO, password, sha
 from native_secure_boot import create_signer, secure_vm, signing_args
 from native_signed_staged_update import boot_operator, cert_sha256, isolated_boot, verify_uki
@@ -170,21 +171,24 @@ def exercise(args, work):
     reject_wrong_variables(args, work, fixture, blank_vars)
     assert digest_map(bundle) == bundle and digest_map(frozen) == frozen
     state, managed, activated_boot = activate(fixture, work, candidate, signed, baseline, admin)
+    selected_dir, selected = exercise_selection(work, args.selector, state, secret, interrupt=False)
+    assert selected["proof"]["secure_boot"] == {**signed, "status": "Enforced"}, selected
     secret.unlink()
     credentials = (operator, admin)
-    new_boot = isolated_boot(work, state / "managed.raw", state / "managed-ovmf-code.fd",
-                             state / "managed-efi-vars.fd", credentials, candidate, baseline, token)
+    new_boot = isolated_boot(work, selected_dir / "managed.raw", selected_dir / "managed-ovmf-code.fd",
+                             selected_dir / "managed-efi-vars.fd", credentials, candidate, baseline, token)
     old_boot = isolated_boot(work, old, code, old_vars, credentials, original, baseline, token)
-    assert len({baseline[3], activated_boot, new_boot, old_boot}) == 4
+    assert len({baseline[3], activated_boot, selected["proof"]["boot_id"], new_boot, old_boot}) == 5
     assert digest_map(frozen) == frozen and digest_map(bundle) == bundle
     assert managed_bytes(state) == managed
-    print("PASS signed native activation, disabled Secure Boot rejection and durable Task and home data")
+    print("PASS signed native activation and selected boot, disabled Secure Boot rejection and durable Task and home data")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--controller", type=Path, default=REPO / "images/native/stage_update.py")
     parser.add_argument("--activator", type=Path, default=REPO / "images/native/activate_update.py")
+    parser.add_argument("--selector", type=Path, default=REPO / "images/native/select_update.py")
     parser.add_argument("--previous-installer", type=Path, default=REPO / "images/native/create.py")
     for name in ("efi-stub", "kernel-iso", "previous-archive", "archive"):
         parser.add_argument("--" + name, type=Path, required=True)

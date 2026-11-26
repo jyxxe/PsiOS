@@ -118,6 +118,30 @@ enum Cmd {
         #[arg(long)]
         scratch_dir: Option<PathBuf>,
     },
+    /// Inspect the exact final placement of a witnessed backup intake.
+    InspectBackupIntake {
+        /// Original detached manifest SHA-256 digest.
+        #[arg(long)]
+        manifest_digest: String,
+        /// Maximum combined database and journal copy size in MiB.
+        #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(u32).range(1..=1024))]
+        max_copy_mib: u32,
+        /// Parent for the private verification copy (defaults to TMPDIR).
+        #[arg(long)]
+        scratch_dir: Option<PathBuf>,
+        /// Maximum total payload bytes to verify.
+        #[arg(long, default_value_t = DEFAULT_BACKUP_MAX_BYTES, value_parser = clap::value_parser!(u64).range(1..=MAX_BACKUP_BYTES))]
+        max_bytes: u64,
+    },
+    /// Register only an already published backup selected by stopped intake inspection.
+    ReconcileBackupIntake {
+        /// Exact recovery object from inspect-backup-intake, or standard input (-).
+        #[arg(long, default_value = "-")]
+        recovery_file: PathBuf,
+        /// Maximum total payload bytes to verify.
+        #[arg(long, default_value_t = DEFAULT_BACKUP_MAX_BYTES, value_parser = clap::value_parser!(u64).range(1..=MAX_BACKUP_BYTES))]
+        max_bytes: u64,
+    },
     /// Register a verified detached backup with a stopped local authority.
     ImportBackup {
         /// Directory containing the copied manifest and data blobs.
@@ -324,6 +348,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &signing_key_file,
             )?;
             println!("{}", serde_json::to_string_pretty(&envelope)?);
+        }
+        Cmd::InspectBackupIntake {
+            manifest_digest,
+            max_copy_mib,
+            scratch_dir,
+            max_bytes,
+        } => {
+            let scratch = scratch_dir.unwrap_or_else(std::env::temp_dir);
+            let report = Store::inspect_backup_intake(
+                &cfg()?,
+                &scratch,
+                u64::from(max_copy_mib) * 1024 * 1024,
+                &manifest_digest,
+                max_bytes,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Cmd::ReconcileBackupIntake {
+            recovery_file,
+            max_bytes,
+        } => {
+            let approval = read_bounded_document(&recovery_file, "backup intake recovery", 4096)?;
+            let report = Store::reconcile_backup_intake(cfg()?, &approval, max_bytes)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Cmd::ImportBackup {
             directory,

@@ -123,6 +123,22 @@ psiosd --config /etc/psios/core.json import-backup \
 
 证明记录签发时的源节点和恢复代次。它不证明此后源节点仍在线、没有恢复过、签名密钥仍获授权，或数据达到应用一致性。跨节点收到的 Backup 作为接收端备份恢复到新卷，接收端仍独立审批激活。已导入的 Backup 不能以接收节点作为原始来源再次签发。[两套独立权威、恶意输入及登记故障验收](../tests/test_backup_transfer.py)
 
+#### 检查并完成中断的备份登记
+
+在接收节点停止服务后，可以按原清单摘要检查该次导入。命令从私有数据库副本读取已确认的见证，核对最终目录身份和各成员内容。若报告为 `Prepared` 与 `VerifiedPublished`，可以明确批准该次登记。恢复文件只包含报告中的 `recovery` 对象。
+
+```bash
+psiosd --config /etc/psios/core.json inspect-backup-intake \
+  --manifest-digest "$MANIFEST_DIGEST" > intake.json
+jq -e '.recovery' intake.json > recovery.json
+psiosd --config /etc/psios/core.json reconcile-backup-intake \
+  --recovery-file recovery.json
+```
+
+恢复命令重新核对接收权威、恢复代次、确切导入修订和原目录，再同步目录与父目录并提交登记。签名导入使用准备阶段留存的签名和原公钥。外部副本或公钥文件遗失时，已经发布的完整目录仍可完成原登记。对仍保留的已登记备份，再次提交原恢复对象会返回原 Backup 回执。
+
+`NoPublishedDirectory` 表示当前看不到最终目录，不能据此判定改名从未发生。`Conflict` 表示目录身份或内容不能与登记证据匹配。两种情况下均不会生成恢复对象。若最终目录缺失且源副本仍可用，可通过原导入命令重试。目录冲突需要保留现场并单独调查。已正常删除的 Backup 报告为 `Retired`。校验默认核对最多 256 MiB 负载，可以通过 `--max-bytes` 明确调整。[签名与传统导入的故障验收](../tests/test_backup_transfer.py)
+
 核验或复制失败时工具清理未发布的暂存目录。若恢复进程被强制中止或断电，可能留下该次操作的 `.stage-*` 目录。确认没有恢复进程持有它后，可在保留备份副本的情况下清理该暂存目录。
 
 ## 检查状态盘

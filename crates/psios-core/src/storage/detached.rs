@@ -89,6 +89,13 @@ pub(super) fn open_detached(
         )
         .map_err(io::Error::from)?,
     );
+    open_detached_root(root, manifest_digest)
+}
+
+pub(super) fn open_detached_root(
+    root: File,
+    manifest_digest: &str,
+) -> Result<(DetachedBackup, Vec<u8>)> {
     let digest = json!(manifest_digest);
     let before = publication::file_set(&root)?;
     let raw = read_manifest(&open_manifest(&root)?, &digest)?;

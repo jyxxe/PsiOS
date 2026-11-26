@@ -21,9 +21,10 @@ use crate::{
     policy, *,
 };
 pub use detached::{inspect_detached_backup, inspect_detached_backup_with_limit};
+pub(crate) use intake::recovery::inspect as inspect_backup_intake;
 use psios_api::{VERSION, canonical, sha256};
 use rusqlite::{OptionalExtension, params};
-use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, ResolveFlags, openat2, statat};
+use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, ResolveFlags, open, openat2, statat};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -672,10 +673,21 @@ struct BackupManifest {
     mtime_unix_v1: Option<BackupTimes>,
 }
 
+fn open_backup_parent(cfg: &Config) -> Result<File> {
+    let path = cfg.state_dir.join("backups");
+    private_dir(&path, false)?;
+    Ok(File::from(
+        open(
+            &path,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?,
+    ))
+}
+
 fn open_backup(cfg: &Config, id: &str) -> Result<(File, File)> {
-    let parent = cfg.state_dir.join("backups");
-    private_dir(&parent, false)?;
-    let parent = File::open(parent)?;
+    let parent = open_backup_parent(cfg)?;
     let root = child(&parent, id, OFlags::RDONLY | OFlags::DIRECTORY)?;
     Ok((parent, root))
 }

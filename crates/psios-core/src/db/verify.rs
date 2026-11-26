@@ -361,6 +361,39 @@ impl Store {
         Ok(report)
     }
 
+    /// Inspect one witnessed intake and its final path without opening the authority for writes.
+    pub fn inspect_backup_intake(
+        cfg: &Config,
+        scratch: &Path,
+        max_copy_bytes: u64,
+        digest: &str,
+        max_bytes: u64,
+    ) -> Result<Value> {
+        require(
+            (1..=1024 * 1024 * 1024).contains(&max_copy_bytes),
+            "InvalidArgument",
+            "invalid backup intake verification copy limit",
+        )?;
+        let _lock = lock_offline(cfg)?;
+        let (_tmp, state, _) = private_database_copy(cfg, scratch, max_copy_bytes)?;
+        let (copy, identity) = checked_copy(&state)?;
+        let (witness, rotation) = verified_witness(&copy, cfg)?;
+        require(
+            witness == "Confirmed" && rotation == "None",
+            "RecoveryRequired",
+            "backup intake inspection needs a confirmed witness and owner credential",
+        )?;
+        crate::storage::inspect_backup_intake(
+            &copy,
+            cfg,
+            identity.database_format,
+            &identity.node_id,
+            &identity.recovery_incarnation,
+            digest,
+            max_bytes,
+        )
+    }
+
     /// Sign one exact native Backup for another authority without opening the source for writes.
     pub fn attest_backup_transfer(
         cfg: &Config,

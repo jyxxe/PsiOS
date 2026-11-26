@@ -48,6 +48,10 @@ jobs:
           fi
           PSIOS_TEST_RESTORE_RENAME_FAULT=1 python3 -B -m unittest discover -s tests \
             -p test_storage_recovery.py -k checkpointed_unpublished_restore -v
+      - name: Interrupt detached backup publication and verify durable catalog recovery
+        run: |
+          PSIOS_TEST_BACKUP_INTAKE_CUT=1 python3 -B -m unittest discover -s tests \
+            -p test_backup_transfer.py -k test_legacy_retry_syncs_publication -v
       - name: Kill offline state compaction after the SQLite WAL commit
         run: |
           PSIOS_TEST_STATE_COMPACTION_CUT=1 python3 -B -m unittest discover -s tests \

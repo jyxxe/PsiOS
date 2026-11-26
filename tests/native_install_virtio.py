@@ -244,6 +244,7 @@ def exercise(args, work):
         return ubuntu_command(instance, target, rejected, port, serial_log)
 
     with boot_ubuntu(instance, key, 1, launch=launch, readiness_timeout=600) as run:
+        print("Ubuntu installer host provisioned from the verified Core package", flush=True)
         ubuntu = identity(run)
         run("test -d /sys/firmware/efi")
         package = remote(run, "dpkg-query", "-W", "-f=${Version}", "psios-core").stdout.strip()

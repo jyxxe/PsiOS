@@ -1,5 +1,8 @@
 //! Bounded observations of Linux pressure and configured controls.
-use crate::{Result, host::Work, linux_cgroup, now};
+mod proc_source;
+
+use crate::{Result, err, host::Work, linux_cgroup, now, require};
+use proc_source::Source;
 use rustix::{
     fd::OwnedFd,
     fs::fstat,
@@ -9,9 +12,8 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
-    fs::{self, File},
+    fs::File,
     io::{self, Read},
-    os::unix::fs::MetadataExt,
     path::{Component, Path, PathBuf},
 };
 
@@ -125,8 +127,8 @@ fn pressure(value: &str, report_full: bool) -> Option<Pressure> {
     })
 }
 
-fn kernel_pressure(source: &str, report_full: bool) -> Reading<Pressure> {
-    read(File::open(source), CONTROL_LIMIT, |text| {
+fn kernel_pressure(source: &Source, path: &str, report_full: bool) -> Reading<Pressure> {
+    read(source.file(path), CONTROL_LIMIT, |text| {
         pressure(text, report_full)
     })
 }
@@ -178,8 +180,8 @@ pub(super) fn cpu_limit(text: &str) -> Option<CpuLimit> {
     })
 }
 
-fn membership() -> io::Result<PathBuf> {
-    let contents = text(File::open("/proc/self/cgroup")?, CONTROL_LIMIT)?;
+fn membership(source: &Source) -> io::Result<PathBuf> {
+    let contents = text(source.membership()?, CONTROL_LIMIT)?;
     let mut unified = contents
         .lines()
         .filter_map(|line| line.strip_prefix("0::/"));
@@ -204,15 +206,15 @@ pub(super) fn contains_process(group: &OwnedFd, pid: u32) -> io::Result<bool> {
     Ok(ids.lines().any(|line| line == pid))
 }
 
-fn group_snapshot() -> io::Result<Value> {
+fn group_snapshot(source: &Source) -> io::Result<Value> {
     let pid = std::process::id();
-    let path = membership()?;
+    let path = membership(source)?;
     let group = linux_cgroup::group(linux_cgroup::root()?, &path)?;
     if !contains_process(&group, pid)? {
         return Err(io::ErrorKind::Interrupted.into());
     }
     let result = cgroup_snapshot(&group)?;
-    if membership()? != path || !contains_process(&group, pid)? {
+    if membership(source)? != path || !contains_process(&group, pid)? {
         return Err(io::ErrorKind::Interrupted.into());
     }
     Ok(result)
@@ -277,21 +279,50 @@ pub(super) fn boot_us() -> u128 {
 
 pub(super) fn observe(work: &Work) -> Result<Value> {
     let start = boot_us();
-    let boot_id = super::scalar("/proc/sys/kernel/random/boot_id")?;
-    let cgroup_namespace = fs::metadata("/proc/self/ns/cgroup")?.ino().to_string();
-    let mount_namespace = fs::metadata("/proc/self/ns/mnt")?.ino().to_string();
+    let source = Source::open().map_err(identity_error)?;
+    let identity = source.identity().map_err(identity_error)?;
+    // Use the effective boot identity of the exact Node revision. A container
+    // can provide its boot ID on a separate mount from the kernel counters.
+    let boot_id = work.target.body["boot_id"]
+        .as_str()
+        .filter(|id| super::block::valid_boot(id))
+        .ok_or_else(|| err("RecoveryRequired", "Node lacks a valid boot identity"))?;
     let kernel = json!({"source":"LinuxProcfs",
-        "cpu":kernel_pressure("/proc/pressure/cpu", false), "memory":kernel_pressure("/proc/pressure/memory", true),
-        "io":kernel_pressure("/proc/pressure/io", true), "oom_kills":read(File::open("/proc/vmstat"), VMSTAT_LIMIT,
+        "cpu":kernel_pressure(&source, "pressure/cpu", false),
+        "memory":kernel_pressure(&source, "pressure/memory", true),
+        "io":kernel_pressure(&source, "pressure/io", true), "oom_kills":read(source.file("vmstat"), VMSTAT_LIMIT,
             |text| counters(text, &["oom_kill"], "oom_kill")?.get("oom_kill").copied())
     });
-    let group = Reading::from(group_snapshot());
+    let group = Reading::from(group_snapshot(&source));
+    require(
+        source.identity().map_err(identity_error)? == identity,
+        "PreconditionFailed",
+        "kernel pressure namespace changed during observation",
+    )?;
     Ok(
         json!({"node_ref":work.target.reference(), "boot_id":boot_id,
-            "cgroup_namespace_inode":cgroup_namespace, "mount_namespace_inode":mount_namespace,
+            "cgroup_namespace_inode":identity.cgroup_namespace, "mount_namespace_inode":identity.mount_namespace,
             "observed_at":now(), "from_boot_us":start.to_string(), "through_boot_us":boot_us().to_string(),
             "kernel":kernel, "core_cgroup":group
         }),
+    )
+}
+
+fn identity_error(error: io::Error) -> crate::Error {
+    let code = match error.kind() {
+        io::ErrorKind::NotFound | io::ErrorKind::Unsupported => "UnsupportedCapability",
+        io::ErrorKind::PermissionDenied => "PermissionDenied",
+        _ => "DependencyUnavailable",
+    };
+    err(code, "kernel pressure namespace identity is unavailable")
+}
+
+pub(crate) fn check_receipt(work: &Work, receipt: &Value) -> Result<()> {
+    require(
+        receipt["node_ref"] == work.target.reference()
+            && receipt["boot_id"] == work.target.body["boot_id"],
+        "Fenced",
+        "kernel pressure sample differs from its authorized Node revision",
     )
 }
 

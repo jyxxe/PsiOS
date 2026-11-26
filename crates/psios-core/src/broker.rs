@@ -6,7 +6,7 @@ mod execution;
 mod history;
 mod network_trial;
 pub(crate) mod preparation;
-pub(crate) use history::{archive, history};
+pub(crate) use history::{archive, history, redact_late_receipt};
 mod recovery;
 pub(crate) mod result_access;
 mod submission;

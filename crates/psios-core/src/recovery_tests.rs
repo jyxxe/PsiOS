@@ -3430,6 +3430,93 @@ fn revoked_process_observation_cannot_publish_an_artifact_or_a_late_body() {
 }
 
 #[test]
+fn revoked_pressure_scope_fences_the_sample_and_late_evidence() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_, mut store) = initialized(directory.path());
+    let node = call(&mut store, "Node.Get", json!({})).unwrap();
+    let tool = node::pressure::TOOL;
+    let grant = call(
+        &mut store,
+        "Grant.Issue",
+        json!({"principal_id":policy::OWNER,"actions":["task.submit","task.read",tool],
+            "tool_targets":[node["reference"]["resource_id"]],"units":1,"ttl_seconds":90}),
+    )
+    .unwrap();
+    let request = call(
+        &mut store,
+        "Task.Prepare",
+        json!({"tool":tool,"input":{},"key":id("pressure-revocation"),
+            "delegation_id":grant["delegation_ref"]["resource_id"]}),
+    )
+    .unwrap();
+    let submitted = call(&mut store, "Task.Submit", request).unwrap();
+    let task = submitted["task_id"].as_str().unwrap();
+    assert_eq!(claim(&mut store), task);
+    let work = dispatch(&mut store, task);
+    let sample = work
+        .perform(|_| unreachable!("pressure has no host effect checkpoint"))
+        .unwrap();
+    assert_eq!(sample["kernel"]["source"], "LinuxProcfs");
+    assert_eq!(sample["node_ref"], node["reference"]);
+    let mut unbound = sample.clone();
+    unbound["boot_id"] = json!("unbound-boot");
+    assert_eq!(
+        node::pressure::check_receipt(&work, &unbound)
+            .unwrap_err()
+            .0
+            .code,
+        "Fenced"
+    );
+    call(
+        &mut store,
+        "Grant.Revoke",
+        json!({"id":grant["grant_ref"]["resource_id"],
+            "expected_resource_version":grant["grant_ref"]["version"]}),
+    )
+    .unwrap();
+    store
+        .transaction("finish-revoked-pressure", |db| {
+            broker::finish(db, &work, Ok(sample.clone()))
+        })
+        .unwrap();
+    let closed = call(&mut store, "Task.Get", json!({"id":task})).unwrap();
+    assert_eq!(closed["lifecycle"], "Failed");
+    assert_eq!(closed["conditions"][0]["type"], "PermissionDenied");
+    assert_eq!(closed["result"]["artifact_refs"], json!([]));
+
+    let legacy = store.transaction("late-revoked-pressure", |db| {
+        broker::finish(db, &work, Ok(sample.clone()))?;
+        let artifact: bool = db.c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM versions WHERE kind='Artifact' AND spec->>'task_id'=?1)",
+            [task], |row| row.get(0),
+        )?;
+        assert!(!artifact);
+        let late: Value = db.c.query_row(
+            "SELECT body FROM versions WHERE kind='LateReceipt' AND body->'operation_ref'->>'resource_id'=?1",
+            [&work.op.id], |row| row.get(0),
+        )?;
+        assert_eq!(late["evidence"], json!({"code":"Fenced"}));
+        let record = db.record("LateReceipt", &work.task.owner, json!({
+            "run_ref":work.run.reference(),"operation_ref":work.op.reference(),
+            "effect_ref":work.effect.reference(),"evidence":{"receipt":sample},
+        }))?;
+        Ok(record.reference())
+    }).unwrap();
+    for (method, params) in [
+        ("Resource.Get", json!({"id":legacy["resource_id"]})),
+        ("Resource.Resolve", json!({"reference":legacy})),
+    ] {
+        let redacted = call(&mut store, method, params).unwrap();
+        assert_eq!(redacted["reference"], legacy);
+        assert_eq!(redacted["value"]["evidence"], json!({"code":"Fenced"}));
+        assert_eq!(
+            redacted["resource"]["spec"]["evidence"],
+            json!({"code":"Fenced"})
+        );
+    }
+}
+
+#[test]
 fn revoked_service_resource_grant_fences_the_result_and_late_receipt() {
     let directory = tempfile::tempdir().unwrap();
     let mut cfg = Config::local(&directory.path().join("core"));

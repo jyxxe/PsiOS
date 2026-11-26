@@ -1,4 +1,31 @@
 use super::*;
+
+pub(crate) fn redact_late_receipt(db: &Db<'_>, doc: &mut Doc) -> Result<()> {
+    if doc.kind != "LateReceipt" {
+        return Ok(());
+    }
+    let receipt = &doc.body["evidence"]["receipt"];
+    let application_logs = receipt.get("last_logs").is_some() || receipt.get("stdout").is_some();
+    let service_logs = receipt.get("entries").is_some();
+    let node_pressure =
+        receipt["kernel"]["source"] == "LinuxProcfs" && receipt.get("core_cgroup").is_some();
+    if !(application_logs || service_logs || node_pressure) {
+        return Ok(());
+    }
+    let effect = db.resolve(&doc.body["effect_ref"])?;
+    let sensitive = match effect.body["action"].as_str() {
+        Some(apps::log_tail::TOOL | "application.stop") => application_logs,
+        Some(node::journal::TOOL | node::journal::SINCE_TOOL) => service_logs,
+        Some(node::pressure::TOOL) => node_pressure,
+        _ => false,
+    };
+    if sensitive {
+        doc.body["evidence"] = json!({"code":"Fenced"});
+        doc.spec["evidence"] = doc.body["evidence"].clone();
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct History {

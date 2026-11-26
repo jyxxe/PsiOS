@@ -158,7 +158,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
                     let reference = d.reference();
                     apps::log_tail::redact_status(&d.kind, &mut d.body);
                     apps::log_tail::redact_status(&d.kind, &mut d.spec);
-                    apps::log_tail::redact_late_receipt(db, &mut d)?;
+                    broker::redact_late_receipt(db, &mut d)?;
                     let env = d.envelope(&db.meta("authority")?);
                     contract("resource-envelope", &env)?;
                     let value = if artifact::is_json(&d) {

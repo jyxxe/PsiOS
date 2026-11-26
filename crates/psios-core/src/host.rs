@@ -741,6 +741,7 @@ impl Work {
                 | Action::InspectFileRename(_)
                 | Action::InspectRestoredVolume(_)
                 | Action::InspectProcess(_)
+                | Action::Pressure {}
                 | Action::TrackBlockDevice(_)
                 | Action::ObserveBlockDevice(_)
                 | Action::ServiceLogs(_)

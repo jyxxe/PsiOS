@@ -4,7 +4,7 @@ pub(super) mod custody;
 use crate::{Result, err, now, require};
 use rustix::{
     fd::OwnedFd,
-    fs::{Dir, Mode, OFlags, ResolveFlags, fstat, fstatfs, open, openat2},
+    fs::{Dir, FileType, Mode, OFlags, ResolveFlags, fstat, fstatfs, open, openat2},
     io::Errno,
     param::{clock_ticks_per_second, page_size},
 };
@@ -72,17 +72,13 @@ struct Proc {
 
 impl Proc {
     fn open(node_id: &str) -> Result<Self> {
-        let root = open(
-            "/proc",
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(io::Error::from)?;
-        require(
-            fstatfs(&root).map_err(io::Error::from)?.f_type as u32 == PROC_SUPER_MAGIC,
-            "UnsupportedCapability",
-            "local procfs is unavailable",
-        )?;
+        let root = proc_root().map_err(|error| {
+            if error.kind() == io::ErrorKind::Unsupported {
+                err("UnsupportedCapability", "local procfs is unavailable")
+            } else {
+                error.into()
+            }
+        })?;
         Ok(Self {
             node_id: node_id.into(),
             boot_id: super::scalar("/proc/sys/kernel/random/boot_id")?,
@@ -110,17 +106,47 @@ const BELOW: ResolveFlags = ResolveFlags::BENEATH
     .union(ResolveFlags::NO_SYMLINKS)
     .union(ResolveFlags::NO_XDEV);
 
-fn read_at(root: &OwnedFd, path: &str, limit: u64) -> Result<String> {
+pub(super) fn proc_root() -> io::Result<OwnedFd> {
+    let root = open(
+        "/proc",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    if fstatfs(&root)?.f_type as u32 != PROC_SUPER_MAGIC {
+        return Err(io::ErrorKind::Unsupported.into());
+    }
+    Ok(root)
+}
+
+pub(super) fn proc_directory(root: &OwnedFd, path: &str) -> io::Result<OwnedFd> {
+    openat2(
+        root,
+        path,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+        BELOW,
+    )
+    .map_err(io::Error::from)
+}
+
+pub(super) fn proc_file(root: &OwnedFd, path: &str) -> io::Result<File> {
     let fd = openat2(
         root,
         path,
         OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
         BELOW,
-    )
-    .map_err(|error| stat_error(error.into()))?;
+    )?;
+    if FileType::from_raw_mode(fstat(&fd)?.st_mode) != FileType::RegularFile {
+        return Err(io::ErrorKind::Unsupported.into());
+    }
+    Ok(File::from(fd))
+}
+
+fn read_at(root: &OwnedFd, path: &str, limit: u64) -> Result<String> {
     let mut bytes = Vec::new();
-    File::from(fd)
+    proc_file(root, path)
+        .map_err(stat_error)?
         .take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(stat_error)?;

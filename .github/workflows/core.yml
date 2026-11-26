@@ -99,6 +99,8 @@ jobs:
             mount -t tmpfs -o size=1m,nodev,nosuid,noexec tmpfs /sys/fs/cgroup
             PSIOS_TEST_HIDE_PRESSURE=1 python3 -B -m unittest discover -s tests -p test_pressure.py -k test_real_kernel -v
           '
+          sudo unshare --mount --propagation private env PSIOS_TEST_REPLACE_PRESSURE=1 \
+            python3 -B -m unittest discover -s tests -p test_pressure.py -k test_grafted_pressure_sources -v
       - name: Verify enrolled block reconciliation, reuse, resize and masked sysfs
         run: |
           if ! command -v sfdisk || ! command -v dmsetup; then

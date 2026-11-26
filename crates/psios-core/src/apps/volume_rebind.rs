@@ -10,11 +10,13 @@ use crate::{
 };
 use psios_api::{ResourceRef, id};
 use rusqlite::{Connection, params};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub(crate) const TOOL: &str = "application.rebind_restored_volume";
 pub(crate) const FORMAT: u32 = crate::workflow::admission_delay::FORMAT + 1;
+// Earlier offline verifiers require Backup provenance for every volume rebind.
+pub(crate) const DIRECT_CLONE_FORMAT: u32 = crate::workflow::session_join::FORMAT + 1;
 pub(crate) mod verify;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -29,9 +31,42 @@ pub(crate) struct Prepared {
     pub source: Doc,
     pub restored: Doc,
     deployment: Doc,
-    backup: Doc,
+    lineage: Lineage,
     activation: Doc,
     previous_runtime: Option<(String, String)>,
+}
+
+#[derive(Serialize)]
+struct CloneSource {
+    volume_ref: ResourceRef,
+    publication_ref: ResourceRef,
+}
+
+enum Lineage {
+    Backup(ResourceRef),
+    DirectClone(CloneSource),
+}
+
+impl Lineage {
+    fn add_proof(&self, proof: &mut Value) {
+        match self {
+            Self::Backup(reference) => proof["backup_ref"] = json!(reference),
+            Self::DirectClone(source) => proof["clone_source"] = json!(source),
+        }
+    }
+
+    fn matches(&self, proof: &Value, format: u32) -> bool {
+        match self {
+            Self::Backup(reference) => {
+                proof.get("clone_source").is_none() && proof["backup_ref"] == json!(reference)
+            }
+            Self::DirectClone(source) => {
+                format >= DIRECT_CLONE_FORMAT
+                    && proof.get("backup_ref").is_none()
+                    && proof["clone_source"] == json!(source)
+            }
+        }
+    }
 }
 
 fn exact_volume(db: &Db<'_>, actor: &str, reference: &ResourceRef) -> Result<Doc> {
@@ -116,34 +151,63 @@ impl Input {
         )?;
         check_release_selection(db, app, &app.spec["release_ref"])?;
         let activation = activation(db.c, &restored)?;
-        let backup = lineage(db.c, &source, &restored)?;
+        let lineage = lineage(db.c, &source, &restored)?;
         let previous_runtime = previous_runtime(db, app)?;
         Ok(Prepared {
             source,
             restored,
             deployment,
-            backup,
+            lineage,
             activation,
             previous_runtime,
         })
     }
 }
 
-fn lineage(conn: &Connection, source: &Doc, restored: &Doc) -> Result<Doc> {
-    let backup = crate::db::resolve(conn, &restored.spec["restored_from"])?;
-    let captured = crate::db::resolve(conn, &backup.spec["source_ref"])?;
+fn lineage(conn: &Connection, source: &Doc, restored: &Doc) -> Result<Lineage> {
+    let (captured, lineage) = match (
+        restored.spec.get("restored_from"),
+        restored.spec.get("cloned_from"),
+    ) {
+        (Some(reference), None) => {
+            let backup = crate::db::resolve(conn, reference)?;
+            require(
+                backup.kind == "Backup"
+                    && backup.body["lifecycle"] == "Stored"
+                    && backup.spec["source_volume"] == source.id,
+                "PreconditionFailed",
+                "replacement backup did not capture the bound volume",
+            )?;
+            (
+                crate::db::resolve(conn, &backup.spec["source_ref"])?,
+                Lineage::Backup(crate::decode(&backup.reference())?),
+            )
+        }
+        (None, Some(_)) => {
+            let (captured, publication) =
+                storage::restore_publication::clone_origin(conn, restored)?;
+            let lineage = Lineage::DirectClone(CloneSource {
+                volume_ref: crate::decode(&captured.reference())?,
+                publication_ref: crate::decode(&publication)?,
+            });
+            (captured, lineage)
+        }
+        _ => {
+            return Err(err(
+                "PreconditionFailed",
+                "replacement volume requires one verified publication origin",
+            ));
+        }
+    };
     require(
-        backup.kind == "Backup"
-            && backup.body["lifecycle"] == "Stored"
-            && backup.spec["source_volume"] == source.id
-            && captured.kind == "Volume"
+        captured.kind == "Volume"
             && captured.id == source.id
             && captured.body["data_incarnation"] == source.body["data_incarnation"]
             && restored.body["data_incarnation"] != source.body["data_incarnation"],
         "PreconditionFailed",
         "restored volume is not a verified clone of the bound volume incarnation",
     )?;
-    Ok(backup)
+    Ok(lineage)
 }
 
 fn activation(conn: &Connection, volume: &Doc) -> Result<Doc> {
@@ -174,10 +238,25 @@ fn activation(conn: &Connection, volume: &Doc) -> Result<Doc> {
             )
         })?;
     let plan = crate::db::resolve(conn, &issued.body["plan_ref"])?;
+    let source_matches = match (
+        pending.spec.get("restored_from"),
+        pending.spec.get("cloned_from"),
+    ) {
+        (Some(backup), None) => {
+            evidence.body.get("backup_ref") == Some(backup)
+                && evidence.body.get("cloned_from").is_none()
+        }
+        (None, Some(source)) => {
+            pending.rev == 1
+                && evidence.body.get("cloned_from") == Some(source)
+                && evidence.body.get("backup_ref").is_none()
+        }
+        _ => false,
+    };
     require(
         evidence.kind == "RecoveryEvidence"
             && evidence.body["verified_at"].is_string()
-            && evidence.body["backup_ref"] == pending.spec["restored_from"]
+            && source_matches
             && evidence.body["tree_digest"] == pending.spec["restore_proof"]["tree_digest"]
             && pending.kind == "Volume"
             && pending.id == volume.id
@@ -301,13 +380,15 @@ pub(crate) fn settle(db: &Db<'_>, work: &Work, observed: &Value) -> Result<Value
     let mut config = prepared.deployment.spec.clone();
     config["volume_id"] = json!(prepared.restored.id);
     config["data_incarnation"] = prepared.restored.body["data_incarnation"].clone();
-    config["restore_rebind"] = json!({
+    let mut proof = json!({
         "operation_ref":work.op.reference(),"previous_application_ref":work.target.reference(),
         "previous_deployment_ref":prepared.deployment.reference(),
         "source_volume_ref":prepared.source.reference(),"restored_volume_ref":prepared.restored.reference(),
-        "backup_ref":prepared.backup.reference(),"activation_ref":prepared.activation.reference(),
+        "activation_ref":prepared.activation.reference(),
         "observation": observed,
     });
+    prepared.lineage.add_proof(&mut proof);
+    config["restore_rebind"] = proof;
     let deployment = db.create(
         "Deployment",
         &id("deployment"),

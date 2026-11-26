@@ -654,7 +654,15 @@ fn open_volume_root(cfg: &Config, volume: &Doc) -> Result<File> {
 }
 
 pub(crate) fn restored_fingerprint(cfg: &Config, volume: &Doc) -> Result<String> {
-    usage::fingerprint(&open_volume_root(cfg, volume)?)
+    usage::fingerprint(&open_rebind_root(cfg, volume)?)
+}
+
+fn open_rebind_root(cfg: &Config, volume: &Doc) -> Result<File> {
+    let root = open_volume_root(cfg, volume)?;
+    if volume.spec.get("cloned_from").is_some() {
+        cloning::root_metadata(&root, "PreconditionFailed")?;
+    }
+    Ok(root)
 }
 
 pub(crate) fn verify_restored_for_rebind(
@@ -662,12 +670,12 @@ pub(crate) fn verify_restored_for_rebind(
     volume: &Doc,
     check: &mut impl FnMut() -> Result<()>,
 ) -> Result<String> {
-    let root = open_volume_root(cfg, volume)?;
+    let root = open_rebind_root(cfg, volume)?;
     let before = usage::fingerprint(&root)?;
     restore_proof::verify_tree_checked(
         &root,
         &volume.spec["restore_proof"],
-        || open_volume_root(cfg, volume),
+        || open_rebind_root(cfg, volume),
         check,
     )?;
     require(

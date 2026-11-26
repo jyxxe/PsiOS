@@ -133,7 +133,7 @@ pub(super) fn check_artifacts(
         crate::storage::restore_publication::verify_clones(conn)?;
     }
     if identity.database_format >= crate::apps::volume_rebind::FORMAT {
-        crate::apps::volume_rebind::verify::check(conn)?;
+        crate::apps::volume_rebind::verify::check(conn, identity.database_format)?;
     }
     if identity.database_format >= crate::apps::mount_observation::FORMAT {
         crate::apps::mount_observation::verify(conn)?;

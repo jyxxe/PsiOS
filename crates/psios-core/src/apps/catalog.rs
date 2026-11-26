@@ -7,6 +7,10 @@ use crate::{
 use rusqlite::{OptionalExtension, params};
 use serde_json::json;
 
+// Older writers turn a pending direct catalog effect into an irreconcilable
+// external Unknown, even though its mutation never left the authority.
+pub(crate) const FORMAT: u32 = crate::storage::publication::FORMAT + 1;
+
 pub(crate) fn is_tool(tool: &str) -> bool {
     matches!(
         tool,

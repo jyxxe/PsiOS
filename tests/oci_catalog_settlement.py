@@ -1,12 +1,72 @@
 """Exercise the OCI catalog boundary against real Docker and SQLite transactions."""
 from contextlib import closing
 import json
+import os
+from pathlib import Path
 import signal
 import sqlite3
 import subprocess
+import time
 
 from oci_recovery import endpoint, stop_proxy
-from support import target
+from support import Node, target
+
+
+def image_inspection(request):
+    path = endpoint(request, b"GET", b"/json")
+    return path is not None and b"/images/" in path.path
+
+
+def committed_catalog_witness(node, stage_input):
+    original = node.prepare("application.stage_release", stage_input)
+    task = node.call("Task.Submit", original)["task_id"]
+    assert node.wait(task)["lifecycle"] == "WaitingApproval"
+    daemon = node.daemon
+    witness_path = node.witness / "head"
+    trace = node.base / "catalog-witness.strace"
+    node.stop()
+    node.daemon = ["strace", "-D", "-f", "-qq", "-o", str(trace), "-P", str(witness_path),
+                   "-e", "trace=rename,renameat,renameat2",
+                   "-e", "inject=rename,renameat,renameat2:delay_enter=500ms", "--", *daemon]
+    try:
+        node.start()
+    finally:
+        node.daemon = daemon
+    assert os.path.samefile(f"/proc/{node.process.pid}/exe", daemon[0])
+    node.approve(task)
+    deadline = time.monotonic() + 10
+    db_path = (node.state / "state.db").as_uri() + "?mode=ro"
+    with closing(sqlite3.connect(db_path, uri=True)) as db:
+        while True:
+            head, phase, body, spent = db.execute("""
+                SELECT m.value,q.phase,t.body,b.spent FROM queue q
+                JOIN current t ON t.id=q.task JOIN budgets b ON b.id=q.budget
+                JOIN meta m ON m.key='head' WHERE q.task=?
+            """, (task,)).fetchone()
+            witness = json.loads(witness_path.read_text())
+            if phase == "Done" and witness.get("pending") == head and witness["committed"] != head:
+                stored = json.loads(body)
+                node.stop(signal.SIGKILL)
+                break
+            assert time.monotonic() < deadline, (phase, witness, trace.read_text())
+            time.sleep(0.015)
+    assert json.loads(witness_path.read_text()) == witness, witness
+    assert '"'+str(witness_path)+'"' in trace.read_text(), trace.read_text()
+    assert (stored["lifecycle"], stored["outcome_knowledge"]) == ("Succeeded", "Known"), stored
+    report = json.loads(subprocess.check_output(daemon + ["verify"], timeout=20))
+    assert report["witness"] == "PendingCommitFinalization", report
+    node.start()
+    assert node.wait(task) == stored
+    with closing(sqlite3.connect(db_path, uri=True)) as db:
+        current_spent, = db.execute("SELECT b.spent FROM queue q JOIN budgets b ON b.id=q.budget WHERE q.task=?",
+                                    (task,)).fetchone()
+    assert current_spent == spent
+    replay = node.call("Task.Submit", original)
+    assert replay["deduplicated"] and replay["task_id"] == task, replay
+    reference, = stored["result"]["artifact_refs"]
+    release = node.call("Artifact.Read", {"reference": reference})
+    assert node.call("Resource.Resolve", {"reference": release})["value"]["release_version"] == stage_input["release"]["release_version"]
+    print("Recovered one committed OCI catalog receipt across the final authority witness cut", flush=True)
 
 
 def verify_catalog_settlement(node, docker, spec, app_ids):
@@ -81,10 +141,6 @@ def verify_catalog_settlement(node, docker, spec, app_ids):
     stage_input = {"target": target(app), "release": release}
     settings = json.loads(node.config.read_text())
 
-    def image_inspection(request):
-        path = endpoint(request, b"GET", b"/json")
-        return path is not None and b"/images/" in path.path
-
     for interruption in ("cancel", "revoke", "kill"):
         grant = node.call("Grant.Issue", {
             "principal_id": "local-owner", "units": 4, "ttl_seconds": 120,
@@ -125,6 +181,8 @@ def verify_catalog_settlement(node, docker, spec, app_ids):
 
     fail_receipt("application.stage_release", stage_input)
     staged = node.perform("application.stage_release", stage_input)
+    if os.getenv("PSIOS_TEST_OCI_CATALOG_CUT") == "1":
+        committed_catalog_witness(node, {**stage_input, "release": dict(release, release_version="3.0.0")})
     selection = {"target": target(app), "release_ref": staged}
     fail_receipt("application.select_release", selection)
     app = node.perform("application.select_release", selection)
@@ -143,3 +201,58 @@ def verify_catalog_settlement(node, docker, spec, app_ids):
                                         "name": "kept"})["content"] == "application data"
     print("PASS real OCI inspection boundaries, approval and atomic catalog state through cancellation, revocation and recovery",
           flush=True)
+
+
+def verify_catalog_upgrade(previous, current, spec, app_ids):
+    node = Node(previous)
+    try:
+        install = dict(spec, name="catalog-upgrade", environment={"EPHEMERAL_ONLY": "1", "TEST_NAME": "upgrade"})
+        del install["volume"]
+        install_task = node.submit("application.install", install)
+        original = node.wait(install_task, autoapprove=True)
+        assert original["lifecycle"] == "Succeeded", original
+        artifact, = original["result"]["artifact_refs"]
+        app = node.call("Artifact.Read", {"reference": artifact})
+        app_ids.append(app["resource_id"])
+        old_daemon = node.daemon.copy()
+        node.stop(signal.SIGKILL)
+        old = json.loads(subprocess.check_output(old_daemon + ["verify"], timeout=20))
+        assert old["database_format"] == 123, old
+        node.daemon[0] = str(Path(current).absolute() / "psiosd")
+        before = json.loads(subprocess.check_output(node.daemon + ["verify"], timeout=20))
+        assert before["node_id"] == old["node_id"] and before["migration_required"], before
+
+        settings = json.loads(node.config.read_text())
+        args = {"target": target(app), "release": dict(install, release_version="2.0.0")}
+        with stop_proxy(node, settings, "catalog-old-writer", image_inspection,
+                        forward=True, status=b" 200 ") as barrier:
+            assert node.wait(install_task) == original
+            assert node.call("Artifact.Read", {"reference": artifact}) == app
+            request = node.prepare("application.stage_release", args)
+            task = node.call("Task.Submit", request)["task_id"]
+            assert node.wait(task)["lifecycle"] == "WaitingApproval"
+            node.approve(task)
+            assert barrier.confirmed.wait(12), "Docker did not return the approved image inspection"
+            active = node.call("Task.Get", {"id": task})
+            [op] = active["operation_refs"]
+            [effect] = node.call("Resource.Resolve", {"reference": op})["value"]["effect_refs"]
+            assert node.call("Resource.Resolve", {"reference": effect})["value"]["phase"] == "PermitBound"
+            node.stop(signal.SIGKILL)
+        old_writer = subprocess.run(old_daemon + ["serve"], capture_output=True, text=True, timeout=15)
+        assert old_writer.returncode != 0 and "SchemaVersionUnsupported" in old_writer.stderr, old_writer
+        node.start()
+        task_state = node.wait(task)
+        assert (task_state["lifecycle"], task_state["outcome_knowledge"]) == ("Failed", "NotStarted"), task_state
+        assert task_state["operation_refs"][0]["resource_id"] == op["resource_id"]
+        assert node.get(app["resource_id"])["reference"] == app
+        replay = node.call("Task.Submit", request)
+        assert replay["deduplicated"] and replay["task_id"] == task, replay
+        node.perform("application.stage_release", args)
+        node.perform("application.uninstall", target(app))
+        node.stop()
+        after = json.loads(subprocess.check_output(node.daemon + ["verify"], timeout=20))
+        assert after["database_format"] >= 124 and not after["migration_required"], after
+        assert after["node_id"] == before["node_id"], after
+        print("PASS format 123 installs retained and old writer fenced while a new catalog effect was pending", flush=True)
+    finally:
+        node.close()

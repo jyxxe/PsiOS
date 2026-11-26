@@ -201,7 +201,30 @@ python3 native/activate_update.py inspect --state-dir "$ACTIVATION_STATE"
 
 签名候选须使用包含挂载前强制检查的分阶段构建。计划核对候选和试启动的证书、EFI stub 摘要与固件强制执行记录。正式候选在可写挂载前要求 Secure Boot。控制器通过来宾核对正式启动的固件状态，并把此次证据收入 `BootVerified` 回执。[签名首次引导验收](../tests/native_signed_activation.py)
 
-有启动记录而缺少最终证明时，`inspect` 报告 `RecoveryRequired`，原计划停止派发。保持原盘停机，直至命令退出。该操作管理选定目录内的首次引导记录与副本，回退仍由操作者执行。[首次引导验收](../tests/native_activation.py)
+有启动记录而缺少最终证明时，`inspect` 报告 `RecoveryRequired`，原计划停止派发。执行期间，控制器在操作者拥有的本地源映像上持有 Linux OFD 排他锁。支持遵循文件锁的 QEMU 进程，原盘在整个操作内保持停机。首次引导回执及其副本可供下一节使用。[首次引导验收](../tests/native_activation.py)
+
+## 选择并启动已验证的受管部署
+
+在同一节点使用一个独立的私有持久目录。用 `BootVerified` 的 `operation.json` 文件摘要生成选择计划，首次选择的预期代次为 0。
+
+```sh
+install -d -m 0700 "$selection_dir"
+receipt_sha256=$(sha256sum "$activation_dir/operation.json" | cut -d ' ' -f1)
+python3 -B native/select_update.py plan --state-dir "$selection_dir" \
+  --activation-dir "$activation_dir" --activation-receipt-sha256 "$receipt_sha256" \
+  --expected-generation 0
+python3 -B native/select_update.py adopt --state-dir "$selection_dir" \
+  --plan-digest "$plan_digest"
+python3 -B native/select_update.py boot-selected --state-dir "$selection_dir" \
+  --selection-digest "$selection_digest" --root-console-password-file "$console_password_file"
+python3 -B native/select_update.py inspect --state-dir "$selection_dir"
+```
+
+从计划回执取得 `plan_digest`。提交会重新校验已验证候选及其来源，将私有磁盘、固件代码与 EFI 变量作为同一代全部持久发布，再更新选择记录。原始分阶段候选、首次引导回执及映像继续保留。采用下一代时，先基于已选代次的当前停机磁盘、EFI 变量及该代构建回执生成新的分阶段候选并验证首次引导。选择命令复核新候选确实从当前受管状态派生，旧代次保留供运维核查。
+
+每次启动从当前 `Selected` 回执取得 `selection_digest`。命令只附加该代的私有磁盘，把 `BootIssued` 持久化后通过受管 QEMU 启动，认证来宾 Core 的节点、部署摘要和新的 Linux 启动 ID，签名部署还需证明 Secure Boot 开启。来宾正常关机并刷盘后回执给出新的选择摘要。后续启动必须显式批准新摘要。若启动结果不明，`inspect` 返回 `RecoveryRequired`，本目录停止再次启动或接管，交由操作者恢复。
+
+当前交付针对单节点受管 OVMF 的有限时引导和干净关机。操作者负责保持本节点的其他副本停机，外部 QEMU 须启用文件锁。物理固件切换、持续运行及自动回退属于后续开发范围。[普通验收](../tests/native_activation.py) · [Secure Boot 验收](../tests/native_signed_activation.py)
 
 ### 启动正式候选盘
 

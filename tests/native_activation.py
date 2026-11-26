@@ -113,7 +113,7 @@ def child_fd(controller):
     return None
 
 
-def stop_after_launch(command, state):
+def stop_after_launch(command, state, fenced_source):
     witness = state / JOURNAL
     descriptor = None
     with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -140,10 +140,14 @@ def stop_after_launch(command, state):
             boundary = witness.read_bytes()
             report = json.loads(boundary)
             assert report["status"] == "BootIssued" and report["boot_issued_at"] and "proof" not in report, report
+            options = f"driver=raw,file.driver=file,file.filename={fenced_source},file.locking=on"
+            compare = ["qemu-img", "compare", "-q", "--image-opts", options, options]
+            rejected(invoke(compare, 30), r"lock")
             controller.kill()
             assert controller.wait(15) == -signal.SIGKILL
             assert select.select([descriptor], [], [], 15)[0], f"controller left its QEMU child {pid} alive"
             assert witness.read_bytes() == boundary
+            succeeded(invoke(compare, 30))
             return boundary
         finally:
             if controller.poll() is None:
@@ -197,6 +201,7 @@ def rejected_inputs(fixture, work, frozen):
     # independently planned byte-identical source.
     drift_source = work / "source-drift.raw"
     copy_disk(fixture.source, drift_source)
+    drift_source.chmod(0o600)
     assert sha(drift_source) == frozen[fixture.source]
     drift = work / "drift-state"
     plan = fixture.planned(drift, source=drift_source)
@@ -222,7 +227,7 @@ def interrupted_boot(fixture, work):
     state = work / "interrupted"
     plan = fixture.planned(state)
     command = fixture.apply(state, plan["plan_digest"])
-    boundary = stop_after_launch(command, state)
+    boundary = stop_after_launch(command, state, fixture.source)
     issued = json.loads(boundary)
     assert issued["plan"] == plan["plan"] and issued["plan_digest"] == plan["plan_digest"], issued
     observed = managed_bytes(state)
@@ -327,21 +332,30 @@ def exercise(args, work):
     rejected_inputs(fixture, work, frozen)
     interrupted_boot(fixture, work)
     state, managed, activated_boot = verified_boot(fixture, work, candidate, frozen, prior, admin)
+    from native_selection import exercise_selection
+    from native_selection_successor import exercise_successor
+    selected_dir, selected = exercise_selection(work, args.selector, state, secret)
+    successor_dir, successor, successor_build, successor_first_boot = exercise_successor(
+        args, work, selected_dir, selected, secret)
     secret.unlink()
 
-    booted = verify_guest(work, state / "managed.raw", state / "managed-ovmf-code.fd",
-                          state / "managed-efi-vars.fd", operator, admin, candidate, prior, token)
+    booted = verify_guest(work, successor_dir / "managed.raw", successor_dir / "managed-ovmf-code.fd",
+                          successor_dir / "managed-efi-vars.fd", operator, admin, successor_build, prior, token)
     rebooted = verify_guest(work, old, code, vars_file, operator, admin, old_build, prior, token)
-    assert len({prior[3], activated_boot, booted, rebooted}) == 4
+    assert len({prior[3], activated_boot, selected["proof"]["boot_id"], successor_first_boot,
+                successor["proof"]["boot_id"], booted, rebooted}) == 7
     assert digest_map(frozen) == frozen and digest_map(bundle) == bundle
     assert managed_bytes(state) == managed
-    print("PASS native activation, crash fencing, unchanged source and stage, and durable guest data")
+    print("PASS native activation, selected deployment boot, crash fencing, original bytes and durable guest data")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--controller", type=Path, default=REPO / "images/native/stage_update.py")
     parser.add_argument("--activator", type=Path, default=REPO / "images/native/activate_update.py")
+    parser.add_argument("--selector", type=Path, default=REPO / "images/native/select_update.py")
+    parser.add_argument("--successor-archive", type=Path)
+    parser.add_argument("--expected-successor-format", type=int)
     parser.add_argument("--previous-installer", type=Path, default=REPO / "images/native/create.py")
     for name in ("--kernel-iso", "--previous-archive", "--archive"):
         parser.add_argument(name, type=Path, required=True)

@@ -2,6 +2,7 @@
 
 from contextlib import ExitStack, contextmanager
 import ctypes
+import hashlib
 import json
 import math
 import os
@@ -64,6 +65,35 @@ def open_file(directory, name, *, writable):
         yield fd, info.st_size
     finally:
         os.close(fd)
+
+
+def artifact_identity(info):
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_nlink, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns)
+
+
+def bound_artifacts(directory, names, descriptors):
+    states = tuple(artifact_identity(os.fstat(fd)) for fd in descriptors)
+    require(all(state == artifact_identity(os.stat(name, dir_fd=directory, follow_symlinks=False))
+                for name, state in zip(names, states, strict=True)),
+            "private candidate artifact no longer names the verified descriptor")
+    return states
+
+
+def artifact_digest(fd, size):
+    result = hashlib.sha256()
+    offset = 0
+    while offset < size:
+        chunk = os.pread(fd, min(MIB, size - offset), offset)
+        require(chunk, "private candidate artifact shrank while reading")
+        result.update(chunk)
+        offset += len(chunk)
+    return result.hexdigest()
+
+
+def artifact_digests(descriptors, sizes):
+    return {name: artifact_digest(fd, size) for name, fd, size in zip(
+        ("image_sha256", "efi_code_sha256", "efi_vars_sha256"), descriptors, sizes, strict=True)}
 
 
 def parent_death_guard():
@@ -273,7 +303,8 @@ def qemu_command(disk_fd, code_fd, vars_fd, vars_probe_fd, *, secure_boot_requir
 
 
 def boot_candidate(work: Path, *, disk: Path, firmware_code: Path, firmware_vars: Path,
-                   credential: bytes, expected_node: str, manifest_sha256: str, before_launch,
+                   credential: bytes, expected_node: str, manifest_sha256: str, expected_artifacts: dict,
+                   before_launch,
                    secure_boot_required: bool = False) -> dict:
     """Confirm a bounded normal OVMF boot and clean shutdown of one owned disk."""
     work = work.absolute()
@@ -298,10 +329,19 @@ def boot_candidate(work: Path, *, disk: Path, firmware_code: Path, firmware_vars
                 "OVMF variable store changed before launch")
         require(disk_size <= MAX_DISK_BYTES and disk_size % 512 == 0, "invalid raw candidate disk size")
         require(code_size + vars_size == 4 * MIB, "expected a matching 4 MiB OVMF code and variable-store pair")
+        names = tuple(path.name for path in paths)
+        artifacts = (disk_fd, code_fd, vars_fd)
+        sizes = (disk_size, code_size, vars_size)
+        before = bound_artifacts(directory, names, artifacts)
+        require(artifact_digests(artifacts, sizes) == expected_artifacts
+                and bound_artifacts(directory, names, artifacts) == before,
+                "managed boot inputs changed from the approved disk and firmware digests")
         fds = (disk_fd, code_fd, vars_fd, vars_probe_fd)
         command = qemu_command(*fds, secure_boot_required=secure_boot_required)
         guard = parent_death_guard()
         before_launch()
+        require(bound_artifacts(directory, names, artifacts) == before,
+                "private candidate artifacts changed at the launch boundary")
         process = subprocess.Popen(command, cwd="/", stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=subprocess.DEVNULL, pass_fds=fds, preexec_fn=guard, bufsize=0)
         try:
@@ -311,7 +351,14 @@ def boot_candidate(work: Path, *, disk: Path, firmware_code: Path, firmware_vars
             console.shutdown(process)
             os.fsync(disk_fd)
             os.fsync(vars_fd)
-            return proof
+            finished = bound_artifacts(directory, names, artifacts)
+            require(tuple(state[5] for state in finished) == sizes and finished[1] == before[1],
+                    "private candidate sizes or firmware code changed during boot")
+            readback = artifact_digests(artifacts, sizes)
+            require(bound_artifacts(directory, names, artifacts) == finished
+                    and readback["efi_code_sha256"] == expected_artifacts["efi_code_sha256"],
+                    "private candidate artifacts changed during boot readback")
+            return {"proof": proof, "artifacts": readback}
         except ValueError as error:
             status = process.poll()
             if status is not None and status != 0:

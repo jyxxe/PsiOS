@@ -71,6 +71,9 @@ if git -C "$repo" cat-file -e "$sha:images/native/README.txt" 2>/dev/null; then
     if git -C "$repo" cat-file -e "$sha:images/native/activate_update.py" 2>/dev/null; then
         native_files+=(activate_update.py activation_guest.py)
     fi
+    if git -C "$repo" cat-file -e "$sha:images/native/select_update.py" 2>/dev/null; then
+        native_files+=(select_update.py select_manifest.py selection_boot.py)
+    fi
     git -C "$repo" archive "$sha:images/native" "${native_files[@]}" | tar --same-permissions -xf - -C native
     checks+=("${native_files[@]/#/native/}")
     members+=(native)

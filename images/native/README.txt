@@ -100,6 +100,11 @@ native/activate_update.py 可核验普通 OVMF 候选盘的首次正式引导。
 其中之一。验收失败可关闭候选盘并启动原盘。已有业务写入时，先处置
 候选盘内的新状态与外部效果。
 
+native/select_update.py 可在受管目录接管完成首次验证的 OVMF 部署。
+它按回执精确批准保留私有选择，随后通过 boot-selected 确认新启动、
+来宾 Core 与干净关机。检查受管目录时若发现结果不明，需人工核查。
+详细命令和回执说明见 docs/native-disk.md。
+
 可在升级命令加 --trial-boot 生成独立的试启动盘。保留原盘停机，
 以试启动盘作为只读后备文件创建一次性 qcow2 覆盖层，并给 QEMU
 传入覆盖层、原 EFI 变量文件的私有副本和 -nic none。签名试启动

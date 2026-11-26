@@ -7,6 +7,7 @@ pub(crate) mod probe;
 mod routes;
 mod rules;
 mod snapshot;
+pub(crate) mod trial;
 use crate::{Result, err, now, require};
 pub use lookup::{LookupQuery, observe_lookup};
 use netlink_packet_route::AddressFamily;

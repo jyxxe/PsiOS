@@ -90,6 +90,10 @@ fn linked_operation(db: &Db<'_>, action: &Action, target: &Doc) -> Result<Option
         Action::InspectFileRename(_) => {
             (Some(target.id.clone()), &[crate::storage::file_move::TOOL])
         }
+        Action::InspectNetworkTrial(_) => (
+            Some(target.id.clone()),
+            &[crate::node::network::trial::TOOL],
+        ),
         Action::Health(_) => (
             held_operation(db, target)?,
             &["application.start", "application.stop"],

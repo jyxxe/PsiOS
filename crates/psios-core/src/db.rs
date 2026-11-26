@@ -190,7 +190,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = node::network::trial::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = agent::provider_authority::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -488,6 +488,9 @@ impl Store {
                 }
                 if ver < node::service_manager::FORMAT {
                     node::service_manager::migrate(db)?;
+                }
+                if ver < agent::provider_authority::FORMAT {
+                    db.c.execute_batch(agent::provider_authority::SCHEMA)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

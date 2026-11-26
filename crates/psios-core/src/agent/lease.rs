@@ -36,7 +36,9 @@ fn outstanding(
          JOIN current d ON d.id=s.spec->>'delegation_id' JOIN current m ON m.id=s.spec->'model_ref'->>'resource_id'
          LEFT JOIN model_lease_times a ON a.lease=st.lease
          LEFT JOIN model_inference_leases i ON i.lease=st.lease
-         WHERE st.receipt IS NULL AND (m.id=?1 OR d.body->>'grant_id'=?2 OR m.spec->>'provider_principal_id'=?3)
+         LEFT JOIN model_provider_authorities p ON p.lease=st.lease
+         WHERE st.receipt IS NULL AND (m.id=?1 OR d.body->>'grant_id'=?2 OR p.root_grant=?2
+               OR (p.lease IS NULL AND m.spec->>'provider_principal_id'=?3))
          AND i.status IS NOT 'NotStarted'
          AND CASE WHEN ?4 IS NULL THEN 1 WHEN st.boot_id=?4 AND (a.lease IS NULL OR a.time_ns=?6)
                   AND (i.lease IS NULL OR i.time_ns=?6) THEN st.deadline_boot_ms>?5

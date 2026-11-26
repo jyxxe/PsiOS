@@ -90,8 +90,10 @@ pub fn claim_status(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> 
     } else {
         let session = db.of(&id, "Session")?;
         if state(&session) == "ModelInFlight"
+            && session.spec["model_ref"] == model.reference()
             && session.body["current_lease"] == p.lease_id
             && Clock::sample()?.current(db, &session)?
+            && provider_authority::current(db, &session, &model, &p.lease_id)?
         {
             "Pending"
         } else {

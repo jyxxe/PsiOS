@@ -71,6 +71,159 @@ fn execute(s: &mut Store, task: &str) -> Value {
 }
 
 #[test]
+fn strict_model_lease_binding_is_witnessed_and_cannot_become_legacy() {
+    use rusqlite::params;
+
+    let directory = tempfile::tempdir().unwrap();
+    let (_, mut store) = initialized(directory.path());
+    let provider = call(
+        &mut store,
+        "Agent.Register",
+        json!({"name":"binding-provider"}),
+    )
+    .unwrap();
+    let model = call(
+        &mut store,
+        "Model.Register",
+        json!({
+            "name":"binding-model","revision":"1","provider_principal_id":provider["principal_id"],
+            "max_context_bytes":16384,"max_output_bytes":8192,"lease_seconds":30,
+            "inference_outcome_policy":"Strict",
+        }),
+    )
+    .unwrap();
+    let issue_provider = |store: &mut Store| {
+        call(
+            store,
+            "Grant.Issue",
+            json!({
+                "principal_id":provider["principal_id"],"actions":["model.serve"],
+                "tool_targets":[model["resource_id"]],"ttl_seconds":120,"units":1,
+            }),
+        )
+        .unwrap()
+    };
+    let issuer = issue_provider(&mut store);
+    let skill = call(
+        &mut store,
+        "Skill.Publish",
+        json!({
+            "name":"binding-skill","version":"1","license":"0BSD","source":"local",
+            "instructions":"Read local status","tools":["system.status"],
+        }),
+    )
+    .unwrap();
+    let runner = call(
+        &mut store,
+        "Agent.Register",
+        json!({"name":"binding-runner"}),
+    )
+    .unwrap();
+    let authority = call(
+        &mut store,
+        "Grant.Issue",
+        json!({
+            "principal_id":runner["principal_id"],
+            "actions":["session.run","task.submit","task.read","system.status"],
+            "tool_targets":[model["resource_id"],"profile-local"],"ttl_seconds":120,
+            "units":2,"model_calls":2,"model_lease_ms":60000,
+        }),
+    )
+    .unwrap();
+    let session = call_as(&mut store, "Session.Open", json!({
+        "key":id("provider-binding"),"goal":"Check local status with an authority-bound inference lease",
+        "skill_ref":skill,"model_ref":model,"context_policy":"ReferencesOnly","max_turns":2,
+        "delegation_id":authority["delegation_ref"]["resource_id"],
+    }), runner["token"].as_str().unwrap().into()).unwrap();
+    let session = session["reference"]["resource_id"].as_str().unwrap();
+    let provider_token = provider["token"].as_str().unwrap();
+    let claim_request = json!({"session_id":session,"key":id("bound-claim")});
+    let issued = call_as(
+        &mut store,
+        "Model.Claim",
+        claim_request.clone(),
+        provider_token.into(),
+    )
+    .unwrap();
+    let lease = issued["lease_id"].as_str().unwrap();
+    let replacement = issue_provider(&mut store);
+    store.transaction("verify-model-provider-binding", |db| {
+        use crate::agent::provider_authority::verify;
+        verify(db.c)?;
+        let (root, binding): (String, Value) = db.c.query_row(
+            "SELECT root_grant,binding FROM model_provider_authorities WHERE lease=?1",
+            [lease], |r| Ok((r.get(0)?,r.get(1)?)),
+        )?;
+        assert_eq!(issuer["grant_ref"]["resource_id"], root);
+        assert_eq!(binding["model_ref"], model);
+        assert_eq!(binding["delegation_refs"], json!([issuer["delegation_ref"]]));
+        assert_eq!(binding["grant_ref"], issuer["grant_ref"]);
+
+        db.c.execute_batch("SAVEPOINT altered_model_provider")?;
+        assert_eq!(db.c.execute(
+            "UPDATE model_provider_authorities SET root_grant=?1,binding=?2 WHERE lease=?3",
+            params![replacement["grant_ref"]["resource_id"].as_str(),
+                json!({"model_ref":model, "delegation_refs":[replacement["delegation_ref"]], "grant_ref":replacement["grant_ref"]}),
+                lease],
+        )?, 1);
+        assert_eq!(verify(db.c).unwrap_err().0.code, "RecoveryRequired");
+        db.c.execute_batch("ROLLBACK TO altered_model_provider; RELEASE altered_model_provider")?;
+        db.c.execute_batch("SAVEPOINT missing_model_provider")?;
+        assert_eq!(db.c.execute("DELETE FROM model_provider_authorities WHERE lease=?1", [lease])?, 1);
+        assert_eq!(verify(db.c).unwrap_err().0.code, "RecoveryRequired");
+        db.c.execute_batch("ROLLBACK TO missing_model_provider; RELEASE missing_model_provider")?;
+        verify(db.c)
+    }).unwrap();
+
+    let unused = issue_provider(&mut store);
+    let revoked = call(
+        &mut store,
+        "Grant.Revoke",
+        json!({
+            "id":unused["grant_ref"]["resource_id"],"expected_resource_version":unused["grant_ref"]["version"],
+        }),
+    ).unwrap();
+    assert_eq!(revoked["status"], "Complete");
+    let replay = call_as(
+        &mut store,
+        "Model.Claim",
+        claim_request.clone(),
+        provider_token.into(),
+    )
+    .unwrap();
+    assert_eq!(replay["lease_id"], lease);
+    assert_eq!(replay["context"], issued["context"]);
+
+    let grant = &issuer["grant_ref"];
+    let revoked = call(
+        &mut store,
+        "Grant.Revoke",
+        json!({
+            "id":grant["resource_id"],"expected_resource_version":grant["version"],
+        }),
+    )
+    .unwrap();
+    assert_eq!(revoked["status"], "Partial");
+    assert_eq!(
+        call_as(
+            &mut store,
+            "Model.Claim",
+            claim_request,
+            provider_token.into()
+        )
+        .unwrap_err()
+        .0
+        .code,
+        "Fenced",
+    );
+    store
+        .transaction("retain-historical-provider-binding", |db| {
+            crate::agent::provider_authority::verify(db.c)
+        })
+        .unwrap();
+}
+
+#[test]
 fn network_probe_projection_fences_older_receipts_and_rolls_back_with_task_result() {
     use std::os::unix::fs::MetadataExt;
 

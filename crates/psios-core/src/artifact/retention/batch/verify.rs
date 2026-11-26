@@ -228,3 +228,92 @@ pub(crate) fn check(conn: &Connection) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Config, Store, broker};
+    use psios_api::id;
+
+    fn observation(store: &mut Store) -> Doc {
+        let task = store
+            .transaction("queue-batch-test", |db| {
+                let prepared = broker::prepare(
+                    db,
+                    policy::OWNER,
+                    &json!({
+                        "tool":"system.status","input":{},"key":id("observation"),
+                        "delegation_id":"owner-delegation",
+                    }),
+                )?;
+                let accepted = broker::submit(db, policy::OWNER, &prepared, None)?;
+                Ok(accepted["task_id"].as_str().unwrap().to_owned())
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .transaction("claim-batch-test", broker::claim)
+                .unwrap(),
+            Some(task.clone()),
+        );
+        let work = store
+            .transaction("dispatch-batch-test", |db| broker::dispatch(db, &task))
+            .unwrap()
+            .unwrap();
+        let outcome = work.perform(|checkpoint| {
+            store.transaction("checkpoint-batch-test", |db| {
+                work.checkpoint(db, checkpoint)
+            })
+        });
+        store
+            .transaction("finish-batch-test", |db| {
+                broker::finish(db, &work, outcome)?;
+                db.of(&task, "Task")
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn offline_check_rejects_a_disconnected_member_or_remaining_payload() {
+        let directory = tempfile::tempdir().unwrap();
+        let cfg = Config::local(&directory.path().join("state"));
+        Store::init(&cfg).unwrap();
+        let mut store = Store::open(cfg).unwrap();
+        let ready = observation(&mut store);
+        let other = observation(&mut store);
+        store.transaction("apply-batch-fixture", |db| {
+            let artifact = db.resolve(&ready.body["result"]["artifact_refs"][0])?;
+            let chunk: Vec<u8> = db.c.query_row(
+                "SELECT payload FROM artifact_chunks WHERE artifact_id=?1 AND artifact_rev=?2 AND chunk_index=0",
+                params![artifact.id, artifact.rev], |r| r.get(0),
+            )?;
+            let prepared = super::super::prepare(db, policy::OWNER, &json!({
+                "task_refs":[ready.reference(),other.reference()], "reason":"evict two read results",
+            }))?;
+            let batch = super::super::apply(db, policy::OWNER, &json!({"plan_token":prepared["plan_token"]}))?;
+            check(db.c)?;
+
+            let receipt = &batch["batch"]["eviction_refs"][0]["resource_id"];
+            db.c.execute(
+                "UPDATE versions SET correlation='unrelated-request' WHERE id=?1 AND rev=1",
+                [receipt.as_str().unwrap()],
+            )?;
+            let error = check(db.c).unwrap_err();
+            assert_eq!(error.0.code, "RecoveryRequired");
+            assert!(error.0.message.contains("consecutive task transitions"));
+
+            db.c.execute(
+                "UPDATE versions SET correlation=?1 WHERE id=?2 AND rev=1",
+                params![db.correlation, receipt.as_str().unwrap()],
+            )?;
+            db.c.execute(
+                "INSERT INTO artifact_chunks(artifact_id,artifact_rev,chunk_index,payload) VALUES(?1,?2,0,?3)",
+                params![artifact.id, artifact.rev, chunk],
+            )?;
+            let error = check(db.c).unwrap_err();
+            assert_eq!(error.0.code, "RecoveryRequired");
+            assert!(error.0.message.contains("unique evicted output"));
+            Ok(())
+        }).unwrap();
+    }
+}

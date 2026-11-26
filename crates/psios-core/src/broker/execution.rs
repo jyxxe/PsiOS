@@ -461,9 +461,11 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
     if matches!(w.action, Action::NetworkTrial(_)) {
         return network_trial::finish_apply(db, w, result);
     }
-    let atomic_project = matches!(
+    let atomic_authority = matches!(
         w.action,
-        Action::SubmitWorkItemEvidence(_) | Action::ListAssignedWork(_)
+        Action::StartAgentSession(_)
+            | Action::SubmitWorkItemEvidence(_)
+            | Action::ListAssignedWork(_)
     );
     let t = db.get(&w.task.id)?;
     if t.body["current_run_id"] != w.run.id
@@ -471,9 +473,9 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
         || w.run.body["recovery_incarnation"] != db.incarnation
     {
         require(
-            !atomic_project,
+            !atomic_authority,
             "Fenced",
-            "project task dispatch no longer owns its current run",
+            "authority task dispatch no longer owns its current run",
         )?;
         let receipt = match result {
             Ok(_)
@@ -515,9 +517,9 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
     let cancelled = t.body["lifecycle"] == "Cancelling";
     let rebind = matches!(w.action, Action::RebindRestoredVolume(_));
     require(
-        !atomic_project || t.body["lifecycle"] == "Running",
+        !atomic_authority || t.body["lifecycle"] == "Running",
         "Fenced",
-        "project task dispatch is no longer running",
+        "authority task dispatch is no longer running",
     )?;
     let service_started = if node::service_control::is_control(&w.action) {
         Some(node::service_control::worker_started(db, w, &t)?)
@@ -606,9 +608,8 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                 Some(&a),
             )?;
         }
-        // Project tasks must publish the result and settle together. Evidence
-        // submission also changed its WorkItem in this same transaction.
-        Err(e) if atomic_project => return Err(e),
+        // Authority-only tasks publish state and settle in the same transaction.
+        Err(e) if atomic_authority => return Err(e),
         Err(e) => {
             let undispatched = service_started == Some(false)
                 || stop_started == Some(false)

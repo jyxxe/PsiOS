@@ -296,6 +296,13 @@ impl Action {
             Self::StartAgentSession(blueprint) => {
                 resources.push(blueprint.skill(db)?.reference());
                 resources.extend(blueprint.fallback_models(db)?.iter().map(Doc::reference));
+                agent::session_inputs::add_task_audience(
+                    db,
+                    actor,
+                    delegation,
+                    blueprint,
+                    &mut resources,
+                )?;
             }
             Self::Start(_)
             | Self::Stop(_)

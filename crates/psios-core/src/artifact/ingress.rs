@@ -794,7 +794,7 @@ pub(crate) fn withdraw(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value
     require(
         !crate::agent::session_inputs::retains(db, &artifact.id)?,
         "Conflict",
-        "artifact is retained by an active Agent session",
+        "artifact is retained by an active Agent session or accepted launch Task",
     )?;
     let manifest = super::Manifest::read(&artifact)?
         .ok_or_else(|| err("RecoveryRequired", "artifact manifest unavailable"))?;

@@ -1,24 +1,29 @@
 //! Exact, separately authorized input data for one local Agent session.
 use super::*;
-use crate::db::{resolve, row};
+use crate::db::resolve;
 use psios_api::ResourceRef;
 use rusqlite::Connection;
 use std::collections::BTreeSet;
+
+mod verify;
+pub(crate) use verify::verify;
 
 pub(crate) const ACTION: &str = "session.context.read";
 pub(crate) const FORMAT: u32 = crate::apps::volume_rebind::FORMAT + 1;
 // Older queue writers could disclose newly queued inputs without negotiation.
 pub(crate) const QUEUED_FORMAT: u32 = crate::node::block_device::FORMAT + 1;
+pub(crate) const BROKERED_FORMAT: u32 = crate::storage::transfer::FORMAT + 1;
 pub(crate) const SCHEMA: &str = include_str!("session_inputs.sql");
+pub(crate) const BROKERED_SCHEMA: &str = include_str!("brokered_session_input_holds.sql");
 const MAX_INPUTS: usize = 4;
 const MAX_INPUT_BYTES: usize = 16 * 1024;
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 enum Kind {
     Json,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Input {
     name: String,
@@ -64,15 +69,15 @@ pub(super) fn require_provider(session: &Doc, accepts_inputs: bool) -> Result<()
     )
 }
 
-fn source(conn: &Connection, session: &Doc, input: &Input) -> Result<Doc> {
+fn source(conn: &Connection, owner: &str, input: &Input) -> Result<Doc> {
     let artifact = resolve(conn, &json!(input.reference))?;
     require(
         artifact.kind == "Artifact"
             && artifact::is_raw(&artifact)
             && !artifact::files::managed(&artifact)
-            && artifact.owner == session.owner
+            && artifact.owner == owner
             && artifact.spec["source"]["kind"] == "LocalSubmission"
-            && artifact.spec["source"]["principal_id"] == session.owner
+            && artifact.spec["source"]["principal_id"] == owner
             && artifact.spec["declared_media_type"] == "application/json",
         "PermissionDenied",
         "session input must be an owned local JSON publication",
@@ -80,30 +85,36 @@ fn source(conn: &Connection, session: &Doc, input: &Input) -> Result<Doc> {
     Ok(artifact)
 }
 
-fn access(db: &Db<'_>, session: &Doc, inputs: &[Input]) -> Result<()> {
+fn access(
+    db: &Db<'_>,
+    owner: &str,
+    delegation_ref: &Value,
+    model_ref: &Value,
+    inputs: &[Input],
+) -> Result<()> {
     if inputs.is_empty() {
         return Ok(());
     }
-    let delegation_id = session.spec["delegation_id"].as_str().ok_or_else(|| {
+    let delegation_id = delegation_ref["resource_id"].as_str().ok_or_else(|| {
         err(
             "RecoveryRequired",
-            "session input lacks its original delegation",
+            "session input lacks its original delegation reference",
         )
     })?;
-    let delegation = policy::delegation(db, &session.owner, delegation_id, ACTION)?;
-    policy::delegation(db, &session.owner, delegation_id, artifact::ingress::READ)?;
+    let delegation = policy::delegation(db, owner, delegation_id, ACTION)?;
+    policy::delegation(db, owner, delegation_id, artifact::ingress::READ)?;
     let grant_id = delegation.body["grant_id"]
         .as_str()
         .ok_or_else(|| err("RecoveryRequired", "session input delegation lacks a grant"))?;
     let grant = db.of(grant_id, "Grant")?;
     require(
-        delegation.reference() == session.body["delegation_ref"]
+        delegation.reference() == *delegation_ref
             && (grant.spec["tool_targets"].is_array()
                 || delegation.body["tool_targets"].is_array()),
         "PermissionDenied",
         "session input requires the original explicit disclosure delegation",
     )?;
-    let model: ResourceRef = decode(&session.spec["model_ref"])?;
+    let model: ResourceRef = decode(model_ref)?;
     policy::tool_scope(db, &delegation.reference(), &model.resource_id)?;
     policy::tool_scope(db, &delegation.reference(), &db.meta("authority")?)?;
     for input in inputs {
@@ -112,9 +123,26 @@ fn access(db: &Db<'_>, session: &Doc, inputs: &[Input]) -> Result<()> {
     Ok(())
 }
 
+fn session_access(db: &Db<'_>, session: &Doc, inputs: &[Input]) -> Result<()> {
+    if !inputs.is_empty() {
+        require(
+            session.spec["delegation_id"] == session.body["delegation_ref"]["resource_id"],
+            "RecoveryRequired",
+            "session input delegation differs from its immutable configuration",
+        )?;
+    }
+    access(
+        db,
+        &session.owner,
+        &session.body["delegation_ref"],
+        &session.spec["model_ref"],
+        inputs,
+    )
+}
+
 pub(super) fn live_access(db: &Db<'_>, session: &Doc) -> Result<()> {
     let inputs = configured(session)?;
-    access(db, session, &inputs)?;
+    session_access(db, session, &inputs)?;
     for input in inputs {
         require(
             hold_exists(db.c, &session.id, &input.reference.resource_id)?,
@@ -130,11 +158,68 @@ fn value(conn: &Connection, artifact: &Doc, limit: usize) -> Result<Value> {
     psios_api::parse(&bytes).map_err(Into::into)
 }
 
+pub(crate) fn add_task_audience(
+    db: &Db<'_>,
+    actor: &str,
+    delegation_ref: &Value,
+    blueprint: &SessionBlueprint,
+    audience: &mut Vec<Value>,
+) -> Result<()> {
+    access(
+        db,
+        actor,
+        delegation_ref,
+        &blueprint.model_ref,
+        &blueprint.input_artifacts,
+    )?;
+    for input in &blueprint.input_artifacts {
+        audience.push(source(db.c, actor, input)?.reference());
+    }
+    Ok(())
+}
+
+pub(crate) fn pin_task(db: &Db<'_>, task: &Doc, blueprint: &SessionBlueprint) -> Result<()> {
+    for input in &blueprint.input_artifacts {
+        let artifact = source(db.c, &task.owner, input)?;
+        value(db.c, &artifact, MAX_INPUT_BYTES)?;
+        db.c.execute(
+            "INSERT INTO brokered_session_input_holds(task,artifact) VALUES(?1,?2)",
+            params![task.id, artifact.id],
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn require_task_holds(conn: &Connection, task: &Doc, inputs: &[Input]) -> Result<()> {
+    let mut stmt =
+        conn.prepare("SELECT artifact FROM brokered_session_input_holds WHERE task=?1")?;
+    let retained: BTreeSet<String> = stmt
+        .query_map([&task.id], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let expected: BTreeSet<String> = inputs
+        .iter()
+        .map(|input| input.reference.resource_id.clone())
+        .collect();
+    require(
+        retained == expected,
+        "RecoveryRequired",
+        "session launch task lacks its exact artifact custody",
+    )
+}
+
+pub(crate) fn release_task(db: &Db<'_>, task: &str) -> Result<()> {
+    db.c.execute(
+        "DELETE FROM brokered_session_input_holds WHERE task=?1",
+        [task],
+    )?;
+    Ok(())
+}
+
 pub(super) fn admit(db: &Db<'_>, session: &Doc) -> Result<()> {
     let inputs = configured(session)?;
-    access(db, session, &inputs)?;
+    session_access(db, session, &inputs)?;
     for input in inputs {
-        let artifact = source(db.c, session, &input)?;
+        let artifact = source(db.c, &session.owner, &input)?;
         value(db.c, &artifact, MAX_INPUT_BYTES)?;
         db.c.execute(
             "INSERT INTO session_input_holds(session,artifact) VALUES(?1,?2)",
@@ -156,11 +241,11 @@ pub(super) fn project(
         return Ok(());
     }
     if let Some(db) = db {
-        access(db, session, &inputs)?;
+        session_access(db, session, &inputs)?;
     }
     context["inputs"] = json!([]);
     for input in inputs {
-        let artifact = source(conn, session, &input)?;
+        let artifact = source(conn, &session.owner, &input)?;
         require(
             hold_exists(conn, &session.id, &artifact.id)?,
             "RecoveryRequired",
@@ -186,63 +271,11 @@ fn hold_exists(conn: &Connection, session: &str, artifact: &str) -> Result<bool>
 
 pub(crate) fn retains(db: &Db<'_>, artifact: &str) -> Result<bool> {
     Ok(db.c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM session_input_holds WHERE artifact=?1)",
+        "SELECT EXISTS(SELECT 1 FROM session_input_holds WHERE artifact=?1)
+             OR EXISTS(SELECT 1 FROM brokered_session_input_holds WHERE artifact=?1)",
         [artifact],
         |row| row.get(0),
     )?)
-}
-
-pub(crate) fn verify(conn: &Connection, database_format: u32) -> Result<()> {
-    let mut sessions = conn.prepare(
-        "SELECT * FROM current WHERE kind='Session' AND spec->>'input_artifacts' IS NOT NULL",
-    )?;
-    let mut expected_holds = 0i64;
-    for session in sessions.query_map([], row)? {
-        let session = session?;
-        let inputs = configured(&session)?;
-        if inputs.is_empty() {
-            continue;
-        }
-        let original = conn.query_row(
-            "SELECT * FROM versions WHERE id=?1 AND rev=1",
-            [&session.id],
-            row,
-        )?;
-        require(
-            original.kind == "Session"
-                && original.owner == session.owner
-                && original.spec == session.spec
-                && original.body["delegation_ref"] == session.body["delegation_ref"]
-                && (session.spec["provider_queue"] != true || database_format >= QUEUED_FORMAT)
-                && !session.spec["fallback_model_refs"]
-                    .as_array()
-                    .is_some_and(|refs| !refs.is_empty())
-                && !session.spec["origin_task_ref"].is_object()
-                && tool_context::enabled(&session),
-            "RecoveryRequired",
-            "session input differs from its original direct-session configuration",
-        )?;
-        for input in inputs {
-            let artifact = source(conn, &session, &input)?;
-            if !matches!(state(&session), "Succeeded" | "Failed" | "Cancelled") {
-                require(
-                    hold_exists(conn, &session.id, &artifact.id)?,
-                    "RecoveryRequired",
-                    "session input hold is missing",
-                )?;
-                value(conn, &artifact, MAX_INPUT_BYTES)?;
-                expected_holds += 1;
-            }
-        }
-    }
-    let actual_holds = conn.query_row("SELECT count(*) FROM session_input_holds", [], |row| {
-        row.get::<_, i64>(0)
-    })?;
-    require(
-        actual_holds == expected_holds,
-        "RecoveryRequired",
-        "session input contains an unbound hold",
-    )
 }
 
 #[cfg(test)]

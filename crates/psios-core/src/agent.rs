@@ -38,6 +38,8 @@ pub(crate) struct SessionBlueprint {
     model_ref: Value,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     fallback_model_refs: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    input_artifacts: Vec<session_inputs::Input>,
     context_policy: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_context_window: Option<u8>,
@@ -54,6 +56,18 @@ fn session_limits(goal: &str, context_policy: &str, max_turns: u32) -> Result<()
     )
 }
 
+fn validate_session_inputs(
+    inputs: &[session_inputs::Input],
+    fallback_models: &[Value],
+) -> Result<()> {
+    session_inputs::validate(inputs)?;
+    require(
+        inputs.is_empty() || fallback_models.is_empty(),
+        "UnsupportedCapability",
+        "artifact inputs require a fixed model without fallback",
+    )
+}
+
 impl SessionBlueprint {
     pub(crate) fn validate(&self) -> Result<()> {
         let _: psios_api::ResourceRef = decode(&self.skill_ref)?;
@@ -64,7 +78,8 @@ impl SessionBlueprint {
             &self.model_ref,
             &self.fallback_model_refs,
             &self.context_policy,
-        )
+        )?;
+        validate_session_inputs(&self.input_artifacts, &self.fallback_model_refs)
     }
 
     pub(crate) fn model(&self, db: &Db<'_>) -> Result<Doc> {
@@ -80,6 +95,14 @@ impl SessionBlueprint {
 
     pub(crate) fn skill(&self, db: &Db<'_>) -> Result<Doc> {
         registry::pinned(db, &self.skill_ref, "Skill")
+    }
+
+    fn opening(&self, task: &Doc) -> Result<Value> {
+        let mut input = serde_json::to_value(self)?;
+        input["key"] = json!(task.id);
+        input["delegation_id"] = task.spec["delegation_ref"]["resource_id"].clone();
+        input["provider_queue"] = json!(true);
+        Ok(input)
     }
 }
 
@@ -144,10 +167,7 @@ pub(crate) fn open_for_task(
     task: &Doc,
     blueprint: &SessionBlueprint,
 ) -> Result<Value> {
-    let mut p = serde_json::to_value(blueprint)?;
-    p["key"] = json!(task.id);
-    p["delegation_id"] = task.spec["delegation_ref"]["resource_id"].clone();
-    p["provider_queue"] = json!(true);
+    let p = blueprint.opening(task)?;
     let admitted = open_session(db, &task.owner, &p, Some(task))?;
     Ok(json!({"session_ref":admitted["reference"]}))
 }
@@ -159,15 +179,18 @@ fn open_session(db: &Db<'_>, actor: &str, p: &Value, origin_task: Option<&Doc>) 
     session_limits(&o.goal, &o.context_policy, o.max_turns)?;
     tool_context::validate(o.tool_context_window)?;
     fallback::validate(&o.model_ref, &o.fallback_model_refs, &o.context_policy)?;
-    session_inputs::validate(&o.input_artifacts)?;
+    validate_session_inputs(&o.input_artifacts, &o.fallback_model_refs)?;
     let with_inputs = !o.input_artifacts.is_empty();
-    require(
-        !with_inputs || (o.fallback_model_refs.is_empty() && origin_task.is_none()),
-        "UnsupportedCapability",
-        "artifact inputs currently require a direct session without fallback",
-    )?;
     let context_window = o.tool_context_window.or(with_inputs.then_some(1));
     let d = policy::delegation(db, actor, &o.delegation_id, "session.run")?;
+    if with_inputs && let Some(task) = origin_task {
+        require(
+            task.spec["delegation_ref"] == d.reference(),
+            "PermissionDenied",
+            "session launch delegation changed",
+        )?;
+        session_inputs::require_task_holds(db.c, task, &o.input_artifacts)?;
+    }
     let mut spec = p.clone();
     if with_inputs {
         spec["tool_context_window"] = json!(context_window);

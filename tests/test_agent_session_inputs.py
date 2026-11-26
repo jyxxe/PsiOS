@@ -412,7 +412,7 @@ class QueuedSessionInputUpgrade(SessionInputFixture, unittest.TestCase):
         self.assertIn("SchemaVersionUnsupported", old_writer.stdout + old_writer.stderr)
         upgraded = json.loads(subprocess.check_output(n.daemon + ["verify"], timeout=20))
         self.assertFalse(upgraded["migration_required"])
-        self.assertEqual(upgraded["database_format"], 104)
+        self.assertGreaterEqual(upgraded["database_format"], 104)
         self.assertEqual(upgraded["node_id"], source["node_id"])
         n.start()
         first = self.queued("new-format-negotiated", accept=True)

@@ -1,10 +1,38 @@
 """Settle a pre-metering reservation in place after a same-boot binary upgrade."""
 import argparse
+from contextlib import closing
 from pathlib import Path
 import signal
+import sqlite3
 
 from model_leases import open_session
-from support import Node
+from support import Failure, Node
+
+
+def reject_unrelated_reservation(node, original, claim):
+    node.stop(signal.SIGKILL)
+    with closing(sqlite3.connect(node.state / "state.db")) as connection:
+        identity = (original["resource_id"],)
+        correlation, = connection.execute(
+            "SELECT correlation FROM versions WHERE id=? AND rev=1", identity
+        ).fetchone()
+        with connection:
+            connection.execute("UPDATE versions SET correlation='unrelated-request' WHERE id=? AND rev=1",
+                               identity)
+        try:
+            node.start()
+            try:
+                node.call("Model.Claim", claim)
+            except Failure as refused:
+                assert refused.code == "OutcomeUnknown", refused
+            else:
+                raise AssertionError("unrelated reservation incorrectly authorized legacy replay")
+        finally:
+            node.stop()
+            with connection:
+                connection.execute("UPDATE versions SET correlation=? WHERE id=? AND rev=1",
+                                   (correlation, *identity))
+    node.start()
 
 
 def upgrade(previous, current):
@@ -20,6 +48,10 @@ def upgrade(previous, current):
         node.start()
         active = node.call("Model.Claim", claim)
         assert active["usage_format"] == "tokens.v1" and active["lease_id"] == leased["lease_id"]
+        assert active["recovered"] is True and active["context"] == leased["context"]
+        assert node.call("Resource.List", {"kind": "ModelUsage"})["items"] == [original]
+        reject_unrelated_reservation(node, original, claim)
+        assert node.call("Model.Claim", claim) == active
         counts = dict(input_tokens=201, output_tokens=8)
         response = dict(session_id=sid, lease_id=leased["lease_id"], decision=dict(action="finish", summary="done"), usage=counts)
         receipt = node.call("Model.Respond", response)

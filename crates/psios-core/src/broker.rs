@@ -216,6 +216,9 @@ fn close(
         admission::release(db, &t.id)?;
         dependencies::release(db, &t.id)?;
         artifact::capacity::release(db, &t.id)?;
+        if t.spec["task_type"] == agent::START_SESSION {
+            agent::session_inputs::release_task(db, &t.id)?;
+        }
         if matches!(
             t.spec["task_type"].as_str(),
             Some(apps::artifact_install::TOOL | apps::artifact_install::STAGE_TOOL)

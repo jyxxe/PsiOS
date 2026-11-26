@@ -703,7 +703,11 @@ Core 记录 Provider 的迟到证据，原 `Unknown`、工具任务和记账继�
 
 直接调用 `Session.Open` 可提交 `input_artifacts`，每项由唯一 `name`、完整资源引用 `reference` 和 `kind: "Json"` 组成。支持至多四个会话所有者发布的 `application/json` 制品，每份原始数据至多 16 KiB。Core 在会话建立和 Provider 领取时校验 JSON、原摘要及合并后上下文预算。会话表和历史查询保存引用及上下文摘要。
 
-原始会话委托需具备 `session.context.read`、`artifact.read`、正常的会话与工具操作权限。它的 `tool_targets` 必须明确包含所选模型、每个制品和节点，以及工具所需的作用域。该模型的注册 Provider 必须在领取请求中显式提交 `accepts_session_inputs: true`，随后通过 `context.inputs` 接收 `name`、`reference`、`kind` 和 `value`。SDK 的 `SessionModel::accepts_session_inputs` 可启用此协商。Core 会在重放和提交新决策前复核原委托。活动会话固定这些精确制品，终态释放。重试会话中的失败 Task 时，会在同一受理事务内重新验证并固定原制品。格式 100 支持直接领取，格式 104 扩展至 Provider 队列并阻止旧 Core 打开升级后的状态。私有输入限定于直接建立、使用固定模型的会话。通用本机盘点适配器继续使用默认能力声明。 [Unix API 验收](../tests/test_agent_session_inputs.py)
+原始会话委托需具备 `session.context.read`、`artifact.read`、正常的会话与工具操作权限。它的 `tool_targets` 必须明确包含所选模型、每个制品和节点，以及工具所需的作用域。该模型的注册 Provider 必须在领取请求中显式提交 `accepts_session_inputs: true`，随后通过 `context.inputs` 接收 `name`、`reference`、`kind` 和 `value`。SDK 的 `SessionModel::accepts_session_inputs` 可启用此协商。Core 会在重放和提交新决策前复核原委托。活动会话固定这些精确制品，终态释放。重试会话中的失败 Task 时，会在同一受理事务内重新验证并固定原制品。格式 100 支持直接领取，格式 104 扩展至 Provider 队列并阻止旧 Core 打开升级后的状态。私有输入要求固定模型，通用本机盘点适配器继续使用默认能力声明。 [Unix API 验收](../tests/test_agent_session_inputs.py)
+
+格式 106 允许 `agent.session.start` 在工具输入中使用同样的 `input_artifacts`。启动 Task 的原始委托同时覆盖此工具、Skill 和私有输入所需的作用域。实际受理后，启动 Task 保留其精确制品，直到失败、取消或移交给 Session。成功时，Core 在同一个持久事务内创建 Session、移交保留关系并发布只含 `session_ref` 的启动回执。
+
+Schedule 和 Workflow 可以固定同样的制品引用，并通过各自已有的 Task 受理路径启动会话。保留从每次实际受理开始。若在该次受理之前撤回制品，该次启动会失败。Workflow 的输入映射继续只接受现有的受支持文本参数。 [启动、撤权与恢复验收](../tests/test_brokered_session_inputs.py)
 
 ### 预授权本机模型交接
 

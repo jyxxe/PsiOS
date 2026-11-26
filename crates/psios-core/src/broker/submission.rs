@@ -542,6 +542,9 @@ fn submit_with_origin(
     }
     artifact::capacity::reserve(db, &t, tool)?;
     apps::artifact_install::acquire(db, &t, &a, &audience)?;
+    if let Action::StartAgentSession(blueprint) = &a {
+        agent::session_inputs::pin_task(db, &t, blueprint)?;
+    }
     dependencies::pin(db, &t, &requirements)?;
     if staged {
         preparation::consume(db, actor, &origin, s)?;

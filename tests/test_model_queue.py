@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import json
+import os
 import signal
 import socket
 import sqlite3
@@ -18,7 +19,7 @@ from support import Failure, Node, key, target
 
 class ModelQueueTests(unittest.TestCase):
     def setUp(self):
-        self.n = Node("target/debug")
+        self.n = Node(os.getenv("PSIOS_TEST_BIN_DIR", "target/debug"))
         self.addCleanup(self.n.close)
         self.tools = ["node.inventory", "node.devices"]
         self.skill = self.n.call("Skill.Publish", dict(name="inventory", version="1", tools=self.tools,

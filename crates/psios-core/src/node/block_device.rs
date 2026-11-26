@@ -190,7 +190,7 @@ pub(super) fn observe(work: &Work) -> Result<Value> {
 }
 
 fn sample(expected: &Identity) -> Result<Value> {
-    if crate::linux_clock::BootClock::sample()?.boot_id != expected.boot_id {
+    if crate::linux_clock::boot_id()? != expected.boot_id {
         return Ok(unobserved("BootEnded", &now()));
     }
     match block::presence(&expected.major_minor, &expected.disk_sequence)? {

@@ -41,14 +41,14 @@ pub fn sync(db: &Db<'_>) -> Result<()> {
         Err(e) if e.0.code == "NotFound" => "Enabled".into(),
         Err(e) => return Err(e),
     };
-    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+    let boot = linux_clock::boot_id()?;
     let spec = json!({"node_id":id,"worker_count":db.cfg.workers,"queue_limit":db.cfg.queue_limit,"scheduling":scheduling});
     upsert(
         db,
         "Node",
         &id,
         spec.clone(),
-        json!({"configuration":spec,"scheduling":scheduling,"boot_id":boot.trim(),"lifecycle":"Ready"}),
+        json!({"configuration":spec,"scheduling":scheduling,"boot_id":boot,"lifecycle":"Ready"}),
     )?;
     let mut active = std::collections::HashSet::new();
     for item in &db.cfg.services {
@@ -69,7 +69,7 @@ pub fn sync(db: &Db<'_>) -> Result<()> {
             body["start_operation_id"] = start.clone();
         }
         let registered = upsert(db, "HostService", &sid, spec, body)?;
-        service_state::sync(db, &registered, boot.trim())?;
+        service_state::sync(db, &registered, &boot)?;
         active.insert(sid);
     }
     let known =
@@ -83,7 +83,7 @@ pub fn sync(db: &Db<'_>) -> Result<()> {
         let mut body = d.body.clone();
         body["lifecycle"] = json!("Unregistered");
         let retired = db.status(&d, body)?;
-        service_state::sync(db, &retired, boot.trim())?;
+        service_state::sync(db, &retired, &boot)?;
     }
     network::enrollment::sync(db)?;
     network::probe::sync(db, &id)
@@ -150,7 +150,7 @@ fn inventory() -> Result<Value> {
         }
     }
     Ok(
-        json!({"boot_id":scalar("/proc/sys/kernel/random/boot_id")?,"kernel_release":scalar("/proc/sys/kernel/osrelease")?,
+        json!({"boot_id":linux_clock::boot_id()?,"kernel_release":scalar("/proc/sys/kernel/osrelease")?,
       "architecture":std::env::consts::ARCH,"available_cpus":std::thread::available_parallelism()?.get(),
       "memory_bytes":mem,"load_average":scalar("/proc/loadavg")?.split_whitespace().take(3).collect::<Vec<_>>(),
       "observed_at":now()}),

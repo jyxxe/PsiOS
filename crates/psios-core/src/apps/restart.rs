@@ -56,16 +56,7 @@ impl Request {
     }
 }
 
-pub(super) fn boot_id() -> Result<String> {
-    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
-    let boot = boot.trim();
-    require(
-        uuid::Uuid::parse_str(boot).is_ok_and(|id| id.to_string() == boot),
-        "DependencyUnavailable",
-        "Linux boot identity unavailable",
-    )?;
-    Ok(boot.into())
-}
+pub(super) use crate::linux_clock::boot_id;
 
 pub(crate) fn observe(work: &Work) -> Result<Value> {
     let e = Engine(&work.cfg);

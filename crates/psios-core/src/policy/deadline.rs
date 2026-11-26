@@ -1,7 +1,6 @@
 use crate::{Result, db::Db, err, linux_clock::BootClock, require};
 use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
-use std::{fs, io, os::unix::fs::MetadataExt};
 
 pub(crate) struct Clock {
     pub boot: BootClock,
@@ -10,15 +9,8 @@ pub(crate) struct Clock {
 
 impl Clock {
     pub fn sample() -> Result<Self> {
-        let time_ns = match fs::metadata("/proc/self/ns/time") {
-            Ok(metadata) => metadata.ino().to_string(),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => "unsupported".into(),
-            Err(error) => return Err(error.into()),
-        };
-        Ok(Self {
-            boot: BootClock::sample()?,
-            time_ns,
-        })
+        let (boot, time_ns) = BootClock::sample_with_time_namespace()?;
+        Ok(Self { boot, time_ns })
     }
 
     pub(super) fn register(&self, db: &Db<'_>, resource: &str, ttl_seconds: u32) -> Result<()> {

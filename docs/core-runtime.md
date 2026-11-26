@@ -329,6 +329,8 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 
 新签发的 Grant 和 Delegation 同时保存绝对 UTC 截止时间与基于 Linux `CLOCK_BOOTTIME` 的时限。Core 在同一内核启动和时间命名空间内同时检查这两个条件，包括服务重启后的权限检查、队列结算和效果准入。墙钟回拨后，已经用完的经过时间仍然计入时限。变更时间命名空间时需要重新取得适用的委托。切换到另一内核启动时使用原 UTC 截止时间。格式 25 保留旧签发记录的原期限，新时限随新签发写入权威。[原生盘回拨验收](../tests/native_grant_deadline.py) · [时间命名空间验收](../tests/grant_time_namespace.py) · [格式 24 升级](../tests/grant_deadline_upgrade.py)
 
+时钟使用由当前 procfs 提供的 boot ID 和调用线程的 Linux 时间命名空间。支持 systemd 将同源 `/proc/sys` 只读重新挂载，也支持由主机提供的 LXC `.lxc-boot-id` 只读单文件配置。Core 在读取前核验实际挂载和文件身份，时间命名空间来自核验过的 `nsfs`。时钟来源无法核实时，依赖该时钟的授权检查会失败。[私有挂载与时钟来源验收](../tests/kernel_clock_provenance.py)
+
 新接受的 Task 在同一事务中固定计划的经过时间截止点。审批决定、队列结算和派发按 UTC 与经过时间中先到期的一项处理。原任务在当前内核启动中的截止点同时约束重试，幂等重发仍可取回原回执。执行许可的短期窗口也保存经过时间，适用于立即准入与备份发布、OCI 启动等后续检查点。已经派发的操作仍按实际效果与回执结算。格式 26 保留早期已接受 Task 的 UTC 期限与审批状态。跨内核启动继续使用原 UTC 截止时间。[真实回拨验收](../tests/native_grant_deadline.py) · [格式 25 升级](../tests/task_deadline_upgrade.py)
 
 ## 任务输出依赖

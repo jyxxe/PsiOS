@@ -69,20 +69,7 @@ pub(super) fn manager_uid(manager: &Manager) -> u32 {
     }
 }
 
-pub(super) fn boot_id() -> Result<String> {
-    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
-    let id = boot.trim();
-    require(
-        valid_boot_id(id),
-        "DependencyUnavailable",
-        "Linux boot identity unavailable",
-    )?;
-    Ok(id.to_owned())
-}
-
-fn valid_boot_id(id: &str) -> bool {
-    uuid::Uuid::parse_str(id).is_ok_and(|uuid| !uuid.is_nil() && uuid.to_string() == id)
-}
+pub(super) use crate::linux_clock::boot_id;
 
 pub(crate) fn migrate(db: &Db<'_>) -> Result<()> {
     db.create(
@@ -436,7 +423,9 @@ fn matches_service(service: &Doc, observation: &Value) -> bool {
             Some("user") => uid.is_some_and(|uid| u32::try_from(uid).is_ok()),
             _ => false,
         })
-        && observation["boot_id"].as_str().is_some_and(valid_boot_id)
+        && observation["boot_id"]
+            .as_str()
+            .is_some_and(block::valid_boot)
         && observation["definition_digest"].is_string()
         && observation["definition_digest"] == service.spec["definition_digest"]
         && observation["load_state"] == "loaded"

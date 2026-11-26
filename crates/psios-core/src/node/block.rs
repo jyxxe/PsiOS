@@ -448,7 +448,7 @@ pub(super) fn presence(major_minor: &str, expected_sequence: &str) -> Result<Pre
 }
 
 pub(super) fn sample(major_minor: &str, trackable: bool) -> Result<Sample> {
-    let boot_id = crate::linux_clock::BootClock::sample()?.boot_id;
+    let boot_id = crate::linux_clock::boot_id()?;
     let namespace = fs::metadata("/proc/self/ns/mnt")?.ino();
     let (path, directory) = lookup(major_minor)?;
     let first = layout(&directory, path, major_minor)?;

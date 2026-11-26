@@ -21,24 +21,29 @@ CTL = "sudo -n -u psios /usr/bin/psiosctl"
 
 
 @contextlib.contextmanager
-def boot(instance, key, number, *, power_cut=False):
+def boot(instance, key, number, *, power_cut=False, launch=None, readiness_timeout=360):
     # Bind forwarding only on loopback. restrict=on prevents guest access to
     # external package mirrors, registries or model endpoints during acceptance.
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     serial = instance / f"serial-{number}.log"
-    with subprocess.Popen([sys.executable, ROOT / "images/qemu/run.py", instance, "--serial-log", serial,
-                           "--ssh-port", str(port)]) as vm:
-        ssh = ["ssh", "-T", "-p", str(port), "-i", str(key), "-o", "BatchMode=yes",
+    command = ([sys.executable, ROOT / "images/qemu/run.py", instance, "--serial-log", serial,
+                "--ssh-port", str(port)] if launch is None else launch(port, serial))
+    with subprocess.Popen(command, cwd=instance if launch is not None else None) as vm:
+        ssh = ["ssh"]
+        if launch is not None:
+            ssh += ["-F", "/dev/null", "-o", "GlobalKnownHostsFile=/dev/null"]
+        ssh += ["-T", "-p", str(port), "-i", str(key), "-o", "BatchMode=yes",
                "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=4",
                "-o", "HostKeyAlias=" + instance.name, "-o", "UserKnownHostsFile=" + str(instance / "known_hosts"),
                "psios-admin@127.0.0.1"]
 
-        def run(command, *, check=True, timeout=40, data=None):
-            return subprocess.run(ssh + [command], check=check, input=data, text=True, capture_output=True, timeout=timeout)
+        def run(command, *, check=True, timeout=40, data=None, stdin=None):
+            return subprocess.run(ssh + [command], check=check, input=data, stdin=stdin,
+                                  text=True, capture_output=True, timeout=timeout)
         try:
-            deadline = time.monotonic() + 360
+            deadline = time.monotonic() + readiness_timeout
             while time.monotonic() < deadline:
                 if vm.poll() is not None:
                     raise RuntimeError("guest exited before provisioning")

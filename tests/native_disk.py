@@ -98,12 +98,12 @@ class Console:
 
 @contextmanager
 def boot(work, image, network_mac=None, extra_disk=None, tap=None, *, rtc_base=None,
-         disk_format="raw", vars_file="vars.fd"):
+         disk_format="raw", vars_file="vars.fd", vcpus=2):
     # The privileged TAP fixture has a reproducible serial stall on hosted KVM.
     # Use a portable CPU emulator for that fixture; keep its real virtio and TAP.
     accel = "kvm" if tap is None and os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
     cmd = ["qemu-system-x86_64", "-nodefaults", "-no-user-config", "-no-reboot", "-machine", "q35",
-           "-accel", accel, "-m", "768", "-smp", "2", "-display", "none",
+           "-accel", accel, "-m", "768", "-smp", str(vcpus), "-display", "none",
            "-monitor", "none", "-serial", "stdio",
            "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=code.fd",
            "-drive", f"if=pflash,format=raw,unit=1,file={vars_file}"]

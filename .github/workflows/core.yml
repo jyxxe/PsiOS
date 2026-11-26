@@ -647,6 +647,37 @@ jobs:
       - name: Boot BIOS and UEFI nodes and recover after abrupt VM loss
         run: python3 tests/qemu_boot.py --base "$RUNNER_TEMP/base.img" --package "$RUNNER_TEMP"/psios-package/psios-core_*.deb
 
+  native-virtio-install:
+    needs: host-package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: psios-core-ubuntu-24.04-amd64
+          path: ${{ runner.temp }}/psios-package
+      - name: Prepare pinned installer inputs
+        run: |
+          sudo timeout 180 apt-get update -q
+          sudo timeout 240 apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils genisoimage \
+            seabios ovmf grub-common grub-efi-amd64-bin cpio dosfstools e2fsprogs fdisk mtools
+          (cd "$RUNNER_TEMP/psios-package" && sha256sum --strict --check SHA256SUMS)
+          curl --fail --location --retry 3 "$(jq -r .url images/qemu/base.json)" -o "$RUNNER_TEMP/base.img"
+          curl --fail --location --retry 3 "$(jq -r .url images/rescue/base.json)" -o "$RUNNER_TEMP/kernel.iso"
+          mkdir "$RUNNER_TEMP/installer-tools"
+          (cd "$RUNNER_TEMP/installer-tools" && apt-get download fdisk mtools)
+          tools/build-portable-core "$RUNNER_TEMP/native-core.tar.gz"
+      - name: Install onto a real virtio device in an isolated Linux guest and reboot the installed disk
+        run: |
+          archive="$RUNNER_TEMP/native-core.tar.gz"
+          tool_args=()
+          for tool in "$RUNNER_TEMP"/installer-tools/*.deb; do tool_args+=(--tool-deb "$tool"); done
+          python3 -B tests/native_install_virtio.py --base "$RUNNER_TEMP/base.img" \
+            --package "$RUNNER_TEMP"/psios-package/psios-core_*.deb \
+            --archive "$archive" --archive-sha256 "$(sha256sum "$archive" | cut -d ' ' -f1)" \
+            --kernel-iso "$RUNNER_TEMP/kernel.iso" "${tool_args[@]}"
+
   package-provenance:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'jyxxe/PsiOS'
     needs: [linux, host-package, guest-boot]

@@ -133,10 +133,12 @@ class StorageReserveTests(unittest.TestCase):
         self.assertEqual(read["lifecycle"], "Succeeded", read)
         self.assertEqual(node.call("Artifact.Read", {"reference": read["result"]["artifact_refs"][0]})["content"],
                          "readable")
+        # Ordinary creation checks inode capacity before issuing its publication permit.
         for task_id in [queued_create, *approved]:
+            outcome = "NotStarted" if task_id == queued_create else "Known"
             task = node.wait(task_id)
             self.assertEqual((task["lifecycle"], task["outcome_knowledge"], task["conditions"][0]["type"]),
-                             ("Failed", "Known", "QuotaExceeded"), task)
+                             ("Failed", outcome, "QuotaExceeded"), task)
             self.assertIn("destination inodes", task["conditions"][0]["message"])
         self.assertEqual(node.wait(cleanup)["lifecycle"], "Succeeded")
         removed = node.state / "volumes" / removable["resource_id"] / "data" / "record"

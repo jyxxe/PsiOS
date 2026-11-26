@@ -35,7 +35,7 @@ mod source;
 pub(crate) use disposal::{Disposal, next_disposal, queue_disposal};
 use source::Source;
 mod verification;
-pub(crate) use verification::verify_clones;
+pub(crate) use verification::{clone_origin, verify_clones};
 pub(crate) use verification::{protected_stages, verify};
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]

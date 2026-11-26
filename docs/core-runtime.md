@@ -317,6 +317,8 @@ Rust SDK 的 `Client::prepare_oci_stop_continuation` 与 `psiosctl application-p
 
 Core 独占两个卷和应用，核对恢复证明、当前文件树和 OCI 容器缺席，然后在同一事务提交新 Deployment 和 Task 回执。原应用 ID、Release 和旧数据卷保留。应用保持停止，可用新的应用修订另行提交 `application.start`。格式 99 增加该能力及离线检查。能力范围是同一节点上经验证的单卷 OCI 恢复。 [真实 OCI 验收](../tests/oci_volume_rebind.py)
 
+格式 116 也接受独立激活后的 `volume.clone` 卷。Core 核对原克隆 Task、已结算的发布检查点和新卷初始修订，并验证捕获的源卷 ID 与数据世代仍与应用数据绑定一致。新的审批仍固定调用时的应用和两个卷修订。重绑定再次验证克隆根目录的所有者、权限与扩展属性。新 Deployment 保留克隆发布和独立激活证据，便于离线检查。 [真实 OCI 克隆重绑定验收](../tests/oci_direct_clone_rebind.py)
+
 ### 导出备份
 
 通过 `Grant.Issue` 把 `backup.export` 授予指定主体，并在 `tool_targets` 中列出获准访问的 Backup ID。主体可使用该 Backup 当前修订的 `ResourceRef` 调用 `Backup.Export`。权限包含清单和备份数据。通用资源查询与卷访问仍按各自权限裁决。

@@ -14,12 +14,18 @@ fn record_missing() -> crate::Error {
     )
 }
 
-fn check_binding(conn: &Connection, deployment: &Doc, previous_app: &Doc, app: &Doc) -> Result<()> {
+fn check_binding(
+    conn: &Connection,
+    deployment: &Doc,
+    previous_app: &Doc,
+    app: &Doc,
+    format: u32,
+) -> Result<()> {
     let proof = &deployment.spec["restore_rebind"];
     let prior = resolve(conn, &proof["previous_deployment_ref"])?;
     let source = resolve(conn, &proof["source_volume_ref"])?;
     let restored = resolve(conn, &proof["restored_volume_ref"])?;
-    let backup = lineage(conn, &source, &restored)?;
+    let lineage = lineage(conn, &source, &restored)?;
     let evidence = activation(conn, &restored)?;
     let issued = resolve(conn, &proof["operation_ref"])?;
     let operation = find(conn, &issued.id)?.ok_or_else(record_missing)?;
@@ -61,7 +67,7 @@ fn check_binding(conn: &Connection, deployment: &Doc, previous_app: &Doc, app: &
             && app.body["runtime_state"] == "Absent"
             && proof["previous_application_ref"] == previous_app.reference()
             && proof["activation_ref"] == evidence.reference()
-            && proof["backup_ref"] == backup.reference(),
+            && lineage.matches(proof, format),
         "RecoveryRequired",
         "application volume rebind history has inconsistent deployment or restore lineage",
     )?;
@@ -101,8 +107,8 @@ fn check_binding(conn: &Connection, deployment: &Doc, previous_app: &Doc, app: &
     )
 }
 
-pub(crate) fn check(conn: &Connection) -> Result<()> {
-    let result = check_history(conn);
+pub(crate) fn check(conn: &Connection, format: u32) -> Result<()> {
+    let result = check_history(conn, format);
     result.map_err(|reason| {
         if reason.0.code == "RecoveryRequired" {
             reason
@@ -115,7 +121,7 @@ pub(crate) fn check(conn: &Connection) -> Result<()> {
     })
 }
 
-fn check_history(conn: &Connection) -> Result<()> {
+fn check_history(conn: &Connection, format: u32) -> Result<()> {
     let mut transitions = conn.prepare(
         "SELECT v.* FROM versions v JOIN versions p ON v.id=p.id AND p.rev=v.rev-1
          WHERE v.kind='Application' AND (v.spec->>'volume_id' IS NOT p.spec->>'volume_id'
@@ -159,7 +165,7 @@ fn check_history(conn: &Connection) -> Result<()> {
             "RecoveryRequired",
             "previous volume binding was not superseded in the same transaction",
         )?;
-        check_binding(conn, &deployment, &prior, &app)?;
+        check_binding(conn, &deployment, &prior, &app, format)?;
     }
     let orphan: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM versions d WHERE d.kind='Deployment' AND d.rev=1

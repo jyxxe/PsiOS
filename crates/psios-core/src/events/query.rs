@@ -17,10 +17,8 @@ pub(super) enum View {
 pub(super) fn selection(cursor: &Cursor, view: View, limit: u32) -> (String, Vec<Value>) {
     let origins = matches!(view, View::Snapshot) && cursor.orders_by_creation();
     let mut arguments = vec![cursor.position.into(), i64::from(limit).into()];
-    let mut conditions = format!(
-        "v.seq > ?1 AND v.kind <> '{}'",
-        crate::apps::log_tail::PRIVATE_KIND
-    );
+    let private_kinds = policy::PRIVATE_RESOURCE_KINDS.join("','");
+    let mut conditions = format!("v.seq > ?1 AND v.kind NOT IN ('{private_kinds}')");
     let resource = cursor.resource.as_ref().map(|id| {
         arguments.push(id.clone().into());
         let position = arguments.len();
@@ -163,6 +161,29 @@ mod tests {
     fn read(conn: &Connection, cursor: &Cursor, view: View, limit: u32) -> (Vec<i64>, i32) {
         let (entries, steps) = page(conn, cursor, view, limit);
         (entries.into_iter().map(|(_, seq)| seq).collect(), steps)
+    }
+
+    #[test]
+    fn generic_events_and_snapshots_exclude_private_project_authority() {
+        let conn = db();
+        let public = insert(&conn, "public", "Task", policy::SYSTEM);
+        for kind in ["Project", "WorkItem", "WorkItemEvidence"] {
+            insert(&conn, kind, kind, policy::OWNER);
+            assert!(
+                read(
+                    &conn,
+                    &cursor(policy::OWNER, kind, Some(kind)),
+                    View::Changes,
+                    8
+                )
+                .0
+                .is_empty()
+            );
+        }
+        let scope = cursor(policy::OWNER, "", None);
+        for view in [View::Changes, View::Snapshot] {
+            assert_eq!(read(&conn, &scope, view, 8).0, [public]);
+        }
     }
 
     #[test]

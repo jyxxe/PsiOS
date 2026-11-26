@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use psios_api::{
     Client, LocalInventoryModel, OciImageCaptureRequest, OciPublisherSignature, ResourceRef,
     SessionModel, StatusProvider, TaskOutputRequirement, parse,
@@ -108,6 +108,16 @@ enum Cmd {
         revision: String,
         #[arg(default_value = "-")]
         file: String,
+    },
+    /// Manage a local Project and its members.
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommand,
+    },
+    /// Manage an assigned WorkItem and review actual Task results.
+    WorkItem {
+        #[command(subcommand)]
+        command: WorkItemCommand,
     },
     /// Read unacknowledged signals from a mailbox, optionally waiting for delivery.
     Inbox {
@@ -355,6 +365,65 @@ enum Cmd {
         file: String,
     },
 }
+#[derive(Subcommand)]
+enum ProjectCommand {
+    /// Create a Project using a JSON declaration from a file or stdin.
+    Create {
+        #[arg(default_value = "-")]
+        file: String,
+    },
+    Get {
+        id: String,
+    },
+    /// Set a member's role by revision. Supply a null role to remove a member.
+    SetMember {
+        #[arg(default_value = "-")]
+        file: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkItemCommand {
+    /// Create an assigned WorkItem using a JSON declaration from a file or stdin.
+    Create {
+        #[arg(default_value = "-")]
+        file: String,
+    },
+    Get {
+        id: String,
+    },
+    List {
+        project_id: String,
+        #[arg(long)]
+        after_id: Option<String>,
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// Submit exact Task and Artifact references from a JSON file or stdin.
+    SubmitEvidence {
+        #[arg(default_value = "-")]
+        file: String,
+    },
+    Review {
+        id: String,
+        #[arg(long)]
+        revision: String,
+        #[arg(value_enum)]
+        decision: ReviewDecision,
+    },
+    Close {
+        id: String,
+        #[arg(long)]
+        revision: String,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ReviewDecision {
+    Accept,
+    Reject,
+}
+
 fn input(path: &str) -> Result<Value, Box<dyn std::error::Error>> {
     if path == "-" {
         read_json(std::io::stdin())
@@ -543,6 +612,47 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .as_str()
                 .ok_or("missing network confirmation token")?;
             c.confirm_network_trial(&operation, &revision, token)?
+        }
+        Cmd::Project { command } => {
+            let record = match command {
+                ProjectCommand::Create { file } => {
+                    c.create_project(&serde_json::from_value(input(&file)?)?)?
+                }
+                ProjectCommand::Get { id } => c.project(&id)?,
+                ProjectCommand::SetMember { file } => {
+                    c.set_project_member(&serde_json::from_value(input(&file)?)?)?
+                }
+            };
+            serde_json::to_value(record)?
+        }
+        Cmd::WorkItem { command } => {
+            let record = match command {
+                WorkItemCommand::Create { file } => {
+                    c.create_work_item(&serde_json::from_value(input(&file)?)?)?
+                }
+                WorkItemCommand::Get { id } => c.work_item(&id)?,
+                WorkItemCommand::List {
+                    project_id,
+                    after_id,
+                    limit,
+                } => {
+                    let page = c.work_items(&project_id, after_id.as_deref(), limit)?;
+                    println!("{}", serde_json::to_string_pretty(&page)?);
+                    return Ok(());
+                }
+                WorkItemCommand::SubmitEvidence { file } => {
+                    c.submit_work_item_evidence(&serde_json::from_value(input(&file)?)?)?
+                }
+                WorkItemCommand::Review {
+                    id,
+                    revision,
+                    decision,
+                } => {
+                    c.review_work_item(&id, &revision, matches!(decision, ReviewDecision::Accept))?
+                }
+                WorkItemCommand::Close { id, revision } => c.close_work_item(&id, &revision)?,
+            };
+            serde_json::to_value(record)?
         }
         Cmd::Inbox { id, limit, wait_ms } => match wait_ms {
             Some(timeout_ms) => c.call(

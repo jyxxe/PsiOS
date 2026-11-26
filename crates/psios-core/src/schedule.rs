@@ -1,6 +1,7 @@
 //! Durable admission into the ordinary Task broker.
 pub(crate) mod admission_delay;
 mod calendar;
+pub(crate) mod coalescence;
 mod repeat;
 mod resource_event;
 pub(crate) mod workflow_overlap;
@@ -364,6 +365,7 @@ struct Attempt {
     version: String,
     run_ms: i64,
     trigger: String,
+    selection: Option<repeat::Selection>,
 }
 
 pub fn tick(store: &mut Store) -> Result<()> {
@@ -409,7 +411,13 @@ fn tick_timed(store: &mut Store) -> Result<()> {
                 let schedule = db.of(&attempt.id, "Schedule")?;
                 schedule.cas(&attempt.version)?;
                 if let Some(series) = repeat::Series::load(&schedule)? {
-                    series.settle(db, &schedule, phase, Some(&error.0.code), None)?;
+                    let selection = attempt.selection.ok_or_else(|| {
+                        err(
+                            "RecoveryRequired",
+                            "timed schedule lost its admission selection",
+                        )
+                    })?;
+                    series.settle(db, &schedule, selection, phase, Some(&error.0.code), None)?;
                 } else {
                     settle(db, &schedule, phase, Some(&error.0.code), None)?;
                 }
@@ -485,13 +493,16 @@ fn fire(db: &Db<'_>, attempt: &mut Option<Attempt>) -> Result<()> {
         settle(db, &schedule, "Expired", Some("DeadlineExceeded"), None)?;
         return Ok(());
     }
-    let template = &schedule.spec["request"];
+    let selection = series
+        .as_ref()
+        .map(|series| series.select(db, &schedule, at, &clock))
+        .transpose()?;
     let timed_request;
-    let request = if let Some(series) = &series {
-        timed_request = series.prepare(template)?;
+    let request = if let Some((series, selection)) = series.as_ref().zip(selection.as_ref()) {
+        timed_request = series.prepare(db, &schedule, selection)?;
         &timed_request
     } else {
-        template
+        &schedule.spec["request"]
     };
     let delegation = request["delegation_ref"]["resource_id"]
         .as_str()
@@ -506,16 +517,26 @@ fn fire(db: &Db<'_>, attempt: &mut Option<Attempt>) -> Result<()> {
         run_ms.ok_or_else(|| err("RecoveryRequired", "expired occurrence was dispatched"))?;
     let result = policy::delegation(db, &schedule.owner, delegation, ACTION)
         .and_then(|_| broker::submit_scheduled(db, &schedule.owner, request, &schedule.id));
-    let receipt = result.inspect_err(|_| {
-        *attempt = Some(Attempt {
-            version: schedule.version(),
-            id: schedule.id.clone(),
-            run_ms,
-            trigger: trigger.to_owned(),
-        });
-    })?;
-    if let Some(series) = series {
-        series.settle(db, &schedule, "Triggered", None, Some(receipt))
+    let receipt = match result {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            // Retain the old pending anchor on deferral. No representative has
+            // committed, so the next eligible set can include newly due windows.
+            let trigger = selection
+                .as_ref()
+                .map_or(trigger, |selected| &selected.anchor_trigger);
+            *attempt = Some(Attempt {
+                version: schedule.version(),
+                id: schedule.id.clone(),
+                run_ms,
+                trigger: trigger.to_owned(),
+                selection,
+            });
+            return Err(error);
+        }
+    };
+    if let Some((series, selection)) = series.zip(selection) {
+        series.settle(db, &schedule, selection, "Triggered", None, Some(receipt))
     } else {
         settle(db, &schedule, "Triggered", None, Some(receipt)).map(|_| ())
     }

@@ -1,12 +1,12 @@
 use super::{
     Window, admission_delay,
     calendar::{Calendar, CalendarPlan},
-    due_ms, instant, remove_pending, timestamp, trigger_id, workflow_overlap,
+    coalescence, due_ms, instant, remove_pending, timestamp, trigger_id, workflow_overlap,
 };
 use crate::{
     Result,
     db::{Db, Doc},
-    err, now, require,
+    err, now, policy, require,
 };
 use chrono::{DateTime, TimeDelta, Utc};
 use rusqlite::params;
@@ -18,12 +18,13 @@ use serde_json::{Value, json};
 pub(super) enum Missed {
     Skip,
     BoundedCatchUp { limit: u32 },
+    Coalesce,
 }
 
 impl Missed {
     pub(super) fn valid(&self, count: u32) -> bool {
         match self {
-            Self::Skip => true,
+            Self::Skip | Self::Coalesce => true,
             Self::BoundedCatchUp { limit } => (1..=8.min(count)).contains(limit),
         }
     }
@@ -80,15 +81,15 @@ pub(super) fn initial_state(schedule: &str, timezone: &str, first: Window) -> Va
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Eq)]
-struct Occurrence {
-    ordinal: u32,
-    run_at: String,
-    deadline_at: String,
-    trigger_id: String,
+pub(super) struct Occurrence {
+    pub(super) ordinal: u32,
+    pub(super) run_at: String,
+    pub(super) deadline_at: String,
+    pub(super) trigger_id: String,
 }
 
 impl Occurrence {
-    fn new(schedule: &str, ordinal: u32, window: Window) -> Self {
+    pub(super) fn new(schedule: &str, ordinal: u32, window: Window) -> Self {
         let run_at = timestamp(window.run_at);
         Self {
             trigger_id: trigger_id(schedule, &run_at),
@@ -103,10 +104,17 @@ pub(super) struct Series {
     missed: Missed,
     overlap: Overlap,
     next: Occurrence,
-    upcoming: Vec<Window>,
+    pub(super) upcoming: Vec<Window>,
 }
 
-fn persisted<T: DeserializeOwned>(value: &Value) -> Result<T> {
+pub(super) struct Selection {
+    offset: usize,
+    representative: Occurrence,
+    pub(super) anchor_trigger: String,
+    proof: Option<coalescence::Proof>,
+}
+
+pub(super) fn persisted<T: DeserializeOwned>(value: &Value) -> Result<T> {
     T::deserialize(value).map_err(|_| err("RecoveryRequired", "invalid stored schedule series"))
 }
 
@@ -175,8 +183,55 @@ impl Series {
         Occurrence::new(schedule, self.next.ordinal + offset as u32, window)
     }
 
-    pub(super) fn prepare(&self, request: &Value) -> Result<Value> {
-        crate::broker::retime_scheduled(request, &self.next.trigger_id, &self.next.deadline_at)
+    pub(super) fn select(
+        &self,
+        db: &Db<'_>,
+        schedule: &Doc,
+        now_ms: i64,
+        clock: &policy::deadline::Clock,
+    ) -> Result<Selection> {
+        let (offset, proof) = if matches!(self.missed, Missed::Coalesce) {
+            let offset = coalescence::representative(&self.upcoming, now_ms).ok_or_else(|| {
+                err(
+                    "RecoveryRequired",
+                    "coalesced schedule has no eligible occurrence",
+                )
+            })?;
+            let covered = self.upcoming[..offset]
+                .iter()
+                .map(|window| trigger_id(&schedule.id, &timestamp(window.run_at)))
+                .collect();
+            (
+                offset,
+                Some(coalescence::Proof::capture(
+                    db, schedule, now_ms, clock, covered,
+                )?),
+            )
+        } else {
+            (0, None)
+        };
+        Ok(Selection {
+            offset,
+            representative: self.occurrence(&schedule.id, offset, self.upcoming[offset]),
+            anchor_trigger: self.next.trigger_id.clone(),
+            proof,
+        })
+    }
+
+    pub(super) fn prepare(
+        &self,
+        db: &Db<'_>,
+        schedule: &Doc,
+        selection: &Selection,
+    ) -> Result<Value> {
+        // The broker inherits this elapsed cutoff from the Schedule. A rolled
+        // back admission must leave the original head's cutoff and index intact.
+        self.move_cutoff(db, schedule, 0, selection.offset)?;
+        crate::broker::retime_scheduled(
+            &schedule.spec["request"],
+            &selection.representative.trigger_id,
+            &selection.representative.deadline_at,
+        )
     }
 
     pub(super) fn skip_outdated(
@@ -194,6 +249,7 @@ impl Series {
         let (keep, reason) = match self.missed {
             Missed::Skip => (1, "MissedTrigger"),
             Missed::BoundedCatchUp { limit } => (limit as usize, "CatchUpLimit"),
+            Missed::Coalesce => (self.upcoming.len(), "Coalesced"),
         };
         let superseded = if expired_through.is_some() {
             0
@@ -230,10 +286,11 @@ impl Series {
                     reason: Some(reason),
                     receipt: None,
                     overlap_evidence: None,
+                    coverage: Coverage::None,
                 },
             )?;
         }
-        self.advance(db, schedule, body, count, None)?;
+        self.advance(db, schedule, body, count, 0, None)?;
         Ok(true)
     }
 
@@ -262,9 +319,10 @@ impl Series {
                 reason: Some(reason),
                 receipt: None,
                 overlap_evidence: evidence,
+                coverage: Coverage::None,
             },
         )?;
-        self.advance(db, schedule, body, 1, None)?;
+        self.advance(db, schedule, body, 1, 0, None)?;
         Ok(true)
     }
 
@@ -272,25 +330,80 @@ impl Series {
         &self,
         db: &Db<'_>,
         schedule: &Doc,
+        selection: Selection,
         phase: &str,
         reason: Option<&str>,
         receipt: Option<Value>,
     ) -> Result<()> {
         let mut body = schedule.body.clone();
+        for (offset, window) in self.upcoming[..selection.offset]
+            .iter()
+            .copied()
+            .enumerate()
+        {
+            let (phase, reason, coverage) = match phase {
+                "Expired" => ("Expired", "DeadlineExceeded", Coverage::None),
+                "Rejected" => (
+                    "Skipped",
+                    coalescence::REJECTED,
+                    Coverage::Covered(&selection.representative.trigger_id),
+                ),
+                _ => (
+                    "Skipped",
+                    coalescence::COVERED,
+                    Coverage::Covered(&selection.representative.trigger_id),
+                ),
+            };
+            record(
+                db,
+                schedule,
+                &mut body,
+                &self.occurrence(&schedule.id, offset, window),
+                Outcome {
+                    phase,
+                    reason: Some(reason),
+                    receipt: None,
+                    overlap_evidence: None,
+                    coverage,
+                },
+            )?;
+        }
         record(
             db,
             schedule,
             &mut body,
-            &self.next,
+            &selection.representative,
             Outcome {
                 phase,
                 reason,
                 receipt,
                 overlap_evidence: None,
+                coverage: selection
+                    .proof
+                    .filter(|_| phase != "Expired")
+                    .map_or(Coverage::None, Coverage::Representative),
             },
         )?;
         let rejection = if phase == "Rejected" { reason } else { None };
-        self.advance(db, schedule, body, 1, rejection)
+        // A refused admission rolled back the in-transaction cutoff shift.
+        let cutoff = if phase == "Triggered" {
+            selection.offset
+        } else {
+            0
+        };
+        self.advance(db, schedule, body, selection.offset + 1, cutoff, rejection)
+    }
+
+    fn move_cutoff(&self, db: &Db<'_>, schedule: &Doc, from: usize, to: usize) -> Result<()> {
+        if from != to {
+            let delta_ms =
+                due_ms(self.upcoming[to].deadline_at) - due_ms(self.upcoming[from].deadline_at);
+            db.c.execute(
+                "UPDATE authorization_deadlines SET deadline_boot_ms=deadline_boot_ms+?2 WHERE resource=?1",
+                params![schedule.id, delta_ms],
+            )?;
+        }
+        Ok(())
     }
 
     fn advance(
@@ -299,6 +412,7 @@ impl Series {
         schedule: &Doc,
         mut body: Value,
         count: usize,
+        cutoff: usize,
         rejection: Option<&str>,
     ) -> Result<()> {
         if let Some(next) = self
@@ -317,15 +431,14 @@ impl Series {
                 "RecoveryRequired",
                 "schedule index disagrees with trigger",
             )?;
-            let delta_ms = due_ms(next.deadline_at) - due_ms(current.deadline_at);
             // Move the stored cutoff by the original interval between windows.
-            db.c.execute(
-                "UPDATE authorization_deadlines SET deadline_boot_ms=deadline_boot_ms+?2 WHERE resource=?1",
-                params![schedule.id, delta_ms],
-            )?;
+            self.move_cutoff(db, schedule, cutoff, count)?;
             admission_delay::clear(db, &schedule.id)?;
             body["next"] = json!(self.occurrence(&schedule.id, count, next));
         } else {
+            if matches!(self.missed, Missed::Coalesce) {
+                self.move_cutoff(db, schedule, cutoff, count - 1)?;
+            }
             remove_pending(db, schedule)?;
             body["lifecycle"] = json!(if rejection.is_some() {
                 "Rejected"
@@ -341,11 +454,18 @@ impl Series {
     }
 }
 
+enum Coverage<'a> {
+    None,
+    Covered(&'a str),
+    Representative(coalescence::Proof),
+}
+
 struct Outcome<'a> {
     phase: &'a str,
     reason: Option<&'a str>,
     receipt: Option<Value>,
     overlap_evidence: Option<Value>,
+    coverage: Coverage<'a>,
 }
 
 fn record(
@@ -360,6 +480,7 @@ fn record(
         reason,
         receipt,
         overlap_evidence,
+        coverage,
     } = outcome;
     if let Some(receipt) = &receipt {
         body["last_task_id"] = receipt["task_id"].clone();
@@ -369,6 +490,13 @@ fn record(
                   "task_receipt": receipt, "settled_at": now()});
     if let Some(evidence) = overlap_evidence {
         state["overlap_evidence"] = evidence;
+    }
+    match coverage {
+        Coverage::None => {}
+        Coverage::Covered(representative) => {
+            state["coalesced_into_trigger_id"] = json!(representative)
+        }
+        Coverage::Representative(proof) => state["coalescence"] = json!(proof),
     }
     let trigger = db.create(
         "ScheduleTrigger",

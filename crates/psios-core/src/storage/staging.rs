@@ -199,10 +199,10 @@ fn reclaim(parent: &Path, legacy_backup: bool, held: &HashSet<String>) -> Result
 // Serve holds the exclusive authority lock. Workers only publish by renaming out of staging.
 // Completed paths can belong to operations whose receipts were lost and must stay intact.
 pub(crate) fn reclaim_on_startup(cfg: &Config, restores: Option<&HashSet<String>>) {
-    if let Some(held) = restores {
-        if let Err(e) = reclaim(&cfg.state_dir.join("volumes"), false, held) {
-            eprintln!("psiosd could not reclaim volume staging: {}", e.0.message);
-        }
+    if let Some(held) = restores
+        && let Err(e) = reclaim(&cfg.state_dir.join("volumes"), false, held)
+    {
+        eprintln!("psiosd could not reclaim volume staging: {}", e.0.message);
     }
     if let Err(e) = reclaim(&cfg.state_dir.join("backups"), true, &HashSet::new()) {
         eprintln!("psiosd could not reclaim backup staging: {}", e.0.message);

@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 import os
 from pathlib import Path
+import signal
 import subprocess
 import time
 import unittest
@@ -207,10 +208,13 @@ class BlockLayoutTests(unittest.TestCase):
                 request["tool_targets"] = [scope]
             return node.call("Grant.Issue", request)
 
-        def run(tool, params, scope, token=None):
+        def send(tool, params, scope, token=None):
             request = node.prepare(tool, params, token=token,
                                    delegation=scope["delegation_ref"]["resource_id"])
-            return receipt(node, node.call("Task.Submit", request, token)["task_id"], token)
+            return node.call("Task.Submit", request, token)["task_id"]
+
+        def run(tool, params, scope, token=None):
+            return receipt(node, send(tool, params, scope, token), token)
 
         def denied(code, call):
             with self.assertRaises(Failure) as error:
@@ -264,8 +268,7 @@ class BlockLayoutTests(unittest.TestCase):
             self.assertEqual(resized["identity"], same["identity"])
             self.assertNotEqual(resized["fence"]["layout_digest"], fence["layout_digest"])
             self.assertEqual(resized["device_ref"]["version"], "r2")
-            denied("Conflict", lambda: node.prepare(inspect, target(original), token=token,
-                    delegation=access["delegation_ref"]["resource_id"]))
+            denied("Conflict", lambda: send(inspect, target(original), access, token))
 
         with attached(second, name) as (_, sysfs):
             self.assertEqual((sysfs / "dev").read_text().strip(), major_minor)
@@ -275,6 +278,9 @@ class BlockLayoutTests(unittest.TestCase):
             self.assertEqual(terminated["device_ref"]["version"], "r3")
             for field in ("layout", "fence", "mount_namespace_inode"):
                 self.assertNotIn(field, terminated)
+            events = node.call("Event.Poll", {"cursor": cursor})["events"]
+            revisions = [item["resource_ref"] for item in events if item["resource_ref"]["resource_id"] == old_id]
+            self.assertEqual(revisions, [resized["device_ref"], terminated["device_ref"]])
 
             fresh = observe_trackable(node, self.grant, major_minor)
             self.assertNotEqual(fresh["fence"]["attachment_digest"], fence["attachment_digest"])
@@ -283,15 +289,11 @@ class BlockLayoutTests(unittest.TestCase):
             self.assertEqual(refused["conditions"][0]["type"], "PreconditionFailed", refused)
             new = run(track, {"major_minor": major_minor, "expected": fresh["fence"]}, owner_scope)["device_ref"]
             self.assertNotEqual(new["resource_id"], old_id)
-            denied("PermissionDenied", lambda: node.prepare(inspect, target(new), token=token,
-                    delegation=access["delegation_ref"]["resource_id"]))
+            denied("PermissionDenied", lambda: send(inspect, target(new), access, token))
             denied("PermissionDenied", lambda: node.call("BlockDevice.Get", {"id": new["resource_id"]}, token))
             self.assertEqual(run(inspect, target(terminated["device_ref"]), access, token), terminated)
             new_access = grant(actor_id, inspect, new["resource_id"])
             self.assertEqual(run(inspect, target(new), new_access, token)["layout"], fresh["layout"])
 
-        events = node.call("Event.Poll", {"cursor": cursor})["events"]
-        revisions = [item["resource_ref"] for item in events if item["resource_ref"]["resource_id"] == old_id]
-        self.assertEqual(revisions, [resized["device_ref"], terminated["device_ref"]])
         node.stop()
         subprocess.run(node.daemon + ["verify"], check=True, stdout=subprocess.DEVNULL, timeout=20)

@@ -7,6 +7,8 @@ use std::collections::BTreeSet;
 
 pub(crate) const ACTION: &str = "session.context.read";
 pub(crate) const FORMAT: u32 = crate::apps::volume_rebind::FORMAT + 1;
+// Older queue writers could disclose newly queued inputs without negotiation.
+pub(crate) const QUEUED_FORMAT: u32 = crate::node::block_device::FORMAT + 1;
 pub(crate) const SCHEMA: &str = include_str!("session_inputs.sql");
 const MAX_INPUTS: usize = 4;
 const MAX_INPUT_BYTES: usize = 16 * 1024;

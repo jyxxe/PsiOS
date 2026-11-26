@@ -21,7 +21,7 @@ CTL = "sudo -n -u psios /usr/bin/psiosctl"
 
 
 @contextlib.contextmanager
-def boot(instance, key, number, *, power_cut=False, launch=None):
+def boot(instance, key, number, *, power_cut=False, launch=None, readiness_timeout=360):
     # Bind forwarding only on loopback. restrict=on prevents guest access to
     # external package mirrors, registries or model endpoints during acceptance.
     with socket.socket() as sock:
@@ -43,7 +43,7 @@ def boot(instance, key, number, *, power_cut=False, launch=None):
             return subprocess.run(ssh + [command], check=check, input=data, stdin=stdin,
                                   text=True, capture_output=True, timeout=timeout)
         try:
-            deadline = time.monotonic() + 360
+            deadline = time.monotonic() + readiness_timeout
             while time.monotonic() < deadline:
                 if vm.poll() is not None:
                     raise RuntimeError("guest exited before provisioning")

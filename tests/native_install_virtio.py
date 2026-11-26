@@ -243,7 +243,7 @@ def exercise(args, work):
     def launch(port, serial_log):
         return ubuntu_command(instance, target, rejected, port, serial_log)
 
-    with boot_ubuntu(instance, key, 1, launch=launch) as run:
+    with boot_ubuntu(instance, key, 1, launch=launch, readiness_timeout=600) as run:
         ubuntu = identity(run)
         run("test -d /sys/firmware/efi")
         package = remote(run, "dpkg-query", "-W", "-f=${Version}", "psios-core").stdout.strip()

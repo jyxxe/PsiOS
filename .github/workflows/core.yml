@@ -438,6 +438,11 @@ jobs:
           sudo systemctl start "user@$(id -u).service"
           export XDG_RUNTIME_DIR="/run/user/$(id -u)"
           python3 tests/services.py
+      - name: Invoke one explicitly granted systemd service through both MCP profiles
+        run: |
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          PSIOS_TEST_MCP_SYSTEMD=1 python3 -B -m unittest discover -s tests \
+            -p test_mcp_bound_read_tools.py -k test_inspect_only_the_registered_systemd_unit -v
       - name: Upgrade a previous writer and verify real systemd service limits
         run: |
           mkdir "$RUNNER_TEMP/psios-format107"

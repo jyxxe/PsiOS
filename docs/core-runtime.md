@@ -724,7 +724,13 @@ psios-mcp --socket /run/psios/api.sock --service-uid PSIOS_UID \
 
 在相同启动参数中加入 `--protocol 2026-07-28`，选择逐请求协议。每个请求的 `params._meta` 必须携带 `io.modelcontextprotocol/protocolVersion` 和 `io.modelcontextprotocol/clientCapabilities`。自报 `clientInfo` 仅用于协议信息，本地 Agent 凭据决定权限。客户端可以先调用 `server/discover`，也可以直接调用 `tools/list` 或 `tools/call`。发现和工具列表为私有且立即失效，重新读取列表时核对最新授权。省略 `--protocol` 时仍使用 `2025-11-25` 握手。[逐请求协议与版本](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning) · [发现](https://modelcontextprotocol.io/specification/2026-07-28/server/discover) · [缓存](https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/caching)
 
-现代 STDIO 每次只接纳一个在途请求。其他有效请求收到忙碌错误，客户端可在在途请求结束后重试。收到与在途请求 ID 精确匹配的 `notifications/cancelled` 后，适配器取消待发的回复，并在首次提交和回执丢失后的补发前检查取消状态。若 Core 已受理 Task，适配器尝试用其当前修订调用本机取消接口。已完成的 Task 保留其记录。关闭 STDIO 使客户端停止等待，已准入的 Task 仍受原授权和截止时间约束。此模式沿用相同的两项只读工具与持久 Task，支持同步结果和按请求取消。[STDIO 与取消](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/stdio) · [独立客户端与官方 SDK 2.0.0 验收](../tests/test_mcp_modern_stdio.py)
+现代 STDIO 每次只接纳一个在途请求。其他有效请求收到忙碌错误，客户端可在在途请求结束后重试。收到与在途请求 ID 精确匹配的 `notifications/cancelled` 后，适配器取消待发的回复，并在首次提交和回执丢失后的补发前检查取消状态。若 Core 已受理 Task，适配器尝试用其当前修订调用本机取消接口。已完成的 Task 保留其记录。关闭 STDIO 使客户端停止等待，已准入的 Task 仍受原授权和截止时间约束。此模式沿用同一 Core 授权路径与持久 Task，支持同步结果和按请求取消。[STDIO 与取消](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/stdio) · [独立客户端与官方 SDK 2.0.0 验收](../tests/test_mcp_modern_stdio.py)
+
+### 绑定指定资源的只读工具
+
+两代协议都可用 `--volume-usage VOLUME_ID` 公开一个该 Agent 所有的已可用 Volume 的根目录容量，用 `--service-inspect HOST_SERVICE_ID` 公开一个 Core 已登记的 systemd 服务状态。指定资源须在该委托的有效范围内，并由根 Grant 或叶 Delegation 显式列出。授权需包含 `task.submit`、`task.read` 和对应的 `volume.usage` 或 `service.inspect`。可通过 `--tool` 同时选择原来的诊断工具。未指定任何工具时默认启用 `system.status`。
+
+两项资源工具的 MCP 参数均为空。适配器从 `Capability.ResolveLocalReadTools` 取得声明资源的当前精确引用，以该修订构造 Native Task，并在返回结果前复查授权和精确引用。列表只显示当前允许的工具名称，不消耗任务预算或创建任务草稿。Core 的卷持有、扫描限制和 systemd 登记校验照常执行。[实际 Volume 和 systemd 验收](../tests/test_mcp_bound_read_tools.py)
 
 ## 运行一个持久的 Agent 会话
 

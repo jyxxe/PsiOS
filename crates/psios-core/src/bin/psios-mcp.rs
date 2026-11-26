@@ -3,7 +3,10 @@
 mod modern;
 
 use clap::{Parser, ValueEnum};
-use psios_api::{ApiError, ApiResult, Client, LocalReadTool, LocalReadToolsRequest, id, parse};
+use psios_api::{
+    ApiError, ApiResult, Client, LocalReadBinding, LocalReadTool, LocalReadToolsRequest,
+    ResolveLocalReadToolsRequest, ResolvedLocalReadTool, ResourceRef, id, parse,
+};
 use rustix::{fs::OFlags, process::geteuid};
 use serde_json::{Map, Value, json};
 use std::{
@@ -44,12 +47,26 @@ struct Options {
     token_file: PathBuf,
     #[arg(long)]
     delegation: String,
-    #[arg(long = "tool", default_value = "system.status", value_parser = parse_tool)]
+    /// Include an unbound diagnostic. Defaults to system.status when no tools are selected.
+    #[arg(long = "tool", value_parser = parse_tool)]
     tools: Vec<LocalReadTool>,
+    /// Include root usage for one exact Volume ID.
+    #[arg(long, value_name = "VOLUME_ID", value_parser = parse_target)]
+    volume_usage: Option<String>,
+    /// Include observations for one exact registered HostService ID.
+    #[arg(long, value_name = "HOST_SERVICE_ID", value_parser = parse_target)]
+    service_inspect: Option<String>,
 }
 
 fn parse_tool(name: &str) -> Result<LocalReadTool, &'static str> {
     serde_json::from_value(json!(name)).map_err(|_| "expected system.status or node.pressure")
+}
+
+fn parse_target(id: &str) -> Result<String, &'static str> {
+    if id.is_empty() || id.len() > 200 || id.chars().any(char::is_control) {
+        return Err("invalid resource ID");
+    }
+    Ok(id.to_owned())
 }
 
 fn credential(path: &Path) -> io::Result<String> {
@@ -81,11 +98,17 @@ enum Phase {
 
 struct Adapter {
     client: Client,
-    scope: LocalReadToolsRequest,
+    delegation_id: String,
+    bindings: Vec<LocalReadBinding>,
     phase: Phase,
     requests: HashSet<String>,
     call_window: Instant,
     calls: u8,
+}
+
+struct AvailableTool<'a> {
+    binding: &'a LocalReadBinding,
+    target_ref: Option<ResourceRef>,
 }
 
 fn invalid_data() -> Box<ApiError> {
@@ -93,17 +116,67 @@ fn invalid_data() -> Box<ApiError> {
 }
 
 impl Adapter {
-    fn available(&self) -> ApiResult<Vec<LocalReadTool>> {
-        let params = serde_json::to_value(&self.scope).map_err(|_| invalid_data())?;
-        let reply = self.client.call("Capability.LocalReadTools", params)?;
-        serde_json::from_value(reply["tools"].clone()).map_err(|_| invalid_data())
+    fn available(&self) -> ApiResult<Vec<AvailableTool<'_>>> {
+        let unbound = self
+            .bindings
+            .iter()
+            .map(LocalReadBinding::unbound_tool)
+            .collect::<Option<Vec<_>>>();
+        let authorized: Vec<_> = if let Some(tools) = unbound {
+            let params = serde_json::to_value(LocalReadToolsRequest {
+                delegation_id: self.delegation_id.clone(),
+                tools,
+            })
+            .map_err(|_| invalid_data())?;
+            let reply = self.client.call("Capability.LocalReadTools", params)?;
+            let tools: Vec<LocalReadTool> =
+                serde_json::from_value(reply["tools"].clone()).map_err(|_| invalid_data())?;
+            tools
+                .into_iter()
+                .map(|tool| (tool.name().to_owned(), None))
+                .collect()
+        } else {
+            let params = serde_json::to_value(ResolveLocalReadToolsRequest {
+                delegation_id: self.delegation_id.clone(),
+                bindings: self.bindings.clone(),
+            })
+            .map_err(|_| invalid_data())?;
+            let reply = self
+                .client
+                .call("Capability.ResolveLocalReadTools", params)?;
+            let tools: Vec<ResolvedLocalReadTool> =
+                serde_json::from_value(reply["tools"].clone()).map_err(|_| invalid_data())?;
+            tools
+                .into_iter()
+                .map(|tool| (tool.tool, Some(tool.target_ref)))
+                .collect()
+        };
+        let mut seen = HashSet::new();
+        authorized
+            .into_iter()
+            .map(|(name, target_ref)| {
+                let binding = self
+                    .bindings
+                    .iter()
+                    .find(|binding| binding.name() == name)
+                    .filter(|binding| seen.insert(binding.name()))
+                    .ok_or_else(invalid_data)?;
+                if let Some((id, _)) = binding.target()
+                    && !target_ref
+                        .as_ref()
+                        .is_some_and(|reference| reference.resource_id == id)
+                {
+                    return Err(invalid_data());
+                }
+                Ok(AvailableTool {
+                    binding,
+                    target_ref,
+                })
+            })
+            .collect()
     }
 
-    fn invoke(
-        &mut self,
-        tool: LocalReadTool,
-        cancelled: Option<&AtomicBool>,
-    ) -> Result<Value, Value> {
+    fn invoke(&mut self, name: &str, cancelled: Option<&AtomicBool>) -> Result<Value, Value> {
         let abandoned = || cancelled.is_some_and(|flag| flag.load(Ordering::Acquire));
         if abandoned() {
             return Err(tool_error("Cancelled", None));
@@ -116,12 +189,16 @@ impl Adapter {
             return Err(tool_error("RateLimited", None));
         }
         self.calls += 1;
-        let allowed = self
+        let selected = self
             .available()
-            .map_err(|error| tool_error(&error.code, None))?;
-        if !allowed.contains(&tool) {
-            return Err(tool_error("PermissionDenied", None));
-        }
+            .map_err(|error| tool_error(&error.code, None))?
+            .into_iter()
+            .find(|tool| tool.binding.name() == name)
+            .ok_or_else(|| tool_error("PermissionDenied", None))?;
+        let input = selected
+            .binding
+            .task_input(selected.target_ref.as_ref())
+            .ok_or_else(|| tool_error("PreconditionFailed", None))?;
         if abandoned() {
             return Err(tool_error("Cancelled", None));
         }
@@ -133,8 +210,8 @@ impl Adapter {
             .client
             .call(
                 "Task.Prepare",
-                json!({"tool":tool.name(),"input":{},
-            "key":id("mcp-call"),"delegation_id":self.scope.delegation_id,"deadline_at":deadline}),
+                json!({"tool":name,"input":input,
+            "key":id("mcp-call"),"delegation_id":self.delegation_id,"deadline_at":deadline}),
             )
             .map_err(|error| tool_error(&error.code, None))?;
         let accepted = self
@@ -174,9 +251,14 @@ impl Adapter {
             .map_err(|error| failed(&error.code))?;
         // Do not return an old tool scope through this adapter just because a
         // separate Task history grant still permits reading the artifact.
-        let live = self.available().map_err(|error| failed(&error.code))?;
-        if !live.contains(&tool) {
-            return Err(failed("PermissionDenied"));
+        let live = self
+            .available()
+            .map_err(|error| failed(&error.code))?
+            .into_iter()
+            .find(|tool| tool.binding.name() == name)
+            .ok_or_else(|| failed("PermissionDenied"))?;
+        if selected.binding.target().is_some() && live.target_ref != selected.target_ref {
+            return Err(failed("PreconditionFailed"));
         }
         let structured = json!({"task_id":task_id,"result":result});
         let text = structured.to_string();
@@ -197,13 +279,9 @@ impl Adapter {
             .get("name")
             .and_then(Value::as_str)
             .ok_or((-32602, "Invalid tool name"))?;
-        let tool = self
-            .scope
-            .tools
-            .iter()
-            .copied()
-            .find(|tool| tool.name() == name)
-            .ok_or((-32602, "Unknown tool"))?;
+        if !self.bindings.iter().any(|tool| tool.name() == name) {
+            return Err((-32602, "Unknown tool"));
+        }
         if params
             .get("arguments")
             .is_some_and(|arguments| !arguments.is_object())
@@ -218,7 +296,7 @@ impl Adapter {
             return Ok(tool_error("InvalidArgument", None));
         }
         Ok(self
-            .invoke(tool, cancelled)
+            .invoke(name, cancelled)
             .unwrap_or_else(|failure| failure))
     }
 
@@ -277,7 +355,7 @@ impl Adapter {
                     .map_err(|_| (-32001, "Local capability query unavailable"))?;
                 let tools: Vec<_> = tools
                     .into_iter()
-                    .map(|tool| descriptor(tool, Protocol::Legacy))
+                    .map(|tool| descriptor(tool.binding, Protocol::Legacy))
                     .collect();
                 Ok(json!({"tools":tools}))
             }
@@ -329,12 +407,18 @@ impl Adapter {
     }
 }
 
-fn descriptor(tool: LocalReadTool, protocol: Protocol) -> Value {
+fn descriptor(tool: &LocalReadBinding, protocol: Protocol) -> Value {
     let description = match tool {
-        LocalReadTool::SystemStatus => "Read current PsiOS system status from the local node.",
-        LocalReadTool::NodePressure => {
+        LocalReadBinding::SystemStatus {} => {
+            "Read current PsiOS system status from the local node."
+        }
+        LocalReadBinding::NodePressure {} => {
             "Sample Linux kernel and Core cgroup resource pressure on the local node."
         }
+        LocalReadBinding::VolumeUsage { .. } => {
+            "Measure file and allocation usage of the configured volume root."
+        }
+        LocalReadBinding::ServiceInspect { .. } => "Observe the configured systemd service state.",
     };
     let mut descriptor = json!({"name":tool.name(),"description":description,
         "inputSchema":{"type":"object","additionalProperties":false},
@@ -400,15 +484,27 @@ fn main() -> io::Result<()> {
     if options.tools.len() > 2 || options.tools.len() == 2 && options.tools[0] == options.tools[1] {
         return Err(io::Error::other("select one or two distinct tools"));
     }
+    let mut bindings: Vec<_> = options
+        .tools
+        .into_iter()
+        .map(LocalReadBinding::from)
+        .collect();
+    if let Some(target_id) = options.volume_usage {
+        bindings.push(LocalReadBinding::VolumeUsage { target_id });
+    }
+    if let Some(target_id) = options.service_inspect {
+        bindings.push(LocalReadBinding::ServiceInspect { target_id });
+    }
+    if bindings.is_empty() {
+        bindings.push(LocalReadBinding::SystemStatus {});
+    }
     let client = Client::new(options.socket, credential(&options.token_file)?)
         .with_service_uid(options.service_uid.unwrap_or_else(|| geteuid().as_raw()))
         .with_fail_fast_connect();
     let adapter = Adapter {
         client,
-        scope: LocalReadToolsRequest {
-            delegation_id: options.delegation,
-            tools: options.tools,
-        },
+        delegation_id: options.delegation,
+        bindings,
         phase: Phase::New,
         requests: HashSet::new(),
         call_window: Instant::now(),

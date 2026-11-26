@@ -96,10 +96,12 @@ class McpFixture:
             "tool_targets": targets, "units": units, "ttl_seconds": 120,
         })
 
-    def command(self, grant):
+    def adapter_command(self, grant):
         return [str(self.node.binaries / "psios-mcp"), "--socket", str(self.node.socket),
-                "--token-file", str(self.token_file), "--delegation", grant["delegation_ref"]["resource_id"],
-                "--tool", "system.status", "--tool", "node.pressure"]
+                "--token-file", str(self.token_file), "--delegation", grant["delegation_ref"]["resource_id"]]
+
+    def command(self, grant):
+        return [*self.adapter_command(grant), "--tool", "system.status", "--tool", "node.pressure"]
 
     def wire(self, grant):
         client = Wire(self.command(grant))

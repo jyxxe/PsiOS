@@ -1,5 +1,6 @@
 """Verify blocking task reads, current grants and bounded wait admission."""
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -10,6 +11,7 @@ import time
 import unittest
 
 from support import Failure, Node, key, target
+from test_model_fallback import publish_skill, register_provider, submit_decision
 
 
 class TaskWaitTests(unittest.TestCase):
@@ -28,15 +30,19 @@ class TaskWaitTests(unittest.TestCase):
             query["after_version"] = after
         return self.node.call("Task.Wait", query, token)
 
-    def wait_stream(self, task):
+    def request_stream(self, method, params, token=None):
         node = self.node
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:
             stream.settimeout(5)
             stream.connect(str(node.socket))
-            frame = json.dumps({"schema_version": "1.0.0", "request_id": key(), "token": node.owner,
-                                "method": "Task.Wait", "params": {"id": task, "timeout_ms": 8000}}).encode()
+            frame = json.dumps({"schema_version": "1.0.0", "request_id": key(),
+                                "token": node.owner if token is None else token,
+                                "method": method, "params": params}).encode()
             stream.sendall(struct.pack(">I", len(frame)) + frame)
             return stream.dup()
+
+    def wait_stream(self, task, token=None):
+        return self.request_stream("Task.Wait", {"id": task, "timeout_ms": 8000}, token)
 
     def receipt(self, stream):
         with stream.makefile("rb") as response:
@@ -116,6 +122,15 @@ class TaskWaitTests(unittest.TestCase):
         node = self.node
         task = node.submit("system.status", {})
         queued = node.call("Task.Get", {"id": task})
+        provider, model = register_provider(node, "ready-under-wait-pressure")
+        skill = publish_skill(node)
+        agent = node.call("Agent.Register", {"name": "ready-model-session-owner"})
+        grant = node.call("Grant.Issue", {"principal_id": agent["principal_id"], "units": 2, "model_calls": 2,
+            "ttl_seconds": 180, "actions": ["task.submit", "task.read", "session.run", "system.status"],
+            "tool_targets": [model["resource_id"], skill["resource_id"], "profile-local"]})
+        session = node.call("Session.Open", {"key": key(), "goal": "Observe local status", "provider_queue": True,
+            "skill_ref": skill, "model_ref": model, "context_policy": "ReferencesOnly", "max_turns": 1,
+            "delegation_id": grant["delegation_ref"]["resource_id"]}, agent["token"])["reference"]
         streams = []
         try:
             for _ in range(12):
@@ -129,16 +144,39 @@ class TaskWaitTests(unittest.TestCase):
                     streams.remove(stream)
                     stream.close()
             self.assertEqual(len(streams), 8)
+            cursor = node.call("Resource.List", {"kind": "Task", "id": task})["watch_start_cursor"]
+            with self.assertRaises(Failure) as unauthorized:
+                node.call("Event.Wait", {"cursor": cursor, "timeout_ms": 1000}, "invalid")
+            self.assertEqual(unauthorized.exception.code, "AuthenticationRequired")
+            with self.assertRaises(Failure) as malformed:
+                node.call("Event.Wait", {"limit": 1, "timeout_ms": 1000})
+            self.assertEqual(malformed.exception.code, "InvalidArgument")
             with self.assertRaises(Failure) as event_wait:
-                node.call("Event.Wait", {"limit": 1, "timeout_ms": 30})
+                node.call("Event.Wait", {"cursor": cursor, "limit": 1, "timeout_ms": 1000})
             self.assertEqual(event_wait.exception.code, "QueueFull")
 
-            # The SDK can still read an already-settled Task when all slots are held.
+            # Normal authorized ready replies do not need a sleeping slot.
             other = node.submit("system.status", {})
+            other_cursor = node.call("Resource.List", {"kind": "Task", "id": other})["watch_start_cursor"]
             before = node.call("Task.Get", {"id": other})
             node.call("Task.Cancel", {"id": other, "expected_resource_version": before["task_revision"]})
+            self.assertEqual(self.wait_task(other, 2000)["lifecycle"], "Cancelled")
             self.assertEqual(node.cli(node.witness / "owner.token", "wait", other, "--seconds", "2")["lifecycle"],
                              "Cancelled")
+            page = node.call("Event.Wait", {"cursor": other_cursor, "timeout_ms": 2000})
+            self.assertEqual([event["resource_ref"] for event in page["events"]], [node.get(other)["reference"]])
+
+            model_wait = {"key": key(), "model_ref": model, "timeout_ms": 2000}
+            claim = node.call("Model.WaitNext", model_wait, provider["token"])
+            self.assertTrue(claim["available"])
+            self.assertFalse(claim["recovered"])
+            self.assertEqual(claim["session_id"], session["resource_id"])
+            self.assertEqual(node.call("Model.WaitNext", model_wait, provider["token"]), {**claim, "recovered": True})
+            budget = node.call("Budget.Get", {"id": grant["budget_ref"]["resource_id"]})
+            self.assertEqual(budget["model_calls_used"], 1)
+            settled = submit_decision(node, provider, claim, {"action": "finish", "summary": "One ready lease"})
+            self.assertEqual(settled["lifecycle"], "Succeeded")
+
             streams.pop().close()
             deadline = time.monotonic() + 2
             while time.monotonic() < deadline:
@@ -153,6 +191,57 @@ class TaskWaitTests(unittest.TestCase):
         finally:
             for stream in streams:
                 stream.close()
+
+    def test_principal_wait_limit_is_shared_across_methods_and_leaves_room_for_a_peer(self):
+        node = self.node
+        actions = ["event.read", "resource.read", "task.submit", "task.read", "system.status"]
+        first, first_grant = node.agent(actions)
+        second, second_grant = node.agent(actions)
+
+        def queued(actor, grant):
+            token = actor["token"]
+            request = node.prepare("system.status", {}, token=token, delegation=grant["delegation_ref"]["resource_id"])
+            task = node.call("Task.Submit", request, token)["task_id"]
+            listed = node.call("Resource.List", {"kind": "Task", "id": task}, token)
+            return task, listed["watch_start_cursor"]
+
+        own_task, own_cursor = queued(first, first_grant)
+        peer_task, peer_cursor = queued(second, second_grant)
+        with ExitStack() as sockets:
+            occupied = [sockets.enter_context(self.wait_stream(own_task, first["token"])) for _ in range(3)]
+            readable, _, _ = select.select(occupied, [], [], 3)
+            self.assertEqual(len(readable), 1, "the third concurrent sleeper must be refused for the same principal")
+            rejected, = readable
+            self.assertEqual(self.receipt(rejected)["error"]["code"], "QueueFull")
+            occupied.remove(rejected)
+            rejected.close()
+
+            watch = {"cursor": own_cursor, "timeout_ms": 1000}
+            with self.assertRaises(Failure) as excess:
+                node.call("Resource.Watch", watch, first["token"])
+            self.assertEqual(excess.exception.code, "QueueFull")
+            peer = sockets.enter_context(self.request_stream("Resource.Watch", {
+                "cursor": peer_cursor, "timeout_ms": 4000,
+            }, second["token"]))
+            self.assertEqual(select.select([peer], [], [], 0.08)[0], [])
+            node.call("Task.Cancel", target(node.get(peer_task)["reference"]), second["token"])
+            reply = self.receipt(peer)
+            self.assertEqual([item["resource_ref"] for item in reply["result"]["events"]],
+                             [node.get(peer_task)["reference"]])
+            self.assertEqual(select.select(occupied, [], [], 0)[0], [])
+
+            occupied.pop().close()
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                try:
+                    resumed = node.call("Resource.Watch", {**watch, "timeout_ms": 30}, first["token"])
+                    self.assertEqual(resumed["events"], [])
+                    break
+                except Failure as full:
+                    self.assertEqual(full.code, "QueueFull")
+                    time.sleep(0.02)
+            else:
+                self.fail("disconnect must free a slot for the same authenticated principal")
 
     def test_write_half_close_still_delivers_the_receipt(self):
         node = self.node

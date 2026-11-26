@@ -158,11 +158,11 @@ fn connection(s: &Shared, stream: &mut UnixStream, stop: &AtomicBool) -> Result<
                 r,
                 method,
                 |page| ready.ready(page),
-                |request| {
+                |request, principal| {
                     let mut authority = accepting(s, stop)?;
                     // A write-half shutdown still permits a response.
                     ensure_peer_connected(stream)?;
-                    authority.request(peer, request)
+                    authority.request_wait_page(peer, request, principal)
                 },
             );
         }

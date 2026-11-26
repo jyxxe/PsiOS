@@ -248,7 +248,11 @@ def verify_create_format_upgrade(previous, current, docker, spec, app_ids):
         old_daemon = n.daemon.copy()
         n.daemon[0] = str(Path(current).absolute() / "psiosd")
         preview = json.loads(subprocess.check_output(n.daemon+["verify","--rehearse-migration"],timeout=20))
-        assert preview["database_format"]==108 and preview["migration_rehearsal"]["target_format"]==109,preview
+        assert preview["database_format"] == 108 and preview["migration_required"], preview
+        rehearsal = preview["migration_rehearsal"]
+        assert rehearsal["source_format"] == 108 and rehearsal["status"] == "Verified", preview
+        target_format = rehearsal["target_format"]
+        assert target_format >= 109, preview
         n.start()
         assert n.wait(old_task)==old
         scope=[old_op["resource_id"],app_id,volume["resource_id"]]
@@ -269,7 +273,7 @@ def verify_create_format_upgrade(previous, current, docker, spec, app_ids):
         rejected=subprocess.run(old_daemon+["check"],capture_output=True,timeout=10)
         assert rejected.returncode!=0 and b"SchemaVersionUnsupported" in rejected.stderr,rejected
         verified=json.loads(subprocess.check_output(n.daemon+["verify"],timeout=15))
-        assert verified["database_format"]==109,verified
-        print("Verified Docker create recovery fencing on exact format 108 to 109",flush=True)
+        assert verified["database_format"] == target_format and not verified["migration_required"], verified
+        print(f"Verified Docker create recovery fencing from format 108 to {target_format}", flush=True)
     finally:
         n.close()

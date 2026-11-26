@@ -565,6 +565,22 @@ enum WorkItemCommand {
         revision: String,
         #[arg(value_enum)]
         decision: ReviewDecision,
+        /// Exact review Signal reference from a JSON file or stdin.
+        #[arg(long)]
+        request_signal: Option<String>,
+    },
+    /// Send the current pending WorkItem reference from a JSON file or stdin.
+    RequestReview {
+        mailbox: String,
+        #[arg(long)]
+        key: String,
+        #[arg(default_value = "-")]
+        file: String,
+    },
+    /// Fetch a committed reply for an exact review Signal reference.
+    ReviewReceipt {
+        #[arg(default_value = "-")]
+        file: String,
     },
     Close {
         id: String,
@@ -919,8 +935,32 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     id,
                     revision,
                     decision,
+                    request_signal,
                 } => {
-                    c.review_work_item(&id, &revision, matches!(decision, ReviewDecision::Accept))?
+                    let accept = matches!(decision, ReviewDecision::Accept);
+                    if let Some(file) = request_signal {
+                        let signal = serde_json::from_value(input(&file)?)?;
+                        let reply =
+                            c.review_work_item_from_signal(&id, &revision, accept, &signal)?;
+                        println!("{}", serde_json::to_string_pretty(&reply)?);
+                        return Ok(());
+                    }
+                    c.review_work_item(&id, &revision, accept)?
+                }
+                WorkItemCommand::RequestReview { mailbox, key, file } => {
+                    let reply = c.request_work_item_review(
+                        &mailbox,
+                        &key,
+                        &serde_json::from_value(input(&file)?)?,
+                    )?;
+                    println!("{}", serde_json::to_string_pretty(&reply)?);
+                    return Ok(());
+                }
+                WorkItemCommand::ReviewReceipt { file } => {
+                    let reply =
+                        c.work_item_review_receipt(&serde_json::from_value(input(&file)?)?)?;
+                    println!("{}", serde_json::to_string_pretty(&reply)?);
+                    return Ok(());
                 }
                 WorkItemCommand::Close { id, revision } => c.close_work_item(&id, &revision)?,
                 WorkItemCommand::Reassign {

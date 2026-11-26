@@ -283,8 +283,7 @@ fn attached(conn: &Connection, item: &Doc) -> Result<Attached> {
     })
 }
 
-pub(super) fn review(db: &Db<'_>, item: &Doc, actor: &str) -> Result<Doc> {
-    let attached = attached(db.c, item)?;
+fn review_authority(db: &Db<'_>, item: &Doc, actor: &str, attached: &Attached) -> Result<Doc> {
     require(
         actor != attached.task.owner
             && item.spec["assignee_principal_id"] != actor
@@ -299,9 +298,51 @@ pub(super) fn review(db: &Db<'_>, item: &Doc, actor: &str) -> Result<Doc> {
         &attached.task,
         &attached.evidence.body["artifact_ref"],
     )?;
+    Ok(artifact)
+}
+
+pub(super) fn review(db: &Db<'_>, item: &Doc, actor: &str) -> Result<Doc> {
+    let attached = attached(db.c, item)?;
+    let artifact = review_authority(db, item, actor, &attached)?;
     live_output(db.c, &attached.task, &artifact)?;
     verify_payload(db, &artifact)?;
     result_access::audit_read(db, actor, "WorkItem.Review", &artifact.id)?;
+    Ok(attached.evidence)
+}
+
+pub(super) fn request_for_review(
+    db: &Db<'_>,
+    item: &Doc,
+    sender: &str,
+    reviewer: &str,
+    require_content: bool,
+) -> Result<Doc> {
+    let attached = attached(db.c, item)?;
+    require(
+        attached.evidence.body["submitted_by"] == sender,
+        "PermissionDenied",
+        "only the evidence submitter can send its review request",
+    )?;
+    result_access(
+        db,
+        sender,
+        &attached.task,
+        &attached.evidence.body["artifact_ref"],
+    )?;
+    let artifact = review_authority(db, item, reviewer, &attached)?;
+    if require_content {
+        live_output(db.c, &attached.task, &artifact)?;
+    }
+    Ok(attached.evidence)
+}
+
+pub(super) fn submitted_evidence(conn: &Connection, item: &Doc, sender: &str) -> Result<Doc> {
+    let attached = attached(conn, item)?;
+    require(
+        attached.evidence.body["submitted_by"] == sender,
+        "RecoveryRequired",
+        "review request does not belong to original evidence submitter",
+    )?;
     Ok(attached.evidence)
 }
 

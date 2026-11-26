@@ -15,10 +15,15 @@ pub(super) enum View {
 }
 
 pub(super) fn selection(cursor: &Cursor, view: View, limit: u32) -> (String, Vec<Value>) {
+    if policy::PRIVATE_RESOURCE_KINDS.contains(&cursor.kind.as_str()) {
+        return (
+            "SELECT v.*, v.seq AS page_position FROM versions v WHERE 0".into(),
+            Vec::new(),
+        );
+    }
     let origins = matches!(view, View::Snapshot) && cursor.orders_by_creation();
     let mut arguments = vec![cursor.position.into(), i64::from(limit).into()];
-    let private_kinds = policy::PRIVATE_RESOURCE_KINDS.join("','");
-    let mut conditions = format!("v.seq > ?1 AND v.kind NOT IN ('{private_kinds}')");
+    let mut conditions = "v.seq > ?1".to_owned();
     let resource = cursor.resource.as_ref().map(|id| {
         arguments.push(id.clone().into());
         let position = arguments.len();
@@ -29,6 +34,9 @@ pub(super) fn selection(cursor: &Cursor, view: View, limit: u32) -> (String, Vec
     if kind {
         arguments.push(cursor.kind.clone().into());
         conditions.push_str(&format!(" AND v.kind = ?{}", arguments.len()));
+    } else {
+        let private_kinds = policy::PRIVATE_RESOURCE_KINDS.join("','");
+        conditions.push_str(&format!(" AND v.kind NOT IN ('{private_kinds}')"));
     }
     let high = if matches!(view, View::Snapshot) {
         arguments.push(cursor.high.into());
@@ -167,18 +175,22 @@ mod tests {
     fn generic_events_and_snapshots_exclude_private_project_authority() {
         let conn = db();
         let public = insert(&conn, "public", "Task", policy::SYSTEM);
-        for kind in ["Project", "Milestone", "WorkItem", "WorkItemEvidence"] {
+        for kind in [
+            "Project",
+            "Milestone",
+            "WorkItem",
+            "WorkItemEvidence",
+            crate::project::review_signal::REQUEST,
+            crate::project::review_signal::RECEIPT,
+        ] {
             insert(&conn, kind, kind, policy::OWNER);
-            assert!(
-                read(
-                    &conn,
-                    &cursor(policy::OWNER, kind, Some(kind)),
-                    View::Changes,
-                    8
-                )
-                .0
-                .is_empty()
-            );
+            for target in [None, Some(kind)] {
+                let mut scope = cursor(policy::OWNER, kind, target);
+                scope.snapshot = format!("{}test", super::super::ORDERED_SNAPSHOT_PREFIX);
+                for view in [View::Changes, View::Snapshot] {
+                    assert!(read(&conn, &scope, view, 8).0.is_empty());
+                }
+            }
         }
         let scope = cursor(policy::OWNER, "", None);
         for view in [View::Changes, View::Snapshot] {
@@ -280,9 +292,9 @@ mod tests {
                 (second, second)
             ]
         );
-        // This ceiling includes the fixed SQL setup cost for the private-kind
-        // filter. The scan must remain independent of the 12,000 revisions.
-        assert!(steps < 425, "{steps}");
+        // This includes two scopes' SQLite setup for the private-kind filter.
+        // The scan must remain independent of the 12,000 revisions.
+        assert!(steps < 440, "{steps}");
         scope.actor = policy::OWNER.into();
         let (items, steps) = page(&conn, &scope, View::Snapshot, 8);
         assert_eq!(

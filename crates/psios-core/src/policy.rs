@@ -416,6 +416,8 @@ pub(crate) const PRIVATE_RESOURCE_KINDS: &[&str] = &[
     "Milestone",
     "WorkItem",
     "WorkItemEvidence",
+    crate::project::review_signal::REQUEST,
+    crate::project::review_signal::RECEIPT,
     crate::artifact::retention::delayed::KIND,
 ];
 

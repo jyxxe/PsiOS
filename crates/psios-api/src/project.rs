@@ -5,6 +5,20 @@ use serde_json::{Value, json};
 pub const WORK_ITEM_EVIDENCE_TOOL: &str = "project.submit_evidence";
 pub const ASSIGNED_WORK_TOOL: &str = "project.list_assigned_work";
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct WorkItemReviewReceipt {
+    pub reference: ResourceRef,
+    pub receipt: WorkItemReviewReply,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct WorkItemReviewReply {
+    pub request_signal_ref: ResourceRef,
+    pub reviewed_item_ref: ResourceRef,
+    pub work_item_ref: ResourceRef,
+    pub accepted: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateProject {
@@ -293,6 +307,40 @@ impl Client {
             "WorkItem.Review",
             &json!({"id":id,"expected_resource_version":revision,"accept":accept}),
         )
+    }
+
+    pub fn request_work_item_review(
+        &self,
+        mailbox: &str,
+        key: &str,
+        item: &ResourceRef,
+    ) -> ApiResult<ResourceRef> {
+        self.project_request(
+            "Signal.Send",
+            &json!({"mailbox_id":mailbox,"key":key,
+            "topic":"ReviewRequested","resource_ref":item}),
+        )
+    }
+
+    pub fn review_work_item_from_signal(
+        &self,
+        id: &str,
+        revision: &str,
+        accept: bool,
+        signal: &ResourceRef,
+    ) -> ApiResult<WorkItemReviewReceipt> {
+        self.project_request(
+            "WorkItem.Review",
+            &json!({"id":id,"expected_resource_version":revision,
+            "accept":accept,"request_signal_ref":signal}),
+        )
+    }
+
+    pub fn work_item_review_receipt(
+        &self,
+        signal: &ResourceRef,
+    ) -> ApiResult<WorkItemReviewReceipt> {
+        self.project_request("Signal.ReviewReceipt", &json!({"signal_ref":signal}))
     }
 
     pub fn close_work_item(&self, id: &str, revision: &str) -> ApiResult<ProjectRecord> {

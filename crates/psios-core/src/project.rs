@@ -8,6 +8,7 @@ pub(crate) mod history;
 mod maintenance;
 pub(crate) mod milestone;
 pub(crate) mod priority;
+pub(crate) mod review_signal;
 pub(crate) mod workflow_proof;
 pub(crate) use maintenance::{abandon, reassign};
 
@@ -22,8 +23,8 @@ use crate::{
     require,
 };
 use psios_api::{
-    CreateProject, CreateWorkItem, ProjectRole as Role, SetProjectMember, SubmitWorkItemEvidence,
-    WorkItemCriterion as Criterion, WorkItemPriority, canonical, sha256,
+    CreateProject, CreateWorkItem, ProjectRole as Role, ResourceRef, SetProjectMember,
+    SubmitWorkItemEvidence, WorkItemCriterion as Criterion, WorkItemPriority, canonical, sha256,
 };
 use rusqlite::{Connection, params};
 use serde::Deserialize;
@@ -55,6 +56,7 @@ struct Review {
     id: String,
     expected_resource_version: String,
     accept: bool,
+    request_signal_ref: Option<ResourceRef>,
 }
 
 #[derive(Deserialize)]
@@ -689,7 +691,12 @@ fn attach_evidence(db: &Db<'_>, actor: &str, request: &SubmitWorkItemEvidence) -
     state["evidence_ref"] = evidence.reference();
     state["updated_by_principal_id"] = json!(actor);
     let fields = state.as_object_mut().ok_or_else(invalid_state)?;
-    for key in ["review", "reviewed_item_ref", "reviewed_evidence_ref"] {
+    for key in [
+        "review",
+        "reviewed_item_ref",
+        "reviewed_evidence_ref",
+        "review_signal_ref",
+    ] {
         fields.remove(key);
     }
     db.status(&item, state)
@@ -698,6 +705,14 @@ fn attach_evidence(db: &Db<'_>, actor: &str, request: &SubmitWorkItemEvidence) -
 pub(crate) fn review(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     let request: Review = decode(params)?;
     let (_, item) = access_item(db, actor, &request.id, REVIEW)?;
+    let signal = request
+        .request_signal_ref
+        .as_ref()
+        .map(|reference| review_signal::begin_reply(db, actor, &request, reference))
+        .transpose()?;
+    if let Some((_, Some(receipt))) = &signal {
+        return Ok(review_signal::receipt_view(receipt));
+    }
     item.cas(&request.expected_resource_version)?;
     require(
         item.body["lifecycle"] == "InReview",
@@ -716,6 +731,9 @@ pub(crate) fn review(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> 
     state["reviewed_item_ref"] = item.reference();
     state["reviewed_evidence_ref"] = evidence.reference();
     state["updated_by_principal_id"] = json!(actor);
+    if let Some((signal, _)) = &signal {
+        state["review_signal_ref"] = signal.reference();
+    }
     if request.accept {
         state["lifecycle"] = json!("Verified");
     } else {
@@ -726,7 +744,11 @@ pub(crate) fn review(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> 
             .expect("work item state")
             .remove("evidence_ref");
     }
-    item_view(db, &db.status(&item, state)?, actor, true)
+    let reviewed = db.status(&item, state)?;
+    if let Some((signal, _)) = signal {
+        return review_signal::settle(db, &signal, &item, &reviewed, request.accept);
+    }
+    item_view(db, &reviewed, actor, true)
 }
 
 pub(crate) fn close(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {

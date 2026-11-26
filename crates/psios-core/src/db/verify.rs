@@ -199,6 +199,9 @@ pub(super) fn check_artifacts(
         crate::project::verify(conn, identity.database_format)?;
         crate::project::evidence::verify(conn)?;
     }
+    if identity.database_format >= crate::project::review_signal::FORMAT {
+        crate::project::review_signal::verify(conn)?;
+    }
     if identity.database_format >= crate::project::milestone::FORMAT {
         crate::project::milestone::verify::check(conn)?;
     }

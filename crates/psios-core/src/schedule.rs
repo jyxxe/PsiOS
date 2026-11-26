@@ -2,6 +2,7 @@
 pub(crate) mod admission_delay;
 mod calendar;
 pub(crate) mod coalescence;
+pub(crate) mod event_workflow_overlap;
 mod repeat;
 mod resource_event;
 pub(crate) mod workflow_overlap;

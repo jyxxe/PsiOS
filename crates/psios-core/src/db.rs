@@ -575,6 +575,7 @@ impl Store {
         }
         store.transaction("node-config", |db| {
             schedule::coalescence::check_active(db.c)?;
+            schedule::event_workflow_overlap::check_active(db.c)?;
             node::work_admission::draining(db)?;
             node::sync(db)
         })?;

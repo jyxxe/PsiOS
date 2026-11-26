@@ -4,10 +4,32 @@ use crate::db::row;
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Rule {
-    source_ref: Value,
+    pub(super) source_ref: Value,
     condition: Condition,
-    expires_at: String,
-    max_triggers: u32,
+    pub(super) expires_at: String,
+    pub(super) max_triggers: u32,
+    #[serde(default, skip_serializing_if = "EventOverlap::legacy")]
+    overlap: EventOverlap,
+}
+
+#[derive(Clone, Copy, Default, Deserialize, Serialize)]
+enum EventOverlap {
+    #[default]
+    #[serde(skip)]
+    Legacy,
+    SkipWhileWorkflowActive,
+}
+
+impl EventOverlap {
+    fn legacy(&self) -> bool {
+        matches!(self, Self::Legacy)
+    }
+}
+
+impl Rule {
+    pub(super) fn protects_workflow(&self) -> bool {
+        !self.overlap.legacy()
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -36,6 +58,11 @@ fn event_permissions(db: &Db<'_>, actor: &str, delegation: &str) -> Result<()> {
 }
 
 pub(super) fn create(db: &Db<'_>, actor: &str, p: &Create, supplied: &Rule) -> Result<Value> {
+    require(
+        !supplied.protects_workflow() || p.tool == crate::workflow::START_TOOL,
+        "InvalidArgument",
+        "event SkipWhileWorkflowActive requires workflow.start",
+    )?;
     require(
         (1..=32).contains(&supplied.max_triggers),
         "InvalidArgument",
@@ -85,16 +112,20 @@ pub(super) fn create(db: &Db<'_>, actor: &str, p: &Create, supplied: &Rule) -> R
         &rule.expires_at,
     )?;
     let tool = db.of(&format!("tool-{}", p.tool), "Capability")?;
+    let mut state = json!({
+        "lifecycle":"Pending", "source_ref":source.reference(), "expires_at":rule.expires_at,
+        "trigger_refs":[], "pending_trigger_ref":null, "max_triggers":rule.max_triggers,
+        "last_task_id":null,"reason":null
+    });
+    if rule.protects_workflow() {
+        state["overlap"] = json!(rule.overlap);
+    }
     let schedule = db.create(
         "Schedule",
         &id,
         actor,
         json!({"creation_digest":creation,"event":rule,"request":template,"tool_ref":tool.reference()}),
-        json!({
-            "lifecycle":"Pending", "source_ref":source.reference(), "expires_at":rule.expires_at,
-            "trigger_refs":[], "pending_trigger_ref":null, "max_triggers":rule.max_triggers,
-            "last_task_id":null,"reason":null
-        }),
+        state,
     )?;
     policy::deadline::Clock::sample()?.register_until(db, &id, &rule.expires_at, None)?;
     db.c.execute(
@@ -211,9 +242,12 @@ fn record_attempt_failure(
             schedule,
             &decode(&schedule.spec["event"])?,
             trigger,
-            "Rejected",
-            Some(reason),
-            None,
+            Disposition {
+                phase: "Rejected",
+                reason: Some(reason),
+                receipt: None,
+                overlap: None,
+            },
         ),
     }
 }
@@ -240,6 +274,86 @@ pub(super) fn trigger_id(schedule: &Doc, event_id: &str) -> String {
     format!("trigger-{}", &digest[7..])
 }
 
+fn load_source(conn: &rusqlite::Connection, sequence: i64) -> Result<(Doc, String, String)> {
+    conn.query_row("SELECT * FROM versions WHERE seq=?1", [sequence], |r| {
+        Ok((row(r)?, r.get("event_id")?, r.get("incarnation")?))
+    })
+    .optional()?
+    .ok_or_else(|| {
+        err(
+            "RecoveryRequired",
+            "event schedule source revision is missing",
+        )
+    })
+}
+
+fn source_event(
+    conn: &rusqlite::Connection,
+    source: &Doc,
+    event_id: &str,
+    incarnation: &str,
+    seq: i64,
+) -> Result<Value> {
+    let authority: String =
+        conn.query_row("SELECT value FROM meta WHERE key='authority'", [], |r| {
+            r.get(0)
+        })?;
+    Ok(json!({
+        "event_id":event_id,"source_seq":seq.to_string(),"source_authority_id":authority,
+        "recovery_incarnation":incarnation,"resource_ref":source.reference(),"occurred_at":source.stamp,
+        "event_type":format!("psios.{}.updated.v1",source.kind.to_ascii_lowercase())
+    }))
+}
+
+pub(super) fn verify_source(
+    conn: &rusqlite::Connection,
+    schedule: &Doc,
+    rule: &Rule,
+    initial: &Doc,
+    id: &str,
+    event: &Value,
+) -> Result<(i64, i64)> {
+    let invalid = || {
+        err(
+            "RecoveryRequired",
+            "protected event trigger lost its original source revision",
+        )
+    };
+    let seq = event["source_seq"]
+        .as_str()
+        .and_then(|seq| seq.parse().ok())
+        .ok_or_else(invalid)?;
+    let (source, event_id, incarnation) = load_source(conn, seq)?;
+    require(
+        source.id == initial.id
+            && source.rev > initial.rev
+            && source.kind == initial.kind
+            && source.owner == initial.owner
+            && id == trigger_id(schedule, &event_id)
+            && policy::visible(&schedule.owner, &source)
+            && *event == source_event(conn, &source, &event_id, &incarnation, seq)?,
+        "RecoveryRequired",
+        "protected event trigger lost its original source revision",
+    )?;
+    let previous = conn
+        .query_row(
+            "SELECT * FROM versions WHERE id=?1 AND rev=?2",
+            params![source.id, source.rev - 1],
+            row,
+        )
+        .optional()?
+        .ok_or_else(invalid)?;
+    require(
+        previous.kind == source.kind
+            && previous.owner == source.owner
+            && policy::visible(&schedule.owner, &previous)
+            && rule.condition.matches(&previous, &source),
+        "RecoveryRequired",
+        "protected event trigger no longer matches its source transition",
+    )?;
+    Ok((seq, source.rev))
+}
+
 fn fire(db: &Db<'_>, rejected: &mut Option<Attempt>) -> Result<()> {
     let Some(work) = next_work(db)? else {
         return Ok(());
@@ -247,7 +361,10 @@ fn fire(db: &Db<'_>, rejected: &mut Option<Attempt>) -> Result<()> {
     let schedule = db.of(&work.schedule, "Schedule")?;
     let rule: Rule = decode(&schedule.spec["event"])?;
     require(
-        schedule.body["lifecycle"] == "Pending" && rule.source_ref["resource_id"] == work.source,
+        schedule.body["lifecycle"] == "Pending"
+            && rule.source_ref["resource_id"] == work.source
+            && rule.protects_workflow()
+                == (schedule.body["overlap"] == super::workflow_overlap::MODE),
         "RecoveryRequired",
         "event schedule index disagrees with its rule",
     )?;
@@ -292,14 +409,7 @@ fn fire(db: &Db<'_>, rejected: &mut Option<Attempt>) -> Result<()> {
         params![work.source, work.source_rev],
         row,
     )?;
-    let (source, event_id, incarnation) =
-        db.c.query_row("SELECT * FROM versions WHERE seq=?1", [seq], |r| {
-            Ok((
-                row(r)?,
-                r.get::<_, String>("event_id")?,
-                r.get::<_, String>("incarnation")?,
-            ))
-        })?;
+    let (source, event_id, incarnation) = load_source(db.c, seq)?;
     require(
         source.id == previous.id && source.rev == previous.rev + 1 && source.kind == previous.kind,
         "RecoveryRequired",
@@ -323,22 +433,42 @@ fn fire(db: &Db<'_>, rejected: &mut Option<Attempt>) -> Result<()> {
         seq,
         previous_rev: previous.rev,
         source_rev: source.rev,
-        event: json!({
-            "event_id":event_id,"source_seq":seq.to_string(),"source_authority_id":db.meta("authority")?,
-            "recovery_incarnation":incarnation,"resource_ref":source_ref,"occurred_at":source.stamp,
-            "event_type":format!("psios.{}.updated.v1",source.kind.to_ascii_lowercase())
-        }),
+        event: source_event(db.c, &source, &event_id, &incarnation, seq)?,
         source_ref,
     };
-    if super::previous_task_active(db, &schedule)? {
+    if rule.protects_workflow() {
+        if let Some(block) = super::event_workflow_overlap::blocked(
+            db.c,
+            &schedule,
+            &rule,
+            &trigger.id,
+            &trigger.event,
+        )? {
+            return finish_trigger(
+                db,
+                &schedule,
+                &rule,
+                &trigger,
+                Disposition {
+                    phase: "Skipped",
+                    reason: Some(block.reason),
+                    receipt: None,
+                    overlap: Some(&block.evidence),
+                },
+            );
+        }
+    } else if super::previous_task_active(db, &schedule)? {
         return finish_trigger(
             db,
             &schedule,
             &rule,
             &trigger,
-            "Skipped",
-            Some("PreviousTaskActive"),
-            None,
+            Disposition {
+                phase: "Skipped",
+                reason: Some("PreviousTaskActive"),
+                receipt: None,
+                overlap: None,
+            },
         );
     }
     let request = broker::retime_scheduled(template, &trigger.id, &rule.expires_at)?;
@@ -370,9 +500,12 @@ fn fire(db: &Db<'_>, rejected: &mut Option<Attempt>) -> Result<()> {
         &schedule,
         &rule,
         &trigger,
-        "Triggered",
-        None,
-        Some(receipt),
+        Disposition {
+            phase: "Triggered",
+            reason: None,
+            receipt: Some(&receipt),
+            overlap: None,
+        },
     )
 }
 
@@ -391,6 +524,14 @@ fn pending_trigger(db: &Db<'_>, schedule: &Doc) -> Result<Option<Doc>> {
         "RecoveryRequired",
         "pending event trigger disagrees with its schedule",
     )?;
+    if schedule.spec["event"]["overlap"] == super::workflow_overlap::MODE {
+        super::event_workflow_overlap::verify_pending(
+            db.c,
+            schedule,
+            &decode(&schedule.spec["event"])?,
+            &pending,
+        )?;
+    }
     Ok(Some(pending))
 }
 
@@ -407,46 +548,68 @@ fn remember_pending(db: &Db<'_>, schedule: &Doc, event: &Trigger) -> Result<Doc>
         require_same_event(&pending, event)?;
         return Ok(schedule.clone());
     }
-    let pending = create_trigger(db, schedule, event, "Pending", None, None)?;
+    let pending = create_trigger(
+        db,
+        schedule,
+        event,
+        &Disposition {
+            phase: "Pending",
+            reason: None,
+            receipt: None,
+            overlap: None,
+        },
+    )?;
     let mut body = schedule.body.clone();
     body["pending_trigger_ref"] = pending.reference();
     db.status(schedule, body)
+}
+
+struct Disposition<'a> {
+    phase: &'a str,
+    reason: Option<&'a str>,
+    receipt: Option<&'a Value>,
+    overlap: Option<&'a Value>,
+}
+
+impl Disposition<'_> {
+    fn apply(&self, mut body: Value) -> Value {
+        body["lifecycle"] = json!(self.phase);
+        body["reason"] = json!(self.reason);
+        body["task_receipt"] = json!(self.receipt);
+        body["settled_at"] = json!((self.phase != "Pending").then(now));
+        if let Some(overlap) = self.overlap {
+            body["overlap_evidence"] = overlap.clone();
+        }
+        body
+    }
 }
 
 fn create_trigger(
     db: &Db<'_>,
     schedule: &Doc,
     trigger: &Trigger,
-    phase: &str,
-    reason: Option<&str>,
-    receipt: Option<&Value>,
+    outcome: &Disposition<'_>,
 ) -> Result<Doc> {
     db.create(
         "ScheduleTrigger",
         &trigger.id,
         &schedule.owner,
-        json!({"schedule_id":schedule.id,"schedule_version":"r1","creation_digest":schedule.spec["creation_digest"]}),
-        json!({
-            "trigger_id":trigger.id,"schedule_id":schedule.id,"lifecycle":phase,
-            "source_event":trigger.event,"reason":reason,"task_receipt":receipt,
-            "settled_at":(phase != "Pending").then(now)
-        }),
+        trigger_spec(schedule),
+        outcome.apply(pending_body(schedule, &trigger.id, &trigger.event)),
     )
 }
 
-fn close_trigger(
-    db: &Db<'_>,
-    trigger: &Doc,
-    phase: &str,
-    reason: Option<&str>,
-    receipt: Option<&Value>,
-) -> Result<Doc> {
-    let mut body = trigger.body.clone();
-    body["lifecycle"] = json!(phase);
-    body["reason"] = json!(reason);
-    body["task_receipt"] = json!(receipt);
-    body["settled_at"] = json!(now());
-    db.status(trigger, body)
+pub(super) fn trigger_spec(schedule: &Doc) -> Value {
+    json!({"schedule_id":schedule.id,"schedule_version":"r1","creation_digest":schedule.spec["creation_digest"]})
+}
+
+pub(super) fn pending_body(schedule: &Doc, id: &str, event: &Value) -> Value {
+    json!({"trigger_id":id,"schedule_id":schedule.id,"source_event":event,
+           "lifecycle":"Pending","reason":null,"task_receipt":null,"settled_at":null})
+}
+
+fn close_trigger(db: &Db<'_>, trigger: &Doc, outcome: &Disposition<'_>) -> Result<Doc> {
+    db.status(trigger, outcome.apply(trigger.body.clone()))
 }
 
 fn append_trigger(body: &mut Value, limit: u32, trigger: &Doc) -> Result<bool> {
@@ -474,7 +637,16 @@ pub(super) fn settle_pending(
 ) -> Result<()> {
     if let Some(pending) = pending_trigger(db, schedule)? {
         let rule: Rule = decode(&schedule.spec["event"])?;
-        let closed = close_trigger(db, &pending, phase, reason, None)?;
+        let closed = close_trigger(
+            db,
+            &pending,
+            &Disposition {
+                phase,
+                reason,
+                receipt: None,
+                overlap: None,
+            },
+        )?;
         append_trigger(body, rule.max_triggers, &closed)?;
         db.audit(
             &schedule.owner,
@@ -491,21 +663,19 @@ fn finish_trigger(
     schedule: &Doc,
     rule: &Rule,
     trigger: &Trigger,
-    phase: &str,
-    reason: Option<&str>,
-    receipt: Option<Value>,
+    outcome: Disposition<'_>,
 ) -> Result<()> {
     let mut body = schedule.body.clone();
     let record = if let Some(pending) = pending_trigger(db, schedule)? {
         require_same_event(&pending, trigger)?;
-        close_trigger(db, &pending, phase, reason, receipt.as_ref())?
+        close_trigger(db, &pending, &outcome)?
     } else {
-        create_trigger(db, schedule, trigger, phase, reason, receipt.as_ref())?
+        create_trigger(db, schedule, trigger, &outcome)?
     };
     advance_source(db, schedule, trigger.previous_rev, trigger.source_rev)?;
     let exhausted = append_trigger(&mut body, rule.max_triggers, &record)?;
     body["source_ref"] = trigger.source_ref.clone();
-    if let Some(receipt) = receipt {
+    if let Some(receipt) = outcome.receipt {
         body["last_task_id"] = receipt["task_id"].clone();
     }
     if exhausted {
@@ -518,7 +688,7 @@ fn finish_trigger(
         &schedule.owner,
         "Schedule.EventTrigger",
         Some(&trigger.id),
-        phase,
+        outcome.phase,
     )
 }
 

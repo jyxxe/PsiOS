@@ -9,7 +9,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 
 pub(crate) const FORMAT: u32 = crate::apps::volume_rebind::DIRECT_CLONE_FORMAT + 1;
-const MODE: &str = "SkipWhileWorkflowActive";
+pub(super) const MODE: &str = "SkipWhileWorkflowActive";
 const TASK_ACTIVE: &str = "PreviousTaskActive";
 const WORKFLOW_ACTIVE: &str = "PreviousWorkflowActive";
 const UNVERIFIED: &str = "PreviousWorkflowUnverified";
@@ -106,6 +106,14 @@ fn state_at(conn: &Connection, id: &str, before: Option<i64>) -> Result<Doc> {
     db::find(conn, id)?.ok_or_else(invalid)
 }
 
+fn launch_deadline<'a>(schedule: &'a Doc, trigger: &'a Doc) -> &'a Value {
+    if schedule.spec["event"].is_object() {
+        &schedule.spec["event"]["expires_at"]
+    } else {
+        &trigger.body["deadline_at"]
+    }
+}
+
 fn prior_task(
     conn: &Connection,
     schedule: &Doc,
@@ -118,7 +126,9 @@ fn prior_task(
         receipt["task_id"].as_str().ok_or_else(invalid)?,
         before,
     )?;
-    let deadline = trigger.body["deadline_at"].as_str().ok_or_else(invalid)?;
+    let deadline = launch_deadline(schedule, trigger)
+        .as_str()
+        .ok_or_else(invalid)?;
     let request = broker::retime_scheduled(&schedule.spec["request"], &trigger.id, deadline)?;
     require(
         task.kind == "Task"
@@ -152,7 +162,7 @@ fn workflow_id(conn: &Connection, task: &Doc) -> Result<String> {
 
 fn completed_launch(
     conn: &Connection,
-    trigger: &Doc,
+    limit: &Value,
     task: &Doc,
     before: Option<i64>,
 ) -> Result<(Doc, Doc)> {
@@ -195,7 +205,7 @@ fn completed_launch(
             && plan.body["allowed_effects"][0]["action"] == START_TOOL
             && input.kind == "Input"
             && input.owner == task.owner
-            && deadline(&plan.body["deadline_at"])? <= deadline(&trigger.body["deadline_at"])?,
+            && deadline(&plan.body["deadline_at"])? <= deadline(limit)?,
         "RecoveryRequired",
         "workflow overlap receipt is outside its original known launch",
     )?;
@@ -300,7 +310,7 @@ fn base_evidence(trigger: &Doc, task: &Doc) -> Value {
     json!({"launch_trigger_ref":trigger.reference(),"launch_task_ref":task.reference()})
 }
 
-fn block_at(
+pub(super) fn block_at(
     conn: &Connection,
     schedule: &Doc,
     trigger: &Doc,
@@ -323,7 +333,7 @@ fn block_at(
             evidence,
         }));
     }
-    let child = completed_launch(conn, trigger, &task, before)
+    let child = completed_launch(conn, launch_deadline(schedule, trigger), &task, before)
         .and_then(|(receipt, child)| Ok((child_incomplete(conn, &child, before)?, receipt, child)));
     match child {
         Ok((false, _, _)) => Ok(None),
@@ -364,15 +374,16 @@ pub(super) fn blocked(conn: &Connection, schedule: &Doc) -> Result<Option<Block>
     block_at(conn, schedule, &previous, None)
 }
 
-pub(crate) fn verify(conn: &Connection) -> Result<()> {
+pub(crate) fn verify(conn: &Connection, event_enabled: bool) -> Result<()> {
     let orphan: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM current t LEFT JOIN current s ON s.id=t.spec->>'schedule_id'
           WHERE t.kind='ScheduleTrigger' AND t.body->'overlap_evidence' IS NOT NULL
           AND (s.id IS NULL OR s.kind<>'Schedule' OR
-              (s.spec->'repeat'->>'overlap' IS NOT ?1 AND s.spec->'calendar'->>'overlap' IS NOT ?1)
+              (s.spec->'repeat'->>'overlap' IS NOT ?1 AND s.spec->'calendar'->>'overlap' IS NOT ?1
+               AND (NOT ?2 OR s.spec->'event'->>'overlap' IS NOT ?1))
               OR NOT EXISTS(SELECT 1 FROM json_each(s.body->'trigger_refs')
                    WHERE value->>'resource_id'=t.id)))",
-        [MODE],
+        params![MODE, event_enabled],
         |row| row.get(0),
     )?;
     require(
@@ -399,63 +410,75 @@ fn verify_schedule(conn: &Connection, schedule: &Doc) -> Result<()> {
             [&trigger.id],
             |row| row.get(0),
         )?;
-        let phase = trigger.body["lifecycle"].as_str().ok_or_else(invalid)?;
-        let reason = trigger.body["reason"].as_str();
-        let evidence = trigger.body.get("overlap_evidence");
-        if phase == "Triggered" {
-            prior_task(conn, schedule, &trigger, None)?;
-            if let Some(prior) = &previous {
-                require(
-                    block_at(conn, schedule, prior, Some(sequence))?.is_none(),
-                    "RecoveryRequired",
-                    "workflow schedule triggered while the original workflow was active",
-                )?;
-            }
-        } else {
-            require(
-                trigger.body["task_receipt"].is_null(),
-                "RecoveryRequired",
-                "workflow overlap skipped trigger has a Task",
-            )?;
-        }
-        if matches!(reason, Some(TASK_ACTIVE | WORKFLOW_ACTIVE | UNVERIFIED)) {
-            let prior = previous.as_ref().ok_or_else(invalid)?;
-            require(
-                phase == "Skipped",
-                "RecoveryRequired",
-                "workflow overlap has an invalid disposition",
-            )?;
-            if reason == Some(UNVERIFIED) {
-                // Retained bytes may have been repaired since the protective skip.
-                let task = prior_task(conn, schedule, prior, Some(sequence))?;
-                require(
-                    settled(&task) && evidence == Some(&base_evidence(prior, &task)),
-                    "RecoveryRequired",
-                    "unverified workflow skip lost its previous launch Task",
-                )?;
-            } else {
-                let expected =
-                    block_at(conn, schedule, prior, Some(sequence))?.ok_or_else(invalid)?;
-                require(
-                    reason == Some(expected.reason) && evidence == Some(&expected.evidence),
-                    "RecoveryRequired",
-                    "workflow overlap proof disagrees with the state at its original skip",
-                )?;
-            }
-        } else {
-            require(
-                evidence.is_none(),
-                "RecoveryRequired",
-                "unexpected workflow overlap evidence",
-            )?;
-        }
-        if phase == "Triggered" {
+        verify_disposition(conn, schedule, &trigger, sequence, previous.as_ref())?;
+        if trigger.body["lifecycle"] == "Triggered" {
             previous = Some(trigger);
         }
     }
-    let latest = previous
-        .as_ref()
-        .map(|trigger| &trigger.body["task_receipt"]["task_id"]);
+    verify_last(conn, schedule, previous.as_ref())
+}
+
+pub(super) fn verify_disposition(
+    conn: &Connection,
+    schedule: &Doc,
+    trigger: &Doc,
+    sequence: i64,
+    previous: Option<&Doc>,
+) -> Result<()> {
+    let phase = trigger.body["lifecycle"].as_str().ok_or_else(invalid)?;
+    let reason = trigger.body["reason"].as_str();
+    let evidence = trigger.body.get("overlap_evidence");
+    if phase == "Triggered" {
+        prior_task(conn, schedule, trigger, None)?;
+        if let Some(prior) = previous {
+            require(
+                block_at(conn, schedule, prior, Some(sequence))?.is_none(),
+                "RecoveryRequired",
+                "workflow schedule triggered while the original workflow was active",
+            )?;
+        }
+    } else {
+        require(
+            trigger.body["task_receipt"].is_null(),
+            "RecoveryRequired",
+            "workflow overlap skipped trigger has a Task",
+        )?;
+    }
+    if matches!(reason, Some(TASK_ACTIVE | WORKFLOW_ACTIVE | UNVERIFIED)) {
+        let prior = previous.ok_or_else(invalid)?;
+        require(
+            phase == "Skipped",
+            "RecoveryRequired",
+            "workflow overlap has an invalid disposition",
+        )?;
+        if reason == Some(UNVERIFIED) {
+            // Retained bytes may have been repaired since the protective skip.
+            let task = prior_task(conn, schedule, prior, Some(sequence))?;
+            require(
+                settled(&task) && evidence == Some(&base_evidence(prior, &task)),
+                "RecoveryRequired",
+                "unverified workflow skip lost its previous launch Task",
+            )?;
+        } else {
+            let expected = block_at(conn, schedule, prior, Some(sequence))?.ok_or_else(invalid)?;
+            require(
+                reason == Some(expected.reason) && evidence == Some(&expected.evidence),
+                "RecoveryRequired",
+                "workflow overlap proof disagrees with the state at its original skip",
+            )?;
+        }
+    } else {
+        require(
+            evidence.is_none(),
+            "RecoveryRequired",
+            "unexpected workflow overlap evidence",
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn verify_last(conn: &Connection, schedule: &Doc, previous: Option<&Doc>) -> Result<()> {
+    let latest = previous.map(|trigger| &trigger.body["task_receipt"]["task_id"]);
     require(
         &schedule.body["last_task_id"] == latest.unwrap_or(&Value::Null),
         "RecoveryRequired",
@@ -463,7 +486,7 @@ fn verify_schedule(conn: &Connection, schedule: &Doc) -> Result<()> {
     )?;
     if let Some(previous) = previous {
         require(
-            block_at(conn, schedule, &previous, None)?
+            block_at(conn, schedule, previous, None)?
                 .is_none_or(|block| block.reason != UNVERIFIED),
             "RecoveryRequired",
             "latest workflow launch cannot be verified",

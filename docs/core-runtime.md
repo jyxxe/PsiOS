@@ -578,6 +578,10 @@ Core 在创建时固定 IANA 数据版本、UTC 窗口和因 `gap` 跳过的当�
 
 跳过记录在 `Schedule.TriggerGet` 中提供 `overlap_evidence`，包含原触发、启动 Task 及已核实的回执和 WorkflowRun 修订。旧 `Skip` 仍按启动 Task 判断。使用 `Schedule.Cancel` 取消待触发的轮次，使用 `Workflow.Cancel` 管理已启动的子工作流。重叠保护作用于各自的调度。需要等待子工作流内的 Agent 时，在该步骤启用 `SessionTerminal`。新格式由当前写入器执行，旧写入器拒绝打开。[重启、取消和实际写入验收](../tests/test_workflow_schedule_overlap.py)
 
+格式 121 的资源事件 `workflow.start` 可设置 `event.overlap: "SkipWhileWorkflowActive"`。跳过记录保留本轮的原始来源事件及上一组确切的启动凭据，推进源游标并消耗一个已记录触发名额，但不会准入 Task 或占用预算。队列压力后结算的触发修订保留原事件 ID、源序列和资源修订。省略此设置时，事件仍按上一启动 Task 判断重叠。`Schedule.Cancel` 和到期仅结算该事件订阅；已启动的子 Workflow 保留独立生命周期。[真实资源事件和写入验收](../tests/test_resource_event_workflow_overlap.py)
+
+受保护的规则独立保存原始单调时钟截止时间及当前事件游标。每次推进都在同一事务核对并更新游标索引。启动和离线校验会拒绝丢失或被替换的记录。后续引导沿用既有跨引导截止规则。
+
 ### 通过调度创建 Agent 会话
 
 将 `agent.session.start` 作为 `Schedule.Create` 的 `tool`。输入包括 `goal`、完整的 `skill_ref` 和 `model_ref`、`context_policy` 及 `max_turns`。所选委托需要包含 `schedule.manage`、`agent.session.start`、`session.run`、`task.submit`、`task.read` 及 Skill 所需工具。启用资源范围时，计划同时核对指定的 Model 和 Skill，后续工具依然各自核对资源。也可通过普通 Task.Submit 接受同一个工具。

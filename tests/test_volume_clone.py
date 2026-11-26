@@ -256,12 +256,14 @@ class VolumeCloneTests(unittest.TestCase):
         n = self.n
         source = n.perform("volume.create", {"name": "space-source"})
         path = self.data(source) / "payload"
+        payload_bytes = 6 * MIB
+        reserve_bytes = 4 * MIB
         with path.open("xb") as file:
-            os.posix_fallocate(file.fileno(), 0, 6 * MIB)
+            os.posix_fallocate(file.fileno(), 0, payload_bytes)
             file.write(b"an actual source on the bounded backing filesystem")
         n.stop()
         config = json.loads(n.config.read_text())
-        config["authority_reserve"] = {"state_bytes": 4 * MIB}
+        config["authority_reserve"] = {"state_bytes": reserve_bytes}
         n.config.write_text(json.dumps(config))
         n.start()
 
@@ -278,15 +280,26 @@ class VolumeCloneTests(unittest.TestCase):
         backup = n.perform("backup.create", target(source))
         self.failure(n.submit("backup.restore", target(backup)), "QuotaExceeded")
         self.assertEqual(set(self.volumes.iterdir()), initial_volumes)
-        n.perform("backup.delete", target(backup))
-        # The published backup's blocks can be reclaimed asynchronously.
+        deletion = n.wait(n.submit("backup.delete", target(backup)), autoapprove=True)
+        self.assertEqual((deletion["lifecycle"], deletion["outcome_knowledge"]), ("Succeeded", "Known"), deletion)
+        op, = deletion["operation_refs"]
+        retired = self.backups / f".retired-{op['resource_id']}"
+        retirement_id = f"storage-retirement-{op['resource_id']}"
         deadline = time.monotonic() + 10
-        while True:
-            stats = os.statvfs(n.state)
-            if stats.f_bavail * stats.f_frsize >= 11 * MIB:
+        while time.monotonic() < deadline:
+            retirement = n.get(retirement_id)["value"]
+            if retirement["lifecycle"] == "Reclaimed":
                 break
-            self.assertLess(time.monotonic(), deadline, "backup blocks were not reclaimed")
             time.sleep(0.04)
+        else:
+            self.fail(f"backup retirement did not settle: {retirement}")
+        self.assertFalse(retired.exists())
+        self.assertFalse((self.backups / backup["resource_id"]).exists())
+
+        stats = os.statvfs(n.state)
+        available = stats.f_bavail * stats.f_frsize
+        self.assertGreaterEqual(available, reserve_bytes + payload_bytes)
+        self.assertLess(available, reserve_bytes + 2 * payload_bytes)
 
         remaining_backups = set(self.backups.iterdir())
         _, pending = self.submit(source, "one-copy", self.grant([source["resource_id"], "local"]))

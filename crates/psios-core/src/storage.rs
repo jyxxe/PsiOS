@@ -11,6 +11,7 @@ mod intake;
 pub(crate) mod oci_archive;
 pub(crate) mod publication;
 pub(crate) mod read_holds;
+pub(crate) mod reclamation;
 pub(crate) mod reconcile_file;
 mod restore_proof;
 pub(crate) mod restore_publication;

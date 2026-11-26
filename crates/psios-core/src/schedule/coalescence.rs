@@ -1,6 +1,6 @@
 //! Witness the selected group of discrete timed occurrences in the broker commit.
 use super::{
-    Window, due_ms, instant,
+    Window, due_ms, elapsed, instant,
     repeat::{Occurrence, Series, persisted},
     timestamp,
 };
@@ -41,46 +41,10 @@ fn check(valid: bool) -> Result<()> {
     if valid { Ok(()) } else { Err(invalid()) }
 }
 
-fn valid_clock_scope(boot: &str, ns: &str) -> bool {
-    uuid::Uuid::parse_str(boot).is_ok_and(|id| !id.is_nil() && id.to_string() == boot)
-        && (ns == "unsupported"
-            || ns
-                .parse::<u64>()
-                .is_ok_and(|n| n != 0 && n.to_string() == ns))
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct ElapsedAnchor {
-    boot_id: String,
-    time_ns: String,
-    deadline_boot_ms: i64,
-}
-
-fn registered_anchor(conn: &Connection, schedule: &str) -> Result<ElapsedAnchor> {
-    conn.query_row(
-        "SELECT boot_id,time_ns,deadline_boot_ms FROM authorization_deadlines WHERE resource=?1",
-        [schedule],
-        |r| {
-            Ok(ElapsedAnchor {
-                boot_id: r.get(0)?,
-                time_ns: r.get(1)?,
-                deadline_boot_ms: r.get(2)?,
-            })
-        },
-    )
-    .optional()?
-    .ok_or_else(|| err("RecoveryRequired", CLOCK_ERROR))
-}
-
 pub(super) fn bind_clock(db: &Db<'_>, schedule: &str, spec: &mut Value) -> Result<()> {
     if configured(spec) {
-        let anchor = registered_anchor(db.c, schedule)?;
-        require(
-            valid_clock_scope(&anchor.boot_id, &anchor.time_ns) && anchor.deadline_boot_ms > 0,
-            "RecoveryRequired",
-            CLOCK_ERROR,
-        )?;
+        let anchor = elapsed::Anchor::capture(db.c, schedule)?
+            .ok_or_else(|| err("RecoveryRequired", CLOCK_ERROR))?;
         spec["coalescence_clock"] = json!(anchor);
     }
     Ok(())
@@ -88,8 +52,6 @@ pub(super) fn bind_clock(db: &Db<'_>, schedule: &str, spec: &mut Value) -> Resul
 
 fn verify_clock(conn: &Connection, schedule: &Doc, deadline_ms: i64) -> Result<()> {
     let corrupt = || err("RecoveryRequired", CLOCK_ERROR);
-    let original: ElapsedAnchor =
-        persisted(&schedule.spec["coalescence_clock"]).map_err(|_| corrupt())?;
     let first = schedule.spec["request"]["deadline_at"]
         .as_str()
         .ok_or_else(corrupt)?;
@@ -98,13 +60,13 @@ fn verify_clock(conn: &Connection, schedule: &Doc, deadline_ms: i64) -> Result<(
         .checked_sub(first_ms)
         .filter(|shift| *shift >= 0)
         .ok_or_else(corrupt)?;
-    let actual = registered_anchor(conn, &schedule.id)?;
     require(
-        valid_clock_scope(&original.boot_id, &original.time_ns)
-            && original.deadline_boot_ms > 0
-            && actual.boot_id == original.boot_id
-            && actual.time_ns == original.time_ns
-            && original.deadline_boot_ms.checked_add(shift) == Some(actual.deadline_boot_ms),
+        elapsed::Anchor::matches(
+            conn,
+            &schedule.id,
+            &schedule.spec["coalescence_clock"],
+            shift,
+        )?,
         "RecoveryRequired",
         CLOCK_ERROR,
     )
@@ -292,7 +254,7 @@ impl Proof {
     fn clock(&self, conn: &Connection, schedule: &str, first: Window, last: Window) -> Result<()> {
         let sample = &self.clock;
         check(
-            valid_clock_scope(&sample.boot_id, &sample.time_ns)
+            elapsed::valid_scope(&sample.boot_id, &sample.time_ns)
                 && sample.elapsed_ms >= 0
                 && sample
                     .prior_cutoff_ms

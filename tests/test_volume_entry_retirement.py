@@ -61,13 +61,13 @@ class VolumeEntryRetirementTests(unittest.TestCase):
             return db.execute("SELECT body->>'lifecycle' FROM current WHERE kind=? AND spec->>'operation_id'=?",
                               (KIND, operation)).fetchone()
 
-    def wait_until(self, condition):
+    def wait_until(self, condition, message="retirement condition did not become true"):
         deadline = time.monotonic() + 12
         while time.monotonic() < deadline:
             if condition():
                 return
             time.sleep(0.05)
-        self.fail("retirement condition did not become true")
+        self.fail(message)
 
     def quarantine(self, operation):
         return self.wrapper / ".entry-retirements" / f"entry-{operation}"
@@ -192,6 +192,70 @@ class VolumeEntryRetirementTests(unittest.TestCase):
         self.volume = n.perform(TOOL, {"target":target(self.volume), "path":"nested"})["volume_ref"]
         self.assertFalse(regular.parent.exists())
         self.assertTrue(extra.is_symlink())
+        n.stop()
+        subprocess.run(n.daemon + ["verify"], check=True, stdout=subprocess.DEVNULL, timeout=15)
+
+    def test_failed_entry_reclamation_receipt_does_not_strand_another_volume(self):
+        n = self.n
+        other = n.perform("volume.create", {"name": "independent-entry-retirement"})
+        other = n.perform("volume.mkdir", {"target": target(other), "path": "empty"})["volume_ref"]
+        other_wrapper = n.state / "volumes" / other["resource_id"]
+        other_path = other_wrapper / "data" / "empty"
+        self.assertTrue(other_path.is_dir())
+        first = self.submit()
+        waiting = n.wait(first)
+        self.assertEqual(waiting["lifecycle"], "WaitingApproval")
+        first_id = waiting["operation_refs"][0]["resource_id"]
+        first_path = self.quarantine(first_id)
+        rejection = f"NEW.id='volume-entry-retirement-{first_id}' AND NEW.kind='{KIND}' AND NEW.body->>'lifecycle'='Reclaimed'"
+
+        with self.source.open("rb") as original, self.reject_receipt("lose_first_entry_reclaim", rejection):
+            first_inode = os.fstat(original.fileno())
+            done = n.wait(first, autoapprove=True)
+            self.assertEqual((done["lifecycle"], done["outcome_knowledge"]), ("Succeeded", "Known"), done)
+            first_operation, = done["operation_refs"]
+            self.assertEqual(first_operation["resource_id"], first_id)
+            self.wait_until(lambda: not first_path.exists(), "the first quarantined file was never physically removed")
+            self.assertFalse(self.source.exists())
+            self.assertEqual(os.fstat(original.fileno()).st_nlink, 0)
+            self.assertEqual(self.state(first_id), ("PendingCleanup",))
+            self.source.write_bytes(b"distinct new file after retirement")
+            replacement = self.source.stat()
+            self.assertNotEqual((replacement.st_dev, replacement.st_ino), (first_inode.st_dev, first_inode.st_ino))
+
+            n.stop(signal.SIGKILL)
+            n.start()
+            self.assertEqual(self.state(first_id), ("PendingCleanup",))
+            second = n.wait(self.submit("empty", other), autoapprove=True)
+            self.assertEqual((second["lifecycle"], second["outcome_knowledge"]), ("Succeeded", "Known"), second)
+            second_operation, = second["operation_refs"]
+            second_id = second_operation["resource_id"]
+            second_path = other_wrapper / ".entry-retirements" / f"entry-{second_id}"
+            self.wait_until(lambda: self.state(second_id) == ("Reclaimed",),
+                            "the failed entry receipt prevented another volume's reclamation")
+            self.assertFalse(other_path.exists())
+            self.assertFalse(second_path.exists())
+            self.assertFalse(first_path.exists())
+            self.assertEqual(self.state(first_id), ("PendingCleanup",))
+            with closing(sqlite3.connect(self.database, timeout=8)) as db:
+                self.assertEqual(db.execute("SELECT operation,phase FROM volume_entry_retirements").fetchall(),
+                                 [(first_id, "PendingCleanup")])
+                self.assertEqual(db.execute("SELECT entries,bytes FROM volume_entry_retirement_budget").fetchone(),
+                                 (1, len(b"approved original")))
+            self.assertEqual(original.read(), b"approved original")
+
+        self.wait_until(lambda: self.state(first_id) == ("Reclaimed",), "the original entry receipt did not resume")
+        with closing(sqlite3.connect(self.database, timeout=8)) as db:
+            self.assertEqual(db.execute("SELECT entries,bytes FROM volume_entry_retirement_budget").fetchone(), (0, 0))
+            for operation, decision in ((first_id, "ConfirmedAbsent"), (second_id, "Removed")):
+                rows = db.execute("SELECT decision FROM audit WHERE method='Storage.VolumeEntryReclaim' AND resource=?",
+                                  (operation,)).fetchall()
+                self.assertEqual(rows, [(decision,)])
+        current = self.source.stat()
+        self.assertEqual((current.st_dev, current.st_ino), (replacement.st_dev, replacement.st_ino))
+        self.assertEqual(self.source.read_bytes(), b"distinct new file after retirement")
+        self.assertEqual(n.wait(first)["operation_refs"], [first_operation])
+        self.assertEqual(n.wait(second["task_id"])["operation_refs"], [second_operation])
         n.stop()
         subprocess.run(n.daemon + ["verify"], check=True, stdout=subprocess.DEVNULL, timeout=15)
 

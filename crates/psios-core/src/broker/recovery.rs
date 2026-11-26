@@ -391,7 +391,12 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
                 &op,
                 storage::restore_publication::INSPECT,
             )?;
-            storage::restore_publication::reconcile(db, &op, &target, &proof, &observation)?
+            let (applied, result, evidence) =
+                storage::restore_publication::reconcile(db, &op, &target, &proof, &observation)?;
+            if !applied {
+                reason = Some(err("LeaseLost", "restored volume was not published"));
+            }
+            (result, evidence)
         }
         Action::RenameFile(_) => {
             let (proof, observation) = inspected(
@@ -567,6 +572,9 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         }
     };
     let evidence=db.record("RecoveryEvidence",&t.owner,json!({"operation_ref":op.reference(),"target_ref":target.reference(),"verified_at":now(),"evidence":proof_details}))?;
+    if t.spec["task_type"] == "backup.restore" {
+        storage::restore_publication::queue_disposal(db, &op, &evidence)?;
+    }
     let artifact = artifact::publish(
         db,
         &t.owner,

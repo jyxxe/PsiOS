@@ -206,7 +206,18 @@ fn worker(s: Shared, changes: Arc<Changes>, stop: Arc<AtomicBool>, tick: Duratio
         let check_each_stage = matches!(work.action, crate::host::Action::ObserveNetworkProbe(_));
         let mut check_after = Instant::now();
         let receipt = work.perform_checked(
-            |checkpoint| state(&s)?.transaction(&correlation, |db| work.checkpoint(db, checkpoint)),
+            |checkpoint| {
+                let restore = matches!(&checkpoint, crate::host::Checkpoint::RestoredVolume { .. });
+                let mut store = state(&s)?;
+                let result = store.transaction(&correlation, |db| work.checkpoint(db, checkpoint));
+                if restore && result.is_err() && store.transaction_is_uncertain() {
+                    return Err(err(
+                        "OutcomeUnknown",
+                        "restore checkpoint requires witness recovery",
+                    ));
+                }
+                result
+            },
             || {
                 crate::require(
                     !stop.load(Ordering::Acquire),
@@ -282,11 +293,17 @@ fn timer(s: Shared, stop: Arc<AtomicBool>) -> Result<()> {
 
 fn reclaim_storage(s: Shared, stop: Arc<AtomicBool>, config: Config) -> Result<()> {
     let mut archive_cursor = String::new();
+    let mut restore_cursor = String::new();
     while !stop.load(Ordering::Acquire) {
         let correlation = id("storage-reclaim");
         if let Err(error) = reclaim_one_oci_archive(&s, &config, &correlation, &mut archive_cursor)
         {
             eprintln!("psiosd managed OCI archive reclamation: {}", error.0.code);
+        }
+        if let Err(error) =
+            reclaim_one_restore_stage(&s, &config, &correlation, &mut restore_cursor)
+        {
+            eprintln!("psiosd restore stage reclamation: {}", error.0.code);
         }
         let ready = state(&s)?.transaction(&correlation, |db| {
             crate::artifact::ingress::expire(db)?;
@@ -331,6 +348,24 @@ fn reclaim_one_oci_archive(
         state(s)?.transaction(correlation, |db| crate::artifact::files::dispose(db, &id))?;
     }
     Ok(())
+}
+
+fn reclaim_one_restore_stage(
+    s: &Shared,
+    config: &Config,
+    correlation: &str,
+    cursor: &mut String,
+) -> Result<()> {
+    use crate::storage::restore_publication::{Disposal, next_disposal};
+    let selected = state(s)?.transaction(correlation, |db| next_disposal(db, cursor))?;
+    let Some(operation) = selected else {
+        cursor.clear();
+        return Ok(());
+    };
+    cursor.clone_from(&operation);
+    let job = state(s)?.transaction(correlation, |db| Disposal::open(db, &operation))?;
+    let removed = job.run(config)?;
+    state(s)?.transaction(correlation, |db| job.finish(db, removed))
 }
 
 struct Endpoint<'a> {
@@ -397,7 +432,14 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     let mut db = Store::open(cfg.clone())?;
     db.reclaim_oci_archives()?;
     let (listener, _endpoint) = bind(&cfg.socket)?;
-    crate::storage::reclaim_on_startup(&cfg);
+    let restore_stages = db.transaction(
+        "restore-stage-custody",
+        crate::storage::restore_publication::protected_stages,
+    );
+    if let Err(error) = &restore_stages {
+        eprintln!("psiosd volume staging retained: {}", error.0.code);
+    }
+    crate::storage::reclaim_on_startup(&cfg, restore_stages.as_ref().ok());
     db.transaction("restart-recovery", |db| {
         crate::events::scopes::reclaim(db)?;
         crate::node::service_control::verify_active_holds(db)?;

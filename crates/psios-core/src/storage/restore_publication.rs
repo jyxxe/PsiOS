@@ -9,32 +9,60 @@ use crate::{
     now, require,
 };
 use psios_api::canonical;
-use rusqlite::params;
-use rustix::fs::{Dir, Mode, OFlags, open};
+use rusqlite::{OptionalExtension, params};
+use rustix::fs::{AtFlags, Dir, Mode, OFlags, open, statat};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{fs::File, io::Read, os::unix::fs::MetadataExt};
+use std::{collections::HashSet, fs::File, io::Read, os::unix::fs::MetadataExt};
 
 pub(crate) const INSPECT: &str = "volume.inspect_publication";
 pub(crate) const FORMAT: u32 = 42;
+pub(crate) const DISPOSAL_FORMAT: u32 = crate::events::offsets::FORMAT + 1;
+pub(crate) const DISPOSAL_SCHEMA: &str = include_str!("restore_publication/custody.sql");
 pub(crate) const PERMIT_MAX_SECONDS: i64 = 86_400;
 
 const INTENT: &str = "RestorePublicationIntent";
 const CHECKPOINT: &str = "RestorePublicationCheckpoint";
+const NOT_APPLIED: &str = "RestorePublicationNotApplied";
+const MAX_RESTORE_STAGES: i64 = 128;
+
+mod disposal;
+pub(crate) use disposal::{Disposal, next_disposal, queue_disposal};
+mod verification;
+pub(crate) use verification::{protected_stages, verify};
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Placement {
     parent: [String; 2],
     directory: [String; 2],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stage_name: Option<String>,
 }
 
 impl Placement {
     pub(super) fn staged(stage: &staging::Stage) -> Result<Self> {
+        let name = stage
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| staging::is_stage_name(name))
+            .ok_or_else(|| err("RecoveryRequired", "restore stage name is invalid"))?;
         Ok(Self {
             parent: identity(stage.parent())?,
             directory: identity(stage.directory())?,
+            stage_name: Some(name.into()),
         })
+    }
+
+    fn stage_name(&self) -> Result<Option<&str>> {
+        let name = self.stage_name.as_deref();
+        require(
+            name.is_none_or(staging::is_stage_name),
+            "RecoveryRequired",
+            "restore stage name is invalid",
+        )?;
+        Ok(name)
     }
 }
 
@@ -74,6 +102,20 @@ fn belongs(record: &Doc, op: &Doc, kind: &str) -> bool {
 
 pub(crate) fn begin(db: &Db<'_>, work: &Work) -> Result<()> {
     held(db, &work.op, &work.target)?;
+    let outstanding: i64 = db.c.query_row(
+        "SELECT count(*) FROM (
+            SELECT 1 FROM queue q JOIN current t ON q.task=t.id
+              WHERE q.phase IN ('Dispatched','Unknown') AND t.spec->>'task_type'='backup.restore'
+            UNION ALL SELECT 1 FROM restore_stage_disposals LIMIT ?1
+         )",
+        [MAX_RESTORE_STAGES],
+        |row| row.get(0),
+    )?;
+    require(
+        outstanding < MAX_RESTORE_STAGES,
+        "QuotaExceeded",
+        "restore staging custody limit reached",
+    )?;
     db.create(
         INTENT,
         &intent_id(&work.op.id),
@@ -92,6 +134,7 @@ pub(crate) fn not_published(db: &Db<'_>, op: &Doc) -> Result<bool> {
     let plan = db.resolve(&op.body["plan_ref"])?;
     Ok(belongs(&intent, op, INTENT)
         && intent.body["backup_ref"] == plan.body["allowed_effects"][0]["resource_ref"]
+        && intent.body.get("checkpoint_ref").is_none()
         && db.find(&checkpoint_id(&op.id))?.is_none())
 }
 
@@ -107,11 +150,15 @@ pub(crate) fn record(
         "Fenced",
         "restore publication intent is unavailable or used",
     )?;
-    db.create(CHECKPOINT, &checkpoint_id(&work.op.id), &work.op.owner,
+    let intent = db.of(&intent_id(&work.op.id), INTENT)?;
+    let checkpoint = db.create(CHECKPOINT, &checkpoint_id(&work.op.id), &work.op.owner,
         json!({"operation_id":work.op.id}),
         json!({"plan_ref":work.op.body["plan_ref"],"effect_id":work.effect.id,
                "backup_ref":work.target.reference(),"manifest_digest":work.target.body["manifest_digest"],
                "receipt":receipt,"placement":placement}))?;
+    let mut body = intent.body.clone();
+    body["checkpoint_ref"] = checkpoint.reference();
+    db.status(&intent, body)?;
     Ok(())
 }
 
@@ -130,7 +177,29 @@ fn recorded(db: &Db<'_>, op: &Doc, backup: &Doc) -> Result<Doc> {
         "RecoveryRequired",
         "restore publication checkpoint does not bind the original operation and backup",
     )?;
+    let intent = db.find(&intent_id(&op.id))?;
+    verify_custody(op, &checkpoint, intent.as_ref())?;
     Ok(checkpoint)
+}
+
+fn verify_custody(op: &Doc, checkpoint: &Doc, intent: Option<&Doc>) -> Result<Placement> {
+    let placement: Placement = decode(&checkpoint.body["placement"])?;
+    let named = placement.stage_name()?.is_some();
+    let linked = intent.and_then(|document| document.body.get("checkpoint_ref"));
+    require(
+        belongs(checkpoint, op, CHECKPOINT)
+            && if named {
+                intent.is_some_and(|doc| {
+                    belongs(doc, op, INTENT)
+                        && doc.body["backup_ref"] == checkpoint.body["backup_ref"]
+                }) && linked == Some(&checkpoint.reference())
+            } else {
+                linked.is_none()
+            },
+        "RecoveryRequired",
+        "restore staging custody disagrees with its witnessed intent",
+    )?;
+    Ok(placement)
 }
 
 pub(crate) fn pending(db: &Db<'_>, op: &Doc) -> Result<Doc> {
@@ -160,13 +229,30 @@ struct Candidate {
     data: File,
 }
 
-fn open_candidate(config: &Config, checkpoint: &Doc) -> Result<Candidate> {
-    let placement: Placement = decode(&checkpoint.body["placement"])?;
-    let receipt = &checkpoint.body["receipt"];
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Publication {
+    Published,
+    NotApplied,
+}
+
+impl Publication {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Published => "Published",
+            Self::NotApplied => "NotApplied",
+        }
+    }
+}
+
+fn volume_id(receipt: &Value) -> Result<&str> {
     let volume = receipt["id"]
         .as_str()
         .ok_or_else(|| err("RecoveryRequired", "checkpointed volume has no ID"))?;
     filename(volume)?;
+    Ok(volume)
+}
+
+fn open_parent(config: &Config, placement: &Placement) -> Result<File> {
     let path = config.state_dir.join("volumes");
     private_dir(&path, false)?;
     let parent = File::from(
@@ -178,13 +264,77 @@ fn open_candidate(config: &Config, checkpoint: &Doc) -> Result<Candidate> {
         .map_err(std::io::Error::from)?,
     );
     require(
-        identity(&parent)? == placement.parent,
+        private_identity(&parent, &placement.parent)?,
         "PreconditionFailed",
         "restore destination parent differs from the checkpoint",
     )?;
-    let root = child(&parent, volume, OFlags::RDONLY | OFlags::DIRECTORY)?;
+    Ok(parent)
+}
+
+fn private_identity(directory: &File, expected: &[String; 2]) -> Result<bool> {
+    let metadata = directory.metadata()?;
+    Ok(metadata.uid() == rustix::process::geteuid().as_raw()
+        && metadata.mode() & 0o077 == 0
+        && identity(directory)? == *expected)
+}
+
+fn present(parent: &File, name: &str) -> Result<bool> {
+    match statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(_) => Ok(true),
+        Err(rustix::io::Errno::NOENT) => Ok(false),
+        Err(e) => Err(std::io::Error::from(e).into()),
+    }
+}
+
+fn open_candidate(config: &Config, checkpoint: &Doc) -> Result<(Publication, Candidate)> {
+    let placement: Placement = decode(&checkpoint.body["placement"])?;
+    let receipt = &checkpoint.body["receipt"];
+    let volume = volume_id(receipt)?;
+    let parent = open_parent(config, &placement)?;
+    let stage_name = placement.stage_name()?;
+    let final_present = present(&parent, volume)?;
+    let stage_present = if let Some(name) = stage_name {
+        present(&parent, name)?
+    } else {
+        false
+    };
+    let (publication, name) = match (final_present, stage_present, stage_name) {
+        (true, false, _) => (Publication::Published, volume),
+        (false, true, Some(stage_name)) => (Publication::NotApplied, stage_name),
+        _ => {
+            return Err(err(
+                "PreconditionFailed",
+                "neither placement uniquely identifies the original restore",
+            ));
+        }
+    };
+    let (root, data) = open_exact(&parent, name, &placement, receipt)?;
+    // Check the alternate name after the anchored opens as well. A competing
+    // or substituted directory never authorizes release of the backup hold.
+    let alternate = if publication == Publication::Published {
+        stage_name
+    } else {
+        Some(volume)
+    };
+    if let Some(alternate) = alternate {
+        require(
+            !present(&parent, alternate)?,
+            "PreconditionFailed",
+            "competing restore placement is present",
+        )?;
+    }
+    Ok((publication, Candidate { parent, root, data }))
+}
+
+fn open_exact(
+    parent: &File,
+    name: &str,
+    placement: &Placement,
+    receipt: &Value,
+) -> Result<(File, File)> {
+    let root = child(parent, name, OFlags::RDONLY | OFlags::DIRECTORY)?;
     require(
-        identity(&root)? == placement.directory,
+        private_identity(&root, &placement.directory)?,
         "PreconditionFailed",
         "restored volume directory differs from the checkpoint",
     )?;
@@ -204,7 +354,7 @@ fn open_candidate(config: &Config, checkpoint: &Doc) -> Result<Candidate> {
     let mut marker_bytes = Vec::new();
     marker.take(4097).read_to_end(&mut marker_bytes)?;
     require(
-        marker_bytes == canonical(&json!([volume, receipt["incarnation"]])),
+        marker_bytes == canonical(&json!([volume_id(receipt)?, receipt["incarnation"]])),
         "PreconditionFailed",
         "restored volume marker differs from the checkpoint",
     )?;
@@ -215,7 +365,7 @@ fn open_candidate(config: &Config, checkpoint: &Doc) -> Result<Candidate> {
         "PreconditionFailed",
         "restored data directory differs from the checkpoint",
     )?;
-    Ok(Candidate { parent, root, data })
+    Ok((root, data))
 }
 
 pub(super) fn observe(work: &Work) -> Result<Value> {
@@ -225,11 +375,17 @@ pub(super) fn observe(work: &Work) -> Result<Value> {
             "inspection lacks its restore publication checkpoint",
         )
     })?;
-    let opened = open_candidate(&work.cfg, checkpoint)?;
+    let (publication, opened) = open_candidate(&work.cfg, checkpoint)?;
     let before = usage::fingerprint(&opened.data)?;
     let proof = &checkpoint.body["receipt"]["restore_proof"];
     restore_proof::verify_tree(&opened.data, proof, || {
-        Ok(open_candidate(&work.cfg, checkpoint)?.data)
+        let (current, opened) = open_candidate(&work.cfg, checkpoint)?;
+        require(
+            current == publication,
+            "PreconditionFailed",
+            "restore placement changed during inspection",
+        )?;
+        Ok(opened.data)
     })?;
     require(
         before == usage::fingerprint(&opened.data)?,
@@ -240,7 +396,7 @@ pub(super) fn observe(work: &Work) -> Result<Value> {
     opened.root.sync_all()?;
     opened.parent.sync_all()?;
     Ok(
-        json!({"operation_ref":work.target.reference(),"checkpoint_ref":checkpoint.reference(),
+        json!({"operation_ref":work.target.reference(),"checkpoint_ref":checkpoint.reference(),"publication":publication.label(),
         "restore_proof":proof,"metadata_digest":before,"observed_at":now()}),
     )
 }
@@ -264,7 +420,12 @@ pub(super) fn settle(db: &Db<'_>, work: &Work, receipt: &Value) -> Result<Value>
         "RecoveryRequired",
         "restore receipt disagrees with the witnessed candidate",
     )?;
-    open_candidate(db.cfg, &checkpoint)?;
+    let (publication, _) = open_candidate(db.cfg, &checkpoint)?;
+    require(
+        publication == Publication::Published,
+        "OutcomeUnknown",
+        "restore has no published volume",
+    )?;
     catalog(db, &work.op, &work.target, receipt)
 }
 
@@ -274,7 +435,7 @@ pub(crate) fn reconcile(
     backup: &Doc,
     observation: &Doc,
     proof: &Value,
-) -> Result<(Value, Value)> {
+) -> Result<(bool, Value, Value)> {
     let checkpoint = recorded(db, op, backup)?;
     let receipt = &checkpoint.body["receipt"];
     require(
@@ -284,15 +445,31 @@ pub(crate) fn reconcile(
         "OutcomeUnknown",
         "inspection does not verify this restore publication",
     )?;
-    let candidate = open_candidate(db.cfg, &checkpoint)?;
+    let (publication, candidate) = open_candidate(db.cfg, &checkpoint)?;
     require(
-        proof["metadata_digest"] == usage::fingerprint(&candidate.data)?,
+        proof["metadata_digest"] == usage::fingerprint(&candidate.data)?
+            && (proof["publication"] == publication.label()
+                || (proof["publication"].is_null()
+                    && publication == Publication::Published
+                    && checkpoint.body["placement"]["stage_name"].is_null())),
         "OutcomeUnknown",
         "restored volume changed after inspection",
     )?;
+    require(
+        open_candidate(db.cfg, &checkpoint)?.0 == publication,
+        "OutcomeUnknown",
+        "restore placement changed after reinspection",
+    )?;
+    let applied = publication == Publication::Published;
+    let result = if applied {
+        catalog(db, op, backup, receipt)?
+    } else {
+        json!({"backup_ref":backup.reference(),"volume_id":receipt["id"],"publication":"NotApplied"})
+    };
     Ok((
-        catalog(db, op, backup, receipt)?,
+        applied,
+        result,
         json!({"observation_ref":observation.reference(),
-        "checkpoint_ref":checkpoint.reference(),"conclusion":"RestorePublicationConfirmed"}),
+        "checkpoint_ref":checkpoint.reference(),"conclusion":if applied {"RestorePublicationConfirmed"} else {NOT_APPLIED}}),
     ))
 }

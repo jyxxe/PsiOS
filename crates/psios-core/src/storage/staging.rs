@@ -2,6 +2,7 @@ use super::{child, filename, remove_contents, unknown};
 use crate::{Config, Result, config::private_dir, err, require};
 use rustix::fs::{AtFlags, Dir, OFlags, RenameFlags, renameat_with, statat, unlinkat};
 use std::{
+    collections::HashSet,
     fs::{File, Permissions},
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
@@ -84,6 +85,18 @@ impl Stage {
         &self.root
     }
 
+    pub(super) fn preserve_for_checkpoint(&mut self) -> Result<()> {
+        check_entry(&self.root, self.path.file_name().unwrap(), &self.dir)?;
+        self.dir.sync_all()?;
+        self.root.sync_all()?;
+        self.retain_on_failure = true;
+        Ok(())
+    }
+
+    pub(super) fn discard_on_failure(&mut self) {
+        self.retain_on_failure = false;
+    }
+
     pub(super) fn publish(mut self, name: &str) -> Result<()> {
         filename(name)?;
         let staged = self.path.file_name().unwrap();
@@ -126,7 +139,7 @@ fn check_entry(root: &File, name: impl rustix::path::Arg, dir: &File) -> Result<
     )
 }
 
-fn discard(root: &File, name: impl rustix::path::Arg + Copy, dir: &File) -> Result<()> {
+pub(super) fn discard(root: &File, name: impl rustix::path::Arg + Copy, dir: &File) -> Result<()> {
     check_entry(root, name, dir)?;
     remove_contents(dir, 0)?;
     unlinkat(root, name, AtFlags::REMOVEDIR).map_err(std::io::Error::from)?;
@@ -139,7 +152,11 @@ fn matches_prefix(name: &[u8], prefix: &[u8]) -> bool {
     })
 }
 
-fn reclaim(parent: &Path, legacy_backup: bool) -> Result<()> {
+pub(super) fn is_stage_name(name: &str) -> bool {
+    matches_prefix(name.as_bytes(), PREFIX.as_bytes())
+}
+
+fn reclaim(parent: &Path, legacy_backup: bool, held: &HashSet<String>) -> Result<()> {
     private_dir(parent, false)?;
     let root = File::open(parent)?;
     let mut removed = 0;
@@ -150,6 +167,9 @@ fn reclaim(parent: &Path, legacy_backup: bool) -> Result<()> {
         if !matches_prefix(bytes, PREFIX.as_bytes())
             && !(legacy_backup && matches_prefix(bytes, b".tmp"))
         {
+            continue;
+        }
+        if name.to_str().is_ok_and(|name| held.contains(name)) {
             continue;
         }
         let result = (|| -> Result<()> {
@@ -178,11 +198,14 @@ fn reclaim(parent: &Path, legacy_backup: bool) -> Result<()> {
 
 // Serve holds the exclusive authority lock. Workers only publish by renaming out of staging.
 // Completed paths can belong to operations whose receipts were lost and must stay intact.
-pub(crate) fn reclaim_on_startup(cfg: &Config) {
-    for (dir, legacy_backup) in [("volumes", false), ("backups", true)] {
-        if let Err(e) = reclaim(&cfg.state_dir.join(dir), legacy_backup) {
-            eprintln!("psiosd could not reclaim {dir} staging: {}", e.0.message);
-        }
+pub(crate) fn reclaim_on_startup(cfg: &Config, restores: Option<&HashSet<String>>) {
+    if let Some(held) = restores
+        && let Err(e) = reclaim(&cfg.state_dir.join("volumes"), false, held)
+    {
+        eprintln!("psiosd could not reclaim volume staging: {}", e.0.message);
+    }
+    if let Err(e) = reclaim(&cfg.state_dir.join("backups"), true, &HashSet::new()) {
+        eprintln!("psiosd could not reclaim backup staging: {}", e.0.message);
     }
 }
 

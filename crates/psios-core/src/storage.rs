@@ -222,7 +222,7 @@ fn create_volume(
         "volume operation identity already present",
     )?;
     let identity = canonical(&json!([vid, inc]));
-    let stage = staging::create(&parent, |root| {
+    let mut stage = staging::create(&parent, |root| {
         w.cfg
             .check_managed_space(root, std::iter::once(identity.len() as u64), 3)
     })?;
@@ -246,9 +246,18 @@ fn create_volume(
         "restore_proof": proof
     });
     if restore.is_some() {
-        checkpoint(&receipt, &restore_publication::Placement::staged(&stage)?)?;
+        let placement = restore_publication::Placement::staged(&stage)?;
+        stage.preserve_for_checkpoint()?;
+        if let Err(error) = checkpoint(&receipt, &placement) {
+            if error.0.code != "OutcomeUnknown" {
+                stage.discard_on_failure();
+            }
+            return Err(error);
+        }
+        stage.publish(&vid).map_err(unknown)?;
+    } else {
+        stage.publish(&vid)?;
     }
-    stage.publish(&vid)?;
     Ok(receipt)
 }
 

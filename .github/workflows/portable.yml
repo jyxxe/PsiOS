@@ -186,6 +186,9 @@ jobs:
 
       - name: Verify managed native activation, deployment selection and boot crash fencing
         run: |
+          prior_activation="$RUNNER_TEMP/native-prior-activation"
+          mkdir -m 0700 "$prior_activation"
+          git archive d38f0bbba1c5714c36e79d36c4e8115875dfe986 images/native images/rescue | tar -x -C "$prior_activation"
           python3 -B tests/native_activation.py \
             --controller "$RUNNER_TEMP/rescue-core/native/stage_update.py" \
             --activator "$RUNNER_TEMP/rescue-core/native/activate_update.py" \
@@ -193,8 +196,9 @@ jobs:
             --previous-installer "$RUNNER_TEMP/rescue-core/native/create.py" \
             --kernel-iso "$RUNNER_TEMP/rescue.iso" \
             --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
+            --prior-activator "$prior_activation/images/native/activate_update.py" \
             --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
-            --expected-source-format 5
+            --expected-source-format 5 --check-unclean-shutdown
 
       - name: Keep larger native state and home partitions through a crash and upgrade
         run: |

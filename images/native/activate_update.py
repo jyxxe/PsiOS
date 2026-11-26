@@ -17,6 +17,7 @@ from tempfile import TemporaryDirectory
 import uuid
 
 from activation_guest import boot_candidate
+from activation_storage import BUILD_RECEIPT, BootStorage
 from create import MIB, boot_media, read_receipt
 from install import (
     JOURNAL, JOURNAL_LIMIT, checked_digest, digest, lock_directory, require, save_operation,
@@ -99,7 +100,7 @@ def stage_contract(bundle, stage_sha256):
         source, inputs = stage["source"], stage["inputs"]
         candidate, trial = stage["candidate"], stage["trial"]
         authority = trial["verified_authority"]
-        receipt_path = bundle / "candidate-build.json"
+        receipt_path = bundle / BUILD_RECEIPT
         receipt_sha256 = checked_digest(candidate["build_receipt_sha256"])
         receipt = digest_json(receipt_path, receipt_sha256)
         parsed, layout, _ = read_receipt(receipt_path)
@@ -261,33 +262,35 @@ def activate_frozen(directory, work, entry, original, frozen, paths, secret):
     plan = entry["plan"]
     disk, code, variables = paths
     signing = plan.get("secure_boot")
+    storage = BootStorage.from_receipt(Path(plan["stage_dir"]) / BUILD_RECEIPT,
+                                        plan["candidate_receipt_sha256"], plan["size_bytes"])
 
     def issue():
         verify_stopped_source(original, frozen)
         entry.update(status="BootIssued", boot_issued_at=timestamp())
         save_operation(directory, entry)
 
-    result = boot_candidate(work, disk=disk, firmware_code=code, firmware_vars=variables,
-                            credential=secret, expected_node=plan["node_id"],
-                            manifest_sha256=plan["deployment_manifest_sha256"], before_launch=issue,
-                            expected_artifacts={
-                                "image_sha256": plan["candidate_sha256"],
-                                "efi_code_sha256": plan["firmware_code_sha256"],
-                                "efi_vars_sha256": plan["firmware_vars_sha256"],
-                            }, secure_boot_required=signing is not None)
-    proof = result["proof"]
-    require(entry["status"] == "BootIssued" and proof["node_id"] == plan["node_id"]
-            and proof["deployment_manifest_sha256"] == plan["deployment_manifest_sha256"]
-            and str(uuid.UUID(proof["boot_id"])) == proof["boot_id"]
-            and proof.get("secure_boot") == ("Enforced" if signing else None),
-            "managed launch did not prove the approved deployment")
-    if signing:
-        proof["secure_boot"] = {"status": "Enforced", **signing}
-    verify_stopped_source(original, frozen)
-    readback = {"disk": DISK, "efi_code": CODE, "efi_vars": VARS, **result["artifacts"]}
-    entry.update(status="BootVerified", boot_verified_at=timestamp(), proof=proof, managed=readback)
-    save_operation(directory, entry)
-    return entry
+    with boot_candidate(work, disk=disk, firmware_code=code, firmware_vars=variables,
+                        credential=secret, expected_node=plan["node_id"],
+                        manifest_sha256=plan["deployment_manifest_sha256"], before_launch=issue,
+                        expected_artifacts={
+                            "image_sha256": plan["candidate_sha256"],
+                            "efi_code_sha256": plan["firmware_code_sha256"],
+                            "efi_vars_sha256": plan["firmware_vars_sha256"],
+                        }, storage=storage, secure_boot_required=signing is not None) as result:
+        proof = result["proof"]
+        require(entry["status"] == "BootIssued" and proof["node_id"] == plan["node_id"]
+                and proof["deployment_manifest_sha256"] == plan["deployment_manifest_sha256"]
+                and str(uuid.UUID(proof["boot_id"])) == proof["boot_id"]
+                and proof.get("secure_boot") == ("Enforced" if signing else None),
+                "managed launch did not prove the approved deployment")
+        if signing:
+            proof["secure_boot"] = {"status": "Enforced", **signing}
+        verify_stopped_source(original, frozen)
+        readback = {"disk": DISK, "efi_code": CODE, "efi_vars": VARS, **result["artifacts"]}
+        entry.update(status="BootVerified", boot_verified_at=timestamp(), proof=proof, managed=readback)
+        save_operation(directory, entry)
+        return entry
 
 
 def main():

@@ -7,8 +7,9 @@ import uuid
 
 from activate_update import stopped_source
 from activation_guest import MAX_DISK_BYTES, MIB, artifact_digest, bound_artifacts, open_file
+from activation_storage import BootStorage
 from install import JOURNAL_LIMIT, checked_digest, encode, require, valid_instant
-from select_manifest import HASHES, NAMES, check_proof, fd_path, read_json, save_bytes
+from select_manifest import BUILD_RECEIPT, HASHES, NAMES, check_proof, fd_path, read_json, save_bytes
 from stage_update import identity
 
 
@@ -95,6 +96,9 @@ def final_artifacts(directory, updated):
                                                  size, identity(os.fstat(descriptor))))
         require(artifact_digest(descriptors[1], sizes[1]) == current[HASHES[1]],
                 "boot proof firmware code changed")
+        work = fd_path(directory)
+        storage = BootStorage.from_receipt(work / BUILD_RECEIPT, deployment["candidate_receipt_sha256"], sizes[0])
+        storage.verify_shutdown(work, descriptors[0])
 
         def verify():
             require(bound_artifacts(directory, NAMES, descriptors) == before,

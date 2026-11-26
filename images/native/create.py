@@ -422,6 +422,10 @@ def write_partition(disk, partition, source, *, replace):
 def read_receipt(path):
     with boot_media.regular_file(path) as receipt:
         raw = receipt.read(16 * 1024 + 1)
+    return parse_receipt(raw)
+
+
+def parse_receipt(raw):
     if len(raw) > 16 * 1024:
         raise ValueError("previous build receipt exceeds size limit")
     prior = json.loads(raw)
@@ -469,13 +473,19 @@ def read_receipt(path):
     return prior, layout, limits
 
 
-def validate_layout(work, disk, layout):
-    boot_media.run(work, ["sfdisk", "--verify", disk])
-    gpt = json.loads(subprocess.check_output(["sfdisk", "--json", disk], timeout=30))["partitiontable"]
+def validate_layout(work, disk, layout, *, pass_fds=()):
+    boot_media.run(work, ["sfdisk", "--verify", disk], pass_fds=pass_fds)
+    limit = 16 * 1024
+    with tempfile.TemporaryFile(dir=work) as listing:
+        subprocess.run(["sfdisk", "--json", disk], stdin=subprocess.DEVNULL, stdout=listing,
+                       check=True, timeout=30, pass_fds=pass_fds, preexec_fn=file_limit(limit))
+        listing.seek(0)
+        gpt = json.loads(listing.read(limit + 1))["partitiontable"]
     expected = [(start * 2048, size * 2048, kind) for start, size, kind in layout.partitions]
     if (gpt["label"], gpt["unit"], gpt["sectorsize"]) != ("gpt", "sectors", 512) or [
             (p["start"], p["size"], p["type"]) for p in gpt["partitions"]] != expected:
         raise ValueError("unsupported previous PsiOS GPT layout")
+    return gpt
 
 
 def file_limit(max_bytes):
@@ -487,7 +497,12 @@ def file_limit(max_bytes):
 def filesystem_state(path, expected_uuid):
     with path.open("rb") as fs:
         fs.seek(1024)
-        superblock = fs.read(1024)
+        return filesystem_superblock(fs.read(1024), expected_uuid)
+
+
+def filesystem_superblock(superblock, expected_uuid):
+    if len(superblock) != 1024:
+        raise ValueError("incomplete ext4 superblock")
     magic, state = struct.unpack_from("<HH", superblock, 56)
     if magic != 0xEF53 or str(uuid.UUID(bytes=superblock[104:120])) != expected_uuid:
         raise ValueError("ext4 partition does not match the previous deployment UUID")

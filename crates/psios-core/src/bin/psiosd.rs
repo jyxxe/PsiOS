@@ -100,6 +100,24 @@ enum Cmd {
         #[arg(long, default_value_t = DEFAULT_BACKUP_MAX_BYTES, value_parser = clap::value_parser!(u64).range(1..=MAX_BACKUP_BYTES))]
         max_bytes: u64,
     },
+    /// Sign an exact native Backup for a named recipient using a stopped source authority.
+    AttestBackupTransfer {
+        /// JSON Backup ResourceRef, or standard input (-).
+        #[arg(long, default_value = "-")]
+        reference_file: PathBuf,
+        /// Exact destination Node authority ID.
+        #[arg(long)]
+        recipient_authority: String,
+        /// Private Ed25519 PKCS#8 DER file owned by the operator in mode 0600.
+        #[arg(long)]
+        signing_key_file: PathBuf,
+        /// Maximum combined database and journal copy size in MiB.
+        #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(u32).range(1..=1024))]
+        max_copy_mib: u32,
+        /// Parent for the private verification copy (defaults to TMPDIR).
+        #[arg(long)]
+        scratch_dir: Option<PathBuf>,
+    },
     /// Register a verified detached backup with a stopped local authority.
     ImportBackup {
         /// Directory containing the copied manifest and data blobs.
@@ -108,6 +126,15 @@ enum Cmd {
         /// Trusted manifest digest obtained from the original authority.
         #[arg(long)]
         manifest_digest: String,
+        /// Detached signed transfer attestation JSON, or standard input (-).
+        #[arg(long, requires_all = ["trusted_source_key", "expected_source_authority"])]
+        attestation_file: Option<PathBuf>,
+        /// Independently trusted source signing key (32 raw Ed25519 public bytes).
+        #[arg(long, requires = "attestation_file")]
+        trusted_source_key: Option<PathBuf>,
+        /// Independently trusted exact source Node authority ID.
+        #[arg(long, requires = "attestation_file")]
+        expected_source_authority: Option<String>,
     },
     RecoverOwner,
 }
@@ -139,8 +166,15 @@ struct CheckpointInput {
 }
 
 fn read_document(path: &Path, name: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    read_bounded_document(path, name, psios_api::MAX_FRAME)
+}
+
+fn read_bounded_document(
+    path: &Path,
+    name: &str,
+    limit: usize,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let mut bytes = Vec::new();
-    let limit = psios_api::MAX_FRAME;
     if path == Path::new("-") {
         stdin()
             .lock()
@@ -272,11 +306,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+        Cmd::AttestBackupTransfer {
+            reference_file,
+            recipient_authority,
+            signing_key_file,
+            max_copy_mib,
+            scratch_dir,
+        } => {
+            let reference = read_bounded_document(&reference_file, "backup reference", 4096)?;
+            let scratch = scratch_dir.unwrap_or_else(std::env::temp_dir);
+            let envelope = Store::attest_backup_transfer(
+                &cfg()?,
+                &scratch,
+                u64::from(max_copy_mib) * 1024 * 1024,
+                &reference,
+                &recipient_authority,
+                &signing_key_file,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&envelope)?);
+        }
         Cmd::ImportBackup {
             directory,
             manifest_digest,
+            attestation_file,
+            trusted_source_key,
+            expected_source_authority,
         } => {
-            let report = Store::import_detached_backup(cfg()?, &directory, &manifest_digest)?;
+            let cfg = cfg()?;
+            let report = match (attestation_file, trusted_source_key, expected_source_authority) {
+                (None, None, None) => Store::import_detached_backup(cfg, &directory, &manifest_digest)?,
+                (Some(path), Some(key), Some(source)) => {
+                    let envelope = read_bounded_document(&path, "backup transfer attestation", 16384)?;
+                    Store::import_signed_detached_backup(
+                        cfg, &directory, &manifest_digest, &envelope, &key, &source,
+                    )?
+                }
+                _ => return Err(psios_core::err("InvalidArgument", "signed import requires the attestation, trusted public key and expected source authority").into()),
+            };
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Cmd::Check => {

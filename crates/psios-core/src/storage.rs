@@ -12,6 +12,7 @@ mod restore_proof;
 pub(crate) mod restore_publication;
 pub(crate) mod retirement;
 mod staging;
+pub(crate) mod transfer;
 pub(crate) mod usage;
 use crate::{
     config::{Config, new_file, private_dir, replace},

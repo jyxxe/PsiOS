@@ -671,6 +671,13 @@ jobs:
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format103" "$RUNNER_TEMP/psios-compatibility-target"
           PSIOS_QUEUED_SESSION_INPUT_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
             python3 -B -m unittest discover -s tests -p test_agent_session_inputs.py -k test_old_writer -v
+      - name: Preserve a published digest-only intake across signed transfer migration
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format104"
+          git archive 65624095ed5cfcdfeadd6a6b0cfaa88ec12f0a9d Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format104"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format104" "$RUNNER_TEMP/psios-compatibility-target"
+          PSIOS_BACKUP_TRANSFER_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
+            python3 -B -m unittest discover -s tests -p test_backup_transfer.py -k test_old_writer -v
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

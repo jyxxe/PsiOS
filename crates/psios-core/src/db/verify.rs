@@ -238,6 +238,9 @@ pub(super) fn check_artifacts(
     if identity.database_format >= crate::storage::restore_publication::DISPOSAL_FORMAT {
         crate::storage::restore_publication::verify(conn)?;
     }
+    if identity.database_format >= crate::storage::transfer::FORMAT {
+        crate::storage::transfer::verify(conn, &identity.node_id)?;
+    }
     Ok(())
 }
 
@@ -356,6 +359,40 @@ impl Store {
                 })?;
         }
         Ok(report)
+    }
+
+    /// Sign one exact native Backup for another authority without opening the source for writes.
+    pub fn attest_backup_transfer(
+        cfg: &Config,
+        scratch: &Path,
+        max_copy_bytes: u64,
+        reference: &Value,
+        recipient: &str,
+        signing_key: &Path,
+    ) -> Result<Value> {
+        require(
+            (1..=1024 * 1024 * 1024).contains(&max_copy_bytes),
+            "InvalidArgument",
+            "invalid backup transfer verification copy limit",
+        )?;
+        let _lock = lock_offline(cfg)?;
+        let (_tmp, state, _) = private_database_copy(cfg, scratch, max_copy_bytes)?;
+        let (copy, identity) = checked_copy(&state)?;
+        let (witness, rotation) = verified_witness(&copy, cfg)?;
+        require(
+            witness == "Confirmed" && rotation == "None",
+            "RecoveryRequired",
+            "backup transfer attestation needs a confirmed witness and owner credential",
+        )?;
+        crate::storage::transfer::attest(
+            &copy,
+            cfg,
+            &identity.node_id,
+            &identity.recovery_incarnation,
+            reference,
+            recipient,
+            signing_key,
+        )
     }
 
     pub fn inspect_retained_inputs(

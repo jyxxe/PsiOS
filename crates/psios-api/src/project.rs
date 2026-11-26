@@ -76,10 +76,11 @@ pub struct ProjectRecord {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct WorkItemPage {
+pub struct ProjectPage {
     pub items: Vec<ProjectRecord>,
     pub next_after_id: Option<String>,
 }
+pub type WorkItemPage = ProjectPage;
 
 impl Client {
     pub fn create_project(&self, request: &CreateProject) -> ApiResult<ProjectRecord> {
@@ -88,6 +89,10 @@ impl Client {
 
     pub fn project(&self, id: &str) -> ApiResult<ProjectRecord> {
         self.project_request("Project.Get", &json!({"id":id}))
+    }
+
+    pub fn projects(&self, after_id: Option<&str>, limit: Option<u32>) -> ApiResult<ProjectPage> {
+        self.project_request("Project.List", &json!({"after_id":after_id,"limit":limit}))
     }
 
     pub fn set_project_member(&self, request: &SetProjectMember) -> ApiResult<ProjectRecord> {
@@ -137,6 +142,30 @@ impl Client {
         self.project_request(
             "WorkItem.Close",
             &json!({"id":id,"expected_resource_version":revision}),
+        )
+    }
+
+    pub fn reassign_work_item(
+        &self,
+        id: &str,
+        revision: &str,
+        assignee_principal_id: &str,
+    ) -> ApiResult<ProjectRecord> {
+        self.project_request(
+            "WorkItem.Reassign",
+            &json!({"id":id,"expected_resource_version":revision,"assignee_principal_id":assignee_principal_id}),
+        )
+    }
+
+    pub fn abandon_work_item(
+        &self,
+        id: &str,
+        revision: &str,
+        reason: &str,
+    ) -> ApiResult<ProjectRecord> {
+        self.project_request(
+            "WorkItem.Abandon",
+            &json!({"id":id,"expected_resource_version":revision,"reason":reason}),
         )
     }
 

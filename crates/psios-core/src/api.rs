@@ -194,6 +194,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Workflow.Resume" => workflow::resume(db, actor, p),
         "Project.Create" => project::create_project(db, actor, p),
         "Project.Get" => project::get_project(db, actor, p),
+        "Project.List" => project::directory::list(db, actor, p),
         "Project.SetMember" => project::set_member(db, actor, p),
         "WorkItem.Create" => project::create_item(db, actor, p),
         "WorkItem.Get" => project::get_item(db, actor, p),
@@ -201,6 +202,8 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "WorkItem.SubmitEvidence" => project::submit_evidence(db, actor, p),
         "WorkItem.Review" => project::review(db, actor, p),
         "WorkItem.Close" => project::close(db, actor, p),
+        "WorkItem.Reassign" => project::reassign(db, actor, p),
+        "WorkItem.Abandon" => project::abandon(db, actor, p),
         "Conversation.OpenDirect" => chat::open(db, actor, p),
         "Conversation.OpenRoom" => chat::open_room(db, actor, p),
         "Conversation.List" => chat::list(db, actor, p),
@@ -311,6 +314,8 @@ impl Store {
                     | "WorkItem.SubmitEvidence"
                     | "WorkItem.Review"
                     | "WorkItem.Close"
+                    | "WorkItem.Reassign"
+                    | "WorkItem.Abandon"
                     | "Conversation.OpenDirect"
                     | "Conversation.OpenRoom"
                     | "Conversation.Invite"

@@ -20,6 +20,7 @@ pub(crate) mod release_retirement;
 pub(crate) mod restart;
 pub(crate) mod restore_archive;
 pub(crate) mod restore_image;
+pub(crate) mod stop;
 
 fn environment(env: &BTreeMap<String, String>) -> Result<()> {
     require(
@@ -241,7 +242,10 @@ pub fn preflight(db: &Db<'_>, w: &Work) -> Result<()> {
             "PreconditionFailed",
             "application must be stopped",
         )?,
-        Action::Stop(_) | Action::RestartApp(_) | Action::InspectOciInstance(_) => require(
+        Action::Stop(_)
+        | Action::ContinueOciStop(_)
+        | Action::RestartApp(_)
+        | Action::InspectOciInstance(_) => require(
             w.target.body["lifecycle"] == "Running",
             "PreconditionFailed",
             "application has no active deployment",
@@ -762,7 +766,7 @@ pub fn perform(w: &Work) -> Result<Value> {
                 "observed_at": now()
             }))
         }
-        Action::Refresh(_) | Action::Health(_) | Action::Stop(_) => {
+        Action::Refresh(_) | Action::Health(_) => {
             let cid = w.target.body["container_id"]
                 .as_str()
                 .ok_or_else(|| err("RecoveryRequired", "instance ID missing"))?;
@@ -781,29 +785,12 @@ pub fn perform(w: &Work) -> Result<Value> {
                 }
                 Err(e) => return Err(e),
             };
-            if matches!(w.action, Action::Refresh(_) | Action::Health(_)) {
-                return Ok(json!({
-                    "container_id": cid,
-                    "process_running": v["State"]["Running"],
-                    "exit_code": v["State"]["ExitCode"],
-                    "runtime_state": if v["State"]["Running"]==true{"Running"}else{"Exited"},
-                    "health": "Unknown",
-                    "readiness": if v["State"]["Running"]==true{"Unknown"}else{"NotReady"},
-                    "observed_at": now()
-                }));
-            }
-            e.command(&["stop", "--time=5", cid].map(String::from), true)?;
-            let v = e
-                .managed(w, cid, start_op)
-                .map_err(|_| err("OutcomeUnknown", "unable to verify stop"))?;
             require(
-                v["State"]["Running"] == false,
-                "OutcomeUnknown",
-                "instance stop unconfirmed",
+                e.identity()? == w.target.body["engine_id"],
+                "PreconditionFailed",
+                "OCI engine changed during health observation",
             )?;
-            let tail = log_tail::capture(w, &e).ok();
-            e.command(&["rm", cid].map(String::from), true)?;
-            Ok(json!({"retained_tail": tail}))
+            Ok(stop::health(&w.target.body, &v))
         }
         _ => Err(err("UnsupportedCapability", "unknown OCI operation")),
     }

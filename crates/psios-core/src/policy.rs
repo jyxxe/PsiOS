@@ -72,6 +72,7 @@ pub const TOOLS: &[&str] = &[
     artifact::session_output::TOOL,
     "application.start",
     "application.stop",
+    apps::stop::TOOL,
     apps::restart::TOOL,
     apps::restart::INSPECT,
     "application.uninstall",
@@ -161,6 +162,7 @@ pub fn approval(tool: &str) -> bool {
             | apps::restore_image::TOOL
             | "application.start"
             | apps::restart::TOOL
+            | apps::stop::TOOL
             | "application.uninstall"
     )
 }
@@ -204,6 +206,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | storage::publication::INSPECT
                     | storage::restore_publication::INSPECT
                     | apps::restart::TOOL
+                    | apps::stop::TOOL
                     | apps::restart::INSPECT
                     | broker::result_access::ACTION
                     | agent::START_SESSION
@@ -535,11 +538,14 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             || p.actions.iter().all(|action| {
                 !matches!(
                     action.as_str(),
-                    apps::capture::TOOL | apps::restore_image::TOOL | apps::restore_image::INSPECT
+                    apps::capture::TOOL
+                        | apps::restore_image::TOOL
+                        | apps::restore_image::INSPECT
+                        | apps::stop::TOOL
                 )
             }),
         "PermissionDenied",
-        "OCI image custody operations require the local owner",
+        "OCI image custody and stop recovery require the local owner",
     )?;
     require(
         p.model_calls <= 1_000_000
@@ -581,6 +587,7 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
                     || action == storage::file_move::TOOL
                     || action == storage::file_move::INSPECT
                     || action == apps::restart::TOOL
+                    || action == apps::stop::TOOL
                     || action == apps::restart::INSPECT
                     || action == agent::fallback::ACTION
             }))

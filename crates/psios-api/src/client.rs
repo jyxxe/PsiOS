@@ -105,6 +105,15 @@ pub struct OciReleaseImageRestoreRequest {
     pub expected_engine_id: String,
 }
 
+/// Continue removal of the original OCI container after independent exit evidence.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OciStopContinuationRequest {
+    pub application_ref: ResourceRef,
+    pub operation_ref: ResourceRef,
+    pub evidence_ref: ResourceRef,
+}
+
 impl Client {
     pub fn new(socket: impl AsRef<Path>, token: impl Into<String>) -> Self {
         Self {
@@ -416,6 +425,25 @@ impl Client {
             json!({"tool":"application.inspect_release_image_restore","key":key,
                 "delegation_id":delegation_id,"deadline_at":deadline_at,
                 "input":{"id":operation.resource_id,"expected_resource_version":operation.version}}),
+        )
+    }
+
+    /// Prepare removal for separate Task submission and approval.
+    pub fn prepare_oci_stop_continuation(
+        &self,
+        request: &OciStopContinuationRequest,
+        key: &str,
+        delegation_id: &str,
+        deadline_at: Option<&str>,
+    ) -> ApiResult<Value> {
+        let application = &request.application_ref;
+        self.call(
+            "Task.Prepare",
+            json!({"tool":"application.continue_stop","key":key,
+                "delegation_id":delegation_id,"deadline_at":deadline_at,"input":{
+                    "target":{"id":application.resource_id,"expected_resource_version":application.version},
+                    "operation_ref":request.operation_ref,"evidence_ref":request.evidence_ref,
+                }}),
         )
     }
 

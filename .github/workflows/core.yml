@@ -26,6 +26,8 @@ jobs:
         run: |
           cargo +1.100.0 build --locked --workspace
           cargo +1.100.0 test --locked --workspace
+      - name: Exercise a real OCI engine and persistent volume
+        run: PSIOS_TEST_OCI_KERNEL_LIMITS=1 python3 tests/oci.py
       - name: Verify documentation contracts
         run: |
           python3 -m venv "$RUNNER_TEMP/psios-docs"
@@ -514,9 +516,6 @@ jobs:
           git archive 115272446e50768ecd3585d9e339bcca52d3bdf7 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format64"
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format64" "$RUNNER_TEMP/psios-compatibility-target"
           python3 -B tests/agent_context_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
-      - name: Exercise a real OCI engine and persistent volume
-        run: PSIOS_TEST_OCI_KERNEL_LIMITS=1 python3 tests/oci.py
-
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

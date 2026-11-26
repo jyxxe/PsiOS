@@ -1,6 +1,7 @@
 use super::*;
 
 pub fn recover(db: &Db<'_>) -> Result<()> {
+    apps::stop::verify_active(db.c)?;
     let active = db
         .c
         .prepare("SELECT task,phase,attempt FROM queue WHERE phase IN ('Claimed','Dispatched')")?
@@ -38,6 +39,9 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
         let restart_undispatched = phase == "Dispatched"
             && tool == apps::restart::TOOL
             && apps::restart::not_dispatched(db, &operation(db, &t)?)?;
+        let stop_undispatched = phase == "Dispatched"
+            && matches!(tool, "application.stop" | apps::stop::TOOL)
+            && apps::stop::not_dispatched(db, &operation(db, &t)?)?;
         let service_undispatched = phase == "Dispatched"
             && node::service_control::is_tool(tool)
             && node::service_control::not_dispatched(db, &operation(db, &t)?)?;
@@ -58,6 +62,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             && !backup_unpublished
             && !restore_unpublished
             && !restart_undispatched
+            && !stop_undispatched
             && !service_undispatched
             && !image_undispatched
             && !deletion_unprepared
@@ -88,6 +93,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             || backup_unpublished
             || restore_unpublished
             || restart_undispatched
+            || stop_undispatched
             || service_undispatched
             || image_undispatched
             || deletion_unprepared
@@ -101,7 +107,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                 } else {
                     "Failed"
                 },
-                if service_undispatched {
+                if service_undispatched || stop_undispatched {
                     "NotStarted"
                 } else {
                     "Known"
@@ -114,6 +120,8 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                         "restore interrupted before volume publication was authorized"
                     } else if restart_undispatched {
                         "OCI restart interrupted before its invocation was checkpointed"
+                    } else if stop_undispatched {
+                        "OCI stop or cleanup interrupted before its dispatch was checkpointed"
                     } else if service_undispatched {
                         "systemd control interrupted before its invocation was checkpointed"
                     } else if image_undispatched {
@@ -248,7 +256,7 @@ struct Reconcile {
     expected_resource_version: String,
     evidence_ref: Option<Value>,
 }
-fn inspected(
+pub(crate) fn inspected(
     db: &Db<'_>,
     reference: Option<&Value>,
     op: &Doc,
@@ -267,12 +275,20 @@ fn inspected(
         "PreconditionFailed",
         "expected a retained inspection artifact",
     )?;
-    let observation_task = db.of(field(&proof.spec, "task_id"), "Task")?;
-    let inspect_op = db.of(field(&proof.spec, "operation_id"), "Operation")?;
+    let identity = |name: &str| {
+        proof.spec[name].as_str().ok_or_else(|| {
+            err(
+                "PreconditionFailed",
+                "inspection artifact has no producing Task, Run or Operation",
+            )
+        })
+    };
+    let observation_task = db.of(identity("task_id")?, "Task")?;
+    let inspect_op = db.of(identity("operation_id")?, "Operation")?;
     let inspect_plan = db.resolve(&inspect_op.body["plan_ref"])?;
     let fresh:bool=db.c.query_row("SELECT EXISTS(SELECT 1 FROM versions sample JOIN versions lost
                 ON sample.seq>lost.seq WHERE sample.kind='Run' AND sample.id=?1 AND sample.rev=1 AND lost.id=?2 AND lost.rev=?3)",
-                params![proof.spec["run_id"].as_str(),op.id,op.rev],|r|r.get(0))?;
+                params![identity("run_id")?,op.id,op.rev],|r|r.get(0))?;
     require(
         fresh
             && observation_task.spec["task_type"] == tool
@@ -315,6 +331,7 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         | Action::Backup(p) => (&p.id, &p.expected_resource_version),
         Action::ServiceRestart(p) => (&p.id, &p.expected_resource_version),
         Action::RestartApp(p) => (&p.id, &p.expected_resource_version),
+        Action::ContinueOciStop(p) => (&p.target.id, &p.target.expected_resource_version),
         Action::RestoreReleaseImage(p) => (&p.target.id, &p.target.expected_resource_version),
         _ => {
             return Err(err(
@@ -324,11 +341,15 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         }
     };
     let target = db.get(target_id)?;
-    let held: bool = db.c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM holds WHERE volume=?1 AND holder=?2)",
-        params![target.id, op.id],
-        |r| r.get(0),
-    )?;
+    let held: bool = if let Action::ContinueOciStop(request) = &action {
+        apps::stop::cleanup_held(db, request, &op)?
+    } else {
+        db.c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM holds WHERE volume=?1 AND holder=?2)",
+            params![target.id, op.id],
+            |r| r.get(0),
+        )?
+    };
     require(
         held && target.version() == *expected,
         "RecoveryRequired",
@@ -396,6 +417,11 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
             )?;
             apps::restart::reconcile(db, &op, &target, &proof, &observation)?
         }
+        Action::ContinueOciStop(request) => {
+            let (proof, observation) =
+                apps::stop::fresh_health(db, req.evidence_ref.as_ref(), &op, &target)?;
+            apps::stop::reconcile_cleanup(db, &target, &op, &request, &proof, &observation)?
+        }
         Action::RestoreReleaseImage(_) => {
             let (proof, observation) = inspected(
                 db,
@@ -448,13 +474,17 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
             (result, evidence)
         }
         Action::Start(_) | Action::Stop(_) => {
-            let (proof, observation) = inspected(
-                db,
-                req.evidence_ref.as_ref(),
-                &op,
-                &target,
-                "application.health",
-            )?;
+            let (proof, observation) = if matches!(action, Action::Stop(_)) {
+                apps::stop::fresh_health(db, req.evidence_ref.as_ref(), &op, &target)?
+            } else {
+                inspected(
+                    db,
+                    req.evidence_ref.as_ref(),
+                    &op,
+                    &target,
+                    "application.health",
+                )?
+            };
             let vol = target.spec["volume_id"]
                 .as_str()
                 .map(|id| db.of(id, "Volume"))
@@ -498,6 +528,7 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
                     "StartConfirmed",
                 )
             } else {
+                apps::stop::original_ready(db, &target, &op, vol.as_ref())?;
                 require(
                     target.body["engine_id"].is_string()
                         && observation["removal_confirmed"] == true

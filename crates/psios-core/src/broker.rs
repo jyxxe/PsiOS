@@ -19,7 +19,9 @@ pub(crate) use approval::decide;
 pub(crate) use execution::finish;
 pub(crate) use execution::{claim, dispatch, dispatch_failed, finish_host, settlement_failed};
 use psios_api::{VERSION, canonical, contract, digest, id, sha256};
-pub(crate) use recovery::{reconcile, recover, release_unstarted_claim};
+pub(crate) use recovery::{
+    inspected as inspect_recovery, reconcile, recover, release_unstarted_claim,
+};
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use submission::authority;
@@ -121,6 +123,11 @@ fn close(
         db.c.execute("UPDATE budgets SET reserved=reserved-1 WHERE id=(SELECT budget FROM queue WHERE task=?1)",[&t.id])?;
     }
     let unknown = knowledge == "Unknown";
+    if unknown && t.spec["task_type"] == apps::stop::TOOL {
+        // The exclusive cleanup is still held by its recovery record. Free the
+        // reserved queue slot so independent health can prove removal.
+        admission::release(db, &t.id)?;
+    }
     db.c.execute(
         "UPDATE queue SET phase=?2 WHERE task=?1",
         params![t.id, if unknown { "Unknown" } else { "Done" }],
@@ -203,6 +210,9 @@ fn close(
         }
         if t.spec["task_type"] == apps::restore_image::TOOL {
             apps::restore_image::release(db, &op.id)?;
+        }
+        if t.spec["task_type"] == apps::stop::TOOL {
+            apps::stop::release(db, &op.id, &t.id)?;
         }
         storage::read_holds::release(db, &t.id)?;
         db.c.execute("DELETE FROM holds WHERE holder=?1", [&op.id])?;

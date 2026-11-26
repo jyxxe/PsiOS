@@ -188,6 +188,11 @@ pub fn evict(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         "Conflict",
         "an unsettled Task requires this producer's result",
     )?;
+    require(
+        !crate::apps::stop::retains_result(db, &task.id)?,
+        "Conflict",
+        "an admitted OCI stop continuation retains the exit evidence",
+    )?;
     let refs = task.body["result"]["artifact_refs"]
         .as_array()
         .filter(|refs| !refs.is_empty())

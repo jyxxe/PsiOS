@@ -21,7 +21,9 @@ fn capacity(db: &Db<'_>) -> Result<Capacity> {
     Ok(db.c.query_row(
         "SELECT
             (SELECT count(*) FROM queue q WHERE q.phase<>'Done'
-                AND NOT EXISTS(SELECT 1 FROM recovery_admissions r WHERE r.task=q.task)),
+                AND NOT EXISTS(SELECT 1 FROM recovery_admissions r WHERE r.task=q.task)
+                AND NOT EXISTS(SELECT 1 FROM oci_stop_cleanups c
+                    WHERE q.phase='Unknown' AND c.cleanup=q.operation)),
             (SELECT count(*) FROM recovery_admissions)",
         [],
         |row| {
@@ -45,7 +47,9 @@ fn principal_ordinary(db: &Db<'_>, actor: &str) -> Result<u32> {
     Ok(db.c.query_row(
         "SELECT count(*) FROM queue q CROSS JOIN submissions s ON s.task=q.task
          WHERE q.phase<>'Done' AND s.owner=?1
-           AND NOT EXISTS(SELECT 1 FROM recovery_admissions r WHERE r.task=q.task)",
+           AND NOT EXISTS(SELECT 1 FROM recovery_admissions r WHERE r.task=q.task)
+           AND NOT EXISTS(SELECT 1 FROM oci_stop_cleanups c
+               WHERE q.phase='Unknown' AND c.cleanup=q.operation)",
         [actor],
         |row| row.get(0),
     )?)
@@ -90,6 +94,7 @@ fn linked_operation(db: &Db<'_>, action: &Action, target: &Doc) -> Result<Option
             held_operation(db, target)?,
             &["application.start", "application.stop"],
         ),
+        Action::ContinueOciStop(_) => (held_operation(db, target)?, &["application.stop"]),
         Action::InspectOciInstance(_) => {
             (held_operation(db, target)?, &[crate::apps::restart::TOOL])
         }
@@ -120,6 +125,11 @@ fn linked_operation(db: &Db<'_>, action: &Action, target: &Doc) -> Result<Option
         return Ok(None);
     }
     let op = db.of(&id, "Operation")?;
+    if let Action::ContinueOciStop(request) = action
+        && request.operation_ref != op.reference()
+    {
+        return Ok(None);
+    }
     require(
         op.body["outcome_knowledge"] == "Unknown" && op.spec["task_id"] == task.id,
         "RecoveryRequired",

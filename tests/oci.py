@@ -10,7 +10,7 @@ import tarfile
 import threading
 
 from support import Failure, Node, key, target
-from oci_recovery import ReceiptBarrier, check_kernel_limits, lose_start_receipt, lose_stop_receipt
+from oci_recovery import ReceiptBarrier, check_kernel_limits, continue_after_lost_stop, lose_start_receipt, lose_stop_receipt
 from oci_capture import TOOL as CAPTURE, denied
 from oci_restart import verify_restart
 from test_artifact_install import TOOL as ARTIFACT_INSTALL, grant as artifact_grant
@@ -465,6 +465,16 @@ int main(void) {
         app = lose_stop_receipt(node, app, reverted, volume)
         unavailable = node.perform("application.logs", target(app))
         assert unavailable["availability"] == "Unavailable" and not unavailable["stdout"], unavailable
+        recovery_volume = node.perform("volume.create", {"name": "stop-continuation-data"})
+        cleanup_spec = dict(spec, name="stop-continuation", environment={"TEST_NAME": "continuation"},
+                            volume=target(recovery_volume))
+        cleanup_app = node.perform("application.install", cleanup_spec)
+        app_ids.append(cleanup_app["resource_id"])
+        for lose_removal in (False, True):
+            cleanup_app = node.perform("application.start", target(cleanup_app))
+            recovery_volume = node.get(recovery_volume["resource_id"])["reference"]
+            cleanup_app = continue_after_lost_stop(node, cleanup_app, recovery_volume, lose_removal=lose_removal)
+        node.perform("application.uninstall", target(cleanup_app))
         node_id = node.call("Node.Get", {})["reference"]["resource_id"]
         artifact_grant(node, "local-owner", ["artifact.withdraw", "artifact.read"], [node_id])
         retirement = artifact_grant(node, "local-owner", ["task.submit", "task.read", "application.retire_release"],

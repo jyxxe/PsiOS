@@ -21,17 +21,27 @@ def dispatch_state(db, task, service):
     return phase, hold
 
 
-def assert_legacy_path(db, operation):
-    assert db.execute("""SELECT id FROM versions
+def checkpoint_path(db, operation, previous_format):
+    records = dict(db.execute("""SELECT kind,id FROM current
         WHERE kind IN ('HostServiceControlIntent', 'HostServiceControlCheckpoint')
-          AND spec->>'operation_id'=?""", (operation,)).fetchall() == []
+          AND spec->>'operation_id'=?""", (operation,)))
+    if previous_format < 69:
+        assert not records, records
+        return None
+    intent_id = records["HostServiceControlIntent"]
+    checkpoint_id = records["HostServiceControlCheckpoint"]
+    revision, body = db.execute("SELECT rev,body FROM current WHERE id=?", (intent_id,)).fetchone()
+    reference = json.loads(body)["checkpoint_ref"]
+    assert revision == 2 and reference["resource_id"] == checkpoint_id
+    assert reference["version"] == "r1", reference
+    return reference
 
 
-def assert_before_control_epoch(db, operation):
+def assert_control_epoch(db, operation, previous_format):
     effect, = db.execute("""SELECT seq FROM versions WHERE kind='Effect' AND rev=1
         AND body->>'operation_id'=? AND body->>'action'='service.start'""", (operation,)).fetchone()
     epoch, = db.execute("SELECT seq FROM current WHERE kind='HostServiceControlEpoch'").fetchone()
-    assert effect < epoch, (effect, epoch)
+    assert (effect < epoch) == (previous_format < 69), (effect, epoch)
 
 
 def main(previous, previous_format, current):
@@ -59,7 +69,7 @@ printf '%s\\n' "$INVOCATION_ID" >> {shlex.quote(str(invocations))}
 while test ! -f {shlex.quote(str(release))}; do sleep .05; done
 """)
         definition.write_text(f"""[Unit]
-Description=PsiOS legacy start cutover fixture
+Description=PsiOS in-flight start cutover fixture
 [Service]
 Type=oneshot
 RemainAfterExit=yes
@@ -92,7 +102,7 @@ ExecStart=/bin/sh {json.dumps(str(starter))}
         with closing(sqlite3.connect(database, uri=True, timeout=10)) as db:
             assert db.execute("PRAGMA user_version").fetchone() == (previous_format,)
             assert dispatch_state(db, task, service_id) == ("Dispatched", (operation_id,))
-            assert_legacy_path(db, operation_id)
+            checkpoint = checkpoint_path(db, operation_id, previous_format)
 
         node.daemon[0] = str(current / "psiosd")
         before = json.loads(subprocess.check_output(node.daemon + ["verify"], timeout=20))
@@ -106,8 +116,8 @@ ExecStart=/bin/sh {json.dumps(str(starter))}
         with closing(sqlite3.connect(database, uri=True, timeout=10)) as db:
             assert db.execute("PRAGMA user_version").fetchone()[0] >= 69
             assert dispatch_state(db, task, service_id) == ("Unknown", (operation_id,))
-            assert_legacy_path(db, operation_id)
-            assert_before_control_epoch(db, operation_id)
+            assert checkpoint_path(db, operation_id, previous_format) == checkpoint
+            assert_control_epoch(db, operation_id, previous_format)
 
         same = node.call("Task.Submit", request)
         assert same["task_id"] == task and same["deduplicated"], same
@@ -131,13 +141,14 @@ ExecStart=/bin/sh {json.dumps(str(starter))}
         assert completed["lifecycle"] == "Succeeded" and completed["current_run_id"] == run_id, completed
         result_ref, = completed["result"]["artifact_refs"]
         receipt = node.call("Artifact.Read", {"reference": result_ref})
-        assert receipt["observation"]["invocation_id"] == original and "checkpoint_ref" not in receipt, receipt
+        assert receipt["observation"]["invocation_id"] == original, receipt
+        assert receipt.get("checkpoint_ref") == checkpoint, receipt
         final = node.get(operation_id)["value"]
         assert len(final["effect_refs"]) == 1 and launches() == [original], (final, launches())
         node.stop()
         with closing(sqlite3.connect(database, uri=True, timeout=10)) as db:
             assert dispatch_state(db, task, service_id) == ("Done", None)
-            assert_legacy_path(db, operation_id)
+            assert checkpoint_path(db, operation_id, previous_format) == checkpoint
         subprocess.run(node.daemon + ["verify"], check=True, stdout=subprocess.DEVNULL, timeout=20)
         print(f"PASS format {previous_format} live systemd invocation carried through migration and reconciled once")
     finally:

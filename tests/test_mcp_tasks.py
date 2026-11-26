@@ -1,0 +1,307 @@
+"""Exercise the 2026-07-28 Tasks extension across real STDIO and Core restarts."""
+from contextlib import closing
+import json
+import os
+from pathlib import Path
+import signal
+import sqlite3
+import subprocess
+import time
+import unittest
+
+from support import Failure, Node, key, target
+from test_mcp_modern_stdio import CAPABILITIES_KEY, PROFILE, params, request, send
+from test_mcp_stdio import McpFixture, Wire
+
+
+EXTENSION = "io.modelcontextprotocol/tasks"
+INVOCATION = "io.psios/mcpInvocationKey"
+
+
+def task_params(fields=None, *, invocation=None, capability=True):
+    body = params(fields)
+    if capability:
+        body["_meta"][CAPABILITIES_KEY]["extensions"] = {EXTENSION: {}}
+    if invocation is not None:
+        body["_meta"][INVOCATION] = invocation
+    return body
+
+
+class McpTaskFixture(McpFixture):
+    def task_wire(self, grant, endpoint="diagnostics", ttl=300, token_file=None, extra=()):
+        command = [*self.adapter_command(grant), "--protocol", PROFILE, *extra]
+        if token_file is not None:
+            command[command.index("--token-file") + 1] = str(token_file)
+        if endpoint is not None:
+            command.extend(["--tasks-endpoint", endpoint, "--tasks-ttl-seconds", str(ttl)])
+        wire = Wire(command)
+        self.addCleanup(wire.close)
+        return wire
+
+    def task_call(self, wire, method, fields=None, *, invocation=None, capability=True):
+        wire.id += 1
+        return request(wire, wire.id, method, task_params(fields, invocation=invocation, capability=capability))
+
+    def begin(self, wire, key):
+        return self.task_call(wire, "tools/call", {"name": "system.status"}, invocation=key)["result"]
+
+    def wait_status(self, wire, handle, status="completed"):
+        cutoff = time.monotonic() + 10
+        while True:
+            view = self.task_call(wire, "tasks/get", {"taskId": handle})["result"]
+            self.assertEqual(view["resultType"], "complete")
+            if view["status"] == status:
+                return view
+            self.assertEqual(view["status"], "working", view)
+            self.assertLess(time.monotonic(), cutoff, view)
+            time.sleep(0.25)
+
+    def scheduling(self, mode):
+        ref = self.node.call("Node.Get", {})["reference"]
+        self.node.call("Node.Configure", {"expected_resource_version": ref["version"], "scheduling": mode})
+
+
+class McpTaskTests(McpTaskFixture, unittest.TestCase):
+    def test_lost_stdio_response_rejoins_one_task_across_daemon_and_adapter_restart(self):
+        n = self.node
+        grant = self.grant([self.profile])
+        invocation = key()
+        first = self.task_wire(grant)
+        discovered = self.task_call(first, "server/discover", capability=False)["result"]
+        self.assertEqual(discovered["capabilities"]["extensions"], {EXTENSION: {}})
+        blocked = self.task_call(first, "tools/call", {"name": "system.status"},
+                                 invocation=invocation, capability=False)
+        self.assertEqual(blocked["error"]["code"], -32021)
+        self.assertEqual(blocked["error"]["data"], {"requiredCapabilities": {"extensions": {EXTENSION: {}}}})
+        self.assertEqual(self.tasks(), [])
+
+        self.scheduling("Cordoned")
+        send(first, "response-not-consumed", "tools/call", task_params({"name": "system.status"}, invocation=invocation))
+        cutoff = time.monotonic() + 5
+        while not self.tasks():
+            self.assertLess(time.monotonic(), cutoff, "no durable Task accepted")
+            time.sleep(0.02)
+        [original] = self.tasks()
+        task_id = original["resource_id"]
+        first.close()
+        n.stop(signal.SIGKILL)
+        checked = json.loads(subprocess.check_output([*n.daemon, "verify"], timeout=20))
+        self.assertEqual(checked["database_format"], 122)
+        n.start()
+        second = self.task_wire(grant)
+        accepted = self.begin(second, invocation)
+        self.assertEqual((accepted["resultType"], accepted["status"], accepted["ttlMs"]), ("task", "working", 300000))
+        handle = accepted["taskId"]
+        self.assertTrue(handle.startswith("mcp-task-"))
+        self.assertNotEqual(handle, task_id)
+        self.assertEqual(self.begin(second, invocation)["taskId"], handle)
+        before = n.get(task_id)
+        self.assertEqual(before["value"]["lifecycle"], "Queued")
+        self.assertEqual(self.task_call(second, "tasks/get", {"taskId": handle}, capability=False)["error"]["code"], -32021)
+        updated = self.task_call(second, "tasks/update", {"taskId": handle,
+                     "inputResponses": {"unissued": {"action": "accept", "content": {"ignored": True}}}})["result"]
+        self.assertEqual(set(updated), {"resultType", "_meta"})
+        self.assertEqual(updated["resultType"], "complete")
+        self.assertEqual(n.get(task_id), before)
+        self.assertEqual(self.task_call(second, "tasks/update", {"taskId": handle, "inputResponses": []})["error"]["code"], -32602)
+        self.assertEqual(self.task_call(second, "tasks/list")["error"]["code"], -32601)
+
+        wrong = self.task_wire(grant, endpoint="another-endpoint")
+        other, other_grant = n.agent(["task.submit", "task.read", "system.status"])
+        other_token = n.base / "other.token"
+        with os.fdopen(os.open(other_token, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as file:
+            file.write(other["token"])
+        foreign = self.task_wire(other_grant, token_file=other_token)
+        alternate = self.task_wire(self.grant([self.profile]))
+        for refused in (wrong, foreign, alternate):
+            denied = self.task_call(refused, "tasks/get", {"taskId": handle})["error"]
+            self.assertEqual(denied["code"], -32602)
+            self.assertEqual(self.task_call(refused, "tasks/cancel", {"taskId": handle})["error"], denied)
+        self.assertEqual(self.tasks(), [original])
+
+        self.scheduling("Enabled")
+        settled = self.wait_status(second, handle)
+        report = self.check_receipt(settled["result"], "system.status", grant)
+        self.assertEqual(report["task_id"], task_id)
+        self.assertEqual(report["result"]["kernel_release"], os.uname().release)
+        second.close()
+        n.stop(signal.SIGKILL)
+        n.start()
+        last = self.task_wire(grant)
+        self.assertEqual(self.wait_status(last, handle), settled)
+        self.assertEqual(self.begin(last, invocation)["taskId"], handle)
+        self.assertEqual(len(self.tasks()), 1)
+        balance = n.call("Budget.Get", {"id": grant["budget_ref"]["resource_id"]})
+        self.assertEqual((balance["reserved"], balance["spent"]), (0, 1))
+
+        n.call("Grant.Revoke", target(grant["grant_ref"]))
+        self.assertEqual(self.task_call(last, "tasks/get", {"taskId": handle})["error"]["code"], -32602)
+        denied_replay = self.begin(last, invocation)
+        self.assertEqual(denied_replay["structuredContent"], {"code": "PermissionDenied"})
+        self.assertEqual(len(self.tasks()), 1)
+
+    def test_cancel_changes_the_original_queue_and_unnegotiated_call_stays_synchronous(self):
+        n = self.node
+        grant = self.grant([self.profile], units=3)
+        client = self.task_wire(grant)
+        disabled = self.task_wire(grant, endpoint=None)
+        self.assertNotIn("extensions", self.task_call(disabled, "server/discover")["result"]["capabilities"])
+        self.assertEqual(self.task_call(disabled, "tasks/get", {"taskId": "no-handle"})["error"]["code"], -32601)
+        direct = self.task_call(client, "tools/call", {"name": "system.status"})["result"]
+        self.assertEqual(direct["resultType"], "complete")
+        self.check_receipt(direct, "system.status", grant)
+        self.scheduling("Cordoned")
+        [item] = self.tasks()
+        accepted = self.begin(client, key())
+        handle = accepted["taskId"]
+        [original] = [entry for entry in self.tasks() if entry["resource_id"] != item["resource_id"]]
+        cancelled = self.task_call(client, "tasks/cancel", {"taskId": handle})["result"]
+        self.assertEqual(set(cancelled), {"resultType", "_meta"})
+        self.assertEqual(cancelled["resultType"], "complete")
+        self.assertEqual(self.wait_status(client, handle, "cancelled")["status"], "cancelled")
+        task = n.wait(original["resource_id"])
+        self.assertEqual((task["lifecycle"], task["outcome_knowledge"]), ("Cancelled", "NotStarted"))
+        self.assertEqual(task["result"]["artifact_refs"], [])
+        self.assertEqual(self.task_call(client, "tasks/cancel", {"taskId": handle})["result"], cancelled)
+        self.assertEqual(n.call("Task.Get", {"id": original["resource_id"]}), task)
+        balance = n.call("Budget.Get", {"id": grant["budget_ref"]["resource_id"]})
+        self.assertEqual((balance["reserved"], balance["spent"]), (0, 1))
+
+    def test_elapsed_handle_expiry_does_not_admit_again_after_cleanup(self):
+        n = self.node
+        grant = self.grant([self.profile])
+        invocation = key()
+        client = self.task_wire(grant, ttl=2)
+        accepted = self.begin(client, invocation)
+        handle = accepted["taskId"]
+        self.assertEqual(accepted["ttlMs"], 2000)
+        [original] = self.tasks()
+        n.wait(original["resource_id"])
+        n.stop(signal.SIGKILL)
+        time.sleep(2.2)
+        n.start()
+        client = self.task_wire(grant, ttl=300)
+        self.assertEqual(self.task_call(client, "tasks/get", {"taskId": handle})["error"]["code"], -32602)
+        cutoff = time.monotonic() + 5
+        while True:
+            with closing(sqlite3.connect(n.state / "state.db")) as database:
+                if database.execute("SELECT count(*) FROM mcp_task_handles WHERE handle=?", (handle,)).fetchone() == (0,):
+                    break
+            self.assertLess(time.monotonic(), cutoff)
+            time.sleep(0.03)
+        rejected = self.begin(client, invocation)
+        self.assertEqual(rejected["structuredContent"], {"code": "IdempotencyKeyExpired"})
+        self.assertEqual(len(self.tasks()), 1)
+        self.assertEqual(n.call("Task.Get", {"id": original["resource_id"]})["lifecycle"], "Succeeded")
+
+    def test_bound_tool_result_stays_with_its_original_volume_revision(self):
+        n = self.node
+        token = self.agent["token"]
+
+        def grant_for(tool, targets):
+            return n.call("Grant.Issue", {
+                "principal_id": self.agent["principal_id"], "actions": ["task.submit", "task.read", tool],
+                "tool_targets": targets, "units": 3, "ttl_seconds": 120,
+            })
+
+        create = grant_for("volume.create", ["local"])
+        request = n.prepare("volume.create", {"name": "mcp-task-volume"}, token=token,
+                            delegation=create["delegation_ref"]["resource_id"])
+        created = n.wait(n.call("Task.Submit", request, token)["task_id"], autoapprove=True)
+        self.assertEqual(created["lifecycle"], "Succeeded", created)
+        [artifact] = created["result"]["artifact_refs"]
+        volume = n.call("Artifact.Read", {"reference": artifact}, token)
+        first = n.perform("volume.write", {**target(volume), "name": "sample", "content": "initial"})["volume_ref"]
+        grant = grant_for("volume.usage", [first["resource_id"]])
+        client = self.task_wire(grant, extra=("--volume-usage", first["resource_id"]))
+
+        def begin_usage(invocation):
+            accepted = self.task_call(client, "tools/call", {"name": "volume.usage"}, invocation=invocation)["result"]
+            self.assertEqual(accepted["resultType"], "task", accepted)
+            return accepted["taskId"]
+
+        invocation = key()
+        handle = begin_usage(invocation)
+        result = self.check_receipt(self.wait_status(client, handle)["result"], "volume.usage", grant)
+        self.assertEqual((result["result"]["volume_ref"], result["result"]["logical_file_bytes"]), (first, "7"))
+        [original] = n.call("Task.Results", {"id": result["task_id"]}, token)["result"]["artifact_refs"]
+
+        second = n.perform("volume.write", {**target(first), "name": "sample", "content": "new"})["volume_ref"]
+        self.assertNotEqual(second, first)
+        refused = self.task_call(client, "tasks/get", {"taskId": handle})
+        self.assertEqual(refused["error"]["code"], -32602, refused)
+        self.assertEqual(begin_usage(invocation), handle)
+        self.assertEqual(n.call("Artifact.Read", {"reference": original}, token), result["result"])
+
+        fresh = self.check_receipt(self.wait_status(client, begin_usage(key()))["result"], "volume.usage", grant)
+        self.assertNotEqual(fresh["task_id"], result["task_id"])
+        self.assertEqual((fresh["result"]["volume_ref"], fresh["result"]["logical_file_bytes"]), (second, "3"))
+
+    def test_retained_handle_limit_follows_the_agent_across_endpoints(self):
+        n = self.node
+        self.scheduling("Cordoned")
+        grant = self.grant([self.profile], units=40)
+        token = self.agent["token"]
+
+        def start(agent_token, credential, endpoint, invocation):
+            return n.call("McpTask.Start", {
+                "endpoint": endpoint, "delegation_id": credential["delegation_ref"]["resource_id"],
+                "invocation_key": invocation, "binding": {"tool": "system.status"}, "ttl_seconds": 300,
+            }, agent_token)
+
+        invocation = key()
+        original = start(token, grant, "diagnostics", invocation)
+        for attempt in range(31):
+            start(token, grant, f"diagnostics-{attempt % 2}", key())
+        limit = n.call("Budget.Get", {"id": grant["budget_ref"]["resource_id"]})
+        self.assertEqual((limit["reserved"], limit["spent"]), (32, 0))
+        self.assertEqual(start(token, grant, "diagnostics", invocation), original)
+        with self.assertRaises(Failure) as rejected:
+            start(token, grant, "separate-endpoint", key())
+        self.assertEqual(rejected.exception.code, "QuotaExceeded")
+        self.assertTrue(rejected.exception.args[0]["retryable"])
+        task_query = {"kind": "Task", "limit": 64}
+        self.assertEqual(len(n.call("Resource.List", task_query)["items"]), 32)
+        self.assertEqual(n.call("Budget.Get", {"id": grant["budget_ref"]["resource_id"]}), limit)
+
+        other, other_grant = n.agent(["task.submit", "task.read", "system.status"])
+        additional = start(other["token"], other_grant, "diagnostics", invocation)
+        self.assertNotEqual(additional["taskId"], original["taskId"])
+        self.assertEqual(len(n.call("Resource.List", task_query)["items"]), 33)
+
+    @unittest.skipUnless(os.environ.get("PSIOS_TEST_MCP_PREVIOUS_BIN_DIR"), "requires genuine format 121 binaries")
+    def test_format_121_task_receipt_survives_migration_and_old_writer_is_fenced(self):
+        previous = Path(os.environ["PSIOS_TEST_MCP_PREVIOUS_BIN_DIR"])
+        node = Node(previous)
+        self.addCleanup(node.close)
+        task = node.submit("system.status", {})
+        body = node.wait(task)
+        [artifact] = body["result"]["artifact_refs"]
+        receipt = node.call("Artifact.Read", {"reference": artifact})
+        [operation] = body["operation_refs"]
+        old = node.daemon.copy()
+        node.stop(signal.SIGKILL)
+        node.daemon[0] = str(self.node.binaries / "psiosd")
+        before = json.loads(subprocess.check_output([*node.daemon, "verify"], timeout=20))
+        self.assertEqual((before["database_format"], before["migration_required"]), (121, True))
+        node.start()
+        self.assertEqual(node.call("Task.Get", {"id": task}), body)
+        self.assertEqual(node.call("Resource.Resolve", {"reference": operation})["reference"], operation)
+        self.assertEqual(node.call("Artifact.Read", {"reference": artifact}), receipt)
+        node.stop()
+        after = json.loads(subprocess.check_output([*node.daemon, "verify"], timeout=20))
+        self.assertEqual((after["database_format"], after["migration_required"]), (122, False))
+        blocked = subprocess.run([*old, "serve"], capture_output=True, timeout=10)
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn(b"SchemaVersionUnsupported", blocked.stderr)
+
+    @unittest.skipUnless(os.environ.get("PSIOS_TEST_MCP_TASKS_SDK_DIR"), "requires pinned official TypeScript Tasks SDK")
+    def test_official_typescript_tasks_client(self):
+        grant = self.grant([self.profile])
+        node = os.environ.get("PSIOS_TEST_MCP_TASKS_NODE", "node")
+        harness = Path(__file__).with_name("mcp_tasks_sdk.mjs")
+        adapter = [*self.adapter_command(grant), "--protocol", PROFILE, "--tasks-endpoint", "sdk-verification"]
+        result = json.loads(subprocess.check_output([node, harness, os.environ["PSIOS_TEST_MCP_TASKS_SDK_DIR"],
+                                                     *adapter], timeout=20))
+        self.check_receipt(result, "system.status", grant)
+        self.assertEqual(len(self.tasks()), 1)

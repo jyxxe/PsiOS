@@ -292,6 +292,7 @@ fn timer(s: Shared, stop: Arc<AtomicBool>) -> Result<()> {
     let mut next_model_expiry = Instant::now();
     let mut next_cursor_expiry = Instant::now() + Duration::from_secs(30);
     let mut next_preparation_expiry = Instant::now();
+    let mut next_mcp_expiry = Instant::now();
     let mut preparation_sweep = broker::preparation::authority::Sweep::default();
     let mut next_preparation_sweep = Instant::now();
     while !stop.load(Ordering::Acquire) {
@@ -335,6 +336,17 @@ fn timer(s: Shared, stop: Arc<AtomicBool>) -> Result<()> {
                     }
                 };
                 next_preparation_expiry = Instant::now() + delay;
+            }
+            if Instant::now() >= next_mcp_expiry {
+                let delay = match store.transaction("mcp-task-expiry", crate::mcp_tasks::collect) {
+                    Ok(removed) if removed > 0 => Duration::from_secs(1),
+                    Ok(_) => Duration::from_secs(30),
+                    Err(error) => {
+                        eprintln!("psiosd MCP task handle expiry: {}", error.0.code);
+                        Duration::from_secs(30)
+                    }
+                };
+                next_mcp_expiry = Instant::now() + delay;
             }
             if Instant::now() >= next_preparation_sweep {
                 let sweep = store.transaction("task-preparation-revocation", |db| {

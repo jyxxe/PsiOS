@@ -736,6 +736,14 @@ psios-mcp --socket /run/psios/api.sock --service-uid PSIOS_UID \
 
 两项资源工具的 MCP 参数均为空。适配器从 `Capability.ResolveLocalReadTools` 取得声明资源的当前精确引用，以该修订构造 Native Task，并在返回结果前复查授权和精确引用。列表只显示当前允许的工具名称，不消耗任务预算或创建任务草稿。Core 的卷持有、扫描限制和 systemd 登记校验照常执行。[实际 Volume 和 systemd 验收](../tests/test_mcp_bound_read_tools.py)
 
+### 现代 MCP Tasks
+
+在 `--protocol 2026-07-28` 上指定 `--tasks-endpoint ENDPOINT_ID` 可启用本机轮询式 Tasks。为每个部署选择稳定的端点标识。调用方在每个 Tasks 请求的 `io.modelcontextprotocol/clientCapabilities.extensions` 中声明 `io.modelcontextprotocol/tasks: {}`。PsiOS 对提供持久调用键的 `tools/call` 采用异步结果，调用键通过 PsiOS 定义的 `_meta.io.psios/mcpInvocationKey` 传递，使用 16 至 96 个 ASCII 字母、数字、短横线或下划线。省略调用键的工具请求仍同步返回。客户端丢失创建回执时，用同一端点、凭据、工具、资源绑定和调用键重连查询原句柄。JSON-RPC 请求 ID 仅用于当次回包关联。[MCP Tasks 2026-07-28](https://tasks.extensions.modelcontextprotocol.io/specification/2026-07-28/tasks)
+
+Core 在同一持久提交中保存原 Task、Operation 与随机外部句柄。`tasks/get` 沿原 Task、Run 和 Operation 读取结果，卷与服务工具还会复核当前资源修订。`tasks/cancel` 通过原 Task 的当前修订请求取消，收到回执后可继续查询实际状态。`tasks/update` 校验句柄和当前原授权，忽略无对应请求的输入。工具级失败返回 `completed` 及含 `isError` 的工具结果。原任务效果未知时继续反映 `working` 和 `Unknown` 原因。
+
+同一 Linux 启动时间域内，重启 Core 或适配器后可继续查询。句柄在内核重启、时间命名空间或权威恢复代次改变后失效。`--tasks-ttl-seconds` 可设置 1 至 600 秒，默认 300 秒。每个 Agent 最多保留 32 个、每个 Core 最多保留 512 个句柄。结果在句柄有效期间免于结果淘汰，轮询不会延长此期限。句柄过期只关闭 MCP 查询。原 Task 历史按原规则保留，相同调用键不会再次受理。[真实 Unix 验收](../tests/test_mcp_tasks.py)
+
 ## 运行一个持久的 Agent 会话
 
 以下示例接续启动指南中的 `ctl` 函数和 `workdir`。模型提供者和 Agent 是两个独立凭据。模型提供者只获得处理模型步骤的权限。

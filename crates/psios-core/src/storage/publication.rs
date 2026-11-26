@@ -12,7 +12,7 @@ pub(crate) use placement::Placement;
 
 pub(crate) const INSPECT: &str = "backup.inspect_publication";
 // Earlier daemons reclaim every .stage-* entry in the backup directory.
-pub(crate) const FORMAT: u32 = 123;
+pub(crate) const FORMAT: u32 = crate::mcp_tasks::FORMAT + 1;
 const INTENT: &str = "BackupPublicationIntent";
 const CHECKPOINT: &str = "BackupPublicationCheckpoint";
 const NOT_APPLIED: &str = "BackupPublicationNotApplied";

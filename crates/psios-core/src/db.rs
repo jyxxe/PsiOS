@@ -573,6 +573,9 @@ impl Store {
                 if ver < schedule::event_workflow_overlap::FORMAT {
                     db.c.execute_batch(schedule::event_workflow_overlap::SCHEMA)?;
                 }
+                if ver < mcp_tasks::FORMAT {
+                    db.c.execute_batch(mcp_tasks::SCHEMA)?;
+                }
                 if ver < storage::publication::FORMAT {
                     db.c.execute_batch(storage::publication::DISPOSAL_SCHEMA)?;
                 }

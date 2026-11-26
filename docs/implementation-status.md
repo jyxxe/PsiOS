@@ -27,6 +27,7 @@
 
 - 便携归档中的安装器核验新盘构建回执和镜像，按强制身份与精确审批写入空白整盘。实际 Linux loop 块设备已验证分区先于 GPT 发布、中断对账和禁止重复写入。默认 Virtio 路径已在隔离 Ubuntu 来宾中验证真实设备身份、精确审批和全盘摘要。写出的盘经两次 OVMF 启动后保留同一个 Task 结果。物理安装和跨宿主启动对账仍待验收。[原生安装说明](native-disk.md#安装到空白块设备) · [loop 故障验收](../tests/native_install.py) · [Virtio 验收](../tests/native_install_virtio.py)
 - OVMF 停机更新从同一源盘快照生成试启动与正式候选，目标 Core 独立核验实际迁移后的状态和见证，通过后发布完整候选目录。真实格式 89→90 验收覆盖运行中源盘拒绝、候选与原盘各自启动、既有 Task 和用户数据，以及原盘和 EFI 变量摘要。签名更新要求原登记证书及试启动固件强制执行。已核验缺少签名、错证书、未启用 Secure Boot 的拒绝，以及候选 UKI 签名与实际引导。自动引导接管和证书轮换仍待开发。[停机更新说明](native-disk.md#试启动后发布停机更新候选) · [OVMF 验收](../tests/native_staged_update.py) · [签名验收](../tests/native_signed_staged_update.py)
+- 本机操作者可在私有持久目录批准 OVMF 候选盘的首次正式引导。已验证启动前持久记录、来宾本地认证、正常关机、磁盘回读和原数据。控制器强杀后的真实验收确认子进程退出，同一计划保持待核实且停止再次启动。签名候选已验证正式引导的 Secure Boot 证据及关闭时的挂载前拒绝。物理固件切换仍待开发。[首次引导说明](native-disk.md#核验受管候选盘的首次正式引导) · [强杀验收](../tests/native_activation.py) · [签名首次引导验收](../tests/native_signed_activation.py)
 
 ## Agent Artifacts 应用化进度
 

@@ -26,6 +26,7 @@ SHUTDOWN_SECONDS = 60
 PR_SET_PDEATHSIG = 1
 PROTECTED_OPEN = os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
 AS_OWNER = "/bin/busybox su -s /bin/sh psios -c"
+EFI_GLOBAL_VARIABLE = "8be4df61-93ca-11d2-aa0d-00e098032b8c"
 
 
 def require(condition, message):
@@ -183,7 +184,36 @@ def core_object(body):
     return value
 
 
-def console_proof(console, credential, expected_node, manifest_sha256):
+def verify_secure_boot(console, deadline):
+    console.command("test -f /psios-secure-boot-required && test ! -L /psios-secure-boot-required", deadline)
+    mode = console.command(
+        "if ! /bin/busybox grep -qw efivarfs /proc/filesystems; then "
+        "/bin/busybox modprobe efivarfs >/dev/null 2>&1 || :; fi; "
+        "if /bin/busybox grep -qw efivarfs /proc/filesystems; then printf 'efivarfs'; else printf 'kernel'; fi",
+        deadline,
+    )
+    if mode == b"kernel":
+        console.command(
+            "/bin/busybox dmesg | /bin/busybox grep -Eiq 'secure boot enabled|locked down from EFI Secure Boot'",
+            deadline,
+        )
+        return
+    require(mode == b"efivarfs", "candidate did not report its Secure Boot evidence source")
+    # efivarfs prepends four attribute bytes to each EFI variable value.
+    values = console.command(
+        "path=/sys/firmware/efi/efivars; mounted=0; "
+        "if ! /bin/busybox grep -Fq ' /sys/firmware/efi/efivars efivarfs ' /proc/mounts; then "
+        "/bin/busybox mount -t efivarfs -o ro,nosuid,nodev,noexec efivarfs \"$path\" || exit 1; mounted=1; fi; "
+        f"secure=$(/bin/busybox od -An -j 4 -N 1 -t u1 \"$path/SecureBoot-{EFI_GLOBAL_VARIABLE}\") || exit 1; "
+        f"setup=$(/bin/busybox od -An -j 4 -N 1 -t u1 \"$path/SetupMode-{EFI_GLOBAL_VARIABLE}\") || exit 1; "
+        "if [ \"$mounted\" = 1 ]; then /bin/busybox umount \"$path\" || exit 1; fi; "
+        "printf '%s %s' \"$secure\" \"$setup\"",
+        deadline,
+    )
+    require(values.split() == [b"1", b"0"], "candidate firmware did not enforce Secure Boot")
+
+
+def console_proof(console, credential, expected_node, manifest_sha256, *, secure_boot_required=False):
     console.login(credential)
     deadline = time.monotonic() + CORE_SECONDS
     console.command("test \"$(/bin/busybox id -u)\" = 0 && test -d /sys/firmware/efi && "
@@ -198,6 +228,8 @@ def console_proof(console, credential, expected_node, manifest_sha256):
     manifest = console.command("/bin/busybox sha256sum /psios-deployment.json", deadline)
     require(manifest == f"{manifest_sha256}  /psios-deployment.json".encode("ascii"),
             "candidate booted a different deployment")
+    if secure_boot_required:
+        verify_secure_boot(console, deadline)
     whoami = f"{AS_OWNER} 'exec /bin/psiosctl whoami'"
     console.command(f"for i in $(/bin/busybox seq 1 120); do "
                     f"{whoami} >/dev/null 2>&1 && exit 0; /bin/busybox sleep 0.2; done; exit 1", deadline)
@@ -207,19 +239,25 @@ def console_proof(console, credential, expected_node, manifest_sha256):
     require(caller.get("principal_id") == "local-owner" and caller.get("authority_id") == expected_node
             and isinstance(reference, dict) and reference.get("resource_id") == expected_node,
             "candidate Core reported a different original node identity")
-    return {"boot_id": boot_id, "node_id": expected_node, "deployment_manifest_sha256": manifest_sha256}
+    proof = {"boot_id": boot_id, "node_id": expected_node, "deployment_manifest_sha256": manifest_sha256}
+    if secure_boot_required:
+        proof["secure_boot"] = "Enforced"
+    return proof
 
 
-def qemu_command(disk_fd, code_fd, vars_fd, vars_probe_fd):
+def qemu_command(disk_fd, code_fd, vars_fd, vars_probe_fd, *, secure_boot_required=False):
     located = shutil.which("qemu-system-x86_64")
     require(located is not None, "qemu-system-x86_64 is required for native activation")
     executable = Path(located).resolve(strict=True)
     info = executable.stat()
     require(stat.S_ISREG(info.st_mode) and not info.st_mode & (stat.S_ISUID | stat.S_ISGID),
             "native activation requires an ordinary QEMU executable")
+    machine = ["-machine", "q35"]
+    if secure_boot_required:
+        machine = ["-machine", "q35,smm=on", "-global", "driver=cfi.pflash01,property=secure,value=on"]
     return [
         executable, "-nodefaults", "-no-user-config", "-no-reboot", "-accel", "tcg,thread=single",
-        "-machine", "q35", "-m", "768", "-smp", "1", "-display", "none", "-monitor", "none",
+        *machine, "-m", "768", "-smp", "1", "-display", "none", "-monitor", "none",
         "-nic", "none", "-boot", "strict=on", "-serial", "stdio",
         "-add-fd", f"fd={disk_fd},set=1", "-add-fd", f"fd={code_fd},set=2", "-add-fd", f"fd={vars_fd},set=3",
         "-add-fd", f"fd={vars_probe_fd},set=3",
@@ -232,7 +270,8 @@ def qemu_command(disk_fd, code_fd, vars_fd, vars_probe_fd):
 
 
 def boot_candidate(work: Path, *, disk: Path, firmware_code: Path, firmware_vars: Path,
-                   credential: bytes, expected_node: str, manifest_sha256: str, before_launch) -> dict:
+                   credential: bytes, expected_node: str, manifest_sha256: str, before_launch,
+                   secure_boot_required: bool = False) -> dict:
     """Confirm a bounded normal OVMF boot and clean shutdown of one owned disk."""
     work = work.absolute()
     paths = [path.absolute() for path in (disk, firmware_code, firmware_vars)]
@@ -244,6 +283,7 @@ def boot_candidate(work: Path, *, disk: Path, firmware_code: Path, firmware_vars
     require(isinstance(expected_node, str) and 0 < len(expected_node) <= 128
             and isinstance(manifest_sha256, str) and re.fullmatch(r"[0-9a-f]{64}", manifest_sha256),
             "candidate boot needs an exact node and deployment digest")
+    require(type(secure_boot_required) is bool, "Secure Boot requirement must be a boolean")
 
     with open_directory(work) as directory, ExitStack() as files:
         disk_fd, disk_size = files.enter_context(open_file(directory, paths[0].name, writable=True))
@@ -256,14 +296,15 @@ def boot_candidate(work: Path, *, disk: Path, firmware_code: Path, firmware_vars
         require(disk_size <= MAX_DISK_BYTES and disk_size % 512 == 0, "invalid raw candidate disk size")
         require(code_size + vars_size == 4 * MIB, "expected a matching 4 MiB OVMF code and variable-store pair")
         fds = (disk_fd, code_fd, vars_fd, vars_probe_fd)
-        command = qemu_command(*fds)
+        command = qemu_command(*fds, secure_boot_required=secure_boot_required)
         guard = parent_death_guard()
         before_launch()
         process = subprocess.Popen(command, cwd="/", stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=subprocess.DEVNULL, pass_fds=fds, preexec_fn=guard, bufsize=0)
         try:
             console = SerialConsole(process)
-            proof = console_proof(console, credential, expected_node, manifest_sha256)
+            proof = console_proof(console, credential, expected_node, manifest_sha256,
+                                  secure_boot_required=secure_boot_required)
             console.shutdown(process)
             os.fsync(disk_fd)
             os.fsync(vars_fd)

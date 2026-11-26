@@ -5,6 +5,7 @@ pub(crate) mod evidence;
 pub(crate) mod history;
 mod maintenance;
 pub(crate) mod milestone;
+pub(crate) mod workflow_proof;
 pub(crate) use maintenance::{abandon, reassign};
 
 use crate::{
@@ -194,6 +195,13 @@ fn unresolved(db: &Db<'_>, item: &Doc) -> Result<Vec<Value>> {
 
 fn criterion_view(db: &Db<'_>, item: &Doc, actor: &str) -> Result<Value> {
     let mut criterion = item.spec["criterion"].clone();
+    if criterion["kind"] == "WorkflowTaskResult"
+        && !workflow_proof::may_view(db, actor, &criterion["definition_ref"])?
+    {
+        let fields = criterion.as_object_mut().ok_or_else(invalid_state)?;
+        fields.remove("definition_ref");
+        fields.remove("step_id");
+    }
     for action in ["resource.read", "task.read"] {
         match policy::can(db, actor, action) {
             Ok(()) => (),
@@ -322,7 +330,12 @@ pub(crate) fn set_member(db: &Db<'_>, actor: &str, params: &Value) -> Result<Val
 }
 
 fn criterion_target(conn: &Connection, criterion: &Criterion) -> Result<()> {
-    let Criterion::TaskResult { tool, target_ref } = criterion;
+    let (tool, target_ref) = match criterion {
+        Criterion::TaskResult { tool, target_ref }
+        | Criterion::WorkflowTaskResult {
+            tool, target_ref, ..
+        } => (tool, target_ref),
+    };
     let (kind, id) = match tool.as_str() {
         "system.status" => ("Profile", policy::PROFILE.to_owned()),
         "node.inventory"
@@ -363,10 +376,87 @@ fn criterion_target(conn: &Connection, criterion: &Criterion) -> Result<()> {
     Ok(())
 }
 
+fn authorize_criterion_definition(db: &Db<'_>, actor: &str, criterion: &Criterion) -> Result<()> {
+    if let Criterion::WorkflowTaskResult { definition_ref, .. } = criterion {
+        policy::can(db, actor, "task.read")?;
+        let definition = db
+            .find(&definition_ref.resource_id)?
+            .filter(|doc| doc.kind == "WorkflowDefinition")
+            .ok_or_else(denied)?;
+        policy::owned(actor, &definition).map_err(|_| denied())?;
+    }
+    Ok(())
+}
+
+fn criterion_definition(
+    conn: &Connection,
+    criterion: &Criterion,
+    assignee: &str,
+) -> Result<Option<Doc>> {
+    let Criterion::WorkflowTaskResult {
+        definition_ref,
+        step_id,
+        tool,
+        ..
+    } = criterion
+    else {
+        return Ok(None);
+    };
+    label(step_id)?;
+    let definition = crate::db::resolve(conn, &serde_json::to_value(definition_ref)?)?;
+    require(
+        definition.kind == "WorkflowDefinition"
+            && definition.rev == 1
+            && definition.generation == 1
+            && definition.body["lifecycle"] == "Registered"
+            && definition.spec["definition_version"] == "r1"
+            && matches!(definition.spec["dsl_version"].as_u64(), Some(1..=3)),
+        "InvalidArgument",
+        "criterion requires an immutable registered workflow definition",
+    )?;
+    policy::owned(assignee, &definition)?;
+    let mut unsigned = definition.spec.clone();
+    let fields = unsigned.as_object_mut().ok_or_else(invalid_state)?;
+    let frozen_digest = fields
+        .remove("definition_digest")
+        .ok_or_else(invalid_state)?;
+    fields.remove("creation_digest");
+    let immutable: bool = conn.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM versions WHERE id=?1 AND rev>1)",
+        [&definition.id],
+        |row| row.get(0),
+    )?;
+    require(
+        frozen_digest == digest(&unsigned) && immutable,
+        "RecoveryRequired",
+        "workflow definition is no longer immutable",
+    )?;
+    let mut matching = definition.spec["steps"]
+        .as_array()
+        .ok_or_else(invalid_state)?
+        .iter()
+        .filter(|frozen| frozen["step"]["id"] == step_id.as_str());
+    require(
+        matching
+            .next()
+            .is_some_and(|frozen| frozen["step"]["tool"] == tool.as_str())
+            && matching.next().is_none(),
+        "InvalidArgument",
+        "criterion step and tool must match the frozen workflow definition",
+    )?;
+    Ok(Some(definition))
+}
+
+fn check_criterion_assignee(conn: &Connection, item: &Doc, assignee: &str) -> Result<()> {
+    let criterion: Criterion = decode(&item.spec["criterion"]).map_err(|_| invalid_state())?;
+    criterion_definition(conn, &criterion, assignee).map(|_| ())
+}
+
 pub(crate) fn create_item(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     let request: CreateWorkItem = decode(params)?;
     let description = request.description.unwrap_or_default();
     let project = access(db, actor, &request.project_id, MANAGE)?;
+    authorize_criterion_definition(db, actor, &request.criterion)?;
     label(&request.key)?;
     require(
         text_ok(&request.title, &description),
@@ -407,6 +497,7 @@ pub(crate) fn create_item(db: &Db<'_>, actor: &str, params: &Value) -> Result<Va
         "assignee is not an enrolled contributor",
     )?;
     criterion_target(db.c, &request.criterion)?;
+    criterion_definition(db.c, &request.criterion, &request.assignee_principal_id).map(|_| ())?;
     let count: i64 = db.c.query_row(
         "SELECT count(*) FROM current WHERE kind='WorkItem' AND spec->>'project_id'=?1",
         [&project.id],
@@ -650,9 +741,29 @@ pub(crate) fn verify(conn: &Connection, format: u32) -> Result<()> {
             "invalid work item authority or blocker scope",
         )?;
         verify_principal(conn, assigned(&item)?)?;
-        let criterion: Criterion = decode(&item.spec["criterion"]).map_err(|_| invalid_state())?;
-        criterion_target(conn, &criterion).map_err(|_| invalid_state())?;
         let original = verify_document(conn, &item)?;
+        let criterion: Criterion =
+            decode(&original.spec["criterion"]).map_err(|_| invalid_state())?;
+        criterion_target(conn, &criterion).map_err(|_| invalid_state())?;
+        if let Some(definition) = criterion_definition(conn, &criterion, assigned(&original)?)
+            .map_err(|_| invalid_state())?
+        {
+            let definition_registered: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM versions WHERE id=?1 AND rev=?2 AND seq<?3)",
+                params![definition.id, definition.rev, created],
+                |row| row.get(0),
+            )?;
+            let creator = original.spec["created_by_principal_id"]
+                .as_str()
+                .ok_or_else(invalid_state)?;
+            require(
+                format >= workflow_proof::FORMAT
+                    && definition_registered
+                    && policy::owned(creator, &definition).is_ok(),
+                "RecoveryRequired",
+                "work item criterion lacks its original workflow definition authority",
+            )?;
+        }
         let abandoned =
             maintenance::verify_history(conn, &original, &item, format >= MAINTENANCE_FORMAT)?;
         let outcome = abandoned.as_ref().unwrap_or(&item);

@@ -480,6 +480,8 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                 if matches!(
                     w.action,
                     Action::InspectProcess(_)
+                        | Action::TrackBlockDevice(_)
+                        | Action::ObserveBlockDevice(_)
                         | Action::ServiceLogs(_)
                         | Action::ServiceLogsSince(_)
                         | Action::ListAppReleases(_)

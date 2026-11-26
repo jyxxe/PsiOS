@@ -26,6 +26,10 @@
 
 用 `node.devices` 取得当前设备号，向操作者显式授予目标 Node 上的 `node.block_layout`、`task.submit` 和 `task.read`。提交 `{"major_minor":"253:0"}` 观测指定整盘，设备号需替换为目标的当前值。结果随 Task 结算。该工具需要 Linux sysfs 的 `diskseq`。[Linux 块设备 ABI](https://docs.kernel.org/admin-guide/abi-stable.html)
 
+本机所有者可以通过 `node.block_layout` 的 `trackable: true` 获取可登记附件的 `fence`，再用目标 Node 上的显式授权提交 `node.track_block_device`。请求包含同一个 `major_minor` 和完整的 `expected` 围栏。Core 复核启动标识、内核设备代次、附件摘要和几何后保存 `BlockDevice`，并在 Task 结果中返回 `device_ref`。
+
+格式 103 按 Linux 启动和原附件登记设备。支持不可移除的非堆叠直连整盘，以及可通过只读设备描述符核验文件身份的只读 loop。对登记设备显式授予 `device.block_layout` 后，可用 `BlockDevice.Get` 读取最近观测及 `on_current_boot`，也可提交带设备 ID 和当前修订的 `device.block_layout` 获取新的观测。几何变化推进原设备修订。确认缺席、设备替换或原启动结束时，结果保留原身份以及对应状态。替换附件经所有者重新登记并取得独立授权后可观测。设备状态变化随资源版本发布。[loop 复用与恢复验收](../tests/test_block_layout.py)
+
 结果含启动 ID、内核盘代次、挂载命名空间、逻辑及物理扇区大小、分区起点和大小，以及当前 holders 与直接后端设备。可取得 WWID 或序列号时返回带来源的摘要。读取期间重新打开内核节点，核对设备身份并重读布局。保存返回的 `fence`，用新的幂等键提交含原设备号与 `expected` 字段的 Task。把原 `fence` 对象作为 `expected` 值。更换设备、替换 loop 后端或改变布局时，原观察失效。[真实 loop 与 Device Mapper 验收](../tests/test_block_layout.py) · [格式 22 升级](../tests/block_layout_upgrade.py)
 
 此结果可用于安装前复核。写入安装介质还需要核验盘上内容签名、取得排他设备控制并通过独立的写入审批。[安装规范](v1/docs/03-host-updates-network-devices.md#3-安装与本地恢复)

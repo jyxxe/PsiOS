@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 import os
 from pathlib import Path
+import signal
 import subprocess
 import time
 import unittest
@@ -33,6 +34,12 @@ def submit(node, grant, device, *, token=None, expected=None):
         params["expected"] = expected
     request = node.prepare(TOOL, params, token=token, delegation=grant["delegation_ref"]["resource_id"])
     return node.call("Task.Submit", request, token)["task_id"]
+
+
+def observe_trackable(node, grant, device):
+    request = node.prepare(TOOL, {"major_minor": device, "trackable": True},
+                           delegation=grant["delegation_ref"]["resource_id"])
+    return receipt(node, node.call("Task.Submit", request)["task_id"])
 
 
 def receipt(node, task, token=None):
@@ -184,3 +191,109 @@ class BlockLayoutTests(unittest.TestCase):
             self.assertNotEqual(new["fence"]["disk_sequence"], observed["fence"]["disk_sequence"])
             stale = node.wait(submit(node, self.grant, device, expected=observed["fence"]))
             self.assertEqual(stale["conditions"][0]["type"], "PreconditionFailed", stale)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_BLOCK_LOOP") == "1", "requires read-only loop fixtures")
+    def test_loop_tracked_grant_keeps_its_original_attachment_across_restart_and_reuse(self):
+        node = self.node
+        track = "node.track_block_device"
+        inspect = "device.block_layout"
+        first, second = node.base / "tracked-first.raw", node.base / "tracked-second.raw"
+        scratch_gpt(first)
+        scratch_gpt(second)
+
+        def grant(principal, tool, scope):
+            request = {"principal_id": principal, "actions": [tool, "task.submit", "task.read"],
+                       "units": 12, "ttl_seconds": 120}
+            if scope is not None:
+                request["tool_targets"] = [scope]
+            return node.call("Grant.Issue", request)
+
+        def send(tool, params, scope, token=None):
+            request = node.prepare(tool, params, token=token,
+                                   delegation=scope["delegation_ref"]["resource_id"])
+            return node.call("Task.Submit", request, token)["task_id"]
+
+        def run(tool, params, scope, token=None):
+            return receipt(node, send(tool, params, scope, token), token)
+
+        def denied(code, call):
+            with self.assertRaises(Failure) as error:
+                call()
+            self.assertEqual(error.exception.code, code, error.exception)
+
+        owner_scope = grant("local-owner", track, self.scope)
+        actor = node.call("Agent.Register", {"name": "one-block-attachment"})
+        actor_id, token = actor["principal_id"], actor["token"]
+        denied("PermissionDenied", lambda: grant(actor_id, track, self.scope))
+        denied("InvalidArgument", lambda: grant(actor_id, inspect, self.scope))
+        denied("InvalidArgument", lambda: grant(actor_id, inspect, None))
+
+        with attached(first) as (name, sysfs):
+            major_minor = (sysfs / "dev").read_text().strip()
+            observed = observe_trackable(node, self.grant, major_minor)
+            fence = observed["fence"]
+            self.assertRegex(fence["attachment_digest"], r"^sha256:[0-9a-f]{64}$")
+            self.assertNotIn(str(first), str(observed))
+            if os.getenv("PSIOS_TEST_BLOCK_MAPPER") == "1":
+                part, = observed["layout"]["partitions"]
+                with readonly_mapper(part["major_minor"], part["size_sectors_512"]) as mapper:
+                    request = node.prepare(TOOL, {"major_minor": mapper, "trackable": True},
+                                           delegation=self.grant["delegation_ref"]["resource_id"])
+                    denied_mapping = node.wait(node.call("Task.Submit", request)["task_id"])
+                    self.assertEqual(denied_mapping["conditions"][0]["type"], "UnsupportedCapability")
+            request = {"major_minor": major_minor, "expected": fence}
+            denied("PermissionDenied", lambda: node.prepare(track, request))
+            enrolled = run(track, request, owner_scope)
+            original = enrolled["device_ref"]
+            self.assertEqual(run(track, request, owner_scope)["device_ref"], original)
+            old_id = original["resource_id"]
+            access = grant(actor_id, inspect, old_id)
+            identity = {"id": old_id}
+            current = node.call("BlockDevice.Get", identity, token)
+            self.assertEqual(current["reference"], original)
+            self.assertTrue(current["on_current_boot"])
+            self.assertEqual(current["state"]["device_generation"], "1")
+            denied("PermissionDenied", lambda: node.call("BlockDevice.Get", identity))
+            cursor = node.call("Resource.List", {"kind": "BlockDevice", "id": old_id})["watch_start_cursor"]
+
+            node.stop(signal.SIGKILL)
+            node.start()
+            self.assertEqual(node.call("BlockDevice.Get", identity, token), current)
+            same = run(inspect, target(original), access, token)
+            self.assertEqual((same["device_ref"], same["layout"]), (original, observed["layout"]))
+            with first.open("r+b") as file:
+                file.truncate(18 * 1024 * 1024)
+            subprocess.run(["losetup", "--set-capacity", Path("/dev") / name], check=True, timeout=8)
+            resized = run(inspect, target(original), access, token)
+            self.assertEqual(resized["identity"], same["identity"])
+            self.assertNotEqual(resized["fence"]["layout_digest"], fence["layout_digest"])
+            self.assertEqual(resized["device_ref"]["version"], "r2")
+            denied("Conflict", lambda: send(inspect, target(original), access, token))
+
+        with attached(second, name) as (_, sysfs):
+            self.assertEqual((sysfs / "dev").read_text().strip(), major_minor)
+            terminated = run(inspect, target(resized["device_ref"]), access, token)
+            self.assertEqual(terminated["lifecycle"], "Replaced")
+            self.assertEqual(terminated["identity"], enrolled["identity"])
+            self.assertEqual(terminated["device_ref"]["version"], "r3")
+            for field in ("layout", "fence", "mount_namespace_inode"):
+                self.assertNotIn(field, terminated)
+            events = node.call("Event.Poll", {"cursor": cursor})["events"]
+            revisions = [item["resource_ref"] for item in events if item["resource_ref"]["resource_id"] == old_id]
+            self.assertEqual(revisions, [resized["device_ref"], terminated["device_ref"]])
+
+            fresh = observe_trackable(node, self.grant, major_minor)
+            self.assertNotEqual(fresh["fence"]["attachment_digest"], fence["attachment_digest"])
+            new_attempt = node.prepare(track, request, delegation=owner_scope["delegation_ref"]["resource_id"])
+            refused = node.wait(node.call("Task.Submit", new_attempt)["task_id"])
+            self.assertEqual(refused["conditions"][0]["type"], "PreconditionFailed", refused)
+            new = run(track, {"major_minor": major_minor, "expected": fresh["fence"]}, owner_scope)["device_ref"]
+            self.assertNotEqual(new["resource_id"], old_id)
+            denied("PermissionDenied", lambda: send(inspect, target(new), access, token))
+            denied("PermissionDenied", lambda: node.call("BlockDevice.Get", {"id": new["resource_id"]}, token))
+            self.assertEqual(run(inspect, target(terminated["device_ref"]), access, token), terminated)
+            new_access = grant(actor_id, inspect, new["resource_id"])
+            self.assertEqual(run(inspect, target(new), new_access, token)["layout"], fresh["layout"])
+
+        node.stop()
+        subprocess.run(node.daemon + ["verify"], check=True, stdout=subprocess.DEVNULL, timeout=20)

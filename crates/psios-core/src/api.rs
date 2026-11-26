@@ -39,6 +39,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
             policy::who(db, actor)
         }
         "Node.Get" => node::get(db, actor, p),
+        "BlockDevice.Get" => node::block_device::get(db, actor, p),
         "Node.Configure" => node::configure(db, actor, p),
         "Node.WorkAdmission.Get" => node::work_admission::get(db, actor, p),
         "Node.WorkAdmission.Set" => node::work_admission::set(db, actor, p),

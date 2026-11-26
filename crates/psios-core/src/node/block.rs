@@ -1,4 +1,6 @@
 //! Observe a whole disk and seal its Linux identity and geometry for later comparison.
+mod attachment;
+
 use crate::{Result, err, host::Work, now, require};
 use psios_api::{canonical, sha256};
 use rustix::{
@@ -32,7 +34,7 @@ fn decimal<T: std::str::FromStr + ToString>(value: &str) -> Option<T> {
     (number.to_string() == value).then_some(number)
 }
 
-fn device_number(value: &str) -> Option<(u32, u32)> {
+pub(super) fn device_number(value: &str) -> Option<(u32, u32)> {
     let (major, minor) = value.split_once(':')?;
     let (major, minor) = (decimal(major)?, decimal(minor)?);
     (major <= 4095 && minor <= 1048575).then_some((major, minor))
@@ -40,10 +42,38 @@ fn device_number(value: &str) -> Option<(u32, u32)> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Fence {
-    boot_id: String,
-    disk_sequence: String,
-    layout_digest: String,
+pub(super) struct Fence {
+    pub(super) boot_id: String,
+    pub(super) disk_sequence: String,
+    pub(super) layout_digest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) attachment_digest: Option<String>,
+}
+
+impl Fence {
+    pub(super) fn valid(&self) -> bool {
+        valid_boot(&self.boot_id)
+            && valid_sequence(&self.disk_sequence)
+            && valid_digest(&self.layout_digest)
+            && self.attachment_digest.as_deref().is_none_or(valid_digest)
+    }
+}
+
+pub(super) fn valid_boot(value: &str) -> bool {
+    uuid::Uuid::parse_str(value).is_ok_and(|id| !id.is_nil() && id.to_string() == value)
+}
+
+pub(super) fn valid_sequence(value: &str) -> bool {
+    decimal::<u64>(value).is_some_and(|sequence| sequence > 0)
+}
+
+pub(super) fn valid_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -51,6 +81,8 @@ struct Fence {
 pub struct Query {
     pub major_minor: String,
     expected: Option<Fence>,
+    #[serde(default)]
+    trackable: bool,
 }
 
 impl Query {
@@ -62,18 +94,7 @@ impl Query {
         )?;
         if let Some(expected) = &self.expected {
             require(
-                uuid::Uuid::parse_str(&expected.boot_id)
-                    .is_ok_and(|id| id.to_string() == expected.boot_id)
-                    && decimal::<u64>(&expected.disk_sequence).is_some_and(|sequence| sequence > 0)
-                    && expected
-                        .layout_digest
-                        .strip_prefix("sha256:")
-                        .is_some_and(|digest| {
-                            digest.len() == 64
-                                && digest.bytes().all(|byte| {
-                                    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
-                                })
-                        }),
+                expected.valid() && expected.attachment_digest.is_some() == self.trackable,
                 "InvalidArgument",
                 "invalid expected block layout identity",
             )?;
@@ -280,6 +301,21 @@ struct Layout {
     partitions: Vec<Partition>,
 }
 
+fn disk_sequence(dir: &OwnedFd) -> Result<String> {
+    let sequence = optional(dir, "diskseq")?.ok_or_else(|| {
+        err(
+            "UnsupportedCapability",
+            "kernel disk sequence is not exposed",
+        )
+    })?;
+    require(
+        valid_sequence(&sequence),
+        "HostFailure",
+        "invalid kernel disk sequence",
+    )?;
+    Ok(sequence)
+}
+
 fn layout(dir: &OwnedFd, path: PathBuf, expected_device: &str) -> Result<Layout> {
     let dev = device(dir)?;
     require(
@@ -292,22 +328,11 @@ fn layout(dir: &OwnedFd, path: PathBuf, expected_device: &str) -> Result<Layout>
         "InvalidArgument",
         "a whole block device is required",
     )?;
-    let sequence = optional(dir, "diskseq")?.ok_or_else(|| {
-        err(
-            "UnsupportedCapability",
-            "kernel disk sequence is not exposed",
-        )
-    })?;
-    require(
-        decimal::<u64>(&sequence).is_some_and(|n| n > 0),
-        "HostFailure",
-        "invalid kernel disk sequence",
-    )?;
     let mut remaining = LAYOUT_ROWS;
     Ok(Layout {
         sysfs_path: path,
         major_minor: dev,
-        disk_sequence: sequence,
+        disk_sequence: disk_sequence(dir)?,
         size_sectors_512: number(dir, "size")?.to_string(),
         read_only: flag(dir, "ro")?,
         removable: flag(dir, "removable")?,
@@ -320,39 +345,99 @@ fn layout(dir: &OwnedFd, path: PathBuf, expected_device: &str) -> Result<Layout>
     })
 }
 
-pub(super) fn observe(w: &Work, query: &Query) -> Result<Value> {
-    let boot_id = super::scalar("/proc/sys/kernel/random/boot_id")?;
-    let namespace = fs::metadata("/proc/self/ns/mnt")?.ino();
-    let (path, directory) = lookup(&query.major_minor)?;
-    let first = layout(&directory, path, &query.major_minor)?;
-    let (path, reopened) = lookup(&query.major_minor)?;
+fn same_directory(first: &OwnedFd, second: &OwnedFd) -> Result<bool> {
     let (old, new) = (
-        fstat(&directory).map_err(io::Error::from)?,
-        fstat(&reopened).map_err(io::Error::from)?,
+        fstat(first).map_err(io::Error::from)?,
+        fstat(second).map_err(io::Error::from)?,
     );
+    Ok(old.st_dev == new.st_dev && old.st_ino == new.st_ino)
+}
+
+pub(super) struct Sample {
+    pub(super) fence: Fence,
+    pub(super) layout: Value,
+    pub(super) mount_namespace_inode: String,
+    pub(super) observed_at: String,
+}
+
+pub(super) enum Presence {
+    Absent,
+    SameSequence,
+    OtherSequence,
+}
+
+pub(super) fn presence(major_minor: &str, expected_sequence: &str) -> Result<Presence> {
+    let (path, first) = match lookup(major_minor) {
+        Ok(found) => found,
+        Err(error) if error.0.code == "NotFound" => {
+            return match lookup(major_minor) {
+                Err(error) if error.0.code == "NotFound" => Ok(Presence::Absent),
+                Err(error) => Err(error),
+                Ok(_) => Err(err("Conflict", "block device appeared during observation")),
+            };
+        }
+        Err(error) => return Err(error),
+    };
+    let sequence = disk_sequence(&first)?;
+    let (current_path, current) = lookup(major_minor)?;
     require(
-        old.st_dev == new.st_dev
-            && old.st_ino == new.st_ino
-            && first == layout(&reopened, path, &query.major_minor)?,
+        path == current_path
+            && same_directory(&first, &current)?
+            && device(&first)? == major_minor
+            && device(&current)? == major_minor
+            && sequence == disk_sequence(&current)?,
+        "Conflict",
+        "block device changed during identity observation",
+    )?;
+    Ok(if sequence == expected_sequence {
+        Presence::SameSequence
+    } else {
+        Presence::OtherSequence
+    })
+}
+
+pub(super) fn sample(major_minor: &str, trackable: bool) -> Result<Sample> {
+    let boot_id = crate::linux_clock::BootClock::sample()?.boot_id;
+    let namespace = fs::metadata("/proc/self/ns/mnt")?.ino();
+    let (path, directory) = lookup(major_minor)?;
+    let first = layout(&directory, path, major_minor)?;
+    let attachment = trackable
+        .then(|| attachment::Ownership::capture(&first))
+        .transpose()?;
+    let (path, reopened) = lookup(major_minor)?;
+    require(
+        same_directory(&directory, &reopened)? && first == layout(&reopened, path, major_minor)?,
         "Conflict",
         "block layout changed during observation",
     )?;
+    let attachment_digest = attachment.map(|proof| proof.confirm(&first)).transpose()?;
     let value = serde_json::to_value(&first)?;
     let fence = Fence {
         boot_id,
         disk_sequence: first.disk_sequence,
         layout_digest: sha256(&canonical(&value)),
+        attachment_digest,
     };
+    Ok(Sample {
+        fence,
+        layout: value,
+        mount_namespace_inode: namespace.to_string(),
+        observed_at: now(),
+    })
+}
+
+pub(super) fn observe(w: &Work, query: &Query) -> Result<Value> {
+    let sample = sample(&query.major_minor, query.trackable)?;
     require(
         query
             .expected
             .as_ref()
-            .is_none_or(|expected| expected == &fence),
+            .is_none_or(|expected| expected == &sample.fence),
         "PreconditionFailed",
         "block layout identity or geometry has changed",
     )?;
     Ok(
-        json!({"node_ref":w.target.reference(),"source":"LinuxSysfs","fence":fence,"layout":value,
-               "mount_namespace_inode":namespace.to_string(),"observed_at":now()}),
+        json!({"node_ref":w.target.reference(),"source":"LinuxSysfs","fence":sample.fence,"layout":sample.layout,
+               "mount_namespace_inode":sample.mount_namespace_inode,"observed_at":sample.observed_at}),
     )
 }

@@ -2,7 +2,7 @@
 use super::{KIND, Location, Reclamation, id, record};
 use crate::{Result, broker, db, decode, err, require};
 use chrono::{DateTime, SecondsFormat, Utc};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::{Value, json};
 
 fn current(conn: &Connection, id: &str, kind: &str) -> Result<db::Doc> {

@@ -12,6 +12,8 @@ use psios_api::{canonical, digest, sha256};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::{Value, json};
 
+pub(crate) mod authority;
+
 pub(crate) const FORMAT: u32 = 96;
 pub(crate) const SCHEMA: &str = include_str!("preparation.sql");
 const PREFIX: &str = "input-prepared-";
@@ -246,23 +248,14 @@ pub(crate) fn preview(db: &Db<'_>, actor: &str, id: &str) -> Result<Option<Doc>>
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for request in eligible {
-        let delegation = field(&request["delegation_ref"], "resource_id")?;
-        let tool = field(&request, "task_type")?;
-        let exact = policy::delegation(db, actor, delegation, "task.submit")
-            .and_then(|_| policy::delegation(db, actor, delegation, tool));
-        match exact {
-            Ok(live) if live.reference() == request["delegation_ref"] => {
-                let doc = input(db.c, actor, id)?.ok_or_else(invalid)?;
-                require(
-                    doc.reference() == request["input_ref"],
-                    "RecoveryRequired",
-                    "preview request disagrees with its staged input",
-                )?;
-                return Ok(Some(doc));
-            }
-            Ok(_) => {}
-            Err(error) if error.0.code == "PermissionDenied" => {}
-            Err(error) => return Err(error),
+        if authority::authorized(db, actor, &request)? {
+            let doc = input(db.c, actor, id)?.ok_or_else(invalid)?;
+            require(
+                doc.reference() == request["input_ref"],
+                "RecoveryRequired",
+                "preview request disagrees with its staged input",
+            )?;
+            return Ok(Some(doc));
         }
     }
     Ok(None)
@@ -323,6 +316,24 @@ fn require_transaction(db: &Db<'_>) -> Result<()> {
         "RecoveryRequired",
         "prepared Task input custody requires an authority transaction",
     )
+}
+
+pub(crate) fn usage(db: &Db<'_>, actor: &str) -> Result<Value> {
+    let (requests, bytes): (i64, i64) = db.c.query_row(
+        "SELECT (SELECT count(*) FROM task_preparations WHERE owner=?1),
+                (SELECT coalesce(sum(bytes),0) FROM task_prepared_inputs WHERE owner=?1)",
+        [actor],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    require(
+        (0..=OWNER_REQUESTS).contains(&requests) && (0..=OWNER_BYTES).contains(&bytes),
+        "RecoveryRequired",
+        "staged Task input usage exceeds its durable quota",
+    )?;
+    Ok(json!({
+        "requests":{"used":requests,"limit":OWNER_REQUESTS},
+        "bytes":{"used":bytes,"limit":OWNER_BYTES}
+    }))
 }
 
 fn capacity(db: &Db<'_>, actor: &str, bytes: i64) -> Result<()> {

@@ -285,6 +285,8 @@ fn timer(s: Shared, stop: Arc<AtomicBool>) -> Result<()> {
     let mut next_model_expiry = Instant::now();
     let mut next_cursor_expiry = Instant::now() + Duration::from_secs(30);
     let mut next_preparation_expiry = Instant::now();
+    let mut preparation_sweep = broker::preparation::authority::Sweep::default();
+    let mut next_preparation_sweep = Instant::now();
     while !stop.load(Ordering::Acquire) {
         {
             let mut store = state(&s)?;
@@ -326,6 +328,26 @@ fn timer(s: Shared, stop: Arc<AtomicBool>) -> Result<()> {
                     }
                 };
                 next_preparation_expiry = Instant::now() + delay;
+            }
+            if Instant::now() >= next_preparation_sweep {
+                let sweep = store.transaction("task-preparation-revocation", |db| {
+                    broker::preparation::authority::advance(db, &preparation_sweep)
+                });
+                let delay = match sweep {
+                    Ok((next, more)) => {
+                        preparation_sweep = next;
+                        if more {
+                            Duration::from_millis(250)
+                        } else {
+                            Duration::from_secs(1)
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("psiosd task preparation authority sweep: {}", error.0.code);
+                        Duration::from_secs(1)
+                    }
+                };
+                next_preparation_sweep = Instant::now() + delay;
             }
         }
         thread::park_timeout(Duration::from_millis(250));

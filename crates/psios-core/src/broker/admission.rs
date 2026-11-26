@@ -1,6 +1,6 @@
 //! A full ordinary queue must leave room to verify its unresolved effects.
 use crate::{
-    Empty, Result, artifact,
+    Result, artifact,
     db::{Db, Doc},
     decode, err,
     host::Action,
@@ -8,6 +8,7 @@ use crate::{
     policy, require,
 };
 use rusqlite::{OptionalExtension, params};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 pub(crate) const FORMAT: u32 = 46;
@@ -56,14 +57,24 @@ fn principal_ordinary(db: &Db<'_>, actor: &str) -> Result<u32> {
     )?)
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrincipalView {
+    #[serde(default)]
+    include_preparations: bool,
+}
+
 pub(crate) fn principal(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
-    let _: Empty = decode(params)?;
+    let params: PrincipalView = decode(params)?;
     policy::can(db, actor, "task.submit")?;
     let limit = db.cfg.principal_queue_limit.unwrap_or(db.cfg.queue_limit);
     let mut view = json!({
         "principal_id":actor,
         "ordinary":{"used":principal_ordinary(db, actor)?,"limit":limit},
     });
+    if params.include_preparations {
+        view["preparations"] = super::preparation::usage(db, actor)?;
+    }
     if let Some(byte_limit) = db.cfg.read_result_bytes_per_principal {
         view["read_results"] = artifact::capacity::principal(db, actor, byte_limit)?;
     }

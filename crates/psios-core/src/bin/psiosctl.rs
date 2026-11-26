@@ -157,7 +157,11 @@ enum Cmd {
         seconds: u64,
     },
     /// Show durable Task admission usage for this principal.
-    TaskAdmission,
+    TaskAdmission {
+        /// Include this principal's retained Task preparation usage.
+        #[arg(long)]
+        include_preparations: bool,
+    },
     /// Discard the exact prepared request in a JSON file or stdin.
     TaskDiscardPreparation {
         #[arg(default_value = "-")]
@@ -935,7 +939,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             c.submit_with_requirements(&tool, input(&file)?, &key, &delegation, &requirements)?
         }
         Cmd::Wait { id, seconds } => c.wait(&id, Duration::from_secs(seconds))?,
-        Cmd::TaskAdmission => c.task_admission()?,
+        Cmd::TaskAdmission {
+            include_preparations,
+        } => {
+            if include_preparations {
+                c.task_admission_with_preparations()?
+            } else {
+                c.task_admission()?
+            }
+        }
         Cmd::TaskDiscardPreparation { file } => c.discard_task_preparation(input(&file)?)?,
         Cmd::SessionUseFallback { id, revision, file } => {
             c.use_session_fallback(&id, &revision, &serde_json::from_value(input(&file)?)?)?

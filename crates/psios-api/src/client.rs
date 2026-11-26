@@ -206,6 +206,10 @@ impl Client {
         self.call("Task.Admission", json!({}))
     }
 
+    pub fn task_admission_with_preparations(&self) -> ApiResult<Value> {
+        self.call("Task.Admission", json!({"include_preparations":true}))
+    }
+
     /// Read the enrolled revision of a locally managed network link.
     pub fn network_link(&self, id: &str) -> ApiResult<Value> {
         self.call("NetworkLink.Get", json!({"id": id}))

@@ -271,14 +271,19 @@ fn context(scope: &Snapshot) -> Result<Bus> {
         "PreconditionFailed",
         "NetworkManager or kernel link identity changed",
     )?;
+    verify_profiles(&bus, scope)?;
+    Ok(bus)
+}
+
+fn verify_profiles(bus: &Bus, scope: &Snapshot) -> Result<()> {
     for expected in &scope.profiles {
         require(
-            profile::read(&bus, &scope.link.interface, &expected.uuid)? == *expected,
+            profile::read(bus, &scope.link.interface, &expected.uuid)? == *expected,
             "PreconditionFailed",
             "NetworkManager profile changed",
         )?;
     }
-    Ok(bus)
+    Ok(())
 }
 
 fn scope_digest(scope: &Snapshot) -> Result<String> {
@@ -803,6 +808,7 @@ fn await_rollback(
                 match no_pending_candidate(bus, scope, Some(activation)) {
                     Ok(()) => {
                         require_checkpoint_available(bus, &scope.device_path, None)?;
+                        verify_profiles(bus, scope)?;
                         let details = device_details(bus, &scope.device_path, &scope.link)?;
                         require(
                             observe_on(bus, &details, scope, checkpoint)? == observed
@@ -850,6 +856,7 @@ pub(crate) fn rollback(
     };
     guard()?;
     before_effect()?;
+    verify_profiles(&bus, scope).map_err(uncertain)?;
     guard().map_err(uncertain)?;
     let reply = bus
         .mutate("CheckpointRollback", &["o", &checkpoint.path], "a{su}")

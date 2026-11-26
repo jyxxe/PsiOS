@@ -19,6 +19,7 @@ pub const TOOLS: &[&str] = &[
     "system.status",
     agent::START_SESSION,
     workflow::START_TOOL,
+    project::agent_tool::TOOL,
     "node.inventory",
     node::pressure::TOOL,
     "node.interfaces",
@@ -239,6 +240,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | PROJECT_MANAGE
                     | PROJECT_CONTRIBUTE
                     | PROJECT_REVIEW
+                    | project::agent_tool::TOOL
             )
         })
         .map(|a| a.to_string())
@@ -598,6 +600,10 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             PROJECT_READ | PROJECT_MANAGE | PROJECT_CONTRIBUTE | PROJECT_REVIEW
         )
     });
+    let submits_evidence = p
+        .actions
+        .iter()
+        .any(|action| action == project::agent_tool::TOOL);
     require(
         !has_project_action || (!reads_results && p.tool_targets.is_some()),
         "InvalidArgument",
@@ -605,6 +611,7 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     )?;
     require(
         !(reads_results
+            || submits_evidence
             || p.actions.iter().any(|action| {
                 action == storage::export::ACTION
                     || action == artifact::ingress::UPLOAD
@@ -642,15 +649,21 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             "InvalidArgument",
             "target scope must contain 1 to 64 resource IDs",
         )?;
+        let mut includes_work_item = false;
         for id in ids {
             if reads_results {
                 db.of(id, "Task")?;
             } else if has_project_action {
                 db.of(id, "Project")?;
             } else {
-                db.get(id)?;
+                includes_work_item |= db.get(id)?.kind == "WorkItem";
             }
         }
+        require(
+            !submits_evidence || includes_work_item,
+            "InvalidArgument",
+            "evidence submission requires an exact WorkItem in the grant target scope",
+        )?;
     }
     require(
         p.max_delegation_depth

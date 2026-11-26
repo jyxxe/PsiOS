@@ -38,6 +38,16 @@ enum Cmd {
         #[arg(long)]
         rehearse_migration: bool,
     },
+    /// Inspect a stopped authority and prepare an exact SQLite compaction plan.
+    PlanStateCompaction(CompactionOptions),
+    /// Reclaim free SQLite pages on a stopped authority using an exact plan.
+    CompactState {
+        /// JSON emitted by plan-state-compaction, or standard input (-).
+        #[arg(long, default_value = "-")]
+        plan_file: PathBuf,
+        #[command(flatten)]
+        options: CompactionOptions,
+    },
     /// Capture a verified database checkpoint from a stopped authority.
     Checkpoint {
         /// New checkpoint directory under a private, operator-owned parent.
@@ -88,6 +98,16 @@ enum Cmd {
 }
 
 #[derive(clap::Args)]
+struct CompactionOptions {
+    /// Maximum combined database and journal input size for verification, in MiB.
+    #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u32).range(1..))]
+    max_copy_mib: u32,
+    /// Parent for the private verification copy (defaults to TMPDIR).
+    #[arg(long)]
+    scratch_dir: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
 struct CheckpointInput {
     /// Private directory containing the checkpoint manifest and SQLite members.
     #[arg(long)]
@@ -103,7 +123,7 @@ struct CheckpointInput {
     scratch_dir: Option<PathBuf>,
 }
 
-fn read_reference(path: &Path) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+fn read_document(path: &Path, name: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let mut bytes = Vec::new();
     let limit = psios_api::MAX_FRAME;
     if path == Path::new("-") {
@@ -118,7 +138,7 @@ fn read_reference(path: &Path) -> Result<serde_json::Value, Box<dyn std::error::
     }
     if bytes.len() > limit {
         return Err(
-            psios_core::err("InvalidArgument", "artifact reference exceeds size limit").into(),
+            psios_core::err("InvalidArgument", format!("{name} exceeds size limit")).into(),
         );
     }
     Ok(psios_api::parse(&bytes)?)
@@ -156,6 +176,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+        Cmd::PlanStateCompaction(options) => {
+            let cfg = cfg()?;
+            let scratch = options.scratch_dir.unwrap_or_else(std::env::temp_dir);
+            let max_bytes = u64::from(options.max_copy_mib) * 1024 * 1024;
+            let plan = Store::plan_state_compaction(&cfg, &scratch, max_bytes)?;
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+        }
+        Cmd::CompactState { plan_file, options } => {
+            let cfg = cfg()?;
+            let scratch = options.scratch_dir.unwrap_or_else(std::env::temp_dir);
+            let max_bytes = u64::from(options.max_copy_mib) * 1024 * 1024;
+            let approved = read_document(&plan_file, "state compaction plan")?;
+            let report = Store::compact_state(&cfg, &scratch, max_bytes, &approved)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Cmd::Checkpoint {
             output,
             max_copy_mib,
@@ -180,7 +215,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_bytes,
         } => {
             let scratch = checkpoint.scratch_dir.unwrap_or_else(std::env::temp_dir);
-            let reference = read_reference(&reference_file)?;
+            let reference = read_document(&reference_file, "artifact reference")?;
             let bytes = Store::checkpoint_artifact(
                 &checkpoint.directory,
                 &checkpoint.manifest_digest,

@@ -40,6 +40,20 @@ psiosctl --config /etc/psios/core.json artifact-repair artifact.json < artifact-
 
 `artifact-repair` 由当前权威验证本机所有者身份、制品引用和分块摘要，然后修复缺失或损坏的内容。这样可以恢复原 Task 结果并保留检查点之后的授权、任务和操作历史。已记录为 `Unavailable` 的 Task 在修复后需要重新核验，再恢复受影响的会话或工作流。[崩溃检查点与在线修复验收](../tests/test_authority_checkpoint.py) · [任务结果核验](core-local.md)
 
+## 停服后回收 SQLite 空闲页
+
+任务结果回收可释放 SQLite 中供后续写入复用的页。停服后以原服务账户运行以下命令，可以将空闲页归还给文件系统。
+
+```bash
+umask 077
+psiosd --config /etc/psios/core.json plan-state-compaction > state-compaction.json
+psiosd --config /etc/psios/core.json compact-state --plan-file state-compaction.json
+```
+
+预检在私有副本上核对数据库、见证与所有者凭据，并记录源库身份、文件摘要和页用量。`free_pages` 用于估算可回收量。两个命令都可用 `--scratch-dir` 指定核验副本目录，用 `--max-copy-mib` 限制需要复制的状态量。
+
+执行独占节点的状态锁，并重新核对原计划。SQLite 在本机原库完成压缩和 WAL 截断，再独立核对节点身份、提交头、数据库及相关制品。已有 Task、事件、授权与回执沿用原记录。容量检查保留权威存储预留，并为临时数据库及 WAL 计入额外空间。提交头变动、凭据轮换待处理或空间储备不足时，执行阶段会报告相应原因。最终回执报告压缩前后的文件大小。[SQLite VACUUM](https://www.sqlite.org/lang_vacuum.html) · [离线压缩验收](../tests/test_state_compaction.py)
+
 ## 验证和恢复独立的卷备份
 
 原权威在线时，可授予操作者目标 Backup 上的 `backup.export`，再用当前 Backup 的 `ResourceRef` 导出经过核验的完整副本。导出命令接受 JSON 引用文件或标准输入，目标必须是私有父目录下的新目录。将导出回执中的 `manifest_digest` 保存到与副本独立的可信记录。手工转存既有副本时，也可以用 `psiosctl get BACKUP_ID` 读取同一摘要。[权限与分页](core-runtime.md#导出备份) · [在线导出与脱机恢复验收](../tests/test_backup_export.py)

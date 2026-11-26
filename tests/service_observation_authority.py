@@ -69,9 +69,10 @@ def check_case(bin_dir, tracer, case):
         request = node.prepare("service.observe", parameters, delegation=delegation)
         return node.call("Task.Submit", request)["task_id"]
 
+    database = (node.state / "state.db").as_uri() + "?mode=ro"
+
     def position():
-        uri = (node.state / "state.db").as_uri() + "?mode=ro"
-        with closing(sqlite3.connect(uri, uri=True)) as db:
+        with closing(sqlite3.connect(database, uri=True)) as db:
             return db.execute(
                 "SELECT dispatched_seq FROM service_observation_positions WHERE service=?",
                 [service],
@@ -150,6 +151,15 @@ def check_case(bin_dir, tracer, case):
         assert settled["outcome_knowledge"] == "Known", settled
         assert (settled["lifecycle"], settled["conditions"][0]["type"]) == expected, settled
         assert settled["result"] == {"availability": "Unavailable", "artifact_refs": []}, settled
+        operation = settled["operation_refs"][0]["resource_id"]
+        with closing(sqlite3.connect(database, uri=True)) as db:
+            bodies = db.execute("""
+                SELECT kind FROM versions
+                WHERE (kind='Artifact' AND spec->>'task_id'=?)
+                   OR (kind='LateReceipt' AND body->'operation_ref'->>'resource_id'=?
+                       AND json_type(body,'$.evidence.receipt') IS NOT NULL)
+            """, [task, operation]).fetchall()
+            assert not bodies, bodies
         assert node.call("Artifact.Read", {"reference": earlier}) == previous_sample
 
         node.stop()
@@ -169,6 +179,9 @@ def check_case(bin_dir, tracer, case):
         assert (event["event_id"], event["resource_ref"]) == (trigger["source_event"]["event_id"], updated)
         child = node.wait(trigger["task_receipt"]["task_id"])
         assert child["lifecycle"] == "Succeeded", child
+        node.stop()
+        verified = json.loads(subprocess.check_output(node.daemon + ["verify"], timeout=20))
+        assert not verified["migration_required"], verified
         print(f"PASS real service observation {case} fence, restart, and independently authorized publication")
     finally:
         try:

@@ -385,6 +385,8 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 
 以准入修订调用 `Node.WorkAdmission.Blockers` 可读取同一事务内的五组样本。CLI 用 `psiosctl node-work-admission-blockers REVISION --limit 16`。每组默认最多 16 条，上限 64 条。若 `truncated` 为真，该组触及采样上限，可能还有未核对的条目。Task 优先展示未决效果和等待确认的操作。独占锁关联当前资源和持有者，正在使用卷的应用包含精确附件引用，读取锁关联卷及正在读取的 Task。恢复还未登记新卷时显示源备份的锁。
 
+应用换绑期间，独占锁组将应用、原卷和已激活的替换卷关联到同一个 Operation 和 Task。快照核对采样到的换绑 Task 和锁，并按原计划校验三个资源的修订和锁的完整性。证据不齐时返回 `RecoveryRequired`。[真实 OCI 换绑验收](../tests/oci_direct_clone_rebind.py)
+
 模型组显示仍有效的当前租约，以及授权已失效但仍在原时限内的租约。严格租约到期而尚未结算时显示 `ElapsedPending`，已记录的未知效果继续独立可查。跨启动或计时范围变化时，残留时限使用保存的 UTC 期限估计。快照包含精确引用和采集时间，供运维确认后逐项核验。[锁与恢复验收](../tests/test_maintenance_blockers.py) · [模型租约验收](../tests/test_maintenance_model_blockers.py)
 
 ### 按主体限制块式读取结果

@@ -213,6 +213,21 @@ class VolumeCreateCustody(unittest.TestCase):
         node.stop()
         self.assertFalse(self.verify(node.daemon)["migration_required"])
 
+        # Keep the valid manifest and chunks but remove the original Task's
+        # receipt link. Offline verification must authenticate the settlement.
+        with closing(sqlite3.connect(node.state / "state.db")) as db, db:
+            revision, body = db.execute("SELECT rev,body FROM current WHERE id=?", (task_id,)).fetchone()
+            db.execute("UPDATE versions SET body=json_set(body,'$.result.artifact_refs',json('[]')) WHERE id=? AND rev=?",
+                       (task_id, revision))
+        try:
+            checked = subprocess.run(node.daemon + ["verify"], capture_output=True, text=True, timeout=20)
+            self.assertNotEqual(checked.returncode, 0, checked)
+            self.assertIn("volume creation settlement does not retain its exact catalog receipt", checked.stderr)
+        finally:
+            with closing(sqlite3.connect(node.state / "state.db")) as db, db:
+                db.execute("UPDATE versions SET body=? WHERE id=? AND rev=?", (body, task_id, revision))
+        self.assertFalse(self.verify(node.daemon)["migration_required"])
+
     @unittest.skipUnless(os.getenv("PSIOS_TEST_VOLUME_CREATE_RENAME_FAULT") == "1" and shutil.which("strace"),
                          "requires an actual renameat2 fault and process kill")
     def test_pre_rename_crash_discards_only_the_verified_original_stage(self):

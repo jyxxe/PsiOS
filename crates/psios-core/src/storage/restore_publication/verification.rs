@@ -299,6 +299,14 @@ fn verify_creates_inner(conn: &Connection) -> Result<()> {
                 "RecoveryRequired",
                 "cataloged volume disagrees with its original empty creation",
             )?;
+            verify_create_receipt(
+                conn,
+                &task,
+                &operation,
+                &current_effect,
+                &checkpoint,
+                &initial,
+            )?;
         } else if operation.body["outcome_knowledge"] == "Known" {
             let references = current_effect.body["evidence_refs"].as_array();
             let mut nonpublication = false;
@@ -328,6 +336,125 @@ fn verify_creates_inner(conn: &Connection) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn verify_create_receipt(
+    conn: &Connection,
+    task: &Doc,
+    op: &Doc,
+    effect: &Doc,
+    checkpoint: &Doc,
+    volume: &Doc,
+) -> Result<()> {
+    let refs = effect.body["evidence_refs"].as_array().ok_or_else(|| {
+        err(
+            "RecoveryRequired",
+            "volume creation has no settlement receipt",
+        )
+    })?;
+    let reconciled = match (effect.body["phase"].as_str(), refs.as_slice()) {
+        (Some("EffectConfirmed"), [_]) => None,
+        (Some("EffectReconciled"), [_, evidence]) => Some(evidence),
+        _ => {
+            return Err(err(
+                "RecoveryRequired",
+                "volume creation settlement phase disagrees with evidence",
+            ));
+        }
+    };
+    let artifact = resolve(conn, &refs[0])?;
+    let run = needed(conn, field_of(&task.body, "current_run_id")?)?;
+    let expected_bytes = serde_json::to_vec(&volume.reference())?;
+    let volume_seq = revision_seq(conn, volume)?;
+    let receipt_seq = revision_seq(conn, &artifact)?;
+    require(
+        effect.body["outcome_knowledge"] == "Known"
+            && effect.body["operation_id"] == op.id
+            && effect.body["action"] == CREATE
+            && artifact.rev == 1
+            && crate::artifact::is_json(&artifact)
+            && crate::artifact::is_task_output(&artifact, task)
+            && artifact.spec["operation_id"] == op.id
+            && artifact.spec["digest"] == psios_api::sha256(&expected_bytes)
+            && artifact.spec["size_bytes"] == expected_bytes.len().to_string()
+            && task.body["result"]["availability"] == "Available"
+            && task.body["result"]["artifact_refs"] == json!([artifact.reference()])
+            && run.kind == "Run"
+            && run.owner == task.owner
+            && run.body["operation_refs"] == json!([op.reference()])
+            && run.body["output_refs"] == json!([artifact.reference()])
+            && revision_seq(conn, checkpoint)? < volume_seq
+            && volume_seq < receipt_seq
+            && receipt_seq < revision_seq(conn, effect)?,
+        "RecoveryRequired",
+        "volume creation settlement does not retain its exact catalog receipt",
+    )?;
+    if let Some(reference) = reconciled {
+        let evidence = resolve(conn, reference)?;
+        let original = resolve(conn, &evidence.body["operation_ref"])?;
+        let effect_ref = resolve(conn, &artifact.spec["effect_ref"])?;
+        let details = &evidence.body["evidence"];
+        let observed = resolve(conn, &details["observation_ref"])?;
+        let observer = needed(conn, field_of(&observed.spec, "task_id")?)?;
+        let observer_operation = resolve(conn, &observer.body["operation_refs"][0])?;
+        let observer_plan = resolve(conn, &observer_operation.body["plan_ref"])?;
+        let observed_body: Value =
+            serde_json::from_slice(&crate::artifact::checkpoint_bytes(conn, &observed, 4096)?)?;
+        let evidence_seq = revision_seq(conn, &evidence)?;
+        require(
+            evidence.kind == "RecoveryEvidence"
+                && evidence.rev == 1
+                && evidence.owner == op.owner
+                && details["conclusion"] == "RestorePublicationConfirmed"
+                && details["checkpoint_ref"] == checkpoint.reference()
+                && evidence.body["target_ref"] == checkpoint.body["create_source"]["pool_ref"]
+                && original.kind == "Operation"
+                && original.owner == op.owner
+                && original.id == op.id
+                && original.rev + 1 == op.rev
+                && original.body["outcome_knowledge"] == "Unknown"
+                && effect_ref.id == effect.id
+                && effect_ref.reference() == original.body["effect_refs"][0]
+                && artifact.spec["reconciliation_evidence_ref"] == evidence.reference()
+                && crate::artifact::is_json(&observed)
+                && crate::artifact::is_task_output(&observed, &observer)
+                && observer.kind == "Task"
+                && observer.spec["task_type"] == INSPECT
+                && observer.body["lifecycle"] == "Succeeded"
+                && observer.body["result"]["artifact_refs"] == json!([observed.reference()])
+                && observer_operation.kind == "Operation"
+                && observed.spec["operation_id"] == observer_operation.id
+                && observer_plan.body["allowed_effects"][0]["resource_ref"] == original.reference()
+                && observed_body["operation_ref"] == original.reference()
+                && observed_body["checkpoint_ref"] == checkpoint.reference()
+                && observed_body["publication"] == "Published"
+                && observed_body
+                    .get("restore_proof")
+                    .is_some_and(Value::is_null)
+                && volume_seq < evidence_seq
+                && revision_seq(conn, &original)? < revision_seq(conn, &observed)?
+                && revision_seq(conn, &observed)? < evidence_seq
+                && evidence_seq < receipt_seq,
+            "RecoveryRequired",
+            "volume creation has no exact Published reconciliation evidence",
+        )?;
+    } else {
+        require(
+            artifact.spec["effect_id"] == effect.id
+                && artifact.spec.get("reconciliation_evidence_ref").is_none(),
+            "RecoveryRequired",
+            "volume creation direct receipt has another effect",
+        )?;
+    }
+    Ok(())
+}
+
+fn revision_seq(conn: &Connection, doc: &Doc) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT seq FROM versions WHERE id=?1 AND rev=?2",
+        params![doc.id, doc.rev],
+        |row| row.get(0),
+    )?)
 }
 
 fn field_of<'a>(body: &'a Value, key: &str) -> Result<&'a str> {

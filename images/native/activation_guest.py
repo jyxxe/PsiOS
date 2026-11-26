@@ -218,6 +218,10 @@ def console_proof(console, credential, expected_node, manifest_sha256, *, secure
     deadline = time.monotonic() + CORE_SECONDS
     console.command("test \"$(/bin/busybox id -u)\" = 0 && test -d /sys/firmware/efi && "
                     "/bin/busybox stty -echo", deadline)
+    whoami = f"{AS_OWNER} 'exec /bin/psiosctl whoami'"
+    console.command(f"for i in $(/bin/busybox seq 1 120); do "
+                    f"{whoami} >/dev/null 2>&1 && exit 0; /bin/busybox sleep 0.2; done; exit 1", deadline)
+
     try:
         boot_id = console.command("/bin/busybox cat /proc/sys/kernel/random/boot_id", deadline).decode("ascii")
         identity = uuid.UUID(boot_id)
@@ -226,13 +230,12 @@ def console_proof(console, credential, expected_node, manifest_sha256, *, secure
         raise ValueError("candidate reported an invalid Linux boot ID") from None
 
     manifest = console.command("/bin/busybox sha256sum /psios-deployment.json", deadline)
-    require(manifest == f"{manifest_sha256}  /psios-deployment.json".encode("ascii"),
-            "candidate booted a different deployment")
+    matches = re.findall(rb"^([0-9a-f]{64})  /psios-deployment\.json$", manifest, re.MULTILINE)
+    require(len(matches) == 1, "candidate did not report one deployment digest")
+    require(matches[0].decode("ascii") == manifest_sha256,
+            f"candidate booted a different deployment ({matches[0].decode('ascii')})")
     if secure_boot_required:
         verify_secure_boot(console, deadline)
-    whoami = f"{AS_OWNER} 'exec /bin/psiosctl whoami'"
-    console.command(f"for i in $(/bin/busybox seq 1 120); do "
-                    f"{whoami} >/dev/null 2>&1 && exit 0; /bin/busybox sleep 0.2; done; exit 1", deadline)
     caller = core_object(console.command(whoami, deadline))
     node = core_object(console.command(f"{AS_OWNER} 'exec /bin/psiosctl node'", deadline))
     reference = node.get("reference")

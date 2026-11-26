@@ -185,7 +185,7 @@ python3 native/stage_update.py next-release \
 
 ### 核验受管候选盘的首次正式引导
 
-对普通 OVMF 部署，可用 `native/activate_update.py` 核验正式候选盘的首次启动。以普通 Linux amd64 操作者运行，为节点准备一个由该操作者所有的 `0700` 持久目录。来宾须已配置本机 root 控制台。命令从操作者持有的私有文件读取此次登录凭据。
+对 OVMF 部署，可用 `native/activate_update.py` 核验正式候选盘的首次启动。以普通 Linux amd64 操作者运行，为节点准备一个由该操作者所有的 `0700` 持久目录。来宾须已配置本机 root 控制台。命令从操作者持有的私有文件读取此次登录凭据。
 
 ```sh
 install -d -m 0700 "$ACTIVATION_STATE"
@@ -198,6 +198,8 @@ python3 native/activate_update.py inspect --state-dir "$ACTIVATION_STATE"
 ```
 
 计划固定分阶段回执、原盘、候选盘和固件，在状态目录准备私有引导材料。执行复核原盘身份与摘要，持久记录 `BootIssued`，再启动只连接候选盘副本的无网络来宾。通过控制台登录后，核对本次启动 ID、部署摘要及 Core 节点身份。来宾正常退出并刷盘后进入 `BootVerified`，回执列出受管磁盘和 EFI 变量。
+
+签名候选须使用包含挂载前强制检查的分阶段构建。计划核对候选和试启动的证书、EFI stub 摘要与固件强制执行记录。正式候选在可写挂载前要求 Secure Boot。控制器通过来宾核对正式启动的固件状态，并把此次证据收入 `BootVerified` 回执。[签名首次引导验收](../tests/native_signed_activation.py)
 
 有启动记录而缺少最终证明时，`inspect` 报告 `RecoveryRequired`，原计划停止派发。保持原盘停机，直至命令退出。该操作管理选定目录内的首次引导记录与副本，回退仍由操作者执行。[首次引导验收](../tests/native_activation.py)
 

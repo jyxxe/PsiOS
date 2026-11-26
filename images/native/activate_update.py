@@ -73,14 +73,12 @@ def stage_contract(bundle, stage_sha256):
         source, inputs = stage["source"], stage["inputs"]
         candidate, trial = stage["candidate"], stage["trial"]
         authority = trial["verified_authority"]
-        require("secure_boot" not in candidate and "secure_boot" not in trial,
-                "managed first boot currently supports the unsigned OVMF profile")
         receipt_path = bundle / "candidate-build.json"
         receipt_sha256 = checked_digest(candidate["build_receipt_sha256"])
         receipt = digest_json(receipt_path, receipt_sha256)
         parsed, layout, _ = read_receipt(receipt_path)
         upgrade = receipt["upgrade"]
-        require(receipt == parsed and "secure_boot" not in receipt
+        require(receipt == parsed
                 and receipt["initial_image_sha256"] == candidate["image_sha256"]
                 and receipt["deployment_manifest_sha256"] == candidate["deployment_manifest_sha256"]
                 and receipt["source_commit"] == candidate["source_commit"]
@@ -97,6 +95,18 @@ def stage_contract(bundle, stage_sha256):
                 and authority["migration_required"] is False
                 and authority["database_format"] == upgrade["verified_authority"]["migration_rehearsal"]["target_format"],
                 "candidate and isolated trial do not reference the same verified deployment")
+        signing = receipt.get("secure_boot")
+        if signing is None:
+            require("secure_boot" not in candidate and "secure_boot" not in trial
+                    and "secure_boot_enforcement_required" not in receipt
+                    and "secure_boot_enforcement_required" not in candidate,
+                    "unsigned candidate has inconsistent Secure Boot evidence")
+        else:
+            require(candidate.get("secure_boot") == signing
+                    and trial.get("secure_boot") == {"status": "Enforced", **signing}
+                    and receipt.get("secure_boot_enforcement_required") is True
+                    and candidate.get("secure_boot_enforcement_required") is True,
+                    "signed candidate requires pre-mount enforcement and matching isolated proof")
         require(isinstance(source["node_id"], str) and source["node_id"].startswith("node-"),
                 "staged update has an invalid source authority")
         return {
@@ -110,6 +120,7 @@ def stage_contract(bundle, stage_sha256):
             "node_id": source["node_id"],
             "database_format": authority["database_format"],
             "size_bytes": layout.image_mib * MIB,
+            "secure_boot": signing,
         }
     except (KeyError, TypeError, AttributeError) as error:
         raise ValueError("staged update lineage is incomplete") from error
@@ -145,6 +156,9 @@ def read_operation(directory):
                 "activation lacks verified boot evidence")
         for key in ("image_sha256", "efi_code_sha256", "efi_vars_sha256"):
             checked_digest(managed.get(key))
+        signing = entry["plan"].get("secure_boot")
+        require(proof.get("secure_boot") == ({"status": "Enforced", **signing} if signing else None),
+                "verified boot receipt has an inconsistent Secure Boot policy")
     return entry
 
 
@@ -203,7 +217,7 @@ def activate(directory, work, args):
     disk, code, variables = (work / name for name in (DISK, CODE, VARS))
     size = plan["size_bytes"]
     accepted = stage_contract(bundle, plan["stage_receipt_sha256"])
-    require(all(plan[key] == value for key, value in accepted.items()), "staged update differs from plan")
+    require(all(plan.get(key) == value for key, value in accepted.items()), "staged update differs from plan")
     require(file_sha256(bundle / "candidate.raw", size) == plan["candidate_sha256"]
             and file_sha256(disk, size) == plan["candidate_sha256"]
             and file_sha256(code, FIRMWARE_LIMIT) == plan["firmware_code_sha256"]
@@ -216,13 +230,18 @@ def activate(directory, work, args):
         entry.update(status="BootIssued", boot_issued_at=timestamp())
         save_operation(directory, entry)
 
+    signing = plan.get("secure_boot")
     proof = boot_candidate(work, disk=disk, firmware_code=code, firmware_vars=variables,
                            credential=secret, expected_node=plan["node_id"],
-                           manifest_sha256=plan["deployment_manifest_sha256"], before_launch=issue)
+                           manifest_sha256=plan["deployment_manifest_sha256"], before_launch=issue,
+                           secure_boot_required=signing is not None)
     require(entry["status"] == "BootIssued" and proof["node_id"] == plan["node_id"]
             and proof["deployment_manifest_sha256"] == plan["deployment_manifest_sha256"]
-            and str(uuid.UUID(proof["boot_id"])) == proof["boot_id"],
+            and str(uuid.UUID(proof["boot_id"])) == proof["boot_id"]
+            and proof.get("secure_boot") == ("Enforced" if signing else None),
             "managed launch did not prove the approved deployment")
+    if signing:
+        proof["secure_boot"] = {"status": "Enforced", **signing}
     source_identity(original, plan["source_sha256"], size, plan["source_identity"])
     readback = {
         "disk": DISK, "efi_code": CODE, "efi_vars": VARS,

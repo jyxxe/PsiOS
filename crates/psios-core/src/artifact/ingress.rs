@@ -7,12 +7,14 @@ use crate::{
     storage::oci_archive::Sealed,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use psios_api::{ApiError, canonical, id, sha256};
+use psios_api::{ApiError, ResourceRef, canonical, id, sha256};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::io::Read;
+
+pub(crate) mod authority;
 
 pub(crate) const FORMAT: u32 = crate::node::process::FORMAT + 1;
 pub(crate) const SCHEMA: &str = include_str!("ingress.sql");
@@ -36,6 +38,8 @@ struct Start {
     digest: String,
     declared_media_type: String,
     ttl_seconds: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delegation_ref: Option<ResourceRef>,
 }
 
 #[derive(Deserialize)]
@@ -97,11 +101,18 @@ fn response(db: &Db<'_>, stage: &Stage) -> Result<Value> {
         .transpose()?;
     let expired = stage.state == "Open"
         && policy::deadline::Clock::sample()?.expired(db, &stage.id, &stage.expires)?;
-    Ok(json!({
+    let mut view = json!({
         "stage_id":stage.id,"digest":stage.digest,"size_bytes":stage.size,
         "received_bytes":stage.received,"expires_at":stage.expires,
         "state":if expired {"Expired"} else {&stage.state},"artifact_ref":reference,
-    }))
+    });
+    if let Some(binding) = authority::lookup(db.c, &stage.id)? {
+        view["delegation_ref"] = json!(binding.delegation_ref);
+        if let Some(reason) = binding.close_reason {
+            view["close_reason"] = json!(reason);
+        }
+    }
+    Ok(view)
 }
 
 fn require_open(db: &Db<'_>, stage: &Stage) -> Result<()> {
@@ -122,6 +133,13 @@ pub(crate) fn authorize(db: &Db<'_>, actor: &str, action: &str) -> Result<()> {
     policy::can_target(db, actor, action, &db.meta("authority")?)
 }
 
+fn authorize_stage(db: &Db<'_>, actor: &str, stage_id: &str) -> Result<()> {
+    if let Some(binding) = authority::lookup(db.c, stage_id)? {
+        authority::authorize(db, actor, &binding.delegation_ref)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn profile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     let _: Empty = decode(params)?;
     authorize(db, actor, UPLOAD)?;
@@ -130,6 +148,7 @@ pub(crate) fn profile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value>
         "max_bytes":MAX_BYTES,"chunk_bytes":CHUNK_BYTES,"owner_bytes":OWNER_BYTES,
         "total_bytes":TOTAL_BYTES,"owner_open_stages":OWNER_STAGES,"total_open_stages":TOTAL_STAGES,
         "min_ttl_seconds":5,"max_ttl_seconds":3600,
+        "exact_delegation":true,
     }))
 }
 
@@ -220,11 +239,21 @@ fn begin_stage(db: &Db<'_>, actor: &str, p: Start, maximum: u32) -> Result<Stage
             "IdempotencyConflict",
             "upload key is already bound to a different request",
         )?;
+        if prior.state == "Open" {
+            authorize_stage(db, actor, &prior.id)?;
+        }
         return Ok(prior);
+    }
+    if let Some(reference) = &p.delegation_ref {
+        authority::authorize(db, actor, reference)?;
     }
     db.cfg.check_admission_space()?;
     check_capacity(db, actor, p.size_bytes)?;
-    let id = id("artifact-stage");
+    let id = id(if p.delegation_ref.is_some() {
+        authority::STAGE_PREFIX
+    } else {
+        "artifact-stage"
+    });
     let expires = after(i64::from(p.ttl_seconds));
     policy::deadline::Clock::sample()?.register_until(db, &id, &expires, None)?;
     db.c.execute(
@@ -232,6 +261,9 @@ fn begin_stage(db: &Db<'_>, actor: &str, p: Start, maximum: u32) -> Result<Stage
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
         params![id,actor,p.key,request_digest,p.digest,p.declared_media_type,p.size_bytes,expires],
     )?;
+    if let Some(reference) = &p.delegation_ref {
+        authority::attach(db, &id, reference, p.ttl_seconds)?;
+    }
     db.audit(actor, "Artifact.Stage", Some(&id), "Accepted")?;
     owned(db, actor, &id)
 }
@@ -247,6 +279,7 @@ pub(crate) fn put(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     let p: Put = decode(params)?;
     let mut stage = owned(db, actor, &p.stage_id)?;
     require_open(db, &stage)?;
+    authorize_stage(db, actor, &stage.id)?;
     let offset = p.offset as usize;
     require(
         p.offset < stage.size && offset.is_multiple_of(CHUNK_BYTES),
@@ -289,6 +322,7 @@ pub(crate) fn put(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     db.cfg.check_admission_space()?;
     authorize(db, actor, UPLOAD)?;
     require_open(db, &stage)?;
+    authorize_stage(db, actor, &stage.id)?;
     append_chunk(db, &mut stage, &raw)?;
     response(db, &stage)
 }
@@ -413,6 +447,7 @@ fn generated(
             digest: digest.to_owned(),
             declared_media_type: media.to_owned(),
             ttl_seconds: 120,
+            delegation_ref: None,
         },
         maximum,
     )
@@ -470,6 +505,7 @@ fn publish_stage(db: &Db<'_>, actor: &str, stage_id: &str, source: Option<Value>
         return response(db, &stage);
     }
     require_open(db, &stage)?;
+    authorize_stage(db, actor, &stage.id)?;
     require(
         stage.received == stage.size,
         "PreconditionFailed",
@@ -489,6 +525,7 @@ fn publish_stage(db: &Db<'_>, actor: &str, stage_id: &str, source: Option<Value>
     )?;
     authorize(db, actor, UPLOAD)?;
     require_open(db, &stage)?;
+    authorize_stage(db, actor, &stage.id)?;
     let source = source.unwrap_or_else(|| json!({"kind":"LocalSubmission"}));
     let artifact = create_artifact(
         db,

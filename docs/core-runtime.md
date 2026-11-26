@@ -368,6 +368,8 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 
 `psiosctl artifact-upload ./bundle.bin --key build-1` 和 Rust SDK 的 `Client::upload_artifact` 从已提交偏移继续，`psiosctl artifact` 使用返回的引用导出并校验原始字节。安装适配器可以按固定引用读取已发布制品。[中断、权限、配额和损坏验收](../tests/test_artifact_ingress.py) · [格式 53 升级](../tests/artifact_ingress_upgrade.py)
 
+`Artifact.UploadProfile` 提供 `exact_delegation` 时，`Artifact.Stage` 可携带完整的 `delegation_ref`。CLI 对应 `psiosctl artifact-upload ./bundle.bin --key build-1 --delegation-ref delegation.json`。受绑定的暂存每次接收分块或发布前都会复核原委托版本、主体和本机 Node 范围。原委托失效后拒绝继续写入或发布，后台原子释放未发布分块并保留 `AuthorityRevoked` 终态回执和原提交键。已发布制品继续遵循独立的读取、留存及回收权限。未绑定的暂存仍支持持有当前 Node 上传授权的原主体续传。
+
 ### 发布模型会话的最终输出
 
 `artifact.publish_session_summary` Task 接受成功会话的确切 `session_ref` 及声明的 `media_type`。允许的会话必须有经认证模型确认的最终摘要，原始 UTF-8 最多 64 KiB。调用者需要具备对会话的读取权、Node 范围的 `artifact.upload`，以及同时覆盖 Node 与会话的发布工具授权。

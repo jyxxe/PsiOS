@@ -1,7 +1,7 @@
 use crate::{ApiError, ApiResult, Client, MAX_ARTIFACT_CHUNK, ResourceRef};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::io::{Error, ErrorKind, Read, Seek, SeekFrom};
 
@@ -45,6 +45,35 @@ impl Client {
         ttl_seconds: u32,
         input: &mut (impl Read + Seek),
     ) -> ApiResult<ArtifactUploadReceipt> {
+        self.upload_artifact_inner(key, declared_media_type, ttl_seconds, None, input)
+    }
+
+    /// Stage and publish bytes under this exact upload delegation.
+    pub fn upload_artifact_with_delegation(
+        &self,
+        key: &str,
+        declared_media_type: &str,
+        ttl_seconds: u32,
+        delegation: &ResourceRef,
+        input: &mut (impl Read + Seek),
+    ) -> ApiResult<ArtifactUploadReceipt> {
+        self.upload_artifact_inner(
+            key,
+            declared_media_type,
+            ttl_seconds,
+            Some(delegation),
+            input,
+        )
+    }
+
+    fn upload_artifact_inner(
+        &self,
+        key: &str,
+        declared_media_type: &str,
+        ttl_seconds: u32,
+        delegation: Option<&ResourceRef>,
+        input: &mut (impl Read + Seek),
+    ) -> ApiResult<ArtifactUploadReceipt> {
         let invalid = || {
             ApiError::new(
                 "RecoveryRequired",
@@ -52,6 +81,19 @@ impl Client {
             )
         };
         let profile = self.call("Artifact.UploadProfile", json!({}))?;
+        if delegation.is_some() && profile["exact_delegation"] != true {
+            return Err(ApiError::new(
+                "UnsupportedCapability",
+                "authority does not support exact upload delegation",
+            )
+            .into());
+        }
+        let delegated_ref = delegation.map(|value| json!(value));
+        let scope_matches = |value: &Value| {
+            delegated_ref
+                .as_ref()
+                .is_none_or(|reference| value["delegation_ref"] == *reference)
+        };
         let chunk = profile["chunk_bytes"]
             .as_u64()
             .filter(|chunk| (1..=MAX_ARTIFACT_CHUNK as u64).contains(chunk))
@@ -79,15 +121,16 @@ impl Client {
             return Err(ApiError::new("PreconditionFailed", "artifact source size changed").into());
         }
         let digest = format!("sha256:{:x}", digest.finalize());
-        let stage = self.call(
-            "Artifact.Stage",
-            json!({
-                "key":key,"declared_media_type":declared_media_type,"ttl_seconds":ttl_seconds,
-                "size_bytes":size,"digest":digest,
-            }),
-        )?;
+        let mut request = json!({
+            "key":key,"declared_media_type":declared_media_type,"ttl_seconds":ttl_seconds,
+            "size_bytes":size,"digest":digest,
+        });
+        if let Some(reference) = &delegated_ref {
+            request["delegation_ref"] = reference.clone();
+        }
+        let stage = self.call("Artifact.Stage", request)?;
         let stage_id = stage["stage_id"].as_str().ok_or_else(invalid)?.to_owned();
-        if stage["digest"] != digest || stage["size_bytes"] != size {
+        if stage["digest"] != digest || stage["size_bytes"] != size || !scope_matches(&stage) {
             return Err(invalid().into());
         }
         let terminal = match stage["state"].as_str() {
@@ -112,6 +155,7 @@ impl Client {
                     }))?;
                     if ack["stage_id"] != stage_id
                         || ack["state"] != "Open"
+                        || !scope_matches(&ack)
                         || !ack["received_bytes"].as_u64().is_some_and(|received| {
                             (offset + length as u64..=size).contains(&received)
                         })
@@ -129,6 +173,13 @@ impl Client {
                 return Err(withdrawn.into());
             }
             Some("Discarded") => {
+                if stage["close_reason"] == "AuthorityRevoked" {
+                    return Err(ApiError::new(
+                        "PermissionDenied",
+                        "upload delegation is no longer active",
+                    )
+                    .into());
+                }
                 return Err(ApiError::new("PreconditionFailed", "upload key was discarded").into());
             }
             _ => return Err(invalid().into()),
@@ -139,6 +190,7 @@ impl Client {
             || terminal["stage_id"] != stage_id
             || terminal["size_bytes"] != size
             || terminal["digest"] != digest
+            || !scope_matches(&terminal)
             || reference.digest != digest
         {
             return Err(invalid().into());

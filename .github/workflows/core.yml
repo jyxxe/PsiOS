@@ -623,6 +623,8 @@ jobs:
           tools/build-compatibility-core "$RUNNER_TEMP/psios-preparation-before-sweep" "$RUNNER_TEMP/psios-compatibility-target"
           PSIOS_PREPARATION_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
             python3 -B -m unittest discover -s tests -p test_task_preparation_revocation.py -k test_startup -v
+          PSIOS_ARTIFACT_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
+            python3 -B -m unittest discover -s tests -p test_bound_artifact_upload.py -k test_legacy_partial -v
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

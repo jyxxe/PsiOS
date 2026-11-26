@@ -174,6 +174,9 @@ pub(super) fn check_artifacts(
     if identity.database_format >= crate::broker::preparation::FORMAT {
         crate::broker::preparation::verify(conn)?;
     }
+    if identity.database_format >= crate::artifact::ingress::authority::FORMAT {
+        crate::artifact::ingress::authority::verify(conn)?;
+    }
     if identity.database_format >= crate::project::FORMAT {
         crate::project::verify(conn, identity.database_format)?;
         crate::project::evidence::verify(conn)?;

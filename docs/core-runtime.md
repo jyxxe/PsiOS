@@ -142,7 +142,7 @@ psiosctl network-trial-confirmation "$OPERATION_ID" --revision "$OPERATION_REVIS
   | psiosctl network-trial-confirm "$OPERATION_ID" --revision "$OPERATION_REVISION"
 ```
 
-挑战绑定原操作、配置代次和期限。超时后，Core 拒绝提交，NetworkManager 按其同一进程的定时检查点尝试回退。网络管理器、检查点、设备或实际地址发生变化时，需要通过原 Operation 的授权观察读取实际结果。无法独立确认的结果继续占用网口。当前范围限于本机 Unix API 和专用备用链路。远程新连接认证、管理网口与 DNS 变更仍需产品验收。[隔离链路验收](../tests/network_manager_trial.py) · [v1 网络契约](v1/docs/03-host-updates-network-devices.md)
+挑战绑定原操作、配置代次和期限。超时后，Core 拒绝提交，NetworkManager 按其同一进程的定时检查点尝试回退。网络管理器、检查点、设备或实际地址发生变化时，需要通过原 Operation 的授权观察读取实际结果。无法独立确认的结果继续占用网口。当前范围限于本机 Unix API 和专用备用链路。远程新连接认证、管理网口与 DNS 变更仍需产品验收。[Core 端到端验收](../tests/network_trial.py) · [隔离链路验收](../tests/network_manager_trial.py) · [v1 网络契约](v1/docs/03-host-updates-network-devices.md)
 
 ### 受管 systemd 服务
 

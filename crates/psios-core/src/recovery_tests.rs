@@ -465,7 +465,9 @@ fn approved_network_trial_parks_and_fences_cancel_revocation_and_lost_commit() {
         let snapshot = json!({
             "identity":{"boot_id":clock.boot.boot_id,"network_namespace_device":1,
                 "network_namespace_inode":2,"time_namespace_device":1,"time_namespace_inode":3,
-                "bus_id":"cafe","manager_owner":":1.2","manager_pid":12},
+                "bus_id":"11111111111111111111111111111111",
+                "transport_guid":"22222222222222222222222222222222",
+                "manager_owner":":1.2","manager_pid":12},
             "link":{"interface":"private-spare","ifindex":2,"mac":mac},
             "device_path":"/org/freedesktop/NetworkManager/Devices/2",
             "profiles":[

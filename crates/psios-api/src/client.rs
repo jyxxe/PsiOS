@@ -41,7 +41,7 @@ pub struct Client {
 pub fn task_wait_ready(task: &Value) -> bool {
     matches!(
         task["lifecycle"].as_str(),
-        Some("Succeeded" | "Failed" | "Cancelled" | "Paused" | "WaitingApproval")
+        Some("Succeeded" | "Failed" | "Cancelled" | "Paused" | "WaitingApproval" | "WaitingInput")
     )
 }
 
@@ -204,6 +204,32 @@ impl Client {
     /// Report the submitting principal's open Task count and admission limit.
     pub fn task_admission(&self) -> ApiResult<Value> {
         self.call("Task.Admission", json!({}))
+    }
+
+    /// Read the enrolled revision of a locally managed network link.
+    pub fn network_link(&self, id: &str) -> ApiResult<Value> {
+        self.call("NetworkLink.Get", json!({"id": id}))
+    }
+
+    /// Request the local confirmation challenge for an exact trial revision.
+    pub fn network_trial_confirmation(&self, id: &str, revision: &str) -> ApiResult<Value> {
+        self.call(
+            "NetworkTrial.Confirmation",
+            json!({"id":id,"expected_resource_version":revision}),
+        )
+    }
+
+    /// Confirm the exact observed trial using its one-use local challenge.
+    pub fn confirm_network_trial(
+        &self,
+        id: &str,
+        revision: &str,
+        confirmation_token: &str,
+    ) -> ApiResult<Value> {
+        self.call(
+            "NetworkTrial.Confirm",
+            json!({"id":id,"expected_resource_version":revision,"confirmation_token":confirmation_token}),
+        )
     }
 
     /// Hand execution to a model previously allowed by the originating Session.

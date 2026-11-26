@@ -345,7 +345,7 @@ pub fn dispatch(db: &Db<'_>, task: &str) -> Result<Option<Work>> {
             "operation_id": op.id,
             "resource_ref": target,
             "action": tool,
-            "phase": if node::service_control::is_tool(tool) || apps::stop::is_tool(tool) || tool == apps::restart::TOOL { "PermitBound" } else { "EffectStarted" },
+            "phase": if node::service_control::is_tool(tool) || apps::stop::is_tool(tool) || tool == apps::restart::TOOL || tool == node::network::trial::TOOL { "PermitBound" } else { "EffectStarted" },
             "outcome_knowledge": "InFlight",
             "evidence_refs": []
         }),
@@ -451,6 +451,9 @@ pub fn finish(db: &Db<'_>, w: &Work, result: Result<Value>) -> Result<()> {
 }
 
 pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -> Result<()> {
+    if matches!(w.action, Action::NetworkTrial(_)) {
+        return network_trial::finish_apply(db, w, result);
+    }
     let t = db.get(&w.task.id)?;
     if t.body["current_run_id"] != w.run.id
         || t.body["outcome_knowledge"] != "InFlight"
@@ -467,6 +470,7 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                         | Action::Logs(_)
                         | Action::Stop(_)
                         | Action::ObserveNetworkProbe(_)
+                        | Action::InspectNetworkTrial(_)
                 ) =>
             {
                 json!({"code":"Fenced"})

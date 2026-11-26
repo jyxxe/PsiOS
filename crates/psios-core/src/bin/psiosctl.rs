@@ -91,6 +91,24 @@ enum Cmd {
         #[arg(long)]
         owner: Option<String>,
     },
+    /// Read a host-enrolled spare network link.
+    NetworkLink {
+        id: String,
+    },
+    /// Request a local confirmation challenge for an exact trial.
+    NetworkTrialConfirmation {
+        operation: String,
+        #[arg(long)]
+        revision: String,
+    },
+    /// Confirm a trial with the challenge JSON from a file or stdin.
+    NetworkTrialConfirm {
+        operation: String,
+        #[arg(long)]
+        revision: String,
+        #[arg(default_value = "-")]
+        file: String,
+    },
     /// Read unacknowledged signals from a mailbox, optionally waiting for delivery.
     Inbox {
         id: String,
@@ -510,6 +528,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             expected_revision,
             owner,
         } => c.delete_event_offset(&consumer, &expected_revision, owner.as_deref())?,
+        Cmd::NetworkLink { id } => c.network_link(&id)?,
+        Cmd::NetworkTrialConfirmation {
+            operation,
+            revision,
+        } => c.network_trial_confirmation(&operation, &revision)?,
+        Cmd::NetworkTrialConfirm {
+            operation,
+            revision,
+            file,
+        } => {
+            let challenge = input(&file)?;
+            let token = challenge["confirmation_token"]
+                .as_str()
+                .ok_or("missing network confirmation token")?;
+            c.confirm_network_trial(&operation, &revision, token)?
+        }
         Cmd::Inbox { id, limit, wait_ms } => match wait_ms {
             Some(timeout_ms) => c.call(
                 "Mailbox.Wait",

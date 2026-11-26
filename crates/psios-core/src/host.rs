@@ -93,6 +93,10 @@ pub enum Action {
     NetworkProbe(Target),
     #[serde(rename = "node.observe_network_probe")]
     ObserveNetworkProbe(Target),
+    #[serde(rename = "network.trial")]
+    NetworkTrial(Target),
+    #[serde(rename = "network.inspect_trial")]
+    InspectNetworkTrial(Target),
     #[serde(rename = "node.devices")]
     Devices {},
     #[serde(rename = "node.block_layout")]
@@ -339,6 +343,15 @@ impl Action {
             Self::NetworkProbe(target) | Self::ObserveNetworkProbe(target) => {
                 return node::network::probe::target(db, target);
             }
+            Self::NetworkTrial(target) => return node::network::trial::target(db, actor, target),
+            Self::InspectNetworkTrial(target) => {
+                policy::admin(actor)?;
+                (
+                    &target.id,
+                    Some(&target.expected_resource_version),
+                    "Operation",
+                )
+            }
             Self::PublishSessionSummary(_) => return db.of(&db.meta("authority")?, "Node"),
             Self::CaptureOciImage(request) => {
                 apps::capture::authorize(db, actor)?;
@@ -519,6 +532,7 @@ pub struct Work {
     pub(crate) restore_image: Option<apps::restore_image::Prepared>,
     pub(crate) restore_image_inspection: Option<apps::restore_image::Recorded>,
     pub(crate) stop_cleanup: Option<apps::stop::Prepared>,
+    network_trial_inspection: Option<node::network::trial::Inspection>,
 }
 pub(crate) enum Output {
     Receipt(Value),
@@ -545,6 +559,7 @@ pub(crate) enum Checkpoint<'a> {
     OciStopCleanup(&'a Value),
     OciImageRestore(&'a apps::restore_image::Dispatch),
     FileRename(&'a storage::file_move::Witness),
+    NetworkTrial(node::network::trial::Boundary<'a>),
     ServiceControl(&'a Value),
 }
 
@@ -606,6 +621,7 @@ impl Work {
                 | Action::InspectRestoredVolume(_)
                 | Action::InspectProcess(_)
                 | Action::ObserveNetworkProbe(_)
+                | Action::InspectNetworkTrial(_)
                 | Action::ListAppReleases(_)
                 | Action::InstallArtifact(_)
                 | Action::StageArtifactRelease(_)
@@ -620,6 +636,14 @@ impl Work {
     }
 
     pub(crate) fn checkpoint(&self, db: &Db<'_>, event: Checkpoint<'_>) -> Result<()> {
+        if let Checkpoint::NetworkTrial(boundary) = event {
+            require(
+                matches!(self.action, Action::NetworkTrial(_)),
+                "Fenced",
+                "checkpoint does not match effect",
+            )?;
+            return node::network::trial::record(db, self, boundary);
+        }
         let target = self.checkpoint_authority(db)?;
         match (&self.action, event) {
             (Action::Start(_), Checkpoint::OciStart { engine, container }) => {
@@ -761,6 +785,19 @@ impl Work {
             Action::ObserveNetworkProbe(_) => {
                 node::network::probe::perform_checked(self, &mut check_streaming)
             }
+            Action::NetworkTrial(_) => node::network::trial::perform(&self.target, |boundary| {
+                checkpoint(Checkpoint::NetworkTrial(boundary))
+            }),
+            Action::InspectNetworkTrial(_) => self
+                .network_trial_inspection
+                .as_ref()
+                .ok_or_else(|| {
+                    err(
+                        "RecoveryRequired",
+                        "network trial inspection has no custody",
+                    )
+                })?
+                .artifact(),
             Action::Stop(_) => apps::stop::run(self, checkpoint),
             Action::ContinueOciStop(_) => apps::stop::cleanup(self, checkpoint),
             Action::RestoreReleaseImage(_) => apps::restore_image::run(self, |dispatch| {
@@ -787,7 +824,7 @@ impl Work {
         }
     }
 }
-fn permit(
+pub(crate) fn permit(
     db: &Db<'_>,
     task: &Doc,
     run: &Doc,
@@ -955,6 +992,11 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     } else {
         None
     };
+    let network_trial_inspection = if matches!(a, Action::InspectNetworkTrial(_)) {
+        Some(node::network::trial::inspect(db, &target)?)
+    } else {
+        None
+    };
     let w = Work {
         start_checkpoint,
         publication_checkpoint,
@@ -973,11 +1015,15 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
         restore_image,
         restore_image_inspection,
         stop_cleanup,
+        network_trial_inspection,
     };
     node::reserve(db, &w)?;
     storage::reserve(db, &w)?;
     if matches!(w.action, Action::Backup(_)) {
         storage::publication::begin(db, &w)?;
+    }
+    if matches!(w.action, Action::NetworkTrial(_)) {
+        node::network::trial::begin(db, &w)?;
     }
     if matches!(w.action, Action::Restore(_)) {
         storage::restore_publication::begin(db, &w)?;

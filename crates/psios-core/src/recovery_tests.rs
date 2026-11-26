@@ -411,6 +411,261 @@ fn approve(s: &mut Store, task: &str) {
 const HOST_WRITE_BARRIER: &str = "PSIOS_TEST_CRASH_STATE";
 
 #[test]
+fn approved_network_trial_parks_and_fences_cancel_revocation_and_lost_commit() {
+    use crate::node::network::{managed, trial};
+    use crate::policy::deadline::Clock;
+    use host::{Checkpoint::NetworkTrial, Target};
+    use trial::Boundary;
+
+    for interruption in ["cancel", "revoke", "lost-confirm", "restart"] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut cfg = Config::local(&directory.path().join("core"));
+        let initial = "1aad7685-9a7d-49ad-8132-0c9c56cfb34e";
+        let candidate = "597da7b3-c8ba-4134-bfa7-57377f1ab670";
+        let mac = "02:50:53:00:00:01";
+        let link = "network-link-025053000001";
+        cfg.network_link = Some(config::NetworkLinkConfig {
+            interface: "private-spare".into(),
+            mac: mac.into(),
+            original_uuid: initial.into(),
+            candidate_uuid: candidate.into(),
+            confirmation_seconds: 40,
+        });
+        Store::init(&cfg).unwrap();
+        let mut store = Store::open(cfg.clone()).unwrap();
+        let grant = call(
+            &mut store,
+            "Grant.Issue",
+            json!({
+                "principal_id":policy::OWNER, "actions":["task.submit","task.read",trial::TOOL],
+                "tool_targets":[link], "ttl_seconds":120, "units":4,
+            }),
+        )
+        .unwrap();
+        let link_ref =
+            call(&mut store, "Resource.Get", json!({"id":link})).unwrap()["reference"].clone();
+        let request = call(&mut store, "Task.Prepare", json!({
+            "tool":trial::TOOL,"input":{"id":link,"expected_resource_version":link_ref["version"]},
+            "delegation_id":grant["delegation_ref"]["resource_id"],"key":id("network-trial"),
+        })).unwrap();
+        let accepted = call(&mut store, "Task.Submit", request).unwrap();
+        let task_id = accepted["task_id"].as_str().unwrap();
+        assert_eq!(
+            call(&mut store, "Task.Get", json!({"id":task_id})).unwrap()["lifecycle"],
+            "WaitingApproval"
+        );
+        approve(&mut store, task_id);
+        assert_eq!(claim(&mut store), task_id);
+        let work = dispatch(&mut store, task_id);
+        assert_eq!(work.effect.body["phase"], "PermitBound");
+
+        // Feed typed adapter receipts through the real witnessed broker transactions.
+        // The isolated NetworkManager integration test exercises the backend itself.
+        let clock = Clock::sample().unwrap();
+        let snapshot = json!({
+            "identity":{"boot_id":clock.boot.boot_id,"network_namespace_device":1,
+                "network_namespace_inode":2,"time_namespace_device":1,"time_namespace_inode":3,
+                "bus_id":"11111111111111111111111111111111",
+                "transport_guid":"22222222222222222222222222222222",
+                "manager_owner":":1.2","manager_pid":12},
+            "link":{"interface":"private-spare","ifindex":2,"mac":mac},
+            "device_path":"/org/freedesktop/NetworkManager/Devices/2",
+            "profiles":[
+                {"uuid":initial,"path":"/org/freedesktop/NetworkManager/Settings/1",
+                 "ipv4":{"address":"192.0.2.2","prefix":24},"settings_digest":"original"},
+                {"uuid":candidate,"path":"/org/freedesktop/NetworkManager/Settings/2",
+                 "ipv4":{"address":"192.0.2.3","prefix":24},"settings_digest":"candidate"}
+            ],
+            "baseline":{"path":"/org/freedesktop/NetworkManager/ActiveConnection/1","profile_uuid":initial}
+        });
+        let typed_scope: managed::Snapshot = decode(&snapshot).unwrap();
+        let start = clock.boot.millis;
+        let checkpoint_path = "/org/freedesktop/NetworkManager/Checkpoint/1";
+        let checkpoint: managed::Checkpoint = decode(&json!({
+            "path":checkpoint_path, "snapshot_digest":psios_api::sha256(&psios_api::canonical(&snapshot)),
+            "created_boottime_ms":start,"rollback_timeout_seconds":40,"deadline_boottime_ms":start+40000,
+        })).unwrap();
+        let active = json!({"path":"/org/freedesktop/NetworkManager/ActiveConnection/2","profile_uuid":candidate});
+        let activation: managed::Activation =
+            decode(&json!({"checkpoint_path":checkpoint_path,"active":active})).unwrap();
+        for boundary in [
+            Boundary::BeforeCreate(&typed_scope, start),
+            Boundary::Created(&checkpoint),
+            Boundary::BeforeActivate,
+            Boundary::Activated(&activation),
+        ] {
+            store
+                .transaction("network-trial-boundary", |db| {
+                    work.checkpoint(db, NetworkTrial(boundary))
+                })
+                .unwrap();
+        }
+        let observed = json!({"checkpoint_present":true,"active":active});
+        store
+            .transaction("network-trial-park", |db| {
+                broker::finish(db, &work, Ok(observed.clone()))
+            })
+            .unwrap();
+        let waiting = call(&mut store, "Task.Get", json!({"id":task_id})).unwrap();
+        assert_eq!(waiting["lifecycle"], "WaitingInput");
+        assert_eq!(waiting["outcome_knowledge"], "InFlight");
+        assert_eq!(waiting["conditions"][0]["type"], "AwaitingConfirmation");
+        let operation: Target = decode(&json!({
+            "id":waiting["operation_refs"][0]["resource_id"],
+            "expected_resource_version":waiting["operation_refs"][0]["version"],
+        }))
+        .unwrap();
+        let query = serde_json::to_value(&operation).unwrap();
+        let challenge = store
+            .transaction("network-trial-get-confirmation", |db| {
+                broker::network_trial_confirmation(db, policy::OWNER, &query)
+            })
+            .unwrap();
+        let mut confirmation = query;
+        confirmation["confirmation_token"] = challenge["confirmation_token"].clone();
+        let first = store
+            .transaction("network-trial-confirm-first", |db| {
+                broker::prepare_network_trial_confirm(db, policy::OWNER, &confirmation)
+            })
+            .unwrap();
+        let second = store
+            .transaction("network-trial-confirm-second", |db| {
+                broker::prepare_network_trial_confirm(db, policy::OWNER, &confirmation)
+            })
+            .unwrap();
+        let ordinary = submit(&mut store, "system.status", json!({}));
+        execute(&mut store, &ordinary);
+        store
+            .transaction("network-late-receipt", |db| {
+                broker::finish(db, &work, Ok(observed))
+            })
+            .unwrap();
+        store
+            .transaction("network-custody-check", |db| trial::verify_active(db.c))
+            .unwrap();
+        match interruption {
+            "cancel" => {
+                call(
+                    &mut store,
+                    "Task.Cancel",
+                    json!({
+                        "id":task_id,"expected_resource_version":waiting["task_revision"],
+                    }),
+                )
+                .unwrap();
+            }
+            "revoke" => {
+                let revoked = call(
+                    &mut store,
+                    "Grant.Revoke",
+                    json!({
+                        "id":grant["grant_ref"]["resource_id"],
+                        "expected_resource_version":grant["grant_ref"]["version"],
+                    }),
+                )
+                .unwrap();
+                assert_eq!(revoked["status"], "Partial");
+                assert!(
+                    store
+                        .transaction("network-trial-denied-after-revoke", |db| {
+                            broker::authorize_network_trial_confirm(
+                                db,
+                                policy::OWNER,
+                                &confirmation,
+                                &first,
+                            )
+                        })
+                        .is_err()
+                );
+                store
+                    .transaction(
+                        "network-trial-expire-revoked",
+                        broker::expire_network_trials,
+                    )
+                    .unwrap();
+            }
+            "lost-confirm" => {
+                store
+                    .transaction("network-trial-issue-first", |db| {
+                        broker::authorize_network_trial_confirm(
+                            db,
+                            policy::OWNER,
+                            &confirmation,
+                            &first,
+                        )
+                    })
+                    .unwrap();
+                assert!(
+                    store
+                        .transaction("network-trial-deny-concurrent", |db| {
+                            broker::authorize_network_trial_confirm(
+                                db,
+                                policy::OWNER,
+                                &confirmation,
+                                &second,
+                            )
+                        })
+                        .is_err()
+                );
+                store
+                    .transaction("network-trial-lost-confirm", |db| {
+                        broker::finish_network_trial_confirm(
+                            db,
+                            policy::OWNER,
+                            &first,
+                            Err(err(
+                                "OutcomeUnknown",
+                                "fixture lost checkpoint destruction receipt",
+                            )),
+                        )
+                    })
+                    .unwrap();
+            }
+            "restart" => {
+                drop(store);
+                store = Store::open(cfg).unwrap();
+                store
+                    .transaction("network-trial-restart", broker::recover)
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let pending = call(&mut store, "Task.Get", json!({"id":task_id})).unwrap();
+        assert_eq!(pending["outcome_knowledge"], "Unknown", "{interruption}");
+        assert_eq!(
+            pending["lifecycle"],
+            if interruption == "cancel" {
+                "Cancelled"
+            } else {
+                "Paused"
+            }
+        );
+        assert_eq!(pending["result"]["availability"], "Unavailable");
+        store
+            .transaction("network-trial-retains-held-link", |db| {
+                trial::verify_active(db.c)?;
+                let holder: String =
+                    db.c.query_row("SELECT holder FROM holds WHERE volume=?1", [link], |r| {
+                        r.get(0)
+                    })?;
+                assert_eq!(holder, operation.id);
+                assert!(
+                    broker::prepare_network_trial_confirm(db, policy::OWNER, &confirmation)
+                        .is_err()
+                );
+                let late: trial::ConfirmationReceipt =
+                    decode(&json!({"checkpoint_present":false,"active":active}))?;
+                assert!(
+                    broker::finish_network_trial_confirm(db, policy::OWNER, &second, Ok(late))
+                        .is_err()
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+}
+
+#[test]
 fn systemd_task_releases_its_hold_after_restart_before_the_command_checkpoint() {
     let directory = tempfile::tempdir().unwrap();
     let (mut config, store) = initialized(directory.path());

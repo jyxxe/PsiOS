@@ -20,7 +20,7 @@
 - `Event.OffsetList` 按消费者 ID 分页，使用返回的 `next_consumer` 作为下一页的 `after`。本机所有者可为已撤销的主体传入 `owner`，列出其位置并逐项删除。实际删除记入审计。[确认位置容量与清理验收](../tests/test_event_offset_capacity.py)
 - CLI 使用 `psiosctl event-offset CONSUMER` 或 `psiosctl event-offsets` 取得修订，再以 `psiosctl event-offset-delete CONSUMER --expected-revision REVISION` 精确删除。Rust SDK 提供 `Client::event_offset`、`Client::event_offsets` 和 `Client::delete_event_offset`。
 - 格式 52 开始，新建的多资源快照按资源首次提交顺序分页，每项解析为快照边界时的修订。高频状态更新不会改变既有资源在列表中的位置。升级前签发的有效分页游标继续使用原有顺序，事件订阅继续按修订提交顺序投递。[固定快照和事件续读](../tests/resource_snapshot_upgrade.py)
-- `Task.Wait` 接受 Task 的 `id`、1 至 10000 毫秒的 `timeout_ms` 和可选 `after_version`。传入此前读到的 `task_revision` 可等待新修订。省略时等待 `Succeeded`、`Failed`、`Cancelled`、`Paused` 或 `WaitingApproval`。到期返回最新快照。每次唤醒均复核 `Task.Get` 的同一读取权限，连接关闭会释放名额。CLI 和 Rust SDK 的完成等待使用此接口，等待名额用完时按退避间隔读取任务。
+- `Task.Wait` 接受 Task 的 `id`、1 至 10000 毫秒的 `timeout_ms` 和可选 `after_version`。传入此前读到的 `task_revision` 可等待新修订。省略时等待 `Succeeded`、`Failed`、`Cancelled`、`Paused`、`WaitingApproval` 或 `WaitingInput`。到期返回最新快照。每次唤醒均复核 `Task.Get` 的同一读取权限，连接关闭会释放名额。CLI 和 Rust SDK 的完成等待使用此接口，等待名额用完时按退避间隔读取任务。
 
 ### 块设备代次与布局核对
 
@@ -118,6 +118,31 @@ Core 可选地先向该目标指定的解析器发出 TCP DNS 请求。按端点
 需要把探测用于自动化时，另行授予限定目标的 `node.observe_network_probe`。Task 输入沿用 `id` 与 `expected_resource_version`。提交成功后，从结果制品获取完整测量和 `network_probe_state_ref`。也可通过 `Resource.List` 查询 `NetworkProbeState`，按 `spec.probe_ref` 找到对应探针的状态。公共资源只包含探针引用、节点 ID、生命周期、规范化原因及状态变更时间。地址、端口和 DNS 细节保存在有授权限制的 Task 制品中。
 
 `Resource.Watch` 可以观察状态变更，`Schedule` 可按 `LifecycleEntered` 触发。探测成功连通时状态为 `Healthy`，明确拒绝或配置所需的 DNS 结果不符合时可为 `Unhealthy`，超时和无法确认的测量为 `Unknown`。Core 按持久派发顺序接受测量，重复状态只推进私有位置，不生成新的公共修订。最新测量制品用于离线核验，更新或重置状态后可回收前一制品。同一配置和网络命名空间内的服务重启保留状态。配置修订、内核启动或网络命名空间变化后重新观察，注销后状态为 `Retired`。[状态与事件的本机验收](../tests/test_network_probe_state.py)
+
+### 本地备用网口试配置
+
+管理员在宿主预置两个 NetworkManager 静态 IPv4 Profile，把原 Profile 启用在专用备用网口，再在 root 所有且仅 root 可写的 Core 配置中登记该网口。两个 Profile 必须使用同一网段内的不同地址。只允许此网口现有的直连路由，两个 Profile 均禁用自动连接、默认路由、IPv6 和 DNS 配置。候选地址须与本机其他网口上的地址无冲突。此后端通过显式配置的本地 root 权威启用。[NetworkManager 检查点](https://networkmanager.dev/docs/api/latest/gdbus-org.freedesktop.NetworkManager.Checkpoint.html)
+
+```json
+{
+  "network_link": {
+    "interface": "psios-spare0",
+    "mac": "02:50:53:00:00:01",
+    "original_uuid": "1aad7685-9a7d-49ad-8132-0c9c56cfb34e",
+    "candidate_uuid": "597da7b3-c8ba-4134-bfa7-57377f1ab670",
+    "confirmation_seconds": 40
+  }
+}
+```
+
+`psiosctl network-link network-link-025053000001` 返回登记的资源修订。在取得新审批后，用该修订提交 `network.trial`。Core 持久记录原 Operation 和网口占用，调用范围明确为此网口的 NetworkManager 检查点，并在切换前保存其标识。确认前，先按站点要求用备用链路测试候选地址，然后用操作 ID 和当前操作修订取得及提交本地挑战。可以通过管道交付挑战。
+
+```sh
+psiosctl network-trial-confirmation "$OPERATION_ID" --revision "$OPERATION_REVISION" \
+  | psiosctl network-trial-confirm "$OPERATION_ID" --revision "$OPERATION_REVISION"
+```
+
+挑战绑定原操作、配置代次和期限。超时后，Core 拒绝提交，NetworkManager 按其同一进程的定时检查点尝试回退。网络管理器、检查点、设备或实际地址发生变化时，需要通过原 Operation 的授权观察读取实际结果。无法独立确认的结果继续占用网口。当前范围限于本机 Unix API 和专用备用链路。远程新连接认证、管理网口与 DNS 变更仍需产品验收。[Core 端到端验收](../tests/network_trial.py) · [隔离链路验收](../tests/network_manager_trial.py) · [v1 网络契约](v1/docs/03-host-updates-network-devices.md)
 
 ### 受管 systemd 服务
 

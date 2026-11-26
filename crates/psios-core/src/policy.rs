@@ -26,6 +26,8 @@ pub const TOOLS: &[&str] = &[
     "node.route_lookup",
     node::network::probe::TOOL,
     node::network::probe::state::TOOL,
+    node::network::trial::TOOL,
+    node::network::trial::INSPECT,
     "node.routing_rules",
     "node.processes",
     node::process::TOOL,
@@ -113,6 +115,7 @@ pub fn readonly(tool: &str) -> bool {
             | "node.route_lookup"
             | node::network::probe::TOOL
             | node::network::probe::state::TOOL
+            | node::network::trial::INSPECT
             | "node.routing_rules"
             | "node.processes"
             | node::process::TOOL
@@ -155,6 +158,7 @@ pub fn approval(tool: &str) -> bool {
             | "service.start"
             | "service.stop"
             | node::RESTART_TOOL
+            | node::network::trial::TOOL
             | "volume.activate"
             | "volume.delete"
             | "backup.delete"
@@ -182,6 +186,8 @@ fn bootstrap_actions() -> Vec<String> {
                     | "node.route_lookup"
                     | node::network::probe::TOOL
                     | node::network::probe::state::TOOL
+                    | node::network::trial::TOOL
+                    | node::network::trial::INSPECT
                     | node::journal::TOOL
                     | node::service_state::TOOL
                     | node::RESTART_TOOL
@@ -665,7 +671,7 @@ pub fn revoke(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let revoked = db.status(&g, b)?;
     let generation = epoch(db)?;
     let host_flight: bool=db.c.query_row("SELECT
-        EXISTS(SELECT 1 FROM queue WHERE grant_id=?1 AND phase IN ('Dispatched','Unknown'))
+        EXISTS(SELECT 1 FROM queue WHERE grant_id=?1 AND phase IN ('Dispatched','WaitingInput','Unknown'))
         OR EXISTS(SELECT 1 FROM task_dependencies input JOIN queue q ON q.task=input.task
            JOIN current d ON d.id=input.read_delegation WHERE q.phase IN ('Dispatched','Unknown') AND d.body->>'grant_id'=?1)
         OR EXISTS(SELECT 1 FROM current a JOIN current op ON op.id=a.body->>'start_operation_id'

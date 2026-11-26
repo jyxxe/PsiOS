@@ -47,6 +47,30 @@ jobs:
             -p test_storage_recovery.py -k checkpointed_unpublished_restore -v
       - name: Refuse a stale service settlement after replacing a disposable systemd manager
         run: sudo -n /usr/bin/python3 -B tests/service_manager_epoch.py --bin-dir "$PWD/target/debug"
+      - name: Revert and confirm approved network trials on an isolated spare link
+        run: |
+          network_env=("PATH=/usr/sbin:/usr/bin:/sbin:/bin")
+          if [[ ! -x /usr/sbin/NetworkManager ]]; then
+            network_tools="$RUNNER_TEMP/psios-network-tools"
+            mkdir -p "$network_tools/archives/partial" "$network_tools/root"
+            sudo timeout 180 apt-get -o "Dir::Cache::archives=$network_tools/archives" \
+              --download-only --no-install-recommends install -y network-manager
+            for package in "$network_tools"/archives/*.deb; do
+              dpkg-deb -x "$package" "$network_tools/root"
+            done
+            network_env=("PATH=$network_tools/root/usr/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
+                         "LD_LIBRARY_PATH=$network_tools/root/usr/lib/x86_64-linux-gnu")
+          fi
+          mount_targets=()
+          trap 'for directory in "${mount_targets[@]}"; do sudo rmdir -- "$directory"; done' EXIT
+          for directory in /etc/NetworkManager /var/lib/NetworkManager; do
+            if [[ ! -d "$directory" ]]; then
+              sudo install -d -m 0755 "$directory"
+              mount_targets+=("$directory")
+            fi
+          done
+          sudo -n unshare --net --mount --uts --propagation private /usr/bin/env "${network_env[@]}" \
+            /usr/bin/python3 -B tests/network_trial.py --bin-dir "$PWD/target/debug"
       - name: Read live cgroup limits and verify pressure on a kernel without visible counters
         run: |
           sudo systemd-run --quiet --collect --wait --pipe --property=WorkingDirectory="$PWD" \

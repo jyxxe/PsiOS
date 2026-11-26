@@ -1,4 +1,5 @@
 //! Bind WorkItem acceptance to the original task receipt without granting result access.
+use super::workflow_proof;
 use crate::{
     Result,
     apps::log_tail,
@@ -47,7 +48,10 @@ fn proof(
         "evidence requires an exact successful output of the assigned principal",
     )?;
     require(
-        criterion["kind"] == "TaskResult" && task.spec["task_type"] == criterion["tool"],
+        matches!(
+            criterion["kind"].as_str(),
+            Some("TaskResult" | "WorkflowTaskResult")
+        ) && task.spec["task_type"] == criterion["tool"],
         "PreconditionFailed",
         "task tool does not satisfy the work item criterion",
     )?;
@@ -218,20 +222,21 @@ pub(super) fn attach(
         "PreconditionFailed",
         "evidence submission requires the current task revision",
     )?;
+    let workflow_witness = workflow_proof::witness(db.c, item, &task, &artifact, None)?;
     check_admission(db.c, &item.id, &artifact.id)?;
     verify_payload(db, &artifact)?;
     if shared {
         result_access::audit_read(db, actor, "WorkItem.SubmitEvidence", &artifact.id)?;
     }
-    db.record(
-        KIND,
-        actor,
-        json!({"work_item_id":item.id, "project_id":item.spec["project_id"],
-            "work_item_ref":item.reference(), "criterion":item.spec["criterion"],
-            "task_ref":task.reference(), "artifact_ref":artifact.reference(),
-            "operation_ref":provenance.operation.reference(), "run_ref":provenance.run.reference(),
-            "submitted_by":actor, "submitted_at":now()}),
-    )
+    let mut body = json!({"work_item_id":item.id, "project_id":item.spec["project_id"],
+        "work_item_ref":item.reference(), "criterion":item.spec["criterion"],
+        "task_ref":task.reference(), "artifact_ref":artifact.reference(),
+        "operation_ref":provenance.operation.reference(), "run_ref":provenance.run.reference(),
+        "submitted_by":actor, "submitted_at":now()});
+    if let Some(witness) = workflow_witness {
+        body["workflow_witness"] = witness;
+    }
+    db.record(KIND, actor, body)
 }
 
 struct Attached {
@@ -270,6 +275,7 @@ fn attached(conn: &Connection, item: &Doc) -> Result<Attached> {
         "RecoveryRequired",
         "work item does not bind its exact evidence and original task",
     )?;
+    workflow_proof::witness(conn, item, &task, &artifact, Some(&evidence))?;
     Ok(Attached {
         evidence,
         task,
@@ -342,7 +348,9 @@ pub(super) fn view(db: &Db<'_>, item: &Doc, actor: &str) -> Result<Option<Value>
                 if shared {
                     result_access::audit_read(db, actor, "WorkItem.Evidence", &artifact.id)?;
                 }
-                Some(attached.evidence.body)
+                let mut details = attached.evidence.body;
+                workflow_proof::redact(db, actor, &mut details)?;
+                Some(details)
             }
             Err(error) if error.0.code == "PermissionDenied" => None,
             Err(error) => return Err(error),
@@ -441,6 +449,12 @@ fn verify_history(conn: &Connection) -> Result<()> {
             "RecoveryRequired",
             "work item evidence is outside its original submission revision",
         )?;
+        if item.spec["criterion"]["kind"] == "WorkflowTaskResult"
+            || evidence.body.get("workflow_witness").is_some()
+        {
+            // Rejected submissions retain their exact evidence history after the byte pin is released.
+            attached(conn, &item)?;
+        }
         indexed += 1;
     }
     let total: i64 = conn.query_row(

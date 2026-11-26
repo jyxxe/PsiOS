@@ -210,7 +210,7 @@ def console_proof(console, credential, expected_node, manifest_sha256):
     return {"boot_id": boot_id, "node_id": expected_node, "deployment_manifest_sha256": manifest_sha256}
 
 
-def qemu_command(disk_fd, code_fd, vars_fd):
+def qemu_command(disk_fd, code_fd, vars_fd, vars_probe_fd):
     located = shutil.which("qemu-system-x86_64")
     require(located is not None, "qemu-system-x86_64 is required for native activation")
     executable = Path(located).resolve(strict=True)
@@ -222,6 +222,7 @@ def qemu_command(disk_fd, code_fd, vars_fd):
         "-machine", "q35", "-m", "768", "-smp", "1", "-display", "none", "-monitor", "none",
         "-nic", "none", "-boot", "strict=on", "-serial", "stdio",
         "-add-fd", f"fd={disk_fd},set=1", "-add-fd", f"fd={code_fd},set=2", "-add-fd", f"fd={vars_fd},set=3",
+        "-add-fd", f"fd={vars_probe_fd},set=3",
         "-drive", "if=pflash,format=raw,unit=0,file=/dev/fdset/2,readonly=on",
         "-drive", "if=pflash,format=raw,unit=1,file=/dev/fdset/3",
         "-blockdev", "driver=file,node-name=candidate-file,filename=/dev/fdset/1,locking=on",
@@ -248,9 +249,13 @@ def boot_candidate(work: Path, *, disk: Path, firmware_code: Path, firmware_vars
         disk_fd, disk_size = files.enter_context(open_file(directory, paths[0].name, writable=True))
         code_fd, code_size = files.enter_context(open_file(directory, paths[1].name, writable=False))
         vars_fd, vars_size = files.enter_context(open_file(directory, paths[2].name, writable=True))
+        # QEMU first probes writable pflash with an O_RDONLY open of the same store.
+        vars_probe_fd, _ = files.enter_context(open_file(directory, paths[2].name, writable=False))
+        require(os.path.samestat(os.fstat(vars_fd), os.fstat(vars_probe_fd)),
+                "OVMF variable store changed before launch")
         require(disk_size <= MAX_DISK_BYTES and disk_size % 512 == 0, "invalid raw candidate disk size")
         require(code_size + vars_size == 4 * MIB, "expected a matching 4 MiB OVMF code and variable-store pair")
-        fds = (disk_fd, code_fd, vars_fd)
+        fds = (disk_fd, code_fd, vars_fd, vars_probe_fd)
         command = qemu_command(*fds)
         guard = parent_death_guard()
         before_launch()
@@ -263,6 +268,11 @@ def boot_candidate(work: Path, *, disk: Path, firmware_code: Path, firmware_vars
             os.fsync(disk_fd)
             os.fsync(vars_fd)
             return proof
+        except ValueError as error:
+            status = process.poll()
+            if status is not None and status != 0:
+                raise ValueError(f"candidate QEMU exited with status {status}. {error}") from None
+            raise
         except (OSError, subprocess.TimeoutExpired):
             raise ValueError("candidate console, shutdown or storage synchronization failed") from None
         finally:

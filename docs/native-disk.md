@@ -183,6 +183,24 @@ python3 native/stage_update.py next-release \
 
 成功后，`next-release` 同时出现 `candidate.raw`、`candidate-build.json` 和 `staged-update.json`。回执记录原始与规范化源摘要、试启动证明及正式候选摘要，状态为 `Staged`，回退方式为 `ManualRecoveryOnly`。正式启动、激活和回退由操作者单独执行。自动引导接管仍待开发。[分阶段更新验收](../tests/native_staged_update.py)
 
+### 核验受管候选盘的首次正式引导
+
+对普通 OVMF 部署，可用 `native/activate_update.py` 核验正式候选盘的首次启动。以普通 Linux amd64 操作者运行，为节点准备一个由该操作者所有的 `0700` 持久目录。来宾须已配置本机 root 控制台。命令从操作者持有的私有文件读取此次登录凭据。
+
+```sh
+install -d -m 0700 "$ACTIVATION_STATE"
+python3 native/activate_update.py plan --state-dir "$ACTIVATION_STATE" \
+  --stage-dir next-release --stage-receipt-sha256 "$VERIFIED_STAGE_SHA256" \
+  --source-disk node.raw --ovmf-code "$OVMF_CODE" --ovmf-vars node-vars.fd
+python3 native/activate_update.py activate --state-dir "$ACTIVATION_STATE" \
+  --plan-digest "$APPROVED_ACTIVATION_SHA256" --root-console-password-file "$CONSOLE_PASSWORD_FILE"
+python3 native/activate_update.py inspect --state-dir "$ACTIVATION_STATE"
+```
+
+计划固定分阶段回执、原盘、候选盘和固件，在状态目录准备私有引导材料。执行复核原盘身份与摘要，持久记录 `BootIssued`，再启动只连接候选盘副本的无网络来宾。通过控制台登录后，核对本次启动 ID、部署摘要及 Core 节点身份。来宾正常退出并刷盘后进入 `BootVerified`，回执列出受管磁盘和 EFI 变量。
+
+有启动记录而缺少最终证明时，`inspect` 报告 `RecoveryRequired`，原计划停止派发。保持原盘停机，直至命令退出。该操作管理选定目录内的首次引导记录与副本，回退仍由操作者执行。[首次引导验收](../tests/native_activation.py)
+
 ### 启动正式候选盘
 
 从保留的停机原盘独立构建正式候选，按本节开头的命令省略 `--trial-boot`。可比对两份回执中的原盘摘要、目标 Core 源码版本及迁移演练结果。使用新的 EFI 变量副本启动 `next.raw`，启动检查会再次执行真实迁移。登录后比对 `/psios-deployment.json` 摘要、节点 ID 和已有任务回执，再恢复工作流。原盘与候选盘共享节点身份和密钥，只启动其中一个。候选盘开始接受业务写入后，回退前需要另行处理候选盘内的新状态与外部效果。[双版本启动与保留数据测试](../tests/native_upgrade.py)

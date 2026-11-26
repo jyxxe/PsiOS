@@ -489,8 +489,9 @@ class BlockLayoutTests(unittest.TestCase):
                              [("local-owner", original["resource_id"])])
 
             denied("PreconditionFailed", lambda: node.call("BlockDevice.Retire", target(retired["reference"])))
-            denied("PreconditionFailed", lambda: node.prepare("device.block_layout", target(retired["reference"]),
-                                                             token=token, delegation=delegation))
+            observation = node.prepare("device.block_layout", target(retired["reference"]), token=token,
+                                       delegation=delegation)
+            denied("PreconditionFailed", lambda: node.call("Task.Submit", observation, token))
             device = (sysfs / "dev").read_text().strip()
             sample = observe_trackable(node, self.grant, device)
             request = node.prepare("node.track_block_device", {"major_minor": device, "expected": sample["fence"]},

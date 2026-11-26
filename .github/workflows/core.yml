@@ -721,6 +721,16 @@ jobs:
           git archive 1f2d9ef514b1725842457f03b57c136aedc298e3 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format109"
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format109" "$RUNNER_TEMP/psios-compatibility-target"
           python3 -B tests/work_item_review_signals_upgrade.py --previous-bin-dir "$RUNNER_TEMP/psios-compatibility-target/debug"
+      - name: Preserve format 110 block history while indexing active attachments
+        run: |
+          if ! command -v sfdisk; then
+            sudo timeout 180 apt-get install -y --no-install-recommends fdisk
+          fi
+          mkdir "$RUNNER_TEMP/psios-format110"
+          git archive 2ab53e66fa7802cbbf5c67cdf45670c4ce064c99 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format110"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format110" "$RUNNER_TEMP/psios-compatibility-target"
+          sudo unshare --mount --propagation private python3 -B tests/block_device_retirement_upgrade.py \
+            --previous-bin-dir "$RUNNER_TEMP/psios-compatibility-target/debug"
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

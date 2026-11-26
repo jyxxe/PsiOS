@@ -427,6 +427,16 @@ enum Cmd {
         revision: String,
     },
     Node,
+    /// Read the state of a specifically authorized enrolled block device.
+    BlockDevice {
+        id: String,
+    },
+    /// Retire an exact block enrollment revision as the local owner.
+    BlockDeviceRetire {
+        id: String,
+        #[arg(long)]
+        revision: String,
+    },
     /// Show the local work admission mode and accepted work counts.
     NodeWorkAdmission,
     /// Change the exact local work admission revision as the local owner.
@@ -787,6 +797,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Cmd::Node => c.call("Node.Get", json!({}))?,
+        Cmd::BlockDevice { id } => c.block_device(&id)?,
+        Cmd::BlockDeviceRetire { id, revision } => c.retire_block_device(&id, &revision)?,
         Cmd::NodeWorkAdmission => serde_json::to_value(c.node_work_admission()?)?,
         Cmd::NodeWorkAdmissionSet {
             revision,

@@ -40,6 +40,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         }
         "Node.Get" => node::get(db, actor, p),
         "BlockDevice.Get" => node::block_device::get(db, actor, p),
+        "BlockDevice.Retire" => node::block_device::retirement::retire(db, actor, p),
         "Node.Configure" => node::configure(db, actor, p),
         "Node.WorkAdmission.Get" => node::work_admission::get(db, actor, p),
         "Node.WorkAdmission.Set" => node::work_admission::set(db, actor, p),
@@ -348,6 +349,7 @@ impl Store {
                     | "Session.Open"
                     | "Session.Cancel"
                     | "Node.Configure"
+                    | "BlockDevice.Retire"
                     | "Principal.Revoke"
                     | "Delegation.Create"
                     | "Delegation.Revoke"
@@ -393,7 +395,8 @@ impl Store {
             ) {
                 let target = if method.starts_with("Conversation.") {
                     r.params["id"].as_str().or_else(|| out["id"].as_str())
-                } else if method.starts_with("Project.")
+                } else if method == "BlockDevice.Retire"
+                    || method.starts_with("Project.")
                     || method.starts_with("WorkItem.")
                     || method.starts_with("Milestone.")
                 {

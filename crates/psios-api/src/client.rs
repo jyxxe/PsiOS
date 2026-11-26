@@ -129,6 +129,19 @@ impl Client {
     }
 
     /// List a fixed snapshot and obtain its matching change cursor.
+    pub fn block_device(&self, id: &str) -> ApiResult<Value> {
+        self.call("BlockDevice.Get", json!({"id": id}))
+    }
+
+    pub fn retire_block_device(&self, id: &str, expected_revision: &str) -> ApiResult<Value> {
+        self.call(
+            "BlockDevice.Retire",
+            json!({
+                "id": id, "expected_resource_version": expected_revision,
+            }),
+        )
+    }
+
     pub fn resource_snapshot(
         &self,
         kind: Option<&str>,

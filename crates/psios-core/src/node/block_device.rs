@@ -1,5 +1,6 @@
 //! A named, boot-local scope for a verified whole block device.
 pub(crate) mod reconcile;
+pub(crate) mod retirement;
 
 use super::block::{self, Fence, Presence};
 use crate::{
@@ -85,6 +86,11 @@ pub(crate) fn target(db: &Db<'_>, actor: &str, query: &Target) -> Result<Doc> {
     let device = db.of(&query.id, KIND)?;
     device.cas(&query.expected_resource_version)?;
     identity(&device, &db.meta("authority")?)?;
+    require(
+        device.body["lifecycle"] != "Retired",
+        "PreconditionFailed",
+        "block attachment enrollment has been retired",
+    )?;
     Ok(device)
 }
 
@@ -95,10 +101,12 @@ pub(crate) fn get(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
     let device = db.of(&request.id, KIND)?;
     let node = db.of(&db.meta("authority")?, "Node")?;
     let expected = identity(&device, &node.id)?;
-    Ok(
-        json!({"reference": device.reference(), "state": device.body,
-              "on_current_boot": node.body["boot_id"] == expected.boot_id}),
-    )
+    Ok(view(&device, &expected, &node))
+}
+
+fn view(device: &Doc, expected: &Identity, node: &Doc) -> Value {
+    json!({"reference": device.reference(), "state": device.body,
+           "on_current_boot": node.body["boot_id"] == expected.boot_id})
 }
 
 fn present(sample: block::Sample) -> Value {
@@ -189,15 +197,16 @@ fn changes_state(existing: &Doc, receipt: &Value) -> bool {
         || existing.body["layout_digest"] != receipt["fence"]["layout_digest"]
 }
 
+fn watched(body: &Value) -> bool {
+    matches!(body["lifecycle"].as_str(), Some("Present" | "Absent"))
+}
+
 fn update(db: &Db<'_>, existing: &Doc, expected: &Identity, receipt: &Value) -> Result<Doc> {
     if !changes_state(existing, receipt) {
         return Ok(existing.clone());
     }
     require(
-        !matches!(
-            existing.body["lifecycle"].as_str(),
-            Some("Replaced" | "BootEnded")
-        ),
+        watched(&existing.body),
         "PreconditionFailed",
         "block attachment has reached its terminal identity state",
     )?;
@@ -285,7 +294,7 @@ pub(crate) fn publish(db: &Db<'_>, work: &Work, receipt: &Value) -> Result<Value
     Ok(result)
 }
 
-pub(crate) fn verify(conn: &Connection) -> Result<()> {
+pub(crate) fn verify(conn: &Connection, format: u32) -> Result<()> {
     let node_id: String =
         conn.query_row("SELECT value FROM meta WHERE key='authority'", [], |r| {
             r.get(0)
@@ -310,6 +319,9 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
                     Some("Absent" | "Replaced" | "BootEnded") => {
                         device.body["layout_digest"].is_null()
                     }
+                    Some("Retired") => {
+                        format >= retirement::FORMAT && device.body["layout_digest"].is_null()
+                    }
                     _ => false,
                 },
             "RecoveryRequired",
@@ -317,15 +329,13 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
         )?;
         if let Some(prior) = previous.as_ref().filter(|prior| prior.id == device.id) {
             require(
-                prior.rev + 1 == device.rev
-                    && prior.spec == device.spec
-                    && !matches!(
-                        prior.body["lifecycle"].as_str(),
-                        Some("Replaced" | "BootEnded")
-                    ),
+                prior.rev + 1 == device.rev && prior.spec == device.spec && watched(&prior.body),
                 "RecoveryRequired",
                 "tracked block device history violates its original attachment",
             )?;
+            if lifecycle == Some("Retired") {
+                retirement::verify_transition(prior, &device, &expected)?;
+            }
         } else {
             require(
                 device.rev == 1 && lifecycle == Some("Present"),
@@ -334,6 +344,9 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
             )?;
         }
         previous = Some(device);
+    }
+    if format >= retirement::FORMAT {
+        retirement::verify_projection(conn)?;
     }
     Ok(())
 }

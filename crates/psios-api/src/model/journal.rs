@@ -266,15 +266,15 @@ fn matches_decision(receipt: &Value, request: &DecisionRequest) -> bool {
 }
 
 fn matches_rejection(receipt: &Value, request: &DecisionRequest) -> bool {
-    receipt.get("rejection").is_none_or(|rejection| {
-        request.decision_rejection_policy.is_some()
-            && request.decision_rejection_policy
-                == serde_json::from_value(rejection["policy"].clone()).ok()
-            && rejection["code"] == "ToolNotDeclared"
-            && receipt["lifecycle"] == "Failed"
-            && receipt["outcome_knowledge"] == "Known"
-            && receipt.get("task_id").is_some_and(Value::is_null)
-    })
+    let Some(rejection) = receipt.get("rejection") else {
+        return receipt.get("outcome_knowledge").is_none();
+    };
+    request
+        .decision_rejection_policy
+        .is_some_and(|policy| rejection == &json!({"policy":policy,"code":"ToolNotDeclared"}))
+        && receipt["lifecycle"] == "Failed"
+        && receipt["outcome_knowledge"] == "Known"
+        && receipt.get("task_id").is_some_and(Value::is_null)
 }
 
 fn matches_observation(

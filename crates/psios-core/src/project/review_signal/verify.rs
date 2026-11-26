@@ -20,9 +20,10 @@ fn request(conn: &Connection, signal: &Doc) -> Result<()> {
     let key = signal.spec["key"].as_str().ok_or_else(invalid_state)?;
     label(key)?;
     let seq = signal.body["seq"].as_u64().ok_or_else(invalid_state)?;
+    let indexed_sequence = i64::try_from(seq).map_err(|_| invalid_state())?;
     let indexed: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM signals WHERE mailbox=?1 AND seq=?2 AND id=?3)",
-        params![mailbox.id, seq, signal.id],
+        params![mailbox.id, indexed_sequence, signal.id],
         |r| r.get(0),
     )?;
     let prior_mailbox = before(conn, &mailbox.id, &signal.id)?;

@@ -376,7 +376,10 @@ fn verify_create_receipt(
             && crate::artifact::is_task_output(&artifact, task)
             && artifact.spec["operation_id"] == op.id
             && artifact.spec["digest"] == psios_api::sha256(&expected_bytes)
-            && artifact.spec["size_bytes"] == expected_bytes.len().to_string()
+            && artifact.spec["size_bytes"]
+                .as_str()
+                .and_then(|size| size.parse::<usize>().ok())
+                == Some(expected_bytes.len())
             && task.body["result"]["availability"] == "Available"
             && task.body["result"]["artifact_refs"] == json!([artifact.reference()])
             && run.kind == "Run"

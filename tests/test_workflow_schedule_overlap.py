@@ -11,7 +11,7 @@ import time
 import unittest
 
 from support import Node, key, target
-from test_schedule import timestamp
+from test_schedule import after, timestamp
 
 
 class WorkflowScheduleOverlap(unittest.TestCase):
@@ -37,11 +37,11 @@ class WorkflowScheduleOverlap(unittest.TestCase):
     def ids(self, kind):
         return {ref["resource_id"] for ref in self.n.call("Resource.List", {"kind": kind})["items"]}
 
-    def schedule(self, *, interval, max_runtime):
+    def schedule(self, *, interval, max_runtime, missed="Skip", count=3):
         request = {"key": key(), "tool": "workflow.start", "run_at": timestamp(1), "deadline_at": timestamp(30),
             "input": {"definition_ref": self.definition, "max_runtime_seconds": max_runtime},
             "delegation_id": self.scope["delegation_ref"]["resource_id"],
-            "repeat": {"interval_seconds": interval, "count": 3, "missed": {"mode": "Skip"},
+            "repeat": {"interval_seconds": interval, "count": count, "missed": {"mode": missed},
                        "overlap": "SkipWhileWorkflowActive"}}
         created = self.n.call("Schedule.Create", request)
         return request, created["reference"]["resource_id"]
@@ -266,3 +266,32 @@ class WorkflowScheduleOverlap(unittest.TestCase):
         self.assertEqual(self.read_workflow(run["reference"]["resource_id"]), run)
         self.assertEqual(self.n.wait(child["task_id"]), child)
         self.assertFalse(self.path.exists())
+
+    def test_known_active_workflow_takes_precedence_over_coalescing_due_windows(self):
+        request, schedule_id = self.schedule(interval=3, max_runtime=25, missed="Coalesce", count=4)
+        _, (first,) = self.wait_triggers(schedule_id, 1)
+        launch_id, waiting, child = self.launch(first, schedule_id)
+        self.assertEqual(first["coalescence"]["covered_trigger_ids"], [])
+        tasks = self.initial_tasks | {launch_id, child["task_id"]}
+        node = self.n.call("Node.Get", {})["reference"]
+        cordoned = self.n.call("Node.Configure", {"expected_resource_version": node["version"],
+                                                   "scheduling": "Cordoned"})
+        after(request["run_at"], 9.1)
+        self.assertEqual(len(self.read_schedule(schedule_id)["state"]["trigger_refs"]), 1)
+        self.n.call("Node.Configure", {"expected_resource_version": cordoned["version"],
+                                        "scheduling": "Enabled"})
+        current, (same_first, *skipped) = self.wait_triggers(schedule_id, 4)
+        self.assertEqual(same_first, first)
+        self.assertEqual(len(skipped), 3)
+        for trigger in skipped:
+            self.assert_skip(current, trigger, launch_id, waiting, "WaitingApproval")
+            self.assertNotIn("coalescence", trigger)
+            self.assertNotIn("coalesced_into_trigger_id", trigger)
+        self.assertEqual(self.ids("Task"), tasks)
+        self.assertEqual(self.ids("WorkflowRun"), {waiting["reference"]["resource_id"]})
+        self.assertEqual(self.budget(), (1, 1))
+        self.assertFalse(self.path.exists())
+        self.n.stop(signal.SIGKILL)
+        self.verify_stopped()
+        self.n.start()
+        self.assertEqual(self.read_schedule(schedule_id), current)

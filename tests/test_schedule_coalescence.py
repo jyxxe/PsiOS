@@ -226,3 +226,32 @@ class ScheduleCoalescence(unittest.TestCase):
         self.assertEqual(self.triggers(final), triggers)
         self.assertEqual(self.ids("Task"), initial_tasks | {task["task_id"]})
         self.assertEqual(self.budget(), (0, 1))
+
+    def test_revocation_rejects_the_exact_latest_representative_without_admission(self):
+        n = self.n
+        self.set_scheduling("Cordoned")
+        request, initial = self.new_schedule(interval=2, window=20, count=3)
+        after(request["run_at"], 4.1)
+        n.call("Grant.Revoke", target(self.grant["grant_ref"]))
+        self.set_scheduling("Enabled")
+        rejected = self.until(lambda: self.state(initial),
+                              lambda report: report["state"]["lifecycle"] == "Rejected")
+        self.assertEqual(rejected["state"]["reason"], "PermissionDenied")
+        self.assertIsNone(rejected["state"]["last_task_id"])
+        references = [ref["resource_id"] for ref in rejected["state"]["trigger_refs"]]
+        first, second, representative = self.triggers(rejected)
+        self.assertEqual((representative["ordinal"], representative["lifecycle"], representative["reason"]),
+                         (3, "Rejected", "PermissionDenied"))
+        self.assertEqual(representative["coalescence"]["covered_trigger_ids"], references[:2])
+        self.assertEqual(representative["coalescence"]["schedule_ref"], initial["reference"])
+        for report in (first, second):
+            self.assertEqual((report["lifecycle"], report["reason"], report["coalesced_into_trigger_id"]),
+                             ("Skipped", "RepresentativeRejected", references[-1]))
+        for report in (first, second, representative):
+            self.assertIsNone(report["task_receipt"])
+        self.assertEqual(self.budget(), (0, 0))
+        self.assertFalse(self.ids("Task"))
+        n.stop(signal.SIGKILL)
+        self.verify_stopped()
+        n.start()
+        self.assertEqual(n.call("Schedule.Create", request), rejected)

@@ -37,6 +37,22 @@ impl Enrollment {
             "track a whole disk using an exact trackable layout fence",
         )
     }
+
+    fn attachment(&self, node_id: String) -> Result<Identity> {
+        let attachment_digest = self.expected.attachment_digest.clone().ok_or_else(|| {
+            err(
+                "RecoveryRequired",
+                "block enrollment has no attachment identity",
+            )
+        })?;
+        Ok(Identity {
+            node_id,
+            boot_id: self.expected.boot_id.clone(),
+            major_minor: self.major_minor.clone(),
+            disk_sequence: self.expected.disk_sequence.clone(),
+            attachment_digest,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -78,6 +94,30 @@ fn identity(device: &Doc, node_id: &str) -> Result<Identity> {
         "tracked block device identity disagrees with its original enrollment",
     )?;
     Ok(identity)
+}
+
+fn enrolled(db: &Db<'_>, expected: &Identity) -> Result<Option<Doc>> {
+    let existing = db.find(&expected.id())?;
+    if let Some(device) = &existing {
+        require(
+            identity(device, &expected.node_id)? == *expected,
+            "RecoveryRequired",
+            "tracked block device ID already belongs to another attachment",
+        )?;
+    }
+    Ok(existing)
+}
+
+pub(crate) fn enrollment_target(db: &Db<'_>, actor: &str, request: &Enrollment) -> Result<Doc> {
+    policy::admin(actor)?;
+    let node = db.of(&db.meta("authority")?, "Node")?;
+    let expected = request.attachment(node.id.clone())?;
+    require(
+        enrolled(db, &expected)?.is_none_or(|device| device.body["lifecycle"] != "Retired"),
+        "PreconditionFailed",
+        "block attachment enrollment has been retired",
+    )?;
+    Ok(node)
 }
 
 pub(crate) fn target(db: &Db<'_>, actor: &str, query: &Target) -> Result<Doc> {
@@ -235,19 +275,8 @@ pub(crate) fn publish(db: &Db<'_>, work: &Work, receipt: &Value) -> Result<Value
                 "Fenced",
                 "block enrollment fence changed",
             )?;
-            let expected = Identity {
-                node_id,
-                boot_id: fence.boot_id,
-                major_minor: request.major_minor.clone(),
-                disk_sequence: fence.disk_sequence,
-                attachment_digest: fence.attachment_digest.unwrap(),
-            };
-            if let Some(existing) = db.find(&expected.id())? {
-                require(
-                    identity(&existing, &expected.node_id)? == expected,
-                    "RecoveryRequired",
-                    "tracked block device ID already belongs to another attachment",
-                )?;
+            let expected = request.attachment(node_id)?;
+            if let Some(existing) = enrolled(db, &expected)? {
                 update(db, &existing, &expected, receipt)?
             } else {
                 db.cfg.check_admission_space()?;

@@ -496,8 +496,7 @@ class BlockLayoutTests(unittest.TestCase):
             sample = observe_trackable(node, self.grant, device)
             request = node.prepare("node.track_block_device", {"major_minor": device, "expected": sample["fence"]},
                                    delegation=tracker["delegation_ref"]["resource_id"])
-            refused = node.wait(node.call("Task.Submit", request)["task_id"])
-            self.assertEqual(refused["conditions"][0]["type"], "PreconditionFailed", refused)
+            denied("PreconditionFailed", lambda: node.call("Task.Submit", request))
             node.stop(signal.SIGKILL)
             resize(retired_image, name, 20)
             resize(live_image, live_name, 18)

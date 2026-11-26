@@ -4,6 +4,7 @@ pub(crate) mod directory;
 pub(crate) mod evidence;
 pub(crate) mod history;
 mod maintenance;
+pub(crate) mod milestone;
 pub(crate) use maintenance::{abandon, reassign};
 
 use crate::{

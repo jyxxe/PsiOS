@@ -791,6 +791,11 @@ pub(crate) fn withdraw(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value
         "Conflict",
         "artifact is retained by an installation or an immutable release",
     )?;
+    require(
+        !crate::agent::session_inputs::retains(db, &artifact.id)?,
+        "Conflict",
+        "artifact is retained by an active Agent session",
+    )?;
     let manifest = super::Manifest::read(&artifact)?
         .ok_or_else(|| err("RecoveryRequired", "artifact manifest unavailable"))?;
     let count = db.c.execute(

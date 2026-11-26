@@ -181,6 +181,13 @@ impl LocalInventoryModel {
         if context.to_string().len() > CONTEXT_LIMIT {
             return Err(ApiError::new("QuotaExceeded", "local model context too large").into());
         }
+        if context.get("inputs").is_some() {
+            return Err(ApiError::new(
+                "UnsupportedCapability",
+                "local inventory provider does not accept session artifact inputs",
+            )
+            .into());
+        }
         let rendered = prompt_context(context, tools).to_string();
         let payload = json!({
             "model": self.model_alias,
@@ -420,6 +427,17 @@ mod tests {
             panic!("oversized context reached the model");
         };
         assert_eq!(failure.error.code, "QuotaExceeded");
+        assert_eq!(failure.outcome, ModelInferenceOutcome::NotStarted);
+    }
+
+    #[test]
+    fn inventory_provider_rejects_an_artifact_backed_context_before_transport() {
+        let (model, mut context) = first_turn();
+        context["inputs"] = json!([{ "name": "private-artifact", "value": {"data": 42} }]);
+        let Err(failure) = model.decide_with_outcome(&context) else {
+            panic!("artifact prompt reached the inventory provider");
+        };
+        assert_eq!(failure.error.code, "UnsupportedCapability");
         assert_eq!(failure.outcome, ModelInferenceOutcome::NotStarted);
     }
 

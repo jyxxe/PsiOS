@@ -192,7 +192,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = apps::volume_rebind::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = agent::session_inputs::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -530,6 +530,9 @@ impl Store {
                 }
                 if ver < workflow::admission_delay::FORMAT {
                     db.c.execute_batch(workflow::admission_delay::SCHEMA)?;
+                }
+                if ver < agent::session_inputs::FORMAT {
+                    db.c.execute_batch(agent::session_inputs::SCHEMA)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

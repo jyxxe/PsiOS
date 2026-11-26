@@ -683,6 +683,12 @@ Core 记录 Provider 的迟到证据，原 `Unknown`、工具任务和记账继�
 
 格式 65 把领取时的 Session 修订、ModelUsage 与规范化上下文摘要一起提交。领取结果和 `Session.History` 提供 `context_digest`。重发领取请求时从原修订重新生成上下文，校验摘要并复核当前权限。内容缺失、检查点损坏或上下文超限会以明确原因暂停自动队列中的该会话，其他会话可继续领取。原调用额度和工具回执仍可核对。[Unix API 与进程故障验收](../tests/test_agent_tool_context.py) · [格式 64 原地升级](../tests/agent_context_upgrade.py)
 
+### 显式授权私有 JSON 输入
+
+直接调用 `Session.Open` 可提交 `input_artifacts`，每项由唯一 `name`、完整资源引用 `reference` 和 `kind: "Json"` 组成。支持至多四个会话所有者发布的 `application/json` 制品，每份原始数据至多 16 KiB。Core 在会话建立和 Provider 领取时校验 JSON、原摘要及合并后上下文预算。会话表和历史查询保存引用及上下文摘要。
+
+原始会话委托需具备 `session.context.read`、`artifact.read`、正常的会话与工具操作权限。它的 `tool_targets` 必须明确包含所选模型、每个制品和节点，以及工具所需的作用域。该模型的注册 Provider 在正常 `Model.Claim` 的 `context.inputs` 中接收 `name`、`reference`、`kind` 和 `value`。Core 会在重放和提交新决策前复核原委托。活动会话固定这些精确制品，终态释放。格式 100 提供此能力，适用于直接模型领取。Provider 队列、备选模型和通用本机盘点适配器会拒绝带此类输入的会话或推理。 [Unix API 验收](../tests/test_agent_session_inputs.py)
+
 ### 预授权本机模型交接
 
 `Session.Open` 和 `agent.session.start` 可用 `fallback_model_refs` 固定至多三个备选 Model 修订。会话选用 `ReferencesOnly`，使用的委托须包含 `session.failover` 并在目标范围纳入主模型及每个备选模型。登记的模型须共享本机认证接口和模态。交接时再次检查所选模型修订、Provider 授权和当前上下文大小。

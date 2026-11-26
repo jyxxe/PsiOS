@@ -8,6 +8,7 @@ pub(crate) mod model_time;
 pub(crate) mod provider_authority;
 mod queue;
 mod registry;
+pub(crate) mod session_inputs;
 pub(crate) mod tool_context;
 pub(crate) mod work_admission_status;
 #[cfg(test)]
@@ -97,6 +98,8 @@ struct Open {
     max_turns: u32,
     #[serde(default)]
     provider_queue: bool,
+    #[serde(default)]
+    input_artifacts: Vec<session_inputs::Input>,
 }
 fn state(d: &Doc) -> &str {
     d.body["lifecycle"].as_str().unwrap_or("")
@@ -155,8 +158,20 @@ fn open_session(db: &Db<'_>, actor: &str, p: &Value, origin_task: Option<&Doc>) 
     session_limits(&o.goal, &o.context_policy, o.max_turns)?;
     tool_context::validate(o.tool_context_window)?;
     fallback::validate(&o.model_ref, &o.fallback_model_refs, &o.context_policy)?;
+    session_inputs::validate(&o.input_artifacts)?;
+    let with_inputs = !o.input_artifacts.is_empty();
+    require(
+        !with_inputs
+            || (!o.provider_queue && o.fallback_model_refs.is_empty() && origin_task.is_none()),
+        "UnsupportedCapability",
+        "artifact inputs currently require a direct session without fallback",
+    )?;
+    let context_window = o.tool_context_window.or(with_inputs.then_some(1));
     let d = policy::delegation(db, actor, &o.delegation_id, "session.run")?;
     let mut spec = p.clone();
+    if with_inputs {
+        spec["tool_context_window"] = json!(context_window);
+    }
     let identity = if let Some(task) = origin_task {
         spec["origin_task_ref"] = task.reference();
         json!([actor, "task", task.id])
@@ -183,6 +198,9 @@ fn open_session(db: &Db<'_>, actor: &str, p: &Value, origin_task: Option<&Doc>) 
         let model = registry::pinned(db, &o.model_ref, "Model")?;
         queue::check_capacity(db, &model.id)?;
     }
+    if with_inputs {
+        db.cfg.check_admission_space()?;
+    }
     let mut state = json!({"lifecycle":"AwaitingModel","checkpoint_version":"1",
       "turn":0,"goal":o.goal,"skill_ref":o.skill_ref,"model_ref":o.model_ref,"context_policy":o.context_policy,
       "budget_ref":d.body["budget_ref"],"delegation_ref":d.reference(),"max_turns":o.max_turns,"last_task":null,"current_lease":null});
@@ -192,13 +210,17 @@ fn open_session(db: &Db<'_>, actor: &str, p: &Value, origin_task: Option<&Doc>) 
     if !o.fallback_model_refs.is_empty() {
         state["fallback_model_refs"] = json!(o.fallback_model_refs);
     }
-    if let Some(window) = o.tool_context_window {
+    if let Some(window) = context_window {
         state["tool_context_window"] = json!(window);
         state["tool_context_refs"] = json!([]);
     }
     let session = db.create("Session", &sid, actor, spec, state)?;
-    let (_, _, model) = deps(db, &session)?;
+    let (_, skill, model) = deps(db, &session)?;
     fallback::check_open(db, &session, &model, &o.fallback_model_refs)?;
+    if with_inputs {
+        session_inputs::admit(db, &session)?;
+        context(db, &session, &skill, &model)?;
+    }
     if let Some(r) = o.trigger_signal_ref {
         mail::consume(db, actor, &r, &session.id)?;
     }
@@ -724,6 +746,7 @@ pub fn respond(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "model response outside current lease",
     )?;
     provider_authority::require_current(db, &s, &model, &p.lease_id)?;
+    session_inputs::live_access(db, &s)?;
     let mut b = s.body.clone();
     let mut task = None;
     match decode::<Decision>(&p.decision)? {

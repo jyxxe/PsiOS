@@ -267,6 +267,29 @@ fn joined(conn: &Connection, run: &Doc, task: &Doc) -> Result<Option<Joined>> {
     Ok(Some(Joined { opened, current }))
 }
 
+pub(crate) fn verify_launch_spec(
+    conn: &Connection,
+    task: &Doc,
+    opened: &Doc,
+    expected: &mut Value,
+) -> Result<()> {
+    if !is_bound(opened) {
+        return Ok(());
+    }
+    let run_id = task.body["origin_ref"]["origin_id"]
+        .as_str()
+        .ok_or_else(invalid)?;
+    let run = db::find(conn, run_id)?.ok_or_else(invalid)?;
+    let binding = from_task(&run, task)?.ok_or_else(invalid)?;
+    let join = joined(conn, &run, task)?.ok_or_else(invalid)?;
+    require(
+        join.opened.reference() == opened.reference(),
+        "RecoveryRequired",
+        "private inputs do not belong to the workflow's launched session",
+    )?;
+    stamp(expected, &binding)
+}
+
 pub(super) fn stopped_launch(db: &Db<'_>, run: &Doc, task: &Doc) -> Result<()> {
     if run.spec["dsl_version"] == 4
         && task.spec["task_type"] == agent::START_SESSION
@@ -313,6 +336,19 @@ fn launch_receipt(conn: &Connection, task: &Doc, opened: &Doc) -> Result<Doc> {
 }
 
 fn unresolved(conn: &Connection, session: &Doc) -> Result<(bool, bool)> {
+    let missing_tool: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_turns t WHERE t.session=?1 AND t.task IS NOT NULL
+           AND (t.receipt->>'task_id' IS NOT t.task OR NOT EXISTS(
+              SELECT 1 FROM session_tasks j WHERE j.session=t.session AND j.turn=t.turn
+                AND j.attempt=1 AND j.task=t.task)))",
+        [&session.id],
+        |row| row.get(0),
+    )?;
+    require(
+        !missing_tool,
+        "RecoveryRequired",
+        "workflow session lost its original tool Task",
+    );
     conn.query_row(
         "SELECT
            EXISTS(SELECT 1 FROM session_turns t JOIN model_inference_leases i USING(lease)
@@ -460,6 +496,20 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
         let task = db::find(conn, &task)?.ok_or_else(invalid)?;
         let join = joined(conn, &run, &task)?.ok_or_else(invalid)?;
         let receipt = launch_receipt(conn, &task, &join.opened)?;
+        let deadline: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM authorization_deadlines child WHERE child.resource=?1)
+               AND NOT EXISTS(SELECT 1 FROM authorization_deadlines child
+                 JOIN authorization_deadlines parent ON parent.resource=?2 AND parent.boot_id=child.boot_id
+                 WHERE child.resource=?1 AND (child.time_ns<>parent.time_ns
+                   OR child.deadline_boot_ms>parent.deadline_boot_ms))",
+            params![join.opened.id,run.id],
+            |row| row.get(0),
+        )?;
+        require(
+            deadline,
+            "RecoveryRequired",
+            "joined session lost its inherited elapsed deadline",
+        )?;
         let active: Option<(i64, Option<i64>)> = conn
             .query_row(
                 "SELECT task_rev,session_rev FROM active_workflow_tasks WHERE run=?1 AND task=?2",

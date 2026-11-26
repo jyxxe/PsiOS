@@ -120,7 +120,8 @@ class WorkflowSessionJoin(SessionInputFixture, unittest.TestCase):
         return claimed
 
     def verify(self):
-        subprocess.run(self.n.daemon + ["verify"], check=True, capture_output=True, timeout=20)
+        checked = subprocess.run(self.n.daemon + ["verify"], capture_output=True, text=True, timeout=20)
+        self.assertEqual(checked.returncode, 0, checked.stderr)
 
     def restart(self):
         self.n.stop(signal.SIGKILL)

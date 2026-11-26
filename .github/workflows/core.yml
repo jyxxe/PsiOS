@@ -757,6 +757,12 @@ jobs:
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format113" "$RUNNER_TEMP/psios-compatibility-target"
           PSIOS_TEST_CLONE_RENAME_FAULT=1 PSIOS_VOLUME_CLONE_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
             python3 -B -m unittest discover -s tests -p test_volume_clone_recovery.py -k kill_before_atomic_publication -v
+      - name: Preserve detached Workflow sessions while upgrading to native session joins
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format114"
+          git archive ac52769cebdc4f8225dd5486ca4ab7b5a0d11ca3 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format114"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format114" "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/workflow_session_join_upgrade.py --previous-bin-dir "$RUNNER_TEMP/psios-compatibility-target/debug"
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

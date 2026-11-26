@@ -47,13 +47,16 @@ fn verify_task_plan(conn: &Connection, task: &Doc, blueprint: &SessionBlueprint)
     Ok(operation)
 }
 
-fn verify_task_origin(conn: &Connection, original: &Doc) -> Result<()> {
+fn verify_task_origin(conn: &Connection, original: &Doc, database_format: u32) -> Result<()> {
     let reference = &original.spec["origin_task_ref"];
     let task = resolve(conn, reference)?;
     let blueprint = task_blueprint(conn, &task)?;
     let mut expected = blueprint.opening(&task)?;
     expected["tool_context_window"] = json!(blueprint.tool_context_window.unwrap_or(1));
     expected["origin_task_ref"] = reference.clone();
+    if database_format >= crate::workflow::session_join::FORMAT {
+        crate::workflow::session_join::verify_launch_spec(conn, &task, original, &mut expected)?;
+    }
     require(
         task.owner == original.owner
             && task.body["outcome_knowledge"] == "InFlight"
@@ -174,7 +177,7 @@ pub(crate) fn verify(conn: &Connection, database_format: u32) -> Result<()> {
                 "RecoveryRequired",
                 "brokered private session predates its custody format or changed its origin",
             )?;
-            verify_task_origin(conn, &original)?;
+            verify_task_origin(conn, &original, database_format)?;
         }
         for input in inputs {
             let artifact = source(conn, &session.owner, &input)?;

@@ -24,8 +24,37 @@ pub(super) fn check_admission(db: &Db<'_>, actor: &str) -> Result<()> {
     )
 }
 
-pub(super) fn new_revision() -> String {
+pub(super) fn new_generation() -> String {
     format!("{NEW_PREFIX}{}", uuid::Uuid::new_v4().simple())
+}
+
+pub(super) fn checked_generation(
+    db: &Db<'_>,
+    owner: &str,
+    consumer: &str,
+    expected: &str,
+    previous: &str,
+    cursor: &str,
+) -> Result<String> {
+    // Use the existing storage shape so old readers can still advance or delete it.
+    let key = hmac::Key::new(hmac::HMAC_SHA256, &db.keys[32..]);
+    let request = serde_json::to_vec(&(
+        "psios/event-offset-advance/1",
+        db.meta("authority")?,
+        &db.incarnation,
+        owner,
+        consumer,
+        expected,
+        previous,
+        cursor,
+    ))?;
+    let tag = hmac::sign(&key, &request);
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&tag.as_ref()[..16]);
+    Ok(format!(
+        "{NEW_PREFIX}{}",
+        uuid::Uuid::from_bytes(bytes).simple()
+    ))
 }
 
 fn valid_generation(revision: &str) -> bool {
@@ -37,7 +66,7 @@ fn valid_generation(revision: &str) -> bool {
     })
 }
 
-fn valid_expected(revision: &str) -> bool {
+pub(super) fn valid_expected(revision: &str) -> bool {
     [NEW_PREFIX, LEGACY_PREFIX].into_iter().any(|prefix| {
         revision.strip_prefix(prefix).is_some_and(|value| {
             value.len() == 43
@@ -48,7 +77,7 @@ fn valid_expected(revision: &str) -> bool {
     })
 }
 
-fn revision(
+pub(super) fn revision(
     db: &Db<'_>,
     owner: &str,
     consumer: &str,
@@ -257,12 +286,12 @@ mod tests {
                 assert_eq!(get_legacy(db)?, legacy);
                 let refreshed = super::super::list(db, actor, &json!({"kind":"Node"}))?;
                 let next = &refreshed["watch_start_cursor"];
-                super::super::ack(
-                    db,
-                    actor,
-                    &json!({"consumer":"legacy","previous":cursor,"cursor":next}),
-                )?;
+                let advance = json!({"consumer":"legacy","previous":cursor,"cursor":next,
+                                     "expected_revision":legacy["revision"]});
+                let checked = super::super::ack(db, actor, &advance)?;
                 let advanced = get_legacy(db)?;
+                assert_eq!(checked, advanced);
+                assert_eq!(super::super::ack(db, actor, &advance)?, advanced);
                 assert_eq!(advanced["cursor"], *next);
                 assert_ne!(advanced["revision"], legacy["revision"]);
                 assert_eq!(

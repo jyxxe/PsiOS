@@ -144,6 +144,14 @@ psiosctl network-trial-confirmation "$OPERATION_ID" --revision "$OPERATION_REVIS
 
 挑战绑定原操作、配置代次和期限。超时后，Core 拒绝提交，NetworkManager 按其同一进程的定时检查点尝试回退。网络管理器、检查点、设备或实际地址发生变化时，需要通过原 Operation 的授权观察读取实际结果。无法独立确认的结果继续占用网口。当前范围限于本机 Unix API 和专用备用链路。远程新连接认证、管理网口与 DNS 变更仍需产品验收。[Core 端到端验收](../tests/network_trial.py) · [隔离链路验收](../tests/network_manager_trial.py) · [v1 网络契约](v1/docs/03-host-updates-network-devices.md)
 
+试配置仍在等待确认时，本机所有者可以指定同一个 Operation 立即回退。
+
+```sh
+psiosctl network-trial-rollback "$OPERATION_ID" --revision "$OPERATION_REVISION"
+```
+
+Core 在请求 NetworkManager 回退前持久记录派发，核对原检查点、设备和当前试配置。确认与回退竞争同一个操作修订和派发位置。只有该设备返回成功且 Core 重新观察到原网络配置后，原 Task 才结算为 `Cancelled / Known`，结果制品记录 `RolledBack`。回执丢失时保留原操作的未决状态和网口占用，通过授权观察核对结局。守护进程重启后沿用原检查点的恢复路径。[NetworkManager CheckpointRollback](https://networkmanager.dev/docs/api/latest/gdbus-org.freedesktop.NetworkManager.html)
+
 ### 受管 systemd 服务
 
 运维人员在本机配置中显式加入 `services`。先使用观察配置并重启守护进程。
@@ -524,6 +532,12 @@ Core 在真正派发时重查项目成员、授权和工作项修订。在同一
 工作项也可采用 `WorkflowTaskResult` 条件，固定 `definition_ref`、`step_id`、`tool` 和 `target_ref`。创建者需有该工作流定义的读取权限，指派者需能按现有 Workflow 权限使用同一份定义。提交证据仍使用原 Task 和 Artifact 引用。Core 核对原 WorkflowRun 中已知成功的确切步骤和生产回执。Project 成员可查看授权范围内的工作项，工作流身份和步骤详情仍按原 Workflow 读取权限裁决。[工作流证据验收](../tests/test_work_item_workflow_evidence.py)
 
 创建工作项时可用 `parent_id` 指向同项目中处于 `Ready` 的已有工作项。父关系随新工作项固定。Core 检查父子关系和 `blocked_by` 共同形成的等待图，拒绝直接或间接循环。每个子项仍各自提交证据、审核并关闭。父项经过评审后，须等直接子项均关闭才能执行最后的关闭操作。`psiosctl work-item children ID` 在当前项目授权范围内分页查询直属子项。[父子关系与关闭验收](../tests/test_work_item_hierarchy.py)
+
+`WorkItem.Assigned` 按当前身份和项目授权分页列出自己负责的 `Ready` 工作项。请求提供 `project_id`，可选 `after_id`、`limit`、`include_blocked` 和 `min_priority`，每页最多 16 项。默认只返回可开始的工作项，打开 `include_blocked` 可查看自己尚被依赖阻塞的工作项。最低优先级适用于直接查询和 Agent 工具派发，分页仍按工作项 ID 排序。CLI 使用 `psiosctl work-item assigned` 读取标准输入的 JSON。
+
+工作项支持 `Low`、`Normal`、`High` 和 `Urgent`。创建时可指定 `priority`，省略时为 `Normal`。项目管理者可用 `psiosctl work-item reprioritize ID --revision REV high` 修改没有保留证据的 `Ready` 工作项。修改仅影响项目工作发现，生成独立修订并保留原优先级和评审历史。可用 `WorkItem.History` 核对每个固定版本。[权限、并发和恢复验收](../tests/test_work_item_priority.py)
+
+原生 Agent 的 Skill 可登记只读工具 `project.list_assigned_work`。工具请求还需提供 `expected_project_version`，委托须包含该工具和所选 Project，实际执行时重新检查项目成员、`project.read`、`project.contribute` 和精确项目修订。查询结果以普通 Task 回执持久保存，继续按 Task 结果权限读取。Agent 可用返回的工作项引用选择后续操作。执行普通 Task 和提交证据仍需要各自的授权。[原生 Agent 领取工作验收](../tests/test_agent_assigned_work.py)
 
 当前支持单节点和单个 Task 或 Workflow 步骤验收条件。多条件验收、外部 Issue 与 CI 同步仍待实现。[多主体与重启验收](../tests/test_project_work_items.py) · [Project 规范](v1/docs/11-workflows-projects.md#118-project-与-workitem)
 

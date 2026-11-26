@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use psios_api::{
     Client, LocalInventoryModel, OciImageCaptureRequest, OciPublisherSignature, ResourceRef,
-    SessionModel, StatusProvider, TaskOutputRequirement, parse,
+    SessionModel, StatusProvider, TaskOutputRequirement, WorkItemPriority, parse,
 };
 use psios_core::{Config, DEFAULT_BACKUP_MAX_BYTES, MAX_BACKUP_BYTES};
 use serde_json::{Value, json};
@@ -108,6 +108,12 @@ enum Cmd {
         revision: String,
         #[arg(default_value = "-")]
         file: String,
+    },
+    /// Request immediate rollback of an exact active trial.
+    NetworkTrialRollback {
+        operation: String,
+        #[arg(long)]
+        revision: String,
     },
     /// Manage a local Project and its members.
     Project {
@@ -473,6 +479,11 @@ enum WorkItemCommand {
         #[arg(long)]
         limit: Option<u32>,
     },
+    /// List work assigned to you using a JSON Project query on stdin or in a file.
+    Assigned {
+        #[arg(default_value = "-")]
+        file: String,
+    },
     List {
         project_id: String,
         #[arg(long)]
@@ -504,6 +515,14 @@ enum WorkItemCommand {
         revision: String,
         assignee: String,
     },
+    /// Change the priority of a ready work item at its current revision.
+    Reprioritize {
+        id: String,
+        #[arg(long)]
+        revision: String,
+        #[arg(value_enum)]
+        priority: PriorityInput,
+    },
     /// End open work with a recorded reason.
     Abandon {
         id: String,
@@ -518,6 +537,25 @@ enum WorkItemCommand {
 enum ReviewDecision {
     Accept,
     Reject,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum PriorityInput {
+    Low,
+    Normal,
+    High,
+    Urgent,
+}
+
+impl From<PriorityInput> for WorkItemPriority {
+    fn from(priority: PriorityInput) -> Self {
+        match priority {
+            PriorityInput::Low => Self::Low,
+            PriorityInput::Normal => Self::Normal,
+            PriorityInput::High => Self::High,
+            PriorityInput::Urgent => Self::Urgent,
+        }
+    }
 }
 
 fn input(path: &str) -> Result<Value, Box<dyn std::error::Error>> {
@@ -709,6 +747,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or("missing network confirmation token")?;
             c.confirm_network_trial(&operation, &revision, token)?
         }
+        Cmd::NetworkTrialRollback {
+            operation,
+            revision,
+        } => c.rollback_network_trial(&operation, &revision)?,
         Cmd::Project { command } => {
             let record = match command {
                 ProjectCommand::Create { file } => {
@@ -773,6 +815,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     println!("{}", serde_json::to_string_pretty(&page)?);
                     return Ok(());
                 }
+                WorkItemCommand::Assigned { file } => {
+                    let page = c.assigned_work(&serde_json::from_value(input(&file)?)?)?;
+                    println!("{}", serde_json::to_string_pretty(&page)?);
+                    return Ok(());
+                }
                 WorkItemCommand::List {
                     project_id,
                     after_id,
@@ -798,6 +845,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     revision,
                     assignee,
                 } => c.reassign_work_item(&id, &revision, &assignee)?,
+                WorkItemCommand::Reprioritize {
+                    id,
+                    revision,
+                    priority,
+                } => c.reprioritize_work_item(&id, &revision, priority.into())?,
                 WorkItemCommand::Abandon {
                     id,
                     revision,

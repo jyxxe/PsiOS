@@ -79,6 +79,8 @@ pub enum Action {
     StartWorkflow(workflow::StartBlueprint),
     #[serde(rename = "project.submit_evidence")]
     SubmitWorkItemEvidence(project::agent_tool::Input),
+    #[serde(rename = "project.list_assigned_work")]
+    ListAssignedWork(project::assigned::Input),
     #[serde(rename = "node.inventory")]
     Inventory {},
     #[serde(rename = "node.pressure")]
@@ -218,6 +220,7 @@ impl Action {
             Self::StartAgentSession(blueprint) => blueprint.validate()?,
             Self::StartWorkflow(blueprint) => blueprint.validate()?,
             Self::SubmitWorkItemEvidence(input) => input.validate()?,
+            Self::ListAssignedWork(input) => input.validate()?,
             Self::Processes(p) => p.validate()?,
             Self::InspectProcess(p) => p.validate()?,
             Self::Interfaces(q) => q.validate()?,
@@ -344,6 +347,7 @@ impl Action {
             Self::StartAgentSession(blueprint) => return blueprint.model(db),
             Self::StartWorkflow(blueprint) => return blueprint.definition(db, actor),
             Self::SubmitWorkItemEvidence(input) => return input.target(db, actor),
+            Self::ListAssignedWork(input) => return input.target(db, actor),
             Self::NetworkProbe(target) | Self::ObserveNetworkProbe(target) => {
                 return node::network::probe::target(db, target);
             }
@@ -626,6 +630,7 @@ impl Work {
                 | Action::InspectProcess(_)
                 | Action::ObserveNetworkProbe(_)
                 | Action::InspectNetworkTrial(_)
+                | Action::ListAssignedWork(_)
                 | Action::ListAppReleases(_)
                 | Action::InstallArtifact(_)
                 | Action::StageArtifactRelease(_)
@@ -739,6 +744,10 @@ impl Work {
             Action::SubmitWorkItemEvidence(_) => Err(err(
                 "RecoveryRequired",
                 "work item evidence requires the authority transaction",
+            )),
+            Action::ListAssignedWork(_) => Err(err(
+                "RecoveryRequired",
+                "assigned work discovery requires the authority transaction",
             )),
             Action::ServiceInspect(_)
             | Action::ServiceObserve(_)
@@ -1059,7 +1068,7 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
 }
 pub fn apply(db: &Db<'_>, w: &Work, receipt: &Value) -> Result<Value> {
     match w.action {
-        Action::SubmitWorkItemEvidence(_) => Ok(receipt.clone()),
+        Action::SubmitWorkItemEvidence(_) | Action::ListAssignedWork(_) => Ok(receipt.clone()),
         Action::ObserveNetworkProbe(_) => node::network::probe::state::publish(db, w, receipt),
         Action::ServiceObserve(_) => node::service_state::publish(db, w, receipt),
         Action::ServiceStart(_) | Action::ServiceStop(_) | Action::ServiceRestart(_) => {

@@ -190,7 +190,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = artifact::retention::selection::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = crate::node::network::trial::ROLLBACK_FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -504,6 +504,9 @@ impl Store {
                 }
                 if ver < artifact::retention::selection::FORMAT {
                     db.c.execute_batch(artifact::retention::selection::SCHEMA)?;
+                }
+                if ver < project::assigned::FORMAT {
+                    db.c.execute_batch(project::assigned::SCHEMA)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

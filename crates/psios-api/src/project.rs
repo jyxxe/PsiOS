@@ -3,6 +3,7 @@ use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
 pub const WORK_ITEM_EVIDENCE_TOOL: &str = "project.submit_evidence";
+pub const ASSIGNED_WORK_TOOL: &str = "project.list_assigned_work";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -63,6 +64,15 @@ pub enum WorkItemCriterion {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+pub enum WorkItemPriority {
+    Low,
+    #[default]
+    Normal,
+    High,
+    Urgent,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateWorkItem {
@@ -73,6 +83,8 @@ pub struct CreateWorkItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub assignee_principal_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<WorkItemPriority>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -87,6 +99,22 @@ pub struct SubmitWorkItemEvidence {
     pub expected_resource_version: String,
     pub task_ref: ResourceRef,
     pub artifact_ref: ResourceRef,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssignedWorkRequest {
+    pub project_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_project_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub include_blocked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_priority: Option<WorkItemPriority>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -219,6 +247,23 @@ impl Client {
         )
     }
 
+    /// List ready work assigned to the calling contributor in one Project.
+    pub fn assigned_work(&self, request: &AssignedWorkRequest) -> ApiResult<WorkItemPage> {
+        self.project_request("WorkItem.Assigned", request)
+    }
+
+    /// Discover assigned work through an authorized read-only Task.
+    pub fn submit_assigned_work_task(
+        &self,
+        request: &AssignedWorkRequest,
+        key: &str,
+        delegation: &str,
+    ) -> ApiResult<Value> {
+        let input =
+            serde_json::to_value(request).map_err(|_| invalid("invalid assigned work request"))?;
+        self.submit(ASSIGNED_WORK_TOOL, input, key, delegation)
+    }
+
     pub fn submit_work_item_evidence(
         &self,
         request: &SubmitWorkItemEvidence,
@@ -266,6 +311,18 @@ impl Client {
         self.project_request(
             "WorkItem.Reassign",
             &json!({"id":id,"expected_resource_version":revision,"assignee_principal_id":assignee_principal_id}),
+        )
+    }
+
+    pub fn reprioritize_work_item(
+        &self,
+        id: &str,
+        revision: &str,
+        priority: WorkItemPriority,
+    ) -> ApiResult<ProjectRecord> {
+        self.project_request(
+            "WorkItem.Reprioritize",
+            &json!({"id":id,"expected_resource_version":revision,"priority":priority}),
         )
     }
 

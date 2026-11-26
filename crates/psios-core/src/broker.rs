@@ -20,8 +20,9 @@ pub(crate) use approval::decide;
 pub(crate) use execution::finish;
 pub(crate) use execution::{claim, dispatch, dispatch_failed, finish_host, settlement_failed};
 pub(crate) use network_trial::{
-    authorize_network_trial_confirm, expire_network_trials, finish_network_trial_confirm,
-    network_trial_confirmation, prepare_network_trial_confirm,
+    authorize_network_trial_confirm, authorize_network_trial_rollback, expire_network_trials,
+    finish_network_trial_confirm, finish_network_trial_rollback, network_trial_confirmation,
+    prepare_network_trial_confirm, prepare_network_trial_rollback,
 };
 use psios_api::{VERSION, canonical, contract, digest, id, sha256};
 pub(crate) use recovery::{

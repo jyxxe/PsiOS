@@ -44,7 +44,7 @@ fn reason_ok(reason: &str) -> bool {
     !reason.trim().is_empty() && reason.len() <= 512 && !reason.chars().any(char::is_control)
 }
 
-fn awaiting_assignment(item: &Doc) -> bool {
+pub(super) fn awaiting_assignment(item: &Doc) -> bool {
     item.body["lifecycle"] == "Ready" && item.body.get("evidence_ref").is_none()
 }
 
@@ -162,7 +162,7 @@ pub(super) fn abandonment_view(item: &Doc) -> Value {
         "abandoned_by_principal_id":change["abandoned_by_principal_id"],"abandoned_at":change["abandoned_at"]})
 }
 
-fn sequence(conn: &Connection, doc: &Doc) -> Result<i64> {
+pub(super) fn sequence(conn: &Connection, doc: &Doc) -> Result<i64> {
     Ok(conn.query_row(
         "SELECT seq FROM versions WHERE id=?1 AND rev=?2",
         params![doc.id, doc.rev],
@@ -170,7 +170,7 @@ fn sequence(conn: &Connection, doc: &Doc) -> Result<i64> {
     )?)
 }
 
-fn preceding(conn: &Connection, id: &str, kind: &str, position: i64) -> Result<Doc> {
+pub(super) fn preceding(conn: &Connection, id: &str, kind: &str, position: i64) -> Result<Doc> {
     conn.query_row(
         "SELECT * FROM versions WHERE id=?1 AND kind=?2 AND seq<?3 ORDER BY seq DESC LIMIT 1",
         params![id, kind, position],
@@ -180,7 +180,7 @@ fn preceding(conn: &Connection, id: &str, kind: &str, position: i64) -> Result<D
     .ok_or_else(invalid_state)
 }
 
-fn manager_project(
+pub(super) fn manager_project(
     conn: &Connection,
     item: &Doc,
     reference: &Value,
@@ -305,8 +305,9 @@ pub(super) fn verify_history(
     conn: &Connection,
     original: &Doc,
     current: &Doc,
-    maintenance_enabled: bool,
+    format: u32,
 ) -> Result<Option<Doc>> {
+    let maintenance_enabled = format >= MAINTENANCE_FORMAT;
     require(
         original.generation == 1
             && original.body
@@ -329,7 +330,14 @@ pub(super) fn verify_history(
             "RecoveryRequired",
             "work item has an invalid revision sequence",
         )?;
-        if next.spec != previous.spec {
+        if priority::changed(&previous, &next) {
+            require(
+                format >= priority::FORMAT,
+                "RecoveryRequired",
+                "work item reprioritization requires the priority format",
+            )?;
+            priority::verify_change(conn, &previous, &next)?;
+        } else if next.spec != previous.spec {
             require(
                 maintenance_enabled,
                 "RecoveryRequired",

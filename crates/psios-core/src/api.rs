@@ -207,10 +207,12 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "WorkItem.RevisionGet" => project::history::revision::get(db, actor, p),
         "WorkItem.List" => project::list_items(db, actor, p),
         "WorkItem.Children" => project::hierarchy::children(db, actor, p),
+        "WorkItem.Assigned" => project::assigned::list(db, actor, p),
         "WorkItem.SubmitEvidence" => project::submit_evidence(db, actor, p),
         "WorkItem.Review" => project::review(db, actor, p),
         "WorkItem.Close" => project::close(db, actor, p),
         "WorkItem.Reassign" => project::reassign(db, actor, p),
+        "WorkItem.Reprioritize" => project::priority::reprioritize(db, actor, p),
         "WorkItem.Abandon" => project::abandon(db, actor, p),
         "Conversation.OpenDirect" => chat::open(db, actor, p),
         "Conversation.OpenRoom" => chat::open_room(db, actor, p),
@@ -329,6 +331,7 @@ impl Store {
                     | "WorkItem.Review"
                     | "WorkItem.Close"
                     | "WorkItem.Reassign"
+                    | "WorkItem.Reprioritize"
                     | "WorkItem.Abandon"
                     | "Conversation.OpenDirect"
                     | "Conversation.OpenRoom"
@@ -434,6 +437,39 @@ impl Store {
     ) -> Result<Value> {
         self.authorized_request(peer, request, |db, actor| {
             broker::finish_network_trial_confirm(db, actor, job, result)
+        })
+    }
+
+    pub(crate) fn prepare_network_trial_rollback(
+        &mut self,
+        peer: u32,
+        request: &Request,
+    ) -> Result<node::network::trial::Rollback> {
+        self.authorized_request(peer, request, |db, actor| {
+            broker::prepare_network_trial_rollback(db, actor, &request.params)
+        })
+    }
+
+    pub(crate) fn authorize_network_trial_rollback(
+        &mut self,
+        peer: u32,
+        request: &Request,
+        job: &node::network::trial::Rollback,
+    ) -> Result<()> {
+        self.authorized_request(peer, request, |db, actor| {
+            broker::authorize_network_trial_rollback(db, actor, &request.params, job)
+        })
+    }
+
+    pub(crate) fn finish_network_trial_rollback(
+        &mut self,
+        peer: u32,
+        request: &Request,
+        job: &node::network::trial::Rollback,
+        result: Result<node::network::trial::RollbackReceipt>,
+    ) -> Result<Value> {
+        self.authorized_request(peer, request, |db, actor| {
+            broker::finish_network_trial_rollback(db, actor, job, result)
         })
     }
 

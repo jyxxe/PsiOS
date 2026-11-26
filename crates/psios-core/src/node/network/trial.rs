@@ -1,4 +1,7 @@
 //! Custody for one locally approved NetworkManager profile trial.
+pub(crate) mod rollback_verify;
+
+pub(crate) use super::managed::RollbackReceipt;
 use super::managed::{self, Activation, Checkpoint, Observation, Snapshot};
 use crate::{
     Result,
@@ -16,10 +19,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub(crate) const FORMAT: u32 = crate::node::service_manager::FORMAT + 1;
+pub(crate) const ROLLBACK_FORMAT: u32 = crate::project::priority::FORMAT + 1;
 pub(crate) const TOOL: &str = "network.trial";
 pub(crate) const INSPECT: &str = "network.inspect_trial";
 pub(crate) const WAITING: &str = "WaitingInput";
 const JOURNAL: &str = "NetworkTrialJournal";
+const ROLLBACK_RECEIPT: &str = "NetworkTrialRollbackReceipt";
 const BOOT_MARGIN_MS: i64 = 3_000;
 
 #[derive(Deserialize)]
@@ -65,6 +70,7 @@ enum Phase {
     Activated,
     AwaitingConfirmation,
     ConfirmIssued,
+    RollbackIssued,
     Committed,
     RolledBack,
     Aborted,
@@ -135,6 +141,22 @@ struct Journal {
     checkpoint: Option<Checkpoint>,
     activation: Option<Activation>,
     confirmation_attempt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rollback_issue: Option<RollbackIssue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rollback_receipt_ref: Option<Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RollbackIssue {
+    attempt: String,
+    operation_ref: Value,
+    previous_journal_ref: Value,
+}
+
+fn rollback_receipt_id(operation: &str) -> String {
+    format!("network-trial-rollback-{operation}")
 }
 
 struct Custody {
@@ -294,6 +316,8 @@ pub(crate) fn begin(db: &Db<'_>, work: &Work) -> Result<()> {
         checkpoint: None,
         activation: None,
         confirmation_attempt: None,
+        rollback_issue: None,
+        rollback_receipt_ref: None,
     };
     db.create(
         JOURNAL,
@@ -557,7 +581,7 @@ pub(crate) fn should_expire(db: &Db<'_>, op: &Doc, task: &Doc) -> Result<bool> {
         Phase::AwaitingConfirmation => {
             Ok(custody.deadline()?.expired(0)? || custody.authorize(db, op, task).is_err())
         }
-        Phase::ConfirmIssued => custody.deadline()?.expired(0),
+        Phase::ConfirmIssued | Phase::RollbackIssued => custody.deadline()?.expired(0),
         _ => Err(err(
             "RecoveryRequired",
             "parked network trial has an invalid custody phase",
@@ -565,8 +589,11 @@ pub(crate) fn should_expire(db: &Db<'_>, op: &Doc, task: &Doc) -> Result<bool> {
     }
 }
 
-pub(crate) fn confirmation_issued(db: &Db<'_>, op: &Doc) -> Result<bool> {
-    Ok(Custody::load(db, op)?.journal.phase == Phase::ConfirmIssued)
+pub(crate) fn terminal_issued(db: &Db<'_>, op: &Doc) -> Result<bool> {
+    Ok(matches!(
+        Custody::load(db, op)?.journal.phase,
+        Phase::ConfirmIssued | Phase::RollbackIssued
+    ))
 }
 
 #[derive(Deserialize)]
@@ -607,6 +634,13 @@ fn awaiting(db: &Db<'_>, actor: &str, id: &str, version: &str) -> Result<(Doc, C
     policy::admin(actor)?;
     let op = db.of(id, "Operation")?;
     op.cas(version)?;
+    require(
+        op.owner == actor
+            && op.body["lifecycle"] == "WaitingDependency"
+            && op.body["outcome_knowledge"] == "InFlight",
+        "PreconditionFailed",
+        "network trial is no longer awaiting this terminal decision",
+    )?;
     let custody = Custody::load(db, &op)?;
     let task = db.of(op.spec["task_id"].as_str().unwrap_or_default(), "Task")?;
     let phase: String =
@@ -614,10 +648,7 @@ fn awaiting(db: &Db<'_>, actor: &str, id: &str, version: &str) -> Result<(Doc, C
             row.get(0)
         })?;
     require(
-        op.owner == actor
-            && op.body["lifecycle"] == "WaitingDependency"
-            && op.body["outcome_knowledge"] == "InFlight"
-            && phase == WAITING
+        phase == WAITING
             && task.body["lifecycle"] == WAITING
             && custody.journal.phase == Phase::AwaitingConfirmation,
         "PreconditionFailed",
@@ -737,6 +768,137 @@ pub(crate) fn confirm_result(
     Ok((op, settled))
 }
 
+pub(crate) struct Rollback {
+    operation_id: String,
+    issue: RollbackIssue,
+    snapshot: Snapshot,
+    checkpoint: Checkpoint,
+    activation: Activation,
+}
+
+impl Rollback {
+    pub(crate) fn perform(
+        &self,
+        before_effect: impl FnOnce() -> Result<()>,
+    ) -> Result<RollbackReceipt> {
+        managed::rollback(
+            &self.snapshot,
+            &self.checkpoint,
+            &self.activation,
+            before_effect,
+        )
+    }
+}
+
+pub(crate) fn prepare_rollback(db: &Db<'_>, actor: &str, params: &Value) -> Result<Rollback> {
+    let request: Target = decode(params)?;
+    let (op, custody) = awaiting(db, actor, &request.id, &request.expected_resource_version)?;
+    let (snapshot, checkpoint) = custody.pair()?;
+    Ok(Rollback {
+        issue: RollbackIssue {
+            attempt: id("network-rollback"),
+            operation_ref: op.reference(),
+            previous_journal_ref: custody.document.reference(),
+        },
+        operation_id: op.id,
+        snapshot: snapshot.clone(),
+        checkpoint: checkpoint.clone(),
+        activation: custody.activation()?.clone(),
+    })
+}
+
+pub(crate) fn authorize_rollback(
+    db: &Db<'_>,
+    actor: &str,
+    params: &Value,
+    job: &Rollback,
+) -> Result<()> {
+    let request: Target = decode(params)?;
+    let (op, mut custody) = awaiting(db, actor, &request.id, &request.expected_resource_version)?;
+    require(
+        op.reference() == job.issue.operation_ref
+            && custody.document.reference() == job.issue.previous_journal_ref,
+        "Fenced",
+        "network rollback lease changed during live validation",
+    )?;
+    custody.journal.phase = Phase::RollbackIssued;
+    custody.journal.rollback_issue = Some(job.issue.clone());
+    custody.save(db)?;
+    db.audit(actor, "NetworkTrial.Rollback", Some(&op.id), "Dispatched")
+}
+
+pub(crate) fn rollback_result(
+    db: &Db<'_>,
+    actor: &str,
+    job: &Rollback,
+    result: Result<RollbackReceipt>,
+) -> Result<(Doc, Option<(RollbackReceipt, Value)>)> {
+    policy::admin(actor)?;
+    let op = db.of(&job.operation_id, "Operation")?;
+    require(
+        op.reference() == job.issue.operation_ref
+            && op.owner == actor
+            && op.body["outcome_knowledge"] == "InFlight",
+        "Fenced",
+        "network rollback receipt is no longer current",
+    )?;
+    let custody = Custody::load(db, &op)?;
+    if custody.journal.phase == Phase::AwaitingConfirmation {
+        return match result {
+            Err(error) => Err(error),
+            Ok(_) => Err(err(
+                "Fenced",
+                "network rollback has no committed invocation",
+            )),
+        };
+    }
+    require(
+        custody.journal.phase == Phase::RollbackIssued
+            && custody.journal.rollback_issue.as_ref() == Some(&job.issue),
+        "Fenced",
+        "network rollback receipt does not own the invocation",
+    )?;
+    let settled = result
+        .ok()
+        .filter(|receipt| receipt.matches(&job.snapshot))
+        .map(|receipt| {
+            (
+                receipt,
+                json!({"publication":"RolledBack","link_ref":custody.journal.link_ref}),
+            )
+        });
+    Ok((op, settled))
+}
+
+pub(crate) fn record_rollback(
+    db: &Db<'_>,
+    op: &Doc,
+    job: &Rollback,
+    acknowledgement: &RollbackReceipt,
+    artifact: &Doc,
+) -> Result<()> {
+    let mut custody = Custody::load(db, op)?;
+    require(
+        custody.journal.phase == Phase::RollbackIssued
+            && custody.journal.rollback_issue.as_ref() == Some(&job.issue)
+            && custody.journal.rollback_receipt_ref.is_none(),
+        "Fenced",
+        "network rollback no longer occupies its original invocation",
+    )?;
+    let record = db.create(
+        ROLLBACK_RECEIPT,
+        &rollback_receipt_id(&op.id),
+        &op.owner,
+        json!({"operation_id":op.id}),
+        json!({"operation_ref":op.reference(),"issued_journal_ref":custody.document.reference(),
+            "link_ref":custody.journal.link_ref,"result_artifact_ref":artifact.reference(),
+            "attempt":job.issue.attempt,"acknowledgement":acknowledgement}),
+    )?;
+    custody.journal.phase = Phase::RolledBack;
+    custody.journal.rollback_receipt_ref = Some(record.reference());
+    custody.save(db)
+}
+
 pub(crate) fn mark_settled(db: &Db<'_>, op: &Doc, committed: bool) -> Result<()> {
     let mut custody = Custody::load(db, op)?;
     custody.journal.phase = if committed {
@@ -838,9 +1000,10 @@ pub(crate) fn inspect(db: &Db<'_>, op: &Doc) -> Result<Inspection> {
     let (scope, checkpoint) = custody.pair()?;
     let activation = match custody.journal.phase {
         Phase::CheckpointOwned => None,
-        Phase::Activated | Phase::AwaitingConfirmation | Phase::ConfirmIssued => {
-            Some(custody.activation()?.clone())
-        }
+        Phase::Activated
+        | Phase::AwaitingConfirmation
+        | Phase::ConfirmIssued
+        | Phase::RollbackIssued => Some(custody.activation()?.clone()),
         _ => {
             return Err(err(
                 "OutcomeUnknown",
@@ -890,8 +1053,8 @@ fn needed(conn: &Connection, id: &str) -> Result<Doc> {
     find(conn, id)?.ok_or_else(|| err("RecoveryRequired", "network trial record is missing"))
 }
 
-pub(crate) fn verify_active(conn: &Connection) -> Result<()> {
-    verify_active_records(conn).map_err(|error| {
+pub(crate) fn verify_active(conn: &Connection, format: u32) -> Result<()> {
+    verify_active_records(conn, format).map_err(|error| {
         if error.0.code == "RecoveryRequired" {
             error
         } else {
@@ -903,7 +1066,48 @@ pub(crate) fn verify_active(conn: &Connection) -> Result<()> {
     })
 }
 
-fn verify_active_records(conn: &Connection) -> Result<()> {
+fn verify_active_rollback(conn: &Connection, custody: &Custody, op: &Doc) -> Result<()> {
+    let issue = custody.journal.rollback_issue.as_ref().ok_or_else(|| {
+        err(
+            "RecoveryRequired",
+            "active network rollback has no dispatch evidence",
+        )
+    })?;
+    let previous = resolve(conn, &issue.previous_journal_ref)?;
+    let armed_op = resolve(conn, &issue.operation_ref)?;
+    let mut expected = previous.body.clone();
+    require(
+        expected.is_object(),
+        "RecoveryRequired",
+        "network rollback predecessor is unreadable",
+    )?;
+    expected["phase"] = json!(Phase::RollbackIssued);
+    expected["rollback_issue"] = serde_json::to_value(issue)?;
+    require(
+        !issue.attempt.is_empty()
+            && previous.id == custody.document.id
+            && previous.owner == op.owner
+            && previous.rev.checked_add(1) == Some(custody.document.rev)
+            && previous.kind == JOURNAL
+            && previous.spec == custody.document.spec
+            && previous.body["phase"] == "AwaitingConfirmation"
+            && previous.body.get("rollback_issue").is_none()
+            && previous.body.get("rollback_receipt_ref").is_none()
+            && expected == custody.document.body
+            && armed_op.id == op.id
+            && armed_op.kind == "Operation"
+            && armed_op.owner == op.owner
+            && armed_op.spec == op.spec
+            && armed_op.body["lifecycle"] == "WaitingDependency"
+            && armed_op.body["outcome_knowledge"] == "InFlight"
+            && armed_op.body["effect_refs"][0]["resource_id"]
+                == op.body["effect_refs"][0]["resource_id"],
+        "RecoveryRequired",
+        "active network rollback does not bind its parked predecessor",
+    )
+}
+
+fn verify_active_records(conn: &Connection, format: u32) -> Result<()> {
     let mut selected = conn.prepare(
         "SELECT q.operation FROM queue q JOIN current t ON q.task=t.id
            WHERE q.phase IN ('Dispatched','WaitingInput','Unknown') AND t.spec->>'task_type'=?1
@@ -914,6 +1118,9 @@ fn verify_active_records(conn: &Connection) -> Result<()> {
     for operation in selected.query_map([TOOL], |row| row.get::<_, String>(0))? {
         let op = needed(conn, &operation?)?;
         let custody = Custody::read(conn, &op)?;
+        if custody.journal.phase == Phase::RollbackIssued {
+            verify_active_rollback(conn, &custody, &op)?;
+        }
         let j = custody.journal;
         let task = needed(conn, j.task_ref["resource_id"].as_str().unwrap_or_default())?;
         let run = needed(conn, j.run_ref["resource_id"].as_str().unwrap_or_default())?;
@@ -935,21 +1142,28 @@ fn verify_active_records(conn: &Connection) -> Result<()> {
             Phase::CheckpointOwned | Phase::ActivateIssued => {
                 j.checkpoint.is_some() && j.activation.is_none()
             }
-            Phase::Activated | Phase::AwaitingConfirmation | Phase::ConfirmIssued => {
-                j.activation.is_some()
-            }
+            Phase::Activated
+            | Phase::AwaitingConfirmation
+            | Phase::ConfirmIssued
+            | Phase::RollbackIssued => j.activation.is_some(),
             _ => false,
         };
         let lease = match state.as_str() {
             "Dispatched" => {
                 op.body["lifecycle"] == "Running"
                     && op.body["outcome_knowledge"] == "InFlight"
-                    && !matches!(j.phase, Phase::AwaitingConfirmation | Phase::ConfirmIssued)
+                    && !matches!(
+                        j.phase,
+                        Phase::AwaitingConfirmation | Phase::ConfirmIssued | Phase::RollbackIssued
+                    )
             }
             WAITING => {
                 op.body["lifecycle"] == "WaitingDependency"
                     && op.body["outcome_knowledge"] == "InFlight"
-                    && matches!(j.phase, Phase::AwaitingConfirmation | Phase::ConfirmIssued)
+                    && matches!(
+                        j.phase,
+                        Phase::AwaitingConfirmation | Phase::ConfirmIssued | Phase::RollbackIssued
+                    )
             }
             "Unknown" => op.body["outcome_knowledge"] == "Unknown" && issued,
             _ => false,
@@ -969,7 +1183,10 @@ fn verify_active_records(conn: &Connection) -> Result<()> {
                     }
                 && issued == j.deadline.is_some()
                 && issued == j.snapshot.is_some()
-                && (j.phase == Phase::ConfirmIssued) == j.confirmation_attempt.is_some(),
+                && (j.phase == Phase::ConfirmIssued) == j.confirmation_attempt.is_some()
+                && (j.phase == Phase::RollbackIssued) == j.rollback_issue.is_some()
+                && j.rollback_receipt_ref.is_none()
+                && (j.rollback_issue.is_none() || format >= ROLLBACK_FORMAT),
             "RecoveryRequired",
             "active network trial custody disagrees with its queue or worker",
         )?;

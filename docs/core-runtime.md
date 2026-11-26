@@ -324,6 +324,18 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 
 `psiosctl task-result-eviction-apply` 可直接读取计划输出的 JSON。回执中的 `content_bytes_removed` 记录释放的逻辑载荷字节数。离线核验检查同一事务内各项回执、历史 Task 修订和分块确实已删除。[跨模块保留与回滚验收](../tests/test_task_result_eviction_batch.py)
 
+#### 预约回收固定结果
+
+在预检请求中设置 `delay_seconds`，取值为 1 至 86400 秒。预检令牌同时绑定回收清单和延时。所有者在两分钟内调用 `Task.ScheduleResultEvictionBatch`，或将同一计划传给 `psiosctl task-result-eviction-schedule`，Core 从预约受理起按 Linux `CLOCK_BOOTTIME` 计时。节点最多同时保留 64 个待处理预约。同一令牌重复提交会返回原预约的当前状态。
+
+`Task.GetResultEvictionSchedule` 返回当前状态和精确版本。所有者可以用 `Task.CancelResultEvictionSchedule` 加预约 ID 和 `expected_resource_version` 取消待处理版本。对应 CLI 是 `task-result-eviction-schedule-get ID` 和 `task-result-eviction-schedule-cancel ID REVISION`。Rust SDK 提供相同操作。
+
+同次 Linux 启动内，进程强杀或重启后会继续处理到期预约。到期时重新核对权威、授权代次、启动身份、计时命名空间、每项修订和新的保留关系。权威或计时范围变化将预约置为 `Suspended`，结果变动或新增保留将整批置为 `Rejected`。管理员可重新预检并提交新计划。界面中的 UTC 到期时间用于展示，实际准入依据经过时间。
+
+回收分块、更新 Task、写入逐项回执及整批回执、结算预约在一个持久事务内完成。成功预约链接到批次回执，批次也链接到原预约版本。离线核验检查双向引用及原始回收清单。[进程与权限验收](../tests/test_delayed_result_eviction.py) · [格式 90 升级](../tests/delayed_result_eviction_upgrade.py)
+
+新预约遵循节点的权威存储预留。已有预约仍可查阅、取消或到期处理。批次遇到写入错误会整批回滚，其他到期预约继续处理。报告的释放量为原制品的逻辑字节数。
+
 ## 本机制品暂存与发布
 
 `Artifact.UploadProfile` 公布 `OpaqueBytesV1` 的分块、大小、暂存期限及配额。上传主体需要以本机 Node 为目标的 `artifact.upload` Grant。`Artifact.Stage` 固定提交键、预计字节数、SHA-256、声明媒体类型和期限。`Artifact.Stage.PutChunk` 按已提交偏移接收 128 KiB 定长块及末块。中断后通过 `Artifact.Stage.Get` 取得继续位置，用同一键和输入恢复。

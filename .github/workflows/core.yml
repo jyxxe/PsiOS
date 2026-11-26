@@ -572,6 +572,12 @@ jobs:
           git archive a3d7b4784163defb171de8516b5d640897e42911 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format88"
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format88" "$RUNNER_TEMP/psios-compatibility-target"
           python3 -B tests/work_item_priority_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
+      - name: Preserve format 90 results and manual receipts while enabling delayed eviction
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format90"
+          git archive f197dc87f05fe8b3ee2fd5754796e5f2141549f9 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format90"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format90" "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/delayed_result_eviction_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

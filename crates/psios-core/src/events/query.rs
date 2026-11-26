@@ -243,6 +243,12 @@ mod tests {
         let public = insert(&conn, "public", "Task", policy::SYSTEM);
         let wrong_kind = insert(&conn, "wrong-kind", "Input", "agent");
         let second = insert(&conn, "second", "Task", "agent");
+        insert(
+            &conn,
+            "private-eviction-schedule",
+            crate::artifact::retention::delayed::KIND,
+            policy::OWNER,
+        );
         conn.execute_batch(
             "WITH RECURSIVE n(rev) AS (VALUES(2) UNION ALL SELECT rev+1 FROM n WHERE rev<12000)
              INSERT INTO versions(id,rev,gen,kind,owner,spec,body,created,stamp,event_id,correlation,incarnation)
@@ -274,7 +280,9 @@ mod tests {
                 (second, second)
             ]
         );
-        assert!(steps < 400, "{steps}");
+        // This ceiling includes the fixed SQL setup cost for the private-kind
+        // filter. The scan must remain independent of the 12,000 revisions.
+        assert!(steps < 425, "{steps}");
         scope.actor = policy::OWNER.into();
         let (items, steps) = page(&conn, &scope, View::Snapshot, 8);
         assert_eq!(

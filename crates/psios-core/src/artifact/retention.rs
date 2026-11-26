@@ -1,4 +1,5 @@
 pub(crate) mod batch;
+pub(crate) mod delayed;
 pub(crate) mod selection;
 
 use super::{CHUNK_BYTES, Manifest, is_task_output, repair, stored_digest};

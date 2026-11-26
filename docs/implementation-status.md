@@ -15,6 +15,7 @@
 ## 任务结果保留与回收
 
 - 本机所有者可按主体和截止时间发现候选。固定分页水位内会逐页检查当前 Task 修订和保留关系，查询仅用制品清单计算候选字节数。预检签发短时计划，执行原子回收最多 16 个已结算的只读结果，保留原 Task 和独立回执。[候选验收](../tests/test_result_eviction_candidates.py) · [批量回滚与重放](../tests/test_task_result_eviction_batch.py)
+- 所有者可给固定批次预约回收。守护进程重启保持到期时间，授权或启动身份变化暂停原预约。已验证并发取消、到期前新增证据保留、部分写故障回滚、其他到期批次继续执行，以及配置权威存储预留后仍可结算已有预约。真实格式 90→91 升级保留旧结果和手工回收回执。[预约回收验收](../tests/test_delayed_result_eviction.py) · [真实旧格式升级](../tests/delayed_result_eviction_upgrade.py)
 - 在途 Workflow、Agent 会话、Task 依赖、网络与恢复观测以及 WorkItem 审核按各自规则保存引用。已验证预检后新增证据会阻止整批回收、删除失败恢复原分块，以及在旧版结果和回执上执行升级。自动保留策略和整个历史账本的压缩仍待开发。[运行协议](core-runtime.md#批量回收任务结果字节) · [真实旧格式升级](../tests/result_eviction_candidates_upgrade.py)
 
 ## 工作项查询和备用网口

@@ -135,6 +135,42 @@ fn member(
     )
 }
 
+fn check_schedule(conn: &Connection, batch: &Entry, plan_digest: &str, start: i64) -> Result<()> {
+    let schedule_id = retention::delayed::schedule_id(plan_digest);
+    let mut revisions = conn.prepare_cached("SELECT * FROM versions WHERE id=?1 AND rev=?2")?;
+    let accepted = revisions
+        .query_row(params![schedule_id, 1], entry)
+        .optional()?
+        .ok_or_else(invalid)?;
+    let settled = revisions
+        .query_row(params![schedule_id, 2], entry)
+        .optional()?
+        .ok_or_else(invalid)?;
+    let schedule_ref = accepted.doc.reference();
+    require(
+        accepted.doc.kind == retention::delayed::KIND
+            && accepted.doc.owner == batch.doc.owner
+            && accepted.doc.spec == batch.doc.spec
+            && accepted.doc.body["lifecycle"] == "Scheduled"
+            && accepted.doc.body["plan_digest"] == plan_digest
+            && accepted.seq < start
+            && accepted.incarnation == batch.incarnation
+            && batch.doc.body["schedule_ref"] == schedule_ref
+            && settled.doc.kind == accepted.doc.kind
+            && settled.doc.owner == accepted.doc.owner
+            && settled.doc.spec == accepted.doc.spec
+            && settled.doc.body["lifecycle"] == "Evicted"
+            && settled.doc.body["plan_digest"] == plan_digest
+            && settled.doc.body["scheduled_ref"] == schedule_ref
+            && settled.doc.body["batch_ref"] == batch.doc.reference()
+            && settled.incarnation == batch.incarnation
+            && settled.correlation == batch.correlation
+            && batch.seq.checked_add(1) == Some(settled.seq),
+        "RecoveryRequired",
+        "delayed eviction batch is not bound to exact schedule acceptance and settlement",
+    )
+}
+
 fn check_batch(conn: &Connection, authority: &str, batch: &Entry) -> Result<()> {
     let record = &batch.doc;
     let plan: Plan = decode(&record.spec["plan"])?;
@@ -148,6 +184,17 @@ fn check_batch(conn: &Connection, authority: &str, batch: &Entry) -> Result<()> 
         [&record.id],
         |r| r.get(0),
     )?;
+    let mut expected = json!({
+        "plan_digest":digest,
+        "reason":plan.reason,
+        "eviction_refs":references,
+        "content_bytes_removed":plan.content_bytes.to_string(),
+        "evicted_at":record.body["evicted_at"],
+        "evicted_by":policy::OWNER,
+    });
+    if plan.delay_seconds.is_some() {
+        expected["schedule_ref"] = record.body["schedule_ref"].clone();
+    }
     require(
         record.id == receipt_id(&digest)
             && record.rev == 1
@@ -159,15 +206,7 @@ fn check_batch(conn: &Connection, authority: &str, batch: &Entry) -> Result<()> 
             && !revised
             && record.spec == json!({"plan":plan})
             && stamped(&record.body["evicted_at"])
-            && record.body
-                == json!({
-                    "plan_digest":digest,
-                    "reason":plan.reason,
-                    "eviction_refs":references,
-                    "content_bytes_removed":plan.content_bytes.to_string(),
-                    "evicted_at":record.body["evicted_at"],
-                    "evicted_by":policy::OWNER,
-                })
+            && record.body == expected
             && references.len() == plan.items.len(),
         "RecoveryRequired",
         "batch aggregate does not bind its canonical plan and receipt set",
@@ -179,6 +218,9 @@ fn check_batch(conn: &Connection, authority: &str, batch: &Entry) -> Result<()> 
         .checked_sub(2 * count)
         .filter(|seq| *seq > 0)
         .ok_or_else(invalid)?;
+    if plan.delay_seconds.is_some() {
+        check_schedule(conn, batch, &digest, start)?;
+    }
     let mut statement =
         conn.prepare_cached("SELECT * FROM versions WHERE seq>=?1 AND seq<?2 ORDER BY seq")?;
     let mut history = statement.query_map(params![start, batch.seq], entry)?;
@@ -290,8 +332,10 @@ mod tests {
             let prepared = super::super::prepare(db, policy::OWNER, &json!({
                 "task_refs":[ready.reference(),other.reference()], "reason":"evict two read results",
             }))?;
+            assert!(prepared.get("delay_seconds").is_none());
             let token = prepared["plan_token"].as_str().unwrap();
             let mut expired = super::super::open(db, policy::OWNER, token)?;
+            assert!(serde_json::to_value(&expired)?.get("delay_seconds").is_none());
             expired.valid_until = crate::after(-1);
             let expired = super::super::seal(db, &expired)?;
             assert_eq!(super::super::apply(db, policy::OWNER, &json!({"plan_token":expired}))
@@ -301,8 +345,25 @@ mod tests {
             let foreign_clock = super::super::seal(db, &foreign_clock)?;
             assert_eq!(super::super::apply(db, policy::OWNER, &json!({"plan_token":foreign_clock}))
                 .unwrap_err().0.code, "DeadlineExceeded");
+            let mut delayed_request = json!({
+                "task_refs":[ready.reference(),other.reference()],
+                "reason":"opt in to later result eviction",
+            });
+            for delay in [0, 86_401] {
+                delayed_request["delay_seconds"] = json!(delay);
+                assert_eq!(super::super::prepare(db, policy::OWNER, &delayed_request)
+                    .unwrap_err().0.code, "InvalidArgument");
+            }
+            delayed_request["delay_seconds"] = json!(86_400);
+            let delayed = super::super::prepare(db, policy::OWNER, &delayed_request)?;
+            assert_eq!(delayed["delay_seconds"], 86_400);
+            assert_eq!(super::super::open(db, policy::OWNER, delayed["plan_token"].as_str().unwrap())?
+                .delay_seconds, Some(86_400));
+            assert_eq!(super::super::apply(db, policy::OWNER, &json!({"plan_token":delayed["plan_token"]}))
+                .unwrap_err().0.code, "PreconditionFailed");
             assert_eq!(db.of(&ready.id, "Task")?.reference(), ready.reference());
             let batch = super::super::apply(db, policy::OWNER, &json!({"plan_token":prepared["plan_token"]}))?;
+            assert!(batch["batch"].get("schedule_ref").is_none());
             check(db.c)?;
 
             let receipt = &batch["batch"]["eviction_refs"][0]["resource_id"];

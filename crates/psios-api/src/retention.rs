@@ -9,6 +9,8 @@ pub struct PrepareResultEvictionBatch {
     pub reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_content_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delay_seconds: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -54,6 +56,8 @@ pub struct ResultEvictionPlan {
     pub items: Vec<ResultEvictionPlanItem>,
     pub content_bytes: u64,
     pub valid_until: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delay_seconds: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -72,6 +76,49 @@ pub struct ResultEvictionBatchReceipt {
     pub content_bytes_removed: String,
     pub evicted_by: String,
     pub evicted_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule_ref: Option<ResourceRef>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub enum ResultEvictionScheduleLifecycle {
+    Scheduled,
+    Evicted,
+    Suspended,
+    Rejected,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResultEvictionSchedule {
+    pub reference: ResourceRef,
+    pub schedule: ResultEvictionScheduleStatus,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResultEvictionScheduleStatus {
+    pub lifecycle: ResultEvictionScheduleLifecycle,
+    pub plan_digest: String,
+    pub admitted_at: String,
+    pub admitted_boot_ms: i64,
+    pub due_at: String,
+    pub due_boot_ms: i64,
+    pub delay_seconds: u32,
+    pub reason: String,
+    pub content_bytes: u64,
+    pub items: Vec<ResultEvictionPlanItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settled_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduled_ref: Option<ResourceRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch_ref: Option<ResourceRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executed_boot_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 impl Client {
@@ -104,5 +151,36 @@ impl Client {
             json!({"plan_token":plan_token}),
         )?;
         serde_json::from_value(result).map_err(|_| invalid("invalid eviction batch receipt"))
+    }
+
+    /// Admit the delayed plan once, preserving the original schedule on retry.
+    pub fn schedule_result_eviction_batch(
+        &self,
+        plan_token: &str,
+    ) -> ApiResult<ResultEvictionSchedule> {
+        let result = self.call(
+            "Task.ScheduleResultEvictionBatch",
+            json!({"plan_token":plan_token}),
+        )?;
+        serde_json::from_value(result).map_err(|_| invalid("invalid eviction schedule"))
+    }
+
+    /// Read the current state and exact revision of an eviction schedule.
+    pub fn get_result_eviction_schedule(&self, id: &str) -> ApiResult<ResultEvictionSchedule> {
+        let result = self.call("Task.GetResultEvictionSchedule", json!({"id":id}))?;
+        serde_json::from_value(result).map_err(|_| invalid("invalid eviction schedule"))
+    }
+
+    /// Cancel the exact pending revision before it settles.
+    pub fn cancel_result_eviction_schedule(
+        &self,
+        id: &str,
+        expected_resource_version: &str,
+    ) -> ApiResult<ResultEvictionSchedule> {
+        let result = self.call(
+            "Task.CancelResultEvictionSchedule",
+            json!({"id":id,"expected_resource_version":expected_resource_version}),
+        )?;
+        serde_json::from_value(result).map_err(|_| invalid("invalid eviction schedule"))
     }
 }

@@ -322,6 +322,7 @@ fn timer(s: Shared, stop: Arc<AtomicBool>) -> Result<()> {
 fn reclaim_storage(s: Shared, stop: Arc<AtomicBool>, config: Config) -> Result<()> {
     let mut archive_cursor = String::new();
     let mut restore_cursor = String::new();
+    let mut eviction_cursor = crate::artifact::retention::delayed::Cursor::default();
     while !stop.load(Ordering::Acquire) {
         let correlation = id("storage-reclaim");
         if let Err(error) = reclaim_one_oci_archive(&s, &config, &correlation, &mut archive_cursor)
@@ -333,6 +334,19 @@ fn reclaim_storage(s: Shared, stop: Arc<AtomicBool>, config: Config) -> Result<(
         {
             eprintln!("psiosd restore stage reclamation: {}", error.0.code);
         }
+        let eviction_progress =
+            match state(&s)?.transaction(&id("result-eviction-schedule"), |db| {
+                if stop.load(Ordering::Acquire) {
+                    return Ok(false);
+                }
+                crate::artifact::retention::delayed::advance(db, &mut eviction_cursor)
+            }) {
+                Ok(progress) => progress,
+                Err(error) => {
+                    eprintln!("psiosd scheduled result eviction: {}", error.0.code);
+                    false
+                }
+            };
         let ready = state(&s)?.transaction(&correlation, |db| {
             crate::artifact::ingress::expire(db)?;
             retirement::next(db)
@@ -348,6 +362,7 @@ fn reclaim_storage(s: Shared, stop: Arc<AtomicBool>, config: Config) -> Result<(
                     }
                 }
             }
+            Ok(_) if eviction_progress => Duration::from_millis(50),
             Ok(_) => Duration::from_secs(1),
             Err(error) => {
                 eprintln!("psiosd storage reclamation admission: {}", error.0.code);

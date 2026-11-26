@@ -231,6 +231,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Message.AckRead" => chat::ack(db, actor, p),
         "Task.Prepare" => broker::prepare(db, actor, p),
         "Task.EvictResults" => artifact::retention::evict(db, actor, p),
+        "Task.ResultEvictionCandidates" => artifact::retention::selection::list(db, actor, p),
         "Task.PrepareResultEvictionBatch" => artifact::retention::batch::prepare(db, actor, p),
         "Task.ApplyResultEvictionBatch" => artifact::retention::batch::apply(db, actor, p),
         "Task.VerifyResults" => artifact::availability::verify(db, actor, p),

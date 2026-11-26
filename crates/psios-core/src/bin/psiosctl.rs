@@ -160,6 +160,11 @@ enum Cmd {
         #[arg(default_value = "-")]
         file: String,
     },
+    /// List unpinned result candidates using a JSON query from a file or stdin.
+    TaskResultEvictionCandidates {
+        #[arg(default_value = "-")]
+        file: String,
+    },
     /// Apply a result-eviction plan from a JSON file or stdin.
     TaskResultEvictionApply {
         #[arg(default_value = "-")]
@@ -830,6 +835,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::TaskResults { id } => c.task_results(&id)?,
         Cmd::TaskResultEvictionPlan { file } => serde_json::to_value(
             c.prepare_result_eviction_batch(&serde_json::from_value(input(&file)?)?)?,
+        )?,
+        Cmd::TaskResultEvictionCandidates { file } => serde_json::to_value(
+            c.result_eviction_candidates(&serde_json::from_value(input(&file)?)?)?,
         )?,
         Cmd::TaskResultEvictionApply { file } => {
             let plan = input(&file)?;

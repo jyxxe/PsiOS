@@ -1,5 +1,5 @@
 //! MCP 2026-07-28 per-request protocol and bounded STDIO work admission.
-use super::{Adapter, MAX_LINE, Protocol, descriptor, rpc_error};
+use super::{Adapter, MAX_LINE, Protocol, descriptor, rpc_error, tool_error, tool_result};
 use psios_api::{ApiError, ApiResult, Client, parse, task_wait_ready};
 use rustix::{
     event::{PollFd, PollFlags, Timespec, poll},
@@ -24,14 +24,39 @@ const VERSION_KEY: &str = "io.modelcontextprotocol/protocolVersion";
 const CAPABILITIES_KEY: &str = "io.modelcontextprotocol/clientCapabilities";
 const CLIENT_INFO_KEY: &str = "io.modelcontextprotocol/clientInfo";
 const SERVER_BUSY: i32 = -32009;
+const TASKS: &str = "io.modelcontextprotocol/tasks";
+const INVOCATION: &str = "io.psios/mcpInvocationKey";
 
 enum Request {
     Discover,
     List,
-    Call(Map<String, Value>),
+    Call(Map<String, Value>, Option<String>),
+    Task(TaskMethod, Map<String, Value>),
 }
 
-fn request(method: &str, parameters: Option<&Value>, id: &Value) -> Result<Request, Value> {
+#[derive(Clone, Copy)]
+enum TaskMethod {
+    Get,
+    Update,
+    Cancel,
+}
+
+impl TaskMethod {
+    fn local(self) -> &'static str {
+        match self {
+            Self::Get => "McpTask.Get",
+            Self::Update => "McpTask.Update",
+            Self::Cancel => "McpTask.Cancel",
+        }
+    }
+}
+
+fn request(
+    method: &str,
+    parameters: Option<&Value>,
+    id: &Value,
+    tasks_enabled: bool,
+) -> Result<Request, Value> {
     let invalid = |message| rpc_error(Some(id), -32602, message);
     if method == "initialize" {
         return Err(rpc_error(
@@ -75,10 +100,65 @@ fn request(method: &str, parameters: Option<&Value>, id: &Value) -> Result<Reque
             .keys()
             .all(|key| key == "_meta" || allowed.contains(&key.as_str()))
     };
+    let task_method = match method {
+        "tasks/get" => Some(TaskMethod::Get),
+        "tasks/update" => Some(TaskMethod::Update),
+        "tasks/cancel" => Some(TaskMethod::Cancel),
+        _ => None,
+    };
+    let wants_task = method == "tools/call" && meta.contains_key(INVOCATION);
+    if task_method.is_some() || wants_task {
+        if !tasks_enabled {
+            return Err(rpc_error(Some(id), -32601, "MCP Tasks is disabled"));
+        }
+        if !meta[CAPABILITIES_KEY]["extensions"][TASKS]
+            .as_object()
+            .is_some_and(Map::is_empty)
+        {
+            let mut error = rpc_error(Some(id), -32021, "Missing required client capability");
+            error["error"]["data"] = json!({"requiredCapabilities":{"extensions":{(TASKS):{}}}});
+            return Err(error);
+        }
+    }
+    if let Some(task_method) = task_method {
+        let valid = if matches!(task_method, TaskMethod::Update) {
+            fields(&["taskId", "inputResponses"])
+                && params.get("inputResponses").is_some_and(Value::is_object)
+        } else {
+            fields(&["taskId"])
+        };
+        if !valid
+            || !params
+                .get("taskId")
+                .and_then(Value::as_str)
+                .is_some_and(|s| (1..=96).contains(&s.len()))
+        {
+            return Err(invalid("Invalid task parameters"));
+        }
+        return Ok(Request::Task(task_method, params.clone()));
+    }
+    let invocation = if wants_task {
+        Some(
+            meta.get(INVOCATION)
+                .and_then(Value::as_str)
+                .filter(|key| {
+                    (16..=96).contains(&key.len())
+                        && key
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+                })
+                .ok_or_else(|| invalid("Invalid MCP invocation key"))?
+                .to_owned(),
+        )
+    } else {
+        None
+    };
     match method {
         "server/discover" if fields(&[]) => Ok(Request::Discover),
         "tools/list" if fields(&[]) => Ok(Request::List),
-        "tools/call" if fields(&["name", "arguments"]) => Ok(Request::Call(params.clone())),
+        "tools/call" if fields(&["name", "arguments"]) => {
+            Ok(Request::Call(params.clone(), invocation))
+        }
         "server/discover" | "tools/list" | "tools/call" => {
             Err(invalid("Invalid or unsupported parameters"))
         }
@@ -87,7 +167,9 @@ fn request(method: &str, parameters: Option<&Value>, id: &Value) -> Result<Reque
 }
 
 fn complete(result: &mut Value, cacheable: bool) {
-    result["resultType"] = json!("complete");
+    if result["resultType"] != "task" {
+        result["resultType"] = json!("complete");
+    }
     result["_meta"] = json!({"io.modelcontextprotocol/serverInfo": {
         "name":"psios-mcp", "version":env!("CARGO_PKG_VERSION"),
     }});
@@ -97,15 +179,61 @@ fn complete(result: &mut Value, cacheable: bool) {
     }
 }
 
+fn task_request(
+    adapter: &Adapter,
+    method: TaskMethod,
+    params: &Map<String, Value>,
+) -> Result<Value, (i32, &'static str)> {
+    let profile = adapter
+        .tasks
+        .as_ref()
+        .ok_or((-32601, "MCP Tasks is disabled"))?;
+    let mut body = json!({"endpoint":profile.endpoint,"delegation_id":adapter.delegation_id,
+        "handle":params["taskId"],"bindings":adapter.bindings});
+    if let Some(responses) = params.get("inputResponses") {
+        body["input_responses"] = responses.clone();
+    }
+    let mut task =
+        adapter
+            .client
+            .call(method.local(), body)
+            .map_err(|error| match error.code.as_str() {
+                "InvalidArgument" | "PermissionDenied" | "NotFound" | "PreconditionFailed" => {
+                    (-32602, "MCP task unavailable or invalid")
+                }
+                _ => (-32603, "Local MCP task query unavailable"),
+            })?;
+    if let Some(result) = task
+        .as_object_mut()
+        .and_then(|task| task.remove("tool_result"))
+    {
+        let task_id = result["task_id"]
+            .as_str()
+            .ok_or((-32603, "Invalid local MCP task result"))?;
+        let mut mapped = if let Some(code) = result["code"].as_str() {
+            tool_error(code, Some(task_id))
+        } else {
+            tool_result(task_id, result["result"].clone()).unwrap_or_else(|error| error)
+        };
+        complete(&mut mapped, false);
+        task["result"] = mapped;
+    }
+    Ok(task)
+}
+
 fn dispatch(adapter: &mut Adapter, request: Request, id: &Value, cancelled: &AtomicBool) -> Value {
-    let cacheable = !matches!(request, Request::Call(_));
+    let cacheable = matches!(request, Request::Discover | Request::List);
     let result = match request {
         Request::Discover => adapter
             .available()
             .map(|_| {
-                json!({
+                let mut discover = json!({
                     "supportedVersions":[VERSION], "capabilities":{"tools":{"listChanged":false}},
-                })
+                });
+                if adapter.tasks.is_some() {
+                    discover["capabilities"]["extensions"] = json!({(TASKS):{}});
+                }
+                discover
             })
             .map_err(|_| (-32603, "Local capability query unavailable")),
         Request::List => adapter
@@ -118,7 +246,10 @@ fn dispatch(adapter: &mut Adapter, request: Request, id: &Value, cancelled: &Ato
                 json!({"tools":tools})
             })
             .map_err(|_| (-32603, "Local capability query unavailable")),
-        Request::Call(params) => adapter.tool_call(&params, Some(cancelled)),
+        Request::Call(params, invocation) => {
+            adapter.tool_call(&params, Some(cancelled), invocation.as_deref())
+        }
+        Request::Task(method, params) => task_request(adapter, method, &params),
     };
     match result {
         Ok(mut result) => {
@@ -212,7 +343,12 @@ fn write_frame(output: impl AsFd, response: &Value) -> io::Result<()> {
 }
 
 impl<W: AsFd> Transport<W> {
-    fn receive(&mut self, frame: Value, work: &mpsc::SyncSender<Job>) -> io::Result<()> {
+    fn receive(
+        &mut self,
+        frame: Value,
+        work: &mpsc::SyncSender<Job>,
+        tasks_enabled: bool,
+    ) -> io::Result<()> {
         let id = frame.get("id").filter(|id| valid_id(id));
         if id.is_some_and(|id| self.active.as_ref().is_some_and(|active| &active.id == id)) {
             // An in-flight ID may not be reused. Keep the first request and its
@@ -239,7 +375,7 @@ impl<W: AsFd> Transport<W> {
             return Ok(());
         };
 
-        let request = match request(method, params, id) {
+        let request = match request(method, params, id, tasks_enabled) {
             Ok(request) => request,
             Err(error) => return write_frame(&self.output, &error),
         };
@@ -260,6 +396,7 @@ impl<W: AsFd> Transport<W> {
 }
 
 pub(super) fn serve(mut adapter: Adapter, output: impl AsFd + Send + 'static) -> io::Result<()> {
+    let tasks_enabled = adapter.tasks.is_some();
     fcntl_setfl(&output, fcntl_getfl(&output)? | OFlags::NONBLOCK)?;
     let transport = Arc::new(Mutex::new(Transport {
         output,
@@ -331,7 +468,7 @@ pub(super) fn serve(mut adapter: Adapter, output: impl AsFd + Send + 'static) ->
             );
         }
         match parse(&line) {
-            Ok(frame) => state.receive(frame, &work)?,
+            Ok(frame) => state.receive(frame, &work, tasks_enabled)?,
             Err(_) => write_frame(
                 &state.output,
                 &rpc_error(None, -32700, "Invalid JSON frame"),

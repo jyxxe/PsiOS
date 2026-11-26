@@ -280,6 +280,10 @@ fn inspect_candidate(
         "an unsettled Task requires this producer's result",
     )?;
     unpinned(
+        !crate::mcp_tasks::retains_result(db, &task.id)?,
+        "an active MCP task handle retains the task result",
+    )?;
+    unpinned(
         !crate::apps::stop::retains_result(db, &task.id)?,
         "an admitted OCI stop continuation retains the exit evidence",
     )?;

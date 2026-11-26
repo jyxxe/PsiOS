@@ -192,7 +192,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = storage::directory_create::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = schedule::event_workflow_overlap::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -570,11 +570,15 @@ impl Store {
                 if ver < storage::directory_create::FORMAT {
                     db.c.execute_batch(storage::directory_create::SCHEMA)?;
                 }
+                if ver < schedule::event_workflow_overlap::FORMAT {
+                    db.c.execute_batch(schedule::event_workflow_overlap::SCHEMA)?;
+                }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;
         }
         store.transaction("node-config", |db| {
             schedule::coalescence::check_active(db.c)?;
+            schedule::event_workflow_overlap::check_active(db.c)?;
             node::work_admission::draining(db)?;
             node::sync(db)
         })?;

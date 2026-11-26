@@ -439,17 +439,22 @@ class RuntimeTests(unittest.TestCase):
         params = dict(id=box["resource_id"], timeout_ms=10000)
         cursor = n.call("Resource.List", dict(kind="Node"))["watch_start_cursor"]
         with ThreadPoolExecutor(9) as pool:
-            inbox = [pool.submit(n.call, "Mailbox.Wait", params, self.token) for _ in range(5)]
-            events = [pool.submit(n.call, "Event.Wait", dict(cursor=cursor, timeout_ms=10000)) for _ in range(4)]
-            done, pending = wait(inbox + events, timeout=3, return_when=FIRST_COMPLETED)
+            inbox = [pool.submit(n.call, "Mailbox.Wait", params, self.token) for _ in range(3)]
+            done, sleeping_inbox = wait(inbox, timeout=3, return_when=FIRST_COMPLETED)
             self.assertEqual(len(done), 1)
+            self.assertEqual(len(sleeping_inbox), 2)
+            self.denied("QueueFull", done.pop().result)
+            events = [pool.submit(n.call, "Event.Wait", dict(cursor=cursor, timeout_ms=10000)) for _ in range(7)]
+            done, sleeping_events = wait(events, timeout=3, return_when=FIRST_COMPLETED)
+            self.assertEqual(len(done), 1)
+            self.assertEqual(len(sleeping_events), 6)
             self.denied("QueueFull", done.pop().result)
             n.call("Mailbox.Close", target(box), self.token)
             node = n.call("Node.Get", {})
             changed = n.call("Node.Configure", dict(scheduling="Cordoned", expected_resource_version=node["reference"]["version"]))
-            for future in pending:
+            for future in sleeping_inbox | sleeping_events:
                 result = future.result(2)
-                if future in inbox:
+                if future in sleeping_inbox:
                     self.assertEqual(result["lifecycle"], "Closed")
                 else:
                     self.assertEqual(result["events"][0]["resource_ref"], changed)

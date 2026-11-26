@@ -1268,7 +1268,10 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     if matches!(w.action, Action::NetworkTrial(_)) {
         node::network::trial::begin(db, &w)?;
     }
-    if storage::restore_publication::is_tool(field(&w.task.spec, "task_type")) {
+    if matches!(
+        w.action,
+        Action::Create { .. } | Action::Restore(_) | Action::CloneVolume(_)
+    ) {
         storage::restore_publication::begin(db, &w)?;
     }
     if matches!(w.action, Action::Start(_)) {

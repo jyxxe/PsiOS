@@ -799,7 +799,7 @@ fn await_rollback(
         )?;
         let details = device_details(bus, &scope.device_path, &scope.link)?;
         if bus::field(&details, "State", "u")? == 100
-            && bus::field(&details, "IpInterface", "s")? == scope.link.interface
+            && bus::text(bus::field(&details, "IpInterface", "s")?)? == scope.link.interface
         {
             let observed = observe_on(bus, &details, scope, checkpoint)?;
             if !observed.checkpoint_present

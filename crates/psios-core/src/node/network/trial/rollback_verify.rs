@@ -378,6 +378,7 @@ fn settled(
     let expected_output = serde_json::to_vec(&json!({
         "publication":"RolledBack","link_ref":start.link.reference(),
     }))?;
+    let expected_size = expected_output.len().to_string();
     let held: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM holds WHERE holder=?1)
             OR EXISTS(SELECT 1 FROM queue WHERE task=?2 AND (phase!='Done' OR operation IS NOT ?1))",
@@ -441,7 +442,7 @@ fn settled(
             && artifact::is_task_output(&output, &task)
             && output.spec["operation_id"] == op.id
             && output.spec["digest"] == sha256(&expected_output)
-            && output.spec["size_bytes"] == expected_output.len().to_string()
+            && output.spec["size_bytes"].as_str() == Some(expected_size.as_str())
             && record.seq.max(output_pos.seq) < effect_pos.seq
             && effect_pos.seq < op_pos.seq
             && op_pos.seq < run_pos.seq

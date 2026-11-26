@@ -999,7 +999,12 @@ pub(crate) fn inspect(db: &Db<'_>, op: &Doc) -> Result<Inspection> {
     )?;
     let (scope, checkpoint) = custody.pair()?;
     let activation = match custody.journal.phase {
-        Phase::CheckpointOwned => None,
+        // The checkpoint is exact, but an issued activation may have lost its
+        // receipt. Recovery can still prove rollback after expiry by checking
+        // the original configuration and ruling out a pending candidate.
+        Phase::CheckpointOwned | Phase::ActivateIssued if custody.journal.activation.is_none() => {
+            None
+        }
         Phase::Activated
         | Phase::AwaitingConfirmation
         | Phase::ConfirmIssued

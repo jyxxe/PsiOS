@@ -71,6 +71,194 @@ fn execute(s: &mut Store, task: &str) -> Value {
 }
 
 #[test]
+fn work_item_evidence_dispatch_rolls_back_receipt_failures_and_keeps_exact_once_cas() {
+    use rusqlite::params;
+
+    let directory = tempfile::tempdir().unwrap();
+    let (_, mut store) = initialized(directory.path());
+    let producer = submit(&mut store, "system.status", json!({}));
+    execute(&mut store, &producer);
+    let produced = call(&mut store, "Resource.Get", json!({"id":producer})).unwrap();
+    let source = &produced["value"];
+    let project = call(
+        &mut store,
+        "Project.Create",
+        json!({"key":id("dispatch-project"),"title":"Atomic evidence dispatch"}),
+    )
+    .unwrap();
+    call(&mut store, "Grant.Issue", json!({
+        "principal_id":policy::OWNER,"actions":["project.read","project.manage","project.contribute"],
+        "tool_targets":[project["reference"]["resource_id"]],"units":1,"ttl_seconds":120,
+    })).unwrap();
+    let profile = call(&mut store, "Resource.Get", json!({"id":policy::PROFILE})).unwrap();
+    let item = call(&mut store, "WorkItem.Create", json!({
+        "project_id":project["reference"]["resource_id"],"expected_project_version":project["reference"]["version"],
+        "key":id("dispatch-item"),"title":"Verify node status","assignee_principal_id":policy::OWNER,
+        "criterion":{"kind":"TaskResult","tool":"system.status","target_ref":profile["reference"]},
+    })).unwrap();
+    let id = item["reference"]["resource_id"].as_str().unwrap();
+    let grant = call(&mut store, "Grant.Issue", json!({
+        "principal_id":policy::OWNER,"actions":["project.submit_evidence","task.submit","task.read"],
+        "tool_targets":[id],"units":3,"ttl_seconds":120,
+    })).unwrap();
+    let budget = grant["budget_ref"]["resource_id"].as_str().unwrap();
+    let input = json!({
+        "id":id,"expected_resource_version":item["reference"]["version"],
+        "task_ref":produced["reference"],"artifact_ref":source["result"]["artifact_refs"][0],
+    });
+    let enqueue = |store: &mut Store, key: &str| {
+        let prepared = call(
+            store,
+            "Task.Prepare",
+            json!({
+                "tool":"project.submit_evidence","input":input,"key":key,
+                "delegation_id":grant["delegation_ref"]["resource_id"],
+            }),
+        )
+        .unwrap();
+        let accepted = call(store, "Task.Submit", prepared.clone()).unwrap();
+        (prepared, accepted["task_id"].as_str().unwrap().to_owned())
+    };
+    let (prepared, first) = enqueue(&mut store, "evidence-first");
+    let (_, competing) = enqueue(&mut store, "evidence-competing");
+    let (_, cancelled) = enqueue(&mut store, "evidence-cancelled");
+    let before = call(&mut store, "Task.Get", json!({"id":cancelled})).unwrap();
+    let cancelled = call(
+        &mut store,
+        "Task.Cancel",
+        json!({
+            "id":cancelled, "expected_resource_version":before["task_revision"],
+        }),
+    )
+    .unwrap();
+    assert_eq!(cancelled["lifecycle"], "Cancelled");
+    assert_eq!(cancelled["outcome_knowledge"], "NotStarted");
+    assert_eq!(claim(&mut store), first);
+    assert_eq!(claim(&mut store), competing);
+
+    let assert_unchanged = |store: &mut Store| {
+        store.transaction("verify-evidence-rollback", |db| {
+            let current = db.of(id, "WorkItem")?;
+            assert_eq!(current.reference(), item["reference"]);
+            assert_eq!(current.body["lifecycle"], "Ready");
+            let count: i64 = db.c.query_row(
+                "SELECT count(*) FROM versions WHERE kind='WorkItemEvidence' AND body->>'work_item_id'=?1",
+                [id], |r| r.get(0),
+            )?;
+            assert_eq!(count, 0);
+            let count: i64 = db.c.query_row(
+                "SELECT count(*) FROM versions WHERE kind='Artifact' AND spec->>'task_id'=?1",
+                [&first], |r| r.get(0),
+            )?;
+            assert_eq!(count, 0);
+            let task = db.of(&first, "Task")?;
+            let op = db.resolve(&task.body["operation_refs"][0])?;
+            assert_eq!(task.body["outcome_knowledge"], "NotStarted");
+            assert_eq!(op.body["outcome_knowledge"], "NotStarted");
+            assert_eq!(op.body["effect_refs"], json!([]));
+            let charged: (i64, i64) = db.c.query_row(
+                "SELECT reserved,spent FROM budgets WHERE id=?1", [budget],
+                |r| Ok((r.get(0)?,r.get(1)?)),
+            )?;
+            assert_eq!(charged, (2, 0));
+            Ok(())
+        }).unwrap();
+    };
+
+    // A pre-publication check can reject before inserting an Artifact. Dispatch
+    // must propagate that error and roll back the WorkItem change as well.
+    let refused = store
+        .transaction("fail-evidence-result-limit", |db| {
+            db.c.execute(
+            "INSERT INTO read_result_charges(resource,owner,bytes,kind) VALUES(?1,?2,1,'Limited')",
+            params![first,policy::OWNER],
+        )?;
+            broker::dispatch(db, &first)
+        })
+        .err()
+        .expect("the undersized result reservation must abort atomic dispatch");
+    assert_eq!(refused.0.code, "QuotaExceeded");
+    assert_unchanged(&mut store);
+
+    store
+        .transaction("install-evidence-receipt-fault", |db| {
+            db.c.execute_batch(
+                "CREATE TEMP TRIGGER fail_evidence_receipt BEFORE INSERT ON versions
+            WHEN NEW.kind='Artifact' AND EXISTS (
+                SELECT 1 FROM current WHERE kind='WorkItem' AND body->>'lifecycle'='InReview'
+            ) BEGIN SELECT RAISE(ABORT,'fixture aborted evidence receipt'); END;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let aborted = store
+        .transaction("abort-evidence-receipt", |db| broker::dispatch(db, &first))
+        .err()
+        .expect("the work item was updated before the injected receipt write failure");
+    assert_eq!(aborted.0.code, "StorageUnavailable");
+    assert_unchanged(&mut store);
+    store
+        .transaction("remove-evidence-receipt-fault", |db| {
+            db.c.execute_batch("DROP TRIGGER fail_evidence_receipt")?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        store
+            .transaction("settle-atomic-evidence", |db| broker::dispatch(db, &first))
+            .unwrap()
+            .is_none()
+    );
+
+    let stale = store
+        .transaction("competing-evidence-cas", |db| {
+            broker::dispatch(db, &competing)
+        })
+        .err()
+        .expect("the competing WorkItem revision must be fenced");
+    assert_eq!(stale.0.code, "Conflict");
+    store
+        .transaction("settle-competing-evidence-cas", |db| {
+            broker::dispatch_failed(db, &competing, &stale)
+        })
+        .unwrap();
+    let refused = call(&mut store, "Task.Get", json!({"id":competing})).unwrap();
+    assert_eq!(refused["lifecycle"], "Failed");
+    assert_eq!(refused["outcome_knowledge"], "NotStarted");
+    let replayed = call(&mut store, "Task.Submit", prepared).unwrap();
+    assert_eq!(replayed["task_id"], first);
+    assert_eq!(replayed["deduplicated"], true);
+
+    let done = call(&mut store, "Task.Get", json!({"id":first})).unwrap();
+    let receipt = call(
+        &mut store,
+        "Artifact.Read",
+        json!({"reference":done["result"]["artifact_refs"][0]}),
+    )
+    .unwrap();
+    let closed = call(&mut store, "WorkItem.Get", json!({"id":id})).unwrap();
+    assert_eq!(done["lifecycle"], "Succeeded");
+    assert_eq!(done["outcome_knowledge"], "Known");
+    assert_eq!(
+        receipt,
+        json!({"work_item_ref":closed["reference"],"lifecycle":"InReview"})
+    );
+    store.transaction("verify-atomic-evidence-result", |db| {
+        let sealed: i64 = db.c.query_row(
+            "SELECT count(*) FROM versions WHERE kind='WorkItemEvidence' AND body->>'work_item_id'=?1",
+            [id], |r| r.get(0),
+        )?;
+        assert_eq!(sealed, 1);
+        let charged: (i64, i64) = db.c.query_row(
+            "SELECT reserved,spent FROM budgets WHERE id=?1", [budget],
+            |r| Ok((r.get(0)?,r.get(1)?)),
+        )?;
+        assert_eq!(charged, (0, 1));
+        project::evidence::verify(db.c)
+    }).unwrap();
+}
+
+#[test]
 fn strict_model_lease_binding_is_witnessed_and_cannot_become_legacy() {
     use rusqlite::params;
 

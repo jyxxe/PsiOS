@@ -42,6 +42,8 @@ jobs:
               python3 -B -m unittest discover -s /tests -p test_storage_retirement.py -v &&
               python3 -B -m unittest discover -s /tests -p test_backup_limits.py -v &&
               python3 -B -m unittest discover -s /tests -p test_project_work_items.py -v &&
+              python3 -B -m unittest discover -s /tests -p test_project_directory.py -v &&
+              python3 -B -m unittest discover -s /tests -p test_work_item_maintenance.py -v &&
               python3 -B -m unittest discover -s /tests -p test_authority_checkpoint.py -v'
       - name: Recover a durable Task in an empty Linux userspace
         run: |

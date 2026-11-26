@@ -192,7 +192,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = artifact::ingress::authority::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = workflow::admission_delay::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -527,6 +527,9 @@ impl Store {
                 }
                 if ver < artifact::ingress::authority::FORMAT {
                     db.c.execute_batch(artifact::ingress::authority::SCHEMA)?;
+                }
+                if ver < workflow::admission_delay::FORMAT {
+                    db.c.execute_batch(workflow::admission_delay::SCHEMA)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

@@ -7,6 +7,7 @@ import hmac
 import json
 import signal
 import sqlite3
+import subprocess
 import time
 import unittest
 
@@ -619,3 +620,68 @@ class WorkflowTests(unittest.TestCase):
         finished = self.wait(run, "Succeeded")
         self.assertEqual(len({s["task_receipt"]["task_id"] for s in finished["state"]["steps"]}), 2)
         self.assertEqual(self.budget(scope), (0, 2))
+
+    def test_workflow_owner_queue_pressure_does_not_block_another_principal(self):
+        n = self.node
+        n.stop()
+        n.config.write_text(json.dumps(dict(json.loads(n.config.read_text()), queue_limit=4,
+                                            principal_queue_limit=1)))
+        n.start()
+        volume = n.perform("volume.create", {"name": "workflow-admission-fairness"})
+        held = n.submit("volume.write", {**target(volume), "name": "held", "content": "hold"})
+        self.assertEqual(n.wait(held)["lifecycle"], "WaitingApproval")
+
+        blocked_scope = self.grant(units=1)
+        blocked_def = self.define([step("older")])
+        blocked_request = self.request(blocked_def, blocked_scope)
+        blocked = n.call("Workflow.Start", blocked_request)
+        blocked_id = blocked["reference"]["resource_id"]
+        pending_sql = "SELECT run_rev,step FROM workflow_admission_deferrals WHERE run=?"
+        with closing(sqlite3.connect(n.state / "state.db")) as conn:
+            original_spec = conn.execute("SELECT spec FROM versions WHERE id=? AND rev=1", (blocked_id,)).fetchone()
+            original = json.loads(original_spec[0])["steps"][0]["request"]
+            deadline = time.monotonic() + 6
+            while conn.execute(pending_sql, (blocked_id,)).fetchone() != (1, "older"):
+                self.assertLess(time.monotonic(), deadline, "older ready run did not hit its owner's full queue")
+                time.sleep(0.05)
+
+        independent = n.call("Agent.Register", {"name": "independent-workflow"})
+        independent_scope = self.grant(units=1, actor=independent["principal_id"])
+        independent_def = self.define([step("later")], independent["token"])
+        later = n.call("Workflow.Start", self.request(independent_def, independent_scope), independent["token"])
+        finished_later = self.wait(later, "Succeeded")
+        later_receipt = self.phases(finished_later)["later"]["task_receipt"]
+        self.assertEqual(self.budget(independent_scope), (0, 1))
+        self.assertEqual(self.fetch(blocked), blocked)
+        self.assertEqual(self.budget(blocked_scope), (0, 0))
+        self.assertEqual(n.wait(held)["lifecycle"], "WaitingApproval")
+
+        n.stop(signal.SIGKILL)
+        with closing(sqlite3.connect(n.state / "state.db")) as conn:
+            self.assertEqual(conn.execute(pending_sql, (blocked_id,)).fetchone(), (1, "older"))
+            self.assertEqual(conn.execute("SELECT count(*) FROM current WHERE kind='Task' "
+                                          "AND body->'origin_ref'->>'origin_id'=?", (blocked_id,)).fetchone(), (0,))
+        subprocess.run(n.daemon + ["verify"], check=True, stdout=subprocess.DEVNULL, timeout=20)
+        with closing(sqlite3.connect(n.state / "state.db")) as conn, conn:
+            conn.execute("UPDATE workflow_admission_deferrals SET run_rev=2 WHERE run=?", (blocked_id,))
+        invalid = subprocess.run(n.daemon + ["verify"], capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertIn("RecoveryRequired", invalid.stderr)
+        with closing(sqlite3.connect(n.state / "state.db")) as conn, conn:
+            conn.execute("UPDATE workflow_admission_deferrals SET run_rev=1 WHERE run=?", (blocked_id,))
+        n.start()
+        self.assertEqual(self.fetch(blocked), blocked)
+        self.assertEqual(self.phases(self.fetch(later))["later"]["task_receipt"], later_receipt)
+
+        n.call("Task.Cancel", target(n.get(held)["reference"]))
+        finished = self.wait(blocked, "Succeeded")
+        receipt = self.phases(finished)["older"]["task_receipt"]
+        self.assertEqual(receipt["origin_ref"], original["origin_ref"])
+        self.assertEqual(receipt["idempotency_key"], original["idempotency_key"])
+        self.assertEqual(receipt["request_digest"], original["request_digest"])
+        self.assertEqual(n.call("Workflow.Start", blocked_request), finished)
+        self.assertEqual(self.budget(blocked_scope), (0, 1))
+        with closing(sqlite3.connect(n.state / "state.db")) as conn:
+            self.assertIsNone(conn.execute(pending_sql, (blocked_id,)).fetchone())
+            self.assertEqual(conn.execute("SELECT count(*) FROM submissions WHERE task=?",
+                                          (receipt["task_id"],)).fetchone(), (1,))

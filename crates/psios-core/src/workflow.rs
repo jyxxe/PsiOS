@@ -1,4 +1,5 @@
 //! Local, immutable DAG definitions and durable Task-broker admission.
+pub(crate) mod admission_delay;
 mod binding;
 mod condition;
 mod output;

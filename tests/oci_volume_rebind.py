@@ -4,6 +4,7 @@ from contextlib import closing
 import json
 import signal
 import sqlite3
+import stat
 import subprocess
 
 from oci_capture import denied
@@ -80,6 +81,23 @@ def verify_rebind(node, docker, specification, app_ids):
     changed = node.get(changed["resource_id"])["reference"]
     reject(inputs(restored_ref=changed))
     assert node.get(restored_id)["reference"] == restored
+
+    root = node.state / "volumes" / restored_id / "data"
+    before = root.stat()
+    try:
+        root.chmod(stat.S_IMODE(before.st_mode) ^ stat.S_IWUSR)
+        pending = submit(inputs())["task_id"]
+        assert node.wait(pending)["lifecycle"] == "WaitingApproval"
+        node.approve(pending)
+        refused = node.wait(pending)
+        assert (refused["lifecycle"], refused["outcome_knowledge"], refused["conditions"][0]["type"]) == (
+            "Failed", "NotStarted", "PreconditionFailed"), refused
+        assert "data root mode" in refused["conditions"][0]["message"], refused
+        assert root.stat().st_mtime_ns == before.st_mtime_ns
+        assert node.get(app_id) == original and absent()
+        assert node.get(restored_id)["reference"] == restored
+    finally:
+        root.chmod(stat.S_IMODE(before.st_mode))
 
     denied(node, "PermissionDenied", "Task.Submit", prepared(inputs(), grant([app_id, source_id])))
     ordinary_scope = grant([app_id, source_id, restored_id])

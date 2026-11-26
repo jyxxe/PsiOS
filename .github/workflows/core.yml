@@ -715,6 +715,8 @@ jobs:
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format108" "$RUNNER_TEMP/psios-compatibility-target"
           PSIOS_OCI_CREATE_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
             python3 -B tests/oci.py --create-recovery-only
+          PSIOS_BACKUP_ROOT_MODE_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
+            python3 -B -m unittest discover -s tests -p test_backup_root_mode.py -k test_legacy -v
       - name: Preserve existing mail while upgrading typed work-item review requests
         run: |
           mkdir "$RUNNER_TEMP/psios-format109"

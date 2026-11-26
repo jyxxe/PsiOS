@@ -38,6 +38,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+// Earlier writers ignore the additive archive field and could certify a
+// widened root using a legacy restore proof.
+pub(crate) const ROOT_MODE_FORMAT: u32 = crate::node::block_device::retirement::FORMAT + 1;
+
 const MAX_ENTRIES: usize = 4096;
 // A capture permits 33 components of 240 bytes per path. Quotes and backslashes
 // can double their JSON representation. Keep room for digests and manifest metadata.
@@ -243,17 +247,21 @@ fn create_volume(
         w.cfg
             .check_managed_space(root, std::iter::once(identity.len() as u64), 3)
     })?;
-    let data = stage.path().join("data");
-    private_dir(&data, true)?;
+    private_dir(&stage.path().join("data"), true)?;
+    let data = child(
+        stage.directory(),
+        "data",
+        OFlags::RDONLY | OFlags::DIRECTORY,
+    )?;
     new_file(&stage.path().join("identity"), &identity)?;
     let proof = match restore {
         Some(backup) => inspect_backup(&w.cfg, backup, Some(&data))?["restore_proof"].clone(),
         None => Value::Null,
     };
-    let m = fs::symlink_metadata(&data)?;
-    let stats = rustix::fs::statvfs(&data).map_err(std::io::Error::from)?;
+    let m = data.metadata()?;
+    let stats = rustix::fs::fstatvfs(&data).map_err(std::io::Error::from)?;
     let capacity = stats.f_blocks.saturating_mul(stats.f_frsize);
-    File::open(&data)?.sync_all()?;
+    data.sync_all()?;
     let receipt = json!({
         "id": vid,
         "incarnation": inc,
@@ -263,6 +271,18 @@ fn create_volume(
         "restore_proof": proof
     });
     if restore.is_some() {
+        // The restored data root must still be accessible to the authority
+        // for verification, with the same identity and applied permissions.
+        let current = child(
+            stage.directory(),
+            "data",
+            OFlags::RDONLY | OFlags::DIRECTORY,
+        )?;
+        require(
+            same_source(&m, &current.metadata()?),
+            "PreconditionFailed",
+            "restored data root changed before publication",
+        )?;
         let placement = restore_publication::Placement::staged(&stage)?;
         stage.preserve_for_checkpoint()?;
         if let Err(error) = checkpoint(&receipt, &placement) {
@@ -627,6 +647,8 @@ pub(crate) fn backup(
     };
     let source = capture_root(w)?;
     let before = source.metadata()?;
+    let root_mode = before.mode() & 0o777;
+    require_managed_root_mode(root_mode)?;
     capture.walk(&source, Path::new(""), 0)?;
     let manifest = json!({
         "schema_version": VERSION,
@@ -640,6 +662,7 @@ pub(crate) fn backup(
         "completed_at": now(),
         "failure_domain": "local-filesystem",
         "tool_version": env!("CARGO_PKG_VERSION"),
+        "root_mode_unix_v1": root_mode,
         "mtime_unix_v1": BackupTimes {
             root: ModifiedTime::from_metadata(&before),
             entries: capture.entries.iter().map(|(_, meta)| ModifiedTime::from_metadata(meta)).collect()
@@ -675,6 +698,15 @@ struct BackupManifest {
     entries: Vec<Entry>,
     total_bytes: String,
     mtime_unix_v1: Option<BackupTimes>,
+    #[serde(default, deserialize_with = "decode_root_mode")]
+    root_mode_unix_v1: Option<u32>,
+}
+
+fn decode_root_mode<'de, D>(deserializer: D) -> std::result::Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    u32::deserialize(deserializer).map(Some)
 }
 
 fn open_backup_parent(cfg: &Config) -> Result<File> {
@@ -735,7 +767,7 @@ fn entry_parent<'a>(root: &File, relative: &'a str) -> Result<(File, &'a str)> {
     Ok((dir, name))
 }
 // Verification and restore read exactly the same authority-bound recovery set.
-fn inspect_backup(cfg: &Config, b: &Doc, destination: Option<&Path>) -> Result<Value> {
+fn inspect_backup(cfg: &Config, b: &Doc, destination: Option<&File>) -> Result<Value> {
     let (_, root) = open_backup(cfg, &b.id)?;
     let manifest = authority_manifest(
         &open_manifest(&root)?,
@@ -743,12 +775,11 @@ fn inspect_backup(cfg: &Config, b: &Doc, destination: Option<&Path>) -> Result<V
         &b.spec["source_ref"],
         &b.body,
     )?;
-    let destination = destination.map(File::open).transpose()?;
     let mut report = inspect_members(
         &root,
         &manifest,
         &b.body["manifest_digest"],
-        destination.as_ref().map(|directory| RestoreDestination {
+        destination.map(|directory| RestoreDestination {
             directory,
             authority: Some(cfg),
         }),
@@ -803,6 +834,11 @@ fn validate_members(m: &BackupManifest, max_bytes: u64) -> Result<u64> {
         m.entries.len() <= MAX_ENTRIES,
         "QuotaExceeded",
         "backup entry limit",
+    )?;
+    require(
+        m.root_mode_unix_v1.is_none_or(|mode| mode <= 0o777),
+        "PreconditionFailed",
+        "backup data root mode exceeds ordinary permission bits",
     )?;
     if let Some(times) = &m.mtime_unix_v1 {
         require(
@@ -866,6 +902,16 @@ fn backup_blob(root: &File, index: usize, bytes: u64) -> Result<File> {
     Ok(file)
 }
 
+fn require_managed_root_mode(mode: u32) -> Result<()> {
+    // The authority owns staged data and must be able to reopen the root for
+    // activation, interrupted publication inspection, and stage disposal.
+    require(
+        mode & 0o500 == 0o500,
+        "UnsupportedCapability",
+        "managed data root mode requires owner read and search permissions",
+    )
+}
+
 fn inspect_members(
     root: &File,
     m: &BackupManifest,
@@ -875,6 +921,11 @@ fn inspect_members(
 ) -> Result<Value> {
     let declared = validate_members(m, max_bytes)?;
     if let Some(destination) = &destination {
+        if destination.authority.is_some()
+            && let Some(mode) = m.root_mode_unix_v1
+        {
+            require_managed_root_mode(mode)?;
+        }
         destination.check_space(file_sizes(m), m.entries.len() as u64)?;
     }
     let mut dirs = vec![];
@@ -943,8 +994,18 @@ fn inspect_members(
             }
             dir.sync_all()?;
         }
+        if let Some(mode) = m.root_mode_unix_v1 {
+            root.set_permissions(Permissions::from_mode(mode))?;
+            require(
+                root.metadata()?.mode() & 0o7777 == mode,
+                "UnsupportedCapability",
+                "restore destination did not apply the exact data root mode",
+            )?;
+        }
         if let Some(times) = &m.mtime_unix_v1 {
             times.root.restore(root)?;
+        }
+        if m.root_mode_unix_v1.is_some() || m.mtime_unix_v1.is_some() {
             root.sync_all()?;
         }
         destination.check_space(std::iter::empty(), 0)?;

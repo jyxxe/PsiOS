@@ -89,6 +89,8 @@ rescue-core/psiosd verify-backup --directory /media/backup/backup-id \
 
 工具核验清单摘要、成员集合、路径结构、各文件长度和完整内容。配置、数据库和见证可以留在离线的原节点。恢复前检查目标的空闲数据块与 inode，将数据写入私有暂存目录，通过核验并刷盘后以拒绝覆盖的原子改名发布。恢复保持文件和目录模式以及清单中记录的修改时间，所有权取自恢复账户。恢复结果是普通目录。[脱离权威的恢复验收](../tests/test_detached_backup.py)
 
+使用数据库格式 112 对应的 Core 核验新备份，才能在恢复时应用清单所记载的根目录 `rwx` 权限位。旧备份缺少此字段时根目录采用 `0700`。旧版独立工具读取新备份时也会使用 `0700`，因此需要保留新版本工具以准确恢复权限。导入后恢复为托管卷时，卷数据根须允许服务账户读取和搜索。[权限恢复与兼容验收](../tests/test_backup_root_mode.py)
+
 导出与脱机核验默认限制 256 MiB 负载。使用 `psiosctl backup-export --max-bytes BYTES` 和 `psiosd verify-backup --max-bytes BYTES` 可提高该次操作的上限。服务端按原清单流式核对已存备份，输出前检查容量与文件摘要。[大备份验收](../tests/test_backup_limits.py)
 
 ### 导入新节点并恢复到新卷

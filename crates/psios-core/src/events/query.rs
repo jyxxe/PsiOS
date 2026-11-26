@@ -167,7 +167,7 @@ mod tests {
     fn generic_events_and_snapshots_exclude_private_project_authority() {
         let conn = db();
         let public = insert(&conn, "public", "Task", policy::SYSTEM);
-        for kind in ["Project", "WorkItem", "WorkItemEvidence"] {
+        for kind in ["Project", "Milestone", "WorkItem", "WorkItemEvidence"] {
             insert(&conn, kind, kind, policy::OWNER);
             assert!(
                 read(

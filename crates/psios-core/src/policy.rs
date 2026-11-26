@@ -385,6 +385,7 @@ pub fn admin(actor: &str) -> Result<()> {
 pub(crate) const PRIVATE_RESOURCE_KINDS: &[&str] = &[
     apps::log_tail::PRIVATE_KIND,
     "Project",
+    "Milestone",
     "WorkItem",
     "WorkItemEvidence",
 ];

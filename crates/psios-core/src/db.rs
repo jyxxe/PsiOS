@@ -190,7 +190,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = project::agent_tool::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = project::milestone::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -495,6 +495,9 @@ impl Store {
                 if ver < project::FORMAT {
                     db.c.execute_batch(project::SCHEMA)?;
                     db.c.execute_batch(project::evidence::SCHEMA)?;
+                }
+                if ver < project::milestone::FORMAT {
+                    db.c.execute_batch(project::milestone::SCHEMA)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

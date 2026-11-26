@@ -13,6 +13,18 @@ pub struct CreateProject {
     pub description: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateMilestone {
+    pub project_id: String,
+    pub expected_project_version: String,
+    pub key: String,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub work_item_ids: Vec<String>,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum ProjectRole {
     Viewer,
@@ -83,6 +95,7 @@ pub struct ProjectPage {
     pub next_after_id: Option<String>,
 }
 pub type WorkItemPage = ProjectPage;
+pub type MilestonePage = ProjectPage;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -106,6 +119,45 @@ impl Client {
 
     pub fn set_project_member(&self, request: &SetProjectMember) -> ApiResult<ProjectRecord> {
         self.project_request("Project.SetMember", request)
+    }
+
+    pub fn create_milestone(&self, request: &CreateMilestone) -> ApiResult<ProjectRecord> {
+        self.project_request("Milestone.Create", request)
+    }
+
+    pub fn milestone(&self, id: &str) -> ApiResult<ProjectRecord> {
+        self.project_request("Milestone.Get", &json!({"id":id}))
+    }
+
+    pub fn milestones(
+        &self,
+        project_id: &str,
+        after_id: Option<&str>,
+        limit: Option<u32>,
+    ) -> ApiResult<MilestonePage> {
+        self.project_request(
+            "Milestone.List",
+            &json!({"project_id":project_id,"after_id":after_id,"limit":limit}),
+        )
+    }
+
+    pub fn close_milestone(&self, id: &str, revision: &str) -> ApiResult<ProjectRecord> {
+        self.project_request(
+            "Milestone.Close",
+            &json!({"id":id,"expected_resource_version":revision}),
+        )
+    }
+
+    pub fn abandon_milestone(
+        &self,
+        id: &str,
+        revision: &str,
+        reason: &str,
+    ) -> ApiResult<ProjectRecord> {
+        self.project_request(
+            "Milestone.Abandon",
+            &json!({"id":id,"expected_resource_version":revision,"reason":reason}),
+        )
     }
 
     pub fn create_work_item(&self, request: &CreateWorkItem) -> ApiResult<ProjectRecord> {

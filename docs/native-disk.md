@@ -87,6 +87,20 @@ sha256sum boot.efi
 
 将结果与回执的 `efi_application_sha256` 比对。启动后普通账户可运行 `sha256sum /psios-deployment.json` 与回执的 `deployment_manifest_sha256` 比对。该清单列出 Core 源码修订及归档摘要、内核 ISO 及其内核与初始内存盘的输入摘要、两个文件系统 UUID 和 PsiOS 加入启动环境的文件摘要。回执另含组装后的完整 initramfs 摘要。PID 1 在挂载可写分区前核对清单和这些文件，发现不一致时给出 `deployment-payload` 停机阶段。外部回执供操作者比对。
 
+## 安装到空白块设备
+
+在 Linux amd64 上用本机 root 运行归档中的 `native/install.py`。准备尚未启动的新盘镜像、构建回执以及来自可信构建的回执 SHA-256。目标应为容量与镜像完全相同的空白 Virtio 整盘，具备唯一序列号和 512 字节逻辑扇区。安装记录目录须位于另一个受保护的本机持久文件系统，支持 ext4、XFS 和 Btrfs。由 root 所有，权限为 `0700`。安装器会检查并同步上级目录。
+
+```sh
+sudo install -d -m 0700 "$INSTALL_STATE"
+sudo python3 native/install.py plan --source-image node.raw --receipt node-build.json \
+  --receipt-sha256 "$VERIFIED_RECEIPT_SHA256" --target "$TARGET_DISK" --state-dir "$INSTALL_STATE"
+sudo python3 native/install.py apply --plan-digest "$APPROVED_PLAN_SHA256" --state-dir "$INSTALL_STATE"
+sudo python3 native/install.py inspect --state-dir "$INSTALL_STATE"
+```
+
+操作者从 Plan 核对目标序列号、设备代次、分区和来源摘要，再将该份计划的 `plan_digest` 用于批准。执行会排他打开同一整盘，重新核对身份和空白字节，在首次写入前刷盘保存 `WriteIssued`。各分区内容刷盘后才写入两份 GPT。设备完成刷盘并全盘回读匹配后，回执进入 `Verified`。成功回执可重复读取。执行中断后，同次宿主启动内可用 `inspect` 对原目标核实完全写入的结果。部分写入或目标身份变化保持 `RecoveryRequired`，原计划停止派发。开发验收可通过 `--allow-loop` 选用专用 loop 测试盘。[Linux 块设备排他打开](https://man7.org/linux/man-pages/man2/open.2.html)
+
 ## 使用已登记证书构建 Secure Boot 盘
 
 构建机需要 `ukify`、`sbsign`、`sbverify` 和 OpenSSL。提供来自可信工具包的 `linuxx64.efi.stub` 及摘要，并使用已登记到目标 UEFI 信任数据库的签名证书和构建者私有 PEM 密钥。将以下参数附加到新盘或升级命令。

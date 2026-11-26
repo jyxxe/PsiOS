@@ -203,6 +203,7 @@ fn worker(s: Shared, changes: Arc<Changes>, stop: Arc<AtomicBool>, tick: Duratio
             }
         };
         // SQLite and the socket remain available while an issued host operation is in flight.
+        let check_each_stage = matches!(work.action, crate::host::Action::ObserveNetworkProbe(_));
         let mut check_after = Instant::now();
         let receipt = work.perform_checked(
             |checkpoint| state(&s)?.transaction(&correlation, |db| work.checkpoint(db, checkpoint)),
@@ -212,7 +213,7 @@ fn worker(s: Shared, changes: Arc<Changes>, stop: Arc<AtomicBool>, tick: Duratio
                     "LeaseLost",
                     "authority stopped during the host data operation",
                 )?;
-                if Instant::now() >= check_after {
+                if check_each_stage || Instant::now() >= check_after {
                     state(&s)?.transaction(&correlation, |db| work.check_streaming(db))?;
                     check_after = Instant::now() + Duration::from_millis(100);
                 }

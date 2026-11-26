@@ -585,8 +585,7 @@ pub(crate) fn close(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     item_view(db, &db.status(&item, state)?, actor, true)
 }
 
-pub(crate) fn verify(conn: &Connection) -> Result<()> {
-    let format: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+pub(crate) fn verify(conn: &Connection, format: u32) -> Result<()> {
     let projects = conn
         .prepare("SELECT * FROM current WHERE kind='Project' ORDER BY id LIMIT 129")?
         .query_map([], row)?

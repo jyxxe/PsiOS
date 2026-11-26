@@ -477,6 +477,9 @@ impl Store {
                 if ver < events::scopes::FORMAT {
                     db.c.execute_batch(events::scopes::SCHEMA)?;
                 }
+                if ver < apps::health::FORMAT {
+                    apps::health::migrate(db)?;
+                }
                 if ver < events::offsets::FORMAT {
                     db.c.execute_batch(events::offsets::SCHEMA)?;
                 }

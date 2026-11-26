@@ -191,6 +191,10 @@ Core 通过已打开的目录和文件描述符流式校验私有普通文件。
 
 重启需独立审批。Core 在调用 OCI 引擎前核对启动身份并持久记录检查点，在回执中保存同一容器和 Linux 启动下的新启动身份。未知结果保留应用与卷的操作约束。用新的观察制品对账，确认后登记在原 Task 与 Operation 下。[真实 OCI 引擎验收](../tests/oci_restart.py)
 
+从格式 74 起，安装或暂存 OCI Release 时，可在直接请求或签名制品的 `install` 段显式加入 `health_check`。字段为 `argv`、`interval_ms`、`timeout_ms` 和 `retries`。按镜像配置摘要核对 Docker 的 exec 形式 `CMD`，要求命令和时间设置与批准输入完全一致。探针最多 16 个参数，首项为容器内的绝对路径。间隔为 1000 至 60000 毫秒，探针进程超时为 100 至 5000 毫秒且不得超过间隔，重试次数为 1 至 5。启动宽限和独立启动间隔暂不可用。省略该字段时 Docker 健康检查保持禁用。[真实健康检查验收](../tests/oci_health.py) · [Docker HEALTHCHECK](https://docs.docker.com/reference/dockerfile/#healthcheck)
+
+`health_check_ref` 固定经核验的镜像探针。原始批准、固定发布物和镜像摘要共同绑定是否启用及全部参数。容器启动前核对生效配置。探针沿用应用的非 root UID、只读根文件系统、挂载和网络隔离。Docker 单独管理启动探针进程的等待时间。`application.health`、`application.refresh`、`application.inspect_instance` 和启动核实均按当前容器调用的近期样本报告健康和就绪。初始检查未完成时，健康为 `Unknown`，就绪为 `NotReady`。通过历史证据对账后，已启用探针的运行应用保持 `Unknown`，直到下次观测。探针的标准输出和错误输出留在 Docker 引擎内。[Docker 健康监视实现](https://raw.githubusercontent.com/moby/moby/v28.5.2/daemon/health.go)
+
 格式 71 将重启检查点与原执行许可、单次批准、Run、应用及绑定卷修订关联。Core 先提交 `EffectStarted` 和检查点，再请求 Docker 重启。调用前中断以 `NotStarted` 结算并释放本次应用占用。丢失调用回执时，原 Operation 保持待核实。Core 启动前检查未结算操作的应用占用及现有卷绑定。离线核验同时核对历史应用、实例及确认记录，允许在任务归档后继续校验。格式 43 至 70 的重启沿用当时记录的证据。旧版在结算失败后可能留有缺少检查点的未知结果，仍需保持占用并等待单独核实。[检查点失效与离线验收](../tests/oci_restart.py)
 
 ### 恢复 OCI 停止操作

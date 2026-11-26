@@ -216,11 +216,14 @@ pub(crate) fn prepare(db: &Db<'_>, actor: &str, params: &Value, tool: &str) -> R
         response["publisher"] = json!({"identity_ref":publisher.reference(),"key_ref":key.reference(),
             "source_trust":"PublisherVerified"});
     }
-    let preview = json!({"name":install.name,"release_version":install.release_version,
+    let mut preview = json!({"name":install.name,"release_version":install.release_version,
             "image_id":install.image_id,"runtime_profile_ref":db.get("oci-local")?.reference(),
             "cpu_millicores":install.cpu_millicores,"memory_max_bytes":install.memory_max_bytes,
             "pids_max":install.pids_max,"ephemeral_max_bytes":install.ephemeral_max_bytes,
             "argv":install.argv,"environment":install.environment,"license_expression":install.license_expression});
+    if let Some(probe) = &install.health_check {
+        preview["health_check"] = json!(probe);
+    }
     if tool == STAGE_TOOL {
         response["release"] = preview;
         response["application_ref"] = target.reference();
@@ -358,6 +361,7 @@ pub(super) fn check_release_source(db: &Db<'_>, release: &Doc) -> Result<()> {
     let binding = release_archive::check_release_pin(db.c, release, source.as_ref())?;
     if let Some(source) = source {
         let descriptor = read_descriptor(db.c, &source)?;
+        super::health::check_retained_choice(db.c, release, &descriptor)?;
         require(
             descriptor
                 .archive

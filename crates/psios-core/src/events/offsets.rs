@@ -1,7 +1,7 @@
 //! Admission and explicit retirement of confirmed consumer offsets.
 use super::*;
 
-pub(crate) const FORMAT: u32 = 75;
+pub(crate) const FORMAT: u32 = crate::apps::health::FORMAT + 1;
 pub(crate) const SCHEMA: &str = "ALTER TABLE event_offsets ADD COLUMN checkpoint_revision TEXT;";
 const PER_PRINCIPAL: i64 = 128;
 const PER_AUTHORITY: i64 = 4096;

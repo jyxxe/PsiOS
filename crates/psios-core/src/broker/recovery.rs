@@ -525,7 +525,7 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
                     "inspection does not confirm the checkpointed runtime and resource limits",
                 )?;
                 (
-                    apps::started(db, &target, &op.id, vol.as_ref(), &observation)?,
+                    apps::started(db, &target, &op.id, vol.as_ref(), &observation, true)?,
                     "StartConfirmed",
                 )
             } else {

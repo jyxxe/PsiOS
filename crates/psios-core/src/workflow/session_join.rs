@@ -348,7 +348,7 @@ fn unresolved(conn: &Connection, session: &Doc) -> Result<(bool, bool)> {
         !missing_tool,
         "RecoveryRequired",
         "workflow session lost its original tool Task",
-    );
+    )?;
     conn.query_row(
         "SELECT
            EXISTS(SELECT 1 FROM session_turns t JOIN model_inference_leases i USING(lease)

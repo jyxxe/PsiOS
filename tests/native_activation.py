@@ -17,7 +17,9 @@ import tempfile
 import time
 import uuid
 
-from native_disk import REPO, boot, password, sha
+from native_disk import (
+    REPO, boot, check_clean_shutdown, extract_partition, password, replace_partition, sha,
+)
 from native_staged_update import digest_map, durable_fact, invoke, succeeded, validate_bundle
 from native_upgrade import shutdown
 
@@ -296,6 +298,110 @@ def verified_boot(fixture, work, candidate, frozen, prior, admin):
     return state, observed, proof["boot_id"]
 
 
+def stage_native(args, stage, source, receipt, code, vars_file, frozen):
+    return succeeded(invoke([sys.executable, "-B", args.controller, stage,
+        "--upgrade-from", source, "--previous-receipt", receipt, "--previous-receipt-sha256", frozen[receipt],
+        "--kernel-iso", args.kernel_iso, "--core-archive", args.archive, "--core-sha256", sha(args.archive),
+        "--ovmf-code", code, "--ovmf-code-sha256", frozen[code],
+        "--ovmf-vars", vars_file, "--ovmf-vars-sha256", frozen[vars_file]], 850))
+
+
+def refuse_unclean_shutdown(args, work, old, old_build, receipt, code, vars_file, secret, node_id):
+    # Keep the original booted disk untouched. Reset just the shutdown action
+    # in an independently staged, otherwise identical safe fixture copy.
+    source = work / "without-shutdown-hook.raw"
+    copy_disk(old, source)
+    source.chmod(0o600)
+    table = json.loads(subprocess.check_output(["sfdisk", "--json", source], timeout=15))["partitiontable"]
+    assert table["sectorsize"] == 512, table
+    parts = table["partitions"]
+    assert len(parts) == 3 and all(part["start"] % 2048 == 0 and part["size"] % 2048 == 0
+                                   for part in parts), table
+    starts = tuple(part["start"] // 2048 for part in parts[1:])
+    state_partition = work / "without-shutdown-hook.ext4"
+    extract_partition(source, state_partition, starts[0], parts[1]["size"] // 2048)
+    inittab = subprocess.check_output(["debugfs", "-R", "cat /etc/inittab", state_partition], text=True,
+                                      stderr=subprocess.DEVNULL, timeout=15)
+    hook = "::shutdown:/bin/sh /psios-shutdown"
+    assert inittab.splitlines().count(hook) == 1, inittab
+    modified = work / "without-shutdown-hook.inittab"
+    previous = inittab.replace(hook, "::shutdown:/bin/busybox true")
+    modified.write_text(previous)
+    patch = (f"rm /etc/inittab\nwrite {modified.name} /etc/inittab\n"
+             "set_inode_field /etc/inittab uid 0\nset_inode_field /etc/inittab gid 0\n"
+             "set_inode_field /etc/inittab mode 0100644\n")
+    subprocess.run(["debugfs", "-w", "-f", "-", state_partition], cwd=work, input=patch,
+                   text=True, capture_output=True, check=True, timeout=20)
+    assert subprocess.check_output(["debugfs", "-R", "cat /etc/inittab", state_partition], text=True,
+                                   stderr=subprocess.DEVNULL, timeout=15) == previous
+    replace_partition(source, state_partition, starts[0])
+    state_partition.unlink()
+    modified.unlink()
+    check_clean_shutdown(source, starts=starts)
+    with source.open("rb") as stable:
+        os.fsync(stable.fileno())
+    frozen = digest_map((source, receipt, code, vars_file))
+
+    staged = work / "stage-without-shutdown-hook"
+    report = stage_native(args, staged, source, receipt, code, vars_file, frozen)
+    validate_bundle(args, staged, report, old_build, frozen, source, receipt, code, vars_file, node_id)
+    check_clean_shutdown(staged / "candidate.raw", starts=starts)
+    bundle = digest_map(staged.iterdir())
+    state = work / "unclean-managed-activation"
+    fixture = Activation(args.activator, staged, source, code, vars_file, secret)
+    plan = fixture.planned(state)
+    command = fixture.apply(state, plan["plan_digest"])
+    # This error is downstream of the real authenticated console boot,
+    # kernel Power down serial line and QEMU status 0.
+    rejected(invoke(command, 300), r"managed candidate (state|home) ext4 was not cleanly shut down")
+    try:
+        check_clean_shutdown(state / "managed.raw", starts=starts)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("guest without the native shutdown hook left no dirty ext4 evidence")
+
+    boundary = (state / JOURNAL).read_bytes()
+    issued = json.loads(boundary)
+    assert issued["status"] == "BootIssued" and issued["plan"] == plan["plan"], issued
+    assert "proof" not in issued and "boot_verified_at" not in issued, issued
+    inspect = no_qemu(fixture.inspect(state), work / "unclean-inspect.strace")
+    assert inspect.returncode != 0 and json.loads(inspect.stdout)["status"] == "RecoveryRequired", inspect
+    stopped = managed_bytes(state)
+    rejected(no_qemu(command, work / "unclean-replay.strace"), r"boot was already issued")
+    assert (state / JOURNAL).read_bytes() == boundary and managed_bytes(state) == stopped
+    if args.prior_activator is not None:
+        check_legacy_adoption(args, work, staged, source, code, vars_file, secret, starts)
+    assert digest_map(frozen) == frozen and digest_map(bundle) == bundle
+    print("PASS actual native poweroff with dirty ext4 retains the issued boot for recovery")
+
+
+def check_legacy_adoption(args, work, staged, source, code, vars_file, secret, starts):
+    state = work / "legacy-unclean-activation"
+    legacy = Activation(args.prior_activator, staged, source, code, vars_file, secret)
+    plan = legacy.planned(state)
+    report = json.loads(succeeded(invoke(legacy.apply(state, plan["plan_digest"]), 300)))
+    assert report["status"] == "BootVerified", report
+    try:
+        check_clean_shutdown(state / "managed.raw", starts=starts)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("legacy activation without shutdown hook did not leave dirty ext4 evidence")
+
+    saved = {state / JOURNAL: sha(state / JOURNAL), **managed_bytes(state)}
+    selection = work / "selection-legacy-unclean-activation"
+    selection.mkdir(mode=0o700)
+    command = [sys.executable, "-B", args.selector, "plan", "--state-dir", selection,
+               "--activation-dir", state, "--activation-receipt-sha256", saved[state / JOURNAL],
+               "--expected-generation", "0"]
+    rejected(no_qemu(command, work / "unclean-legacy-selection.strace"),
+             r"managed candidate (state|home) ext4 was not cleanly shut down")
+    assert not (selection / "selection-plan.json").exists() and not (selection / "selection.json").exists()
+    assert digest_map(saved) == saved
+    print("PASS actual prior controller BootVerified receipt with dirty ext4 cannot be selected")
+
+
 def exercise(args, work):
     operator, operator_hash = password(work, "operator.hash")
     admin, admin_hash = password(work, "root.hash")
@@ -325,12 +431,13 @@ def exercise(args, work):
     frozen = digest_map((old, receipt, code, vars_file))
     assert frozen[old] != old_build["initial_image_sha256"]
 
+    if args.unclean_shutdown_only:
+        refuse_unclean_shutdown(args, work, old, old_build, receipt, code, vars_file, secret, prior[0])
+        assert digest_map(frozen) == frozen
+        return
+
     stage = work / "staged"
-    stdout = succeeded(invoke([sys.executable, "-B", args.controller, stage,
-        "--upgrade-from", old, "--previous-receipt", receipt, "--previous-receipt-sha256", frozen[receipt],
-        "--kernel-iso", args.kernel_iso, "--core-archive", args.archive, "--core-sha256", sha(args.archive),
-        "--ovmf-code", code, "--ovmf-code-sha256", frozen[code],
-        "--ovmf-vars", vars_file, "--ovmf-vars-sha256", frozen[vars_file]], 850))
+    stdout = stage_native(args, stage, old, receipt, code, vars_file, frozen)
     candidate = validate_bundle(args, stage, stdout, old_build, frozen, old, receipt, code, vars_file, prior[0])
     bundle = digest_map(stage.iterdir())
     fixture = Activation(args.activator, stage, old, code, vars_file, secret)
@@ -344,6 +451,8 @@ def exercise(args, work):
     successor_dir, successor, successor_build, successor_first_boot = exercise_successor(
         args, work, selected_dir, selected, secret)
     _, recovered = exercise_selection_recovery(work, args.selector, state, secret)
+    if args.check_unclean_shutdown:
+        refuse_unclean_shutdown(args, work, old, old_build, receipt, code, vars_file, secret, prior[0])
     secret.unlink()
 
     booted = verify_guest(work, successor_dir / "managed.raw", successor_dir / "managed-ovmf-code.fd",
@@ -370,6 +479,10 @@ def main():
     parser.add_argument("--work-parent", type=Path)
     parser.add_argument("--expected-source-format", type=int)
     parser.add_argument("--expected-target-format", type=int)
+    parser.add_argument("--prior-activator", type=Path)
+    cases = parser.add_mutually_exclusive_group()
+    cases.add_argument("--check-unclean-shutdown", action="store_true")
+    cases.add_argument("--unclean-shutdown-only", action="store_true")
     args = parser.parse_args()
     if os.geteuid() == 0:
         parser.error("run the managed activation acceptance as an unprivileged Linux operator")

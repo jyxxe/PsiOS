@@ -17,6 +17,8 @@ import subprocess
 import time
 import uuid
 
+from activation_storage import BootStorage, lock_cold
+
 
 MIB = 1024 * 1024
 MAX_DISK_BYTES = 8192 * MIB
@@ -302,11 +304,11 @@ def qemu_command(disk_fd, code_fd, vars_fd, vars_probe_fd, *, secure_boot_requir
     ]
 
 
+@contextmanager
 def boot_candidate(work: Path, *, disk: Path, firmware_code: Path, firmware_vars: Path,
                    credential: bytes, expected_node: str, manifest_sha256: str, expected_artifacts: dict,
-                   before_launch,
-                   secure_boot_required: bool = False) -> dict:
-    """Confirm a bounded normal OVMF boot and clean shutdown of one owned disk."""
+                   before_launch, storage: BootStorage, secure_boot_required: bool = False):
+    """Hold cold artifacts after a verified normal OVMF boot and shutdown."""
     work = work.absolute()
     paths = [path.absolute() for path in (disk, firmware_code, firmware_vars)]
     require(len(set(paths)) == len(paths) and all(path.parent == work for path in paths)
@@ -336,6 +338,7 @@ def boot_candidate(work: Path, *, disk: Path, firmware_code: Path, firmware_vars
         require(artifact_digests(artifacts, sizes) == expected_artifacts
                 and bound_artifacts(directory, names, artifacts) == before,
                 "managed boot inputs changed from the approved disk and firmware digests")
+        partition_table = storage.gpt(work, disk_fd)
         fds = (disk_fd, code_fd, vars_fd, vars_probe_fd)
         command = qemu_command(*fds, secure_boot_required=secure_boot_required)
         guard = parent_death_guard()
@@ -349,16 +352,19 @@ def boot_candidate(work: Path, *, disk: Path, firmware_code: Path, firmware_vars
             proof = console_proof(console, credential, expected_node, manifest_sha256,
                                   secure_boot_required=secure_boot_required)
             console.shutdown(process)
+            lock_cold(disk_fd)
+            lock_cold(vars_fd)
             os.fsync(disk_fd)
             os.fsync(vars_fd)
             finished = bound_artifacts(directory, names, artifacts)
             require(tuple(state[5] for state in finished) == sizes and finished[1] == before[1],
                     "private candidate sizes or firmware code changed during boot")
+            storage.verify_shutdown(work, disk_fd, partition_table)
             readback = artifact_digests(artifacts, sizes)
             require(bound_artifacts(directory, names, artifacts) == finished
                     and readback["efi_code_sha256"] == expected_artifacts["efi_code_sha256"],
                     "private candidate artifacts changed during boot readback")
-            return {"proof": proof, "artifacts": readback}
+            yield {"proof": proof, "artifacts": readback}
         except ValueError as error:
             status = process.poll()
             if status is not None and status != 0:

@@ -43,11 +43,8 @@ def partition_copy(work, image, partition, name):
         path.unlink(missing_ok=True)
 
 
-def gpt_facts(work, image, layout):
-    create.validate_layout(work, image, layout)
-    table = json.loads(subprocess.check_output(
-        ["sfdisk", "--json", image], stdin=subprocess.DEVNULL, timeout=30,
-    ))["partitiontable"]
+def gpt_facts(work, image, layout, *, pass_fds=()):
+    table = create.validate_layout(work, image, layout, pass_fds=pass_fds)
     disk = uuid.UUID(table["id"])
     identities = {disk}
     partitions = []

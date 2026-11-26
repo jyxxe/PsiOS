@@ -15,10 +15,11 @@ import selection_recovery
 import selection_scratch
 from activate_update import DISK, VARS, stopped_source, verify_stopped_source
 from activation_guest import open_file
+from activation_storage import BootStorage
 from install import checked_digest, digest, lock_directory, require, timestamp, valid_instant
 from select_manifest import (
-    check_build_receipt, check_material, check_proof, copy_build_receipt, copy_material, fd_path, generation_directory,
-    prepare_activation, read_json, save_json, write_json_exclusive,
+    BUILD_RECEIPT, check_build_receipt, check_material, check_proof, copy_build_receipt, copy_material, fd_path,
+    generation_directory, prepare_activation, read_json, save_json, write_json_exclusive,
 )
 from selection_boot import boot
 from stage_update import identity, publish_bundle
@@ -157,6 +158,7 @@ def hold_source(custody, sources, path, expected, size, previous=None):
             "activation and predecessor custody require distinct files")
     saved = custody.enter_context(stopped_source(path, expected, size, previous if previous is not None else observed))
     sources.append((path, saved))
+    return saved
 
 
 def hold_variables(custody, sources, directory, expected):
@@ -173,11 +175,16 @@ def activation_context(directory, existing, path, expected):
         size = deployment["size_bytes"]
         sources = []
         hold_source(custody, sources, original, deployment["source_sha256"], size, deployment["source_identity"])
-        hold_source(custody, sources, managed, current["image_sha256"], size)
+        managed_identity = hold_source(custody, sources, managed, current["image_sha256"], size)
         hold_variables(custody, sources, activation, current["efi_vars_sha256"])
         previous = check_successor(directory, existing, deployment, custody)
         if previous is not None:
             hold_variables(custody, sources, previous, existing["current"]["efi_vars_sha256"])
+        receipt = Path(deployment["stage_dir"]) / BUILD_RECEIPT
+        storage = BootStorage.from_receipt(receipt, deployment["candidate_receipt_sha256"], size)
+        with open_file(activation, DISK, writable=False) as (raw, _):
+            require(identity(os.fstat(raw)) == tuple(managed_identity), "adopted disk differs from its cold fence")
+            storage.verify_shutdown(fd_path(activation), raw)
         yield activation, deployment, current, proof, sources
 
 
@@ -255,16 +262,12 @@ def check_adoption(directory, entry):
     return original, previous
 
 
-def recover_publication(directory, name, plan, approved, existing):
-    with generation_directory(directory, name) as published:
-        entry, _ = read_json(published, ADOPTION)
-        _, previous = check_adoption(published, entry)
-        require(entry == selected_entry(plan, approved, entry["selected_at"]),
-                "published generation does not match the approved adoption")
-        require(previous == existing, "published generation has a different predecessor receipt")
-        check_material(published, entry["deployment"], entry["current"])
-        os.fsync(published)
-    os.fsync(directory)
+def recover_publication(published, plan, approved, existing):
+    entry, _ = read_json(published, ADOPTION)
+    _, previous = check_adoption(published, entry)
+    require(entry == selected_entry(plan, approved, entry["selected_at"]),
+            "published generation does not match the approved adoption")
+    require(previous == existing, "published generation has a different predecessor receipt")
     return entry
 
 
@@ -285,25 +288,33 @@ def adopt(directory, args):
     name = generation_name(plan["generation"])
     path = Path(deployment["activation_dir"])
     expected = deployment["activation_receipt_sha256"]
-    with activation_context(directory, existing, path, expected) as (activation, actual, current, proof, sources):
+    with (activation_context(directory, existing, path, expected) as (activation, actual, current, proof, sources),
+          ExitStack() as publication):
         require((actual, current, proof) == (deployment, plan["current"], plan["proof"]),
                 "approved activation evidence changed before adoption")
+        pair = None
         if exists_at(directory, name):
-            entry = recover_publication(directory, name, plan, approved, existing)
+            target = publication.enter_context(generation_directory(directory, name))
+            entry = recover_publication(target, plan, approved, existing)
         else:
-            with selection_scratch.staging(directory, plan, approved) as (pair, target):
-                entry = selected_entry(plan, approved, timestamp())
-                copy_material(activation, target, current)
-                copy_build_receipt(target, deployment, exclusive=True)
-                check_material(target, deployment, current)
-                if existing is not None:
-                    write_json_exclusive(target, PREVIOUS, existing)
-                write_json_exclusive(target, ADOPTION, entry)
-                verify_activation_sources(sources)
-                selection_scratch.verify_staging(directory, target, plan, approved)
-                publish_bundle(pair, directory, name)
+            pair, target = publication.enter_context(selection_scratch.staging(directory, plan, approved))
+            entry = selected_entry(plan, approved, timestamp())
+            copy_material(activation, target, current)
+            copy_build_receipt(target, deployment, exclusive=True)
+            if existing is not None:
+                write_json_exclusive(target, PREVIOUS, existing)
+            write_json_exclusive(target, ADOPTION, entry)
+        recheck = publication.enter_context(selection_recovery.final_artifacts(target, entry))
+        if pair is None:
+            os.fsync(target)
+            os.fsync(directory)
+        else:
+            verify_activation_sources(sources)
+            selection_scratch.verify_staging(directory, target, plan, approved)
+            publish_bundle(pair, directory, name)
         verify_activation_sources(sources)
         selection_scratch.finish_publication(directory, plan, approved, name)
+        recheck()
         save_json(directory, SELECTION, entry)
         return entry
 

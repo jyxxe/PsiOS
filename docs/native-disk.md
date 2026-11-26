@@ -197,7 +197,7 @@ python3 native/activate_update.py activate --state-dir "$ACTIVATION_STATE" \
 python3 native/activate_update.py inspect --state-dir "$ACTIVATION_STATE"
 ```
 
-计划固定分阶段回执、原盘、候选盘和固件，在状态目录准备私有引导材料。执行复核原盘身份与摘要，持久记录 `BootIssued`，再启动只连接候选盘副本的无网络来宾。通过控制台登录后，核对本次启动 ID、部署摘要及 Core 节点身份。来宾正常退出并刷盘后进入 `BootVerified`，回执列出受管磁盘和 EFI 变量。
+计划固定分阶段回执、原盘、候选盘和固件，在状态目录准备私有引导材料。执行复核原盘身份与摘要，持久记录 `BootIssued`，再启动只连接候选盘副本的无网络来宾。通过控制台登录后，核对本次启动 ID、部署摘要及 Core 节点身份。来宾正常退出并刷盘后，控制器从加锁的停机磁盘再次核对 GPT 布局和分区标识，以及状态和主目录分区的 ext4 UUID、清洁标志和启用时的超级块校验和。确认无需日志重放且无待清理的孤立 inode 后，才写入列有受管磁盘和 EFI 变量的 `BootVerified` 回执。完整文件系统检查仍由离线救援执行。
 
 签名候选须使用包含挂载前强制检查的分阶段构建。计划核对候选和试启动的证书、EFI stub 摘要与固件强制执行记录。正式候选在可写挂载前要求 Secure Boot。控制器通过来宾核对正式启动的固件状态，并把此次证据收入 `BootVerified` 回执。[签名首次引导验收](../tests/native_signed_activation.py)
 
@@ -220,9 +220,9 @@ python3 -B native/select_update.py boot-selected --state-dir "$selection_dir" \
 python3 -B native/select_update.py inspect --state-dir "$selection_dir"
 ```
 
-从计划回执取得 `plan_digest`。提交会重新校验已验证候选及其来源，将私有磁盘、固件代码与 EFI 变量作为同一代全部持久发布，再更新选择记录。原始分阶段候选、首次引导回执及映像继续保留。采用下一代时，先基于已选代次的当前停机磁盘、EFI 变量及该代构建回执生成新的分阶段候选并验证首次引导。选择命令复核新候选确实从当前受管状态派生，旧代次保留供运维核查。
+从计划回执取得 `plan_digest`。提交会重新校验已验证候选及其来源，从加锁的停机盘核验状态和主目录分区，再将私有磁盘、固件代码与 EFI 变量作为同一代全部持久发布。原始分阶段候选、首次引导回执及映像继续保留。采用下一代时，先基于已选代次的当前停机磁盘、EFI 变量及该代构建回执生成新的分阶段候选并验证首次引导。选择命令复核新候选确实从当前受管状态派生，旧代次保留供运维核查。
 
-每次启动从当前 `Selected` 回执取得 `selection_digest`。命令只附加该代的私有磁盘，把 `BootIssued` 持久化后通过受管 QEMU 启动，认证来宾 Core 的节点、部署摘要和新的 Linux 启动 ID，签名部署还需证明 Secure Boot 开启。来宾正常关机并刷盘后回执给出新的选择摘要。后续启动必须显式批准新摘要。若启动结果不明，`inspect` 返回 `RecoveryRequired`，本目录停止再次启动或接管。
+每次启动从当前 `Selected` 回执取得 `selection_digest`。命令只附加该代的私有磁盘，把 `BootIssued` 持久化后通过受管 QEMU 启动，认证来宾 Core 的节点、部署摘要和新的 Linux 启动 ID，签名部署还需证明 Secure Boot 开启。来宾正常关机、刷盘并通过同样的停机分区核验后，回执给出新的选择摘要。后续启动必须显式批准新摘要。若缺少干净关机证据或启动结果不明，`inspect` 返回 `RecoveryRequired`，本目录停止再次启动或接管。
 
 如果 `inspect` 提供 `boot_proof_sha256`，操作者可以核对并批准已有启动证据。
 
@@ -231,7 +231,7 @@ python3 -B native/select_update.py reconcile-boot --state-dir "$selection_dir" \
   --selection-digest "$issued_selection_digest" --boot-proof-sha256 "$boot_proof_sha256"
 ```
 
-对账复核原启动意图、证明文件和同代磁盘及 EFI 摘要。核验通过只补交选择指针，无需再启动来宾。证明缺失、过时或盘面不匹配时仍保留待核实状态。
+对账复核原启动意图、证明文件和同代磁盘及 EFI 摘要，并再次读取停机盘上的分区状态。核验通过只补交选择指针。证明缺失、过时、盘面不匹配或分区未干净关闭时仍保留待核实状态。
 
 采用复制开始前登记一份精确计划对应的暂存目录。复制中断且新代目录尚未发布时，可用 `discard-staging --state-dir "$selection_dir" --plan-digest "$plan_digest"` 清理该计划的暂存文件。指向不明文件或目录的记录交由操作者核查。已发布的代次继续使用原批准的 `adopt` 恢复指针。
 

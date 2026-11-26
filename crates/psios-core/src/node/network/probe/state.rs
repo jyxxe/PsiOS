@@ -13,6 +13,7 @@ use serde_json::Value;
 
 pub(crate) const TOOL: &str = "node.observe_network_probe";
 pub(crate) const FORMAT: u32 = crate::apps::restart::CUSTODY_FORMAT + 1;
+pub(crate) const RESULT_BYTES: i64 = 64 * 1024;
 pub(crate) const SCHEMA: &str = "CREATE TABLE network_probe_positions (
     probe TEXT PRIMARY KEY, context TEXT NOT NULL,
     dispatched_seq INTEGER NOT NULL CHECK(dispatched_seq>=0),
@@ -360,7 +361,7 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
             "RecoveryRequired",
             "network probe receipt lineage disagrees with its settled observation",
         )?;
-        let bytes = artifact::checkpoint_bytes(conn, &artifact, 64 * 1024)?;
+        let bytes = artifact::checkpoint_bytes(conn, &artifact, RESULT_BYTES as usize)?;
         let result: Value = serde_json::from_slice(&bytes)?;
         let measurement = &result["measurement"];
         let statuses = normalized(&measurement["observation"]);

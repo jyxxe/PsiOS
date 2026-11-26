@@ -38,10 +38,10 @@ class NetworkProbeStateTests(unittest.TestCase):
         host, port = stream.getsockname()
         return f"{host}:{port}"
 
-    def configure(self, *probes):
+    def configure(self, *probes, **settings):
         self.node.stop()
         config = json.loads(self.node.config.read_text())
-        self.node.config.write_text(json.dumps(dict(config, network_probes=probes)))
+        self.node.config.write_text(json.dumps(dict(config, network_probes=probes, **settings)))
         self.node.start()
 
     def probe(self, name):
@@ -115,7 +115,8 @@ class NetworkProbeStateTests(unittest.TestCase):
         n = self.node
         stream = self.socket()
         address = self.endpoint(stream)
-        self.configure(dict(name="primary", endpoint=address), dict(name="other", endpoint=address))
+        self.configure(dict(name="primary", endpoint=address), dict(name="other", endpoint=address),
+                       read_result_bytes_per_principal=4 * 1024 * 1024)
         probe = self.probe("primary")
         other = self.probe("other")
         state_id = self.state_id(probe)

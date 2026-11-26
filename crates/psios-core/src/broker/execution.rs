@@ -540,6 +540,9 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                 host::Output::Receipt(receipt) => host::apply(db, w, &receipt)?,
                 host::Output::OciImage(capture) => apps::capture::publish(db, w, *capture)?,
             };
+            if matches!(w.action, Action::ObserveNetworkProbe(_)) {
+                artifact::capacity::check_result(db, &t, &body)?;
+            }
             let a = artifact::publish(
                 db,
                 &t.owner,

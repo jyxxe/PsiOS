@@ -511,6 +511,8 @@ Core 在真正派发时重查项目成员、授权和工作项修订。在同一
 
 工作项也可采用 `WorkflowTaskResult` 条件，固定 `definition_ref`、`step_id`、`tool` 和 `target_ref`。创建者需有该工作流定义的读取权限，指派者需能按现有 Workflow 权限使用同一份定义。提交证据仍使用原 Task 和 Artifact 引用。Core 核对原 WorkflowRun 中已知成功的确切步骤和生产回执。Project 成员可查看授权范围内的工作项，工作流身份和步骤详情仍按原 Workflow 读取权限裁决。[工作流证据验收](../tests/test_work_item_workflow_evidence.py)
 
+创建工作项时可用 `parent_id` 指向同项目中处于 `Ready` 的已有工作项。父关系随新工作项固定。Core 检查父子关系和 `blocked_by` 共同形成的等待图，拒绝直接或间接循环。每个子项仍各自提交证据、审核并关闭。父项经过评审后，须等直接子项均关闭才能执行最后的关闭操作。`psiosctl work-item children ID` 在当前项目授权范围内分页查询直属子项。[父子关系与关闭验收](../tests/test_work_item_hierarchy.py)
+
 当前支持单节点和单个 Task 或 Workflow 步骤验收条件。多条件验收、外部 Issue 与 CI 同步仍待实现。[多主体与重启验收](../tests/test_project_work_items.py) · [Project 规范](v1/docs/11-workflows-projects.md#118-project-与-workitem)
 
 ## 本机会话

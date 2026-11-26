@@ -235,7 +235,7 @@ class VolumeCreateCustody(unittest.TestCase):
         name = "not-applied-volume-create"
         pool = node.get("local")["reference"]
         node_ref = node.call("Node.Get", {})["reference"]
-        node.call("Node.Configure", {**target(node_ref), "scheduling": "Cordoned"})
+        node.call("Node.Configure", {"expected_resource_version": node_ref["version"], "scheduling": "Cordoned"})
         node.stop()
         daemon, trace = node.daemon, node.base / "volume-create-rename.strace"
         node.daemon = ["strace", "-D", "-f", "-o", str(trace), "-e", "trace=renameat2",
@@ -251,7 +251,7 @@ class VolumeCreateCustody(unittest.TestCase):
         self.assertEqual(node.call("Task.Get", {"id": task_id})["lifecycle"], "Queued")
         try:
             node_ref = node.call("Node.Get", {})["reference"]
-            node.call("Node.Configure", {**target(node_ref), "scheduling": "Enabled"})
+            node.call("Node.Configure", {"expected_resource_version": node_ref["version"], "scheduling": "Enabled"})
             task = node.wait(task_id)
             if task["lifecycle"] == "WaitingApproval":
                 node.approve(task_id)

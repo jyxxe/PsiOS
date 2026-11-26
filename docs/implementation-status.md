@@ -28,6 +28,11 @@
 
 - 格式 69 在调用 systemd 前将批准、一次性使用、原操作和服务修订绑定到持久检查点。检查点失败时未发出宿主命令，可经重新审批重试。已提交检查点但丢失回执时保留服务占用，允许以同次 Linux 启动及相同管理器范围和 UID 的新观测结算。已用真实用户 systemd 验证启停、重启、检查点写入失败、守护进程强杀，以及格式 34 和 68 的在途启动跨升级。其他宿主管理员可独立改变 unit，Core 的回执记录已核实的状态。[启动与停止](../tests/services.py) · [重启与核验](../tests/service_restart.py) · [在途升级](../tests/service_dispatch_upgrade.py)
 
+## OCI 恢复与网络状态
+
+- OCI 停止和重启都记录持久命令检查点。停止回执丢失时，可在独立核实原容器已退出后授权清理，始终保留原应用和卷占用，直到观测证实容器已消失。真实 Docker 已验证普通队列满、停止与删除回执先后丢失、重启检查点失败、原审批和占用核验。应用日志按专门授权读取，停止后保留有界私有尾部。[OCI 与卷回归](../tests/oci.py) · [停止故障](../tests/oci_recovery.py) · [重启核验](../tests/oci_restart.py)
+- 注册网络探针可发布有持久证据的状态和生命周期事件。本机 TCP/DNS 验收覆盖状态变化触发 Schedule、撤权后阻止后续连接、跨命名空间重置、证据回收和保留原授权范围的旧格式升级。精确 Watch 支持 200 字节的资源筛选，游标仍满足 v1 长度契约。已验证确认位置经历重启、作用域回收及授权变化后可用同一筛选恢复。[网络探针状态](../tests/test_network_probe_state.py) · [精确作用域](../tests/test_bounded_watch_scopes.py)
+
 ## 如何复核
 
 每次合入后可在相应提交的 Actions 中查看各项作业。Linux 作业运行契约、进程故障、真实 Docker 和 systemd 测试；host-package 实际安装并升级；guest-boot 使用该次打出的包启动虚机。独立工作流用 Alpine 构建，在断网的非特权用户空间执行系统测试，随后为主线归档签发证明并在禁网环境核验。主线的 package-provenance 在 .deb 对应的检查通过后签发证明，verify-provenance 独立核验并测试被更改的包将被拒绝。单项通过仅覆盖脚本中的平台与故障条件。v1 原始包的校验报告记录文档一致性，保留在其发布目录内。[宿主 CI](../.github/workflows/core.yml) · [独立 Core CI](../.github/workflows/portable.yml) · [主线运行记录](https://github.com/jyxxe/PsiOS/actions?query=branch%3Amain) · [验收规范](v1/docs/15-acceptance-and-evidence.md)

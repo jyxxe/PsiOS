@@ -2,7 +2,7 @@
 use super::{inference, late_decision::sha256_digest, provider_authority, state};
 use crate::{
     Result,
-    db::{resolve, row},
+    db::{find, resolve, row},
     err, require,
 };
 use psios_api::{ModelDecisionRejectionPolicy as Policy, ModelTokenUsage, sha256};
@@ -18,10 +18,11 @@ pub(super) fn record(
     lease: &str,
     tool: &str,
     decision_digest: &str,
+    output_bytes: usize,
 ) -> Value {
     body["lifecycle"] = json!("Failed");
     body["outcome_knowledge"] = json!("Known");
-    body[MARKER] = json!({"lease_id":lease,"decision_digest":decision_digest,
+    body[MARKER] = json!({"lease_id":lease,"decision_digest":decision_digest,"output_bytes":output_bytes,
         "tool_digest":sha256(tool.as_bytes()),"policy":policy,"code":CODE});
     json!({"policy":policy,"code":CODE})
 }
@@ -78,33 +79,41 @@ pub(super) fn verify_receipt(
     let settled = resolve(conn, &receipt["session_ref"])?;
     let before = inference::predecessor(conn, &settled)?;
     let reserved = resolve(conn, &issued.body["current_usage_ref"])?;
+    let current_usage = find(conn, &reserved.id)?.ok_or_else(invalid)?;
     let marker = &settled.body[MARKER];
     let tool_digest = marker["tool_digest"].as_str().ok_or_else(invalid)?;
     let digest = digest
         .as_deref()
         .filter(|value| sha256_digest(value))
         .ok_or_else(invalid)?;
+    let output_bytes = receipt["output_bytes"]
+        .as_u64()
+        .filter(|bytes| {
+            *bytes > 0
+                && model.spec["max_output_bytes"]
+                    .as_u64()
+                    .is_some_and(|maximum| *bytes <= maximum)
+        })
+        .ok_or_else(invalid)?;
     let policy = Policy::UndeclaredToolV1;
+    let mut expected_receipt = json!({"session_ref":settled.reference(),"task_id":null,
+        "decision_digest":digest,"output_bytes":output_bytes,"lifecycle":"Failed",
+        "outcome_knowledge":"Known","rejection":{"policy":policy,"code":CODE}});
+    if let Some(reference) = receipt.get("usage_ref") {
+        expected_receipt["usage_ref"] = reference.clone();
+    }
     let declared = skill.spec["tool_refs"].as_object().ok_or_else(invalid)?;
     require(
         no_task
             && status == "Responded"
             && marker
                 == &json!({"lease_id":lease,"decision_digest":digest,"tool_digest":tool_digest,
-                "policy":policy,"code":CODE})
+                "output_bytes":output_bytes,"policy":policy,"code":CODE})
             && sha256_digest(tool_digest)
             && declared
                 .keys()
                 .all(|tool| sha256(tool.as_bytes()) != tool_digest)
-            && receipt["rejection"] == json!({"policy":policy,"code":CODE})
-            && receipt["decision_digest"] == digest
-            && receipt["lifecycle"] == "Failed"
-            && receipt["outcome_knowledge"] == "Known"
-            && receipt.get("task_id").is_some_and(Value::is_null)
-            && receipt["output_bytes"]
-                .as_u64()
-                .zip(model.spec["max_output_bytes"].as_u64())
-                .is_some_and(|(bytes, maximum)| bytes > 0 && bytes <= maximum)
+            && receipt == &expected_receipt
             && issued.kind == "Session"
             && state(&issued) == "ModelInFlight"
             && issued.body["current_lease"] == lease
@@ -139,6 +148,7 @@ pub(super) fn verify_receipt(
             usage.kind == "ModelUsage"
                 && usage.owner == issued.owner
                 && usage.id == reserved.id
+                && current_usage.reference() == *reference
                 && reserved.rev.checked_add(1) == Some(usage.rev)
                 && usage.body["model_ref"] == model.reference()
                 && usage.body["session_id"] == session
@@ -154,26 +164,13 @@ pub(super) fn verify_receipt(
             "RecoveryRequired",
             "rejected decision usage differs from the original model reservation",
         )?;
-    } else if elapsed.is_some() {
+    } else if elapsed.is_some() || current_usage.reference() != reserved.reference() {
         return Err(invalid());
     }
     Ok(())
 }
 
-pub(super) fn verify(conn: &Connection) -> Result<()> {
-    let mut query = conn.prepare(
-        "SELECT session,lease,receipt FROM session_turns
-        WHERE receipt->'rejection' IS NOT NULL OR receipt->>'outcome_knowledge'='Known'",
-    )?;
-    let mut rows = query.query([])?;
-    while let Some(r) = rows.next()? {
-        verify_receipt(
-            conn,
-            &r.get::<_, String>(0)?,
-            &r.get::<_, String>(1)?,
-            &r.get(2)?,
-        )?;
-    }
+pub(super) fn verify_links(conn: &Connection) -> Result<()> {
     let missing: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM current s WHERE s.kind='Session' AND s.body->'model_decision_rejection' IS NOT NULL
         AND NOT EXISTS(SELECT 1 FROM session_turns t WHERE t.session=s.id AND t.lease=s.body->'model_decision_rejection'->>'lease_id'

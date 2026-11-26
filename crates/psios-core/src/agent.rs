@@ -791,6 +791,7 @@ pub fn respond(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
                 &p.lease_id,
                 &tool,
                 &hash,
+                bytes.len(),
             ));
         }
         Decision::Tool { tool, input } => {

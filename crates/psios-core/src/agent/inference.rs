@@ -384,7 +384,9 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
     let mut statement = conn.prepare(
         "SELECT i.lease,t.session,t.turn,i.session_revision,i.model,i.status,i.source,i.receipt,
             i.boot_id=t.boot_id AND i.deadline_boot_ms=t.deadline_boot_ms
-                AND (a.lease IS NULL OR i.time_ns=a.time_ns),t.expires,t.receipt IS NOT NULL,a.settled_ms
+                AND (a.lease IS NULL OR i.time_ns=a.time_ns),t.expires,t.receipt IS NOT NULL,a.settled_ms,
+            CASE WHEN t.receipt->'rejection' IS NOT NULL OR t.receipt->>'outcome_knowledge'='Known'
+                 THEN t.receipt END
          FROM model_inference_leases i JOIN session_turns t USING(lease)
          LEFT JOIN model_lease_times a USING(lease)",
     )?;
@@ -435,6 +437,9 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
                 "unreported strict model lease is no longer current",
             )?;
         }
+        if let Some(decision) = record.get::<_, Option<Value>>(12)? {
+            super::rejected_decision::verify_receipt(conn, &session, &lease, &decision)?;
+        }
         if let Some(receipt) = receipt {
             let settled = resolve(conn, &receipt["session_ref"])?;
             let before_settlement = predecessor(conn, &settled)?;
@@ -470,5 +475,5 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
             )?;
         }
     }
-    super::rejected_decision::verify(conn)
+    super::rejected_decision::verify_links(conn)
 }

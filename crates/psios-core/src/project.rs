@@ -2,6 +2,7 @@
 pub(crate) mod agent_tool;
 pub(crate) mod directory;
 pub(crate) mod evidence;
+pub(crate) mod history;
 mod maintenance;
 pub(crate) use maintenance::{abandon, reassign};
 

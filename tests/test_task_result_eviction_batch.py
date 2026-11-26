@@ -172,6 +172,8 @@ class TaskResultEvictionBatchTests(unittest.TestCase):
         self.denied("InvalidArgument", APPLY, {"plan_token": tampered})
         self.assert_available(first, second)
 
+        self.restart()
+
         pinned = n.call("WorkItem.SubmitEvidence", {
             **target(item), "task_ref": second.task, "artifact_ref": second.artifact,
         }, self.token)

@@ -36,10 +36,6 @@ struct CandidateArtifact {
 }
 
 impl Candidate {
-    pub(super) fn task_reference(&self) -> Value {
-        self.task.reference()
-    }
-
     pub(super) fn bytes(&self) -> u128 {
         self.bytes
     }

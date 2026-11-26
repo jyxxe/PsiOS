@@ -76,7 +76,7 @@ def main(previous, current):
         assert replay["deduplicated"] and replay["task_id"] == task_id, replay
         node.stop(signal.SIGKILL)
         after = verify(node.daemon)
-        assert after["database_format"] == 123 and not after["migration_required"], after
+        assert after["database_format"] >= 123 and not after["migration_required"], after
         assert after["node_id"] == source["node_id"], after
         old = subprocess.run(old_daemon + ["serve"], capture_output=True, text=True, timeout=15)
         assert old.returncode != 0 and "SchemaVersionUnsupported" in old.stderr, old

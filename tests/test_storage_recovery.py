@@ -625,8 +625,8 @@ class StorageRecoveryTests(unittest.TestCase):
         n.stop()
         daemon, trace = n.daemon, n.base / "backup-cleanup-cut.strace"
         manifest = quarantine / "manifest.json"
-        n.daemon = ["strace", "-D", "-f", "-yy", "-o", str(trace), "-P", str(manifest),
-                    "-e", "trace=unlinkat", "-e", "inject=unlinkat:error=EINTR:signal=SIGKILL:when=1",
+        n.daemon = ["strace", "-D", "-f", "-yy", "-o", str(trace),
+                    "-e", "trace=unlinkat", "-e", "inject=unlinkat:error=EINTR:signal=SIGKILL:when=2",
                     "--", *daemon]
         try:
             n.start()
@@ -636,8 +636,11 @@ class StorageRecoveryTests(unittest.TestCase):
         marker.unlink()
         quarantine.rmdir()
         self.assertEqual(n.process.wait(25), -signal.SIGKILL)
-        self.assertTrue(any('unlinkat(' in line and '"manifest.json"' in line
-                            for line in trace.read_text().splitlines()))
+        traced = trace.read_text()
+        self.assertTrue(any("unlinkat(" in line and quarantine.name in line
+                            and '"blob-0"' in line and "= 0" in line for line in traced.splitlines()), traced)
+        self.assertTrue(any("unlinkat(" in line and quarantine.name in line
+                            and '"manifest.json"' in line and "INJECTED" in line for line in traced.splitlines()), traced)
         self.assertFalse(stage.exists())
         self.assertEqual(quarantine.stat().st_ino, inode)
         self.assertTrue(manifest.is_file())

@@ -287,7 +287,9 @@ pub fn dispatch(db: &Db<'_>, task: &str) -> Result<Option<Work>> {
         "Grant",
     )?;
     let effect_seconds = match tool {
-        "backup.create" => i64::from(db.cfg.backup_capture_timeout_seconds),
+        "backup.create" | apps::volume_rebind::TOOL => {
+            i64::from(db.cfg.backup_capture_timeout_seconds)
+        }
         "backup.restore" => storage::restore_publication::PERMIT_MAX_SECONDS,
         _ => 30,
     };
@@ -345,7 +347,7 @@ pub fn dispatch(db: &Db<'_>, task: &str) -> Result<Option<Work>> {
             "operation_id": op.id,
             "resource_ref": target,
             "action": tool,
-            "phase": if node::service_control::is_tool(tool) || apps::stop::is_tool(tool) || tool == apps::restart::TOOL || tool == node::network::trial::TOOL { "PermitBound" } else { "EffectStarted" },
+            "phase": if node::service_control::is_tool(tool) || apps::stop::is_tool(tool) || tool == apps::restart::TOOL || tool == node::network::trial::TOOL || tool == apps::volume_rebind::TOOL { "PermitBound" } else { "EffectStarted" },
             "outcome_knowledge": "InFlight",
             "evidence_refs": []
         }),
@@ -434,7 +436,10 @@ pub fn settlement_failed(db: &Db<'_>, w: &Work) -> Result<()> {
         )
     } else if matches!(
         w.action,
-        Action::InstallArtifact(_) | Action::StageArtifactRelease(_) | Action::RetireRelease(_)
+        Action::InstallArtifact(_)
+            | Action::StageArtifactRelease(_)
+            | Action::RetireRelease(_)
+            | Action::RebindRestoredVolume(_)
     ) {
         err(
             "StorageUnavailable",
@@ -506,6 +511,7 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
         return Ok(());
     }
     let cancelled = t.body["lifecycle"] == "Cancelling";
+    let rebind = matches!(w.action, Action::RebindRestoredVolume(_));
     require(
         !atomic_project || t.body["lifecycle"] == "Running",
         "Fenced",
@@ -530,6 +536,10 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
         close(db, &t, "Cancelled", "NotStarted", None, None)?;
         return Ok(());
     }
+    if cancelled && rebind {
+        close(db, &t, "Cancelled", "NotStarted", None, None)?;
+        return Ok(());
+    }
     if cancelled && matches!(w.action, Action::Activate(_) | Action::CaptureOciImage(_)) {
         close(db, &t, "Cancelled", "Known", None, None)?;
         return Ok(());
@@ -551,7 +561,12 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
         )?;
         w.check_result_publication(db)?;
         match &output {
-            host::Output::Receipt(receipt) => artifact::capacity::check_result(db, &t, receipt)?,
+            host::Output::Receipt(receipt) => {
+                if rebind {
+                    apps::volume_rebind::validate_observation(db, w, receipt)?;
+                }
+                artifact::capacity::check_result(db, &t, receipt)?;
+            }
             host::Output::OciImage(capture) => apps::capture::check_capacity(db, w, capture)?,
         }
         Ok(output)
@@ -595,7 +610,8 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
         Err(e) => {
             let undispatched = service_started == Some(false)
                 || stop_started == Some(false)
-                || restart_started == Some(false);
+                || restart_started == Some(false)
+                || rebind;
             let e = if stop_started == Some(true) && e.0.code != "OutcomeUnknown" {
                 err(
                     "OutcomeUnknown",

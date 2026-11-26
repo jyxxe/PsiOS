@@ -175,6 +175,8 @@ pub enum Action {
     ListAppReleases(apps::inventory::Request),
     #[serde(rename = "application.select_release")]
     Select { target: Target, release_ref: Value },
+    #[serde(rename = "application.rebind_restored_volume")]
+    RebindRestoredVolume(apps::volume_rebind::Input),
     #[serde(rename = "application.retire_release")]
     RetireRelease(apps::release_retirement::Request),
     #[serde(rename = "application.refresh")]
@@ -331,6 +333,10 @@ impl Action {
                 resources
                     .push(apps::release_retirement::candidate(db, primary, input)?.reference());
             }
+            Self::RebindRestoredVolume(input) => {
+                let (source, restored) = input.volumes(db, actor)?;
+                resources.extend([source.reference(), restored.reference()]);
+            }
             Self::RestoreReleaseImage(input) => {
                 apps::restore_image::audience(db, primary, input, &mut resources)?;
             }
@@ -483,6 +489,11 @@ impl Action {
                 Some(&input.target.expected_resource_version),
                 "Application",
             ),
+            Self::RebindRestoredVolume(input) => (
+                &input.target.id,
+                Some(&input.target.expected_resource_version),
+                "Application",
+            ),
             Self::Stage { target: t, .. }
             | Self::Select { target: t, .. }
             | Self::Refresh(t)
@@ -546,6 +557,7 @@ pub struct Work {
     pub(crate) restore_image: Option<apps::restore_image::Prepared>,
     pub(crate) restore_image_inspection: Option<apps::restore_image::Recorded>,
     pub(crate) stop_cleanup: Option<apps::stop::Prepared>,
+    pub(crate) volume_rebind: Option<apps::volume_rebind::Prepared>,
     network_trial_inspection: Option<node::network::trial::Inspection>,
 }
 pub(crate) enum Output {
@@ -643,6 +655,7 @@ impl Work {
                 | Action::InstallArtifact(_)
                 | Action::StageArtifactRelease(_)
                 | Action::RetireRelease(_)
+                | Action::RebindRestoredVolume(_)
                 | Action::CaptureOciImage(_)
                 | Action::InspectReleaseImageRestore(_)
                 | Action::Logs(_)
@@ -805,6 +818,9 @@ impl Work {
             Action::Restore(_) => storage::restore(self, |receipt, placement| {
                 checkpoint(Checkpoint::RestoredVolume { receipt, placement })
             }),
+            Action::RebindRestoredVolume(_) => {
+                apps::volume_rebind::observe(self, &mut check_streaming)
+            }
             Action::RestartApp(request) => apps::restart::run(self, request, |before| {
                 checkpoint(Checkpoint::OciRestart(before))
             }),
@@ -971,6 +987,7 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
                 a,
                 Action::Stop(_)
                     | Action::ContinueOciStop(_)
+                    | Action::RebindRestoredVolume(_)
                     | Action::Logs(_)
                     | Action::Health(_)
                     | Action::Uninstall(_)
@@ -1018,6 +1035,11 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     } else {
         None
     };
+    let volume_rebind = if let Action::RebindRestoredVolume(input) = &a {
+        Some(input.prepare(db, actor, &target)?)
+    } else {
+        None
+    };
     let network_trial_inspection = if matches!(a, Action::InspectNetworkTrial(_)) {
         Some(node::network::trial::inspect(db, &target)?)
     } else {
@@ -1041,6 +1063,7 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
         restore_image,
         restore_image_inspection,
         stop_cleanup,
+        volume_rebind,
         network_trial_inspection,
     };
     node::reserve(db, &w)?;
@@ -1084,6 +1107,7 @@ pub fn apply(db: &Db<'_>, w: &Work, receipt: &Value) -> Result<Value> {
             node::apply(db, w, receipt)
         }
         Action::RestoreReleaseImage(_) => apps::restore_image::settle(db, w, receipt),
+        Action::RebindRestoredVolume(_) => apps::volume_rebind::settle(db, w, receipt),
         Action::ContinueOciStop(_) => apps::stop::settle_cleanup(db, w, receipt),
         Action::Stage { .. }
         | Action::StageArtifactRelease(_)

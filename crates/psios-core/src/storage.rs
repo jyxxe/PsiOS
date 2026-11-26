@@ -205,6 +205,17 @@ pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
             "application has unresolved effect",
         )?;
     }
+    if let Some(rebind) = &w.volume_rebind {
+        read_holds::ensure_no_readers(db, &rebind.restored.id)?;
+        require(
+            db.c.execute(
+                "INSERT OR IGNORE INTO holds VALUES(?1,?2)",
+                params![rebind.restored.id, w.op.id],
+            )? == 1,
+            "Conflict",
+            "restored volume held by another operation or workload",
+        )?;
+    }
     Ok(())
 }
 fn create_volume(
@@ -544,7 +555,11 @@ fn copy_hash_checked(
     Ok((len, format!("sha256:{:x}", hash.finalize())))
 }
 fn capture_root(w: &Work) -> Result<File> {
-    let path = volume_dir(&w.cfg, &w.target)?;
+    open_volume_root(&w.cfg, &w.target)
+}
+
+fn open_volume_root(cfg: &Config, volume: &Doc) -> Result<File> {
+    let path = volume_dir(cfg, volume)?;
     let root = File::from(
         rustix::fs::open(
             path,
@@ -553,8 +568,33 @@ fn capture_root(w: &Work) -> Result<File> {
         )
         .map_err(std::io::Error::from)?,
     );
-    registered_root(&w.target, &root.metadata()?)?;
+    registered_root(volume, &root.metadata()?)?;
     Ok(root)
+}
+
+pub(crate) fn restored_fingerprint(cfg: &Config, volume: &Doc) -> Result<String> {
+    usage::fingerprint(&open_volume_root(cfg, volume)?)
+}
+
+pub(crate) fn verify_restored_for_rebind(
+    cfg: &Config,
+    volume: &Doc,
+    check: &mut impl FnMut() -> Result<()>,
+) -> Result<String> {
+    let root = open_volume_root(cfg, volume)?;
+    let before = usage::fingerprint(&root)?;
+    restore_proof::verify_tree_checked(
+        &root,
+        &volume.spec["restore_proof"],
+        || open_volume_root(cfg, volume),
+        check,
+    )?;
+    require(
+        restored_fingerprint(cfg, volume)? == before,
+        "Conflict",
+        "restored volume changed while checking its backup tree",
+    )?;
+    Ok(before)
 }
 
 pub(crate) fn backup(

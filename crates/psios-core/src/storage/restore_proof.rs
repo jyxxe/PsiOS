@@ -56,6 +56,15 @@ pub(super) fn verify_tree(
     expected: &Value,
     reopen: impl FnOnce() -> Result<File>,
 ) -> Result<()> {
+    verify_tree_checked(root, expected, reopen, &mut || Ok(()))
+}
+
+pub(super) fn verify_tree_checked(
+    root: &File,
+    expected: &Value,
+    reopen: impl FnOnce() -> Result<File>,
+    check: &mut impl FnMut() -> Result<()>,
+) -> Result<()> {
     let expected: RestoreProof = decode(expected)?;
     let before = root.metadata()?;
     let mut capture = Capture {
@@ -63,7 +72,7 @@ pub(super) fn verify_tree(
         entries: vec![],
         total: 0,
         max_bytes: MAX_BACKUP_BYTES,
-        check: &mut || Ok(()),
+        check,
     };
     capture.walk(root, Path::new(""), 0)?;
     let entries = capture.entries.iter().map(|(entry, meta)| {

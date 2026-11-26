@@ -9,7 +9,7 @@ use crate::{
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 
-mod fs;
+pub(super) mod fs;
 mod verify;
 pub(crate) use fs::Location;
 use fs::{Entry, Paths, Placement};

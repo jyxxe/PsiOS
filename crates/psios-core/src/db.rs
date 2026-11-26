@@ -192,7 +192,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = schedule::coalescence::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = storage::directory_create::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -566,6 +566,9 @@ impl Store {
                 }
                 if ver < schedule::coalescence::FORMAT {
                     db.c.execute_batch(schedule::coalescence::SCHEMA)?;
+                }
+                if ver < storage::directory_create::FORMAT {
+                    db.c.execute_batch(storage::directory_create::SCHEMA)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

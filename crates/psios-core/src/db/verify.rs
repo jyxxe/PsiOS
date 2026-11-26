@@ -135,6 +135,9 @@ pub(super) fn check_artifacts(
     if identity.database_format >= crate::storage::restore_publication::CREATE_FORMAT {
         crate::storage::restore_publication::verify_creates(conn)?;
     }
+    if identity.database_format >= crate::storage::directory_create::FORMAT {
+        crate::storage::directory_create::verify(conn)?;
+    }
     if identity.database_format >= crate::apps::volume_rebind::FORMAT {
         crate::apps::volume_rebind::verify::check(conn, identity.database_format)?;
     }

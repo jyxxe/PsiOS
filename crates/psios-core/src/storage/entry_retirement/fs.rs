@@ -21,14 +21,14 @@ use std::{
 };
 
 const DEPOT: &str = ".entry-retirements";
-type Identity = [u64; 2];
+pub(in crate::storage) type Identity = [u64; 2];
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Entry {
-    identity: Identity,
-    mode: u32,
-    owner: [u32; 2],
+pub(in crate::storage) struct Entry {
+    pub(in crate::storage) identity: Identity,
+    pub(in crate::storage) mode: u32,
+    pub(in crate::storage) owner: [u32; 2],
     links: u64,
     size: u64,
     modified: [i64; 2],
@@ -36,7 +36,7 @@ pub(super) struct Entry {
 }
 
 impl Entry {
-    fn new(meta: &Metadata) -> Self {
+    pub(in crate::storage) fn new(meta: &Metadata) -> Self {
         Self {
             identity: [meta.dev(), meta.ino()],
             mode: meta.mode(),
@@ -48,7 +48,7 @@ impl Entry {
         }
     }
 
-    fn is_dir(&self) -> bool {
+    pub(in crate::storage) fn is_dir(&self) -> bool {
         FileType::from_raw_mode(self.mode) == FileType::Directory
     }
 
@@ -61,7 +61,7 @@ impl Entry {
         if self.is_dir() { 0 } else { self.size }
     }
 
-    fn same_after_move(&self, other: &Self) -> bool {
+    pub(in crate::storage) fn same_after_move(&self, other: &Self) -> bool {
         self.identity == other.identity
             && self.mode == other.mode
             && self.owner == other.owner
@@ -130,19 +130,19 @@ pub(super) enum Placement {
     Retired(Entry),
 }
 
-fn identity(file: &File) -> Result<Identity> {
+pub(in crate::storage) fn identity(file: &File) -> Result<Identity> {
     let meta = file.metadata()?;
     Ok([meta.dev(), meta.ino()])
 }
 
-struct Depot {
-    wrapper: File,
-    root: File,
-    directory: File,
+pub(in crate::storage) struct Depot {
+    pub(in crate::storage) wrapper: File,
+    pub(in crate::storage) root: File,
+    pub(in crate::storage) directory: File,
 }
 
 impl Depot {
-    fn open(cfg: &Config, volume: &Doc, create: bool) -> Result<Self> {
+    pub(in crate::storage) fn open(cfg: &Config, volume: &Doc, create: bool) -> Result<Self> {
         let path = volume_dir(cfg, volume)?;
         let parent = path
             .parent()
@@ -214,7 +214,7 @@ pub(super) fn guard_volume_retirement(wrapper: &File) -> Result<()> {
     )
 }
 
-fn sample(parent: &File, name: &str) -> Result<Option<Entry>> {
+pub(in crate::storage) fn sample(parent: &File, name: &str) -> Result<Option<Entry>> {
     let stat = match statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
         Err(Errno::NOENT) => return Ok(None),
         Err(e) => return Err(io::Error::from(e).into()),
@@ -276,7 +276,7 @@ fn empty(parent: &File, name: &str, entry: &Entry) -> Result<()> {
     )
 }
 
-fn contains_entries(dir: &File) -> Result<bool> {
+pub(in crate::storage) fn contains_entries(dir: &File) -> Result<bool> {
     for name in Dir::read_from(dir).map_err(io::Error::from)? {
         let name = name.map_err(io::Error::from)?;
         if !matches!(name.file_name().to_bytes(), b"." | b"..") {

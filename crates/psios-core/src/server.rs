@@ -231,13 +231,18 @@ fn worker(s: Shared, changes: Arc<Changes>, stop: Arc<AtomicBool>, tick: Duratio
         let mut check_after = Instant::now();
         let receipt = work.perform_checked(
             |checkpoint| {
-                let restore = matches!(&checkpoint, crate::host::Checkpoint::RestoredVolume { .. });
+                let publication = matches!(
+                    &checkpoint,
+                    crate::host::Checkpoint::RestoredVolume { .. }
+                        | crate::host::Checkpoint::DirectoryAllocation(_)
+                        | crate::host::Checkpoint::DirectoryCreation(_)
+                );
                 let mut store = state(&s)?;
                 let result = store.transaction(&correlation, |db| work.checkpoint(db, checkpoint));
-                if restore && result.is_err() && store.transaction_is_uncertain() {
+                if publication && result.is_err() && store.transaction_is_uncertain() {
                     return Err(err(
                         "OutcomeUnknown",
-                        "restore checkpoint requires witness recovery",
+                        "storage checkpoint requires witness recovery",
                     ));
                 }
                 result
@@ -359,6 +364,7 @@ fn timer(s: Shared, stop: Arc<AtomicBool>) -> Result<()> {
 fn reclaim_storage(s: Shared, stop: Arc<AtomicBool>, config: Config) -> Result<()> {
     let mut archive_cursor = String::new();
     let mut restore_cursor = String::new();
+    let mut directory_cursor = String::new();
     let mut retirement_cursor = retirement::Cursor::default();
     let mut eviction_cursor = crate::artifact::retention::delayed::Cursor::default();
     while !stop.load(Ordering::Acquire) {
@@ -371,6 +377,15 @@ fn reclaim_storage(s: Shared, stop: Arc<AtomicBool>, config: Config) -> Result<(
             reclaim_one_restore_stage(&s, &config, &correlation, &mut restore_cursor)
         {
             eprintln!("psiosd restore stage reclamation: {}", error.0.code);
+        }
+        if !stop.load(Ordering::Acquire)
+            && let Err(error) =
+                reclaim_one_directory_stage(&s, &config, &correlation, &mut directory_cursor)
+        {
+            eprintln!(
+                "psiosd directory creation stage reclamation: {}",
+                error.0.code
+            );
         }
         if !stop.load(Ordering::Acquire)
             && let Err(error) = reclaim_one_volume_entry(&s, &config, &correlation)
@@ -431,6 +446,22 @@ fn reclaim_storage(s: Shared, stop: Arc<AtomicBool>, config: Config) -> Result<(
 fn reclaim_one_volume_entry(s: &Shared, config: &Config, correlation: &str) -> Result<()> {
     use crate::storage::entry_retirement;
     let selected = state(s)?.transaction(correlation, entry_retirement::next_disposal)?;
+    if let Some(disposal) = selected {
+        let result = disposal.run(config);
+        state(s)?.transaction(correlation, |db| disposal.finish(db, result))?;
+    }
+    Ok(())
+}
+
+fn reclaim_one_directory_stage(
+    s: &Shared,
+    config: &Config,
+    correlation: &str,
+    cursor: &mut String,
+) -> Result<()> {
+    let selected = state(s)?.transaction(correlation, |db| {
+        crate::storage::directory_create::next_disposal(db, cursor)
+    })?;
     if let Some(disposal) = selected {
         let result = disposal.run(config);
         state(s)?.transaction(correlation, |db| disposal.finish(db, result))?;

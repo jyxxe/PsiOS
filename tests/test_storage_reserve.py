@@ -92,7 +92,7 @@ class StorageReserveTests(unittest.TestCase):
             task = node.submit(tool, request)
             self.assertEqual(node.wait(task)["lifecycle"], "WaitingApproval")
             node.approve(task)
-            approved.append(task)
+            approved.append((task, "NotStarted" if tool == "volume.mkdir" else "Known"))
         cleanup = node.submit("volume.remove_entry", {"target": target(removable), "path": "record"})
         self.assertEqual(node.wait(cleanup)["lifecycle"], "WaitingApproval")
         node.approve(cleanup)
@@ -133,9 +133,8 @@ class StorageReserveTests(unittest.TestCase):
         self.assertEqual(read["lifecycle"], "Succeeded", read)
         self.assertEqual(node.call("Artifact.Read", {"reference": read["result"]["artifact_refs"][0]})["content"],
                          "readable")
-        # Ordinary creation checks inode capacity before issuing its publication permit.
-        for task_id in [queued_create, *approved]:
-            outcome = "NotStarted" if task_id == queued_create else "Known"
+        # Volume and directory creation check inode capacity before publication.
+        for task_id, outcome in [(queued_create, "NotStarted"), *approved]:
             task = node.wait(task_id)
             self.assertEqual((task["lifecycle"], task["outcome_knowledge"], task["conditions"][0]["type"]),
                              ("Failed", outcome, "QuotaExceeded"), task)

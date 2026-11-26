@@ -675,6 +675,8 @@ pub(crate) enum Checkpoint<'a> {
     },
     StorageDeletion(&'a storage::retirement::Location),
     EntryRetirement(&'a storage::entry_retirement::Location),
+    DirectoryAllocation(&'a storage::directory_create::Parents),
+    DirectoryCreation(&'a storage::directory_create::Location),
     RestoredVolume {
         receipt: &'a Value,
         placement: &'a storage::restore_publication::Placement,
@@ -690,6 +692,34 @@ pub(crate) enum Checkpoint<'a> {
 }
 
 impl Work {
+    pub(crate) fn start_host_effect(&self, db: &Db<'_>) -> Result<Doc> {
+        let effect = db.of(&self.effect.id, "Effect")?;
+        let operation = db.of(&self.op.id, "Operation")?;
+        let task = db.of(&self.task.id, "Task")?;
+        let run = db.of(&self.run.id, "Run")?;
+        require(
+            effect.reference() == self.effect.reference()
+                && effect.body["phase"] == "PermitBound"
+                && operation.body["effect_refs"] == json!([effect.reference()])
+                && task.body["operation_refs"] == json!([operation.reference()])
+                && run.body["operation_refs"] == json!([operation.reference()]),
+            "Fenced",
+            "host effect permit has already been used or replaced",
+        )?;
+        let mut body = effect.body.clone();
+        body["phase"] = json!("EffectStarted");
+        let started = db.status(&effect, body)?;
+        let mut body = operation.body.clone();
+        body["effect_refs"] = json!([started.reference()]);
+        let operation = db.status(&operation, body)?;
+        for document in [run, task] {
+            let mut body = document.body.clone();
+            body["operation_refs"] = json!([operation.reference()]);
+            db.status(&document, body)?;
+        }
+        Ok(started)
+    }
+
     fn checkpoint_authority(&self, db: &Db<'_>) -> Result<Doc> {
         let t = db.of(&self.task.id, "Task")?;
         require(
@@ -844,6 +874,12 @@ impl Work {
             (Action::RemoveEntry(request), Checkpoint::EntryRetirement(location)) => {
                 storage::entry_retirement::prepare(db, self, &request.path, location)
             }
+            (Action::MakeDir(_), Checkpoint::DirectoryAllocation(parents)) => {
+                storage::directory_create::reserve_stage(db, self, parents)
+            }
+            (Action::MakeDir(_), Checkpoint::DirectoryCreation(location)) => {
+                storage::directory_create::prepare(db, self, location)
+            }
             (Action::RenameFile(request), Checkpoint::FileRename(before)) => {
                 storage::file_move::record(db, self, request, before)
             }
@@ -958,6 +994,9 @@ impl Work {
                 storage::entry_retirement::retire(self, &request.path, |location| {
                     checkpoint(Checkpoint::EntryRetirement(location))
                 })
+            }
+            Action::MakeDir(request) => {
+                storage::directory_create::publish(self, &request.path, checkpoint)
             }
             Action::RenameFile(request) => storage::file_move::rename(
                 self,
@@ -1294,6 +1333,9 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     }
     if let Action::RemoveEntry(request) = &w.action {
         storage::entry_retirement::begin(db, &w, &request.path)?;
+    }
+    if let Action::MakeDir(request) = &w.action {
+        storage::directory_create::begin(db, &w, &request.path)?;
     }
     if matches!(w.action, Action::RenameFile(_)) {
         storage::file_move::begin(db, &w)?;

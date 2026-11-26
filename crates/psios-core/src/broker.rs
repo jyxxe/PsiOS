@@ -159,6 +159,9 @@ fn close(
     if !unknown && state != "Succeeded" && t.spec["task_type"] == storage::entry_retirement::TOOL {
         storage::entry_retirement::abandon(db, &op)?;
     }
+    if !unknown && state != "Succeeded" && t.spec["task_type"] == storage::directory_create::TOOL {
+        storage::directory_create::abandon(db, &op)?;
+    }
     let mut effects = op.body["effect_refs"].clone();
     if let Some(r) = effects.as_array_mut().and_then(|a| a.last_mut()) {
         let e = db.get(field(r, "resource_id"))?;
@@ -186,6 +189,9 @@ fn close(
             }
             if t.spec["task_type"] == storage::entry_retirement::TOOL {
                 refs.push(storage::entry_retirement::settlement_ref(db, &op)?);
+            }
+            if t.spec["task_type"] == storage::directory_create::TOOL {
+                refs.push(storage::directory_create::settlement_ref(db, &op)?);
             }
             b["evidence_refs"] = json!(refs);
         }

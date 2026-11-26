@@ -2,7 +2,6 @@
 use super::*;
 use crate::host::Target;
 use base64::{Engine, engine::general_purpose::STANDARD};
-use rustix::fs::mkdirat;
 use std::io::{Seek, SeekFrom};
 const CHUNK: usize = 96 * 1024;
 const FILE_MAX: u64 = 256 * 1024 * 1024;
@@ -220,13 +219,6 @@ pub fn perform(w: &Work) -> Result<Value> {
         Action::Files(p) => list(&root, p),
         Action::Chunk(p) => read(&root, p),
         Action::Append(p) => append(&w.cfg, &root, p),
-        Action::MakeDir(p) => {
-            let (dir, name) = parent(&root, &p.path)?;
-            w.cfg.check_managed_space(&dir, std::iter::empty(), 1)?;
-            mkdirat(&dir, name.as_str(), Mode::RWXU).map_err(std::io::Error::from)?;
-            dir.sync_all().map_err(unknown)?;
-            Ok(json!({"path":p.path}))
-        }
         _ => Err(err("UnsupportedCapability", "unknown file operation")),
     }
 }

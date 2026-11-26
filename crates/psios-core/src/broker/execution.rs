@@ -347,7 +347,7 @@ pub fn dispatch(db: &Db<'_>, task: &str) -> Result<Option<Work>> {
             "operation_id": op.id,
             "resource_ref": target,
             "action": tool,
-            "phase": if node::service_control::is_tool(tool) || apps::stop::is_tool(tool) || tool == apps::restart::TOOL || tool == node::network::trial::TOOL || tool == apps::volume_rebind::TOOL || matches!(tool, apps::create_recovery::CREATE | apps::create_recovery::CLEANUP | storage::entry_retirement::TOOL | storage::restore_publication::CREATE) { "PermitBound" } else { "EffectStarted" },
+            "phase": if node::service_control::is_tool(tool) || apps::stop::is_tool(tool) || tool == apps::restart::TOOL || tool == node::network::trial::TOOL || tool == apps::volume_rebind::TOOL || matches!(tool, apps::create_recovery::CREATE | apps::create_recovery::CLEANUP | storage::entry_retirement::TOOL | storage::restore_publication::CREATE | storage::directory_create::TOOL) { "PermitBound" } else { "EffectStarted" },
             "outcome_knowledge": "InFlight",
             "evidence_refs": []
         }),
@@ -543,6 +543,8 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
     } else {
         None
     };
+    let mkdir_unprepared = matches!(w.action, Action::MakeDir(_))
+        && storage::directory_create::not_prepared(db, &db.of(&w.op.id, "Operation")?)?;
     let rebind = matches!(w.action, Action::RebindRestoredVolume(_));
     require(
         !atomic_authority || t.body["lifecycle"] == "Running",
@@ -569,6 +571,7 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
             || create_undispatched
             || cleanup_started == Some(false)
             || volume_create_started == Some(false)
+            || mkdir_unprepared
             || entry_unprepared)
     {
         close(db, &t, "Cancelled", "NotStarted", None, None)?;
@@ -592,6 +595,7 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
             "Fenced",
             "new volume result has no publication checkpoint",
         )?;
+        require(!mkdir_unprepared, "Fenced", "directory result has no publication checkpoint")?;
         require(
             service_started != Some(false),
             "Fenced",
@@ -664,6 +668,7 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                 || cleanup_started == Some(false)
                 || entry_unprepared
                 || volume_create_started == Some(false)
+                || mkdir_unprepared
                 || rebind;
             let e = if (stop_started == Some(true) || cleanup_started == Some(true))
                 && e.0.code != "OutcomeUnknown"
@@ -691,6 +696,11 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                 err(
                     "StorageUnavailable",
                     "volume publication did not reach its checkpoint",
+                )
+            } else if mkdir_unprepared && e.0.code == "OutcomeUnknown" {
+                err(
+                    "StorageUnavailable",
+                    "directory creation did not reach its checkpoint",
                 )
             } else {
                 e

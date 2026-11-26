@@ -14,12 +14,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub(crate) const FORMAT: u32 = crate::project::hierarchy::FORMAT + 1;
-const KIND: &str = "TaskResultEvictionBatch";
+pub(super) const KIND: &str = "TaskResultEvictionBatch";
 const MAX_TASKS: usize = 16;
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_TOKEN: usize = 16 * 1024;
 const LIFETIME_SECONDS: i64 = 120;
+const MAX_DELAY_SECONDS: u32 = 86_400;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,6 +28,8 @@ struct Prepare {
     task_refs: Vec<ResourceRef>,
     reason: String,
     max_content_bytes: Option<u64>,
+    #[serde(default)]
+    delay_seconds: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -35,35 +38,46 @@ struct Apply {
     plan_token: String,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct PlanItem {
-    task_ref: ResourceRef,
-    content_bytes: u64,
+pub(super) struct PlanItem {
+    pub(super) task_ref: ResourceRef,
+    pub(super) content_bytes: u64,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Plan {
+pub(super) struct Plan {
     schema_version: String,
-    authority_id: String,
-    recovery_incarnation: String,
-    authorization_epoch: String,
-    owner: String,
-    boot_id: String,
-    time_namespace: String,
-    issued_boot_ms: i64,
-    deadline_boot_ms: i64,
+    pub(super) authority_id: String,
+    pub(super) recovery_incarnation: String,
+    pub(super) authorization_epoch: String,
+    pub(super) owner: String,
+    pub(super) boot_id: String,
+    pub(super) time_namespace: String,
+    pub(super) issued_boot_ms: i64,
+    pub(super) deadline_boot_ms: i64,
     valid_until: String,
     reason: String,
     max_content_bytes: u64,
-    content_bytes: u64,
-    items: Vec<PlanItem>,
+    pub(super) content_bytes: u64,
+    pub(super) items: Vec<PlanItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) delay_seconds: Option<u32>,
+}
+
+fn validate_delay(delay: Option<u32>) -> Result<()> {
+    require(
+        delay.is_none_or(|seconds| (1..=MAX_DELAY_SECONDS).contains(&seconds)),
+        "InvalidArgument",
+        "result eviction delay must be 1 to 86400 seconds",
+    )
 }
 
 impl Plan {
-    fn validate(&self) -> Result<()> {
+    pub(super) fn validate(&self) -> Result<()> {
         validate_reason(&self.reason)?;
+        validate_delay(self.delay_seconds)?;
         require(
             self.schema_version == VERSION
                 && self.owner == policy::OWNER
@@ -96,7 +110,7 @@ impl Plan {
         Ok(())
     }
 
-    fn live(&self, db: &Db<'_>) -> Result<()> {
+    pub(super) fn live(&self, db: &Db<'_>) -> Result<()> {
         require(
             self.authorization_epoch == db.meta("epoch")?,
             "Conflict",
@@ -114,11 +128,11 @@ impl Plan {
     }
 }
 
-fn digest(plan: &Plan) -> Result<String> {
+pub(super) fn digest(plan: &Plan) -> Result<String> {
     Ok(sha256(&canonical(&serde_json::to_value(plan)?)))
 }
 
-fn receipt_id(digest: &str) -> String {
+pub(super) fn receipt_id(digest: &str) -> String {
     format!("result-eviction-batch-{}", &digest[7..])
 }
 
@@ -144,7 +158,7 @@ fn seal(db: &Db<'_>, plan: &Plan) -> Result<String> {
     Ok(token)
 }
 
-fn open(db: &Db<'_>, actor: &str, token: &str) -> Result<Plan> {
+pub(super) fn open(db: &Db<'_>, actor: &str, token: &str) -> Result<Plan> {
     let bad = || err("InvalidArgument", "invalid or foreign eviction plan token");
     require(
         token.len() <= MAX_TOKEN,
@@ -181,6 +195,7 @@ pub(crate) fn prepare(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value>
     policy::admin(actor)?;
     let request: Prepare = decode(params)?;
     validate_reason(&request.reason)?;
+    validate_delay(request.delay_seconds)?;
     let max_content_bytes = request.max_content_bytes.unwrap_or(DEFAULT_BYTES);
     let mut task_refs = request.task_refs;
     require(
@@ -237,14 +252,19 @@ pub(crate) fn prepare(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value>
         max_content_bytes,
         content_bytes,
         items,
+        delay_seconds: request.delay_seconds,
     };
     plan.validate()?;
     let token = seal(db, &plan)?;
     db.audit(actor, "Task.PrepareResultEvictionBatch", None, "Prepared")?;
-    Ok(
-        json!({"plan_token":token,"items":plan.items,"content_bytes":plan.content_bytes,
-        "valid_until":plan.valid_until}),
-    )
+    let mut response = json!({
+        "plan_token":token, "items":plan.items, "content_bytes":plan.content_bytes,
+        "valid_until":plan.valid_until
+    });
+    if let Some(delay) = plan.delay_seconds {
+        response["delay_seconds"] = json!(delay);
+    }
+    Ok(response)
 }
 
 fn view(record: &Doc) -> Value {
@@ -255,6 +275,11 @@ pub(crate) fn apply(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     policy::admin(actor)?;
     let request: Apply = decode(params)?;
     let plan = open(db, actor, &request.plan_token)?;
+    require(
+        plan.delay_seconds.is_none(),
+        "PreconditionFailed",
+        "delayed result eviction requires scheduling",
+    )?;
     let plan_value = serde_json::to_value(&plan)?;
     let plan_digest = digest(&plan)?;
     let id = receipt_id(&plan_digest);
@@ -264,13 +289,20 @@ pub(crate) fn apply(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
                 && record.owner == actor
                 && record.rev == 1
                 && record.spec["plan"] == plan_value
-                && record.body["plan_digest"] == plan_digest,
+                && record.body["plan_digest"] == plan_digest
+                && record.body.get("schedule_ref").is_none(),
             "RecoveryRequired",
             "stored batch receipt does not match its prepared plan",
         )?;
         return Ok(view(&record));
     }
     plan.live(db)?;
+    let candidates = check_candidates(db, &plan)?;
+    plan.live(db)?;
+    publish_batch(db, &plan, candidates, None)
+}
+
+pub(super) fn check_candidates(db: &Db<'_>, plan: &Plan) -> Result<Vec<Candidate>> {
     let mut candidates = Vec::with_capacity(plan.items.len());
     for item in &plan.items {
         let next = candidate(db, &item.task_ref)?;
@@ -281,17 +313,94 @@ pub(crate) fn apply(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         )?;
         candidates.push(next);
     }
-    plan.live(db)?;
+    Ok(candidates)
+}
+
+/// Applies the prepared batch within the same transaction as schedule settlement.
+/// The caller must propagate errors so that partial payload removal rolls back.
+pub(super) fn apply_delayed(
+    db: &Db<'_>,
+    plan: &Plan,
+    candidates: Vec<Candidate>,
+    schedule: &Doc,
+) -> Result<Value> {
+    plan.validate()?;
+    let delay = plan.delay_seconds.ok_or_else(|| {
+        err(
+            "RecoveryRequired",
+            "scheduled eviction has no approved delay",
+        )
+    })?;
+    let plan_digest = digest(plan)?;
+    let schedule_ref = schedule.reference();
+    let admitted = schedule.body["admitted_boot_ms"].as_i64();
+    let due = schedule.body["due_boot_ms"].as_i64();
+    require(
+        schedule.kind == super::delayed::KIND
+            && schedule.id == super::delayed::schedule_id(&plan_digest)
+            && schedule.rev == 1
+            && schedule.owner == plan.owner
+            && schedule.spec == json!({"plan":plan})
+            && schedule.body["plan_digest"] == plan_digest
+            && schedule.body["lifecycle"] == "Scheduled"
+            && db.get(&schedule.id)?.reference() == schedule_ref
+            && admitted.is_some_and(|accepted| {
+                (plan.issued_boot_ms..plan.deadline_boot_ms).contains(&accepted)
+                    && accepted
+                        .checked_add(i64::from(delay) * 1000)
+                        .is_some_and(|deadline| Some(deadline) == due)
+            }),
+        "RecoveryRequired",
+        "scheduled eviction does not bind the exact accepted plan",
+    )?;
+    let clock = policy::deadline::Clock::sample()?;
+    require(
+        plan.authority_id == db.meta("authority")?
+            && plan.recovery_incarnation == db.incarnation
+            && plan.authorization_epoch == db.meta("epoch")?
+            && plan.boot_id == clock.boot.boot_id
+            && plan.time_namespace == clock.time_ns
+            && due.is_some_and(|deadline| clock.boot.millis >= deadline),
+        "PreconditionFailed",
+        "scheduled eviction no longer has live and due authority",
+    )?;
+    publish_batch(db, plan, candidates, Some(schedule_ref))
+}
+
+fn publish_batch(
+    db: &Db<'_>,
+    plan: &Plan,
+    candidates: Vec<Candidate>,
+    schedule_ref: Option<Value>,
+) -> Result<Value> {
+    require(
+        candidates.len() == plan.items.len()
+            && candidates.iter().zip(&plan.items).all(|(candidate, item)| {
+                candidate.task.reference() == json!(item.task_ref)
+                    && candidate.bytes() == u128::from(item.content_bytes)
+            }),
+        "RecoveryRequired",
+        "eviction candidates no longer match the approved batch",
+    )?;
     let mut eviction_refs = Vec::with_capacity(candidates.len());
     for next in candidates {
-        let receipt = apply_candidate(db, actor, &plan.reason, next)?;
+        let receipt = apply_candidate(db, &plan.owner, &plan.reason, next)?;
         let reference: ResourceRef = decode(&receipt["reference"])?;
         eviction_refs.push(reference);
     }
-    let record = db.create(KIND, &id, actor, json!({"plan":plan_value}), json!({
+    let plan_digest = digest(plan)?;
+    let id = receipt_id(&plan_digest);
+    let mut body = json!({
         "plan_digest":plan_digest,"reason":plan.reason,"eviction_refs":eviction_refs,
-        "content_bytes_removed":plan.content_bytes.to_string(),"evicted_by":actor,"evicted_at":now()
-    }))?;
-    db.audit(actor, "Task.ApplyResultEvictionBatch", Some(&id), "Evicted")?;
+        "content_bytes_removed":plan.content_bytes.to_string(),"evicted_by":plan.owner,"evicted_at":now()
+    });
+    let method = if let Some(reference) = schedule_ref {
+        body["schedule_ref"] = reference;
+        "Task.ExecuteScheduledResultEvictionBatch"
+    } else {
+        "Task.ApplyResultEvictionBatch"
+    };
+    let record = db.create(KIND, &id, &plan.owner, json!({"plan":plan}), body)?;
+    db.audit(&plan.owner, method, Some(&id), "Evicted")?;
     Ok(view(&record))
 }

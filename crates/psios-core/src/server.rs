@@ -1,5 +1,6 @@
 use crate::{
-    Config, Result, Store, broker, err, schedule, storage::retirement, watch::Changes, workflow,
+    Config, Result, Store, broker, err, node::block_device::reconcile, schedule,
+    storage::retirement, watch::Changes, workflow,
 };
 use psios_api::{ApiError, Request, id, parse, read_frame, write_frame};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
@@ -421,6 +422,35 @@ fn reclaim_storage(s: Shared, stop: Arc<AtomicBool>, config: Config) -> Result<(
     Ok(())
 }
 
+fn reconcile_block_devices(s: Shared, stop: Arc<AtomicBool>, interval: Duration) -> Result<()> {
+    let mut cursor = reconcile::Cursor::default();
+    while !stop.load(Ordering::Acquire) {
+        let round = (|| {
+            let (next, batch) = state(&s)?
+                .transaction("block-device-reconcile", |db| reconcile::next(db, cursor))?;
+            cursor = next;
+            if stop.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            let observed = batch.sample()?;
+            if !observed.is_empty() {
+                state(&s)?.transaction("block-device-reconcile", |db| {
+                    if !stop.load(Ordering::Acquire) {
+                        observed.publish(db)?;
+                    }
+                    Ok(())
+                })?;
+            }
+            Ok::<(), crate::Error>(())
+        })();
+        if let Err(error) = round {
+            eprintln!("psiosd block device reconciliation: {}", error.0.code);
+        }
+        thread::park_timeout(interval);
+    }
+    Ok(())
+}
+
 fn reclaim_one_oci_archive(
     s: &Shared,
     config: &Config,
@@ -550,6 +580,13 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
         workers.push(
             thread::Builder::new().spawn(move || reclaim_storage(cleanup, shutdown, storage))?,
         );
+        if let Some(ms) = cfg.block_device_reconcile_ms {
+            let running = db.clone();
+            let shutdown = stop.clone();
+            workers.push(thread::Builder::new().spawn(move || {
+                reconcile_block_devices(running, shutdown, Duration::from_millis(ms))
+            })?);
+        }
         let tick = Duration::from_millis(cfg.tick_ms);
         for _ in 0..cfg.workers {
             let running = db.clone();

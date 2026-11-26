@@ -95,12 +95,13 @@ jobs:
             mount -t tmpfs -o size=1m,nodev,nosuid,noexec tmpfs /sys/fs/cgroup
             PSIOS_TEST_HIDE_PRESSURE=1 python3 -B -m unittest discover -s tests -p test_pressure.py -k test_real_kernel -v
           '
-      - name: Verify layout identity across reuse, resize and device-mapper attachment
+      - name: Verify enrolled block reconciliation, reuse, resize and masked sysfs
         run: |
           if ! command -v sfdisk || ! command -v dmsetup; then
             sudo timeout 180 apt-get install -y --no-install-recommends fdisk dmsetup
           fi
-          sudo env PSIOS_TEST_BLOCK_LOOP=1 PSIOS_TEST_BLOCK_MAPPER=1 \
+          sudo unshare --mount --propagation private env \
+            PSIOS_TEST_BLOCK_LOOP=1 PSIOS_TEST_BLOCK_MAPPER=1 PSIOS_TEST_MASK_BLOCK=1 \
             python3 -B -m unittest discover -s tests -p test_block_layout.py -k test_loop -v
       - name: Pair and inspect real Tasks in headless Chrome
         run: PSIOS_TEST_SHELL_BROWSER=1 python3 -B -m unittest discover -s tests -p test_shell.py -k test_browser -v

@@ -44,6 +44,8 @@ pub struct Config {
     pub network_probes: Vec<NetworkProbeConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_link: Option<NetworkLinkConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_device_reconcile_ms: Option<u64>,
     #[serde(default = "default_docker")]
     pub docker_socket: PathBuf,
     #[serde(default)]
@@ -213,6 +215,7 @@ impl Config {
             services: Vec::new(),
             network_probes: Vec::new(),
             network_link: None,
+            block_device_reconcile_ms: None,
             tick_ms: default_tick(),
             docker_socket: default_docker(),
             oci_effective_volume_observation: false,
@@ -299,6 +302,12 @@ impl Config {
         if let Some(link) = &self.network_link {
             link.validate()?;
         }
+        require(
+            self.block_device_reconcile_ms
+                .is_none_or(|interval| (250..=60_000).contains(&interval)),
+            "InvalidArgument",
+            "block device reconciliation interval must be between 250 and 60000 milliseconds",
+        )?;
         require(
             (1..=storage::oci_archive::MAX_BYTES).contains(&self.oci_capture_max_bytes),
             "InvalidArgument",

@@ -5,20 +5,24 @@ use crate::{Result, err, host::Work, now, require};
 use psios_api::{canonical, sha256};
 use rustix::{
     fd::OwnedFd,
-    fs::{Dir, FileType, Mode, OFlags, ResolveFlags, fstat, fstatfs, open, openat, openat2},
+    fs::{
+        Dir, FileType, Mode, OFlags, ResolveFlags, fstat, fstatfs, open, openat, openat2,
+        readlinkat,
+    },
+    io::Errno,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    ffi::CStr,
+    ffi::{CStr, OsStr},
     fs::{self, File},
     io::{self, Read},
-    os::unix::fs::MetadataExt,
-    path::{Path, PathBuf},
+    os::unix::{ffi::OsStrExt, fs::MetadataExt},
+    path::{Component, Path, PathBuf},
 };
 
 pub const TOOL: &str = "node.block_layout";
-const BLOCK_CLASS: &str = "/sys/dev/block";
+const SYSFS: &str = "/sys";
 const SYSFS_MAGIC: u32 = 0x6265_6572;
 const ATTRIBUTE_BYTES: u64 = 4096;
 const LAYOUT_ROWS: usize = 512;
@@ -111,22 +115,59 @@ fn sysfs(dir: &OwnedFd) -> Result<()> {
     )
 }
 
-fn lookup(device: &str) -> Result<(PathBuf, OwnedFd)> {
-    let path =
-        fs::canonicalize(Path::new(BLOCK_CLASS).join(device)).map_err(|error| {
-            match error.kind() {
-                io::ErrorKind::NotFound => err("NotFound", "block device is absent"),
-                _ => error.into(),
-            }
+struct BlockTree {
+    root: OwnedFd,
+    entries: OwnedFd,
+}
+
+impl BlockTree {
+    fn open() -> Result<Self> {
+        let unavailable = |_| err("DependencyUnavailable", "kernel block sysfs is unavailable");
+        let root = open(SYSFS, DIRECTORY | OFlags::NOFOLLOW, Mode::empty()).map_err(unavailable)?;
+        sysfs(&root)?;
+        let entries =
+            openat2(&root, "dev/block", DIRECTORY, Mode::empty(), BELOW).map_err(unavailable)?;
+        Ok(Self { root, entries })
+    }
+
+    fn lookup(&self, device: &str) -> Result<Option<(PathBuf, OwnedFd)>> {
+        let link = match readlinkat(&self.entries, device, Vec::new()) {
+            Ok(link) => link,
+            Err(Errno::NOENT) => return Ok(None),
+            Err(error) => return Err(io::Error::from(error).into()),
+        };
+        let path = Path::new(OsStr::from_bytes(link.as_bytes()));
+        let relative = path.strip_prefix("../..").ok().filter(|path| {
+            path.starts_with("devices")
+                && path
+                    .components()
+                    .all(|part| matches!(part, Component::Normal(_)))
+        });
+        let relative = relative.ok_or_else(|| {
+            err(
+                "HostFailure",
+                "block device is outside the kernel device tree",
+            )
         })?;
-    require(
-        path.starts_with("/sys/devices"),
-        "HostFailure",
-        "block device is outside the kernel device tree",
-    )?;
-    let dir = open(&path, DIRECTORY | OFlags::NOFOLLOW, Mode::empty()).map_err(io::Error::from)?;
-    sysfs(&dir)?;
-    Ok((path, dir))
+        let dir =
+            openat2(&self.root, relative, DIRECTORY, Mode::empty(), BELOW).map_err(|error| {
+                if error == Errno::NOENT {
+                    err(
+                        "Conflict",
+                        "block device changed while opening its sysfs entry",
+                    )
+                } else {
+                    io::Error::from(error).into()
+                }
+            })?;
+        Ok(Some((Path::new(SYSFS).join(relative), dir)))
+    }
+}
+
+fn lookup(device: &str) -> Result<(PathBuf, OwnedFd)> {
+    BlockTree::open()?
+        .lookup(device)?
+        .ok_or_else(|| err("NotFound", "block device is absent"))
 }
 
 fn attribute(dir: &OwnedFd, name: &str) -> io::Result<String> {
@@ -367,19 +408,29 @@ pub(super) enum Presence {
 }
 
 pub(super) fn presence(major_minor: &str, expected_sequence: &str) -> Result<Presence> {
-    let (path, first) = match lookup(major_minor) {
-        Ok(found) => found,
-        Err(error) if error.0.code == "NotFound" => {
-            return match lookup(major_minor) {
-                Err(error) if error.0.code == "NotFound" => Ok(Presence::Absent),
-                Err(error) => Err(error),
-                Ok(_) => Err(err("Conflict", "block device appeared during observation")),
-            };
+    let tree = BlockTree::open()?;
+    let first = tree.lookup(major_minor)?;
+    let sequence = first
+        .as_ref()
+        .map(|(_, dir)| disk_sequence(dir))
+        .transpose()?;
+    let fresh = BlockTree::open()?;
+    require(
+        same_directory(&tree.entries, &fresh.entries)?,
+        "Conflict",
+        "kernel block sysfs changed during observation",
+    )?;
+    let current = fresh.lookup(major_minor)?;
+    let ((path, first), (current_path, current), sequence) = match (first, current, sequence) {
+        (None, None, None) => return Ok(Presence::Absent),
+        (Some(first), Some(current), Some(sequence)) => (first, current, sequence),
+        _ => {
+            return Err(err(
+                "Conflict",
+                "block device appeared or went away during observation",
+            ));
         }
-        Err(error) => return Err(error),
     };
-    let sequence = disk_sequence(&first)?;
-    let (current_path, current) = lookup(major_minor)?;
     require(
         path == current_path
             && same_directory(&first, &current)?

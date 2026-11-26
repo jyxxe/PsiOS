@@ -33,7 +33,7 @@ class ScheduleCoalescence(unittest.TestCase):
 
     def set_scheduling(self, mode):
         node = self.n.call("Node.Get", {})["reference"]
-        self.n.call("Node.Configure", {**target(node), "scheduling": mode})
+        self.n.call("Node.Configure", {"expected_resource_version": node["version"], "scheduling": mode})
 
     def state(self, schedule):
         return self.n.call("Schedule.Get", {"id": schedule["reference"]["resource_id"]})

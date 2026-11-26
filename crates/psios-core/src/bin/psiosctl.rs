@@ -68,6 +68,29 @@ enum Cmd {
         #[arg(long)]
         wait_ms: Option<u64>,
     },
+    /// Read your confirmed event offset and revision.
+    EventOffset {
+        consumer: String,
+    },
+    /// List confirmed event consumer revisions.
+    EventOffsets {
+        /// Revoked principal ID for local-owner maintenance.
+        #[arg(long)]
+        owner: Option<String>,
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// Remove the exact confirmed event offset revision.
+    EventOffsetDelete {
+        consumer: String,
+        #[arg(long)]
+        expected_revision: String,
+        /// Revoked principal ID for local-owner maintenance.
+        #[arg(long)]
+        owner: Option<String>,
+    },
     /// Read unacknowledged signals from a mailbox, optionally waiting for delivery.
     Inbox {
         id: String,
@@ -476,6 +499,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             c.resource_snapshot(kind.as_deref(), id.as_deref(), None, None)?
         }
         Cmd::Watch { cursor, wait_ms } => c.watch_resources(&cursor, None, wait_ms)?,
+        Cmd::EventOffset { consumer } => c.event_offset(&consumer)?,
+        Cmd::EventOffsets {
+            owner,
+            after,
+            limit,
+        } => c.event_offsets(owner.as_deref(), after.as_deref(), limit)?,
+        Cmd::EventOffsetDelete {
+            consumer,
+            expected_revision,
+            owner,
+        } => c.delete_event_offset(&consumer, &expected_revision, owner.as_deref())?,
         Cmd::Inbox { id, limit, wait_ms } => match wait_ms {
             Some(timeout_ms) => c.call(
                 "Mailbox.Wait",

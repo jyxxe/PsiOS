@@ -50,19 +50,21 @@ def checked_digest(value):
 
 
 @contextmanager
-def lock_directory(path):
+def lock_directory(path, *, owner=0):
     parts = path.absolute().parts[1:]
     require(parts and ".." not in parts, "use a dedicated absolute installation state directory")
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     fd = os.open("/", flags)
     try:
+        trusted_owners = (0, owner)
         for component in parts:
             parent = os.fstat(fd)
-            require(parent.st_uid == 0 and (not parent.st_mode & 0o022 or parent.st_mode & stat.S_ISVTX),
-                    "installation state path must have protected root-owned parent directories")
+            require(parent.st_uid in trusted_owners and (not parent.st_mode & 0o022 or parent.st_mode & stat.S_ISVTX),
+                    "state path must have protected root-owned parent directories" if owner == 0
+                    else "state path must have protected parent directories")
             child = os.open(component, flags, dir_fd=fd)
             try:
-                require(os.fstat(child).st_uid == 0, "installation state path must be root-owned")
+                require(os.fstat(child).st_uid in trusted_owners, "state path has an untrusted directory owner")
                 os.fsync(fd)
             except BaseException:
                 os.close(child)
@@ -70,8 +72,8 @@ def lock_directory(path):
             os.close(fd)
             fd = child
         state = os.fstat(fd)
-        require(stat.S_IMODE(state.st_mode) == 0o700,
-                "installation state directory must have mode 0700")
+        require(state.st_uid == owner and stat.S_IMODE(state.st_mode) == 0o700,
+                "state directory must have mode 0700 and belong to the operator")
         require(filesystem_type(fd) in (b"ext4", b"xfs", b"btrfs"),
                 "installation state requires a supported persistent local filesystem (ext4, XFS or Btrfs)")
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

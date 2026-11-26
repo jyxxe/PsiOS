@@ -278,7 +278,8 @@ def prepare_boot_inputs(work, args):
     return base
 
 
-def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network_profile, *, core_limits, trial):
+def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network_profile, *, core_limits, trial,
+                   require_secure_boot=False):
     (work / "psios-disk-uuid").write_text(str(instance) + "\n")
     (work / "psios-home-uuid").write_text(str(home_id) + "\n")
     sectors = [str(mib * 2048) for start, size, _ in layout.partitions[1:] for mib in (start, size)]
@@ -296,6 +297,9 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
         if trial.secure_boot_required:
             (work / "psios-trial-secure-boot-required").write_text("required\n")
             files.append("psios-trial-secure-boot-required")
+    if require_secure_boot:
+        (work / "psios-secure-boot-required").write_text("required\n")
+        files.append("psios-secure-boot-required")
     for script in boot_scripts:
         shutil.copyfile(HERE / script, work / f"psios-{script}")
     files.extend(f"psios-{script}" for script in boot_scripts)
@@ -316,8 +320,8 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
         inputs["core_limits"] = asdict(core_limits)
     if trial:
         inputs.update(boot_mode=TRIAL_BOOT_MODE, trial_disk_uuid=str(trial.disk_uuid))
-        if trial.secure_boot_required:
-            inputs["secure_boot_enforcement_required"] = True
+    if require_secure_boot or (trial and trial.secure_boot_required):
+        inputs["secure_boot_enforcement_required"] = True
     manifest = work / "psios-deployment.json"
     manifest.write_text(json.dumps(inputs, sort_keys=True, separators=(",", ":")) + "\n")
     # BusyBox can verify the exact extracted bytes without a JSON interpreter.
@@ -649,8 +653,8 @@ def finish_disk(work, disk, output, *, signing, upgrade):
     if "boot_mode" in manifest:
         receipt.update(format=TRIAL_RECEIPT_FORMAT, boot_mode=manifest["boot_mode"],
                        trial_disk_uuid=manifest["trial_disk_uuid"])
-        if "secure_boot_enforcement_required" in manifest:
-            receipt["secure_boot_enforcement_required"] = True
+    if "secure_boot_enforcement_required" in manifest:
+        receipt["secure_boot_enforcement_required"] = True
     if upgrade is not None:
         receipt["upgrade"] = deepcopy(upgrade)
     return receipt
@@ -698,7 +702,8 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
     network_profile = prior.get("network_profile")
     for directory, mode in ((candidate_work, None), (trial_work, trial)):
         assemble_ramfs(directory, args, base, instance, home_id, layout, signing, network_profile,
-                       core_limits=core_limits, trial=mode)
+                       core_limits=core_limits, trial=mode,
+                       require_secure_boot=signing is not None and mode is None)
     candidate_manifest = json.loads((candidate_work / "psios-deployment.json").read_bytes())
     trial_manifest = json.loads((trial_work / "psios-deployment.json").read_bytes())
     del trial_manifest["boot_mode"], trial_manifest["trial_disk_uuid"]
@@ -707,6 +712,8 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
     if signing:
         del trial_manifest["secure_boot_enforcement_required"]
         del trial_manifest["payload_sha256"]["/psios-trial-secure-boot-required"]
+        del candidate_manifest["secure_boot_enforcement_required"]
+        del candidate_manifest["payload_sha256"]["/psios-secure-boot-required"]
     if trial_manifest != candidate_manifest:
         raise ValueError("trial and candidate boot inputs disagree")
 

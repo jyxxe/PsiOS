@@ -100,15 +100,24 @@ if [ "$trial_boot" = yes ]; then
         [ -f "$path" ] && [ ! -L "$path" ] || exit 1
     done
 fi
-requires_secure_boot=/psios-trial-secure-boot-required
-if [ -e "$requires_secure_boot" ] || [ -L "$requires_secure_boot" ]; then
+for requires_secure_boot in /psios-secure-boot-required /psios-trial-secure-boot-required; do
+    if [ ! -e "$requires_secure_boot" ] && [ ! -L "$requires_secure_boot" ]; then
+        continue
+    fi
     stage=secure-boot-not-enforced
-    [ "$trial_boot" = yes ] && [ -f "$requires_secure_boot" ] && [ ! -L "$requires_secure_boot" ] || exit 1
+    [ -f "$requires_secure_boot" ] && [ ! -L "$requires_secure_boot" ] || exit 1
+    case "$trial_boot:$requires_secure_boot" in
+        no:/psios-secure-boot-required)
+            "$bb" grep -Eq '^[0-9a-f]{64}  /psios-secure-boot-required$' /psios-payload.sha256
+            ;;
+        yes:/psios-trial-secure-boot-required) ;;
+        *) exit 1 ;;
+    esac
     # The pinned kernel reports EFI enforcement during early boot. This check
     # runs before loading persisted code or mounting writable authority state.
     "$bb" dmesg | "$bb" grep -Eiq 'secure boot enabled|locked down from EFI Secure Boot'
     secure_boot_enforced=yes
-fi
+done
 payload_verified=yes
 "$bb" hostname psios
 if [ -f /psios-core-limits ]; then

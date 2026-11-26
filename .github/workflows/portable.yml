@@ -184,6 +184,17 @@ jobs:
             --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
             --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
 
+      - name: Verify a managed native boot and fence it after controller loss
+        run: |
+          python3 -B tests/native_activation.py \
+            --controller "$RUNNER_TEMP/rescue-core/native/stage_update.py" \
+            --activator "$RUNNER_TEMP/rescue-core/native/activate_update.py" \
+            --previous-installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" \
+            --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
+            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
+            --expected-source-format 5
+
       - name: Keep larger native state and home partitions through a crash and upgrade
         run: |
           python3 tests/native_capacity.py --kernel-iso "$RUNNER_TEMP/rescue.iso" \
@@ -245,6 +256,21 @@ jobs:
           export PYTHONPATH="$secure_tools/root/usr/lib/python3/dist-packages"
           /usr/bin/python3 -B tests/native_signed_staged_update.py \
             --controller "$RUNNER_TEMP/rescue-core/native/stage_update.py" \
+            --previous-installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" \
+            --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
+            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
+            --efi-stub "$secure_tools/root/usr/lib/systemd/boot/efi/linuxx64.efi.stub" \
+            --expected-source-format 5
+
+      - name: Activate a staged signed disk and refuse setup-mode firmware before writable mounts
+        run: |
+          secure_tools="$RUNNER_TEMP/psios-secure-boot-tools"
+          export PATH="$secure_tools/root/usr/bin:$PATH"
+          export PYTHONPATH="$secure_tools/root/usr/lib/python3/dist-packages"
+          /usr/bin/python3 -B tests/native_signed_activation.py \
+            --controller "$RUNNER_TEMP/rescue-core/native/stage_update.py" \
+            --activator "$RUNNER_TEMP/rescue-core/native/activate_update.py" \
             --previous-installer "$RUNNER_TEMP/rescue-core/native/create.py" \
             --kernel-iso "$RUNNER_TEMP/rescue.iso" \
             --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \

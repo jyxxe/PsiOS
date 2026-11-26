@@ -176,6 +176,20 @@ enum Cmd {
         #[arg(default_value = "-")]
         file: String,
     },
+    /// Admit an explicitly delayed result-eviction plan from a file or stdin.
+    TaskResultEvictionSchedule {
+        #[arg(default_value = "-")]
+        file: String,
+    },
+    /// Show a result-eviction schedule and its current revision.
+    TaskResultEvictionScheduleGet {
+        id: String,
+    },
+    /// Cancel a result-eviction schedule using its exact pending revision.
+    TaskResultEvictionScheduleCancel {
+        id: String,
+        revision: String,
+    },
     /// Verify and write stored bytes for an Artifact reference from a file or stdin.
     Artifact {
         #[arg(default_value = "-")]
@@ -897,6 +911,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .as_str()
                 .ok_or("missing eviction plan token")?;
             serde_json::to_value(c.apply_result_eviction_batch(token)?)?
+        }
+        Cmd::TaskResultEvictionSchedule { file } => {
+            let plan = input(&file)?;
+            let token = plan["plan_token"]
+                .as_str()
+                .ok_or("missing eviction plan token")?;
+            serde_json::to_value(c.schedule_result_eviction_batch(token)?)?
+        }
+        Cmd::TaskResultEvictionScheduleGet { id } => {
+            serde_json::to_value(c.get_result_eviction_schedule(&id)?)?
+        }
+        Cmd::TaskResultEvictionScheduleCancel { id, revision } => {
+            serde_json::to_value(c.cancel_result_eviction_schedule(&id, &revision)?)?
         }
         Cmd::Artifact { file, max_bytes } => {
             let reference = serde_json::from_value(input(&file)?)?;

@@ -55,13 +55,13 @@ jobs:
           "$RUNNER_TEMP/psios-mcp-modern/bin/pip" install 'mcp==2.0.0'
           PSIOS_TEST_MCP_MODERN_SDK=1 "$RUNNER_TEMP/psios-mcp-modern/bin/python" -B -m unittest discover -s tests \
             -p test_mcp_modern_stdio.py -k test_official_python_modern_stdio_client -v
-      - name: Kill a restore at its filesystem publication boundary and reconcile it
+      - name: Reconcile backups and restores interrupted before filesystem publication
         run: |
           if ! command -v strace; then
             sudo timeout 180 apt-get install -y --no-install-recommends strace
           fi
           PSIOS_TEST_RESTORE_RENAME_FAULT=1 python3 -B -m unittest discover -s tests \
-            -p test_storage_recovery.py -k checkpointed_unpublished_restore -v
+            -p test_storage_recovery.py -k checkpointed_unpublished -v
       - name: Kill a single-copy clone at the atomic publication boundary
         run: |
           PSIOS_TEST_CLONE_RENAME_FAULT=1 python3 -B -m unittest discover -s tests \

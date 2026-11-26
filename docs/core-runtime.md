@@ -301,7 +301,11 @@ Rust SDK 的 `Client::prepare_oci_stop_continuation` 与 `psiosctl application-p
 
 本地备份在持有原卷期间写入私有暂存目录。发布前重新检查执行许可，将卷引用、Operation 和清单摘要及暂存目录身份一起提交至带见证的权威，然后以原子重命名发布备份。新协议下若在授权发布前崩溃，原 Task 以已知失败结算并释放卷。存在发布检查点而原回执丢失时，原 Task 暂停并保留卷占用。
 
-给恢复主体授予限定到原 Operation 的 `backup.inspect_publication`、`task.submit` 和 `task.read`。对未知 Operation 的当前修订运行该观测 Task。它核实最终目录与原暂存目录同一身份，检查清单及全部数据摘要，并同步备份所在目录。管理员将新制品的引用作为 `evidence_ref` 提交给 `Operation.Reconcile`。Core 复核证据与当前目录身份，在一个事务中登记原 Backup，保存原 Task 回执并释放卷。缺少检查点、最终目录不可达或数据校验失败时仍保留未知结果。[强杀测试](../crates/psios-core/src/recovery_tests.rs) · [截断复制测试](../tests/test_storage_recovery.py)
+给恢复主体授予限定到原 Operation 的 `backup.inspect_publication`、`task.submit` 和 `task.read`，对未知 Operation 的当前修订运行观测 Task。Core 验证原目录的身份、清单和全部数据摘要，并同步备份所在目录。管理员将新制品的引用作为 `evidence_ref` 提交给 `Operation.Reconcile`。核实已发布时，Core 在一个事务中登记原 Backup、保存原 Task 回执并释放卷。
+
+从数据库格式 123 起，发布检查点绑定私有暂存名、父目录和捕获时的文件集合。原目录仍在该暂存位置、所有成员保持原身份及内容且最终路径不存在时，Core 可以结算 `NotApplied`，保存原 Task 回执并释放源卷。两个位置都存在、均不存在，目录身份变化或核验失败时保留 `Unknown`。旧检查点仍可核实已发布的备份。节点最多留存 128 项待对账或待回收的备份暂存目录。
+
+已确认未发布的暂存目录由后台重命名隔离。清理中断后，Core 按证据核验剩余文件，只回收原捕获中记录的普通文件。发现其他成员时保留该目录。原请求重放返回原结算，新的备份操作需要独立提交。[真实中断与清理验收](../tests/test_storage_recovery.py) · [旧格式回执验收](../tests/backup_creation_publication_upgrade.py)
 
 ### 核实恢复卷发布回执
 

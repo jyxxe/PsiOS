@@ -620,7 +620,7 @@ fn witnessed_unpublished_restore_reconciles_without_replaying_and_resumes_dispos
         )
         .unwrap();
     assert!(retained.contains(stage_name));
-    storage::reclaim_on_startup(&cfg, Some(&retained));
+    storage::reclaim_on_startup(&cfg, Some(&retained), &std::collections::HashSet::new());
     store
         .transaction("recover-restore", broker::recover)
         .unwrap();

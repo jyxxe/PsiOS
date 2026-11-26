@@ -689,13 +689,13 @@ pub(crate) fn verify_restored_for_rebind(
 
 pub(crate) fn backup(
     w: &Work,
-    checkpoint: impl FnOnce(&Value, u64, u64) -> Result<()>,
+    checkpoint: impl FnOnce(&Value, &publication::Placement) -> Result<()>,
     check: &mut impl FnMut() -> Result<()>,
 ) -> Result<Value> {
     check()?;
     let parent = w.cfg.state_dir.join("backups");
     let bid = format!("backup-{}", w.op.id);
-    let stage = staging::create(&parent, |root| {
+    let mut stage = staging::create(&parent, |root| {
         w.cfg.check_managed_space(root, std::iter::empty(), 1)
     })?;
     let started = now();
@@ -749,10 +749,16 @@ pub(crate) fn backup(
         "bytes": capture.total.to_string(),
         "entries": capture.entries.len()
     });
-    let (device, inode) = stage.identity()?;
     (capture.check)()?;
-    checkpoint(&receipt, device, inode)?;
-    stage.publish(&bid)?;
+    let placement = publication::Placement::staged(&stage)?;
+    stage.preserve_for_checkpoint()?;
+    if let Err(error) = checkpoint(&receipt, &placement) {
+        if error.0.code != "OutcomeUnknown" {
+            stage.discard_on_failure();
+        }
+        return Err(error);
+    }
+    stage.publish(&bid).map_err(unknown)?;
     Ok(receipt)
 }
 #[derive(Deserialize)]

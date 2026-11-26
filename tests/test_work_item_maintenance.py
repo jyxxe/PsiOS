@@ -142,7 +142,11 @@ class WorkItemMaintenanceTests(unittest.TestCase):
         })
 
         self.restart()
-        self.assertEqual(self.get_item(item, self.replacement), assigned)
+        self.assertEqual(self.get_item(item), assigned)
+        replacement_view = self.get_item(item, self.replacement)
+        self.assertEqual(replacement_view["reference"], assigned["reference"])
+        self.assertEqual(replacement_view["value"]["assignment"], change)
+        self.assertNotIn("target_ref", replacement_view["value"]["criterion"])
         self.audited_once("WorkItem.Reassign", assigned)
         self.grant(self.replacement, ["task.results.read"], [old_task["resource_id"]])
         self.assertTrue(self.call("Artifact.Read", {"reference": old_artifact}, self.replacement)["authority_id"])

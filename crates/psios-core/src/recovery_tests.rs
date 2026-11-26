@@ -3679,6 +3679,97 @@ fn revoked_pressure_scope_fences_the_sample_and_late_evidence() {
 }
 
 #[test]
+fn service_observation_keeps_superseded_reads_and_redacts_fenced_evidence() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = Config::local(&directory.path().join("core"));
+    let unit = "psios-service-observation-fence.service";
+    config.services.push(config::ServiceConfig {
+        unit: unit.into(),
+        manager: config::Manager::User,
+        allow_control: false,
+        definition_digest: None,
+    });
+    Store::init(&config).unwrap();
+    let mut store = Store::open(config).unwrap();
+    let service = format!("service-{unit}");
+    let state = format!("state-{service}");
+    let initial = call(&mut store, "Resource.Get", json!({"id":state})).unwrap();
+    let boot = initial["value"]["boot_id"].clone();
+    let grant = call(
+        &mut store,
+        "Grant.Issue",
+        json!({"principal_id":policy::OWNER,"actions":["task.submit","task.read","service.observe"],
+            "tool_targets":[service],"units":1,"ttl_seconds":90}),
+    )
+    .unwrap();
+    let request = call(
+        &mut store,
+        "Task.Prepare",
+        json!({"tool":"service.observe","key":"superseded-observation",
+            "delegation_id":grant["delegation_ref"]["resource_id"],
+            "input":{"id":service,"expected_spec_generation":"1"}}),
+    )
+    .unwrap();
+    let accepted = call(&mut store, "Task.Submit", request).unwrap();
+    let task = accepted["task_id"].as_str().unwrap();
+    assert_eq!(claim(&mut store), task);
+    let work = dispatch(&mut store, task);
+    let sample = json!({"unit":unit,"manager":"user","boot_id":boot,"load_state":"loaded",
+        "active_state":"active","main_pid":"42","observed_at":now()});
+    let (late, legacy) = store
+        .transaction("finish-superseded-observation", |db| {
+            let mut status = work.target.body.clone();
+            status["observation"] = json!({"active_state":"inactive"});
+            db.status(&work.target, status)?;
+            broker::finish(db, &work, Ok(sample.clone()))?;
+            broker::finish(db, &work, Ok(sample.clone()))?;
+            let late = db.c.query_row(
+                "SELECT body FROM current WHERE kind='LateReceipt'
+                 AND body->'operation_ref'->>'resource_id'=?1",
+                [&work.op.id],
+                |row| row.get::<_, Value>(0),
+            )?;
+            let legacy = db.record(
+                "LateReceipt",
+                &work.task.owner,
+                json!({
+                    "run_ref":work.run.reference(),"operation_ref":work.op.reference(),
+                    "effect_ref":work.effect.reference(),"evidence":{"receipt":sample},
+                }),
+            )?;
+            Ok((late, legacy.reference()))
+        })
+        .unwrap();
+    let settled = call(&mut store, "Task.Get", json!({"id":task})).unwrap();
+    assert_eq!(settled["lifecycle"], "Succeeded");
+    let result = call(
+        &mut store,
+        "Artifact.Read",
+        json!({"reference":settled["result"]["artifact_refs"][0]}),
+    )
+    .unwrap();
+    assert_eq!(result["projection"], "Superseded");
+    assert_eq!(result["service_state_ref"], initial["reference"]);
+    assert_eq!(
+        call(&mut store, "Resource.Get", json!({"id":state})).unwrap(),
+        initial
+    );
+    assert_eq!(late["evidence"], json!({"code":"Fenced"}));
+    for (method, params) in [
+        ("Resource.Get", json!({"id":legacy["resource_id"]})),
+        ("Resource.Resolve", json!({"reference":legacy})),
+    ] {
+        let result = call(&mut store, method, params).unwrap();
+        assert_eq!(result["reference"], legacy);
+        assert_eq!(result["value"]["evidence"], json!({"code":"Fenced"}));
+        assert_eq!(
+            result["resource"]["spec"]["evidence"],
+            json!({"code":"Fenced"})
+        );
+    }
+}
+
+#[test]
 fn revoked_service_resource_grant_fences_the_result_and_late_receipt() {
     let directory = tempfile::tempdir().unwrap();
     let mut cfg = Config::local(&directory.path().join("core"));

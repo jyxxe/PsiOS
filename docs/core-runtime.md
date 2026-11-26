@@ -200,6 +200,8 @@ Core 在请求 NetworkManager 回退前持久记录派发，核对原检查点�
 
 订阅 `HostServiceState` 的资源事件可观察 `Active`、`Inactive`、`Failed` 等变化。systemd 明确报告单元缺失或屏蔽时可查询 `Missing`、`Masked`。使用现有 Schedule 的 `LifecycleEntered` 可将观测结果送入授权任务。观测和 Task 结果在同一事务中发布，已登记配置移除时状态变为 `Retired`。格式 36 创建状态并安装能力，配置完成后的初始状态为 `Unknown`。[真实服务、事件和故障验收](../tests/service_state.py)
 
+发布前再次核对原服务观测的委托、许可和当前 Task。同一配置代次内较早的有效样本可作为 `Superseded` 返回，当前状态保持最新。执行中的撤权或取消会阻止该样本推进状态、触发计划或生成制品，已结算制品仍按原读取策略保留。历史迟到回执只显示围栏结果。[真实撤权和取消验收](../tests/service_observation_authority.py)
+
 格式 108 增加只读 `service.resources`。需对已登记的 HostService 显式授予 `service.resources`、`task.submit` 和 `task.read`。输入是服务的 `id`、`expected_resource_version`，以及 `service.inspect` 返回的 `boot_id` 和 `invocation_id`，分别填入 `expected_boot_id` 和 `expected_invocation_id`。支持主进程直接位于其服务 cgroup 的运行实例。采样期间会两次核验 systemd 管理器、实例、主进程身份、cgroup 挂载和目录；实例退出、配置修订变化或读取被拒绝时，任务会返回对应错误。
 
 结果附带 Linux cgroup v2 的进程计数、CPU 使用与节流计数、内存与交换用量，以及可见祖先层级中的最紧 CPU 配额比率、内存、交换和进程数上限。各指标可报告不支持或不可用。CPU 配额比率描述长期带宽上限，可用容量还受其他工作负载及调度影响；命名空间外的祖先可能无法观测。报告只保留已核验的资源身份和各项读数。[真实 systemd 与遮蔽验收](../tests/service_resources.py) · [Linux cgroup v2](https://www.kernel.org/doc/html/v6.8/admin-guide/cgroup-v2.html)

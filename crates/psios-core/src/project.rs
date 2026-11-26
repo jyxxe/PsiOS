@@ -1,5 +1,6 @@
 //! Private project membership, work-item dependencies, and local review decisions.
 pub(crate) mod agent_tool;
+pub(crate) mod assigned;
 pub(crate) mod directory;
 pub(crate) mod evidence;
 pub(crate) mod hierarchy;

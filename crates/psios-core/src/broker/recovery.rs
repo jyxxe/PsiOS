@@ -591,7 +591,12 @@ pub(crate) fn reconcile(
                 &op,
                 storage::publication::INSPECT,
             )?;
-            storage::publication::reconcile(db, &op, &target, &proof, &observation)?
+            let (applied, result, evidence) =
+                storage::publication::reconcile(db, &op, &target, &proof, &observation)?;
+            if !applied {
+                reason = Some(err("LeaseLost", "backup was not published"));
+            }
+            (result, evidence)
         }
         Action::Create { .. } | Action::Restore(_) | Action::CloneVolume(_) => {
             let (proof, observation) = inspected(
@@ -850,6 +855,9 @@ pub(crate) fn reconcile(
     let evidence=db.record("RecoveryEvidence",&t.owner,json!({"operation_ref":op.reference(),"target_ref":target.reference(),"verified_at":now(),"evidence":proof_details}))?;
     if storage::restore_publication::is_tool(field(&t.spec, "task_type")) {
         storage::restore_publication::queue_disposal(db, &op, &evidence)?;
+    }
+    if t.spec["task_type"] == "backup.create" {
+        storage::publication::queue_disposal(db, &op, &evidence)?;
     }
     let artifact = artifact::publish(
         db,

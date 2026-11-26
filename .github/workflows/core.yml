@@ -63,13 +63,13 @@ jobs:
             node-linux-x64@22.20.0 @modelcontextprotocol/ext-tasks@0.2.3 @modelcontextprotocol/client@2.2.0
           PSIOS_TEST_MCP_TASKS_SDK_DIR="$sdk" PSIOS_TEST_MCP_TASKS_NODE="$sdk/node_modules/node-linux-x64/bin/node" \
             python3 -B -m unittest discover -s tests -p test_mcp_tasks.py -k test_official_typescript_tasks_client -v
-      - name: Kill a restore at its filesystem publication boundary and reconcile it
+      - name: Reconcile backups and restores interrupted before filesystem publication
         run: |
           if ! command -v strace; then
             sudo timeout 180 apt-get install -y --no-install-recommends strace
           fi
           PSIOS_TEST_RESTORE_RENAME_FAULT=1 python3 -B -m unittest discover -s tests \
-            -p test_storage_recovery.py -k checkpointed_unpublished_restore -v
+            -p test_storage_recovery.py -k checkpointed_unpublished -v
       - name: Kill a single-copy clone at the atomic publication boundary
         run: |
           PSIOS_TEST_CLONE_RENAME_FAULT=1 python3 -B -m unittest discover -s tests \
@@ -837,6 +837,12 @@ jobs:
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format121" "$RUNNER_TEMP/psios-compatibility-target"
           PSIOS_TEST_MCP_PREVIOUS_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
             python3 -B -m unittest discover -s tests -p test_mcp_tasks.py -k test_format_121_task_receipt_survives_migration -v
+      - name: Reconcile a format 122 backup using its original publication evidence
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format122"
+          git archive 62f1050d3de5bd48c3e08cf7d976cf93224fcfcf Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format122"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format122" "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/backup_creation_publication_upgrade.py --previous-bin-dir "$RUNNER_TEMP/psios-compatibility-target/debug"
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

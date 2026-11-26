@@ -192,7 +192,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = mcp_tasks::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = storage::publication::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -575,6 +575,9 @@ impl Store {
                 }
                 if ver < mcp_tasks::FORMAT {
                     db.c.execute_batch(mcp_tasks::SCHEMA)?;
+                }
+                if ver < storage::publication::FORMAT {
+                    db.c.execute_batch(storage::publication::DISPOSAL_SCHEMA)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

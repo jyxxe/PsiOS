@@ -670,8 +670,7 @@ pub(crate) enum Checkpoint<'a> {
     },
     BackupPublication {
         receipt: &'a Value,
-        device: u64,
-        inode: u64,
+        placement: &'a storage::publication::Placement,
     },
     StorageDeletion(&'a storage::retirement::Location),
     EntryRetirement(&'a storage::entry_retirement::Location),
@@ -797,6 +796,7 @@ impl Work {
                 self.action,
                 Action::InspectFileRename(_)
                     | Action::InspectRestoredVolume(_)
+                    | Action::InspectBackupPublication(_)
                     | Action::InspectProcess(_)
                     | Action::Pressure {}
                     | Action::TrackBlockDevice(_)
@@ -874,14 +874,9 @@ impl Work {
                 )?;
                 Ok(())
             }
-            (
-                Action::Backup(_),
-                Checkpoint::BackupPublication {
-                    receipt,
-                    device,
-                    inode,
-                },
-            ) => storage::publication::record(db, self, receipt, device, inode),
+            (Action::Backup(_), Checkpoint::BackupPublication { receipt, placement }) => {
+                storage::publication::record(db, self, receipt, placement)
+            }
             (
                 Action::Create { .. } | Action::Restore(_) | Action::CloneVolume(_),
                 Checkpoint::RestoredVolume { receipt, placement },
@@ -993,12 +988,8 @@ impl Work {
             Action::DiscardOciCreate(_) => apps::create_recovery::cleanup(self, checkpoint),
             Action::Backup(_) => storage::backup(
                 self,
-                |receipt, device, inode| {
-                    checkpoint(Checkpoint::BackupPublication {
-                        receipt,
-                        device,
-                        inode,
-                    })
+                |receipt, placement| {
+                    checkpoint(Checkpoint::BackupPublication { receipt, placement })
                 },
                 &mut check_streaming,
             ),

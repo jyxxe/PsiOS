@@ -1,7 +1,9 @@
 use super::{
     backup_blob, copy_hash,
     detached::{DetachedBackup, expected_digest, open_detached},
-    file_sizes, inspect_members, open_backup, staging, validate_members,
+    file_sizes, inspect_members, open_backup, staging,
+    transfer::{Attestation, ReceiverAdmission},
+    validate_members,
 };
 use crate::{
     Config, MAX_BACKUP_BYTES, Result, Store,
@@ -20,7 +22,7 @@ use std::{
     path::Path,
 };
 
-const KIND: &str = "BackupIntake";
+pub(super) const KIND: &str = "BackupIntake";
 const METHOD: &str = "Backup.ImportDetached";
 
 #[derive(Deserialize)]
@@ -33,17 +35,19 @@ struct Origin {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Intake {
-    backup_id: String,
-    source: ResourceRef,
-    data_incarnation: String,
-    manifest_digest: String,
-    entries: usize,
-    bytes: String,
+pub(super) struct Intake {
+    pub(super) backup_id: String,
+    pub(super) source: ResourceRef,
+    pub(super) data_incarnation: String,
+    pub(super) manifest_digest: String,
+    pub(super) entries: usize,
+    pub(super) bytes: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) transfer: Option<Attestation>,
 }
 
 impl Intake {
-    fn from_archive(archive: &DetachedBackup, raw: &[u8], digest: &str) -> Result<Self> {
+    pub(super) fn from_archive(archive: &DetachedBackup, raw: &[u8], digest: &str) -> Result<Self> {
         let origin: Origin = serde_json::from_slice(raw)?;
         let manifest = &archive.manifest;
         require(
@@ -84,6 +88,7 @@ impl Intake {
             manifest_digest: digest.into(),
             entries: manifest.entries.len(),
             bytes: declared.to_string(),
+            transfer: None,
         })
     }
 
@@ -121,6 +126,10 @@ impl Intake {
             "RecoveryRequired",
             "published backup differs from the witnessed intake",
         )?;
+        self.verify_archive(&archive)
+    }
+
+    pub(super) fn verify_archive(&self, archive: &DetachedBackup) -> Result<()> {
         inspect_members(
             &archive.root,
             &archive.manifest,
@@ -220,37 +229,78 @@ fn settle(db: &Db<'_>, intake: &Doc, info: &Intake, reused: bool) -> Result<Valu
     Ok(receipt(&backup, reused))
 }
 
+pub(super) fn intake_id(digest: &str) -> String {
+    format!("backup-intake-{}", &digest[7..])
+}
+
 impl Store {
     /// Register a verified copy under the stopped authority's local storage catalog.
     pub fn import_detached_backup(config: Config, directory: &Path, digest: &str) -> Result<Value> {
+        Self::import_backup(config, directory, digest, None)
+    }
+
+    /// Register a detached backup accompanied by a recipient-bound source attestation.
+    pub fn import_signed_detached_backup(
+        config: Config,
+        directory: &Path,
+        digest: &str,
+        attestation: &Value,
+        trusted_key: &Path,
+        expected_authority: &str,
+    ) -> Result<Value> {
+        let admission =
+            ReceiverAdmission::read(attestation, trusted_key, expected_authority, digest)?;
+        Self::import_backup(config, directory, digest, Some(admission))
+    }
+
+    fn import_backup(
+        config: Config,
+        directory: &Path,
+        digest: &str,
+        admission: Option<ReceiverAdmission>,
+    ) -> Result<Value> {
         require(
             expected_digest(digest),
             "InvalidArgument",
             "expected a SHA-256 manifest digest",
         )?;
-        let id = format!("backup-intake-{}", &digest[7..]);
+        let id = intake_id(digest);
         let mut store = Self::open(config)?;
         let parent = store.config.state_dir.join("backups");
-        let existing = store.transaction(&id, |db| db.find(&id))?;
-        if let Some(intake) = &existing {
+        let existing = store.transaction(&id, |db| {
+            if let Some(admission) = &admission {
+                admission.check_recipient(&db.meta("authority")?)?;
+            }
+            let Some(intake) = db.find(&id)? else {
+                return Ok(None);
+            };
             let info: Intake = decode(&intake.spec)?;
             require(
                 intake.kind == KIND
                     && intake.owner == policy::OWNER
                     && info.manifest_digest == digest
+                    && json!(info) == intake.spec
                     && matches!(
                         intake.body["lifecycle"].as_str(),
                         Some("Prepared" | "Settled")
-                    ),
+                    )
+                    && info
+                        .transfer
+                        .as_ref()
+                        .is_none_or(|envelope| envelope.matches(&info)),
                 "RecoveryRequired",
                 "invalid witnessed backup intake",
             )?;
+            ReceiverAdmission::verify_existing(db.c, &id, &info, admission.as_ref())?;
+            Ok(Some((intake, info)))
+        })?;
+        if let Some((intake, info)) = &existing {
             super::filename(&info.backup_id)?;
             let published = parent.join(&info.backup_id);
             match fs::symlink_metadata(&published) {
                 Ok(_) => {
                     info.verify_published(&published, Some(&intake.body["directory"]))?;
-                    return store.transaction(&id, |db| settle(db, intake, &info, true));
+                    return store.transaction(&id, |db| settle(db, intake, info, true));
                 }
                 Err(e)
                     if e.kind() == ErrorKind::NotFound
@@ -266,9 +316,17 @@ impl Store {
         }
 
         let (archive, raw) = open_detached(directory, digest)?;
-        let info = Intake::from_archive(&archive, &raw, digest)?;
+        let mut info = Intake::from_archive(&archive, &raw, digest)?;
+        if let Some(admission) = &admission {
+            require(
+                admission.envelope.matches(&info),
+                "PreconditionFailed",
+                "backup manifest provenance differs from its transfer attestation",
+            )?;
+            info.transfer = Some(admission.envelope.clone());
+        }
         let spec = json!(info);
-        if let Some(intake) = &existing {
+        if let Some((intake, _)) = &existing {
             require(
                 intake.spec == spec,
                 "RecoveryRequired",
@@ -285,6 +343,11 @@ impl Store {
             info.compatible_backup(db)
         })?;
         if let Some(backup) = registered {
+            require(
+                admission.is_none(),
+                "Conflict",
+                "an existing Backup cannot acquire signed transfer provenance",
+            )?;
             info.verify_published(&path, None)?;
             return Ok(receipt(&backup, true));
         }
@@ -315,8 +378,14 @@ impl Store {
             json!({"lifecycle":"Prepared", "directory":directory_identity(stage.directory())?});
         let intake = store.transaction(&id, |db| {
             let current = match &existing {
-                Some(intake) => db.status(intake, state)?,
-                None => db.create(KIND, &id, policy::OWNER, spec, state)?,
+                Some((intake, _)) => db.status(intake, state)?,
+                None => {
+                    let prepared = db.create(KIND, &id, policy::OWNER, spec, state)?;
+                    if let Some(admission) = &admission {
+                        admission.persist(db.c, &prepared.id)?;
+                    }
+                    prepared
+                }
             };
             db.audit(policy::OWNER, METHOD, Some(&info.backup_id), "Prepared")?;
             Ok(current)

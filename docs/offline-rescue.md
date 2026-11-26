@@ -104,6 +104,25 @@ psiosd --config /etc/psios/core.json import-backup \
 
 启动服务后，使用回执里的 `reference` 提交 `backup.restore`。新卷有新的资源 ID 与数据代次。检查内容后提交并审批 `volume.activate`，激活前写入和应用挂载受限。导入记录在发布前绑定接收节点的目录身份。若目录已发布而登记中断，以同一摘要重试即可重新检查字节并完成登记。只有对应已提交导入记录的目录可通过此方式恢复。[跨节点恢复与登记故障验收](../tests/test_backup_intake.py)
 
+#### 向指定节点签发备份副本
+
+传输前通过独立可信渠道确认源和接收方的 `Node.Get` 资源 ID。接收方也需从独立渠道固定源操作者的 Ed25519 公钥，文件内容为 32 字节原始公钥。源服务停止后，以服务账户使用其独有的 Ed25519 PKCS#8 DER 私钥签发证明。私钥文件须由当前账户持有、权限为 `0600`、只存在一个硬链接。源端在私有 SQLite 副本中核对确定的提交见证、当前本地原生 Backup 引用和历史源卷，再验证原始清单与实际文件摘要。
+
+```bash
+psiosd --config /etc/psios/core.json attest-backup-transfer \
+  --reference-file backup-ref.json --recipient-authority "$RECIPIENT_NODE_ID" \
+  --signing-key-file source-private.der > transfer.json
+
+psiosd --config /etc/psios/core.json import-backup \
+  --directory /media/backup/backup-id --manifest-digest "$MANIFEST_DIGEST" \
+  --attestation-file transfer.json --trusted-source-key trusted-source-public.raw \
+  --expected-source-authority "$SOURCE_NODE_ID"
+```
+
+接收端核对目标节点、指定源节点、固定公钥、签名以及清单中原备份和数据代次，并验证每个数据文件后才发布。签名与公钥指纹随离线导入记录保存。登记中断后，提供完全相同的证明和信任参数重试，接收端会重新核对已经发布的确切目录。同一份导入记录始终绑定首次选择的途径和证明，摘要导入与签名导入各自保留原有重试语义。
+
+证明记录签发时的源节点和恢复代次。它不证明此后源节点仍在线、没有恢复过、签名密钥仍获授权，或数据达到应用一致性。跨节点收到的 Backup 作为接收端备份恢复到新卷，接收端仍独立审批激活。已导入的 Backup 不能以接收节点作为原始来源再次签发。[两套独立权威、恶意输入及登记故障验收](../tests/test_backup_transfer.py)
+
 核验或复制失败时工具清理未发布的暂存目录。若恢复进程被强制中止或断电，可能留下该次操作的 `.stage-*` 目录。确认没有恢复进程持有它后，可在保留备份副本的情况下清理该暂存目录。
 
 ## 检查状态盘

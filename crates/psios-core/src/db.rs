@@ -192,7 +192,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = agent::session_inputs::QUEUED_FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = storage::transfer::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -539,6 +539,9 @@ impl Store {
                 }
                 if ver < apps::mount_observation::FORMAT {
                     apps::mount_observation::migrate(db)?;
+                }
+                if ver < storage::transfer::FORMAT {
+                    db.c.execute_batch(storage::transfer::SCHEMA)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

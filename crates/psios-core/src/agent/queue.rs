@@ -137,6 +137,9 @@ pub fn claim_next(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
     }
 
     inference::expire_queued(db, &clock, &model)?;
+    if work_admission::draining(db)? {
+        return Ok(json!({"available":false}));
+    }
     let runnable =
         db.c.prepare(
             "SELECT q.session FROM model_queue q

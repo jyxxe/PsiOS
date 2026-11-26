@@ -40,6 +40,8 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         }
         "Node.Get" => node::get(db, actor, p),
         "Node.Configure" => node::configure(db, actor, p),
+        "Node.WorkAdmission.Get" => node::work_admission::get(db, actor, p),
+        "Node.WorkAdmission.Set" => node::work_admission::set(db, actor, p),
         "NetworkProbe.Get" => node::network::probe::get(db, actor, p),
         "NetworkLink.Get" => node::network::enrollment::get(db, actor, p),
         "NetworkTrial.Confirmation" => broker::network_trial_confirmation(db, actor, p),

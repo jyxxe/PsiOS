@@ -413,7 +413,7 @@ fn fire(db: &Db<'_>, rejection: &mut Option<Rejection>) -> Result<()> {
             [at], |r| r.get(0),
         ).optional()?;
         let Some(id) = due else { return Ok(()) };
-        if !node::enabled(db)? {
+        if !node::enabled(db)? || node::work_admission::draining(db)? {
             return Ok(());
         }
         (id, None)

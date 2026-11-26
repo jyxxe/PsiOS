@@ -223,7 +223,7 @@ fn fire(db: &Db<'_>, rejected: &mut Option<Attempt>) -> Result<()> {
         settle(db, &schedule, "Expired", Some("DeadlineExceeded"), None)?;
         return Ok(());
     }
-    if !node::enabled(db)? {
+    if !node::enabled(db)? || node::work_admission::draining(db)? {
         return Ok(());
     }
     let template = &schedule.spec["request"];

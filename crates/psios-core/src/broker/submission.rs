@@ -1,4 +1,5 @@
 use super::*;
+use crate::node::work_admission;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -15,6 +16,7 @@ struct Prepare {
 #[derive(Clone, Copy)]
 enum LocalOrigin<'a> {
     Direct,
+    ClaimedModel(&'a str),
     Schedule(&'a str),
     Workflow { run: &'a str, step_key: &'a str },
 }
@@ -23,14 +25,16 @@ impl<'a> LocalOrigin<'a> {
     fn id(self) -> Option<&'a str> {
         match self {
             Self::Direct => None,
-            Self::Schedule(id) | Self::Workflow { run: id, .. } => Some(id),
+            Self::ClaimedModel(id) | Self::Schedule(id) | Self::Workflow { run: id, .. } => {
+                Some(id)
+            }
         }
     }
 
     fn kind(self, actor: &str) -> &'static str {
         match self {
-            Self::Direct if actor == policy::OWNER => "HumanRequest",
-            Self::Direct => "Service",
+            Self::Direct | Self::ClaimedModel(_) if actor == policy::OWNER => "HumanRequest",
+            Self::Direct | Self::ClaimedModel(_) => "Service",
             Self::Schedule(_) => "Schedule",
             Self::Workflow { .. } => "WorkflowRun",
         }
@@ -38,7 +42,7 @@ impl<'a> LocalOrigin<'a> {
 
     fn authority(self, db: &Db<'_>, actor: &str) -> Result<String> {
         match self {
-            Self::Direct => Ok(actor.to_owned()),
+            Self::Direct | Self::ClaimedModel(_) => Ok(actor.to_owned()),
             _ => db.meta("authority"),
         }
     }
@@ -258,6 +262,41 @@ fn plan(db: &Db<'_>, actor: &str, s: &Value, audience: &[Value]) -> Result<Doc> 
 pub fn submit(db: &Db<'_>, actor: &str, s: &Value, retry: Option<&str>) -> Result<Value> {
     submit_with_origin(db, actor, s, retry, LocalOrigin::Direct)
 }
+
+// Called only as part of the transaction consuming a provider's authorized
+// decision. Keep the existing direct Task origin, keyed to this exact lease.
+pub(crate) fn submit_claimed_model_tool(
+    db: &Db<'_>,
+    session: &Doc,
+    lease: &str,
+    request: &Value,
+) -> Result<Value> {
+    require(
+        !db.c.is_autocommit(),
+        "RecoveryRequired",
+        "model decision requires an authority transaction",
+    )?;
+    let current = db.of(&session.id, "Session")?;
+    require(
+        current.reference() == session.reference()
+            && current.owner == session.owner
+            && current.body["lifecycle"] == "ModelInFlight"
+            && current.body["current_lease"] == lease
+            && request["idempotency_key"] == lease
+            && request["delegation_ref"]["resource_id"] == current.spec["delegation_id"]
+            && agent::model_tool_lease_live(db, &current)?,
+        "Fenced",
+        "tool decision no longer belongs to the issued model lease",
+    )?;
+    submit_with_origin(
+        db,
+        &current.owner,
+        request,
+        None,
+        LocalOrigin::ClaimedModel(lease),
+    )
+}
+
 pub fn submit_scheduled(db: &Db<'_>, actor: &str, s: &Value, schedule: &str) -> Result<Value> {
     submit_with_origin(db, actor, s, None, LocalOrigin::Schedule(schedule))
 }
@@ -303,9 +342,23 @@ fn submit_with_origin(
     } else {
         None
     };
-    db.cfg.check_admission_space()?;
     let requirements = dependencies::requirements(&input)?;
-    let recovery = admission::select(db, actor, &a, &target, !requirements.is_empty())?;
+    let recovery_only =
+        !matches!(source, LocalOrigin::ClaimedModel(_)) && work_admission::draining(db)?;
+    if !recovery_only {
+        db.cfg.check_admission_space()?;
+    }
+    let recovery = admission::select(
+        db,
+        actor,
+        &a,
+        &target,
+        !requirements.is_empty(),
+        recovery_only,
+    )?;
+    if recovery_only {
+        db.cfg.check_admission_space()?;
+    }
     artifact::capacity::check_admission(db, actor, tool)?;
     let budget = field(&s["budget_ref"], "resource_id");
     if recovery.is_some() {
@@ -329,7 +382,7 @@ fn submit_with_origin(
     let deadline_source = match source {
         LocalOrigin::Workflow { run, .. } => Some(run),
         LocalOrigin::Schedule(schedule) => Some(schedule),
-        LocalOrigin::Direct => retry,
+        LocalOrigin::Direct | LocalOrigin::ClaimedModel(_) => retry,
     };
     policy::deadline::Clock::sample()?.register_until(
         db,

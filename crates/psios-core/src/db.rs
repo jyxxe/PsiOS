@@ -190,7 +190,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = node::journal::SINCE_FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = node::work_admission::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -511,10 +511,16 @@ impl Store {
                 if ver < artifact::retention::delayed::FORMAT {
                     db.c.execute_batch(artifact::retention::delayed::SCHEMA)?;
                 }
+                if ver < node::work_admission::FORMAT {
+                    node::work_admission::migrate(db)?;
+                }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;
         }
-        store.transaction("node-config", node::sync)?;
+        store.transaction("node-config", |db| {
+            node::work_admission::draining(db)?;
+            node::sync(db)
+        })?;
         Ok(store)
     }
 

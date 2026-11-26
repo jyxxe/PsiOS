@@ -36,8 +36,7 @@ class DefaultContextUpgrade(AgentToolContextFixture, unittest.TestCase):
                                  (payload, *artifact))
         repaired = n.call("Task.VerifyResults", target(invalid_ref))
         current_ref = n.get(task)["reference"]
-        self.assertEqual(repaired, old_result)
-        self.assertEqual(current_ref["digest"], old_ref["digest"])
+        self.assertEqual(repaired, {**old_result, "task_revision": current_ref["version"]})
         self.assertNotEqual(current_ref["version"], old_ref["version"])
 
     def upgrade_in_flight(self, *, changed):

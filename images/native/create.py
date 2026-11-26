@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Build a new PsiOS UEFI disk or prepare an offline upgrade of a stopped node."""
 import argparse
+from copy import deepcopy
 from dataclasses import asdict, dataclass
+import fcntl
 from functools import partial
 import hashlib
 import ipaddress
@@ -11,6 +13,7 @@ from pathlib import Path
 import re
 import resource
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -94,6 +97,18 @@ class CoreLimits:
 class TrialInput:
     disk_uuid: uuid.UUID
     configuration_sha256: str
+
+
+@dataclass(frozen=True)
+class PreparedUpdate:
+    candidate_disk: Path
+    trial_disk: Path
+    candidate_receipt: dict
+    trial_receipt: dict
+    core: Path
+    configuration: bytes
+    normalized_source_sha256: str
+    kernel_iso: Path
 
 
 def sha256(path):
@@ -255,11 +270,14 @@ def host_config(seed, args):
     (seed / "etc").chmod(0o755)
 
 
-def ramfs(work, args, instance, home_id, layout=Layout(), signing=None, network_profile=None, *, core_limits=None,
-          trial=None):
+def prepare_boot_inputs(work, args):
     base = boot_media.prepare_kernel(work, args.kernel_iso)
     (work / "bin").mkdir()
     install_core(work, args.core_archive, args.core_sha256)
+    return base
+
+
+def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network_profile, *, core_limits, trial):
     (work / "psios-disk-uuid").write_text(str(instance) + "\n")
     (work / "psios-home-uuid").write_text(str(home_id) + "\n")
     sectors = [str(mib * 2048) for start, size, _ in layout.partitions[1:] for mib in (start, size)]
@@ -307,6 +325,13 @@ def ramfs(work, args, instance, home_id, layout=Layout(), signing=None, network_
         out.flush()
         subprocess.run(["cpio", "--quiet", "-o", "-H", "newc", "--reproducible", "--owner=0:0"], cwd=work,
                        input=("\n".join(files) + "\n").encode(), stdout=out, check=True)
+
+
+def ramfs(work, args, instance, home_id, layout=Layout(), signing=None, network_profile=None, *, core_limits=None,
+          trial=None):
+    base = prepare_boot_inputs(work, args)
+    assemble_ramfs(work, args, base, instance, home_id, layout, signing, network_profile,
+                   core_limits=core_limits, trial=trial)
 
 
 def seeded_ext4(work, name, label, identity, size_mib, seed, owners):
@@ -511,20 +536,21 @@ def read_root_file(work, fs, member, limit, modes):
     return read_partition_file(work, fs, member, limit)
 
 
-def source_snapshot(work, disk, args, prior, layout, signing):
+def source_snapshot(work, disk, source_fd, prior, layout, signing):
     disk_size = layout.image_mib * MIB
-    with boot_media.regular_file(args.upgrade_from) as source:
-        fd = source.fileno()
-        before = os.fstat(fd)
-        if before.st_size != disk_size:
-            raise ValueError("unsupported previous PsiOS disk size")
-        options = f"driver=raw,file.driver=file,file.filename=/proc/self/fd/{fd},file.locking=on"
-        subprocess.run(["qemu-img", "convert", "--image-opts", "-m", "1", "-O", "raw", options, disk],
-                       pass_fds=(fd,), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, check=True,
-                       timeout=90, preexec_fn=file_limit(disk_size))
-        after = os.fstat(fd)
-        if (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (before.st_size, before.st_mtime_ns, before.st_ctime_ns):
-            raise ValueError("previous disk changed during capture")
+    before = os.fstat(source_fd)
+    flags = fcntl.fcntl(source_fd, fcntl.F_GETFL)
+    if not stat.S_ISREG(before.st_mode) or flags & os.O_PATH or flags & os.O_ACCMODE != os.O_RDONLY:
+        raise ValueError("previous PsiOS disk requires a regular read-only descriptor")
+    if before.st_size != disk_size:
+        raise ValueError("unsupported previous PsiOS disk size")
+    options = f"driver=raw,file.driver=file,file.filename=/proc/self/fd/{source_fd},file.locking=on"
+    subprocess.run(["qemu-img", "convert", "--image-opts", "-m", "1", "-O", "raw", options, disk],
+                   pass_fds=(source_fd,), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, check=True,
+                   timeout=90, preexec_fn=file_limit(disk_size))
+    after = os.fstat(source_fd)
+    if (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (before.st_size, before.st_mtime_ns, before.st_ctime_ns):
+        raise ValueError("previous disk changed during capture")
     if disk.stat().st_size != disk_size:
         raise ValueError("incomplete previous disk capture")
     digest = sha256(disk)
@@ -580,6 +606,99 @@ def verify_authority(work, disk, core_config):
     return report
 
 
+def prepare_trial_disk(work, disk, layout, configuration):
+    trial = TrialInput(uuid.uuid4(), hashlib.sha256(configuration).hexdigest())
+    # A trial EFI payload can only open its own copied authority writable.
+    boot_media.run(work, ["sfdisk", "--disk-id", disk, str(trial.disk_uuid)])
+    validate_layout(work, disk, layout)
+    return trial
+
+
+def finish_disk(work, disk, output, *, signing, upgrade):
+    manifest_path = work / "psios-deployment.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    efi = boot_media.secure_efi_application(work, CMDLINE, signing) if signing else boot_media.efi_application(work, CMDLINE)
+    esp = work / "esp.fat"
+    with esp.open("xb") as f:
+        f.truncate(ESP[1] * MIB)
+    boot_media.run(work, ["mkfs.fat", "-F", "32", "--invariant", "-n", "PSIOSBOOT", esp])
+    boot_media.run(work, ["mmd", "-i", esp, "::/EFI", "::/EFI/BOOT"])
+    boot_media.run(work, ["mcopy", "-i", esp, efi, EFI_PATH])
+    write_partition(disk, ESP, esp, replace=upgrade is not None)
+    with disk.open("rb") as completed:
+        os.fsync(completed.fileno())
+    receipt_format = {STATIC_IPV4: 4, STATIC_IPV6: 5, STATIC_DUAL: 5}
+    receipt = {
+        "format": 6 if "core_limits" in manifest else receipt_format.get(manifest.get("network_profile"), 3 if signing else 2),
+        "image": str(output), "source_commit": manifest["core_source_commit"],
+        "geometry_mib": manifest["geometry_mib"], "state_uuid": manifest["required_filesystems"]["state"],
+        "home_uuid": manifest["required_filesystems"]["home"],
+        "deployment_manifest_sha256": sha256(manifest_path),
+        "efi_application_sha256": sha256(efi), "installed_initramfs_sha256": sha256(work / "initrd"),
+        "initial_image_sha256": sha256(disk),
+    }
+    for name in ("secure_boot", "network_profile", "core_limits"):
+        if name in manifest:
+            receipt[name] = manifest[name]
+    if "boot_mode" in manifest:
+        receipt.update(format=TRIAL_RECEIPT_FORMAT, boot_mode=manifest["boot_mode"],
+                       trial_disk_uuid=manifest["trial_disk_uuid"])
+    if upgrade is not None:
+        receipt["upgrade"] = deepcopy(upgrade)
+    return receipt
+
+
+def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
+    """Prepare two private EFI variants of one stopped source; publish neither."""
+    prior, layout, core_limits = read_receipt(args.previous_receipt)
+    if "secure_boot" in prior or any(getattr(args, name, None) is not None for name in (
+            "secure_boot_key", "secure_boot_cert", "efi_stub", "efi_stub_sha256")):
+        raise ValueError("staged updates currently support only unsigned native deployments")
+    work = work.absolute()
+    candidate_work, trial_work = work / "candidate", work / "trial"
+    for directory in (candidate_work, trial_work):
+        directory.mkdir(mode=0o700)
+    candidate_disk, trial_disk = candidate_work / "installed.raw", trial_work / "installed.raw"
+    source_digest, replayed, configuration = source_snapshot(
+        candidate_work, candidate_disk, source_fd, prior, layout, None)
+    normalized = sha256(candidate_disk)
+    with candidate_disk.open("rb") as frozen, trial_disk.open("xb") as clone:
+        copy_mib(frozen, clone, layout.image_mib, replace=False)
+        clone.truncate(layout.image_mib * MIB)
+    if sha256(trial_disk) != normalized:
+        raise ValueError("trial disk clone does not match the normalized source")
+    for disk in (candidate_disk, trial_disk):
+        disk.chmod(0o600)
+    trial = prepare_trial_disk(trial_work, trial_disk, layout, configuration)
+
+    base = prepare_boot_inputs(candidate_work, args)
+    (trial_work / "bin").mkdir()
+    # Share the pinned input kernel and binaries, but each initrd is extended independently.
+    for name in ("kernel", "initrd", "bin/psiosd", "bin/psiosctl", "psios-source"):
+        shutil.copyfile(candidate_work / name, trial_work / name)
+    instance, home_id = prior["state_uuid"], prior["home_uuid"]
+    network_profile = prior.get("network_profile")
+    for directory, mode in ((candidate_work, None), (trial_work, trial)):
+        assemble_ramfs(directory, args, base, instance, home_id, layout, None, network_profile,
+                       core_limits=core_limits, trial=mode)
+    candidate_manifest = json.loads((candidate_work / "psios-deployment.json").read_bytes())
+    trial_manifest = json.loads((trial_work / "psios-deployment.json").read_bytes())
+    del trial_manifest["boot_mode"], trial_manifest["trial_disk_uuid"]
+    del trial_manifest["payload_sha256"]["/psios-trial-config.sha256"]
+    del trial_manifest["payload_sha256"]["/psios-trial-disk-id"]
+    if trial_manifest != candidate_manifest:
+        raise ValueError("trial and candidate boot inputs disagree")
+
+    authority = verify_authority(candidate_work, candidate_disk, configuration)
+    upgrade = {"previous_image_sha256": source_digest, "previous_source_commit": prior["source_commit"],
+               "normalized_source_sha256": normalized, "verified_authority": authority,
+               "replayed_ext4_partitions": replayed}
+    candidate_receipt = finish_disk(candidate_work, candidate_disk, candidate_disk, signing=None, upgrade=upgrade)
+    trial_receipt = finish_disk(trial_work, trial_disk, trial_disk, signing=None, upgrade=upgrade)
+    return PreparedUpdate(candidate_disk, trial_disk, candidate_receipt, trial_receipt,
+                          candidate_work / "bin/psiosd", configuration, normalized, candidate_work / "base.iso")
+
+
 def build(args):
     output = args.output.absolute()
     if os.path.lexists(output):
@@ -602,13 +721,10 @@ def build(args):
                     signing.certificate_sha256 != prior["secure_boot"]["certificate_sha256"]):
                 raise ValueError("a Secure Boot upgrade requires the existing signing certificate")
             instance, home_id = prior["state_uuid"], prior["home_uuid"]
-            source_digest, replayed, core_config = source_snapshot(work, disk, args, prior, layout, signing)
+            with boot_media.regular_file(args.upgrade_from) as source:
+                source_digest, replayed, core_config = source_snapshot(work, disk, source.fileno(), prior, layout, signing)
             if args.trial_boot:
-                trial = TrialInput(uuid.uuid4(), hashlib.sha256(core_config).hexdigest())
-                # Only the trial copy receives this identity. Its EFI payload
-                # can then refuse to open the original authority read-write.
-                boot_media.run(work, ["sfdisk", "--disk-id", disk, str(trial.disk_uuid)])
-                validate_layout(work, disk, layout)
+                trial = prepare_trial_disk(work, disk, layout, core_config)
         else:
             layout = Layout(MIN_STATE_MIB if args.state_mib is None else args.state_mib,
                             MIN_HOME_MIB if args.home_mib is None else args.home_mib)
@@ -616,42 +732,15 @@ def build(args):
             new_disk(work, disk, args, instance, home_id, layout)
         disk.chmod(0o600)
         ramfs(work, args, instance, home_id, layout, signing, network_profile, core_limits=core_limits, trial=trial)
-        source_commit = (work / "psios-source").read_text().strip()
-        authority = verify_authority(work, disk, core_config) if prior else None
-        efi = boot_media.secure_efi_application(work, CMDLINE, signing) if signing else boot_media.efi_application(work, CMDLINE)
-        esp = work / "esp.fat"
-        with esp.open("xb") as f:
-            f.truncate(ESP[1] * MIB)
-        boot_media.run(work, ["mkfs.fat", "-F", "32", "--invariant", "-n", "PSIOSBOOT", esp])
-        boot_media.run(work, ["mmd", "-i", esp, "::/EFI", "::/EFI/BOOT"])
-        boot_media.run(work, ["mcopy", "-i", esp, efi, EFI_PATH])
-        write_partition(disk, ESP, esp, replace=prior is not None)
-        with disk.open("rb") as completed:
-            os.fsync(completed.fileno())
-        receipt_format = {STATIC_IPV4: 4, STATIC_IPV6: 5, STATIC_DUAL: 5}
-        receipt = {
-            "format": 6 if core_limits else receipt_format.get(network_profile, 3 if signing else 2),
-            "image": str(output), "source_commit": source_commit, "geometry_mib": layout.receipt(),
-            "state_uuid": instance, "home_uuid": home_id,
-            "deployment_manifest_sha256": sha256(work / "psios-deployment.json"),
-            "efi_application_sha256": sha256(efi), "installed_initramfs_sha256": sha256(work / "initrd"),
-            "initial_image_sha256": sha256(disk),
-        }
-        if signing:
-            receipt["secure_boot"] = signing.receipt()
-        if network_profile:
-            receipt["network_profile"] = network_profile
-        if core_limits:
-            receipt["core_limits"] = asdict(core_limits)
-        if trial:
-            receipt.update(format=TRIAL_RECEIPT_FORMAT, boot_mode=TRIAL_BOOT_MODE, trial_disk_uuid=str(trial.disk_uuid))
+        upgrade = None
         if prior:
-            receipt["upgrade"] = {
+            upgrade = {
                 "previous_image_sha256": source_digest,
                 "previous_source_commit": prior["source_commit"],
-                "verified_authority": authority,
+                "verified_authority": verify_authority(work, disk, core_config),
                 "replayed_ext4_partitions": replayed,
             }
+        receipt = finish_disk(work, disk, output, signing=signing, upgrade=upgrade)
         # No existing image or block device is ever an install target.
         os.link(disk, output)
         fd = os.open(output.parent, os.O_DIRECTORY | os.O_RDONLY)

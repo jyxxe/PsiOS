@@ -367,7 +367,17 @@ pub(crate) fn inspect(w: &Work) -> Result<Value> {
         .ok_or_else(|| err("Fenced", "OCI create inspection is unavailable"))?;
     engine::runtime()?.block_on(async {
         let mut connection = engine::Connection::open(&w.cfg.docker_socket).await?;
-        inspection.observe(&w.cfg, &mut connection).await
+        inspection
+            .observe(&w.cfg, &mut connection)
+            .await
+            .map_err(|mut error| {
+                // This Task has only read host state. An ambiguous observation
+                // leaves the original create unresolved without parking the reader.
+                if error.0.code == "OutcomeUnknown" {
+                    error.0.code = "PreconditionFailed".into();
+                }
+                error
+            })
     })
 }
 

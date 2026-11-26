@@ -165,6 +165,55 @@ class AgentSessionInputs(unittest.TestCase):
         n.call("Session.Cancel", target(current["reference"]), self.agent["token"])
         n.call("Artifact.Withdraw", self.withdrawal(), self.agent["token"])
 
+    def test_task_retry_atomically_reacquires_the_original_input_hold(self):
+        n = self.n
+        token = self.agent["token"]
+        new_volume = self.grant(self.agent, ["task.submit", "task.read", "volume.create"], None)
+        request = n.prepare("volume.create", {"name": "session-input-retry-volume"}, token=token,
+                            delegation=new_volume["delegation_ref"]["resource_id"])
+        made = n.wait(n.call("Task.Submit", request, token)["task_id"])
+        self.assertEqual(made["lifecycle"], "Succeeded", made)
+        volume = n.call("Artifact.Read", {"reference": made["result"]["artifact_refs"][0]}, token)
+        volume = n.perform("volume.write", {**target(volume), "name": "stable", "content": "ready"})["volume_ref"]
+        skill = n.call("Skill.Publish", {"name": "read-retry-skill", "version": "1", "license": "0BSD",
+            "source": "local-test", "tools": ["volume.read"], "instructions": "Read the allowed volume record."})
+        scoped = self.grant(self.agent, ["session.run", "session.context.read", "artifact.read", "task.read",
+                            "task.submit", "volume.read"],
+                            [self.node_id, self.model["resource_id"], self.artifact["resource_id"],
+                             volume["resource_id"]])
+        session = self.opened(self.opening(scoped, skill_ref=skill))
+        first = self.claimed(session, "before-host-failure")
+        source = n.state / "volumes" / volume["resource_id"] / "data"
+        displaced = source.with_name("temporarily-missing-data")
+        source.rename(displaced)
+        try:
+            response = self.respond(session, first, {"action": "tool", "tool": "volume.read",
+                                    "input": {**target(volume), "name": "stable"}})
+            failed = n.wait(response["task_id"])
+            self.assertEqual(failed["lifecycle"], "Failed", failed)
+        finally:
+            displaced.rename(source)
+        current = n.call("Session.Get", {"id": session["resource_id"]}, token)
+        self.assertEqual(current["session"]["lifecycle"], "Failed", current)
+        with closing(sqlite3.connect(n.state / "state.db")) as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM session_input_holds WHERE session=?",
+                             (session["resource_id"],)).fetchone(), (0,))
+
+        params = {**target(current["reference"]), "task_id": response["task_id"], "key": key()}
+        accepted = n.call("Session.RetryTask", params, token)
+        self.refuse("Conflict", "Artifact.Withdraw", self.withdrawal(), token)
+        settled = n.wait(accepted["task_id"])
+        self.assertEqual(settled["lifecycle"], "Succeeded", settled)
+        self.assertEqual(n.call("Session.RetryTask", params, token), {**accepted, "deduplicated": True})
+        n.stop(signal.SIGKILL)
+        subprocess.run(n.daemon + ["verify"], check=True, capture_output=True, timeout=20)
+        n.start()
+        second = self.claimed(session, "after-exact-task-retry")
+        self.assertEqual(second["context"]["inputs"], first["context"]["inputs"])
+        final = self.respond(session, second, {"action": "finish", "summary": "Read after storage recovered."})
+        self.assertEqual(final["lifecycle"], "Succeeded")
+        n.call("Artifact.Withdraw", self.withdrawal(), token)
+
     def test_open_rejects_foreign_unscoped_untyped_and_excessive_inputs(self):
         n = self.n
         token = self.agent["token"]

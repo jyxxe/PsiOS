@@ -133,6 +133,7 @@ pub(super) fn admit(db: &Db<'_>, session: &Doc) -> Result<()> {
     access(db, session, &inputs)?;
     for input in inputs {
         let artifact = source(db.c, session, &input)?;
+        value(db.c, &artifact, MAX_INPUT_BYTES)?;
         db.c.execute(
             "INSERT INTO session_input_holds(session,artifact) VALUES(?1,?2)",
             params![session.id, artifact.id],

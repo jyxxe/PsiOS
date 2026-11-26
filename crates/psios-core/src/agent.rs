@@ -964,6 +964,7 @@ pub fn retry_task(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     )?;
     let mut b = s.body.clone();
     tool_context::prepare_retry(db, &s, &model, &previous, turn, &mut b)?;
+    session_inputs::admit(db, &s)?;
     let accepted = broker::retry_in_session(
         db,
         actor,

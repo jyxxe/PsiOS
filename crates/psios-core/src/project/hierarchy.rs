@@ -344,3 +344,71 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::policy::OWNER;
+    use serde_json::json;
+
+    #[test]
+    fn offline_verification_rejects_correct_current_states_in_the_wrong_order() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("../state.sql")).unwrap();
+        let write =
+            |seq: i64, id: &str, rev: i64, kind: &str, spec: &Value, body: Value| {
+                conn.execute(
+                "INSERT INTO versions VALUES(?1,?2,?3,1,?4,?5,?6,?7,'now','now',?8,'test','test')",
+                params![seq, id, rev, kind, OWNER, spec, body, format!("event-{seq}")],
+            )
+            .unwrap()
+            };
+        write(
+            1,
+            "manager",
+            1,
+            "Principal",
+            &json!({}),
+            json!({"lifecycle":"Active"}),
+        );
+        write(
+            2,
+            "project",
+            1,
+            PROJECT,
+            &json!({}),
+            json!({"members":{"manager":"Manager"}}),
+        );
+        let parent =
+            json!({"project_id":"project","created_by_principal_id":"manager","blocked_by":[]});
+        let mut child = parent.clone();
+        child["parent_work_item_id"] = json!("parent");
+        let ready = json!({"lifecycle":"Ready","updated_by_principal_id":"manager"});
+        let closed = json!({"lifecycle":"Closed","updated_by_principal_id":"manager"});
+        write(3, "parent", 1, ITEM, &parent, ready.clone());
+        write(4, "parent", 2, ITEM, &parent, ready.clone());
+        write(5, "child", 1, ITEM, &child, ready);
+        write(6, "child", 2, ITEM, &child, closed.clone());
+        write(7, "parent", 3, ITEM, &parent, closed);
+        write(8, "project", 2, PROJECT, &json!({}), json!({"members":{}}));
+        verify(&conn).unwrap();
+
+        conn.execute("UPDATE versions SET seq=9 WHERE id='child' AND rev=2", [])
+            .unwrap();
+        let error = verify(&conn).unwrap_err();
+        assert_eq!(error.0.code, "RecoveryRequired");
+        assert!(error.0.message.contains("parent closed before"));
+
+        conn.execute("UPDATE versions SET seq=6 WHERE id='child' AND rev=2", [])
+            .unwrap();
+        conn.execute(
+            "UPDATE versions SET body=json_set(body,'$.lifecycle','Verified')
+             WHERE id='parent' AND rev=2",
+            [],
+        )
+        .unwrap();
+        let error = verify(&conn).unwrap_err();
+        assert_eq!(error.0.code, "RecoveryRequired");
+        assert!(error.0.message.contains("not enrolled under a ready"));
+    }
+}

@@ -19,6 +19,7 @@
 - 格式 75 将新增的 `Event.Ack` 消费者确认位置限制为每主体 128 个、每权威 4096 个。确认位置持续保留，达到上限仍可推进已有位置。`Event.Offset` 传入 `include_revision: true` 可取得当前修订。用 `Event.OffsetDelete` 提交 `consumer` 和 `expected_revision` 精确清理。相同删除请求在位置仍不存在时返回 `deleted: false`。同一消费者重建或推进后，旧修订会得到 `Conflict`。
 - `Event.OffsetList` 按消费者 ID 分页，使用返回的 `next_consumer` 作为下一页的 `after`。本机所有者可为已撤销的主体传入 `owner`，列出其位置并逐项删除。实际删除记入审计。[确认位置容量与清理验收](../tests/test_event_offset_capacity.py)
 - CLI 使用 `psiosctl event-offset CONSUMER` 或 `psiosctl event-offsets` 取得修订，再以 `psiosctl event-offset-delete CONSUMER --expected-revision REVISION` 精确删除。Rust SDK 提供 `Client::event_offset`、`Client::event_offsets` 和 `Client::delete_event_offset`。
+- 消费者处理事件后，可用 `psiosctl event-ack CONSUMER CURSOR --previous PREVIOUS_CURSOR` 或 `Client::acknowledge_events` 确认位置。初次确认省略前一游标。回执丢失时，同一主体在原授权代次及恢复世代内可重送已确认的相同游标。即使短期作用域已回收，回执仍可核验，不产生新修订或重复提交审计。游标失效后，继续订阅仍需要重新列举。[作用域清理与回执恢复验收](../tests/test_bounded_watch_scopes.py)
 - 格式 52 开始，新建的多资源快照按资源首次提交顺序分页，每项解析为快照边界时的修订。高频状态更新不会改变既有资源在列表中的位置。升级前签发的有效分页游标继续使用原有顺序，事件订阅继续按修订提交顺序投递。[固定快照和事件续读](../tests/resource_snapshot_upgrade.py)
 - `Task.Wait` 接受 Task 的 `id`、1 至 10000 毫秒的 `timeout_ms` 和可选 `after_version`。传入此前读到的 `task_revision` 可等待新修订。省略时等待 `Succeeded`、`Failed`、`Cancelled`、`Paused`、`WaitingApproval` 或 `WaitingInput`。到期返回最新快照。每次唤醒均复核 `Task.Get` 的同一读取权限，连接关闭会释放名额。CLI 和 Rust SDK 的完成等待使用此接口，等待名额用完时按退避间隔读取任务。
 

@@ -123,7 +123,7 @@ pub fn describe(db: &Db<'_>, artifact: &Doc, shared: bool) -> Result<Value> {
     }))
 }
 
-fn require_read_only(db: &Db<'_>, task: &Doc) -> Result<()> {
+fn require_read_only(conn: &Connection, task: &Doc) -> Result<()> {
     let tool = task.spec["task_type"]
         .as_str()
         .ok_or_else(|| err("RecoveryRequired", "producing Task has no tool identity"))?;
@@ -142,14 +142,14 @@ fn require_read_only(db: &Db<'_>, task: &Doc) -> Result<()> {
             )
         })?;
     for reference in operations {
-        let op = db.resolve(reference)?;
+        let op = crate::db::resolve(conn, reference)?;
         require(
             op.kind == "Operation" && op.owner == task.owner && op.spec["task_id"] == task.id,
             "RecoveryRequired",
             "operation does not belong to the producing Task",
         )?;
-        let plan = db.resolve(&op.body["plan_ref"])?;
-        let capability = db.resolve(&plan.body["runtime_refs"][0])?;
+        let plan = crate::db::resolve(conn, &op.body["plan_ref"])?;
+        let capability = crate::db::resolve(conn, &plan.body["runtime_refs"][0])?;
         require(
             plan.kind == "OperationPlan"
                 && plan.body["allowed_effects"][0]["action"] == tool
@@ -223,7 +223,7 @@ pub(super) fn prepare_candidate(db: &Db<'_>, task: Doc) -> Result<Candidate> {
         "PreconditionFailed",
         "eviction requires a settled Task with available results",
     )?;
-    require_read_only(db, &task)?;
+    require_read_only(db.c, &task)?;
     require(
         !workflow::retains_result(db, &task)?,
         "Conflict",

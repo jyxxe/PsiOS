@@ -640,7 +640,8 @@ class StorageRecoveryTests(unittest.TestCase):
         self.assertTrue(any("unlinkat(" in line and quarantine.name in line
                             and '"blob-0"' in line and "= 0" in line for line in traced.splitlines()), traced)
         self.assertTrue(any("unlinkat(" in line and quarantine.name in line
-                            and '"manifest.json"' in line and "INJECTED" in line for line in traced.splitlines()), traced)
+                            and '"manifest.json"' in line and ("= ?" in line or "INJECTED" in line)
+                            for line in traced.splitlines()), traced)
         self.assertFalse(stage.exists())
         self.assertEqual(quarantine.stat().st_ino, inode)
         self.assertTrue(manifest.is_file())

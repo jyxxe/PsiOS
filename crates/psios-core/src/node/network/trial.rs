@@ -1,4 +1,5 @@
 //! Custody for one locally approved NetworkManager profile trial.
+mod activation_receipt;
 pub(crate) mod rollback_verify;
 
 pub(crate) use super::managed::RollbackReceipt;
@@ -334,6 +335,7 @@ pub(crate) enum Boundary<'a> {
     Created(&'a Checkpoint),
     BeforeActivate,
     Activated(&'a Activation),
+    ActivationReceiptReturned(&'a Activation),
 }
 
 pub(crate) fn perform(
@@ -357,7 +359,10 @@ pub(crate) fn perform(
     let activation = managed::activate(&scope, &nm_checkpoint, &settings.candidate_uuid, || {
         checkpoint(Boundary::BeforeActivate)
     })?;
-    checkpoint(Boundary::Activated(&activation))?;
+    if let Err(error) = checkpoint(Boundary::Activated(&activation)) {
+        checkpoint(Boundary::ActivationReceiptReturned(&activation))?;
+        return Err(error);
+    }
     let observed = managed::await_candidate(&scope, &nm_checkpoint, &activation)?;
     require(
         observed.checkpoint_present && observed.active == activation.active,
@@ -467,6 +472,9 @@ pub(crate) fn record(db: &Db<'_>, work: &Work, boundary: Boundary<'_>) -> Result
             )?;
             custody.journal.activation = Some(activation.clone());
             Phase::Activated
+        }
+        (Phase::ActivateIssued, Boundary::ActivationReceiptReturned(activation)) => {
+            return activation_receipt::record(db, &op, &custody, activation);
         }
         _ => {
             return Err(err(
@@ -932,6 +940,7 @@ pub(crate) struct Inspection {
     snapshot: Snapshot,
     checkpoint: Checkpoint,
     activation: Option<Activation>,
+    activation_receipt_ref: Option<Value>,
     confirm_issued: bool,
 }
 
@@ -998,12 +1007,18 @@ pub(crate) fn inspect(db: &Db<'_>, op: &Doc) -> Result<Inspection> {
         "inspection requires the unresolved operation and its enrolled link revision",
     )?;
     let (scope, checkpoint) = custody.pair()?;
-    let activation = match custody.journal.phase {
-        Phase::CheckpointOwned => None,
+    let (activation, activation_receipt_ref) = match custody.journal.phase {
+        Phase::CheckpointOwned => (None, None),
+        // Only the original worker can attest that the activation returned.
+        // An issuance alone can still have an orphaned client in flight.
+        Phase::ActivateIssued => {
+            let (activation, reference) = activation_receipt::get(db, op, &custody)?;
+            (Some(activation), Some(reference))
+        }
         Phase::Activated
         | Phase::AwaitingConfirmation
         | Phase::ConfirmIssued
-        | Phase::RollbackIssued => Some(custody.activation()?.clone()),
+        | Phase::RollbackIssued => (Some(custody.activation()?.clone()), None),
         _ => {
             return Err(err(
                 "OutcomeUnknown",
@@ -1018,6 +1033,7 @@ pub(crate) fn inspect(db: &Db<'_>, op: &Doc) -> Result<Inspection> {
         snapshot: scope.clone(),
         checkpoint: checkpoint.clone(),
         activation,
+        activation_receipt_ref,
         confirm_issued: custody.journal.phase == Phase::ConfirmIssued,
     })
 }
@@ -1041,11 +1057,15 @@ pub(crate) fn reconcile(
     )?;
     let applied = artifact.publication == Conclusion::Committed;
     mark_settled(db, op, applied)?;
+    let mut evidence = json!({"observation_ref":observation.reference(),"journal_ref":artifact.journal_ref,
+        "conclusion":if applied {"NetworkTrialCommitted"} else {"NetworkTrialRolledBack"}});
+    if let Some(reference) = current.activation_receipt_ref {
+        evidence["activation_receipt_ref"] = reference;
+    }
     Ok((
         applied,
         json!({"publication":artifact.publication, "link_ref":artifact.link_ref}),
-        json!({"observation_ref":observation.reference(),"journal_ref":artifact.journal_ref,
-            "conclusion":if applied {"NetworkTrialCommitted"} else {"NetworkTrialRolledBack"}}),
+        evidence,
     ))
 }
 
@@ -1054,16 +1074,18 @@ fn needed(conn: &Connection, id: &str) -> Result<Doc> {
 }
 
 pub(crate) fn verify_active(conn: &Connection, format: u32) -> Result<()> {
-    verify_active_records(conn, format).map_err(|error| {
-        if error.0.code == "RecoveryRequired" {
-            error
-        } else {
-            err(
-                "RecoveryRequired",
-                format!("network trial custody verification: {}", error.0.message),
-            )
-        }
-    })
+    verify_active_records(conn, format)
+        .and_then(|()| activation_receipt::verify(conn))
+        .map_err(|error| {
+            if error.0.code == "RecoveryRequired" {
+                error
+            } else {
+                err(
+                    "RecoveryRequired",
+                    format!("network trial custody verification: {}", error.0.message),
+                )
+            }
+        })
 }
 
 fn verify_active_rollback(conn: &Connection, custody: &Custody, op: &Doc) -> Result<()> {

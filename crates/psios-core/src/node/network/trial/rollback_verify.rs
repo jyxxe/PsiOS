@@ -12,11 +12,11 @@ use psios_api::{canonical, sha256};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::{Value, json};
 
-struct Revision {
-    seq: i64,
+pub(super) struct Revision {
+    pub(super) seq: i64,
     doc: Doc,
-    correlation: String,
-    incarnation: String,
+    pub(super) correlation: String,
+    pub(super) incarnation: String,
 }
 
 fn revision(record: &Row<'_>) -> rusqlite::Result<Revision> {
@@ -32,14 +32,14 @@ fn invalid() -> crate::Error {
     err("RecoveryRequired", "invalid network trial rollback history")
 }
 
-fn position(conn: &Connection, doc: &Doc) -> Result<Revision> {
+pub(super) fn position(conn: &Connection, doc: &Doc) -> Result<Revision> {
     conn.prepare_cached("SELECT * FROM versions WHERE id=?1 AND rev=?2")?
         .query_row(params![doc.id, doc.rev], revision)
         .optional()?
         .ok_or_else(invalid)
 }
 
-fn preceding(conn: &Connection, id: &str, seq: i64) -> Result<Doc> {
+pub(super) fn preceding(conn: &Connection, id: &str, seq: i64) -> Result<Doc> {
     conn.prepare_cached("SELECT * FROM versions WHERE id=?1 AND seq<?2 ORDER BY seq DESC LIMIT 1")?
         .query_row(params![id, seq], row)
         .optional()?
@@ -73,11 +73,14 @@ fn numbered_path(path: &str, kind: &str) -> bool {
         })
 }
 
-fn exact_scope(journal: &Journal, link: &Doc) -> Result<()> {
+pub(super) fn exact_scope(
+    journal: &Journal,
+    link: &Doc,
+    activation: &managed::Activation,
+) -> Result<()> {
     let enrollment = Enrollment::read(link)?;
     let scope = journal.snapshot.as_ref().ok_or_else(invalid)?;
     let checkpoint = journal.checkpoint.as_ref().ok_or_else(invalid)?;
-    let activation = journal.activation.as_ref().ok_or_else(invalid)?;
     let deadline = journal.deadline.as_ref().ok_or_else(invalid)?;
     let started = journal.started_boottime_ms.ok_or_else(invalid)?;
     let duration = i64::from(checkpoint.rollback_timeout_seconds) * 1000;
@@ -89,6 +92,7 @@ fn exact_scope(journal: &Journal, link: &Doc) -> Result<()> {
             && numbered_path(&scope.baseline.path, "ActiveConnection")
             && numbered_path(&checkpoint.path, "Checkpoint")
             && numbered_path(&activation.active.path, "ActiveConnection")
+            && activation.active.path != scope.baseline.path
             && scope.baseline.profile_uuid == enrollment.original_uuid
             && scope.profiles[0].uuid == enrollment.original_uuid
             && scope.profiles[1].uuid == enrollment.candidate_uuid
@@ -195,7 +199,11 @@ fn issued(conn: &Connection, entry: &Revision) -> Result<Issued> {
         "RecoveryRequired",
         "network rollback issuance does not bind its original parked trial",
     )?;
-    exact_scope(&journal, &link)?;
+    exact_scope(
+        &journal,
+        &link,
+        journal.activation.as_ref().ok_or_else(invalid)?,
+    )?;
     Ok(Issued {
         journal,
         prior_op: parked_op,

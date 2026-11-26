@@ -22,6 +22,8 @@ class WorkflowScheduleOverlap(unittest.TestCase):
         self.addCleanup(self.n.close)
         self.volume = self.n.perform("volume.create", {"name": "workflow-overlap"})
         self.path = self.n.state / "volumes" / self.volume["resource_id"] / "data" / "proof"
+        self.n.call("Grant.Issue", {"principal_id": "local-owner", "units": 1, "ttl_seconds": 120,
+            "actions": ["workflow.manage"], "tool_targets": [self.volume["resource_id"]]})
         self.definition = self.n.call("Workflow.Define", {"key": key(), "steps": [{
             "id": "record", "tool": "volume.write", "after": [],
             "input": {**target(self.volume), "name": self.path.name, "content": self.payload.decode()},

@@ -291,12 +291,12 @@ class StorageRecoveryTests(unittest.TestCase):
         activated = n.perform("volume.activate", target(volume))
         self.assertEqual(n.get(activated["resource_id"])["resource"]["spec"]["storage_restore_phase"], "Activated")
 
-    def interrupt_restore_rename(self):
+    def stop_before_publication_rename(self, tool, source, key_suffix):
         n = self.n
         node = n.call("Node.Get", {})["reference"]
         n.call("Node.Configure", {"expected_resource_version": node["version"], "scheduling": "Cordoned"})
         n.stop()
-        daemon, trace = n.daemon, n.base / "restore-rename.strace"
+        daemon, trace = n.daemon, n.base / f"{key_suffix}.strace"
         n.daemon = ["strace", "-D", "-f", "-o", str(trace), "-e", "trace=renameat2",
                     "-e", "inject=renameat2:error=EINTR:signal=SIGKILL:when=1", "--", *daemon]
         try:
@@ -304,7 +304,7 @@ class StorageRecoveryTests(unittest.TestCase):
         finally:
             n.daemon = daemon
         self.assertTrue(os.path.samefile(f"/proc/{n.process.pid}/exe", daemon[0]))
-        request = n.prepare("backup.restore", target(self.backup), submission_key="lost-restore-rename")
+        request = n.prepare(tool, target(source), submission_key=key_suffix)
         task_id = n.call("Task.Submit", request)["task_id"]
         self.assertEqual(n.call("Task.Get", {"id": task_id})["lifecycle"], "Queued")
         node = n.call("Node.Get", {})["reference"]
@@ -314,6 +314,12 @@ class StorageRecoveryTests(unittest.TestCase):
             # The state change can commit before the interrupted response reaches the client.
             pass
         self.assertEqual(n.process.wait(25), -signal.SIGKILL)
+        return request, task_id, trace
+
+    def interrupt_restore_rename(self):
+        n = self.n
+        request, task_id, trace = self.stop_before_publication_rename(
+            "backup.restore", self.backup, "lost-restore-rename")
 
         db_url = (n.state / "state.db").as_uri() + "?mode=ro"
         with closing(sqlite3.connect(db_url, uri=True)) as db:
@@ -475,6 +481,203 @@ class StorageRecoveryTests(unittest.TestCase):
         self.assertFalse(quarantine.exists())
         self.assertFalse(final.exists())
         n.perform("backup.delete", target(self.backup))
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_RESTORE_RENAME_FAULT") == "1",
+                         "requires strace with syscall and signal injection")
+    def test_checkpointed_unpublished_backup_reconciles_and_reclaims_exact_stage(self):
+        n = self.n
+        request, task_id, trace = self.stop_before_publication_rename(
+            "backup.create", self.volume, "lost-backup-publication")
+        with closing(sqlite3.connect(n.state / "state.db")) as database:
+            retained = database.execute(
+                "SELECT q.operation,q.phase,o.body->>'outcome_knowledge',c.body "
+                "FROM queue q JOIN current o ON o.id=q.operation JOIN current c "
+                "ON c.id='backup-publication-'||q.operation WHERE q.task=?", (task_id,),
+            ).fetchone()
+            self.assertIsNotNone(retained, "process died before the backup checkpoint committed")
+            operation, phase, knowledge, body = retained
+            self.assertEqual((phase, knowledge), ("Dispatched", "InFlight"))
+            checkpoint = json.loads(body)
+            self.assertEqual(checkpoint["source_ref"], self.volume)
+            index = database.execute(
+                "SELECT * FROM backup_stage_custody WHERE operation=?", (operation,),
+            ).fetchone()
+            self.assertIsNotNone(index)
+            stage = self.backups / checkpoint["placement"]["stage_name"]
+            final = self.backups / checkpoint["receipt"]["id"]
+            self.assertEqual(final.name, f"backup-{operation}")
+            self.assertEqual(index[:2], (operation, stage.name))
+            self.assertIsNone(index[-1])
+            head, = database.execute("SELECT value FROM meta WHERE key='head'").fetchone()
+        witness = json.loads((n.witness / "head").read_text())
+        self.assertEqual(witness, {"committed": head})
+        inode = stage.stat().st_ino
+        self.assertEqual(checkpoint["placement"]["directory"], [stage.stat().st_dev, inode])
+        self.assertEqual(checkpoint["placement"]["parent"], [self.backups.stat().st_dev, self.backups.stat().st_ino])
+        self.assertFalse(os.path.lexists(final))
+        with (stage / "blob-0").open("rb") as record:
+            self.assertEqual(hashlib.file_digest(record, "sha256").hexdigest(), self.digest)
+        self.assertTrue(any("renameat2(" in line and f'"{stage.name}"' in line and f'"{final.name}"' in line
+                            and "RENAME_NOREPLACE" in line for line in trace.read_text().splitlines()))
+
+        with closing(sqlite3.connect(n.state / "state.db")) as database, database:
+            database.execute("DELETE FROM backup_stage_custody WHERE operation=?", (operation,))
+        try:
+            for command in ("verify", "serve"):
+                corrupt = subprocess.run(n.daemon + [command], capture_output=True, text=True, timeout=15)
+                self.assertNotEqual(corrupt.returncode, 0, corrupt)
+                self.assertIn("active backup checkpoint is missing its exact stage custody", corrupt.stderr)
+            self.assertEqual(stage.stat().st_ino, inode, "startup reclaimed unresolved evidence")
+        finally:
+            with closing(sqlite3.connect(n.state / "state.db")) as database, database:
+                database.execute("INSERT INTO backup_stage_custody VALUES(?,?,?,?)", index)
+        subprocess.run(n.daemon + ["verify"], check=True, stdout=subprocess.DEVNULL, timeout=15)
+        n.start()
+        paused = n.wait(task_id)
+        self.assertEqual((paused["lifecycle"], paused["outcome_knowledge"]), ("Paused", "Unknown"), paused)
+        op, = paused["operation_refs"]
+        checkpoint_ref = n.get(f"backup-publication-{operation}")["reference"]
+        self.assertEqual(stage.stat().st_ino, inode)
+        self.assertEqual(op["resource_id"], operation)
+
+        blocked = n.wait(n.submit("backup.create", target(self.volume)))
+        self.assertEqual((blocked["lifecycle"], blocked["conditions"][0]["type"]), ("Failed", "Conflict"), blocked)
+        inspector = "backup.inspect_publication"
+        with self.assertRaises(Failure) as refused:
+            n.prepare(inspector, target(op))
+        self.assertEqual(refused.exception.code, "PermissionDenied")
+        grant = n.call("Grant.Issue", {"principal_id": "local-owner", "units": 12, "ttl_seconds": 180,
+            "actions": [inspector, "task.submit", "task.read"], "tool_targets": [operation]})
+        delegation = grant["delegation_ref"]["resource_id"]
+
+        def inspect(publication=None):
+            prepared = n.prepare(inspector, target(op), delegation=delegation)
+            result = n.wait(n.call("Task.Submit", prepared)["task_id"])
+            if publication is None:
+                self.assertEqual((result["lifecycle"], result["conditions"][0]["type"]),
+                                 ("Failed", "PreconditionFailed"), result)
+                self.assertEqual(result["result"]["artifact_refs"], [])
+                self.assertEqual(n.wait(task_id), paused)
+                return None
+            self.assertEqual(result["lifecycle"], "Succeeded", result)
+            reference, = result["result"]["artifact_refs"]
+            proof = n.call("Artifact.Read", {"reference": reference})
+            self.assertEqual((proof["publication"], proof["operation_ref"], proof["checkpoint_ref"]),
+                             (publication, op, checkpoint_ref), proof)
+            return reference
+
+        evidence = inspect("NotApplied")
+        reader, _ = n.agent(["task.read"])
+        with self.assertRaises(Failure) as denied:
+            n.call("Operation.Reconcile", {**target(op), "evidence_ref": evidence}, reader["token"])
+        self.assertEqual(denied.exception.code, "PermissionDenied")
+        final.mkdir(mode=0o700)
+        try:
+            inspect()  # Both paths exist.
+        finally:
+            final.rmdir()
+        parked = n.base / "parked-backup-stage"
+        stage.rename(parked)
+        try:
+            inspect()  # Neither path exists.
+            shutil.copytree(parked, stage)
+            try:
+                self.assertNotEqual(stage.stat().st_ino, inode)
+                inspect()  # Exact contents alone cannot identify the directory.
+            finally:
+                shutil.rmtree(stage)
+        finally:
+            parked.rename(stage)
+        stage.rename(final)
+        try:
+            inspect("Published")
+            with self.assertRaises(Failure) as stale:
+                n.call("Operation.Reconcile", {**target(op), "evidence_ref": evidence})
+            self.assertEqual(stale.exception.code, "OutcomeUnknown")
+        finally:
+            final.rename(stage)
+
+        quarantine = self.backups / f".backup-discard-{operation}"
+        quarantine.mkdir(mode=0o700)
+        marker = quarantine / "unrelated"
+        marker.write_text("keep original contents")
+        evidence = inspect("NotApplied")
+        settled_op = n.call("Operation.Reconcile", {**target(op), "evidence_ref": evidence})
+        self.assertEqual((settled_op["lifecycle"], settled_op["outcome_knowledge"]), ("Failed", "Known"))
+        settled = n.wait(task_id)
+        self.assertEqual(settled["conditions"][0]["type"], "LeaseLost")
+        receipt, = settled["result"]["artifact_refs"]
+        self.assertEqual(n.call("Artifact.Read", {"reference": receipt}), {
+            "source_volume_ref": self.volume, "backup_id": final.name, "publication": "NotApplied",
+        })
+        with self.assertRaises(Failure) as missing:
+            n.get(final.name)
+        self.assertEqual(missing.exception.code, "NotFound")
+        replay = n.call("Task.Submit", request)
+        self.assertTrue(replay["deduplicated"] and replay["task_id"] == task_id, replay)
+        n.stop(signal.SIGKILL)
+        subprocess.run(n.daemon + ["verify"], check=True, stdout=subprocess.DEVNULL, timeout=15)
+        n.start()
+        successor = n.perform("backup.create", target(self.volume))
+        self.assertNotEqual(successor["resource_id"], final.name)
+        self.assertEqual(stage.stat().st_ino, inode)
+        self.assertEqual(marker.read_text(), "keep original contents")
+        n.stop()
+        daemon, trace = n.daemon, n.base / "backup-cleanup-cut.strace"
+        manifest = quarantine / "manifest.json"
+        n.daemon = ["strace", "-D", "-f", "-yy", "-o", str(trace),
+                    "-e", "trace=unlinkat", "-e", "inject=unlinkat:error=EINTR:signal=SIGKILL:when=2",
+                    "--", *daemon]
+        try:
+            n.start()
+        finally:
+            n.daemon = daemon
+        self.assertTrue(os.path.samefile(f"/proc/{n.process.pid}/exe", daemon[0]))
+        marker.unlink()
+        quarantine.rmdir()
+        self.assertEqual(n.process.wait(25), -signal.SIGKILL)
+        traced = trace.read_text()
+        self.assertTrue(any("unlinkat(" in line and quarantine.name in line
+                            and '"blob-0"' in line and "= 0" in line for line in traced.splitlines()), traced)
+        self.assertTrue(any("unlinkat(" in line and quarantine.name in line
+                            and '"manifest.json"' in line and ("= ?" in line or "INJECTED" in line)
+                            for line in traced.splitlines()), traced)
+        self.assertFalse(stage.exists())
+        self.assertEqual(quarantine.stat().st_ino, inode)
+        self.assertTrue(manifest.is_file())
+        replacement = quarantine / "blob-0"
+        self.assertFalse(replacement.exists(), "cleanup was interrupted before removing its first member")
+        replacement.write_bytes(b"unrelated file with a valid backup member name")
+        log = n.base / "backup-cleanup-resume.stderr"
+        n.daemon = ["/bin/sh", "-c", 'log=$1; shift; exec "$@" 2>"$log"',
+                    "capture-backup-cleanup", str(log), *daemon]
+        try:
+            n.start()
+        finally:
+            n.daemon = daemon
+        self.assertEqual(n.wait(task_id), settled)
+        deadline = time.monotonic() + 8
+        while "psiosd backup stage reclamation: PreconditionFailed" not in log.read_text():
+            self.assertLess(time.monotonic(), deadline, "the worker did not observe the foreign member")
+            time.sleep(0.05)
+        self.assertEqual(replacement.read_bytes(), b"unrelated file with a valid backup member name")
+        self.assertTrue(manifest.is_file())
+        replacement.unlink()
+        deadline = time.monotonic() + 8
+        while True:
+            observations = [entry for entry in n.call("Audit.List", {"limit": 128})
+                            if (entry["method"], entry["resource"]) == ("Storage.BackupStageReclaim", operation)]
+            if observations:
+                self.assertEqual([entry["decision"] for entry in observations], ["Removed"])
+                break
+            self.assertLess(time.monotonic(), deadline, "backup stage reclamation did not settle")
+            time.sleep(0.05)
+        self.assertEqual(n.wait(task_id), settled)
+        self.assertFalse(stage.exists())
+        self.assertFalse(quarantine.exists())
+        self.assertFalse(final.exists())
+        n.stop()
+        subprocess.run(n.daemon + ["verify"], check=True, stdout=subprocess.DEVNULL, timeout=15)
 
 
 if __name__ == "__main__":

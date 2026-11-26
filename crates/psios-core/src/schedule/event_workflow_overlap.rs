@@ -14,7 +14,7 @@ use psios_api::canonical;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 
-pub(crate) const FORMAT: u32 = 121;
+pub(crate) const FORMAT: u32 = crate::storage::directory_create::FORMAT + 1;
 
 fn invalid() -> crate::Error {
     err(

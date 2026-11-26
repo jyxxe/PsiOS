@@ -130,9 +130,15 @@ fn next_work(db: &Db<'_>) -> Result<Option<Work>> {
            FROM pending_event_schedules p LEFT JOIN authorization_deadlines elapsed
                 ON elapsed.resource=p.schedule AND elapsed.boot_id=?2
          )
-         SELECT schedule,source,source_rev,expired,next_seq FROM candidates
-         WHERE expired OR next_seq IS NOT NULL ORDER BY expired DESC,next_seq,schedule LIMIT 1",
-        params![Utc::now().timestamp_millis(), clock.boot.boot_id, clock.time_ns, clock.boot.millis],
+         SELECT c.schedule,c.source,c.source_rev,c.expired,c.next_seq FROM candidates c
+          LEFT JOIN schedule_admission_deferrals d
+           ON d.schedule=c.schedule AND d.kind='ResourceEvent' AND d.anchor=c.next_seq
+         WHERE c.expired OR (c.next_seq IS NOT NULL AND (d.boot_id IS NULL OR d.boot_id!=?2
+             OR d.time_ns!=?3 OR d.deferred_boot_ms NOT BETWEEN ?5 AND ?4))
+         ORDER BY c.expired DESC,CASE WHEN c.expired THEN c.next_seq
+                       ELSE coalesce(d.ready_order,c.next_seq) END,c.next_seq,c.schedule LIMIT 1",
+        params![Utc::now().timestamp_millis(), clock.boot.boot_id, clock.time_ns, clock.boot.millis,
+            admission_delay::cutoff(clock.boot.millis)],
         |r| Ok(Work {
             schedule: r.get(0)?, source: r.get(1)?, source_rev: r.get(2)?,
             expired: r.get(3)?, next_seq: r.get(4)?,
@@ -142,6 +148,7 @@ fn next_work(db: &Db<'_>) -> Result<Option<Work>> {
 
 struct Trigger {
     id: String,
+    seq: i64,
     previous_rev: i64,
     source_rev: i64,
     source_ref: Value,
@@ -159,11 +166,26 @@ pub(super) fn tick(store: &mut Store) -> Result<()> {
     let mut rejected = None;
     match store.transaction(&correlation, |db| fire(db, &mut rejected)) {
         Ok(()) => Ok(()),
-        Err(error) if deferred(&error) && error.0.code != "QueueFull" => Ok(()),
         Err(error) => {
             let Some(attempt) = rejected else {
                 return Err(error);
             };
+            if deferred(&error) {
+                return admission_delay::after_refusal(store, &correlation, |db| {
+                    let mut schedule = db.of(&attempt.schedule, "Schedule")?;
+                    schedule.cas(&attempt.version)?;
+                    if error.0.code == "QueueFull" {
+                        schedule = remember_pending(db, &schedule, &attempt.trigger)?;
+                    }
+                    admission_delay::defer(
+                        db,
+                        &schedule,
+                        admission_delay::Kind::ResourceEvent,
+                        attempt.trigger.seq,
+                        &attempt.trigger.id,
+                    )
+                });
+            }
             store.transaction(&correlation, |db| {
                 let schedule = db.of(&attempt.schedule, "Schedule")?;
                 schedule.cas(&attempt.version)?;
@@ -180,7 +202,6 @@ fn record_attempt_failure(
     error: &crate::Error,
 ) -> Result<()> {
     match error.0.code.as_str() {
-        "QueueFull" => remember_pending(db, schedule, trigger).map(|_| ()),
         "DeadlineExceeded" => {
             let schedule = remember_pending(db, schedule, trigger)?;
             settle(db, &schedule, "Expired", Some("DeadlineExceeded"), None).map(|_| ())
@@ -205,7 +226,18 @@ fn advance_source(db: &Db<'_>, schedule: &Doc, previous: i64, next: i64) -> Resu
         )? == 1,
         "RecoveryRequired",
         "event schedule cursor changed during settlement",
-    )
+    )?;
+    admission_delay::clear(db, &schedule.id)
+}
+
+pub(super) fn trigger_id(schedule: &Doc, event_id: &str) -> String {
+    let digest = sha256(&canonical(&json!([
+        "psios/schedule/event/1",
+        schedule.id,
+        schedule.spec["creation_digest"],
+        event_id
+    ])));
+    format!("trigger-{}", &digest[7..])
 }
 
 fn fire(db: &Db<'_>, rejected: &mut Option<Attempt>) -> Result<()> {
@@ -278,17 +310,17 @@ fn fire(db: &Db<'_>, rejected: &mut Option<Attempt>) -> Result<()> {
         return Ok(());
     }
     if !rule.condition.matches(&previous, &source) {
+        require(
+            schedule.body["pending_trigger_ref"].is_null(),
+            "RecoveryRequired",
+            "a pending event trigger still holds this source cursor",
+        )?;
         return advance_source(db, &schedule, previous.rev, source.rev);
     }
-    let digest = sha256(&canonical(&json!([
-        "psios/schedule/event/1",
-        schedule.id,
-        schedule.spec["creation_digest"],
-        event_id
-    ])));
     let source_ref = source.reference();
     let trigger = Trigger {
-        id: format!("trigger-{}", &digest[7..]),
+        id: trigger_id(&schedule, &event_id),
+        seq,
         previous_rev: previous.rev,
         source_rev: source.rev,
         event: json!({

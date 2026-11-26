@@ -192,7 +192,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = agent::session_inputs::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = schedule::admission_delay::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -533,6 +533,9 @@ impl Store {
                 }
                 if ver < agent::session_inputs::FORMAT {
                     db.c.execute_batch(agent::session_inputs::SCHEMA)?;
+                }
+                if ver < schedule::admission_delay::FORMAT {
+                    db.c.execute_batch(schedule::admission_delay::SCHEMA)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

@@ -496,6 +496,8 @@ Core 在创建时固定 IANA 数据版本、UTC 窗口和因 `gap` 跳过的当�
 
 每个 `ScheduleTrigger` 保存来源事件 ID、资源版本、序号和 Task 回执。队列满时可通过 `pending_trigger_ref` 查询持久等待中的原触发。接受任务时，写入触发结算、推进源游标和创建 Task 在同一事务完成。如果到期或取消，待提交触发保留终态及原事件。用 `Schedule.Get` 的 `trigger_refs` 查询已结算历史。[事件调度验收](../tests/test_resource_event_schedule.py) · [格式 31 升级验收](../tests/resource_event_schedule_upgrade.py)
 
+定时与事件调度分别排列已就绪的触发。遇到可重试的准入限制时，Core 持久保存短暂延期，让其他拥有可用配额的主体继续。格式 101 保存原触发身份和同一 Linux 启动内的 1 秒退避。定时窗口和事件游标继续按原规则推进，到期处理优先，重试沿用原提交键。[定时公平验收](../tests/test_schedule.py) · [事件游标与重启验收](../tests/test_resource_event_schedule.py)
+
 ### 通过任务启动工作流
 
 普通 Task 或 Schedule 可选择 `workflow.start`。输入为固定的 `definition_ref` 和正整数 `max_runtime_seconds`。委托须允许 `workflow.start`、`workflow.manage`、任务读写以及图中各工具，并覆盖定义和执行目标。工作流步骤直接使用各自的工具，嵌套启动需要另行支持。

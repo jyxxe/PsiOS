@@ -1,9 +1,12 @@
 """Schedule real Tasks through deadlines, restart, approval and competing admission."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import json
 import os
 import signal
+import sqlite3
+import subprocess
 import time
 import unittest
 
@@ -190,6 +193,77 @@ class ScheduleTests(unittest.TestCase):
         observed = n.call("Artifact.Read", {"reference": task["result"]["artifact_refs"][0]}, agent["token"])
         self.assertGreater(observed["memory_bytes"]["MemTotal"], 0)
         self.rejected("PermissionDenied", "Task.Get", {"id": task["task_id"]}, observer["token"])
+
+    def test_owner_queue_pressure_does_not_block_a_later_timed_schedule(self):
+        n = self.node
+        n.stop()
+        n.config.write_text(json.dumps(dict(json.loads(n.config.read_text()), queue_limit=4,
+                                            principal_queue_limit=1)))
+        n.start()
+        volume = n.perform("volume.create", {"name": "timed-schedule-fairness"})
+        held = n.submit("volume.write", {**target(volume), "name": "held", "content": "pending"})
+        self.assertEqual(n.wait(held)["lifecycle"], "WaitingApproval")
+
+        blocked_scope = self.grant("volume.write", volume["resource_id"], units=2)
+        independent = n.call("Agent.Register", {"name": "independent-timed-schedule"})
+        independent_scope = self.grant(principal=independent["principal_id"])
+        blocked = n.call("Schedule.Create", self.interval(
+            blocked_scope, tool="volume.write", count=2, every=20, run=0.5, deadline=25,
+            input={**target(volume), "name": "original", "content": "scheduled once"},
+        ))
+        later = n.call("Schedule.Create", self.request(independent_scope, run=1.2), independent["token"])
+        later_receipt = self.wait(later, "Triggered")["state"]["task_receipt"]
+        self.assertEqual(n.wait(later_receipt["task_id"])["lifecycle"], "Succeeded")
+        self.assertEqual(self.state(blocked), blocked)
+        self.assertEqual(self.budget(blocked_scope), (0, 0))
+        self.assertEqual(self.budget(independent_scope), (0, 1))
+
+        original = blocked["state"]["next"]
+        blocked_id = blocked["reference"]["resource_id"]
+        n.stop(signal.SIGKILL)
+        with closing(sqlite3.connect(n.state / "state.db")) as conn:
+            admission = conn.execute(
+                "SELECT d.kind,d.trigger,d.anchor,p.run_ms,d.schedule_rev FROM schedule_admission_deferrals d "
+                "JOIN pending_schedules p ON p.schedule=d.schedule WHERE d.schedule=?", (blocked_id,)
+            ).fetchone()
+            self.assertIsNotNone(admission)
+            self.assertEqual((admission[0], admission[1], admission[4]), ("Timed", original["trigger_id"], 1))
+            self.assertEqual(admission[2], admission[3])
+        verification = json.loads(subprocess.check_output(n.daemon + ["verify"], timeout=20))
+        self.assertGreaterEqual(verification["database_format"], 101, verification)
+        with closing(sqlite3.connect(n.state / "state.db")) as conn, conn:
+            conn.execute("UPDATE schedule_admission_deferrals SET trigger='swapped' WHERE schedule=?", (blocked_id,))
+        invalid = subprocess.run(n.daemon + ["verify"], capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertIn("RecoveryRequired", invalid.stderr)
+        with closing(sqlite3.connect(n.state / "state.db")) as conn, conn:
+            conn.execute("UPDATE schedule_admission_deferrals SET trigger=? WHERE schedule=?",
+                         (original["trigger_id"], blocked_id))
+        n.start()
+        self.assertEqual(self.state(blocked), blocked)
+        self.assertEqual(self.state(later)["state"]["task_receipt"], later_receipt)
+
+        n.call("Task.Cancel", target(n.get(held)["reference"]))
+        progress = self.interval_progress(blocked, 1)
+        executed, = self.triggers(progress)
+        receipt = executed["task_receipt"]
+        self.assertEqual(progress["state"]["trigger_refs"][0]["resource_id"], original["trigger_id"])
+        self.assertEqual(executed["run_at"], original["run_at"])
+        self.assertEqual(executed["deadline_at"], original["deadline_at"])
+        self.assertEqual(receipt["idempotency_key"], original["trigger_id"])
+        self.assertEqual(receipt["origin_ref"]["origin_id"], blocked_id)
+        child = receipt["task_id"]
+        self.assertEqual(n.wait(child)["lifecycle"], "WaitingApproval")
+        data = n.state / "volumes" / volume["resource_id"] / "data"
+        self.assertFalse((data / "original").exists())
+        n.approve(child)
+        self.assertEqual(n.wait(child)["lifecycle"], "Succeeded")
+        self.assertEqual((data / "original").read_text(), "scheduled once")
+        self.assertEqual(self.budget(blocked_scope), (0, 1))
+        with closing(sqlite3.connect(n.state / "state.db")) as conn:
+            self.assertIsNone(conn.execute("SELECT 1 FROM schedule_admission_deferrals WHERE schedule=?",
+                                           (blocked_id,)).fetchone())
+            self.assertEqual(conn.execute("SELECT count(*) FROM submissions WHERE task=?", (child,)).fetchone(), (1,))
 
     def test_manual_retry_preserves_the_original_trigger_identity(self):
         n = self.node

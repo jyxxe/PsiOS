@@ -1,4 +1,5 @@
 //! Durable admission into the ordinary Task broker.
+pub(crate) mod admission_delay;
 mod calendar;
 mod repeat;
 mod resource_event;
@@ -325,7 +326,8 @@ fn remove_pending(db: &Db<'_>, schedule: &Doc) -> Result<()> {
         schedule.body["lifecycle"] == "Pending" && db.c.execute(sql, [&schedule.id])? == 1,
         "RecoveryRequired",
         "schedule state disagrees with its pending entry",
-    )
+    )?;
+    admission_delay::clear(db, &schedule.id)
 }
 
 fn deferred(error: &Error) -> bool {
@@ -344,10 +346,11 @@ fn previous_task_active(db: &Db<'_>, schedule: &Doc) -> Result<bool> {
     ) || task.body["outcome_knowledge"] == "Unknown")
 }
 
-struct Rejection {
+struct Attempt {
     id: String,
     version: String,
-    phase: &'static str,
+    run_ms: i64,
+    trigger: String,
 }
 
 pub fn tick(store: &mut Store) -> Result<()> {
@@ -357,23 +360,45 @@ pub fn tick(store: &mut Store) -> Result<()> {
 
 fn tick_timed(store: &mut Store) -> Result<()> {
     let correlation = id("schedule-tick");
-    let mut rejection = None;
-    match store.transaction(&correlation, |db| fire(db, &mut rejection)) {
+    let mut attempt = None;
+    match store.transaction(&correlation, |db| fire(db, &mut attempt)) {
         Ok(()) => Ok(()),
-        Err(error) if deferred(&error) => Ok(()),
         Err(error) => {
-            let Some(rejection) = rejection else {
+            let Some(attempt) = attempt else {
                 return Err(error);
             };
             // The attempted admission has rolled back. The caller still holds
-            // the authority lock while this second transaction records the rejection.
+            // the authority lock while the same attempt is deferred or settled.
+            if deferred(&error) {
+                return admission_delay::after_refusal(store, &correlation, |db| {
+                    let schedule = db.of(&attempt.id, "Schedule")?;
+                    schedule.cas(&attempt.version)?;
+                    admission_delay::defer(
+                        db,
+                        &schedule,
+                        admission_delay::Kind::Timed,
+                        attempt.run_ms,
+                        &attempt.trigger,
+                    )
+                });
+            }
+            let phase = match error.0.code.as_str() {
+                "DeadlineExceeded" => "Expired",
+                "PermissionDenied"
+                | "PreconditionFailed"
+                | "Conflict"
+                | "NotFound"
+                | "QuotaExceeded"
+                | "UnsupportedCapability" => "Rejected",
+                _ => return Err(error),
+            };
             store.transaction(&correlation, |db| {
-                let schedule = db.of(&rejection.id, "Schedule")?;
-                schedule.cas(&rejection.version)?;
+                let schedule = db.of(&attempt.id, "Schedule")?;
+                schedule.cas(&attempt.version)?;
                 if let Some(series) = repeat::Series::load(&schedule)? {
-                    series.settle(db, &schedule, rejection.phase, Some(&error.0.code), None)?;
+                    series.settle(db, &schedule, phase, Some(&error.0.code), None)?;
                 } else {
-                    settle(db, &schedule, rejection.phase, Some(&error.0.code), None)?;
+                    settle(db, &schedule, phase, Some(&error.0.code), None)?;
                 }
                 Ok(())
             })
@@ -381,7 +406,7 @@ fn tick_timed(store: &mut Store) -> Result<()> {
     }
 }
 
-fn fire(db: &Db<'_>, rejection: &mut Option<Rejection>) -> Result<()> {
+fn fire(db: &Db<'_>, attempt: &mut Option<Attempt>) -> Result<()> {
     let pending: bool = db.c.query_row(
         "SELECT EXISTS(SELECT 1 FROM pending_schedules)",
         [],
@@ -405,18 +430,34 @@ fn fire(db: &Db<'_>, rejection: &mut Option<Rejection>) -> Result<()> {
         SELECT schedule,through FROM checked WHERE deadline_ms<=through ORDER BY deadline_ms,schedule LIMIT 1",
         params![at,clock.boot.boot_id,clock.time_ns,clock.boot.millis,i64::MAX], |r| Ok((r.get(0)?,r.get(1)?)),
     ).optional()?;
-    let (id, expired_through) = if let Some((id, through)) = expired {
-        (id, Some(through))
+    let (id, expired_through, run_ms) = if let Some((id, through)) = expired {
+        (id, Some(through), None)
     } else {
-        let due: Option<String> = db.c.query_row(
-            "SELECT schedule FROM pending_schedules WHERE run_ms<=?1 ORDER BY run_ms,schedule LIMIT 1",
-            [at], |r| r.get(0),
-        ).optional()?;
-        let Some(id) = due else { return Ok(()) };
         if !node::enabled(db)? || node::work_admission::draining(db)? {
             return Ok(());
         }
-        (id, None)
+        let due =
+            db.c.query_row(
+                "SELECT p.schedule,p.run_ms FROM pending_schedules p
+              LEFT JOIN schedule_admission_deferrals d
+                ON d.schedule=p.schedule AND d.kind='Timed' AND d.anchor=p.run_ms
+             WHERE p.run_ms<=?1 AND (d.boot_id IS NULL OR d.boot_id!=?2 OR d.time_ns!=?3
+                OR d.deferred_boot_ms NOT BETWEEN ?4 AND ?5)
+             ORDER BY coalesce(d.ready_order,p.run_ms),p.run_ms,p.schedule LIMIT 1",
+                params![
+                    at,
+                    clock.boot.boot_id,
+                    clock.time_ns,
+                    admission_delay::cutoff(clock.boot.millis),
+                    clock.boot.millis
+                ],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        let Some((id, run_ms)) = due else {
+            return Ok(());
+        };
+        (id, None, Some(run_ms))
     };
     let schedule = db.of(&id, "Schedule")?;
     let series = repeat::Series::load(&schedule)?;
@@ -442,27 +483,22 @@ fn fire(db: &Db<'_>, rejection: &mut Option<Rejection>) -> Result<()> {
     let delegation = request["delegation_ref"]["resource_id"]
         .as_str()
         .ok_or_else(|| err("RecoveryRequired", "schedule delegation reference missing"))?;
+    let trigger = request["idempotency_key"].as_str().ok_or_else(|| {
+        err(
+            "RecoveryRequired",
+            "timed schedule trigger identity missing",
+        )
+    })?;
+    let run_ms =
+        run_ms.ok_or_else(|| err("RecoveryRequired", "expired occurrence was dispatched"))?;
     let result = policy::delegation(db, &schedule.owner, delegation, ACTION)
         .and_then(|_| broker::submit_scheduled(db, &schedule.owner, request, &schedule.id));
-    let receipt = result.inspect_err(|error| {
-        let phase = match error.0.code.as_str() {
-            "DeadlineExceeded" => "Expired",
-            "PermissionDenied"
-            | "PreconditionFailed"
-            | "Conflict"
-            | "NotFound"
-            | "QuotaExceeded"
-            | "UnsupportedCapability"
-                if !deferred(error) =>
-            {
-                "Rejected"
-            }
-            _ => return,
-        };
-        *rejection = Some(Rejection {
+    let receipt = result.inspect_err(|_| {
+        *attempt = Some(Attempt {
             version: schedule.version(),
             id: schedule.id.clone(),
-            phase,
+            run_ms,
+            trigger: trigger.to_owned(),
         });
     })?;
     if let Some(series) = series {

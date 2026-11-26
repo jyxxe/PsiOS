@@ -1,5 +1,5 @@
 use super::{
-    Window,
+    Window, admission_delay,
     calendar::{Calendar, CalendarPlan},
     due_ms, instant, remove_pending, timestamp, trigger_id,
 };
@@ -278,6 +278,7 @@ impl Series {
                 "UPDATE authorization_deadlines SET deadline_boot_ms=deadline_boot_ms+?2 WHERE resource=?1",
                 params![schedule.id, delta_ms],
             )?;
+            admission_delay::clear(db, &schedule.id)?;
             body["next"] = json!(self.occurrence(&schedule.id, count, next));
         } else {
             remove_pending(db, schedule)?;

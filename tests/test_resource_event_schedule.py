@@ -4,6 +4,7 @@ from contextlib import closing
 import json
 import signal
 import sqlite3
+import subprocess
 import time
 import unittest
 
@@ -63,12 +64,15 @@ class ResourceEventSchedules(unittest.TestCase):
             self.node.call(method, params, token)
         self.assertEqual(e.exception.code, code, e.exception)
 
-    def fill_queue(self):
+    def fill_queue(self, *, queue_limit=1, principal_queue_limit=None):
         n = self.node
         volume = n.perform("volume.create", {"name": "event-reserve"})
         cfg = json.loads(n.config.read_text())
         n.stop()
-        n.config.write_text(json.dumps(dict(cfg, queue_limit=1)))
+        cfg["queue_limit"] = queue_limit
+        if principal_queue_limit is not None:
+            cfg["principal_queue_limit"] = principal_queue_limit
+        n.config.write_text(json.dumps(cfg))
         n.start()
         blocker = n.submit("volume.write", {**target(volume), "name": "hold", "content": "pending"})
         blocked = n.wait(blocker)
@@ -212,6 +216,67 @@ class ResourceEventSchedules(unittest.TestCase):
                 self.assertEqual(settled["source_event"], pending["state"]["source_event"])
                 self.assertEqual(self.budget(grant), (0, 0))
         self.assertEqual(n.call("Task.Get", {"id": blocked["task_id"]}), blocked)
+
+    def test_pending_older_event_does_not_block_another_principal(self):
+        n = self.node
+        volume, held = self.fill_queue(queue_limit=4, principal_queue_limit=1)
+        blocked_scope = self.grant("volume.write", volume["resource_id"])
+        original_source = n.call("Node.Get", {})["reference"]
+        blocked = n.call("Schedule.Create", self.request(
+            blocked_scope, original_source, tool="volume.write",
+            input={**target(volume), "name": "event", "content": "original event"},
+        ))
+        original_event = self.mode("Cordoned")
+        next_source = self.mode("Enabled")
+        current, pending = self.pending(blocked)
+        self.assertEqual(pending["state"]["source_event"]["resource_ref"], original_event)
+
+        independent = n.call("Agent.Register", {"name": "independent-event-schedule"})
+        independent_scope = self.grant("system.status", "profile-local", independent["principal_id"])
+        later = n.call("Schedule.Create", self.request(independent_scope, next_source), independent["token"])
+        later_event = self.mode("Cordoned")
+        self.mode("Enabled")
+        self.wait(later, lambda s: s["lifecycle"] == "Completed")
+        later_trigger, = self.triggers(later)
+        self.assertEqual(later_trigger["source_event"]["resource_ref"], later_event)
+        self.assertEqual(n.wait(later_trigger["task_receipt"]["task_id"])["lifecycle"], "Succeeded")
+        self.assertEqual(self.pending(blocked), (current, pending))
+        self.assertEqual(self.budget(blocked_scope), (0, 0))
+        self.assertEqual(self.budget(independent_scope), (0, 1))
+
+        blocked_id = blocked["reference"]["resource_id"]
+        n.stop(signal.SIGKILL)
+        with closing(sqlite3.connect(n.state / "state.db")) as conn:
+            record = conn.execute(
+                "SELECT d.kind,d.trigger,d.anchor,p.source_rev FROM schedule_admission_deferrals d "
+                "JOIN pending_event_schedules p ON p.schedule=d.schedule WHERE d.schedule=?", (blocked_id,)
+            ).fetchone()
+            self.assertEqual(record, ("ResourceEvent", pending["state"]["trigger_id"],
+                                      int(pending["state"]["source_event"]["source_seq"]),
+                                      int(original_source["version"][1:])))
+        subprocess.run(n.daemon + ["verify"], check=True, stdout=subprocess.DEVNULL, timeout=20)
+        n.start()
+        self.assertEqual(self.pending(blocked), (current, pending))
+        self.assertEqual(self.triggers(later), [later_trigger])
+
+        n.call("Task.Cancel", {"id": held["task_id"], "expected_resource_version": held["task_revision"]})
+        self.wait(blocked, lambda s: s["lifecycle"] == "Completed")
+        triggered, = self.triggers(blocked)
+        self.assertEqual(triggered["trigger_id"], pending["state"]["trigger_id"])
+        self.assertEqual(triggered["source_event"], pending["state"]["source_event"])
+        self.assertEqual(triggered["task_receipt"]["idempotency_key"], triggered["trigger_id"])
+        child = triggered["task_receipt"]["task_id"]
+        self.assertEqual(n.wait(child)["lifecycle"], "WaitingApproval")
+        artifact = n.state / "volumes" / volume["resource_id"] / "data" / "event"
+        self.assertFalse(artifact.exists())
+        n.approve(child)
+        self.assertEqual(n.wait(child)["lifecycle"], "Succeeded")
+        self.assertEqual(artifact.read_text(), "original event")
+        self.assertEqual(self.budget(blocked_scope), (0, 1))
+        with closing(sqlite3.connect(n.state / "state.db")) as conn:
+            self.assertIsNone(conn.execute("SELECT 1 FROM schedule_admission_deferrals WHERE schedule=?",
+                                           (blocked_id,)).fetchone())
+            self.assertEqual(conn.execute("SELECT count(*) FROM submissions WHERE task=?", (child,)).fetchone(), (1,))
 
     def test_scope_rechecked_and_expiration_settles_while_cordoned(self):
         n = self.node

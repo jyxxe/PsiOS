@@ -113,6 +113,43 @@ class VolumeMkdirRecovery(unittest.TestCase):
         self.assertEqual(checked["sqlite_integrity"], "Verified", checked)
         self.assertFalse(checked["migration_required"], checked)
 
+    def refuses_stopped_graph(self, method, reason):
+        rejected = subprocess.run(self.n.daemon + [method], capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(rejected.returncode, 0, rejected)
+        self.assertIn("RecoveryRequired", rejected.stderr)
+        self.assertIn(reason, rejected.stderr)
+
+    def check_missing_witness_and_approval_boundaries(self, operation):
+        op_id = operation["resource_id"]
+        journal = f"volume-directory-creation-{op_id}"
+        with closing(sqlite3.connect(self.database, timeout=10)) as db, db:
+            versions = db.execute("SELECT * FROM versions WHERE id=? ORDER BY rev", (journal,)).fetchall()
+            stage = db.execute("SELECT * FROM volume_mkdir_stages WHERE operation=?", (op_id,)).fetchone()
+            self.assertEqual(len(versions), 3)
+            self.assertIsNotNone(stage)
+            db.execute("DELETE FROM versions WHERE id=?", (journal,))
+            db.execute("DELETE FROM volume_mkdir_stages WHERE operation=?", (op_id,))
+        try:
+            self.refuses_stopped_graph("serve", "queued directory creation lost its witnessed stage")
+            self.refuses_stopped_graph("verify", "queued directory creation lost its witnessed stage")
+        finally:
+            placeholders = ",".join("?" for _ in versions[0])
+            with closing(sqlite3.connect(self.database, timeout=10)) as db, db:
+                db.executemany(f"INSERT INTO versions VALUES ({placeholders})", versions)
+                db.execute("INSERT INTO volume_mkdir_stages VALUES (?,?,?,?)", stage)
+
+        with closing(sqlite3.connect(self.database, timeout=10)) as db, db:
+            decision, = db.execute("SELECT decision FROM approval_bindings WHERE operation=?", (op_id,)).fetchone()
+            use = f"use-{decision}"
+            body, = db.execute("SELECT body FROM versions WHERE id=? AND rev=2", (use,)).fetchone()
+            db.execute("UPDATE versions SET body=json_set(body,'$.operation_id','op-unrelated') WHERE id=? AND rev=2", (use,))
+        try:
+            self.refuses_stopped_graph("verify", "effect disagrees with the originally approved permit and run")
+            self.refuses_stopped_graph("serve", "effect disagrees with the originally approved permit and run")
+        finally:
+            with closing(sqlite3.connect(self.database, timeout=10)) as db, db:
+                db.execute("UPDATE versions SET body=? WHERE id=? AND rev=2", (body, use))
+
     def holds_volume(self, operation):
         with closing(sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True, timeout=10)) as db:
             return db.execute("SELECT 1 FROM holds WHERE volume=? AND holder=?",
@@ -171,6 +208,8 @@ class VolumeMkdirRecovery(unittest.TestCase):
             self.assertEqual(n.get(self.volume["resource_id"])["reference"], self.volume)
             self.assert_protected()
             n.stop(signal.SIGKILL)
+        self.verify_stopped()
+        self.check_missing_witness_and_approval_boundaries(operation)
         self.verify_stopped()
         n.start()
         self.assertEqual(self.paused(job), (original, operation))

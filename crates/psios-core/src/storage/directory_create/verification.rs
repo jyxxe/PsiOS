@@ -90,6 +90,33 @@ fn bind(conn: &Connection, document: &Doc) -> Result<Binding> {
         "RecoveryRequired",
         "directory creation evidence disagrees with the original approved Volume and path",
     )?;
+    let run = current(conn, field(&task.body, "current_run_id")?, "Run")?;
+    let issued_run = at_revision(conn, &run, 2)?;
+    let issued_operation = db::resolve(conn, &issued_run.body["operation_refs"][0])?;
+    let bound_effect = at_revision(conn, &effect, 1)?;
+    require(
+        issued_operation.kind == "Operation"
+            && issued_operation.id == op.id
+            && issued_operation.body["effect_refs"] == json!([bound_effect.reference()])
+            && issued_operation.body["plan_ref"] == plan.reference()
+            && issued_run.kind == "Run"
+            && issued_run.owner == task.owner
+            && issued_run.body["task_id"] == task.id
+            && issued_run.body["outcome_knowledge"] == "InFlight"
+            && bound_effect.spec == effect.spec
+            && bound_effect.body["phase"] == "PermitBound",
+        "RecoveryRequired",
+        "directory creation lost its original permit-bound dispatch",
+    )?;
+    crate::broker::verify_bound_approval(
+        conn,
+        &op,
+        &task,
+        &issued_run,
+        &plan,
+        &bound_effect,
+        TOOL,
+    )?;
     Ok(Binding {
         op,
         task,
@@ -386,18 +413,33 @@ fn active(conn: &Connection) -> Result<()> {
         !missing,
         "RecoveryRequired",
         "a witnessed directory stage is missing from the cleanup inventory",
+    )?;
+    let missing_dispatch: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM queue q
+           CROSS JOIN current t ON t.id=q.task AND t.kind='Task'
+           LEFT JOIN current o ON o.id=q.operation AND o.kind='Operation'
+           LEFT JOIN versions e ON e.id=o.body->'effect_refs'->0->>'resource_id' AND e.rev=1
+           WHERE q.phase IN ('Dispatched','Unknown') AND t.spec->>'task_type'='volume.mkdir'
+             AND (e.seq IS NULL OR e.seq>?1)
+             AND NOT EXISTS(SELECT 1 FROM volume_mkdir_stages WHERE operation=q.operation))",
+        [cutover(conn)?],
+        |row| row.get(0),
+    )?;
+    require(
+        !missing_dispatch,
+        "RecoveryRequired",
+        "queued directory creation lost its witnessed stage",
     )
 }
 
-fn check(conn: &Connection) -> Result<()> {
-    active(conn)?;
+fn cutover(conn: &Connection) -> Result<i64> {
     let epoch: String = conn.query_row("SELECT value FROM meta WHERE key=?1", [EPOCH], |row| {
         row.get(0)
     })?;
     let latest: i64 = conn.query_row("SELECT COALESCE(MAX(seq),0) FROM versions", [], |row| {
         row.get(0)
     })?;
-    let epoch = epoch
+    epoch
         .parse::<i64>()
         .ok()
         .filter(|epoch| (0..=latest).contains(epoch))
@@ -406,7 +448,12 @@ fn check(conn: &Connection) -> Result<()> {
                 "RecoveryRequired",
                 "directory creation cutover epoch is invalid",
             )
-        })?;
+        })
+}
+
+fn check(conn: &Connection) -> Result<()> {
+    active(conn)?;
+    let epoch = cutover(conn)?;
     let mut dispatches = conn.prepare("SELECT * FROM versions WHERE kind='Effect' AND rev=1 AND seq>?1 AND body->>'action'='volume.mkdir'")?;
     for initial_effect in dispatches.query_map([epoch], db::row)? {
         let initial_effect = initial_effect?;

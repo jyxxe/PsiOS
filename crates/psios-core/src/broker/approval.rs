@@ -1,4 +1,6 @@
 use super::*;
+use crate::db::resolve;
+use rusqlite::Connection;
 
 pub(super) fn request(db: &Db<'_>, actor: &str, task: &str, plan: &Doc) -> Result<Value> {
     let id = id("approval");
@@ -121,4 +123,100 @@ pub fn decide(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         )?;
     }
     Ok(d.body)
+}
+
+pub(crate) fn verify_bound_approval(
+    conn: &Connection,
+    op: &Doc,
+    task: &Doc,
+    run: &Doc,
+    plan: &Doc,
+    effect: &Doc,
+    tool: &str,
+) -> Result<Doc> {
+    let historical = |id: &str, revision: i64| {
+        conn.query_row(
+            "SELECT * FROM versions WHERE id=?1 AND rev=?2",
+            params![id, revision],
+            crate::db::row,
+        )
+    };
+    let permit = resolve(conn, &effect.spec["permit_ref"])?;
+    let proof = resolve(conn, &permit.body["auth_proof"]["record_ref"])?;
+    let decision = resolve(conn, &permit.body["decision_ref"])?;
+    let request = resolve(conn, &decision.body["request_ref"])?;
+    let approval = historical(&request.id, 2)?;
+    let used = historical(&format!("use-{}", decision.id), 2)?;
+    let initial = historical(&used.id, 1)?;
+    let indexed: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM approval_bindings WHERE request=?1 AND task=?2 AND decision=?3 AND operation=?4)",
+        params![request.id,task.id,decision.id,op.id], |r|r.get(0))?;
+    let audience: Vec<_> = plan.body["preconditions"]
+        .as_array()
+        .ok_or_else(|| err("RecoveryRequired", "approved permit audience is missing"))?
+        .iter()
+        .map(|condition| condition["resource_ref"].clone())
+        .collect();
+    require(
+        indexed
+            && plan.kind == "OperationPlan"
+            && plan.owner == op.owner
+            && plan.body["requester_principal_id"] == op.owner
+            && plan.body["purpose_ref"] == task.spec["input_ref"]
+            && plan.body["allowed_effects"][0]["action"] == tool
+            && plan.body["allowed_effects"][0]["resource_ref"] == effect.body["resource_ref"]
+            && permit.kind == "ExecutionPermit"
+            && permit.rev == 1
+            && permit.owner == op.owner
+            && permit.body["operation_id"] == op.id
+            && permit.body["effect_id"] == effect.id
+            && permit.body["plan_digest"] == plan.body["plan_digest"]
+            && permit.body["preconditions"] == plan.body["preconditions"]
+            && permit.body["authorization_ref"] == task.spec["delegation_ref"]
+            && permit.body["audience_resource_refs"] == json!(audience)
+            && permit.body["recovery_incarnation"] == run.body["recovery_incarnation"]
+            && proof.kind == "PermitBinding"
+            && proof.rev == 1
+            && proof.owner == op.owner
+            && proof.body["operation_id"] == op.id
+            && proof.body["effect_id"] == effect.id
+            && proof.body["permit_id"] == permit.id
+            && proof.body["claim_id"] == run.body["claim_id"]
+            && proof.body["claim_epoch"] == run.body["claim_epoch"]
+            && proof.body["plan_digest"] == plan.body["plan_digest"]
+            && proof.body["audience_resource_refs"] == permit.body["audience_resource_refs"]
+            && decision.kind == "ApprovalDecision"
+            && decision.rev == 1
+            && decision.owner == op.owner
+            && decision.body["decision"] == "Approved"
+            && decision.body["approver_principal_id"] == crate::policy::OWNER
+            && decision.body["use_limit"] == "SingleOperation"
+            && decision.body["plan_digest"] == plan.body["plan_digest"]
+            && decision.body["preconditions"] == plan.body["preconditions"]
+            && request.kind == "ApprovalRequest"
+            && request.rev == 1
+            && request.owner == op.owner
+            && request.spec["task_id"] == task.id
+            && request.body["plan_ref"] == plan.reference()
+            && request.body["status"] == "Pending"
+            && approval.kind == request.kind
+            && approval.spec == request.spec
+            && approval.owner == request.owner
+            && approval.body["status"] == "Approved"
+            && approval.body["decision_ref"] == decision.reference()
+            && used.kind == "ApprovalUse"
+            && used.owner == op.owner
+            && used.body["binding_status"] == "Bound"
+            && used.body["validity_status"] == "Valid"
+            && used.body["operation_id"] == op.id
+            && used.body["plan_digest"] == plan.body["plan_digest"]
+            && used.body["decision_ref"] == decision.reference()
+            && initial.kind == used.kind
+            && initial.owner == used.owner
+            && initial.body["binding_status"] == "Unbound"
+            && initial.body["decision_ref"] == decision.reference()
+            && initial.body["plan_digest"] == plan.body["plan_digest"],
+        "RecoveryRequired",
+        "effect disagrees with the originally approved permit and run",
+    )?;
+    Ok(used)
 }

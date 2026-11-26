@@ -16,7 +16,7 @@ use crate::{
     host::{self, Action, Work},
     policy, *,
 };
-pub(crate) use approval::decide;
+pub(crate) use approval::{decide, verify_bound_approval};
 #[cfg(test)]
 pub(crate) use execution::finish;
 pub(crate) use execution::{claim, dispatch, dispatch_failed, finish_host, settlement_failed};

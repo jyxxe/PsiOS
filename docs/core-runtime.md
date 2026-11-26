@@ -755,6 +755,10 @@ API 的 `Model.ClaimNext` 接受 `model_ref` 和 `key`。`Model.WaitNext` 另接
 
 接收方以 `mail.receive` 调用 `Mailbox.Bind`，指定 `name` 和 `sender_principal_id`。指定的发送方以 `mail.send` 调用 `Signal.Send`，提供 `mailbox_id, key, topic` 和可选 `resource_ref`。当前 topic 为 ObservationReady、ReviewRequested、WorkAvailable。附带的资源必须已经对双方可见。接收方用 `Mailbox.Read` 读取，用 `Mailbox.Ack` 的 `previous, through` 确认；崩溃后可重读。会话创建可带 `trigger_signal_ref`，同一信号最多触发一个会话。每个信箱最多有 256 条未确认通知，历史上限 16384 条。
 
+格式 110 的 `ReviewRequested` 可指向精确的 `InReview` WorkItem 修订。已提交证据的 Contributor 通过受限信箱发送，接收方须独立拥有当前 Reviewer 角色及原 Task 结果读取权限。Core 固定请求时的 Project 名册修订。名册变化会使此前请求失效，包括移除后重新加入。后续投递重新检查访问权和工作项状态。失效通知只保留原序号用于确认。普通资源和事件查询不会返回审核请求或回执。
+
+独立评审者可在 `WorkItem.Review` 中提供 `request_signal_ref`。Core 在同一事务提交当前工作项的条件审核和固定回执。双方可在现有授权下调用 `Signal.ReviewReceipt` 查询原回执。信箱确认有独立的读取水位，审核回执由 Project 权威生成。CLI 提供 `work-item request-review`、`work-item review --request-signal FILE` 和 `work-item review-receipt`。[权限、崩溃与原子回执验收](../tests/test_work_item_review_signals.py)
+
 常驻 Agent 可用 `psiosctl inbox MAILBOX --wait-ms 5000 --limit 16` 等待投递。省略 `--wait-ms` 即刻读取。API `Mailbox.Wait` 接受 `id`、1 至 10000 毫秒的 `timeout_ms` 和可选的 `limit`（1 至 128）。返回值包含 `items`、`acked`、`lifecycle` 和 `mailbox_ref`。处理完一页再用该页的 `acked` 作 `previous`，最后一项的 `signal.seq` 作 `through` 确认。接收端在确认前退出，可在重启后重新投递同一页。空的 Open 页代表超时，Closed 信箱可以继续读取积压的信号，直到返回空页。阻塞期间的撤权会终止本次等待。等待名额已满时返回 `QueueFull`。
 
 CI 同时执行原有契约、故障与 API 测试，以及持久会话、授权链、真实 systemd、从旧二进制升级和两个 OCI 镜像间的切换回退。在线多卷应用一致性、异机备份、多节点 fencing、整机断电、跨主机 Provider 及云模型账单仍需对应驱动与环境。[平台测试](../tests/test_platform.py) · [Agent 测试](../tests/test_runtime.py) · [systemd 故障测试](../tests/services.py) · [升级测试](../tests/upgrade.py) · [OCI 测试](../tests/oci.py)

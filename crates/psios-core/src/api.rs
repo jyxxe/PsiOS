@@ -61,6 +61,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Mailbox.Read" => agent::mail::read(db, actor, p),
         "Mailbox.Ack" => agent::mail::ack(db, actor, p),
         "Signal.Send" => agent::mail::send(db, actor, p),
+        "Signal.ReviewReceipt" => project::review_signal::get_receipt(db, actor, p),
         "Session.Open" => agent::open(db, actor, p),
         "Session.RetryTask" => agent::retry_task(db, actor, p),
         "Session.Extend" => agent::extend(db, actor, p),
@@ -120,6 +121,15 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
                         }
                     } else {
                         let p: Reference = decode(p)?;
+                        if let Some(id) = p.reference["resource_id"].as_str()
+                            && let Some(doc) = db.find(id)?
+                            && project::review_signal::private_kind(&doc.kind)
+                        {
+                            return Err(err(
+                                "PermissionDenied",
+                                "resource outside authorized scope",
+                            ));
+                        }
                         match db.resolve(&p.reference) {
                             Ok(doc) => doc,
                             Err(error)

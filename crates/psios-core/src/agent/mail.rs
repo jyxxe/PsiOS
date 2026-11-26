@@ -1,5 +1,6 @@
 //! Opt-in point-to-point notifications. Content and linked resources keep their own ownership.
 use super::*;
+use crate::project::review_signal;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Bind {
@@ -41,6 +42,11 @@ struct Send {
     topic: String,
     resource_ref: Option<Value>,
 }
+
+pub(crate) fn signal_id(mailbox: &str, sender: &str, key: &str) -> String {
+    registry::stable("signal", json!([mailbox, sender, key]))
+}
+
 pub fn send(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     policy::can(db, actor, "mail.send")?;
     let v: Send = decode(p)?;
@@ -61,18 +67,48 @@ pub fn send(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     )?;
     policy::active(db, &d.owner)?;
     policy::can(db, &d.owner, "mail.receive")?;
-    if let Some(r) = &v.resource_ref {
-        let doc = db.resolve(r)?;
-        policy::can(db, actor, "resource.read")?;
-        policy::can(db, &d.owner, "resource.read")?;
+    let id = signal_id(&d.id, actor, &v.key);
+    let old = db.find(&id)?;
+    if let Some(previous) = old
+        .as_ref()
+        .filter(|signal| signal.kind == review_signal::REQUEST)
+    {
+        review_signal::replay_send(db, previous)?;
         require(
-            policy::visible(actor, &doc) && policy::visible(&d.owner, &doc),
-            "PermissionDenied",
-            "reference not shared by both principals",
+            previous.spec == *p,
+            "IdempotencyConflict",
+            "signal key already bound",
         )?;
+        return Ok(previous.reference());
     }
-    let id = registry::stable("signal", json!([d.id, actor, v.key]));
-    if let Some(old) = db.find(&id)? {
+    let mut review_binding = None;
+    if let Some(r) = &v.resource_ref {
+        let current = r["resource_id"]
+            .as_str()
+            .map(|id| db.find(id))
+            .transpose()?
+            .flatten();
+        if let Some(item) =
+            current.filter(|doc| doc.kind == "WorkItem" && v.topic == review_signal::TOPIC)
+        {
+            review_binding = Some(review_signal::admit(db, actor, &d, &item)?);
+            require(
+                item.reference() == *r,
+                "PreconditionFailed",
+                "review request requires the current exact WorkItem reference",
+            )?;
+        } else {
+            let doc = db.resolve(r)?;
+            policy::can(db, actor, "resource.read")?;
+            policy::can(db, &d.owner, "resource.read")?;
+            require(
+                policy::visible(actor, &doc) && policy::visible(&d.owner, &doc),
+                "PermissionDenied",
+                "reference not shared by both principals",
+            )?;
+        }
+    }
+    if let Some(old) = old {
         require(
             old.spec == *p,
             "IdempotencyConflict",
@@ -86,7 +122,15 @@ pub fn send(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "QueueFull",
         "mailbox retention or outstanding signal limit",
     )?;
-    let signal=db.create("AgentSignal",&id,&d.owner,p.clone(),json!({"mailbox_id":d.id,"sender":actor,"topic":v.topic,"seq":seq,"resource_ref":v.resource_ref}))?;
+    let mut body = json!({"mailbox_id":d.id,"sender":actor,"topic":v.topic,
+        "seq":seq,"resource_ref":v.resource_ref});
+    let kind = if let Some(binding) = review_binding {
+        body["review_binding"] = binding;
+        review_signal::REQUEST
+    } else {
+        "AgentSignal"
+    };
+    let signal = db.create(kind, &id, &d.owner, p.clone(), body)?;
     db.c.execute(
         "INSERT INTO signals VALUES(?1,?2,?3)",
         params![d.id, seq as i64, id],
@@ -113,18 +157,35 @@ pub fn read(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "InvalidArgument",
         "invalid inbox page limit",
     )?;
-    let ids =
-        db.c.prepare("SELECT id FROM signals WHERE mailbox=?1 AND seq>?2 ORDER BY seq LIMIT ?3")?
-            .query_map(params![d.id, d.body["acked"].as_i64(), limit], |r| {
-                r.get::<_, String>(0)
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+    let ids = db
+        .c
+        .prepare("SELECT id,seq FROM signals WHERE mailbox=?1 AND seq>?2 ORDER BY seq LIMIT ?3")?
+        .query_map(params![d.id, d.body["acked"].as_i64(), limit], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut items = Vec::new();
     let mut last = d.body["delivered"].as_u64().unwrap();
-    for id in ids {
-        let signal = db.of(&id, "AgentSignal")?;
-        last = last.max(signal.body["seq"].as_u64().unwrap());
-        items.push(json!({"reference":signal.reference(),"signal":signal.body}));
+    for (id, seq) in ids {
+        let signal = db.get(&id)?;
+        require(
+            signal.body["mailbox_id"] == d.id
+                && signal.owner == d.owner
+                && signal.body["seq"] == seq,
+            "RecoveryRequired",
+            "mailbox index disagrees with the recipient or signal sequence",
+        )?;
+        last = last.max(u64::from(seq));
+        if signal.kind == review_signal::REQUEST {
+            items.push(review_signal::delivery(db, actor, &signal)?);
+        } else {
+            require(
+                signal.kind == "AgentSignal",
+                "RecoveryRequired",
+                "mailbox index references an unsupported record",
+            )?;
+            items.push(json!({"reference":signal.reference(),"signal":signal.body}));
+        }
     }
     let d = if d.body["delivered"] != last {
         let mut b = d.body.clone();

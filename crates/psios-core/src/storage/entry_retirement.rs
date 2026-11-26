@@ -1,4 +1,5 @@
 //! A witnessed rename separates retiring a volume entry from reclaiming its inode.
+use super::reclamation::Cursor;
 use crate::{
     Config, Error, Result, after,
     db::{self, Db, Doc},
@@ -422,15 +423,17 @@ pub(crate) struct Disposal {
     retired: Entry,
 }
 
-pub(crate) fn next_disposal(db: &Db<'_>) -> Result<Option<Disposal>> {
-    let operation: Option<String> = db.c.query_row(
-        "SELECT operation FROM volume_entry_retirements WHERE phase='PendingCleanup' AND eligible_at<=?1
-        ORDER BY eligible_at,operation LIMIT 1", [now()], |row| row.get(0),
-    ).optional()?;
-    let Some(operation) = operation else {
+pub(crate) fn next_disposal(db: &Db<'_>, cursor: &mut Cursor) -> Result<Option<Disposal>> {
+    let Some(operation) = cursor.select_due(
+        db.c,
+        "SELECT eligible_at,operation FROM volume_entry_retirements
+          WHERE phase='PendingCleanup' AND eligible_at<=?1 AND (eligible_at,operation)>(?2,?3)
+          ORDER BY eligible_at,operation LIMIT 1",
+    )?
+    else {
         return Ok(None);
     };
-    let op = db.of(&operation, "Operation")?;
+    let op = db.of(operation, "Operation")?;
     let record = record(db.c, &op)?
         .ok_or_else(|| err("RecoveryRequired", "entry disposal evidence is missing"))?;
     let (_, volume) = verify::binding(db.c, &record)?;
@@ -446,7 +449,7 @@ pub(crate) fn next_disposal(db: &Db<'_>) -> Result<Option<Disposal>> {
     Ok(Some(Disposal {
         record,
         volume,
-        operation,
+        operation: operation.to_owned(),
         location,
         retired,
     }))

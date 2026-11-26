@@ -473,6 +473,11 @@ enum WorkItemCommand {
         #[arg(long)]
         limit: Option<u32>,
     },
+    /// List work assigned to you using a JSON Project query on stdin or in a file.
+    Assigned {
+        #[arg(default_value = "-")]
+        file: String,
+    },
     List {
         project_id: String,
         #[arg(long)]
@@ -770,6 +775,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     limit,
                 } => {
                     let page = c.work_item_children(&id, after_id.as_deref(), limit)?;
+                    println!("{}", serde_json::to_string_pretty(&page)?);
+                    return Ok(());
+                }
+                WorkItemCommand::Assigned { file } => {
+                    let page = c.assigned_work(&serde_json::from_value(input(&file)?)?)?;
                     println!("{}", serde_json::to_string_pretty(&page)?);
                     return Ok(());
                 }

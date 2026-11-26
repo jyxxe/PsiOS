@@ -381,6 +381,7 @@ pub fn dispatch(db: &Db<'_>, task: &str) -> Result<Option<Work>> {
             Some(artifact::session_output::publish(db, &work, input)?)
         }
         Action::SubmitWorkItemEvidence(input) => Some(input.submit(db, &work.task.owner)?),
+        Action::ListAssignedWork(input) => Some(input.list(db, &work.task.owner)?),
         _ => None,
     };
     if let Some(receipt) = receipt {
@@ -455,16 +456,19 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
     if matches!(w.action, Action::NetworkTrial(_)) {
         return network_trial::finish_apply(db, w, result);
     }
-    let atomic_evidence = matches!(w.action, Action::SubmitWorkItemEvidence(_));
+    let atomic_project = matches!(
+        w.action,
+        Action::SubmitWorkItemEvidence(_) | Action::ListAssignedWork(_)
+    );
     let t = db.get(&w.task.id)?;
     if t.body["current_run_id"] != w.run.id
         || t.body["outcome_knowledge"] != "InFlight"
         || w.run.body["recovery_incarnation"] != db.incarnation
     {
         require(
-            !atomic_evidence,
+            !atomic_project,
             "Fenced",
-            "work item evidence dispatch no longer owns its current run",
+            "project task dispatch no longer owns its current run",
         )?;
         let receipt = match result {
             Ok(_)
@@ -501,9 +505,9 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
     }
     let cancelled = t.body["lifecycle"] == "Cancelling";
     require(
-        !atomic_evidence || t.body["lifecycle"] == "Running",
+        !atomic_project || t.body["lifecycle"] == "Running",
         "Fenced",
-        "work item evidence dispatch is no longer running",
+        "project task dispatch is no longer running",
     )?;
     let service_started = if node::service_control::is_control(&w.action) {
         Some(node::service_control::worker_started(db, w, &t)?)
@@ -583,9 +587,9 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                 Some(&a),
             )?;
         }
-        // This action already changed the WorkItem in the dispatch transaction.
-        // Returning a settled failure here would commit that write without its receipt.
-        Err(e) if atomic_evidence => return Err(e),
+        // Project tasks must publish the result and settle together. Evidence
+        // submission also changed its WorkItem in this same transaction.
+        Err(e) if atomic_project => return Err(e),
         Err(e) => {
             let undispatched = service_started == Some(false)
                 || stop_started == Some(false)
@@ -632,4 +636,156 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Config, Store, project};
+
+    #[test]
+    fn assigned_work_rechecks_the_project_grant_and_revision_after_claim() {
+        let folder = tempfile::tempdir().unwrap();
+        let cfg = Config::local(&folder.path().join("state"));
+        Store::init(&cfg).unwrap();
+        let mut store = Store::open(cfg).unwrap();
+        let project = store
+            .transaction("create-assigned-work-fixture", |db| {
+                project::create_project(
+                    db,
+                    policy::OWNER,
+                    &json!({"key":"assigned-work-fixture","title":"Post-claim authority"}),
+                )
+            })
+            .unwrap();
+        let initial = &project["reference"];
+        let project_id = initial["resource_id"].as_str().unwrap();
+        let project_grant = |db: &Db<'_>| {
+            policy::grant(
+                db,
+                policy::OWNER,
+                &json!({
+                    "principal_id":policy::OWNER, "tool_targets":[project_id],
+                    "actions":["project.read","project.manage","project.contribute"],
+                    "units":1,"ttl_seconds":120,
+                }),
+            )
+        };
+        let (access, execution) = store
+            .transaction("grant-assigned-work-fixture", |db| {
+                let access = project_grant(db)?;
+                let execution = policy::grant(
+                    db,
+                    policy::OWNER,
+                    &json!({
+                        "principal_id":policy::OWNER, "tool_targets":[project_id],
+                        "actions":["task.submit","task.read",project::assigned::TOOL],
+                        "units":2,"ttl_seconds":120,
+                    }),
+                )?;
+                Ok((access, execution))
+            })
+            .unwrap();
+        let enqueue =
+            |store: &mut Store, version: &Value| {
+                store.transaction("submit-assigned-work-fixture", |db| {
+                let prepared = prepare(db, policy::OWNER, &json!({
+                    "tool":project::assigned::TOOL,
+                    "input":{"project_id":project_id,"expected_project_version":version},
+                    "key":id("assigned-work-fixture"),
+                    "delegation_id":execution["delegation_ref"]["resource_id"],
+                }))?;
+                let submitted = submit(db, policy::OWNER, &prepared, None)?;
+                Ok(submitted["task_id"].as_str().unwrap().to_owned())
+            }).unwrap()
+            };
+        let blocked = |store: &mut Store, task: &str, code: &str| {
+            let error = store
+                .transaction("fence-assigned-work-fixture", |db| dispatch(db, task))
+                .err()
+                .expect("stale assigned work should fail before effect publication");
+            assert_eq!(error.0.code, code);
+            store
+                .transaction("settle-assigned-work-fixture", |db| {
+                    dispatch_failed(db, task, &error)?;
+                    let task = db.of(task, "Task")?;
+                    assert_eq!(task.body["lifecycle"], "Failed");
+                    assert_eq!(task.body["outcome_knowledge"], "NotStarted");
+                    assert_eq!(task.body["result"]["artifact_refs"], json!([]));
+                    assert_eq!(operation(db, &task)?.body["effect_refs"], json!([]));
+                    Ok(())
+                })
+                .unwrap();
+        };
+
+        let task = enqueue(&mut store, &initial["version"]);
+        assert_eq!(
+            store
+                .transaction("claim-assigned-work-fixture", claim)
+                .unwrap(),
+            Some(task.clone())
+        );
+        store
+            .transaction("revoke-assigned-work-fixture", |db| {
+                policy::revoke(
+                    db,
+                    policy::OWNER,
+                    &json!({
+                        "id":access["grant_ref"]["resource_id"],
+                        "expected_resource_version":access["grant_ref"]["version"],
+                    }),
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        blocked(&mut store, &task, "PermissionDenied");
+
+        store
+            .transaction("restore-project-grant-fixture", project_grant)
+            .unwrap();
+        let task = enqueue(&mut store, &initial["version"]);
+        assert_eq!(
+            store
+                .transaction("claim-assigned-work-fixture", claim)
+                .unwrap(),
+            Some(task.clone())
+        );
+        let revised = store
+            .transaction("change-project-roster-fixture", |db| {
+                let viewer =
+                    policy::register(db, policy::OWNER, &json!({"name":"assigned-visitor"}))?;
+                project::set_member(
+                    db,
+                    policy::OWNER,
+                    &json!({
+                        "id":project_id,"expected_resource_version":initial["version"],
+                        "principal_id":viewer["principal_id"],"role":"Viewer",
+                    }),
+                )
+            })
+            .unwrap();
+        blocked(&mut store, &task, "Conflict");
+
+        let task = enqueue(&mut store, &revised["reference"]["version"]);
+        assert_eq!(
+            store
+                .transaction("claim-assigned-work-fixture", claim)
+                .unwrap(),
+            Some(task.clone())
+        );
+        store
+            .transaction("dispatch-current-assigned-work-fixture", |db| {
+                assert!(dispatch(db, &task)?.is_none());
+                let settled = db.of(&task, "Task")?;
+                assert_eq!(settled.body["lifecycle"], "Succeeded");
+                assert_eq!(settled.body["outcome_knowledge"], "Known");
+                let output = db.resolve(&settled.body["result"]["artifact_refs"][0])?;
+                assert_eq!(
+                    crate::artifact::read(db, &output, Some(64 * 1024))?,
+                    json!({"items":[],"next_after_id":null})
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
 }

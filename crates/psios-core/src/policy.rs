@@ -20,6 +20,7 @@ pub const TOOLS: &[&str] = &[
     agent::START_SESSION,
     workflow::START_TOOL,
     project::agent_tool::TOOL,
+    project::assigned::TOOL,
     "node.inventory",
     node::pressure::TOOL,
     "node.interfaces",
@@ -118,6 +119,7 @@ pub fn readonly(tool: &str) -> bool {
     matches!(
         tool,
         "system.status"
+            | project::assigned::TOOL
             | "node.inventory"
             | node::pressure::TOOL
             | "node.interfaces"
@@ -241,6 +243,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | PROJECT_CONTRIBUTE
                     | PROJECT_REVIEW
                     | project::agent_tool::TOOL
+                    | project::assigned::TOOL
             )
         })
         .map(|a| a.to_string())
@@ -605,6 +608,10 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         .actions
         .iter()
         .any(|action| action == project::agent_tool::TOOL);
+    let discovers_work = p
+        .actions
+        .iter()
+        .any(|action| action == project::assigned::TOOL);
     require(
         !has_project_action || (!reads_results && p.tool_targets.is_some()),
         "InvalidArgument",
@@ -613,6 +620,7 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     require(
         !(reads_results
             || submits_evidence
+            || discovers_work
             || p.actions.iter().any(|action| {
                 action == storage::export::ACTION
                     || action == artifact::ingress::UPLOAD
@@ -651,19 +659,28 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             "target scope must contain 1 to 64 resource IDs",
         )?;
         let mut includes_work_item = false;
+        let mut includes_project = false;
         for id in ids {
             if reads_results {
                 db.of(id, "Task")?;
             } else if has_project_action {
                 db.of(id, "Project")?;
+                includes_project = true;
             } else {
-                includes_work_item |= db.get(id)?.kind == "WorkItem";
+                let target = db.get(id)?;
+                includes_work_item |= target.kind == "WorkItem";
+                includes_project |= target.kind == "Project";
             }
         }
         require(
             !submits_evidence || includes_work_item,
             "InvalidArgument",
             "evidence submission requires an exact WorkItem in the grant target scope",
+        )?;
+        require(
+            !discovers_work || includes_project,
+            "InvalidArgument",
+            "assigned work discovery requires an exact Project in the grant target scope",
         )?;
     }
     require(

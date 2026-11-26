@@ -3,6 +3,7 @@ use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
 pub const WORK_ITEM_EVIDENCE_TOOL: &str = "project.submit_evidence";
+pub const ASSIGNED_WORK_TOOL: &str = "project.list_assigned_work";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -87,6 +88,20 @@ pub struct SubmitWorkItemEvidence {
     pub expected_resource_version: String,
     pub task_ref: ResourceRef,
     pub artifact_ref: ResourceRef,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssignedWorkRequest {
+    pub project_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_project_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub include_blocked: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -217,6 +232,23 @@ impl Client {
             "WorkItem.Children",
             &json!({"id":id,"after_id":after_id,"limit":limit}),
         )
+    }
+
+    /// List ready work assigned to the calling contributor in one Project.
+    pub fn assigned_work(&self, request: &AssignedWorkRequest) -> ApiResult<WorkItemPage> {
+        self.project_request("WorkItem.Assigned", request)
+    }
+
+    /// Discover assigned work through an authorized read-only Task.
+    pub fn submit_assigned_work_task(
+        &self,
+        request: &AssignedWorkRequest,
+        key: &str,
+        delegation: &str,
+    ) -> ApiResult<Value> {
+        let input =
+            serde_json::to_value(request).map_err(|_| invalid("invalid assigned work request"))?;
+        self.submit(ASSIGNED_WORK_TOOL, input, key, delegation)
     }
 
     pub fn submit_work_item_evidence(

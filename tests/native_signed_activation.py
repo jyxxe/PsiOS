@@ -176,7 +176,8 @@ def exercise(args, work):
     secret.unlink()
     credentials = (operator, admin)
     new_boot = isolated_boot(work, selected_dir / "managed.raw", selected_dir / "managed-ovmf-code.fd",
-                             selected_dir / "managed-efi-vars.fd", credentials, candidate, baseline, token)
+                             selected_dir / "managed-efi-vars.fd", credentials, candidate, baseline, token,
+                             pace_commands=True)
     old_boot = isolated_boot(work, old, code, old_vars, credentials, original, baseline, token)
     assert len({baseline[3], activated_boot, selected["proof"]["boot_id"], new_boot, old_boot}) == 5
     assert digest_map(frozen) == frozen and digest_map(bundle) == bundle

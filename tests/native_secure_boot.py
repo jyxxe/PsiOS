@@ -21,7 +21,7 @@ EFI_FILE = "::/EFI/BOOT/BOOTX64.EFI"
 
 
 @contextmanager
-def secure_vm(work, image, *, disk_format="raw", vars_file="vars.fd"):
+def secure_vm(work, image, *, disk_format="raw", vars_file="vars.fd", pace_commands=False):
     shutil.copyfile(work / "enrolled.fd", work / vars_file)
     cmd = ["qemu-system-x86_64", "-nodefaults", "-no-user-config", "-no-reboot", "-machine", "q35,smm=on",
            "-accel", "tcg", "-m", "768", "-smp", "2", "-display", "none", "-monitor", "none", "-serial", "stdio",
@@ -31,7 +31,7 @@ def secure_vm(work, image, *, disk_format="raw", vars_file="vars.fd"):
            "-drive", f"if=virtio,format={disk_format},file={image.name}", "-boot", "order=c,strict=on"]
     with subprocess.Popen(cmd, cwd=work, stdin=subprocess.PIPE, stdout=subprocess.PIPE) as vm:
         try:
-            yield Console(vm)
+            yield Console(vm, pace_commands=pace_commands)
         finally:
             if vm.poll() is None:
                 vm.kill()

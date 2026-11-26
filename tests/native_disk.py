@@ -28,12 +28,20 @@ def sha(path):
 
 
 class Console:
-    def __init__(self, vm):
+    def __init__(self, vm, *, pace_commands=False):
         self.vm = vm
         self.buf = b""
+        self.pace_commands = pace_commands
 
-    def until(self, marker, timeout=75, reject=None):
+    def _serial_failure(self, reason, phase, received):
+        status = self.vm.poll()
+        qemu = "running" if status is None else f"exited({status})"
+        return AssertionError(f"guest serial {reason} at {phase} "
+                              f"(QEMU={qemu}, received_bytes={received}, buffered_bytes={len(self.buf)})")
+
+    def until(self, marker, timeout=75, reject=None, *, phase="marker"):
         end = time.monotonic() + timeout
+        received = 0
         while True:
             position = self.buf.find(marker)
             if reject is not None:
@@ -44,54 +52,65 @@ class Console:
                 break
             remaining = end - time.monotonic()
             if remaining <= 0 or not select.select([self.vm.stdout], [], [], remaining)[0]:
-                raise AssertionError(f"guest did not reach {marker!r}")
+                raise self._serial_failure("timed out", phase, received)
             chunk = os.read(self.vm.stdout.fileno(), 8192)
             if not chunk:
-                raise AssertionError(f"guest stopped before {marker!r}")
+                raise self._serial_failure("reached EOF", phase, received)
+            received += len(chunk)
             self.buf += chunk.replace(b"\r", b"")
             if len(self.buf) > 1024 * 1024:
-                raise AssertionError("guest serial output exceeded the limit")
+                raise self._serial_failure("exceeded its output limit", phase, received)
         data, _, self.buf = self.buf.partition(marker)
         return data
 
-    def send(self, line):
-        self.vm.stdin.write(line.encode() + b"\r")
+    def _write(self, data):
+        self.vm.stdin.write(data)
         self.vm.stdin.flush()
+
+    def send(self, line, *, paced=False):
+        data = line.encode()
+        if paced:
+            # Keep bursts smaller than the emulated UART FIFO.
+            for start in range(0, len(data), 8):
+                self._write(data[start:start + 8])
+                time.sleep(0.01)
+            data = b""
+        self._write(data + b"\r")
 
     def send_secret(self, secret):
         # Give BusyBox time to switch off echo after printing the prompt.
-        # Keep password bursts smaller than the emulated UART FIFO.
         time.sleep(0.03)
-        for start in range(0, len(secret), 8):
-            self.vm.stdin.write(secret[start:start + 8].encode())
-            self.vm.stdin.flush()
-            time.sleep(0.01)
-        self.send("")
+        self.send(secret, paced=True)
 
     def credentials(self, user, password):
-        self.until(b"login: ")
+        self.until(b"login: ", phase="login prompt")
         self.send(user)
-        self.until(b"Password: ")
+        self.until(b"Password: ", phase="password prompt")
         self.send_secret(password)
 
     def login(self, user, password):
         self.credentials(user, password)
-        before_shell = self.until(b"# " if user == "root" else b"$ ", reject=b"Login incorrect")
+        before_shell = self.until(b"# " if user == "root" else b"$ ", reject=b"Login incorrect",
+                                  phase="authenticated shell prompt")
         if password.encode() in before_shell:
             raise AssertionError("guest serial console echoed the fixture password")
         marker = "PSIOSLOGIN" + secrets.token_hex(6)
         self.send(f"stty -echo; export PS1=''; printf '\\n{marker}\\n'")
-        self.until(("\n" + marker + "\n").encode())
+        self.until(("\n" + marker + "\n").encode(), phase="shell login nonce")
         if user == "psios":
             self.run("for i in $(seq 1 100); do psiosctl whoami >/dev/null 2>&1 && exit 0; sleep 0.1; done; exit 1")
 
     def run(self, command):
         marker = "PSIOSCMD" + secrets.token_hex(6)
-        self.send(f"printf '\\n{marker}\\n'; ( {command} ); r=$?; printf '\\n{marker}:%s\\n' \"$r\"")
-        self.until(("\n" + marker + "\n").encode())
-        output = self.until(("\n" + marker + ":").encode())
-        status = self.until(b"\n")
+        self.send(f"printf '\\n{marker}\\n'; ( {command} ); r=$?; printf '\\n{marker}:%s\\n' \"$r\"",
+                  paced=self.pace_commands)
+        self.until(("\n" + marker + "\n").encode(), phase="shell command start nonce")
+        output = self.until(("\n" + marker + ":").encode(), phase="shell command result nonce")
+        status = self.until(b"\n", phase="shell command exit status")
         if status != b"0":
+            if self.pace_commands:
+                raise AssertionError(f"paced guest command failed (result_bytes={len(output)}, "
+                                     f"exit_status_bytes={len(status)})")
             raise AssertionError(f"guest command {command!r} exited {status!r}: {output[-512:]!r}")
         return output.decode().strip()
 

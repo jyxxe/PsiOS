@@ -525,6 +525,7 @@ pub(crate) fn park(db: &Db<'_>, work: &Work, receipt: Value) -> Result<()> {
     );
     let mut body = op.body.clone();
     body["lifecycle"] = json!("WaitingDependency");
+    body["updated_at"] = json!(crate::now());
     body["conditions"] = json!([condition]);
     let op = db.status(&op, body)?;
     for subject in [&task, &run] {
@@ -808,7 +809,16 @@ impl Inspection {
     }
 
     pub(crate) fn artifact(&self) -> Result<Value> {
-        Ok(serde_json::to_value(self.read()?)?)
+        let proof = self.read().map_err(|error| {
+            if error.0.code == "OutcomeUnknown" {
+                // The original effect is still unknown. This read completed
+                // without sufficient evidence, so release its recovery slot.
+                err("PreconditionFailed", error.0.message)
+            } else {
+                error
+            }
+        })?;
+        Ok(serde_json::to_value(proof)?)
     }
 
     pub(crate) fn live(&self) -> Result<ReconcileSample> {

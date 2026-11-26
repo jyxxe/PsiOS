@@ -627,6 +627,7 @@ impl Work {
                     | Action::InspectFileRename(_)
                     | Action::CaptureOciImage(_)
                     | Action::ObserveNetworkProbe(_)
+                    | Action::RebindRestoredVolume(_)
             ),
             "Fenced",
             "host data operation is outside its permit",

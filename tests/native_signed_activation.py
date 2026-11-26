@@ -12,7 +12,7 @@ import tempfile
 import uuid
 
 from native_activation import Activation, JOURNAL, assert_private, managed_bytes, no_qemu, rejected
-from native_selection import exercise_selection
+from native_selection_recovery import exercise_selection_recovery
 from native_disk import REPO, password, sha
 from native_secure_boot import create_signer, secure_vm, signing_args
 from native_signed_staged_update import boot_operator, cert_sha256, isolated_boot, verify_uki
@@ -171,7 +171,7 @@ def exercise(args, work):
     reject_wrong_variables(args, work, fixture, blank_vars)
     assert digest_map(bundle) == bundle and digest_map(frozen) == frozen
     state, managed, activated_boot = activate(fixture, work, candidate, signed, baseline, admin)
-    selected_dir, selected = exercise_selection(work, args.selector, state, secret, interrupt=False)
+    selected_dir, selected = exercise_selection_recovery(work, args.selector, state, secret)
     assert selected["proof"]["secure_boot"] == {**signed, "status": "Enforced"}, selected
     secret.unlink()
     credentials = (operator, admin)
@@ -181,7 +181,7 @@ def exercise(args, work):
     assert len({baseline[3], activated_boot, selected["proof"]["boot_id"], new_boot, old_boot}) == 5
     assert digest_map(frozen) == frozen and digest_map(bundle) == bundle
     assert managed_bytes(state) == managed
-    print("PASS signed native activation and selected boot, disabled Secure Boot rejection and durable Task and home data")
+    print("PASS signed native activation and boot reconciliation, Secure Boot enforcement and durable Task and home data")
 
 
 def main():

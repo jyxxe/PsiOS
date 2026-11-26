@@ -43,16 +43,10 @@ def save_json(directory, name, value):
 
 
 def save_bytes(directory, name, raw):
-    require(len(raw) <= JOURNAL_LIMIT, "selection record exceeds its size limit")
     temporary = f".selection-{uuid.uuid4().hex}"
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-                 0o600, dir_fd=directory)
+    fd = open_exclusive(directory, temporary, raw)
     try:
-        with os.fdopen(fd, "wb") as target:
-            os.fchmod(target.fileno(), 0o600)
-            target.write(raw)
-            target.flush()
-            os.fsync(target.fileno())
+        flush_bytes(fd, raw)
         os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
         os.fsync(directory)
     finally:
@@ -60,6 +54,28 @@ def save_bytes(directory, name, raw):
             os.unlink(temporary, dir_fd=directory)
         except FileNotFoundError:
             pass
+
+
+def open_exclusive(directory, name, raw):
+    require(len(raw) <= JOURNAL_LIMIT, "selection record exceeds its size limit")
+    return os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                   0o600, dir_fd=directory)
+
+
+def flush_bytes(fd, raw):
+    with os.fdopen(fd, "wb") as target:
+        os.fchmod(target.fileno(), 0o600)
+        target.write(raw)
+        target.flush()
+        os.fsync(target.fileno())
+
+
+def write_bytes_exclusive(directory, name, raw):
+    flush_bytes(open_exclusive(directory, name, raw), raw)
+
+
+def write_json_exclusive(directory, name, value):
+    write_bytes_exclusive(directory, name, encode(value) + b"\n")
 
 
 @contextmanager
@@ -115,11 +131,14 @@ def check_build_receipt(directory, deployment):
             "selected build receipt changed")
 
 
-def copy_build_receipt(directory, deployment):
+def copy_build_receipt(directory, deployment, *, exclusive=False):
     raw = bytes_at(Path(deployment["stage_dir"]) / BUILD_RECEIPT, JOURNAL_LIMIT)
     require(hashlib.sha256(raw).hexdigest() == deployment["candidate_receipt_sha256"],
             "staged build receipt changed during adoption")
-    save_bytes(directory, BUILD_RECEIPT, raw)
+    if exclusive:
+        write_bytes_exclusive(directory, BUILD_RECEIPT, raw)
+    else:
+        save_bytes(directory, BUILD_RECEIPT, raw)
 
 
 def prepare_activation(directory, activation_dir, receipt_digest):

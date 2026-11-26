@@ -9,14 +9,16 @@ from pathlib import Path
 import platform
 import subprocess
 import sys
-from tempfile import TemporaryDirectory
+import uuid
 
+import selection_recovery
+import selection_scratch
 from activate_update import DISK, VARS, stopped_source, verify_stopped_source
 from activation_guest import open_file
 from install import checked_digest, digest, lock_directory, require, timestamp, valid_instant
 from select_manifest import (
     check_build_receipt, check_material, check_proof, copy_build_receipt, copy_material, fd_path, generation_directory,
-    prepare_activation, read_json, save_json,
+    prepare_activation, read_json, save_json, write_json_exclusive,
 )
 from selection_boot import boot
 from stage_update import identity, publish_bundle
@@ -80,6 +82,10 @@ def validate_selection(entry):
     else:
         checked_digest(entry["previous_selection_digest"])
     check_proof(entry["deployment"], entry["current"], entry["proof"])
+    if "boot_attempt_id" in entry:
+        attempt = entry["boot_attempt_id"]
+        require(isinstance(attempt, str) and str(uuid.UUID(attempt)) == attempt and uuid.UUID(attempt).int != 0,
+                "managed selection has an invalid boot attempt ID")
     if entry["status"] == "BootIssued":
         require(valid_instant(entry.get("boot_issued_at")) and "boot_verified_at" not in entry,
                 "managed selection lacks its issued boot witness")
@@ -198,6 +204,7 @@ def plan_adoption(directory, args):
             "proof": proof,
         }
         approved = plan_digest(plan)
+        selection_scratch.require_plan(directory, approved)
         previous = read_plan(directory)
         if previous is not None and previous["plan_digest"] == approved:
             return previous
@@ -261,11 +268,14 @@ def recover_publication(directory, name, plan, approved, existing):
     return entry
 
 
-def adopt(directory, work, args):
+def adopt(directory, args):
     approved = checked_digest(args.plan_digest)
     existing = read_selection(directory)
     if existing is not None and existing["adoption_plan_digest"] == approved:
-        return inspect(directory)
+        report = inspect(directory)
+        if report["status"] == "Selected":
+            os.fsync(directory)
+        return report
     pending = read_plan(directory)
     require(pending is not None and pending["plan_digest"] == approved,
             "approval differs from the exact pending adoption plan")
@@ -281,27 +291,49 @@ def adopt(directory, work, args):
         if exists_at(directory, name):
             entry = recover_publication(directory, name, plan, approved, existing)
         else:
-            with TemporaryDirectory(dir=work, prefix=".selection-adopt-") as staging:
-                pair = Path(staging) / "pair"
-                pair.mkdir(mode=0o700)
+            with selection_scratch.staging(directory, plan, approved) as (pair, target):
                 entry = selected_entry(plan, approved, timestamp())
-                with generation_directory(directory, pair.relative_to(work)) as target:
-                    copy_material(activation, target, current)
-                    copy_build_receipt(target, deployment)
-                    check_material(target, deployment, current)
-                    if existing is not None:
-                        save_json(target, PREVIOUS, existing)
-                    save_json(target, ADOPTION, entry)
+                copy_material(activation, target, current)
+                copy_build_receipt(target, deployment, exclusive=True)
+                check_material(target, deployment, current)
+                if existing is not None:
+                    write_json_exclusive(target, PREVIOUS, existing)
+                write_json_exclusive(target, ADOPTION, entry)
                 verify_activation_sources(sources)
+                selection_scratch.verify_staging(directory, target, plan, approved)
                 publish_bundle(pair, directory, name)
         verify_activation_sources(sources)
+        selection_scratch.finish_publication(directory, plan, approved, name)
         save_json(directory, SELECTION, entry)
         return entry
 
 
+def discard_staging(directory, args):
+    approved = checked_digest(args.plan_digest)
+    pending = read_plan(directory)
+    require(pending is not None and pending["plan_digest"] == approved,
+            "scratch discard approval differs from the exact pending adoption plan")
+    plan = pending["plan"]
+    return selection_scratch.discard(directory, plan, approved, generation_name(plan["generation"]))
+
+
+def observe_unsettled_boot(directory, entry):
+    report = {**entry, "status": "RecoveryRequired", "reason": "issued selected boot has no verified receipt"}
+    try:
+        with generation_directory(directory, generation_name(entry["generation"])) as selected:
+            record, receipt_sha = selection_recovery.read(selected, validate_selection)
+            if record["issued"] == entry:
+                report.update(reason="a selected boot proof awaits exact reconciliation",
+                              boot_proof_sha256=receipt_sha)
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
+        # A missing, malformed, or older proof cannot settle an issued boot.
+        pass
+    return report
+
+
 def observed_selection(directory, entry):
     if entry["status"] == "BootIssued":
-        return {**entry, "status": "RecoveryRequired", "reason": "issued selected boot has no verified receipt"}
+        return observe_unsettled_boot(directory, entry)
     try:
         with generation_directory(directory, generation_name(entry["generation"])) as selected:
             check_adoption(selected, entry)
@@ -321,6 +353,10 @@ def inspect(directory):
     if current["status"] != "RecoveryRequired" and pending is not None:
         return {**current, "status": "RecoveryRequired", "reason": "published generation awaits exact adoption",
                 "pending_generation": pending}
+    scratch = selection_scratch.copy_status(directory)
+    if current["status"] != "RecoveryRequired" and scratch is not None:
+        return {**current, "status": "RecoveryRequired", "reason": "adoption staging awaits exact cleanup",
+                "staging": scratch}
     return current
 
 
@@ -332,6 +368,8 @@ def boot_selected(directory, args):
             "approval differs from the exact current selection digest")
     require(pending_publication(directory, entry["generation"]) is None,
             "a published generation awaits exact adoption; inspect before booting")
+    require(selection_scratch.copy_status(directory) is None,
+            "an adoption staging copy needs exact cleanup before booting")
     next_boot = entry["boot_generation"] + 1
     require(next_boot < 2**63, "selected boot generation exhausted")
 
@@ -340,8 +378,10 @@ def boot_selected(directory, args):
     def issue():
         nonlocal issued
         require(issued is None, "selected boot was already issued")
-        issued = {**entry, "status": "BootIssued", "boot_issued_at": timestamp()}
+        issued = {**entry, "status": "BootIssued", "boot_issued_at": timestamp(),
+                  "boot_attempt_id": str(uuid.uuid4())}
         issued.pop("boot_verified_at", None)
+        selection_recovery.check_capacity(issued)
         save_json(directory, SELECTION, issued)
 
     with generation_directory(directory, generation_name(entry["generation"])) as selected:
@@ -354,8 +394,38 @@ def boot_selected(directory, args):
                    "boot_verified_at": timestamp()}
         updated["selection_digest"] = selection_digest(updated)
         validate_selection(updated)
-        save_json(directory, SELECTION, updated)
+        with selection_recovery.final_artifacts(selected, updated) as recheck:
+            selection_recovery.seal(selected, issued, updated)
+            recheck()
+            save_json(directory, SELECTION, updated)
         return updated
+
+
+def reconcile_boot(directory, args):
+    approved_selection = checked_digest(args.selection_digest)
+    approved_proof = checked_digest(args.boot_proof_sha256)
+    current = read_selection(directory)
+    require(current is not None, "managed node has no selected deployment")
+    generation = generation_name(current["generation"])
+    require(pending_publication(directory, current["generation"]) is None
+            and selection_scratch.copy_status(directory) is None,
+            "managed adoption needs recovery before settling a selected boot")
+    with generation_directory(directory, generation) as selected:
+        check_adoption(selected, current)
+        record, proof_sha = selection_recovery.read(selected, validate_selection)
+        require(proof_sha == approved_proof and record["issued"]["selection_digest"] == approved_selection,
+                "approval differs from the exact issued selection and boot proof")
+        settled = record["settled"]
+        require(current == record["issued"] or current == settled,
+                "boot proof does not settle the current issued attempt")
+        with selection_recovery.final_artifacts(selected, settled) as recheck:
+            os.fsync(selected)
+            recheck()
+            if current != settled:
+                save_json(directory, SELECTION, settled)
+            else:
+                os.fsync(directory)
+        return settled
 
 
 def main():
@@ -367,11 +437,16 @@ def main():
     plan.add_argument("--expected-generation", type=int, required=True)
     apply = commands.add_parser("adopt")
     apply.add_argument("--plan-digest", required=True)
+    discard = commands.add_parser("discard-staging")
+    discard.add_argument("--plan-digest", required=True)
     read = commands.add_parser("inspect")
     run = commands.add_parser("boot-selected")
     run.add_argument("--selection-digest", required=True)
     run.add_argument("--root-console-password-file", type=Path, required=True)
-    for command in (plan, apply, read, run):
+    reconcile = commands.add_parser("reconcile-boot")
+    reconcile.add_argument("--selection-digest", required=True)
+    reconcile.add_argument("--boot-proof-sha256", required=True)
+    for command in (plan, apply, discard, read, run, reconcile):
         command.add_argument("--state-dir", type=Path, required=True)
     args = parser.parse_args()
     try:
@@ -381,9 +456,13 @@ def main():
             if args.command == "plan":
                 result = plan_adoption(directory, args)
             elif args.command == "adopt":
-                result = adopt(directory, fd_path(directory), args)
+                result = adopt(directory, args)
+            elif args.command == "discard-staging":
+                result = discard_staging(directory, args)
             elif args.command == "boot-selected":
                 result = boot_selected(directory, args)
+            elif args.command == "reconcile-boot":
+                result = reconcile_boot(directory, args)
             else:
                 result = inspect(directory)
         print(json.dumps(result))

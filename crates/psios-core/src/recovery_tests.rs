@@ -1309,7 +1309,7 @@ fn oci_stop_recovery_rejects_missing_and_mismatched_active_custody() {
     })).unwrap();
     let stop_task = retried["task_id"].as_str().unwrap();
     assert_eq!(claim(&mut store), stop_task);
-    let stop = dispatch(&mut store, &stop_task);
+    let stop = dispatch(&mut store, stop_task);
     assert_ne!(stop.op.id, initial_stop.op.id);
     let before = json!({"engine_id":"oci-test-engine","container_id":container,
         "start_operation_id":start.op.id,"started_at":"2026-11-25T12:00:00Z",

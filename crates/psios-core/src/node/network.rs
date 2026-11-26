@@ -2,6 +2,7 @@
 pub(crate) mod enrollment;
 mod kernel;
 mod lookup;
+pub(crate) mod managed;
 pub(crate) mod probe;
 mod routes;
 mod rules;

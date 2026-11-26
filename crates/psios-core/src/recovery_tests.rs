@@ -383,7 +383,7 @@ fn witnessed_unpublished_restore_reconciles_without_replaying_and_resumes_dispos
     drop(store);
     assert_eq!(
         Store::verify(&cfg, directory.path(), 64 * 1024 * 1024).unwrap()["database_format"],
-        storage::restore_publication::DISPOSAL_FORMAT,
+        crate::db::CURRENT_FORMAT,
     );
 }
 

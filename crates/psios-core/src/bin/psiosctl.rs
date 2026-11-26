@@ -79,6 +79,9 @@ enum Cmd {
         cursor: String,
         #[arg(long)]
         previous: Option<String>,
+        /// Guard the advance with a revision from event-offset.
+        #[arg(long, requires = "previous")]
+        expected_revision: Option<String>,
     },
     /// List confirmed event consumer revisions.
     EventOffsets {
@@ -845,7 +848,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             consumer,
             cursor,
             previous,
-        } => c.acknowledge_events(&consumer, &cursor, previous.as_deref())?,
+            expected_revision,
+        } => match expected_revision {
+            Some(revision) => c.acknowledge_events_checked(
+                &consumer,
+                &cursor,
+                previous.as_deref().ok_or("missing previous event cursor")?,
+                &revision,
+            )?,
+            None => c.acknowledge_events(&consumer, &cursor, previous.as_deref())?,
+        },
         Cmd::EventOffsets {
             owner,
             after,

@@ -201,6 +201,22 @@ impl Client {
         )
     }
 
+    /// Advance an existing watch checkpoint against its exact prior cursor and revision.
+    /// Retry the same request after a lost reply to recover its current successor.
+    pub fn acknowledge_events_checked(
+        &self,
+        consumer: &str,
+        cursor: &str,
+        previous: &str,
+        expected_revision: &str,
+    ) -> ApiResult<Value> {
+        self.call(
+            "Event.Ack",
+            json!({"consumer":consumer,"cursor":cursor,"previous":previous,
+                   "expected_revision":expected_revision}),
+        )
+    }
+
     /// List confirmed consumer revisions for maintenance.
     pub fn event_offsets(
         &self,

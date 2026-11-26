@@ -350,6 +350,23 @@ struct Ack {
     consumer: String,
     previous: Option<String>,
     cursor: String,
+    expected_revision: Option<String>,
+}
+
+impl Ack {
+    fn receipt(&self, db: &Db<'_>, actor: &str, stored: Option<&str>) -> Result<Value> {
+        let mut result = json!({"cursor":self.cursor});
+        if self.expected_revision.is_some() {
+            result["revision"] = json!(offsets::revision(
+                db,
+                actor,
+                &self.consumer,
+                &self.cursor,
+                stored
+            )?);
+        }
+        Ok(result)
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -432,18 +449,50 @@ impl Checkpoint {
     }
 }
 
-pub fn ack(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
-    let p: Ack = decode(p)?;
+pub fn ack(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
+    let p: Ack = decode(params)?;
     label(&p.consumer)?;
-    let old: Option<(String, Option<String>)> =
-        db.c.query_row(
-            "SELECT cursor,scope FROM event_offsets WHERE owner=?1 AND consumer=?2",
+    let expected = p.expected_revision.as_deref();
+    require(
+        params.get("expected_revision").is_none() || expected.is_some_and(offsets::valid_expected),
+        "InvalidArgument",
+        "invalid expected event offset revision",
+    )?;
+    let previous = p.previous.as_deref();
+    require(
+        expected.is_none() || previous.is_some_and(|cursor| !cursor.is_empty()),
+        "InvalidArgument",
+        "a checked event advance requires its previous cursor",
+    )?;
+    let old: Option<(String, Option<String>, Option<String>)> = db
+        .c
+        .query_row(
+            "SELECT cursor,scope,checkpoint_revision FROM event_offsets WHERE owner=?1 AND consumer=?2",
             params![actor, p.consumer],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    let old_token = old.as_ref().map(|(cursor, _)| cursor.as_str());
-    if let Some((token, record)) = &old
+    let old_token = old.as_ref().map(|(cursor, _, _)| cursor.as_str());
+    let checked = if let Some((expected, previous)) = expected.zip(previous) {
+        let (token, _, generation) = old
+            .as_ref()
+            .ok_or_else(|| err("Conflict", "consumer checkpoint changed"))?;
+        let current = offsets::revision(db, actor, &p.consumer, token, generation.as_deref())?;
+        let successor =
+            offsets::checked_generation(db, actor, &p.consumer, expected, previous, &p.cursor)?;
+        // Matching cursor text alone cannot distinguish a recreated offset from
+        // the operation that committed after the original caller's reply was lost.
+        require(
+            (token == previous && current == expected)
+                || (token == &p.cursor && generation.as_ref() == Some(&successor)),
+            "Conflict",
+            "consumer checkpoint changed",
+        )?;
+        Some(successor)
+    } else {
+        None
+    };
+    if let Some((token, record, generation)) = &old
         && token == &p.cursor
     {
         let checkpoint = Checkpoint::stored(db, actor, &p.consumer, token, record.as_deref())?;
@@ -454,18 +503,18 @@ pub fn ack(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         } else {
             Cursor::read_inline(db, token, actor, "watch")?;
         }
-        return Ok(json!({"cursor": p.cursor}));
+        return p.receipt(db, actor, generation.as_deref());
     }
     let next = Cursor::read(db, &p.cursor, actor, "watch")?;
     require(
-        old_token == p.previous.as_deref(),
+        old_token == previous,
         "Conflict",
         "consumer checkpoint changed",
     )?;
     if old.is_none() {
         offsets::check_admission(db, actor)?;
     }
-    if let Some((token, record)) = old {
+    if let Some((token, record, _)) = old {
         let Checkpoint {
             kind,
             resource,
@@ -499,14 +548,15 @@ pub fn ack(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             .seal(db, actor, &p.consumer, &p.cursor)
         })
         .transpose()?;
+    let generation = checked.unwrap_or_else(offsets::new_generation);
     db.c.execute(
         "INSERT INTO event_offsets(owner,consumer,cursor,scope,checkpoint_revision) VALUES(?1,?2,?3,?4,?5)
         ON CONFLICT(owner,consumer) DO UPDATE SET cursor=excluded.cursor,scope=excluded.scope,
             checkpoint_revision=excluded.checkpoint_revision",
-        params![actor, p.consumer, p.cursor, record, offsets::new_revision()],
+        params![actor, p.consumer, p.cursor, record, generation],
     )?;
     db.audit(actor, "Event.Ack", None, "Allowed")?;
-    Ok(json!({"cursor": p.cursor}))
+    p.receipt(db, actor, Some(&generation))
 }
 #[cfg(test)]
 mod tests {
@@ -552,6 +602,9 @@ mod tests {
                     &json!({"id":"confirmed","include_revision":true}),
                 )?;
                 assert_eq!(ack(db, actor, &request)?, json!({"cursor":token}));
+                let checked = json!({"consumer":"confirmed","cursor":token,"previous":token,
+                                     "expected_revision":before["revision"]});
+                assert_eq!(ack(db, actor, &checked)?, before);
                 assert_eq!(
                     offsets::get(
                         db,
@@ -580,6 +633,10 @@ mod tests {
                 )?;
                 assert_eq!(
                     ack(db, actor, &request).unwrap_err().0.code,
+                    "CursorExpired"
+                );
+                assert_eq!(
+                    ack(db, actor, &checked).unwrap_err().0.code,
                     "CursorExpired"
                 );
                 Ok(())

@@ -303,6 +303,19 @@ impl Action {
                 policy::owned(actor, &volume)?;
                 resources.push(volume.reference());
             }
+            Self::Health(_)
+                if primary.body["lifecycle"] == "Stopped"
+                    && primary.spec["volume_id"].is_string() =>
+            {
+                if let Some(checkpoint) = apps::pending_start(db, primary)?
+                    && (db.cfg.oci_effective_volume_observation
+                        || apps::mount_observation::required(&checkpoint))
+                {
+                    let volume = db.of(primary.spec["volume_id"].as_str().unwrap(), "Volume")?;
+                    policy::owned(actor, &volume)?;
+                    resources.push(volume.reference());
+                }
+            }
             Self::Restore(_) => resources.push(db.of("local", "StoragePool")?.reference()),
             Self::InstallArtifact(input) => {
                 let source = apps::artifact_install::source(db, actor, &input.reference)?;
@@ -558,6 +571,7 @@ pub struct Work {
     pub(crate) restore_image_inspection: Option<apps::restore_image::Recorded>,
     pub(crate) stop_cleanup: Option<apps::stop::Prepared>,
     pub(crate) volume_rebind: Option<apps::volume_rebind::Prepared>,
+    pub(crate) mount_observation_required: bool,
     network_trial_inspection: Option<node::network::trial::Inspection>,
 }
 pub(crate) enum Output {
@@ -641,6 +655,14 @@ impl Work {
             let target = self.checkpoint_authority(db)?;
             return apps::check_release_selection(db, &target, release_ref);
         }
+        if self.mount_observation_required
+            && matches!(
+                self.action,
+                Action::Health(_) | Action::InspectOciInstance(_)
+            )
+        {
+            self.checkpoint_authority(db)?;
+        }
         if matches!(
             self.action,
             Action::VerifyVolumeFile(_)
@@ -681,7 +703,7 @@ impl Work {
                 apps::check_selected_publisher(db, &target)?;
                 let evidence = json!({"start_operation_id":self.op.id, "effect_ref":self.effect.reference(),
                     "application_ref":target.reference(),"volume_ref":self.volume.as_ref().map(Doc::reference),
-                    "engine_id":engine, "container_id":container});
+                    "engine_id":engine, "container_id":container,"mount_observation_required":self.mount_observation_required});
                 db.create(
                     "OCIStartCheckpoint",
                     &format!("oci-start-{}", self.op.id),
@@ -974,6 +996,22 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
         } else {
             None
         };
+    let mount_observation_required = if volume.is_some() {
+        match a {
+            Action::Start(_) | Action::RestartApp(_) => db.cfg.oci_effective_volume_observation,
+            Action::InspectOciInstance(_) => {
+                db.cfg.oci_effective_volume_observation
+                    || apps::restart::pending_mount_requirement(db, &target)?
+            }
+            Action::Health(_) => start_checkpoint.as_ref().is_some_and(|checkpoint| {
+                db.cfg.oci_effective_volume_observation
+                    || apps::mount_observation::required(checkpoint)
+            }),
+            _ => false,
+        }
+    } else {
+        false
+    };
     let publication_checkpoint = match a {
         Action::InspectFileRename(_) => rename_inspection.map(|(_, checkpoint)| checkpoint),
         Action::InspectBackupPublication(_) => Some(storage::publication::pending(db, &target)?),
@@ -1065,6 +1103,7 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
         restore_image_inspection,
         stop_cleanup,
         volume_rebind,
+        mount_observation_required,
         network_trial_inspection,
     };
     node::reserve(db, &w)?;

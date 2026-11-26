@@ -1,6 +1,7 @@
 use super::*;
 
 pub fn recover(db: &Db<'_>) -> Result<()> {
+    apps::mount_observation::verify_active(db.c)?;
     apps::stop::verify_active(db.c)?;
     apps::restart::verify_active(db.c)?;
     node::network::trial::verify_active(db.c, crate::db::CURRENT_FORMAT)?;

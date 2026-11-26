@@ -15,6 +15,7 @@ mod cgroup;
 pub(crate) mod health;
 pub(crate) mod inventory;
 pub(crate) mod log_tail;
+pub(crate) mod mount_observation;
 pub(crate) mod publisher;
 pub(crate) mod release_archive;
 pub(crate) mod release_retirement;
@@ -296,6 +297,45 @@ impl EngineProfile {
     }
 }
 impl Engine<'_> {
+    fn observe_mount(
+        &self,
+        work: &Work,
+        engine: &EngineProfile,
+        container: &str,
+        start_op: &str,
+        state: &Value,
+        report: &mut Value,
+    ) -> Result<()> {
+        if !work.mount_observation_required {
+            return Ok(());
+        }
+        require(
+            engine.unified_cgroups,
+            "UnsupportedCapability",
+            "effective OCI mount observation requires a local cgroup v2 engine",
+        )?;
+        let volume = work.volume.as_ref().ok_or_else(|| {
+            err(
+                "RecoveryRequired",
+                "effective OCI mount has no approved volume",
+            )
+        })?;
+        let proof = mount_observation::observe(volume, &engine.id, container, state, || {
+            let latest = self.managed(work, container, start_op)?;
+            require(
+                self.identity()? == engine.id,
+                "PreconditionFailed",
+                "OCI engine changed during effective mount observation",
+            )?;
+            Ok(latest["State"].clone())
+        })?;
+        report[mount_observation::FIELD] = proof;
+        require(
+            mount_observation::matches(volume, report),
+            "PreconditionFailed",
+            "effective OCI mount disagrees with the observed process",
+        )
+    }
     fn command_line(&self, args: &[String]) -> Command {
         let mut cmd = Command::new("/usr/bin/docker");
         cmd.env_clear()
@@ -508,6 +548,11 @@ pub fn start(w: &Work, checkpoint: impl FnOnce(&str, &str) -> Result<()>) -> Res
         .ok_or_else(|| err("PreconditionFailed", "missing validated release"))?;
     e.inspect_image(&s.image_id, s.health_check.as_ref())?;
     let engine = e.check_engine()?;
+    require(
+        !w.mount_observation_required || engine.unified_cgroups,
+        "UnsupportedCapability",
+        "effective OCI mount observation requires a local cgroup v2 engine",
+    )?;
     let uid = rustix::process::geteuid().as_raw();
     let gid = rustix::process::getegid().as_raw();
     require(
@@ -640,6 +685,8 @@ pub fn start(w: &Work, checkpoint: impl FnOnce(&str, &str) -> Result<()>) -> Res
         "effective_limits": limits,
         "observed_at": now()
     });
+    e.observe_mount(w, &engine, &cid, &w.op.id, state, &mut report)
+        .map_err(|error| err("OutcomeUnknown", error.0.message))?;
     health::status(&mut report, s.health_check.as_ref(), state);
     Ok(report)
 }
@@ -773,6 +820,7 @@ fn observe_start(w: &Work, e: &Engine<'_>, checkpoint: &Doc) -> Result<Value> {
     let mut report = json!({"container_id":cid, "engine_id":engine.id, "start_operation_id":op,
         "checkpoint_ref":checkpoint.reference(), "process_running":running,
         "runtime_state":state["Status"], "effective_limits":limits,"observed_at":now()});
+    e.observe_mount(w, &engine, cid, op, state, &mut report)?;
     health::status(&mut report, launch.health_check.as_ref(), state);
     Ok(report)
 }
@@ -1197,6 +1245,14 @@ pub fn started(
     recovered: bool,
 ) -> Result<Value> {
     if let Some(v) = volume {
+        let issued = db.find(&format!("oci-start-{op_id}"))?;
+        require(
+            !(db.cfg.oci_effective_volume_observation
+                || issued.as_ref().is_some_and(mount_observation::required))
+                || mount_observation::matches(v, r),
+            "OutcomeUnknown",
+            "OCI start has no verified effective volume mount",
+        )?;
         attachment(db, app, op_id, v, true)?;
     }
     let deployment = db.resolve(&app.spec["deployment_ref"])?;
@@ -1206,13 +1262,17 @@ pub fn started(
     )?;
     let running = r["process_running"] == true;
     let runtime = if running { "Running" } else { "Exited" };
+    let mut instance_body = json!({"lifecycle": runtime, "observed_at": r["observed_at"]});
+    if r.get(mount_observation::FIELD).is_some() {
+        instance_body["observation"] = r.clone();
+    }
     let instance = db.create(
         "RuntimeInstance", &id("instance"), &app.owner,
         json!({
             "application_id": app.id, "deployment_ref": deployment.reference(),
             "container_id": r["container_id"], "engine_id": r["engine_id"], "start_operation_id": op_id
         }),
-        json!({"lifecycle": runtime, "observed_at": r["observed_at"]}),
+        instance_body,
     )?;
     let mut spec = app.spec.clone();
     spec["deployment_ref"] = deployment.reference();

@@ -46,6 +46,8 @@ pub struct Config {
     pub network_link: Option<NetworkLinkConfig>,
     #[serde(default = "default_docker")]
     pub docker_socket: PathBuf,
+    #[serde(default)]
+    pub oci_effective_volume_observation: bool,
     #[serde(default = "default_oci_capture_bytes")]
     pub oci_capture_max_bytes: u32,
     #[serde(default)]
@@ -213,6 +215,7 @@ impl Config {
             network_link: None,
             tick_ms: default_tick(),
             docker_socket: default_docker(),
+            oci_effective_volume_observation: false,
             oci_capture_max_bytes: default_oci_capture_bytes(),
             authority_reserve: AuthorityReserve::default(),
             backup_max_bytes: DEFAULT_BACKUP_MAX_BYTES,

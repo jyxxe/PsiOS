@@ -13,6 +13,7 @@ from support import Failure, Node, key, target
 from oci_recovery import ReceiptBarrier, check_kernel_limits, continue_after_lost_stop, lose_start_receipt, lose_stop_receipt
 from oci_capture import TOOL as CAPTURE, denied
 from oci_health import verify_image_health
+from oci_mount_observation import exercise as verify_effective_mounts
 from oci_restart import verify_restart
 from oci_volume_rebind import verify_rebind
 from test_artifact_install import TOOL as ARTIFACT_INSTALL, grant as artifact_grant
@@ -530,6 +531,8 @@ int main(void) {
         verify_rebind(node, docker, spec, app_ids)
         verify_restart(node, docker, spec, app_ids)
         verify_image_health(node, docker)
+        if os.getenv("PSIOS_TEST_OCI_EFFECTIVE_MOUNTS") == "1":
+            verify_effective_mounts(node, docker, spec, app_ids)
         node.stop()
         subprocess.run(node.daemon + ["verify"], check=True, stdout=subprocess.DEVNULL, timeout=15)
         print("PASS live OCI lifecycle, scoped restart, isolated execution, release rollback, external exit, receipt recovery, volume holds and verified backup restore")

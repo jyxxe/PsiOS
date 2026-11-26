@@ -1,7 +1,7 @@
 //! Linux observation and the operator's explicit systemd allowlist.
 pub mod block;
 pub mod journal;
-mod mounts;
+pub(crate) mod mounts;
 pub mod network;
 pub mod pressure;
 pub mod process;

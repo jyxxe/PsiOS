@@ -192,7 +192,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = schedule::admission_delay::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = apps::mount_observation::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -536,6 +536,9 @@ impl Store {
                 }
                 if ver < schedule::admission_delay::FORMAT {
                     db.c.execute_batch(schedule::admission_delay::SCHEMA)?;
+                }
+                if ver < apps::mount_observation::FORMAT {
+                    apps::mount_observation::migrate(db)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

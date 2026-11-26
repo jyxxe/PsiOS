@@ -83,22 +83,54 @@ fn finite(value: Option<&str>) -> Result<u64> {
     })
 }
 
+pub(super) struct Process {
+    pub(super) pid: i32,
+    pub(super) directory: OwnedFd,
+    lifetime: OwnedFd,
+    path: PathBuf,
+}
+
+impl Process {
+    pub(super) fn pin(container: &str, state: &Value) -> Result<Self> {
+        let raw = state["Pid"]
+            .as_i64()
+            .and_then(|pid| i32::try_from(pid).ok())
+            .filter(|pid| *pid > 0)
+            .ok_or_else(|| {
+                err(
+                    "PreconditionFailed",
+                    "Docker did not report a live host PID",
+                )
+            })?;
+        let pid = Pid::from_raw(raw).expect("positive host PID");
+        let lifetime = pidfd_open(pid, PidfdFlags::empty()).map_err(io::Error::from)?;
+        let directory =
+            open(format!("/proc/{raw}"), DIRECTORY, Mode::empty()).map_err(io::Error::from)?;
+        let path = membership(&directory, container)?;
+        let process = Self {
+            pid: raw,
+            directory,
+            lifetime,
+            path,
+        };
+        process.confirm(container)?;
+        Ok(process)
+    }
+
+    pub(super) fn confirm(&self, container: &str) -> Result<()> {
+        let mut watch = [PollFd::new(&self.lifetime, PollFlags::IN)];
+        require(
+            membership(&self.directory, container)? == self.path
+                && poll(&mut watch, Some(&Timespec::default())).map_err(io::Error::from)? == 0,
+            "PreconditionFailed",
+            "Docker process changed during kernel observation",
+        )
+    }
+}
+
 pub(super) fn observe(container: &str, state: &Value, approval: &Install) -> Result<Value> {
-    let raw = state["Pid"]
-        .as_i64()
-        .and_then(|pid| i32::try_from(pid).ok())
-        .filter(|pid| *pid > 0)
-        .ok_or_else(|| {
-            err(
-                "PreconditionFailed",
-                "Docker did not report a live host PID",
-            )
-        })?;
-    let pid = Pid::from_raw(raw).expect("positive host PID");
-    let lifetime = pidfd_open(pid, PidfdFlags::empty()).map_err(io::Error::from)?;
-    let proc = open(format!("/proc/{raw}"), DIRECTORY, Mode::empty()).map_err(io::Error::from)?;
-    let path = membership(&proc, container)?;
-    let group = linux_cgroup::group(root()?, &path)?;
+    let process = Process::pin(container, state)?;
+    let group = linux_cgroup::group(root()?, &process.path)?;
     let control = |name| read(linux_cgroup::control(&group, name)?);
     let cpu = control("cpu.max")?;
     let mut cpu = cpu.split_whitespace();
@@ -122,15 +154,9 @@ pub(super) fn observe(container: &str, state: &Value, approval: &Install) -> Res
         "PreconditionFailed",
         "live kernel cgroup limits exceed the approved resource profile",
     )?;
-    let mut watch = [PollFd::new(&lifetime, PollFlags::IN)];
-    require(
-        membership(&proc, container)? == path
-            && poll(&mut watch, Some(&Timespec::default())).map_err(io::Error::from)? == 0,
-        "PreconditionFailed",
-        "Docker process changed during kernel observation",
-    )?;
+    process.confirm(container)?;
     Ok(json!({
-        "source": "LinuxCgroupV2", "host_pid": raw,
+        "source": "LinuxCgroupV2", "host_pid": process.pid,
         "cgroup_inode": fstat(&group).map_err(io::Error::from)?.st_ino.to_string(),
         "cpu_quota_us": quota, "cpu_period_us": period, "cpu_burst_us": 0,
         "memory_max_bytes": memory, "swap_max_bytes": swap, "pids_max": pids,

@@ -27,7 +27,10 @@ jobs:
           cargo +1.100.0 build --locked --workspace
           cargo +1.100.0 test --locked --workspace
       - name: Exercise a real OCI engine and persistent volume
-        run: PSIOS_TEST_OCI_KERNEL_LIMITS=1 python3 tests/oci.py
+        env:
+          PSIOS_TEST_OCI_KERNEL_LIMITS: "1"
+          PSIOS_TEST_OCI_EFFECTIVE_MOUNTS: "1"
+        run: python3 -B tests/oci.py
       - name: Verify documentation contracts
         run: |
           python3 -m venv "$RUNNER_TEMP/psios-docs"
@@ -652,6 +655,15 @@ jobs:
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format100" "$RUNNER_TEMP/psios-compatibility-target"
           PSIOS_SCHEDULE_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
             python3 -B -m unittest discover -s tests -p test_resource_event_schedule.py -k test_format100 -v
+      - name: Observe a live format 101 OCI attachment across the mount-evidence upgrade
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format101"
+          git archive 0e221a2777b92308417f8638b45231968869a030 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format101"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format101" "$RUNNER_TEMP/psios-compatibility-target"
+          printf '#include <unistd.h>\nint main(void) { for (;;) pause(); }\n' |
+            cc -x c -static -o "$RUNNER_TEMP/psios-oci-mount-probe" -
+          python3 -B tests/oci_mount_observation_upgrade.py --previous-bin-dir "$RUNNER_TEMP/psios-compatibility-target/debug" \
+            --probe "$RUNNER_TEMP/psios-oci-mount-probe"
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

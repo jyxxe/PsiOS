@@ -129,6 +129,9 @@ pub(super) fn check_artifacts(
     if identity.database_format >= crate::apps::volume_rebind::FORMAT {
         crate::apps::volume_rebind::verify::check(conn)?;
     }
+    if identity.database_format >= crate::apps::mount_observation::FORMAT {
+        crate::apps::mount_observation::verify(conn)?;
+    }
     if identity.database_format >= artifact::files::FORMAT {
         artifact::files::verify_registry(conn)?;
     }

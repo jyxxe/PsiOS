@@ -197,7 +197,12 @@ fn network_probe_projection_fences_older_receipts_and_rolls_back_with_task_resul
 
 #[test]
 fn witnessed_unpublished_restore_reconciles_without_replaying_and_resumes_disposal() {
-    let directory = tempfile::tempdir().unwrap();
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
     let (cfg, mut store) = initialized(directory.path());
     let target = |reference: &Value| {
         json!({
@@ -254,6 +259,28 @@ fn witnessed_unpublished_restore_reconciles_without_replaying_and_resumes_dispos
     let pending = call(&mut store, "Task.Get", json!({"id":restoration})).unwrap();
     assert_eq!(pending["outcome_knowledge"], "Unknown");
     assert!(staged.is_dir() && !final_path.exists());
+    store
+        .transaction("verify-active-restore-custody", |db| {
+            use storage::restore_publication::{protected_stages, verify};
+            let intent = format!("restore-intent-{operation_id}");
+            let checkpoint = format!("restore-publication-{operation_id}");
+            for (statement, target) in [
+                ("DELETE FROM versions WHERE id=?1", &intent),
+                ("DELETE FROM versions WHERE id=?1", &checkpoint),
+                ("DELETE FROM holds WHERE holder=?1", &operation_id),
+                ("DELETE FROM queue WHERE operation=?1", &operation_id),
+            ] {
+                db.c.execute_batch("SAVEPOINT damage_restore_custody")?;
+                assert!(db.c.execute(statement, [target])? > 0);
+                assert_eq!(verify(db.c).unwrap_err().0.code, "RecoveryRequired");
+                assert_eq!(protected_stages(db).unwrap_err().0.code, "RecoveryRequired");
+                db.c.execute_batch(
+                    "ROLLBACK TO damage_restore_custody; RELEASE damage_restore_custody",
+                )?;
+            }
+            verify(db.c)
+        })
+        .unwrap();
     let original = &pending["operation_refs"][0];
     let tool = storage::restore_publication::INSPECT;
     let grant = call(
@@ -306,11 +333,25 @@ fn witnessed_unpublished_restore_reconciles_without_replaying_and_resumes_dispos
                 [&operation_id],
                 |r| r.get::<_, bool>(0)
             )?);
-            use storage::restore_publication::{Disposal, next_disposal};
+            use storage::restore_publication::{Disposal, next_disposal, protected_stages, verify};
             assert_eq!(
                 next_disposal(db, "")?.as_deref(),
                 Some(operation_id.as_str())
             );
+            verify(db.c)?;
+            for statement in [
+                "DELETE FROM restore_stage_disposals WHERE operation=?1",
+                "UPDATE restore_stage_disposals SET checkpoint_ref='{}' WHERE operation=?1",
+                "UPDATE restore_stage_disposals SET evidence_ref='{}' WHERE operation=?1",
+            ] {
+                db.c.execute_batch("SAVEPOINT damage_restore_disposal")?;
+                assert_eq!(db.c.execute(statement, [&operation_id])?, 1);
+                assert_eq!(verify(db.c).unwrap_err().0.code, "RecoveryRequired");
+                assert_eq!(protected_stages(db).unwrap_err().0.code, "RecoveryRequired");
+                db.c.execute_batch(
+                    "ROLLBACK TO damage_restore_disposal; RELEASE damage_restore_disposal",
+                )?;
+            }
             Disposal::open(db, &operation_id)
         })
         .unwrap();
@@ -334,8 +375,16 @@ fn witnessed_unpublished_restore_reconciles_without_replaying_and_resumes_dispos
     assert!(!removed);
     assert!(!staged.exists() && !trash.exists() && !final_path.exists());
     store
-        .transaction("restore-disposal-finished", |db| job.finish(db, removed))
+        .transaction("restore-disposal-finished", |db| {
+            job.finish(db, removed)?;
+            storage::restore_publication::verify(db.c)
+        })
         .unwrap();
+    drop(store);
+    assert_eq!(
+        Store::verify(&cfg, directory.path(), 64 * 1024 * 1024).unwrap()["database_format"],
+        storage::restore_publication::DISPOSAL_FORMAT,
+    );
 }
 
 fn approve(s: &mut Store, task: &str) {

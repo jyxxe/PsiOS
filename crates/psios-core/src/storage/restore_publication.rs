@@ -18,9 +18,7 @@ use std::{collections::HashSet, fs::File, io::Read, os::unix::fs::MetadataExt};
 pub(crate) const INSPECT: &str = "volume.inspect_publication";
 pub(crate) const FORMAT: u32 = 42;
 pub(crate) const DISPOSAL_FORMAT: u32 = crate::events::offsets::FORMAT + 1;
-pub(crate) const DISPOSAL_SCHEMA: &str = "CREATE TABLE restore_stage_disposals (
-    operation TEXT PRIMARY KEY, checkpoint_ref TEXT NOT NULL, evidence_ref TEXT NOT NULL
-) STRICT;";
+pub(crate) const DISPOSAL_SCHEMA: &str = include_str!("restore_publication/custody.sql");
 pub(crate) const PERMIT_MAX_SECONDS: i64 = 86_400;
 
 const INTENT: &str = "RestorePublicationIntent";
@@ -30,6 +28,8 @@ const MAX_RESTORE_STAGES: i64 = 128;
 
 mod disposal;
 pub(crate) use disposal::{Disposal, next_disposal, queue_disposal};
+mod verification;
+pub(crate) use verification::{protected_stages, verify};
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -221,35 +221,6 @@ pub(crate) fn pending(db: &Db<'_>, op: &Doc) -> Result<Doc> {
         "source backup differs from the original restore plan",
     )?;
     recorded(db, op, &backup)
-}
-
-pub(crate) fn protected_stages(db: &Db<'_>) -> Result<HashSet<String>> {
-    let prepared =
-        db.c.prepare(
-            "SELECT q.operation FROM queue q JOIN current t ON q.task=t.id
-         WHERE q.phase IN ('Dispatched','Unknown') AND t.spec->>'task_type'='backup.restore'
-         UNION SELECT operation FROM restore_stage_disposals",
-        )?
-        .query_map([], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut names = HashSet::new();
-    for operation in prepared {
-        let intent = db.find(&intent_id(&operation))?;
-        if let Some(checkpoint) = db.find(&checkpoint_id(&operation))? {
-            let op = db.of(&operation, "Operation")?;
-            let placement = verify_custody(&op, &checkpoint, intent.as_ref())?;
-            if let Some(name) = placement.stage_name()? {
-                names.insert(name.into());
-            }
-        } else {
-            require(
-                intent.is_none_or(|intent| intent.body.get("checkpoint_ref").is_none()),
-                "RecoveryRequired",
-                "witnessed restore checkpoint is missing",
-            )?;
-        }
-    }
-    Ok(names)
 }
 
 struct Candidate {

@@ -329,7 +329,33 @@ impl Store {
                 Ok(claimed)
             })?;
         }
-        self.authorized_request(peer, &r, |db, actor| {
+        self.request_value(peer, &r, None, |_, value| value)
+    }
+
+    pub(crate) fn request_wait_page(
+        &mut self,
+        peer: u32,
+        r: Request,
+        principal: Option<&str>,
+    ) -> Result<(String, Value)> {
+        self.request_value(peer, &r, principal, |actor, value| {
+            (actor.to_owned(), value)
+        })
+    }
+
+    fn request_value<T>(
+        &mut self,
+        peer: u32,
+        r: &Request,
+        principal: Option<&str>,
+        response: impl FnOnce(&str, Value) -> T,
+    ) -> Result<T> {
+        self.authorized_request(peer, r, |db, actor| {
+            require(
+                principal.is_none_or(|principal| principal == actor),
+                "PermissionDenied",
+                "wait credential no longer belongs to the original principal",
+            )?;
             let method = r.method.as_str();
             let out = invoke(db, actor, method, &r.params)?;
             if matches!(
@@ -406,7 +432,7 @@ impl Store {
                 };
                 db.audit(actor, method, target, "Allowed")?;
             }
-            Ok(out)
+            Ok(response(actor, out))
         })
     }
 

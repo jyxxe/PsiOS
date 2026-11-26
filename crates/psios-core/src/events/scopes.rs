@@ -279,7 +279,7 @@ mod tests {
                     "CursorExpired"
                 );
                 assert_eq!(
-                    offset(db, actor, &json!({"id":"expiry-test"}))?["cursor"],
+                    offsets::get(db, actor, &json!({"id":"expiry-test"}))?["cursor"],
                     renewed
                 );
                 let wrong = list(db, actor, &exact(&other))?;

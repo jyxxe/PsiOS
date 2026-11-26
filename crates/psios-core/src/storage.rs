@@ -8,6 +8,7 @@ mod intake;
 pub(crate) mod oci_archive;
 pub(crate) mod publication;
 pub(crate) mod read_holds;
+pub(crate) mod reconcile_file;
 mod restore_proof;
 pub(crate) mod restore_publication;
 pub(crate) mod retirement;
@@ -978,20 +979,6 @@ fn remove_contents(dir: &File, depth: usize) -> Result<()> {
         rustix::fs::unlinkat(dir, name, flags).map_err(std::io::Error::from)?;
     }
     Ok(())
-}
-pub fn confirm_write(cfg: &Config, volume: &Doc, name: &str, expected: &str) -> Result<Value> {
-    filename(name)?;
-    let dir = File::open(volume_dir(cfg, volume)?)?;
-    let file = child(&dir, name, OFlags::RDONLY)?;
-    regular(&file.metadata()?)?;
-    let mut bytes = Vec::new();
-    file.take(65537).read_to_end(&mut bytes)?;
-    require(
-        bytes == expected.as_bytes(),
-        "OutcomeUnknown",
-        "observed content does not confirm the approved postcondition",
-    )?;
-    Ok(json!({"name": name, "digest": sha256(&bytes), "verified_at": now()}))
 }
 pub fn perform(w: &Work) -> Result<Value> {
     match &w.action {

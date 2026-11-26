@@ -64,7 +64,7 @@ pub(super) struct Revision {
 }
 
 impl Revision {
-    fn from(m: &Metadata) -> Self {
+    pub(super) fn from(m: &Metadata) -> Self {
         Self {
             device: m.dev().to_string(),
             inode: m.ino().to_string(),
@@ -107,6 +107,24 @@ pub(super) fn revision(root: &File, path: &str) -> Result<Revision> {
     Ok(Revision::from(&metadata))
 }
 
+pub(super) fn open_pinned_entry(entry: &File, revision: &Revision) -> Result<File> {
+    // Reopen the exact descriptor after the caller verifies the entry type.
+    let file = File::from(
+        open(
+            format!("/proc/self/fd/{}", entry.as_raw_fd()),
+            OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::RDONLY,
+            Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?,
+    );
+    require(
+        *revision == Revision::from(&file.metadata()?),
+        "PreconditionFailed",
+        "file changed before verification",
+    )?;
+    Ok(file)
+}
+
 pub(super) fn capture(
     root: &File,
     path: &str,
@@ -123,20 +141,7 @@ pub(super) fn capture(
         "file exceeds the requested inspection byte limit",
     )?;
     let revision = Revision::from(&first);
-    // Reopen the exact descriptor after verifying the entry type.
-    let mut file = File::from(
-        open(
-            format!("/proc/self/fd/{}", entry.as_raw_fd()),
-            OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::RDONLY,
-            Mode::empty(),
-        )
-        .map_err(std::io::Error::from)?,
-    );
-    require(
-        revision == Revision::from(&file.metadata()?),
-        "PreconditionFailed",
-        "file changed before verification",
-    )?;
+    let mut file = open_pinned_entry(&entry, &revision)?;
     let mut remaining = first.len();
     let mut buffer = [0; 128 * 1024];
     let mut hasher = Sha256::new();

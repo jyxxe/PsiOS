@@ -38,7 +38,7 @@ pub struct Append {
     pub data_base64: String,
 }
 impl Append {
-    fn bytes(&self) -> Result<Vec<u8>> {
+    pub(super) fn bytes(&self) -> Result<Vec<u8>> {
         require(
             !self.data_base64.is_empty() && self.data_base64.len() <= CHUNK.div_ceil(3) * 4,
             "QuotaExceeded",
@@ -207,29 +207,6 @@ fn append(config: &Config, root: &File, p: &Append) -> Result<Value> {
     dir.sync_all().map_err(unknown)?;
     Ok(
         json!({"path":p.path,"offset":p.offset,"next_offset":p.offset+bytes.len() as u64,"digest":sha256(&bytes)}),
-    )
-}
-pub fn confirm(cfg: &Config, volume: &Doc, p: &Append) -> Result<Value> {
-    let expected = p.bytes()?;
-    let root = File::open(volume_dir(cfg, volume)?)?;
-    let mut f = child(&root, &p.path, OFlags::RDONLY)?;
-    let m = f.metadata()?;
-    regular(&m)?;
-    require(
-        m.len() == p.offset + expected.len() as u64,
-        "OutcomeUnknown",
-        "file length does not confirm append",
-    )?;
-    f.seek(SeekFrom::Start(p.offset))?;
-    let mut actual = Vec::new();
-    f.take(expected.len() as u64).read_to_end(&mut actual)?;
-    require(
-        actual == expected,
-        "OutcomeUnknown",
-        "file bytes do not confirm append",
-    )?;
-    Ok(
-        json!({"path":p.path,"offset":p.offset,"next_offset":m.len(),"digest":sha256(&actual),"verified_at":now()}),
     )
 }
 pub fn perform(w: &Work) -> Result<Value> {

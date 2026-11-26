@@ -1,7 +1,7 @@
 """A timed Workflow series must retain custody of its active child across restart."""
 
 from contextlib import closing, contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import signal
@@ -240,3 +240,29 @@ class WorkflowScheduleOverlap(unittest.TestCase):
         self.assertEqual(self.n.call("Schedule.Create", request), complete)
         self.assertEqual(self.read_workflow(first_run), after_deadline)
         self.assertEqual(self.budget(), (0, 2))
+
+    def test_calendar_dispatches_workflow_and_preserves_exact_mode_across_restart(self):
+        due = (datetime.now(timezone.utc) + timedelta(seconds=4)).replace(microsecond=0)
+        calendar = dict(timezone="UTC", start_date=due.date().isoformat(),
+                        local_time=due.time().isoformat(), days=1, window_seconds=25,
+                        gap="Reject", fold="Earlier", missed={"mode": "Skip"},
+                        overlap="SkipWhileWorkflowActive")
+        request = dict(key=key(), tool="workflow.start", calendar=calendar,
+                       input={"definition_ref": self.definition, "max_runtime_seconds": 20},
+                       delegation_id=self.scope["delegation_ref"]["resource_id"])
+        created = self.n.call("Schedule.Create", request)
+        self.assertEqual(created["state"]["calendar"], calendar)
+        schedule_id = created["reference"]["resource_id"]
+        completed, (trigger,) = self.wait_triggers(schedule_id, 1)
+        self.assertEqual(datetime.fromisoformat(trigger["run_at"]), due)
+        self.assertEqual(completed["state"]["lifecycle"], "Completed")
+        launch_id, run, child = self.launch(trigger, schedule_id)
+        self.assertEqual(completed["state"]["last_task_id"], launch_id)
+        self.assertEqual(self.budget(), (1, 1))
+        self.n.stop(signal.SIGKILL)
+        self.verify_stopped()
+        self.n.start()
+        self.assertEqual(self.n.call("Schedule.Create", request), completed)
+        self.assertEqual(self.read_workflow(run["reference"]["resource_id"]), run)
+        self.assertEqual(self.n.wait(child["task_id"]), child)
+        self.assertFalse(self.path.exists())

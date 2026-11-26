@@ -661,6 +661,7 @@ pub(crate) enum Checkpoint<'a> {
         inode: u64,
     },
     StorageDeletion(&'a storage::retirement::Location),
+    EntryRetirement(&'a storage::entry_retirement::Location),
     RestoredVolume {
         receipt: &'a Value,
         placement: &'a storage::restore_publication::Placement,
@@ -825,6 +826,9 @@ impl Work {
             (Action::Restore(_), Checkpoint::RestoredVolume { receipt, placement }) => {
                 storage::restore_publication::record(db, self, receipt, placement)
             }
+            (Action::RemoveEntry(request), Checkpoint::EntryRetirement(location)) => {
+                storage::entry_retirement::prepare(db, self, &request.path, location)
+            }
             (Action::RenameFile(request), Checkpoint::FileRename(before)) => {
                 storage::file_move::record(db, self, request, before)
             }
@@ -934,6 +938,11 @@ impl Work {
             ),
             Action::VerifyVolumeFile(query) => {
                 storage::file_integrity::verify(self, query, &mut check_streaming)
+            }
+            Action::RemoveEntry(request) => {
+                storage::entry_retirement::retire(self, &request.path, |location| {
+                    checkpoint(Checkpoint::EntryRetirement(location))
+                })
             }
             Action::RenameFile(request) => storage::file_move::rename(
                 self,
@@ -1254,6 +1263,9 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     }
     if let Some(image) = &w.restore_image {
         apps::restore_image::begin(db, &w, image)?;
+    }
+    if let Action::RemoveEntry(request) = &w.action {
+        storage::entry_retirement::begin(db, &w, &request.path)?;
     }
     if matches!(w.action, Action::RenameFile(_)) {
         storage::file_move::begin(db, &w)?;

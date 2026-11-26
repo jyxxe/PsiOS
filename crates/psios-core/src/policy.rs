@@ -420,6 +420,7 @@ pub(crate) const PRIVATE_RESOURCE_KINDS: &[&str] = &[
     crate::project::review_signal::REQUEST,
     crate::project::review_signal::RECEIPT,
     crate::artifact::retention::delayed::KIND,
+    storage::entry_retirement::KIND,
 ];
 
 pub fn visible(actor: &str, d: &Doc) -> bool {

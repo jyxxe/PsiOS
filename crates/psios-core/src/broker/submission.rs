@@ -299,7 +299,7 @@ fn plan(db: &Db<'_>, actor: &str, s: &Value, audience: &[Value]) -> Result<Doc> 
         "data_policy_ref": profile,
         "permission_delta_refs": [],
         "recovery_plan_ref": profile,
-        "irreversible_effects": match tool { "volume.delete" => vec!["Volume content deletion"], "backup.delete" => vec!["Backup content deletion"], _ => vec![] },
+        "irreversible_effects": match tool { "volume.delete" => vec!["Volume content deletion"], "backup.delete" => vec!["Backup content deletion"], storage::entry_retirement::TOOL => vec!["Volume entry deletion"], _ => vec![] },
         "use_scope": "SingleOperation",
         "digest_profile": {
             "digest_algorithm": "SHA-256",

@@ -109,6 +109,7 @@ fn entry(parent: &File, name: &str) -> Result<Option<Identity>> {
 
 fn check_target(root: &File, target: &Doc) -> Result<()> {
     if target.kind == "Volume" {
+        super::entry_retirement::guard_volume_retirement(root)?;
         let marker = child(root, "identity", OFlags::RDONLY)?;
         regular(&marker.metadata()?)?;
         let mut identity = Vec::new();
@@ -239,6 +240,9 @@ pub(crate) fn retire(
     };
     let retired = retired_name(&work.op.id);
     checkpoint(&location)?;
+    if work.target.kind == "Volume" {
+        super::entry_retirement::guard_volume_retirement(&root)?;
+    }
     require(
         Identity::file(&open_parent(&work.cfg, &work.target.kind)?)? == location.parent
             && entry(&parent, name)?.as_ref() == Some(&location.directory)
@@ -399,6 +403,9 @@ impl Reclamation {
                 "PreconditionFailed",
                 "reclamation requires the private retired directory",
             )?;
+            if self.target.kind == "Volume" {
+                super::entry_retirement::guard_volume_retirement(&root)?;
+            }
             remove_contents(&root, 0)?;
             require(
                 entry(&parent, &name)?.as_ref() == Some(&found),

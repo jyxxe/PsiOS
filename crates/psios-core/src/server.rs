@@ -371,6 +371,11 @@ fn reclaim_storage(s: Shared, stop: Arc<AtomicBool>, config: Config) -> Result<(
         {
             eprintln!("psiosd restore stage reclamation: {}", error.0.code);
         }
+        if !stop.load(Ordering::Acquire)
+            && let Err(error) = reclaim_one_volume_entry(&s, &config, &correlation)
+        {
+            eprintln!("psiosd volume entry reclamation: {}", error.0.code);
+        }
         let eviction_progress =
             match state(&s)?.transaction(&id("result-eviction-schedule"), |db| {
                 if stop.load(Ordering::Acquire) {
@@ -418,6 +423,16 @@ fn reclaim_storage(s: Shared, stop: Arc<AtomicBool>, config: Config) -> Result<(
             }
         };
         thread::park_timeout(delay);
+    }
+    Ok(())
+}
+
+fn reclaim_one_volume_entry(s: &Shared, config: &Config, correlation: &str) -> Result<()> {
+    use crate::storage::entry_retirement;
+    let selected = state(s)?.transaction(correlation, entry_retirement::next_disposal)?;
+    if let Some(disposal) = selected {
+        let result = disposal.run(config);
+        state(s)?.transaction(correlation, |db| disposal.finish(db, result))?;
     }
     Ok(())
 }

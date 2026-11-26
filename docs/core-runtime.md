@@ -111,6 +111,10 @@ Core 可选地先向该目标指定的解析器发出 TCP DNS 请求。按端点
 
 制品包含目标引用、启动 ID、网络命名空间和观测时间，并分别记录解析与连接结果。Connected 的范围是指定 TCP 端点。连接被拒绝或只有有效 DNS 回复时报告 Limited。没有这两类响应时报告 Offline。DNS 解析器的记录和 TCP 连通性证据不能证明应用层身份。改变端点、解析器或 DNS 名称会注销原资源并生成新授权目标。仅改超时保留身份并更新修订。队列中的旧目标请求按原引用复核。[TCP 与 DNS 进程验收](../tests/test_network_probe.py) · [格式 20 升级](../tests/network_probe_upgrade.py) · [Hickory DNS 协议库](https://docs.rs/hickory-proto/0.26.3/hickory_proto/)
 
+需要把探测用于自动化时，另行授予限定目标的 `node.observe_network_probe`。Task 输入沿用 `id` 与 `expected_resource_version`。提交成功后，从结果制品获取完整测量和 `network_probe_state_ref`。也可通过 `Resource.List` 查询 `NetworkProbeState`，按 `spec.probe_ref` 找到对应探针的状态。公共资源只包含探针引用、节点 ID、生命周期、规范化原因及状态变更时间。地址、端口和 DNS 细节保存在有授权限制的 Task 制品中。
+
+`Resource.Watch` 可以观察状态变更，`Schedule` 可按 `LifecycleEntered` 触发。探测成功连通时状态为 `Healthy`，明确拒绝或配置所需的 DNS 结果不符合时可为 `Unhealthy`，超时和无法确认的测量为 `Unknown`。Core 按持久派发顺序接受测量，重复状态只推进私有位置，不生成新的公共修订。最新测量制品用于离线核验，更新或重置状态后可回收前一制品。同一配置和网络命名空间内的服务重启保留状态。配置修订、内核启动或网络命名空间变化后重新观察，注销后状态为 `Retired`。[状态与事件的本机验收](../tests/test_network_probe_state.py)
+
 ### 受管 systemd 服务
 
 运维人员在本机配置中显式加入 `services`。先使用观察配置并重启守护进程。

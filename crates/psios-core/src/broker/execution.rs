@@ -466,6 +466,7 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                         | Action::StageArtifactRelease(_)
                         | Action::Logs(_)
                         | Action::Stop(_)
+                        | Action::ObserveNetworkProbe(_)
                 ) =>
             {
                 json!({"code":"Fenced"})
@@ -539,6 +540,9 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                 host::Output::Receipt(receipt) => host::apply(db, w, &receipt)?,
                 host::Output::OciImage(capture) => apps::capture::publish(db, w, *capture)?,
             };
+            if matches!(w.action, Action::ObserveNetworkProbe(_)) {
+                artifact::capacity::check_result(db, &t, &body)?;
+            }
             let a = artifact::publish(
                 db,
                 &t.owner,
@@ -550,6 +554,9 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                 }),
                 &body,
             )?;
+            if matches!(w.action, Action::ObserveNetworkProbe(_)) {
+                node::network::probe::state::bind_result(db, w, &body, &a)?;
+            }
             artifact::capacity::retain(db, &t, &a)?;
             close(
                 db,

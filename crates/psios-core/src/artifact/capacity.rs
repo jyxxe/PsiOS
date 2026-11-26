@@ -2,7 +2,9 @@
 use crate::{
     Error, Result,
     db::{Db, Doc},
-    err, policy, require,
+    err,
+    node::network::probe::state as probe_state,
+    policy, require,
 };
 use psios_api::ApiError;
 use rusqlite::{OptionalExtension, params};
@@ -12,6 +14,13 @@ use std::io::{self, Write};
 pub(crate) const FORMAT: u32 = crate::storage::file_move::FORMAT + 1;
 pub(crate) const SCHEMA: &str = include_str!("capacity.sql");
 pub(crate) const RESERVATION: i64 = 4 * 1024 * 1024;
+
+fn reservation(tool: &str) -> i64 {
+    match tool {
+        probe_state::TOOL => probe_state::RESULT_BYTES,
+        _ => RESERVATION,
+    }
+}
 
 fn charged(tool: &str) -> bool {
     policy::readonly(tool)
@@ -56,7 +65,7 @@ pub(crate) fn check_admission(db: &Db<'_>, actor: &str, tool: &str) -> Result<()
         let (reserved, retained) = usage(db, actor)?;
         if reserved
             .saturating_add(retained)
-            .saturating_add(RESERVATION)
+            .saturating_add(reservation(tool))
             > limit
         {
             let mut quota = ApiError::new("QuotaExceeded", "read result capacity exhausted");
@@ -83,7 +92,7 @@ pub(crate) fn reserve(db: &Db<'_>, task: &Doc, tool: &str) -> Result<()> {
         } else {
             "Reserved"
         };
-        insert(db, &task.id, &task.owner, RESERVATION, kind)?;
+        insert(db, &task.id, &task.owner, reservation(tool), kind)?;
     }
     Ok(())
 }
@@ -118,14 +127,17 @@ impl Write for BoundedSize {
 }
 
 pub(crate) fn check_result(db: &Db<'_>, task: &Doc, receipt: &Value) -> Result<()> {
-    let reservation: Option<i64> =
+    let remaining: Option<i64> = if task.spec["task_type"] == probe_state::TOOL {
+        Some(probe_state::RESULT_BYTES)
+    } else {
         db.c.query_row(
             "SELECT bytes FROM read_result_charges WHERE resource=?1 AND owner=?2 AND kind='Limited'",
             params![task.id, task.owner],
             |row| row.get(0),
         )
-        .optional()?;
-    if let Some(remaining) = reservation {
+        .optional()?
+    };
+    if let Some(remaining) = remaining {
         let mut bound = BoundedSize {
             remaining: u64::try_from(remaining)
                 .map_err(|_| err("RecoveryRequired", "negative read result reservation"))?,

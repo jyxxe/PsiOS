@@ -1,5 +1,6 @@
 //! Operator-configured DNS and TCP checks in the Core network namespace.
 mod dns;
+pub(crate) mod state;
 
 use super::namespace;
 use crate::{
@@ -108,18 +109,20 @@ fn fingerprint(probe: &NetworkProbeConfig) -> String {
 }
 
 pub fn sync(db: &Db<'_>, node: &str) -> Result<()> {
+    let host = namespace()?;
     let mut active = HashSet::new();
     for probe in &db.cfg.network_probes {
         let id = resource_id(node, probe);
         let spec =
             json!({"name":probe.name, "node_id":node, "configuration_digest":fingerprint(probe)});
-        upsert(
+        let registered = upsert(
             db,
             KIND,
             &id,
             spec,
             json!({"lifecycle":"Registered","name":probe.name,"node_id":node}),
         )?;
+        state::sync(db, &registered, &host)?;
         active.insert(id);
     }
     let registered =
@@ -130,7 +133,8 @@ pub fn sync(db: &Db<'_>, node: &str) -> Result<()> {
         let probe = db.get(id)?;
         let mut state = probe.body.clone();
         state["lifecycle"] = json!("Unregistered");
-        db.status(&probe, state)?;
+        let retired = db.status(&probe, state)?;
+        state::sync(db, &retired, &host)?;
     }
     Ok(())
 }
@@ -264,10 +268,14 @@ async fn dial(endpoint: SocketAddr) -> io::Result<TcpStream> {
     Ok(stream)
 }
 
-async fn observe(probe: &NetworkProbeConfig) -> Result<Value> {
+async fn observe(
+    probe: &NetworkProbeConfig,
+    check_authority: &mut impl FnMut() -> Result<()>,
+) -> Result<Value> {
     let deadline = ProbeDeadline::start(Duration::from_millis(probe.timeout_ms))?;
     let dns = match &probe.dns {
         Some(resolver) => {
+            check_authority()?;
             let report = deadline
                 .until_expiration(dns::observe(resolver, probe.endpoint.ip()))
                 .await?
@@ -282,6 +290,7 @@ async fn observe(probe: &NetworkProbeConfig) -> Result<Value> {
     {
         json!({"status":"Skipped","reason":"DnsUnverified"})
     } else {
+        check_authority()?;
         match deadline.until_expiration(dial(probe.endpoint)).await? {
             Some(Ok(stream)) => match stream.local_addr() {
                 Ok(local) => json!({"status":"Connected","local_address":local}),
@@ -309,12 +318,19 @@ async fn observe(probe: &NetworkProbeConfig) -> Result<Value> {
 }
 
 pub fn perform(work: &Work) -> Result<Value> {
+    perform_checked(work, &mut || Ok(()))
+}
+
+pub(crate) fn perform_checked(
+    work: &Work,
+    check_authority: &mut impl FnMut() -> Result<()>,
+) -> Result<Value> {
     let probe = definition(&work.cfg, &work.target)?;
     let namespace = namespace()?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let observation = runtime.block_on(observe(probe))?;
+    let observation = runtime.block_on(observe(probe, check_authority))?;
     Ok(json!({
         "target_ref":work.target.reference(), "boot_id":namespace.boot_id,
         "network_namespace_inode":namespace.network_namespace_inode, "observed_at":now(),

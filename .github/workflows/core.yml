@@ -60,6 +60,12 @@ jobs:
         run: PSIOS_TEST_SHELL_BROWSER=1 python3 -B -m unittest discover -s tests -p test_shell.py -k test_browser -v
       - name: Verify scoped IPv6 probes across a real private veth pair
         run: sudo unshare --net --propagation private python3 -B tests/network_probe_netns.py
+      - name: Reset durable probe observations across real network namespaces
+        run: |
+          sudo unshare --net sh -ec '
+            ip link set lo up
+            PSIOS_TEST_PROBE_NETNS=1 python3 -B -m unittest discover -s tests -p test_network_probe_state.py -k test_real_netns -v
+          '
       - name: Verify scoped addresses, routes and rules in a private Linux network namespace
         run: |
           sudo unshare --net sh -ec '

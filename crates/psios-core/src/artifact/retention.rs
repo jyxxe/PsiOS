@@ -210,6 +210,11 @@ pub fn evict(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
             "RecoveryRequired",
             "task result refers to a foreign artifact",
         )?;
+        require(
+            !crate::node::network::probe::state::retains_artifact(db.c, &artifact)?,
+            "Conflict",
+            "a network probe retains its latest measurement for verification",
+        )?;
         let mut evidence = db.c.prepare(
             "SELECT * FROM versions WHERE kind='RecoveryEvidence'
                AND json_extract(body,'$.evidence.observation_ref.resource_id')=?1",

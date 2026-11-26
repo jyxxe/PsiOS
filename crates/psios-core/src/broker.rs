@@ -34,7 +34,8 @@ use serde_json::{Value, json};
 use submission::authority;
 pub(crate) use submission::{
     bind_workflow_input, cancel_origin, lookup, prepare, prepare_scheduled, prepare_workflow,
-    retime_scheduled, retry, retry_in_session, submit, submit_scheduled, submit_workflow,
+    retime_scheduled, retry, retry_in_session, submit, submit_claimed_model_tool, submit_scheduled,
+    submit_workflow,
 };
 
 fn field<'v>(v: &'v Value, k: &str) -> &'v str {

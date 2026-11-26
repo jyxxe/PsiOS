@@ -1,7 +1,8 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use psios_api::{
     Client, LocalInventoryModel, OciImageCaptureRequest, OciPublisherSignature, ResourceRef,
-    SessionModel, StatusProvider, TaskOutputRequirement, WorkItemPriority, parse,
+    SessionModel, StatusProvider, TaskOutputRequirement, WorkAdmissionMode, WorkItemPriority,
+    parse,
 };
 use psios_core::{Config, DEFAULT_BACKUP_MAX_BYTES, MAX_BACKUP_BYTES};
 use serde_json::{Value, json};
@@ -399,12 +400,27 @@ enum Cmd {
         revision: String,
     },
     Node,
+    /// Show the local work admission mode and accepted work counts.
+    NodeWorkAdmission,
+    /// Change the exact local work admission revision as the local owner.
+    NodeWorkAdmissionSet {
+        revision: String,
+        #[arg(value_enum)]
+        mode: WorkAdmissionCommandMode,
+        reason: String,
+    },
     Validate {
         contract: String,
         #[arg(default_value = "-")]
         file: String,
     },
 }
+#[derive(Clone, Copy, ValueEnum)]
+enum WorkAdmissionCommandMode {
+    Open,
+    Draining,
+}
+
 #[derive(Subcommand)]
 enum ProjectCommand {
     /// Create a Project using a JSON declaration from a file or stdin.
@@ -722,6 +738,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Cmd::Node => c.call("Node.Get", json!({}))?,
+        Cmd::NodeWorkAdmission => serde_json::to_value(c.node_work_admission()?)?,
+        Cmd::NodeWorkAdmissionSet {
+            revision,
+            mode,
+            reason,
+        } => {
+            let mode = match mode {
+                WorkAdmissionCommandMode::Open => WorkAdmissionMode::Open,
+                WorkAdmissionCommandMode::Draining => WorkAdmissionMode::Draining,
+            };
+            serde_json::to_value(c.set_node_work_admission(&revision, mode, &reason)?)?
+        }
         Cmd::Whoami => c.call("Principal.WhoAmI", json!({}))?,
         Cmd::Capabilities => c.call("Capability.Discover", json!({}))?,
         Cmd::Status { delegation } => c.call(

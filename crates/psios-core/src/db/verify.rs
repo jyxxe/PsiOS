@@ -184,6 +184,9 @@ pub(super) fn check_artifacts(
     if identity.database_format >= artifact::retention::delayed::FORMAT {
         artifact::retention::delayed::verify(conn)?;
     }
+    if identity.database_format >= crate::node::work_admission::FORMAT {
+        crate::node::work_admission::verify(conn)?;
+    }
     if identity.database_format >= crate::node::service_control::FORMAT {
         crate::node::service_control::verify(conn)?;
     }

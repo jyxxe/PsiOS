@@ -4,6 +4,7 @@ use crate::{
     db::{Db, Doc},
     decode, err,
     host::Action,
+    node::work_admission,
     policy, require,
 };
 use rusqlite::{OptionalExtension, params};
@@ -155,7 +156,20 @@ pub(super) fn select(
     action: &Action,
     target: &Doc,
     has_dependencies: bool,
+    recovery_only: bool,
 ) -> Result<Option<Doc>> {
+    if recovery_only {
+        if has_dependencies {
+            return Err(work_admission::closed());
+        }
+        let operation = linked_operation(db, action, target)?.ok_or_else(work_admission::closed)?;
+        require(
+            capacity(db)?.recovery < db.cfg.recovery_queue_limit,
+            "QueueFull",
+            "recovery queue full",
+        )?;
+        return reserve(db, operation).map(Some);
+    }
     let used = capacity(db)?;
     let exhausted = if used.ordinary >= db.cfg.queue_limit {
         "durable queue full"
@@ -173,6 +187,10 @@ pub(super) fn select(
     )?;
     let operation =
         linked_operation(db, action, target)?.ok_or_else(|| err("QueueFull", exhausted))?;
+    reserve(db, operation).map(Some)
+}
+
+fn reserve(db: &Db<'_>, operation: Doc) -> Result<Doc> {
     let already: bool = db.c.query_row(
         "SELECT EXISTS(SELECT 1 FROM recovery_admissions WHERE operation=?1)",
         [&operation.id],
@@ -183,7 +201,7 @@ pub(super) fn select(
         "QueueFull",
         "the unresolved operation has a pending recovery task",
     )?;
-    Ok(Some(operation))
+    Ok(operation)
 }
 
 pub(super) fn bind(db: &Db<'_>, task: &Doc, operation: &Doc) -> Result<()> {

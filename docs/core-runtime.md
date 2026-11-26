@@ -312,6 +312,14 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 
 `Task.Admission`、`Client::task_admission` 和 `psiosctl task-admission` 公开当前主体的普通准入用量，要求 `task.submit`。[竞争、重启及对账验收](../tests/test_principal_admission.py)
 
+### 维护期间关闭本机工作准入
+
+本机所有者可调用 `Node.WorkAdmission.Get` 查看持久准入模式、活动 Task 阶段、恢复队列和模型租约数量。以返回的版本调用 `Node.WorkAdmission.Set`，提交 `expected_resource_version`、`mode` 和 `reason`。CLI 对应 `psiosctl node-work-admission` 和 `psiosctl node-work-admission-set REVISION draining REASON`。维护完成后，使用当前版本设置 `Open` 或 CLI 的 `open`。Rust SDK 提供同样的读写操作。
+
+`Draining` 暂停新普通 Task 和重试准入、Schedule 与 Workflow 的新派发以及新模型租约。已接受的 Task 可领取、审批、执行或取消，原请求重放可查询既有回执。已有模型租约可在原范围内结算本轮决定及其工具 Task，下一轮领取仍需准入开放。与原未决 Operation 精确匹配的核验 Task 可进入既有有界恢复队列，并继续遵循自身授权和预算。模式在 Core 重启后保留。
+
+`Node.Configure` 的 `Cordoned` 继续独立控制派发。格式 93 升级时，独立准入模式初始值为 `Open`，原节点模式和已接受工作沿用原版本。本机准入计数用于观察 Task、恢复队列及模型状态。服务停止、卷释放及外部操作是否达到维护安全点，各自需要观测回执。[运维顺序](v1/docs/13-operations-release-governance.md) · [准入验收](../tests/test_node_work_admission.py) · [格式 92 升级](../tests/node_work_admission_upgrade.py)
+
 ### 按主体限制块式读取结果
 
 `read_result_bytes_per_principal` 可为普通只读 Task 的块式结果设置每主体 4 MiB 至 1 TiB 的上限。接受 Task 时为本次结果预留 4 MiB。完成时按实际 JSON 字节从预留转为保留，用量和制品在同一事务提交。失败、取消及显式回收释放对应字节。设置上限后，`Task.Admission.read_results` 显示预留、保留和上限。额度吃满时，提交返回可退避重试的 `QuotaExceeded`。

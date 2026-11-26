@@ -8,9 +8,12 @@ pub(crate) mod provider_authority;
 mod queue;
 mod registry;
 pub(crate) mod tool_context;
+#[cfg(test)]
+mod work_admission_tests;
 use crate::{
     broker,
     db::{Db, Doc},
+    node::work_admission,
     policy, *,
 };
 pub(crate) use lease::pending_for_grant;
@@ -418,6 +421,9 @@ pub fn claim(db: &Db<'_>, actor: &str, p: &Value) -> Result<Result<Value>> {
             Err(failure)
         };
     }
+    if work_admission::draining(db)? {
+        return Ok(Err(work_admission::closed()));
+    }
     require(
         state(&s) == "AwaitingModel" || (state(&s) == "ModelInFlight" && !clock.current(db, &s)?),
         "Conflict",
@@ -498,6 +504,10 @@ fn model_has_slot(db: &Db<'_>, clock: &lease::Clock, model: &Doc) -> Result<bool
 
 fn has_turn(s: &Doc) -> bool {
     s.body["turn"].as_u64().unwrap() < s.body["max_turns"].as_u64().unwrap()
+}
+
+pub(crate) fn model_tool_lease_live(db: &Db<'_>, session: &Doc) -> Result<bool> {
+    lease::Clock::sample()?.current(db, session)
 }
 
 // Budget pressure is a scheduling decision. Persistence errors roll back the
@@ -718,7 +728,7 @@ pub fn respond(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
                 &s.owner,
                 &json!({"tool":tool,"input":input,"key":p.lease_id,"delegation_id":s.spec["delegation_id"]}),
             )?;
-            let receipt = broker::submit(db, &s.owner, &request, None)?;
+            let receipt = broker::submit_claimed_model_tool(db, &s, &p.lease_id, &request)?;
             task = receipt["task_id"].as_str().map(str::to_owned);
             b["last_task"] = receipt["task_id"].clone();
             b["lifecycle"] = json!("WaitingTask");

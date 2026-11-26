@@ -23,6 +23,10 @@
 - 原生 Agent 可查询自己在获准项目内负责的工作项，并根据当前最低优先级选择执行。派发复核项目版本及授权。管理者仅能修改符合条件的就绪工作项，原优先级与审核决定保留在历史中。已验证撤权、并发修改、排队重启和真实格式 88→89 升级。[Agent 验收](../tests/test_agent_assigned_work.py) · [优先级验收](../tests/test_work_item_priority.py)
 - 本机所有者可对同一个操作主动回退备用网口。已用独立 Linux 网络命名空间验证原地址及真实 TCP 流量在超时前恢复。回执入库故障和守护进程强杀后，D-Bus 只有一次回退调用，网口保留占用直至授权对账。管理链路远程确认与 DNS 变更仍待验收。[NetworkManager 验收](../tests/network_trial_abort.py)
 
+## 本机维护准入
+
+- 本机所有者可持久关闭新 Task 和模型租约准入。已接收 Task 可以继续，已有模型租约可以结算当前工具决定，有精确原操作的核验可使用恢复队列。已验证并发设置、强杀重启、已有审批、真实恢复丢回执、定时调度等待以及 Workflow 后继恢复。格式 92→93 保留原调度模式及已接受工作。服务和卷的安全交接仍依赖各模块的证据。[准入验收](../tests/test_node_work_admission.py) · [升级验收](../tests/node_work_admission_upgrade.py)
+
 ## 原生安装与停机更新
 
 - 便携归档中的安装器核验新盘构建回执和镜像，按强制身份与精确审批写入空白整盘。实际 Linux loop 块设备已验证分区先于 GPT 发布、中断对账和禁止重复写入。默认 Virtio 路径已在隔离 Ubuntu 来宾中验证真实设备身份、精确审批和全盘摘要。写出的盘经两次 OVMF 启动后保留同一个 Task 结果。物理安装和跨宿主启动对账仍待验收。[原生安装说明](native-disk.md#安装到空白块设备) · [loop 故障验收](../tests/native_install.py) · [Virtio 验收](../tests/native_install_virtio.py)

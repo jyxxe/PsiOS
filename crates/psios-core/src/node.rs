@@ -8,6 +8,7 @@ pub mod process;
 pub(crate) mod service_control;
 pub(crate) mod service_manager;
 pub mod service_state;
+pub(crate) mod work_admission;
 use crate::{
     db::{Db, Doc},
     host::{Action, ServiceRestart, Work},

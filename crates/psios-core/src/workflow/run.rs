@@ -145,7 +145,7 @@ fn advance(db: &Db<'_>, rejection: &mut Option<Rejection>) -> Result<()> {
     }
     let clock = policy::deadline::Clock::sample()?;
     let stamp = Utc::now().timestamp_millis();
-    let enabled = node::enabled(db)?;
+    let enabled = node::enabled(db)? && !node::work_admission::draining(db)?;
     let work =
         db.c.query_row(
             "WITH candidates AS (

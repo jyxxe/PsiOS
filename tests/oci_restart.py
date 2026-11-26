@@ -4,6 +4,7 @@ import os
 import signal
 import sqlite3
 import subprocess
+from uuid import uuid4
 
 from oci_recovery import check_kernel_limits
 from support import Failure, target
@@ -52,13 +53,33 @@ def verify_restart(node, docker, spec, app_ids):
     def real_start(cid):
         return subprocess.check_output(docker + ["inspect", "--format", "{{.State.StartedAt}}", cid], text=True).strip()
 
+    database = node.state / "state.db"
+
+    def verify_fails(message):
+        result = subprocess.run(node.daemon + ["verify"], capture_output=True, timeout=15)
+        assert result.returncode and message in result.stderr, result
+
     first, old_proof = inspect(app)
     cid = first["container_id"]
     assert real_start(cid) == first["started_at"] and starts.read_text() == "restart\n", first
     bad = dict(params(app, first), expected_started_at="1970-01-01T00:00:00Z")
     refused = node.wait(submit("application.restart", bad), autoapprove=True)
-    assert refused["lifecycle"] == "Failed" and refused["conditions"][0]["type"] == "PreconditionFailed", refused
+    assert (refused["lifecycle"], refused["outcome_knowledge"], refused["conditions"][0]["type"]) == (
+        "Failed", "NotStarted", "PreconditionFailed"), refused
     assert real_start(cid) == first["started_at"] and starts.read_text() == "restart\n"
+
+    with sqlite3.connect(database, timeout=10) as connection:
+        connection.execute("""CREATE TRIGGER refuse_oci_restart_checkpoint BEFORE INSERT ON versions
+            WHEN NEW.kind='OCIRestartCheckpoint'
+            BEGIN SELECT RAISE(ABORT, 'injected invocation checkpoint failure'); END""")
+    try:
+        refused = node.wait(submit("application.restart", params(app, first)), autoapprove=True)
+        assert (refused["lifecycle"], refused["outcome_knowledge"], refused["conditions"][0]["type"]) == (
+            "Failed", "NotStarted", "StorageUnavailable"), refused
+        assert real_start(cid) == first["started_at"] and starts.read_text() == "restart\n"
+    finally:
+        with sqlite3.connect(database, timeout=10) as connection:
+            connection.execute("DROP TRIGGER refuse_oci_restart_checkpoint")
 
     accepted = submit("application.restart", params(app, first))
     waiting = node.wait(accepted)
@@ -75,8 +96,8 @@ def verify_restart(node, docker, spec, app_ids):
         check_kernel_limits(second, docker, cid)
 
     app_id = app["resource_id"]
-    with sqlite3.connect(node.state / "state.db", timeout=10) as database:
-        database.execute(f"""CREATE TRIGGER lose_oci_restart BEFORE INSERT ON versions
+    with sqlite3.connect(database, timeout=10) as connection:
+        connection.execute(f"""CREATE TRIGGER lose_oci_restart BEFORE INSERT ON versions
             WHEN NEW.id='{app_id}' AND NEW.body->'last_restart_checkpoint_ref' IS NOT NULL
             BEGIN SELECT RAISE(ABORT, 'injected OCI restart receipt loss'); END""")
     lost_task = submit("application.restart", params(app, second))
@@ -85,13 +106,27 @@ def verify_restart(node, docker, spec, app_ids):
     actual = real_start(cid)
     assert actual != second["started_at"]
     node.stop(signal.SIGKILL)
-    with sqlite3.connect(node.state / "state.db", timeout=10) as database:
-        database.execute("DROP TRIGGER lose_oci_restart")
+    operation = lost["operation_refs"][0]
+    operation_id = operation["resource_id"]
+    with sqlite3.connect(database, timeout=10) as connection:
+        connection.execute("DROP TRIGGER lose_oci_restart")
+        connection.execute("DELETE FROM holds WHERE volume=? AND holder=?", (app_id, operation_id))
+    verify_fails(b"restart exclusive application hold")
+    blocked = subprocess.run(node.daemon + ["serve"], capture_output=True, timeout=15)
+    assert blocked.returncode and b"RecoveryRequired" in blocked.stderr and b"psiosd ready" not in blocked.stderr, blocked
+    with sqlite3.connect(database, timeout=10) as connection:
+        connection.execute("INSERT INTO holds VALUES(?,?)", (app_id, operation_id))
+        checkpoint_id, checkpoint = connection.execute("SELECT id,body FROM current WHERE kind='OCIRestartCheckpoint' "
+                                                       "AND spec->>'operation_id'=?", (operation_id,)).fetchone()
+        connection.execute("UPDATE versions SET body=json_set(body,'$.before.boot_id',?) WHERE id=? AND rev=1",
+                           (str(uuid4()), checkpoint_id))
+    verify_fails(b"checkpoint disagrees with approved invocation or volume")
+    with sqlite3.connect(database, timeout=10) as connection:
+        connection.execute("UPDATE versions SET body=? WHERE id=? AND rev=1", (checkpoint, checkpoint_id))
     node.start()
     assert node.wait(lost_task) == lost
     competing = node.wait(node.submit("application.stop", target(app)), autoapprove=True)
     assert competing["conditions"][0]["type"] == "Conflict", competing
-    operation = lost["operation_refs"][0]
     try:
         node.call("Operation.Reconcile", {**target(operation), "evidence_ref": old_proof})
     except Failure as stale:
@@ -115,6 +150,20 @@ def verify_restart(node, docker, spec, app_ids):
     assert settled["lifecycle"] == "Succeeded", settled
     app = node.call("Artifact.Read", {"reference": settled["result"]["artifact_refs"][0]})
     assert real_start(cid) == actual and node.get(volume["resource_id"])["reference"] == volume
+    for task in (accepted, lost_task):
+        node.call("Task.Archive", target(node.get(task)["reference"]))
     app = node.perform("application.stop", target(app))
     node.perform("application.uninstall", target(app))
     assert starts.read_text() == "restart\n" * 3, starts.read_text()
+    node.stop()
+    subprocess.run(node.daemon + ["verify"], check=True, capture_output=True, timeout=15)
+    with sqlite3.connect(database, timeout=10) as connection:
+        confirmation_id, confirmation = connection.execute("SELECT id,body FROM current WHERE kind='OCIRestartConfirmation' "
+                                                           "AND spec->>'operation_id'=?", (operation_id,)).fetchone()
+        connection.execute("UPDATE versions SET body=json_set(body,'$.result_ref',json(?)) WHERE id=? AND rev=1",
+                           (json.dumps(completed["result"]["artifact_refs"][0]), confirmation_id))
+    verify_fails(b"confirmation disagrees with the original effect or receipt")
+    with sqlite3.connect(database, timeout=10) as connection:
+        connection.execute("UPDATE versions SET body=? WHERE id=? AND rev=1", (confirmation, confirmation_id))
+    subprocess.run(node.daemon + ["verify"], check=True, capture_output=True, timeout=15)
+    node.start()

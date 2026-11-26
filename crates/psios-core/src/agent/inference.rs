@@ -21,10 +21,25 @@ pub(super) fn strict(model: &Doc) -> bool {
     model.spec["inference_outcome_policy"] == STRICT
 }
 
-pub(super) fn decorate_claim(model: &Doc, reply: &mut Value) {
+pub(super) fn decorate_claim(
+    db: &Db<'_>,
+    model: &Doc,
+    lease: &str,
+    reply: &mut Value,
+) -> Result<()> {
     if strict(model) {
         reply["inference_outcome_policy"] = json!(STRICT);
+        let witnessed: bool = db.c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM model_provider_authorities WHERE lease=?1)",
+            [lease],
+            |row| row.get(0),
+        )?;
+        if witnessed {
+            reply["late_decision_observation"] = json!(true);
+            reply["model_ref"] = model.reference();
+        }
     }
+    Ok(())
 }
 
 pub(super) fn bind(

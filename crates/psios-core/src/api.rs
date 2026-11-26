@@ -54,6 +54,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Model.ClaimStatus" => agent::claim_status(db, actor, p),
         "Model.Respond" => agent::respond(db, actor, p),
         "Model.ReportFailure" => agent::inference::report(db, actor, p),
+        "Model.ObserveLateDecision" => agent::late_decision::observe(db, actor, p),
         "Mailbox.Bind" => agent::mail::bind(db, actor, p),
         "Mailbox.Close" => agent::mail::close(db, actor, p),
         "Mailbox.Read" => agent::mail::read(db, actor, p),

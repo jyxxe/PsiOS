@@ -46,6 +46,7 @@
 
 - 会话可按配置将最近的有界工具结果纳入模型上下文。Core 在原模型租约上固定会话修订、上下文摘要与实际制品引用。已验证升级保留旧租约、内容过期后的授权修复、截断和引用模式。[模型上下文](../tests/agent_context_upgrade.py) · [结果材料验收](../tests/test_agent_tool_context.py)
 - 模型版本可启用严格结算。Provider 报告请求发送前失败或结果未知，Core 保留原租约和结算修订。确认未发送时，所有者可按原会话修订和剩余预算恢复。发送后失联或 Provider 进程终止时，会话停止自动重新推理。已通过真实 Unix socket HTTP 传输、响应丢失、进程强杀和旧租约升级验收。云提供者独立提供的幂等键、计费对账和多节点接管待开发。[API 验收](../tests/test_model_inference.py) · [Provider 传输验收](../tests/test_model_provider_outcome.py)
+- 原严格租约的 Provider 可把迟到决策记录为摘要证据。真实 HTTP 验收覆盖直接与队列领取、两次传输丢失、Core 强杀恢复、撤权与替代授权、离线引用核验，以及格式 94→95 后沿用原签发证据。原任务、会话结局和已扣额度随各自账本保留。[迟到证据](../tests/test_model_late_decision.py) · [升级验收](../tests/model_late_decision_upgrade.py)
 
 ## 受管服务调用与恢复
 

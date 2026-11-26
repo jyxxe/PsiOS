@@ -1,6 +1,7 @@
 //! The local runtime coordinates model decisions with (and never independently executes) broker Tasks.
 pub(crate) mod fallback;
 pub(crate) mod inference;
+pub(crate) mod late_decision;
 mod lease;
 pub mod mail;
 pub(crate) mod model_time;
@@ -251,7 +252,7 @@ pub fn history(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let s = db.of(&p.id, "Session")?;
     policy::owned(actor, &s)?;
     policy::can(db, actor, "task.read")?;
-    let turns=db.c.prepare("SELECT t.turn,t.lease,t.expires,t.task,t.receipt,c.context_digest,i.receipt
+    let mut turns=db.c.prepare("SELECT t.turn,t.lease,t.expires,t.task,t.receipt,c.context_digest,i.receipt
         FROM session_turns t LEFT JOIN model_context_snapshots c ON c.lease=t.lease
         LEFT JOIN model_inference_leases i ON i.lease=t.lease
         WHERE t.session=?1 ORDER BY t.turn")?
@@ -266,6 +267,14 @@ pub fn history(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             }
             Ok(view)
         })?.collect::<rusqlite::Result<Vec<_>>>()?;
+    for turn in &mut turns {
+        let lease = turn["lease_id"]
+            .as_str()
+            .ok_or_else(|| err("RecoveryRequired", "model history is missing its lease ID"))?;
+        if let Some(observation) = late_decision::receipt(db.c, lease)? {
+            turn["late_decision_observation"] = observation;
+        }
+    }
     let tasks=db.c.prepare("SELECT task,turn,attempt FROM session_tasks WHERE session=?1 ORDER BY turn,attempt")?
        .query_map([&s.id],|r|Ok(json!({"task_id":r.get::<_,String>(0)?,"turn":r.get::<_,u32>(1)?,"attempt":r.get::<_,u32>(2)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(json!({"session_ref":s.reference(),"turns":turns,"tasks":tasks}))
@@ -494,7 +503,7 @@ fn replay_claim(
         (context(db, s, skill, model)?, None)
     };
     let mut result = lease_info(&lease, &until, turn, ctx, true, digest.as_deref());
-    inference::decorate_claim(model, &mut result);
+    inference::decorate_claim(db, model, &lease, &mut result)?;
     Ok(Some(result))
 }
 
@@ -586,7 +595,7 @@ fn allocate_turn(
         serving_authority.as_ref(),
     )?;
     let mut result = lease_info(&lease, &until, turn, ctx, false, digest.as_deref());
-    inference::decorate_claim(m, &mut result);
+    inference::decorate_claim(db, m, &lease, &mut result)?;
     Ok(Ok(result))
 }
 

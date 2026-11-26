@@ -4,6 +4,7 @@ pub(crate) mod inference;
 mod lease;
 pub mod mail;
 pub(crate) mod model_time;
+pub(crate) mod provider_authority;
 mod queue;
 mod registry;
 pub(crate) mod tool_context;
@@ -478,6 +479,7 @@ fn replay_claim(
         "Fenced",
         "model lease no longer current",
     )?;
+    provider_authority::require_current(db, s, model, &lease)?;
     let (ctx, digest) = if tool_context::enabled(s) {
         let (ctx, digest) = tool_context::replay(db, s, skill, model, &lease, turn)?;
         (ctx, Some(digest))
@@ -516,6 +518,9 @@ fn allocate_turn(
         Ok(window) => window,
         Err(refusal) => return Ok(Err(refusal)),
     };
+    let serving_authority = inference::strict(m)
+        .then(|| provider_authority::select(db, m))
+        .transpose()?;
     let turn = s.body["turn"].as_u64().unwrap() as u32 + 1;
     let lease = id("model-call");
     let until = (chrono::Utc::now() + chrono::Duration::milliseconds(window.millis))
@@ -552,13 +557,23 @@ fn allocate_turn(
     if let Some(digest) = &digest {
         usage["context_digest"] = json!(digest);
     }
+    if let Some(binding) = &serving_authority {
+        usage["provider_authority_digest"] = json!(binding.digest());
+    }
     let usage = db.record("ModelUsage", &s.owner, usage)?;
     if let Some(digest) = &digest {
         tool_context::bind(db, s, &lease, &usage, digest)?;
     }
     b["current_usage_ref"] = usage.reference();
     let issued = db.status(s, b)?;
-    inference::bind(db, &issued, m, clock, clock.boot.millis + window.millis)?;
+    inference::bind(
+        db,
+        &issued,
+        m,
+        clock,
+        clock.boot.millis + window.millis,
+        serving_authority.as_ref(),
+    )?;
     let mut result = lease_info(&lease, &until, turn, ctx, false, digest.as_deref());
     inference::decorate_claim(m, &mut result);
     Ok(Ok(result))
@@ -688,6 +703,7 @@ pub fn respond(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "Fenced",
         "model response outside current lease",
     )?;
+    provider_authority::require_current(db, &s, &model, &p.lease_id)?;
     let mut b = s.body.clone();
     let mut task = None;
     match decode::<Decision>(&p.decision)? {

@@ -33,12 +33,25 @@ pub(super) fn bind(
     model: &Doc,
     clock: &Clock,
     deadline: i64,
+    authority: Option<&provider_authority::Binding>,
 ) -> Result<()> {
-    if strict(model) {
+    if let Some(authority) = authority {
+        require(
+            strict(model),
+            "RecoveryRequired",
+            "unexpected provider authority on a legacy lease",
+        )?;
         db.c.execute(
             "INSERT INTO model_inference_leases(lease,session_revision,model,boot_id,time_ns,deadline_boot_ms)
              VALUES(?1,?2,?3,?4,?5,?6)",
             params![session.body["current_lease"].as_str(),session.rev,model.id,clock.boot.boot_id,clock.time_ns,deadline],
+        )?;
+        authority.persist(db, current_lease(session)?)?;
+    } else {
+        require(
+            !strict(model),
+            "RecoveryRequired",
+            "strict lease has no issuing provider authority",
         )?;
     }
     Ok(())
@@ -263,6 +276,7 @@ pub fn report(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
         "Fenced",
         "model failure report outside current strict lease",
     )?;
+    provider_authority::require_current(db, &session, &model, &report.lease_id)?;
     if outcome == NOT_STARTED {
         let budget = session.body["budget_ref"]["resource_id"]
             .as_str()

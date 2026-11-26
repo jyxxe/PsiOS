@@ -1,5 +1,6 @@
 """Compare fenced block layouts with Linux sysfs and optional real loop devices."""
 from contextlib import contextmanager
+import json
 import os
 from pathlib import Path
 import signal
@@ -100,6 +101,49 @@ class BlockLayoutTests(unittest.TestCase):
         self.addCleanup(self.node.close)
         self.scope = self.node.call("Node.Get", {})["reference"]["resource_id"]
         self.grant = issue(self.node, "local-owner", self.scope)
+
+    def enable_reconciler(self):
+        self.node.stop()
+        config = json.loads(self.node.config.read_text())
+        config["block_device_reconcile_ms"] = 250
+        self.node.config.write_text(json.dumps(config))
+        self.node.start()
+
+    def tracking_delegation(self):
+        return self.node.call("Grant.Issue", {"principal_id": "local-owner", "ttl_seconds": 120, "units": 8,
+            "actions": ["node.track_block_device", "task.submit", "task.read"], "tool_targets": [self.scope]})
+
+    def enroll_for_reconciliation(self, sysfs, grant):
+        node = self.node
+        dev = (sysfs / "dev").read_text().strip()
+        sample = observe_trackable(node, self.grant, dev)
+        task = node.prepare("node.track_block_device", {"major_minor": dev, "expected": sample["fence"]},
+                            delegation=grant["delegation_ref"]["resource_id"])
+        return receipt(node, node.call("Task.Submit", task)["task_id"])
+
+    def tracked_reader(self, device):
+        node = self.node
+        actor = node.call("Agent.Register", {"name": "tracked-block-observer"})
+        grant = node.call("Grant.Issue", {"principal_id": actor["principal_id"], "ttl_seconds": 120, "units": 8,
+            "actions": ["device.block_layout", "task.submit", "task.read", "resource.read", "event.read"],
+            "tool_targets": [device["resource_id"]]})
+        return actor["token"], grant["delegation_ref"]["resource_id"]
+
+    def wait_revision(self, device, token, version, lifecycle):
+        deadline = time.monotonic() + 7
+        while True:
+            current = self.node.call("BlockDevice.Get", {"id": device["resource_id"]}, token)
+            actual = (current["reference"]["version"], current["state"]["lifecycle"])
+            if actual == (version, lifecycle) or time.monotonic() >= deadline:
+                self.assertEqual(actual, (version, lifecycle), current)
+                return current
+            time.sleep(.05)
+
+    def assert_exact_event_refs(self, cursor, references):
+        report = self.node.call("Event.Poll", {"cursor": cursor})
+        events = report["events"]
+        self.assertEqual([event["resource_ref"] for event in events], references, events)
+        return report["cursor"]
 
     def test_sysfs_geometry_and_fence(self):
         node = self.node
@@ -297,3 +341,97 @@ class BlockLayoutTests(unittest.TestCase):
 
         node.stop()
         subprocess.run(node.daemon + ["verify"], check=True, stdout=subprocess.DEVNULL, timeout=20)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_BLOCK_LOOP") == "1", "requires read-only loop fixtures")
+    def test_loop_reconciler_persists_geometry_and_detects_reuse_across_process_death(self):
+        node = self.node
+        self.enable_reconciler()
+        first, second = node.base / "watched-first.raw", node.base / "watched-second.raw"
+        scratch_gpt(first)
+        scratch_gpt(second)
+        tracker = self.tracking_delegation()
+        with attached(first) as (name, sysfs):
+            enrolled = self.enroll_for_reconciliation(sysfs, tracker)
+            original = enrolled["device_ref"]
+            token, _ = self.tracked_reader(original)
+            where = {"kind": "BlockDevice", "id": original["resource_id"]}
+            cursor = node.call("Resource.List", where)["watch_start_cursor"]
+            self.assertEqual(node.call("Resource.List", where, token)["items"], [])
+            before = self.wait_revision(original, token, "r1", "Present")
+            with first.open("r+b") as disk:
+                disk.truncate(18 * 1024 * 1024)
+            subprocess.run(["losetup", "--set-capacity", Path("/dev") / name], check=True, timeout=8)
+            changed = self.wait_revision(original, token, "r2", "Present")
+            self.assertEqual(changed["state"]["identity"], before["state"]["identity"])
+            self.assertNotEqual(changed["state"]["layout_digest"], before["state"]["layout_digest"])
+            self.assertEqual(changed["state"]["device_generation"], "2")
+            after_resize = self.assert_exact_event_refs(cursor, [changed["reference"]])
+            self.assertEqual(node.call("Resource.Watch", {"cursor": after_resize, "timeout_ms": 750})["events"], [])
+            node.stop(signal.SIGKILL)
+
+        with attached(second, name) as (_, sysfs):
+            self.assertEqual((sysfs / "dev").read_text().strip(), enrolled["identity"]["major_minor"])
+            self.assertNotEqual((sysfs / "diskseq").read_text().strip(), enrolled["identity"]["disk_sequence"])
+            node.start()
+            terminal = self.wait_revision(original, token, "r3", "Replaced")
+            self.assertEqual(terminal["state"]["identity"], enrolled["identity"])
+            self.assertIsNone(terminal["state"]["layout_digest"])
+            self.assertNotIn("layout", terminal["state"])
+            self.assert_exact_event_refs(cursor, [changed["reference"], terminal["reference"]])
+            replacement = self.enroll_for_reconciliation(sysfs, tracker)["device_ref"]
+            self.assertNotEqual(replacement["resource_id"], original["resource_id"])
+            with self.assertRaises(Failure) as denied:
+                node.call("BlockDevice.Get", {"id": replacement["resource_id"]}, token)
+            self.assertEqual(denied.exception.code, "PermissionDenied")
+            self.assertEqual(node.call("BlockDevice.Get", {"id": original["resource_id"]}, token), terminal)
+            self.assert_exact_event_refs(cursor, [changed["reference"], terminal["reference"]])
+            node.stop()
+            subprocess.run([*node.daemon, "verify"], check=True, stdout=subprocess.DEVNULL, timeout=20)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_MASK_BLOCK") == "1", "requires a private mount namespace")
+    def test_loop_reconciler_does_not_treat_masked_sysfs_as_absent(self):
+        # The opt-in test may cover /sys/dev/block only inside a non-propagating namespace.
+        namespace = Path("/proc/self/ns/mnt").readlink()
+        self.assertNotEqual(namespace, Path(f"/proc/{os.getppid()}/ns/mnt").readlink())
+        for mount in Path("/proc/self/mountinfo").read_text().splitlines():
+            fields = mount.split(" - ", 1)[0].split()
+            if fields[4] in ("/", "/sys", "/sys/dev", str(BLOCK)):
+                self.assertFalse(any(field.startswith("shared:") for field in fields[6:]), mount)
+        node = self.node
+        self.enable_reconciler()
+        image = node.base / "watched-masked.raw"
+        scratch_gpt(image)
+        empty = node.base / "private-masked-sysfs"
+        empty.mkdir()
+        tracker = self.tracking_delegation()
+        with attached(image) as (name, sysfs):
+            original = self.enroll_for_reconciliation(sysfs, tracker)["device_ref"]
+            token, delegation = self.tracked_reader(original)
+            cursor = node.call("Resource.List", {"kind": "BlockDevice", "id": original["resource_id"]})[
+                "watch_start_cursor"]
+            before = self.wait_revision(original, token, "r1", "Present")
+            node.stop()
+            subprocess.run(["mount", "--bind", empty, BLOCK], check=True, timeout=8)
+            try:
+                self.assertEqual(list(BLOCK.iterdir()), [])
+                with image.open("r+b") as disk:
+                    disk.truncate(18 * 1024 * 1024)
+                subprocess.run(["losetup", "--set-capacity", Path("/dev") / name], check=True, timeout=8)
+                node.start()
+                request = node.prepare("device.block_layout", target(original), token=token, delegation=delegation)
+                failed = node.wait(node.call("Task.Submit", request, token)["task_id"])
+                self.assertEqual(failed["conditions"][0]["type"], "DependencyUnavailable", failed)
+                deadline = time.monotonic() + 1
+                while time.monotonic() < deadline:
+                    current = node.call("BlockDevice.Get", {"id": original["resource_id"]}, token)
+                    self.assertEqual(current, before)
+                    time.sleep(.05)
+                self.assert_exact_event_refs(cursor, [])
+            finally:
+                subprocess.run(["umount", BLOCK], check=True, timeout=8)
+
+            changed = self.wait_revision(original, token, "r2", "Present")
+            self.assertNotEqual(changed["state"]["layout_digest"], before["state"]["layout_digest"])
+            self.assert_exact_event_refs(cursor, [changed["reference"]])
+            node.stop()
+            subprocess.run([*node.daemon, "verify"], check=True, stdout=subprocess.DEVNULL, timeout=20)

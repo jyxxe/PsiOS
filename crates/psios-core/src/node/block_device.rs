@@ -1,4 +1,6 @@
 //! A named, boot-local scope for a verified whole block device.
+pub(crate) mod reconcile;
+
 use super::block::{self, Fence, Presence};
 use crate::{
     ById, Result,
@@ -136,6 +138,10 @@ pub(super) fn observe(work: &Work) -> Result<Value> {
         })?;
         return Ok(unobserved(lifecycle, timestamp));
     }
+    sample(&expected)
+}
+
+fn sample(expected: &Identity) -> Result<Value> {
     if crate::linux_clock::BootClock::sample()?.boot_id != expected.boot_id {
         return Ok(unobserved("BootEnded", &now()));
     }
@@ -178,10 +184,13 @@ fn state(identity: &Identity, receipt: &Value, generation: i64) -> Value {
            "layout_digest":receipt["fence"]["layout_digest"], "device_generation":generation.to_string()})
 }
 
+fn changes_state(existing: &Doc, receipt: &Value) -> bool {
+    existing.body["lifecycle"] != receipt["lifecycle"]
+        || existing.body["layout_digest"] != receipt["fence"]["layout_digest"]
+}
+
 fn update(db: &Db<'_>, existing: &Doc, expected: &Identity, receipt: &Value) -> Result<Doc> {
-    if existing.body["lifecycle"] == receipt["lifecycle"]
-        && existing.body["layout_digest"] == receipt["fence"]["layout_digest"]
-    {
+    if !changes_state(existing, receipt) {
         return Ok(existing.clone());
     }
     require(

@@ -93,7 +93,10 @@ def verify_kernel(docker, report, data, reference):
 
 def exercise(node, docker, specification, app_ids):
     original = json.loads(node.config.read_text())
-    reconfigure(node, {**original, CONFIG: True})
+    # The shared fixture may leave ordinary admission at one slot. Keep room
+    # to reach and verify the independent volume hold after the unknown start.
+    available = {**original, "queue_limit": max(original.get("queue_limit", 64), 4)}
+    reconfigure(node, {**available, CONFIG: True})
 
     def install(name):
         volume = node.perform("volume.create", {"name": name})
@@ -146,7 +149,7 @@ def exercise(node, docker, specification, app_ids):
         with closing(sqlite3.connect(database, timeout=10)) as conn, conn:
             conn.execute("DROP TRIGGER interrupt_observed_oci_start")
     op = lost["operation_refs"][0]
-    reconfigure(node, original, crash=True)
+    reconfigure(node, available, crash=True)
     sampled = node.wait(node.submit("application.health", target(app)))
     assert sampled["lifecycle"] == "Succeeded", sampled
     proof, = sampled["result"]["artifact_refs"]
@@ -160,7 +163,7 @@ def exercise(node, docker, specification, app_ids):
     assert instance["observation"]["mount_observation"] == evidence
     app = node.perform("application.stop", target(app["reference"]))
     node.perform("application.uninstall", target(app))
-    reconfigure(node, {**original, CONFIG: True})
+    reconfigure(node, {**available, CONFIG: True})
 
     app, volume, data = install("substituted-oci-mount")
     held = data.with_name("approved-before-start")
@@ -171,7 +174,7 @@ def exercise(node, docker, specification, app_ids):
         proxy = threading.Thread(target=barrier.serve_forever, daemon=True)
         proxy.start()
         try:
-            reconfigure(node, {**original, CONFIG: True, "docker_socket": str(socket_path)})
+            reconfigure(node, {**available, CONFIG: True, "docker_socket": str(socket_path)})
             attempt = node.submit("application.start", target(app))
             assert node.wait(attempt)["lifecycle"] == "WaitingApproval"
             node.approve(attempt)
@@ -199,7 +202,7 @@ def exercise(node, docker, specification, app_ids):
 
             # Turning the profile off after a witnessed start must not let a
             # recovery observation attest the wrong inode by pathname alone.
-            reconfigure(node, original, crash=True)
+            reconfigure(node, available, crash=True)
             denied = node.wait(node.submit("application.health", target(app)))
             assert denied["lifecycle"] == "Failed" and not denied["result"]["artifact_refs"], denied
             assert node.call("Task.Get", {"id": attempt}) == task
@@ -215,6 +218,7 @@ def exercise(node, docker, specification, app_ids):
                     data.rename(wrong)
                 held.rename(data)
     node.stop()
+    node.config.write_text(json.dumps(original))
     subprocess.run([*node.daemon, "verify"], check=True, stdout=subprocess.DEVNULL, timeout=20)
     print("PASS real effective OCI mount, restart, wrong inode rejection, and durable recovery fence")
 

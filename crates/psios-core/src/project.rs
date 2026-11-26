@@ -1,5 +1,8 @@
 //! Private project membership, work-item dependencies, and local review decisions.
+pub(crate) mod directory;
 pub(crate) mod evidence;
+mod maintenance;
+pub(crate) use maintenance::{abandon, reassign};
 
 use crate::{
     ById, Result,
@@ -21,6 +24,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) const FORMAT: u32 = crate::agent::provider_authority::FORMAT + 1;
+pub(crate) const MAINTENANCE_FORMAT: u32 = FORMAT + 1;
 pub(crate) const SCHEMA: &str = "CREATE INDEX project_work_items ON versions((spec->>'project_id'),id,rev) WHERE kind='WorkItem';";
 const PROJECT: &str = "Project";
 const ITEM: &str = "WorkItem";
@@ -210,6 +214,7 @@ fn item_view(db: &Db<'_>, item: &Doc, actor: &str, include_evidence: bool) -> Re
         "blocked_by":item.spec["blocked_by"],"blockers":unresolved(db,item)?,"criterion":criterion_view(db, item, actor)?,
         "lifecycle":item.body["lifecycle"],"has_evidence":item.body.get("evidence_ref").is_some(),
         "review":item.body["review"],"created_at":item.created,"updated_at":item.stamp,
+        "assignment":maintenance::assignment_view(item),"abandonment":maintenance::abandonment_view(item),
         "created_by_principal_id":item.spec["created_by_principal_id"],"updated_by_principal_id":item.body["updated_by_principal_id"],
     });
     if include_evidence && let Some(evidence) = evidence::view(db, item, actor)? {
@@ -580,7 +585,7 @@ pub(crate) fn close(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     item_view(db, &db.status(&item, state)?, actor, true)
 }
 
-pub(crate) fn verify(conn: &Connection) -> Result<()> {
+pub(crate) fn verify(conn: &Connection, format: u32) -> Result<()> {
     let projects = conn
         .prepare("SELECT * FROM current WHERE kind='Project' ORDER BY id LIMIT 129")?
         .query_map([], row)?
@@ -618,7 +623,6 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
         let project = project_id(&item)?.to_owned();
         let count = counts.entry(project.clone()).or_insert(0);
         *count += 1;
-        verify_document(conn, &item)?;
         let created = conn.query_row(
             "SELECT seq FROM versions WHERE id=?1 AND rev=1 AND kind='WorkItem'",
             [&item.id],
@@ -636,29 +640,33 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
         verify_principal(conn, assigned(&item)?)?;
         let criterion: Criterion = decode(&item.spec["criterion"]).map_err(|_| invalid_state())?;
         criterion_target(conn, &criterion).map_err(|_| invalid_state())?;
-        let lifecycle = item.body["lifecycle"].as_str();
-        let evidence = item.body.get("evidence_ref");
+        let original = verify_document(conn, &item)?;
+        let abandoned =
+            maintenance::verify_history(conn, &original, &item, format >= MAINTENANCE_FORMAT)?;
+        let outcome = abandoned.as_ref().unwrap_or(&item);
+        let lifecycle = outcome.body["lifecycle"].as_str();
+        let evidence = outcome.body.get("evidence_ref");
         require(
             match lifecycle {
-                Some("Ready") => evidence.is_none() && item.body["review"]["accepted"] != true,
+                Some("Ready") => evidence.is_none() && outcome.body["review"]["accepted"] != true,
                 Some("InReview") => {
-                    evidence.is_some_and(Value::is_object) && item.body.get("review").is_none()
+                    evidence.is_some_and(Value::is_object) && outcome.body.get("review").is_none()
                 }
                 Some("Verified" | "Closed") => {
                     evidence.is_some_and(Value::is_object)
-                        && item.body["review"]["accepted"] == true
+                        && outcome.body["review"]["accepted"] == true
                 }
                 _ => false,
             },
             "RecoveryRequired",
             "invalid work item lifecycle and review state",
         )?;
-        if let Some(review) = item.body.get("review") {
-            verify_review(conn, &item, review)?;
+        if let Some(review) = outcome.body.get("review") {
+            verify_review(conn, outcome, review)?;
         } else {
             require(
-                item.body.get("reviewed_item_ref").is_none()
-                    && item.body.get("reviewed_evidence_ref").is_none(),
+                outcome.body.get("reviewed_item_ref").is_none()
+                    && outcome.body.get("reviewed_evidence_ref").is_none(),
                 "RecoveryRequired",
                 "work item has a review binding without a decision",
             )?;
@@ -678,13 +686,13 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn verify_document(conn: &Connection, doc: &Doc) -> Result<()> {
+fn verify_document(conn: &Connection, doc: &Doc) -> Result<Doc> {
     let original = conn.query_row(
         "SELECT * FROM versions WHERE id=?1 AND rev=1",
         [&doc.id],
         row,
     )?;
-    let mut fields = doc.spec.clone();
+    let mut fields = original.spec.clone();
     let creation = fields
         .as_object_mut()
         .ok_or_else(invalid_state)?
@@ -693,9 +701,8 @@ fn verify_document(conn: &Connection, doc: &Doc) -> Result<()> {
     require(
         doc.kind == original.kind
             && doc.owner == original.owner
-            && doc.spec == original.spec
+            && (doc.kind == ITEM || (doc.spec == original.spec && doc.generation == 1))
             && creation == digest(&fields)
-            && doc.generation == 1
             && text_ok(
                 fields["title"].as_str().unwrap_or_default(),
                 fields["description"].as_str().ok_or_else(invalid_state)?,
@@ -709,7 +716,7 @@ fn verify_document(conn: &Connection, doc: &Doc) -> Result<()> {
     ] {
         verify_principal(conn, key.as_str().ok_or_else(invalid_state)?)?;
     }
-    Ok(())
+    Ok(original)
 }
 
 fn verify_review(conn: &Connection, item: &Doc, review: &Value) -> Result<()> {

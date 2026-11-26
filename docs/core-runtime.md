@@ -491,13 +491,15 @@ jq -n --argjson definition "$definition" --arg grant "$grant" --arg until "$(dat
 
 本机所有者通过 `Project.Create` 建立私有 Project。使用 `psiosctl project create` 从标准输入发送 `{"key":"local-ops","title":"本机运维"}`，得到稳定 ID 和资源修订。随后用 `Grant.Issue` 给实际操作者签发 `project.read` 和所需的 `project.manage`、`project.contribute` 或 `project.review`。`tool_targets` 必须列出已有的 Project ID。所有者也需要为日常调用签发相应的限定授权。
 
-`Project.SetMember` 用当前 Project 修订指定 `Viewer`、`Contributor`、`Reviewer` 或 `Manager`。传入显式的 `"role":null` 移除成员。每次项目操作都同时验证当前成员角色和授权。Project、Conversation、Task 结果和宿主资源按各自的权限读取。普通 `Resource` 和 `Event` 查询不会返回 Project 的私有记录。
+`Project.SetMember` 用当前 Project 修订指定 `Viewer`、`Contributor`、`Reviewer` 或 `Manager`。传入显式的 `"role":null` 移除成员。每次项目操作都同时验证当前成员角色和授权。`psiosctl project list --limit 16` 只返回当前可读项目，续页使用上一页返回的 `next_after_id`。Project、Conversation、Task 结果和宿主资源按各自的权限读取。普通 `Resource` 和 `Event` 查询不会返回 Project 的私有记录。
 
 `WorkItem.Create` 指定 `project_id`、`expected_project_version`、`key`、`title`、`assignee_principal_id`，以及有界的可选 `blocked_by`。`criterion` 设为 `{"kind":"TaskResult","tool":"system.status","target_ref":…}`，其中 `target_ref` 是该受管目标的完整引用。依赖必须指向同一 Project 中已存在的工作项。用 `psiosctl work-item list PROJECT_ID` 或 `work-item get ID` 查询工作项、未结束的依赖和当前修订。
 
 指派者用 `WorkItem.SubmitEvidence` 提交自己的已知成功 Task 和实际输出 Artifact 的固定引用。Core 校验计划、执行尝试、操作结算和制品摘要，再把工作项从 `Ready` 推进至 `InReview`。独立评审者需另有针对生产 Task 的 `task.results.read`，可通过 `psiosctl work-item review ID --revision REV accept` 进入 `Verified`，或以 `reject` 退回 `Ready`。项目管理者通过 `work-item close ID --revision REV` 接受结束。依赖项在被依赖的工作项关闭后才可提交。`InReview` 和 `Verified` 保留已提交的制品字节，拒绝或关闭解除保留。关闭后，审核结论以及经独立结果权限核准的证据元数据仍可查询。
 
-当前支持单节点、单个 TaskResult 验收条件和固定指派。里程碑、多条件验收、外部 Issue 与 CI 同步仍待实现。[多主体与重启验收](../tests/test_project_work_items.py) · [Project 规范](v1/docs/11-workflows-projects.md#118-project-与-workitem)
+指派者离开项目后，项目管理者可用 `psiosctl work-item reassign ID --revision REV PRINCIPAL` 将没有在审证据的 `Ready` 工作项交给有明确项目授权的 Contributor。新指派者仍需通过普通 Task 权限执行任务并提交自己的结果。`work-item abandon ID --revision REV --reason REASON` 终止未关闭的工作项。原审核和证据记录保留，在审产物解除保留，依赖项仍显示阻塞。并发修改使用同一版本检查。
+
+当前支持单节点和单个 TaskResult 验收条件。里程碑、多条件验收、外部 Issue 与 CI 同步仍待实现。[多主体与重启验收](../tests/test_project_work_items.py) · [Project 规范](v1/docs/11-workflows-projects.md#118-project-与-workitem)
 
 ## 本机会话
 

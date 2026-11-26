@@ -375,6 +375,13 @@ enum ProjectCommand {
     Get {
         id: String,
     },
+    /// List projects for which you have active membership and an exact read grant.
+    List {
+        #[arg(long)]
+        after_id: Option<String>,
+        #[arg(long)]
+        limit: Option<u32>,
+    },
     /// Set a member's role by revision. Supply a null role to remove a member.
     SetMember {
         #[arg(default_value = "-")]
@@ -415,6 +422,21 @@ enum WorkItemCommand {
         id: String,
         #[arg(long)]
         revision: String,
+    },
+    /// Assign an unsubmitted work item to a scoped contributor.
+    Reassign {
+        id: String,
+        #[arg(long)]
+        revision: String,
+        assignee: String,
+    },
+    /// End open work with a recorded reason.
+    Abandon {
+        id: String,
+        #[arg(long)]
+        revision: String,
+        #[arg(long)]
+        reason: String,
     },
 }
 
@@ -619,6 +641,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     c.create_project(&serde_json::from_value(input(&file)?)?)?
                 }
                 ProjectCommand::Get { id } => c.project(&id)?,
+                ProjectCommand::List { after_id, limit } => {
+                    let page = c.projects(after_id.as_deref(), limit)?;
+                    println!("{}", serde_json::to_string_pretty(&page)?);
+                    return Ok(());
+                }
                 ProjectCommand::SetMember { file } => {
                     c.set_project_member(&serde_json::from_value(input(&file)?)?)?
                 }
@@ -651,6 +678,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     c.review_work_item(&id, &revision, matches!(decision, ReviewDecision::Accept))?
                 }
                 WorkItemCommand::Close { id, revision } => c.close_work_item(&id, &revision)?,
+                WorkItemCommand::Reassign {
+                    id,
+                    revision,
+                    assignee,
+                } => c.reassign_work_item(&id, &revision, &assignee)?,
+                WorkItemCommand::Abandon {
+                    id,
+                    revision,
+                    reason,
+                } => c.abandon_work_item(&id, &revision, &reason)?,
             };
             serde_json::to_value(record)?
         }

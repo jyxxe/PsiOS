@@ -720,6 +720,12 @@ psios-mcp --socket /run/psios/api.sock --service-uid PSIOS_UID \
 
 这个接入面提供同步工具调用。MCP Tasks、跨连接调用映射和 HTTP 沿用各自的独立协议要求。[独立 STDIO 客户端、官方 Python 客户端和原 Task 验收](../tests/test_mcp_stdio.py)
 
+### MCP `2026-07-28`
+
+在相同启动参数中加入 `--protocol 2026-07-28`，选择逐请求协议。每个请求的 `params._meta` 必须携带 `io.modelcontextprotocol/protocolVersion` 和 `io.modelcontextprotocol/clientCapabilities`。自报 `clientInfo` 仅用于协议信息，本地 Agent 凭据决定权限。客户端可以先调用 `server/discover`，也可以直接调用 `tools/list` 或 `tools/call`。发现和工具列表为私有且立即失效，重新读取列表时核对最新授权。省略 `--protocol` 时仍使用 `2025-11-25` 握手。[逐请求协议与版本](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning) · [发现](https://modelcontextprotocol.io/specification/2026-07-28/server/discover) · [缓存](https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/caching)
+
+现代 STDIO 每次只接纳一个在途请求。其他有效请求收到忙碌错误，客户端可在在途请求结束后重试。收到与在途请求 ID 精确匹配的 `notifications/cancelled` 时，适配器停止发送该请求的消息，并尝试用原 Task 的当前修订调用本机取消接口。已完成的 Task 保留其记录。关闭 STDIO 使客户端停止等待，已准入的 Task 仍受原授权和截止时间约束。此模式沿用相同的两项只读工具与持久 Task，支持同步结果和按请求取消。[STDIO 与取消](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/stdio) · [独立客户端与官方 SDK 2.0.0 验收](../tests/test_mcp_modern_stdio.py)
+
 ## 运行一个持久的 Agent 会话
 
 以下示例接续启动指南中的 `ctl` 函数和 `workdir`。模型提供者和 Agent 是两个独立凭据。模型提供者只获得处理模型步骤的权限。

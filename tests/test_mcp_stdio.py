@@ -78,7 +78,7 @@ class Wire:
         return self.request("tools/call", {"name": name, "arguments": {}})["result"]
 
 
-class McpStdioTests(unittest.TestCase):
+class McpFixture:
     def setUp(self):
         self.node = Node(os.environ.get("PSIOS_TEST_BIN_DIR", "target/debug"))
         self.addCleanup(self.node.close)
@@ -125,6 +125,8 @@ class McpStdioTests(unittest.TestCase):
         self.assertEqual(self.node.call("Artifact.Read", {"reference": artifact}, self.agent["token"]), result["result"])
         return result
 
+
+class McpStdioTests(McpFixture, unittest.TestCase):
     def test_wire_scope_revocation_budget_and_restart(self):
         status = self.grant([self.profile], units=1)
         pressure = self.grant([self.node_id])

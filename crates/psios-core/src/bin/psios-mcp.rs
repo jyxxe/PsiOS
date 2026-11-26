@@ -1,5 +1,8 @@
-//! MCP 2025-11-25 STDIO adapter for explicitly delegated local diagnostics.
-use clap::Parser;
+//! MCP STDIO adapter for explicitly delegated local diagnostics.
+#[path = "psios_mcp/modern.rs"]
+mod modern;
+
+use clap::{Parser, ValueEnum};
 use psios_api::{ApiError, ApiResult, Client, LocalReadTool, LocalReadToolsRequest, id, parse};
 use rustix::{fs::OFlags, process::geteuid};
 use serde_json::{Map, Value, json};
@@ -9,6 +12,7 @@ use std::{
     io::{self, BufRead, Read, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
@@ -19,9 +23,19 @@ const MAX_REQUESTS: usize = 1024;
 const CALLS_PER_SECOND: u8 = 8;
 const TASK_DEADLINE_SECS: i64 = 30;
 
+#[derive(Clone, Copy, ValueEnum)]
+enum Protocol {
+    #[value(name = "2025-11-25")]
+    Legacy,
+    #[value(name = "2026-07-28")]
+    Modern,
+}
+
 #[derive(Parser)]
 #[command(about = "Serve explicitly delegated local PsiOS tools on MCP STDIO")]
 struct Options {
+    #[arg(long, value_enum, default_value = "2025-11-25")]
+    protocol: Protocol,
     #[arg(long)]
     socket: PathBuf,
     #[arg(long)]
@@ -85,7 +99,15 @@ impl Adapter {
         serde_json::from_value(reply["tools"].clone()).map_err(|_| invalid_data())
     }
 
-    fn invoke(&mut self, tool: LocalReadTool) -> Result<Value, Value> {
+    fn invoke(
+        &mut self,
+        tool: LocalReadTool,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<Value, Value> {
+        let abandoned = || cancelled.is_some_and(|flag| flag.load(Ordering::Acquire));
+        if abandoned() {
+            return Err(tool_error("Cancelled", None));
+        }
         if self.call_window.elapsed() >= Duration::from_secs(1) {
             self.call_window = Instant::now();
             self.calls = 0;
@@ -100,6 +122,9 @@ impl Adapter {
         if !allowed.contains(&tool) {
             return Err(tool_error("PermissionDenied", None));
         }
+        if abandoned() {
+            return Err(tool_error("Cancelled", None));
+        }
         // Idempotency is owned by the local submission ledger. Never reuse an MCP
         // request ID as a key across distinct connections or principals.
         let deadline = (chrono::Utc::now() + chrono::Duration::seconds(TASK_DEADLINE_SECS))
@@ -112,6 +137,9 @@ impl Adapter {
             "key":id("mcp-call"),"delegation_id":self.scope.delegation_id,"deadline_at":deadline}),
             )
             .map_err(|error| tool_error(&error.code, None))?;
+        if abandoned() {
+            return Err(tool_error("Cancelled", None));
+        }
         let accepted = self
             .client
             .submit_prepared(prepared)
@@ -120,10 +148,14 @@ impl Adapter {
             .as_str()
             .ok_or_else(|| tool_error("PreconditionFailed", None))?;
         let failed = |code: &str| tool_error(code, Some(task_id));
-        let task = self
-            .client
-            .wait(task_id, Duration::from_secs(10))
-            .map_err(|error| failed(&error.code))?;
+        let task = match cancelled {
+            Some(flag) => modern::wait_task(&self.client, task_id, flag),
+            None => self.client.wait(task_id, Duration::from_secs(10)),
+        }
+        .map_err(|error| failed(&error.code))?;
+        if abandoned() {
+            return Err(failed("Cancelled"));
+        }
         if task["outcome_knowledge"] == "Unknown" {
             return Err(failed("OutcomeUnknown"));
         }
@@ -157,6 +189,40 @@ impl Adapter {
         Ok(
             json!({"isError":false,"structuredContent":structured,"content":[{"type":"text","text":text}]}),
         )
+    }
+
+    fn tool_call(
+        &mut self,
+        params: &Map<String, Value>,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<Value, (i32, &'static str)> {
+        let name = params
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or((-32602, "Invalid tool name"))?;
+        let tool = self
+            .scope
+            .tools
+            .iter()
+            .copied()
+            .find(|tool| tool.name() == name)
+            .ok_or((-32602, "Unknown tool"))?;
+        if params
+            .get("arguments")
+            .is_some_and(|arguments| !arguments.is_object())
+        {
+            return Err((-32602, "Tool arguments must be an object"));
+        }
+        if params
+            .get("arguments")
+            .and_then(Value::as_object)
+            .is_some_and(|arguments| !arguments.is_empty())
+        {
+            return Ok(tool_error("InvalidArgument", None));
+        }
+        Ok(self
+            .invoke(tool, cancelled)
+            .unwrap_or_else(|failure| failure))
     }
 
     fn initialize(&mut self, params: &Map<String, Value>) -> Result<Value, (i32, &'static str)> {
@@ -212,36 +278,13 @@ impl Adapter {
                 let tools = self
                     .available()
                     .map_err(|_| (-32001, "Local capability query unavailable"))?;
-                let tools: Vec<_> = tools.into_iter().map(descriptor).collect();
+                let tools: Vec<_> = tools
+                    .into_iter()
+                    .map(|tool| descriptor(tool, Protocol::Legacy))
+                    .collect();
                 Ok(json!({"tools":tools}))
             }
-            "tools/call" if fields(&["name", "arguments"]) => {
-                let name = params
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .ok_or((-32602, "Invalid tool name"))?;
-                let tool = self
-                    .scope
-                    .tools
-                    .iter()
-                    .copied()
-                    .find(|tool| tool.name() == name)
-                    .ok_or((-32602, "Unknown tool"))?;
-                if params
-                    .get("arguments")
-                    .is_some_and(|arguments| !arguments.is_object())
-                {
-                    return Err((-32602, "Tool arguments must be an object"));
-                }
-                if params
-                    .get("arguments")
-                    .and_then(Value::as_object)
-                    .is_some_and(|arguments| !arguments.is_empty())
-                {
-                    return Ok(tool_error("InvalidArgument", None));
-                }
-                Ok(self.invoke(tool).unwrap_or_else(|failure| failure))
-            }
+            "tools/call" if fields(&["name", "arguments"]) => self.tool_call(params, None),
             "tools/list" | "tools/call" | "ping" => {
                 Err((-32602, "Invalid or unsupported parameters"))
             }
@@ -289,16 +332,20 @@ impl Adapter {
     }
 }
 
-fn descriptor(tool: LocalReadTool) -> Value {
+fn descriptor(tool: LocalReadTool, protocol: Protocol) -> Value {
     let description = match tool {
         LocalReadTool::SystemStatus => "Read current PsiOS system status from the local node.",
         LocalReadTool::NodePressure => {
             "Sample Linux kernel and Core cgroup resource pressure on the local node."
         }
     };
-    json!({"name":tool.name(),"description":description,
+    let mut descriptor = json!({"name":tool.name(),"description":description,
         "inputSchema":{"type":"object","additionalProperties":false},
-        "annotations":{"readOnlyHint":true},"execution":{"taskSupport":"forbidden"}})
+        "annotations":{"readOnlyHint":true}});
+    if matches!(protocol, Protocol::Legacy) {
+        descriptor["execution"] = json!({"taskSupport":"forbidden"});
+    }
+    descriptor
 }
 
 fn tool_error(code: &str, task: Option<&str>) -> Value {
@@ -312,12 +359,18 @@ fn tool_error(code: &str, task: Option<&str>) -> Value {
 
 fn rpc_error(id: Option<&Value>, code: i32, message: &str) -> Value {
     let mut frame = json!({"jsonrpc":"2.0","error":{"code":code,"message":message}});
-    // The 2025-11-25 schema omits the ID when a malformed request has no
+    // Both MCP schemas omit the ID when a malformed request has no
     // correlatable string or integer ID. Null is not an MCP RequestId.
     if let Some(id) = id {
         frame["id"] = id.clone();
     }
     frame
+}
+
+fn write_frame(output: &mut impl Write, response: &Value) -> io::Result<()> {
+    serde_json::to_writer(&mut *output, response)?;
+    output.write_all(b"\n")?;
+    output.flush()
 }
 
 fn serve(mut adapter: Adapter, mut input: impl BufRead, mut output: impl Write) -> io::Result<()> {
@@ -337,9 +390,7 @@ fn serve(mut adapter: Adapter, mut input: impl BufRead, mut output: impl Write) 
             }
         };
         if let Some(response) = response {
-            serde_json::to_writer(&mut output, &response)?;
-            output.write_all(b"\n")?;
-            output.flush()?;
+            write_frame(&mut output, &response)?;
         }
         if oversized || adapter.requests.len() == MAX_REQUESTS {
             return Ok(());
@@ -355,19 +406,19 @@ fn main() -> io::Result<()> {
     let client = Client::new(options.socket, credential(&options.token_file)?)
         .with_service_uid(options.service_uid.unwrap_or_else(|| geteuid().as_raw()))
         .with_fail_fast_connect();
-    serve(
-        Adapter {
-            client,
-            scope: LocalReadToolsRequest {
-                delegation_id: options.delegation,
-                tools: options.tools,
-            },
-            phase: Phase::New,
-            requests: HashSet::new(),
-            call_window: Instant::now(),
-            calls: 0,
+    let adapter = Adapter {
+        client,
+        scope: LocalReadToolsRequest {
+            delegation_id: options.delegation,
+            tools: options.tools,
         },
-        io::stdin().lock(),
-        io::stdout().lock(),
-    )
+        phase: Phase::New,
+        requests: HashSet::new(),
+        call_window: Instant::now(),
+        calls: 0,
+    };
+    match options.protocol {
+        Protocol::Legacy => serve(adapter, io::stdin().lock(), io::stdout().lock()),
+        Protocol::Modern => modern::serve(adapter, io::stdin().lock(), io::stdout()),
+    }
 }

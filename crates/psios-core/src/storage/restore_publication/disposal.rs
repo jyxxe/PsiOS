@@ -39,7 +39,7 @@ impl Disposal {
         let prior = db.resolve(&evidence.body["operation_ref"])?;
         let effect = db.resolve(&op.body["effect_refs"][0])?;
         let intent = db.get(&intent_id(operation))?;
-        verify_custody(&op, &checkpoint, intent.as_ref())?;
+        verify_custody(&op, &checkpoint, Some(&intent))?;
         require(
             checkpoint.id == checkpoint_id(operation)
                 && op.body["outcome_knowledge"] == "Known"

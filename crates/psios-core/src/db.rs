@@ -190,7 +190,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = artifact::retention::batch::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = artifact::retention::selection::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -501,6 +501,9 @@ impl Store {
                 }
                 if ver < project::hierarchy::FORMAT {
                     db.c.execute_batch(project::hierarchy::SCHEMA)?;
+                }
+                if ver < artifact::retention::selection::FORMAT {
+                    db.c.execute_batch(artifact::retention::selection::SCHEMA)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

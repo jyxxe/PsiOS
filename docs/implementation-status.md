@@ -12,6 +12,11 @@
 | 本机 Project | 私有成员角色和项目级授权同时生效。工作项可指定责任人和有向依赖，并凭固定 Task 结果交由独立主体验收。评审期间保留原制品，单独的关闭操作接受交付并解锁依赖。项目可按当前成员角色和授权分页查询。管理者可重新指派就绪项，或在保留历史和解除制品保留的同时终止在途工作。Milestone 组织固定工作项，关闭时记录已接受的工作项精确版本。原生 Agent 可提交固定 Task 制品。工作项也可绑定工作流中固定步骤的原 Task 产物，历史查询继续逐次校验项目与结果权限。CLI 和 Rust SDK 使用同一 System API。 | 当前支持单个 Task 或 Workflow 步骤条件。可变里程碑计划、复合条件、跨节点 Project 与外部 Issue/CI 同步待开发。[本机接口](core-runtime.md#本机-project-与工作项验收) · [多主体及重启验收](../tests/test_project_work_items.py) |
 | 用户交互与集群 | 本机 CLI、Rust SDK 和无需模型的传统系统管理入口可用。CLI 与 SDK 可按固定版本分块导出任务制品并核对完整摘要，已验证超过单帧上限的结果。两台独立虚机已验证会生成不同的身份。共享 PsiOS Shell 提供本机一次性配对，在浏览器查看授权节点状态、存储余量和任务列表及详情。 可核对任务制品的固定版本及完整摘要，并预览 64 KiB 内的 JSON。 | macOS 式浏览器桌面的菜单栏、Dock、多窗口、工作区和布局恢复待开发；现有本机查询入口仅是初始实现。[Shell 设计](v1/docs/07-applications-packages-gui.md#5-psios-shell浏览器桌面工作环境)。Shell 远程接入及管理操作、Argon KDE 与 GUI Bridge、节点加入和退出、跨节点路由、租约共识及故障接管待开发。[本机 Shell](core-local.md#本机-psios-shell) · [集群规范](v1/docs/12-cluster-coordination.md) |
 
+## 任务结果保留与回收
+
+- 本机所有者可按主体和截止时间发现候选。固定分页水位内会逐页检查当前 Task 修订和保留关系，查询仅用制品清单计算候选字节数。预检签发短时计划，执行原子回收最多 16 个已结算的只读结果，保留原 Task 和独立回执。[候选验收](../tests/test_result_eviction_candidates.py) · [批量回滚与重放](../tests/test_task_result_eviction_batch.py)
+- 在途 Workflow、Agent 会话、Task 依赖、网络与恢复观测以及 WorkItem 审核按各自规则保存引用。已验证预检后新增证据会阻止整批回收、删除失败恢复原分块，以及在旧版结果和回执上执行升级。自动保留策略和整个历史账本的压缩仍待开发。[运行协议](core-runtime.md#批量回收任务结果字节) · [真实旧格式升级](../tests/result_eviction_candidates_upgrade.py)
+
 ## Agent Artifacts 应用化进度
 
 - 本机授权主体可分块暂存和发布通用字节，按提交偏移继续中断的上传。下载核对原始摘要，回收需要独立权限。原生 Agent 的成功模型会话可以将最终摘要发布为带模型、Skill、Provider 和租约来源的制品。已验证断线、重启、重复请求、配额、授权撤销及事务失败。[上传验收](../tests/test_artifact_ingress.py) · [模型输出发布验收](../tests/test_session_output.py)

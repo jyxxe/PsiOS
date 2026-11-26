@@ -306,6 +306,10 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 
 ### 批量回收任务结果字节
 
+本机所有者可先用 `Task.ResultEvictionCandidates` 查询早于 `updated_before` 的候选任务。截止时间使用 RFC 3339，可用 `principal_id` 限定原任务主体。`psiosctl task-result-eviction-candidates` 从标准输入接收查询。续页使用 `next_cursor`，它固定匹配范围与修订水位。Core 按原修订顺序扫描，并实时跳过已变动、受保留或不合格的结果。某一页若只有跳过项，仍可使用返回的续页游标继续。
+
+候选项返回 Task 的完整引用和清单中的逻辑字节数。批量预检与执行会重新读取实际内容并检查保留状态。[候选分页与保留竞争验收](../tests/test_result_eviction_candidates.py)
+
 本机所有者可用 `Task.PrepareResultEvictionBatch` 提交 1 至 16 个完整 Task 引用和非空 `reason`。可选 `max_content_bytes` 默认 16 MiB，上限 64 MiB。预检核对已结算的只读 Task、产物完整性和当前保留关系，返回每项字节数、总量以及两分钟内有效的 `plan_token`。CLI 用 `psiosctl task-result-eviction-plan` 从标准输入读取这份 JSON 请求。
 
 `Task.ApplyResultEvictionBatch` 接收计划令牌。Core 在同一事务重新核对当前任务修订、产物和工作流、会话、项目证据等保留关系。全部满足时才回收各项任务的制品字节，并记录原 Task 引用、每项原回执和整批回执。期间出现新的保留关系或部分写入错误时，整批回滚。授权代次、启动身份、时间命名空间或控制权变化会使未执行计划失效。已结算的原请求在当前权威下可按原令牌重放查询回执。

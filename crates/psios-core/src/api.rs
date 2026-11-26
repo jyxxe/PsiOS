@@ -42,6 +42,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Node.Configure" => node::configure(db, actor, p),
         "NetworkProbe.Get" => node::network::probe::get(db, actor, p),
         "NetworkLink.Get" => node::network::enrollment::get(db, actor, p),
+        "NetworkTrial.Confirmation" => broker::network_trial_confirmation(db, actor, p),
         "Skill.Publish" => agent::skill(db, actor, p),
         "Skill.Retire" => agent::retire(db, actor, p, "Skill"),
         "Model.Register" => agent::model(db, actor, p),
@@ -347,7 +348,7 @@ impl Store {
         &mut self,
         peer: u32,
         r: &Request,
-    ) -> Result<Option<node::service_control::ReconcileProbe>> {
+    ) -> Result<Option<broker::ReconcileProbe>> {
         self.authorized_request(peer, r, |db, actor| {
             broker::prepare_reconcile(db, actor, &r.params)
         })
@@ -357,10 +358,43 @@ impl Store {
         &mut self,
         peer: u32,
         r: &Request,
-        sample: Result<Option<node::service_control::ReconcileSample>>,
+        sample: Result<Option<broker::ReconcileSample>>,
     ) -> Result<Value> {
         self.authorized_request(peer, r, |db, actor| {
             broker::reconcile(db, actor, &r.params, sample)
+        })
+    }
+
+    pub(crate) fn prepare_network_trial_confirm(
+        &mut self,
+        peer: u32,
+        request: &Request,
+    ) -> Result<node::network::trial::Confirmation> {
+        self.authorized_request(peer, request, |db, actor| {
+            broker::prepare_network_trial_confirm(db, actor, &request.params)
+        })
+    }
+
+    pub(crate) fn authorize_network_trial_confirm(
+        &mut self,
+        peer: u32,
+        request: &Request,
+        job: &node::network::trial::Confirmation,
+    ) -> Result<()> {
+        self.authorized_request(peer, request, |db, actor| {
+            broker::authorize_network_trial_confirm(db, actor, &request.params, job)
+        })
+    }
+
+    pub(crate) fn finish_network_trial_confirm(
+        &mut self,
+        peer: u32,
+        request: &Request,
+        job: &node::network::trial::Confirmation,
+        result: Result<node::network::trial::ConfirmationReceipt>,
+    ) -> Result<Value> {
+        self.authorized_request(peer, request, |db, actor| {
+            broker::finish_network_trial_confirm(db, actor, job, result)
         })
     }
 

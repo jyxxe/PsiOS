@@ -119,6 +119,31 @@ Core 可选地先向该目标指定的解析器发出 TCP DNS 请求。按端点
 
 `Resource.Watch` 可以观察状态变更，`Schedule` 可按 `LifecycleEntered` 触发。探测成功连通时状态为 `Healthy`，明确拒绝或配置所需的 DNS 结果不符合时可为 `Unhealthy`，超时和无法确认的测量为 `Unknown`。Core 按持久派发顺序接受测量，重复状态只推进私有位置，不生成新的公共修订。最新测量制品用于离线核验，更新或重置状态后可回收前一制品。同一配置和网络命名空间内的服务重启保留状态。配置修订、内核启动或网络命名空间变化后重新观察，注销后状态为 `Retired`。[状态与事件的本机验收](../tests/test_network_probe_state.py)
 
+### 本地备用网口试配置
+
+管理员在宿主预置两个 NetworkManager 静态 IPv4 Profile，把原 Profile 启用在专用备用网口，再在 root 所有且仅 root 可写的 Core 配置中登记该网口。两个 Profile 必须使用同一网段内的不同地址。只允许此网口现有的直连路由，两个 Profile 均禁用自动连接、默认路由、IPv6 和 DNS 配置。候选地址须与本机其他网口上的地址无冲突。此后端通过显式配置的本地 root 权威启用。[NetworkManager 检查点](https://networkmanager.dev/docs/api/latest/gdbus-org.freedesktop.NetworkManager.Checkpoint.html)
+
+```json
+{
+  "network_link": {
+    "interface": "psios-spare0",
+    "mac": "02:50:53:00:00:01",
+    "original_uuid": "1aad7685-9a7d-49ad-8132-0c9c56cfb34e",
+    "candidate_uuid": "597da7b3-c8ba-4134-bfa7-57377f1ab670",
+    "confirmation_seconds": 40
+  }
+}
+```
+
+`psiosctl network-link network-link-025053000001` 返回登记的资源修订。在取得新审批后，用该修订提交 `network.trial`。Core 持久记录原 Operation 和网口占用，调用范围明确为此网口的 NetworkManager 检查点，并在切换前保存其标识。确认前，先按站点要求用备用链路测试候选地址，然后用操作 ID 和当前操作修订取得及提交本地挑战。可以通过管道交付挑战。
+
+```sh
+psiosctl network-trial-confirmation "$OPERATION_ID" --revision "$OPERATION_REVISION" \
+  | psiosctl network-trial-confirm "$OPERATION_ID" --revision "$OPERATION_REVISION"
+```
+
+挑战绑定原操作、配置代次和期限。超时后，Core 拒绝提交，NetworkManager 按其同一进程的定时检查点尝试回退。网络管理器、检查点、设备或实际地址发生变化时，需要通过原 Operation 的授权观察读取实际结果。无法独立确认的结果继续占用网口。当前范围限于本机 Unix API 和专用备用链路。远程新连接认证、管理网口与 DNS 变更仍需产品验收。[隔离链路验收](../tests/network_manager_trial.py) · [v1 网络契约](v1/docs/03-host-updates-network-devices.md)
+
 ### 受管 systemd 服务
 
 运维人员在本机配置中显式加入 `services`。先使用观察配置并重启守护进程。

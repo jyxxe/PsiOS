@@ -9,9 +9,14 @@ use rusqlite::{Connection, OptionalExtension, params};
 use rustix::{
     fd::OwnedFd,
     fs::{AtFlags, Mode, OFlags, StatxFlags, fstat, open, openat, statx},
+    io::Errno,
 };
 use serde_json::{Value, json};
-use std::{fs::File, io};
+use std::{
+    fs::File,
+    io,
+    time::{Duration, Instant},
+};
 
 pub(crate) const FORMAT: u32 = crate::schedule::admission_delay::FORMAT + 1;
 const PROFILE: &str = "LinuxLocalOciVolumeV1";
@@ -35,11 +40,37 @@ impl Identity {
     }
 }
 
-fn directory(process: &Process) -> Result<OwnedFd> {
+fn process_file(
+    process: &Process,
+    name: &str,
+    flags: OFlags,
+    deadline: Instant,
+) -> Result<OwnedFd> {
+    loop {
+        match openat(&process.directory, name, flags, Mode::empty()) {
+            Ok(fd) => return Ok(fd),
+            // Docker can report Running while its init is still crossing the
+            // approved UID and exec boundary, when procfs access is denied.
+            // Only re-read the same pinned process, never repeat a host command.
+            Err(Errno::ACCESS | Errno::PERM) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(Errno::ACCESS | Errno::PERM) => {
+                return Err(err(
+                    "DependencyUnavailable",
+                    "Linux denied access to the required OCI mount observation",
+                ));
+            }
+            Err(error) => return Err(io::Error::from(error).into()),
+        }
+    }
+}
+
+fn directory(process: &Process, deadline: Instant) -> Result<OwnedFd> {
     let flags = OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC;
     // The fixed /proc/PID/root entry is a kernel magic link. Dereference only
     // that entry and forbid symlinks when opening the approved mount point.
-    let root = openat(&process.directory, "root", flags, Mode::empty()).map_err(io::Error::from)?;
+    let root = process_file(process, "root", flags, deadline)?;
     openat(root, "data", flags | OFlags::NOFOLLOW, Mode::empty())
         .map_err(io::Error::from)
         .map_err(Into::into)
@@ -56,25 +87,22 @@ fn mount_id(fd: &OwnedFd) -> Result<u64> {
     Ok(meta.stx_mnt_id)
 }
 
-fn namespace(process: &Process) -> Result<OwnedFd> {
-    openat(
-        &process.directory,
+fn namespace(process: &Process, deadline: Instant) -> Result<OwnedFd> {
+    process_file(
+        process,
         "ns/mnt",
         OFlags::RDONLY | OFlags::CLOEXEC,
-        Mode::empty(),
+        deadline,
     )
-    .map_err(io::Error::from)
-    .map_err(Into::into)
 }
 
-fn inspect(process: &Process, mount: u64) -> Result<()> {
-    let table = openat(
-        &process.directory,
+fn inspect(process: &Process, mount: u64, deadline: Instant) -> Result<()> {
+    let table = process_file(
+        process,
         "mountinfo",
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(io::Error::from)?;
+        deadline,
+    )?;
     crate::node::mounts::private_writable_data(File::from(table), mount)
 }
 
@@ -101,7 +129,8 @@ pub(super) fn observe(
         })?;
     let boot = super::restart::boot_id()?;
     let process = Process::pin(container, state)?;
-    let mount_namespace = namespace(&process)?;
+    let access_deadline = Instant::now() + Duration::from_millis(250);
+    let mount_namespace = namespace(&process, access_deadline)?;
     let held_namespace = Identity::read(&mount_namespace)?;
     let service_namespace = open(
         "/proc/self/ns/mnt",
@@ -114,19 +143,21 @@ pub(super) fn observe(
         "PreconditionFailed",
         "OCI data mount is visible in the service's own mount namespace",
     )?;
-    let data = directory(&process)?;
+    let data = directory(&process, access_deadline)?;
     let held_data = Identity::read(&data)?;
+    let device = held_data.device.to_string();
+    let inode = held_data.inode.to_string();
     require(
-        volume.spec["device"] == held_data.device.to_string()
-            && volume.spec["inode"] == held_data.inode.to_string(),
+        volume.spec["device"].as_str() == Some(device.as_str())
+            && volume.spec["inode"].as_str() == Some(inode.as_str()),
         "PreconditionFailed",
         "effective OCI /data root differs from the approved volume inode",
     )?;
     let mount = mount_id(&data)?;
-    inspect(&process, mount)?;
+    inspect(&process, mount, access_deadline)?;
     let latest = confirm()?;
     process.confirm(container)?;
-    let current = directory(&process)?;
+    let current = directory(&process, access_deadline)?;
     require(
         latest["Running"] == true
             && latest["Status"] == "running"
@@ -135,18 +166,18 @@ pub(super) fn observe(
             && latest["StartedAt"] == started
             && Identity::read(&current)? == held_data
             && mount_id(&current)? == mount
-            && Identity::read(&namespace(&process)?)? == held_namespace
+            && Identity::read(&namespace(&process, access_deadline)?)? == held_namespace
             && super::restart::boot_id()? == boot,
         "PreconditionFailed",
         "OCI mount or invocation identity changed during observation",
     )?;
-    inspect(&process, mount)?;
+    inspect(&process, mount, access_deadline)?;
     process.confirm(container)?;
     Ok(json!({
         "profile":PROFILE,"volume_ref":volume.reference(),"data_incarnation":volume.body["data_incarnation"],
         "boot_id":boot,"engine_id":engine,"container_id":container,"host_pid":process.pid,"started_at":started,
         "mount_namespace_device":held_namespace.device.to_string(),"mount_namespace_inode":held_namespace.inode.to_string(),
-        "mount_id":mount.to_string(),"device":held_data.device.to_string(),"inode":held_data.inode.to_string(),
+        "mount_id":mount.to_string(),"device":device,"inode":inode,
         "effective_access":"ReadWrite","observed_at":now()
     }))
 }
@@ -181,7 +212,7 @@ pub(super) fn matches(volume: &Doc, report: &Value) -> bool {
             .is_none_or(|at| *at == proof["started_at"])
         && proof["observed_at"].as_str().is_some_and(valid_time)
         && proof["boot_id"].as_str().is_some_and(|value| {
-            uuid::Uuid::parse_str(value).is_ok_and(|id| id.int() != 0 && id.to_string() == value)
+            uuid::Uuid::parse_str(value).is_ok_and(|id| !id.is_nil() && id.to_string() == value)
         })
         && report
             .get("boot_id")

@@ -1,6 +1,7 @@
 """Exercise effective OCI /data observation against a real Docker bind mount."""
 
 import argparse
+from contextlib import closing
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import selectors
 import signal
 import socket
 import socketserver
+import sqlite3
 import subprocess
 import tarfile
 import threading
@@ -128,6 +130,37 @@ def exercise(node, docker, specification, app_ids):
     assert refreshed["started_at"] != live["started_at"] and refreshed["container_id"] == live["container_id"], refreshed
     app = node.perform("application.stop", target(app))
     node.perform("application.uninstall", target(app))
+
+    app, volume, data = install("recover-observed-oci-mount")
+    app_id = app["resource_id"]
+    database = node.state / "state.db"
+    with closing(sqlite3.connect(database, timeout=10)) as conn, conn:
+        conn.execute(f"""CREATE TRIGGER interrupt_observed_oci_start BEFORE INSERT ON versions
+            WHEN NEW.id='{app_id}' AND NEW.body->>'lifecycle'='Running'
+            BEGIN SELECT RAISE(ABORT, 'injected effective mount receipt loss'); END""")
+    try:
+        started = node.submit("application.start", target(app))
+        lost = node.wait(started, autoapprove=True)
+        assert (lost["lifecycle"], lost["outcome_knowledge"]) == ("Paused", "Unknown"), lost
+    finally:
+        with closing(sqlite3.connect(database, timeout=10)) as conn, conn:
+            conn.execute("DROP TRIGGER interrupt_observed_oci_start")
+    op = lost["operation_refs"][0]
+    reconfigure(node, original, crash=True)
+    sampled = node.wait(node.submit("application.health", target(app)))
+    assert sampled["lifecycle"] == "Succeeded", sampled
+    proof, = sampled["result"]["artifact_refs"]
+    observed = node.call("Artifact.Read", {"reference": proof})
+    evidence = verify_kernel(docker, observed, data, volume)
+    node.call("Operation.Reconcile", {**target(op), "evidence_ref": proof})
+    settled = node.wait(started)
+    assert (settled["lifecycle"], settled["outcome_knowledge"]) == ("Succeeded", "Known"), settled
+    app = node.get(app_id)
+    instance = node.get(app["value"]["instance_ref"]["resource_id"])["value"]
+    assert instance["observation"]["mount_observation"] == evidence
+    app = node.perform("application.stop", target(app["reference"]))
+    node.perform("application.uninstall", target(app))
+    reconfigure(node, {**original, CONFIG: True})
 
     app, volume, data = install("substituted-oci-mount")
     held = data.with_name("approved-before-start")

@@ -87,10 +87,14 @@ fn device(bus: &Bus, link: &Link) -> Result<(String, Value)> {
         "o",
     )?;
     let path = bus::numbered_path(&path, DEVICE_PATH)?;
+    Ok((path.to_owned(), device_details(bus, path, link)?))
+}
+
+fn device_details(bus: &Bus, path: &str, link: &Link) -> Result<Value> {
+    bus::numbered_path(&json!(path), DEVICE_PATH)?;
     let details = bus.get_all(path, DEVICE)?;
     require(
         bus::field(&details, "Interface", "s")? == &link.interface
-            && bus::field(&details, "IpInterface", "s")? == &link.interface
             && matches!(bus::uint(bus::field(&details, "DeviceType", "u")?)?, 1 | 20)
             && bus::field(&details, "Managed", "b")? == true
             && bus::field(&details, "Real", "b")? == true
@@ -105,7 +109,7 @@ fn device(bus: &Bus, link: &Link) -> Result<(String, Value)> {
             "management link has ports",
         )?;
     }
-    Ok((path.to_owned(), details))
+    Ok(details)
 }
 
 fn inactive_ipv6(bus: &Bus, device: &Value, active: &Value) -> Result<()> {
@@ -152,9 +156,10 @@ fn active(
     profiles: &[Profile; 2],
 ) -> Result<Active> {
     require(
-        bus::field(details, "State", "u")? == 100,
+        bus::field(details, "State", "u")? == 100
+            && bus::field(details, "IpInterface", "s")? == &link.interface,
         "PreconditionFailed",
-        "NetworkManager link is not activated",
+        "NetworkManager link is not activated on the expected IP interface",
     )?;
     let path = bus::numbered_path(bus::field(details, "ActiveConnection", "o")?, ACTIVE_PATH)?;
     let properties = bus.get_all(path, ACTIVE)?;
@@ -186,10 +191,11 @@ fn active(
     inactive_ipv6(bus, details, &properties)?;
     profile::verifies_applied(bus, device, &link.interface, profile)?;
     link::verifies(link, profile.ipv4, [profiles[0].ipv4, profiles[1].ipv4])?;
-    let current = bus.get_all(device, DEVICE)?;
+    let current = device_details(bus, device, link)?;
     require(
         bus::field(&current, "ActiveConnection", "o")? == path
-            && bus::field(&current, "State", "u")? == 100,
+            && bus::field(&current, "State", "u")? == 100
+            && bus::field(&current, "IpInterface", "s")? == &link.interface,
         "PreconditionFailed",
         "NetworkManager active connection changed during sampling",
     )?;
@@ -236,19 +242,13 @@ pub(crate) fn snapshot(interface: &str, profiles: [&str; 2]) -> Result<Snapshot>
     })
 }
 
-fn context(scope: &Snapshot) -> Result<(Bus, Value)> {
+fn context(scope: &Snapshot) -> Result<Bus> {
     compatible_profiles(&scope.profiles)?;
     let bus = Bus::open()?;
     require(
         bus.identity == scope.identity && link::read(&scope.link.interface)? == scope.link,
         "PreconditionFailed",
         "NetworkManager or kernel link identity changed",
-    )?;
-    let (path, details) = device(&bus, &scope.link)?;
-    require(
-        path == scope.device_path,
-        "PreconditionFailed",
-        "NetworkManager device object changed",
     )?;
     for expected in &scope.profiles {
         require(
@@ -257,7 +257,7 @@ fn context(scope: &Snapshot) -> Result<(Bus, Value)> {
             "NetworkManager profile changed",
         )?;
     }
-    Ok((bus, details))
+    Ok(bus)
 }
 
 fn scope_digest(scope: &Snapshot) -> Result<String> {
@@ -422,7 +422,8 @@ pub(crate) fn checkpoint(
         "InvalidArgument",
         "NetworkManager rollback timeout must be 5 to 120 seconds",
     )?;
-    let (bus, details) = context(scope)?;
+    let bus = context(scope)?;
+    let details = device_details(&bus, &scope.device_path, &scope.link)?;
     require(
         active(
             &bus,
@@ -477,7 +478,8 @@ pub(crate) fn activate(
                 "activation requires the other approved NetworkManager profile",
             )
         })?;
-    let (bus, details) = context(scope)?;
+    let bus = context(scope)?;
+    let details = device_details(&bus, &scope.device_path, &scope.link)?;
     require(
         active(
             &bus,
@@ -518,7 +520,8 @@ pub(crate) fn activate(
 }
 
 pub(crate) fn observe(scope: &Snapshot, checkpoint: &Checkpoint) -> Result<Observation> {
-    let (bus, details) = context(scope)?;
+    let bus = context(scope)?;
+    let details = device_details(&bus, &scope.device_path, &scope.link)?;
     observe_on(&bus, &details, scope, checkpoint)
 }
 
@@ -574,6 +577,71 @@ fn bound_activation(
     Ok(())
 }
 
+fn activation_ready(
+    details: &Value,
+    interface: &str,
+    baseline: &str,
+    candidate: &str,
+    verify_pending: impl FnOnce() -> Result<()>,
+) -> Result<bool> {
+    let path = bus::text(bus::field(details, "ActiveConnection", "o")?)?;
+    let state = bus::uint(bus::field(details, "State", "u")?)?;
+    let ip_interface = bus::text(bus::field(details, "IpInterface", "s")?)?;
+    require(
+        path == "/" || path == baseline || path == candidate,
+        "OutcomeUnknown",
+        "NetworkManager activated an unrelated connection during the trial",
+    )?;
+    let preparing = matches!(state, 40 | 50 | 70 | 80 | 90);
+    if ip_interface.is_empty() && (state == 30 || (path == "/" && (preparing || state == 110))) {
+        // Between activations the Device can temporarily lack an active object.
+        verify_pending()?;
+        return Ok(false);
+    }
+    // The original activation can be deactivating while the candidate prepares its IP setup.
+    let transitioning = preparing || (path == baseline && state == 110);
+    require(
+        ip_interface == interface || (ip_interface.is_empty() && path != "/" && transitioning),
+        "OutcomeUnknown",
+        "NetworkManager trial IP interface changed",
+    )?;
+    Ok(path == candidate && state == 100 && ip_interface == interface)
+}
+
+fn pending_activation(bus: &Bus, scope: &Snapshot, activation: &Activation) -> Result<()> {
+    let profile = scope
+        .profiles
+        .iter()
+        .find(|profile| profile.uuid == activation.active.profile_uuid)
+        .ok_or_else(mode)?;
+    let details = bus.get_all(&activation.active.path, ACTIVE)?;
+    require(
+        bus::field(&details, "Uuid", "s")? == &profile.uuid
+            && bus::field(&details, "Connection", "o")? == &profile.path
+            && bus::field(&details, "Devices", "ao")? == &json!([scope.device_path]),
+        "OutcomeUnknown",
+        "NetworkManager did not confirm the exact pending trial activation",
+    )?;
+    match bus::uint(bus::field(&details, "State", "u")?)? {
+        1 => Ok(()),
+        2 => {
+            // The pending object can finish between the two read-only samples.
+            let device = device_details(bus, &scope.device_path, &scope.link)?;
+            require(
+                bus::field(&device, "State", "u")? == 100
+                    && bus::field(&device, "IpInterface", "s")? == &scope.link.interface
+                    && bus::field(&device, "ActiveConnection", "o")? == &activation.active.path,
+                "OutcomeUnknown",
+                "the issued NetworkManager activation has unstable IP identity",
+            )
+        }
+        _ => Err(err(
+            "OutcomeUnknown",
+            "NetworkManager trial candidate is no longer activating",
+        )),
+    }
+}
+
 /// Poll only the issued activation, without repeating it.
 pub(crate) fn await_candidate(
     scope: &Snapshot,
@@ -587,16 +655,21 @@ pub(crate) fn await_candidate(
             .saturating_sub(EFFECT_MARGIN_MS),
     );
     loop {
-        let (bus, details) = context(scope)?;
+        let bus = context(scope)?;
         require(
             boottime(&bus)? < stop_at,
             "OutcomeUnknown",
             "NetworkManager trial activation did not stabilize in time",
         )?;
         guarded_checkpoint(&bus, scope, checkpoint)?;
-        let path = bus::text(bus::field(&details, "ActiveConnection", "o")?)?;
-        let state = bus::uint(bus::field(&details, "State", "u")?)?;
-        if path == activation.active.path && state == 100 {
+        let details = device_details(&bus, &scope.device_path, &scope.link)?;
+        if activation_ready(
+            &details,
+            &scope.link.interface,
+            &scope.baseline.path,
+            &activation.active.path,
+            || pending_activation(&bus, scope, activation),
+        )? {
             let observed = observe_on(&bus, &details, scope, checkpoint)?;
             require(
                 observed.checkpoint_present && observed.active == activation.active,
@@ -606,11 +679,6 @@ pub(crate) fn await_candidate(
             deadline(&bus, checkpoint)?;
             return Ok(observed);
         }
-        require(
-            path == "/" || path == scope.baseline.path || path == activation.active.path,
-            "OutcomeUnknown",
-            "NetworkManager activated an unrelated connection during the trial",
-        )?;
         thread::sleep(Duration::from_millis(50));
     }
 }
@@ -624,7 +692,8 @@ pub(crate) fn observe_recovery(
     if let Some(activation) = activation {
         bound_activation(scope, checkpoint, activation)?;
     }
-    let (bus, details) = context(scope)?;
+    let bus = context(scope)?;
+    let details = device_details(&bus, &scope.device_path, &scope.link)?;
     let observed = observe_on(&bus, &details, scope, checkpoint)?;
     if !observed.checkpoint_present && observed.active.profile_uuid == scope.baseline.profile_uuid {
         require(
@@ -637,9 +706,10 @@ pub(crate) fn observe_recovery(
             .iter()
             .find(|profile| profile.uuid != scope.baseline.profile_uuid)
             .ok_or_else(mode)?;
-        for path in manager_paths(&bus, "ActiveConnections", ACTIVE_PATH, 16)? {
-            let details = bus.get_all(&path, ACTIVE)?;
-            let selected = activation.is_some_and(|activation| path == activation.active.path);
+        let connections = manager_paths(&bus, "ActiveConnections", ACTIVE_PATH, 16)?;
+        for path in &connections {
+            let details = bus.get_all(path, ACTIVE)?;
+            let selected = activation.is_some_and(|activation| path == &activation.active.path);
             let uuid = bus::text(bus::field(&details, "Uuid", "s")?)?;
             let devices = bus::field(&details, "Devices", "ao")?
                 .as_array()
@@ -661,7 +731,19 @@ pub(crate) fn observe_recovery(
                 )?;
             }
         }
-        bus.verify_owner()?;
+        require(
+            manager_paths(&bus, "ActiveConnections", ACTIVE_PATH, 16)? == connections,
+            "OutcomeUnknown",
+            "NetworkManager active connections changed during rollback verification",
+        )?;
+    }
+    if !observed.checkpoint_present {
+        let details = device_details(&bus, &scope.device_path, &scope.link)?;
+        require(
+            observe_on(&bus, &details, scope, checkpoint)? == observed,
+            "OutcomeUnknown",
+            "NetworkManager active configuration changed after checkpoint disappearance",
+        )?;
     }
     Ok(observed)
 }
@@ -673,7 +755,8 @@ pub(crate) fn commit(
     before_effect: impl FnOnce() -> Result<()>,
 ) -> Result<Observation> {
     bound_activation(scope, checkpoint, activation)?;
-    let (bus, details) = context(scope)?;
+    let bus = context(scope)?;
+    let details = device_details(&bus, &scope.device_path, &scope.link)?;
     require(
         active(
             &bus,
@@ -704,6 +787,45 @@ pub(crate) fn commit(
 mod tests {
     use super::*;
     use std::{env, fs, os::unix::fs::MetadataExt};
+
+    #[test]
+    fn activation_poll_only_tolerates_empty_ip_on_the_bound_transition() {
+        let baseline = "/org/freedesktop/NetworkManager/ActiveConnection/1";
+        let candidate = "/org/freedesktop/NetworkManager/ActiveConnection/2";
+        let unrelated = "/org/freedesktop/NetworkManager/ActiveConnection/3";
+        let interface = "trial0";
+        let details = |path, state, ip| {
+            json!({
+                "ActiveConnection":{"type":"o","data":path},
+                "State":{"type":"u","data":state},
+                "IpInterface":{"type":"s","data":ip},
+            })
+        };
+        let check = |path, state, ip| {
+            activation_ready(
+                &details(path, state, ip),
+                interface,
+                baseline,
+                candidate,
+                || panic!("disconnected proof was unexpected"),
+            )
+        };
+        assert!(!check(baseline, 110, "").unwrap());
+        assert!(!check(candidate, 70, "").unwrap());
+        assert!(check(candidate, 100, interface).unwrap());
+        assert!(check(candidate, 100, "").is_err());
+        assert!(check(candidate, 70, "other0").is_err());
+        assert!(check(unrelated, 70, "").is_err());
+        let gap = details("/", 30, "");
+        assert!(!activation_ready(&gap, interface, baseline, candidate, || Ok(())).unwrap());
+        assert!(
+            activation_ready(&gap, interface, baseline, candidate, || Err(err(
+                "OutcomeUnknown",
+                "candidate was not pending"
+            )))
+            .is_err()
+        );
+    }
 
     #[test]
     #[ignore = "requires tests/network_manager_trial.py and its private NetworkManager namespaces"]

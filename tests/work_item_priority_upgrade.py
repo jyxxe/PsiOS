@@ -60,7 +60,6 @@ def upgrade(previous, current):
         original_ref = original["reference"]
         current_query = {"id": original_ref["resource_id"]}
         former_query = {"reference": original_ref}
-        original_view = node.call("WorkItem.RevisionGet", former_query, token)
         assert original["value"]["lifecycle"] == "Ready" and "priority" not in original["value"], original
 
         query = {"project_id": project_id, "expected_project_version": project["version"]}
@@ -70,6 +69,7 @@ def upgrade(previous, current):
         rejects("InvalidArgument", "WorkItem.Create", {**creation, "key": key(), "priority": "High"})
         rejects("InvalidArgument", ASSIGNED, only_high, token)
         execution = grant(principal, ["task.submit", "task.read", "resource.read", DISCOVER], [project_id])
+        original_view = node.call("WorkItem.RevisionGet", former_query, token)
         old_task, old_artifact, old_page = discover(query, token, execution)
         references = sorted([original_ref, peer["reference"]], key=lambda ref: ref["resource_id"])
         assert [entry["reference"] for entry in old_page["items"]] == references, old_page

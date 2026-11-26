@@ -131,7 +131,11 @@ class WorkItemPriorityTests(unittest.TestCase):
         })
         self.denied("PermissionDenied", REPRIORITIZE,
                     {**target(outside["reference"]), "priority": "Urgent"}, self.manager)
-        self.assertEqual(self.set_priority(original, "Normal"), original)
+        unchanged = self.set_priority(original, "Normal")
+        self.assertEqual(unchanged["reference"], original["reference"])
+        self.assertEqual(self.priority(unchanged), "Normal")
+        self.assertNotIn("priority_change", unchanged["value"])
+        self.assertNotIn("target_ref", unchanged["value"]["criterion"])
 
         gate = Barrier(2)
 

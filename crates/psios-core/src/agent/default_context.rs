@@ -126,13 +126,38 @@ pub(super) fn replay_legacy(
     };
     let issue = issue(db.c, session, lease)?.ok_or_else(unknown)?;
     require_current_incarnation(db, &issue.incarnation)?;
-    let issued = issue.session;
+    let issued = &issue.session;
     require(
         issue.seq < cutover(db.c)?,
         "RecoveryRequired",
         "new default model lease has no context checkpoint",
     )?;
-    let usage = resolve(db.c, &issued.body["current_usage_ref"]).map_err(|_| unknown())?;
+    let usage = reserved_usage(db, issued, lease).map_err(|error| {
+        if matches!(
+            error.0.code.as_str(),
+            "InvalidArgument" | "PreconditionFailed" | "RecoveryRequired"
+        ) {
+            unknown()
+        } else {
+            error
+        }
+    })?;
+    if issued.body.get("current_usage_ref").is_none() {
+        // The old writer stored ModelUsage immediately after the issued
+        // Session in the same request. An identity match alone cannot prove that order.
+        let witnessed: bool = db.c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM versions s JOIN versions u ON u.seq=s.seq+1
+             WHERE s.seq=?1 AND u.id=?2 AND u.rev=1
+               AND s.correlation=u.correlation AND s.incarnation=u.incarnation)",
+            params![issue.seq, usage.id],
+            |r| r.get(0),
+        )?;
+        require(
+            witnessed,
+            "OutcomeUnknown",
+            "original default model reservation does not witness its issuance",
+        )?;
+    }
     require(
         issued.owner == session.owner
             && issued.spec == session.spec
@@ -141,13 +166,18 @@ pub(super) fn replay_legacy(
             && usage.kind == "ModelUsage"
             && usage.owner == session.owner
             && usage.rev == 1
+            && usage.body["reserved_calls"] == 1
+            && usage
+                .body
+                .get("budget_ref")
+                .is_none_or(|r| *r == issued.body["budget_ref"])
             && usage.body["session_id"] == session.id
             && usage.body["call_id"] == lease
             && usage.body["model_ref"] == model.reference(),
         "OutcomeUnknown",
         "original default model context cannot be verified",
     )?;
-    let selected = task_at_issue(db.c, &issued, issue.seq).map_err(|error| {
+    let selected = task_at_issue(db.c, issued, issue.seq).map_err(|error| {
         if error.0.code == "RecoveryRequired" {
             unknown()
         } else {
@@ -160,7 +190,7 @@ pub(super) fn replay_legacy(
         "OutcomeUnknown",
         "session tool Task changed since the original model context was issued",
     )?;
-    let context = build(db.c, Some(db), &issued, skill, model, selected.as_ref())?;
+    let context = build(db.c, Some(db), issued, skill, model, selected.as_ref())?;
     require(
         usage.body["input_bytes"] == canonical(&context).len(),
         "OutcomeUnknown",

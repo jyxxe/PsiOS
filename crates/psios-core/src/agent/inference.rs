@@ -36,9 +36,10 @@ pub(super) fn decorate_claim(
         )?;
         if witnessed {
             reply["late_decision_observation"] = json!(true);
-            reply["decision_rejection_policy"] =
-                json!(psios_api::ModelDecisionRejectionPolicy::UndeclaredToolV1);
             reply["model_ref"] = model.reference();
+            if let Some(policy) = super::rejected_decision::offer(db.c, lease, model)? {
+                reply[super::rejected_decision::OFFER] = json!(policy);
+            }
         }
     }
     Ok(())
@@ -155,6 +156,9 @@ fn settle(
         json!({"lease_id":lease,"model_ref":model,"outcome":outcome,"source":source.text()});
     body["current_lease"] = Value::Null;
     body.as_object_mut().unwrap().remove("current_usage_ref");
+    body.as_object_mut()
+        .unwrap()
+        .remove(super::rejected_decision::OFFER);
     body.as_object_mut().unwrap().remove("lease_until");
     let saved = db.status(session, body)?;
     let receipt = json!({"session_ref":saved.reference(),"model_ref":model,"lease_id":lease,
@@ -401,6 +405,7 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
             row,
         )?;
         let before_issue = predecessor(conn, &issued)?;
+        let _ = super::rejected_decision::issued_offer(&issued)?;
         let model = resolve(conn, &issued.spec["model_ref"])?;
         let usage = resolve(conn, &issued.body["current_usage_ref"])?;
         let status: String = record.get(5)?;

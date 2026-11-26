@@ -619,6 +619,8 @@ fn allocate_turn(
     }
     if let Some(binding) = &serving_authority {
         usage["provider_authority_digest"] = json!(binding.digest());
+        b[rejected_decision::OFFER] =
+            json!(psios_api::ModelDecisionRejectionPolicy::UndeclaredToolV1);
     }
     let usage = db.record("ModelUsage", &s.owner, usage)?;
     tool_context::bind(db, s, &lease, &usage, &digest)?;
@@ -772,11 +774,14 @@ pub fn respond(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     )?;
     provider_authority::require_current(db, &s, &model, &p.lease_id)?;
     session_inputs::live_access(db, &s)?;
-    require(
-        p.decision_rejection_policy.is_none() || inference::strict(&model),
-        "UnsupportedCapability",
-        "known tool rejection requires the strict provider policy",
-    )?;
+    if let Some(requested) = p.decision_rejection_policy {
+        require(
+            inference::strict(&model)
+                && rejected_decision::offer(db.c, &p.lease_id, &model)? == Some(requested),
+            "UnsupportedCapability",
+            "known tool rejection was not offered for this strict lease",
+        )?;
+    }
     let mut b = s.body.clone();
     let mut task = None;
     let mut rejection = None;
@@ -840,6 +845,7 @@ pub fn respond(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     };
     b["current_lease"] = Value::Null;
     b.as_object_mut().unwrap().remove("current_usage_ref");
+    b.as_object_mut().unwrap().remove(rejected_decision::OFFER);
     let saved = db.status(&s, b)?;
     let mut receipt = json!({"session_ref":saved.reference(),"task_id":task,"decision_digest":hash,"output_bytes":bytes.len(),"lifecycle":state(&saved)});
     if let Some(reference) = usage_ref {

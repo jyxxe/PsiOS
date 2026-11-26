@@ -588,6 +588,13 @@ jobs:
           git archive e344346851cde1e35a53b3ff4f6b5bc72852115c Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format92"
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format92" "$RUNNER_TEMP/psios-compatibility-target"
           python3 -B tests/node_work_admission_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
+      - name: Preserve format 93 drain and live model leases in the exact blocker view
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format93"
+          git archive 181b9ca8f07fbc0877be4ce130394d3718343f7e Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format93"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format93" "$RUNNER_TEMP/psios-compatibility-target"
+          PSIOS_TEST_MODEL_BLOCKERS_PREVIOUS="$RUNNER_TEMP/psios-compatibility-target/debug" \
+            python3 -B -m unittest discover -s tests -p test_maintenance_model_blockers.py -v
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

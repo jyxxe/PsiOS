@@ -8,6 +8,7 @@ pub(crate) mod provider_authority;
 mod queue;
 mod registry;
 pub(crate) mod tool_context;
+pub(crate) mod work_admission_status;
 #[cfg(test)]
 mod work_admission_tests;
 use crate::{

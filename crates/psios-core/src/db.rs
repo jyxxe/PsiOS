@@ -190,7 +190,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = node::work_admission::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = node::work_admission::BLOCKERS_FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -513,6 +513,9 @@ impl Store {
                 }
                 if ver < node::work_admission::FORMAT {
                     node::work_admission::migrate(db)?;
+                }
+                if ver < node::work_admission::BLOCKERS_FORMAT {
+                    db.c.execute_batch(crate::agent::work_admission_status::SCHEMA)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

@@ -387,6 +387,30 @@ int main(void) {
         if os.getenv("PSIOS_TEST_OCI_KERNEL_LIMITS"):
             check_kernel_limits(node.get(app_id)["value"]["last_observation"], docker, cid)
         volume = node.get(volume["resource_id"])["reference"]
+
+        def volume_blockers():
+            admission = node.call("Node.WorkAdmission.Get", {})["reference"]
+            snapshot = node.call("Node.WorkAdmission.Blockers", {
+                "expected_resource_version": admission["version"], "limit": 16,
+            })
+            holds = snapshot["exclusive_holds"]
+            assert not holds["truncated"], holds
+            return [item for item in holds["items"]
+                    if item["resource_ref"]["resource_id"] == volume["resource_id"]]
+
+        def assert_volume_attachment_blocker():
+            current_volume = node.get(volume["resource_id"])
+            attachment, = current_volume["value"]["attachment_refs"]
+            assert volume_blockers() == [{
+                "resource_kind": "Volume", "resource_ref": current_volume["reference"],
+                "holder_kind": "Application", "holder_ref": node.get(app_id)["reference"],
+                "attachment_ref": attachment,
+            }]
+            attached = node.call("Resource.Resolve", {"reference": attachment})["value"]
+            assert attached["volume_id"] == volume["resource_id"] and attached["workload_id"] == app_id
+            assert attached["lifecycle"] == "Attached" and attached["effective_access"] == "ReadWrite"
+
+        assert_volume_attachment_blocker()
         busy = node.wait(node.submit("backup.create", target(volume)))
         assert busy["lifecycle"] == "Failed" and busy["conditions"][0]["type"] == "Conflict", busy
         busy = node.wait(node.submit("volume.usage", {"target": target(volume)}))
@@ -394,7 +418,9 @@ int main(void) {
         node.stop()
         node.start()
         assert node.perform("application.health", target(app))["container_id"] == cid
+        assert_volume_attachment_blocker()
         app = node.perform("application.stop", target(app))
+        assert not volume_blockers()
         volume = node.get(volume["resource_id"])["reference"]
         measured = node.perform("volume.usage", {"target": target(volume)})
         assert measured["files"] == 2 and measured["logical_file_bytes"] == str(len("new revisionfirst\n")), measured

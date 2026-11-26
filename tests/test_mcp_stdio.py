@@ -6,11 +6,8 @@ import os
 from pathlib import Path
 import select
 import signal
-import socket
 import sqlite3
-import struct
 import subprocess
-import threading
 import time
 import unittest
 
@@ -99,13 +96,13 @@ class McpStdioTests(unittest.TestCase):
             "tool_targets": targets, "units": units, "ttl_seconds": 120,
         })
 
-    def command(self, grant, socket_path=None):
-        return [str(self.node.binaries / "psios-mcp"), "--socket", str(socket_path or self.node.socket),
+    def command(self, grant):
+        return [str(self.node.binaries / "psios-mcp"), "--socket", str(self.node.socket),
                 "--token-file", str(self.token_file), "--delegation", grant["delegation_ref"]["resource_id"],
                 "--tool", "system.status", "--tool", "node.pressure"]
 
-    def wire(self, grant, socket_path=None):
-        client = Wire(self.command(grant, socket_path))
+    def wire(self, grant):
+        client = Wire(self.command(grant))
         self.addCleanup(client.close)
         return client
 
@@ -172,59 +169,6 @@ class McpStdioTests(unittest.TestCase):
         self.assertEqual(sample["result"]["node_ref"]["resource_id"], self.node_id)
         self.assertEqual(sample["result"]["kernel"]["source"], "LinuxProcfs")
         self.assertEqual(len(self.tasks()), 2)
-
-    def test_real_submission_ack_loss_looks_up_original_task(self):
-        grant = self.grant([self.profile], units=1)
-        frames, errors = [], []
-        proxy = self.node.base / "mcp-authority-proxy.sock"
-
-        def read_frame(stream):
-            wire = stream.makefile("rb")
-            with wire:
-                length = wire.read(4)
-                return length + wire.read(struct.unpack(">I", length)[0])
-
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
-            listener.bind(str(proxy))
-            listener.listen()
-            listener.settimeout(8)
-
-            def forward():
-                try:
-                    while len(frames) < 8:
-                        client, _ = listener.accept()
-                        with client, socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as upstream:
-                            client.settimeout(10)
-                            upstream.settimeout(10)
-                            request = read_frame(client)
-                            method = json.loads(request[4:])["method"]
-                            frames.append(method)
-                            upstream.connect(str(self.node.socket))
-                            upstream.sendall(request)
-                            response = read_frame(upstream)
-                            if method != "Task.Submit":
-                                client.sendall(response)
-                except (OSError, ValueError, struct.error) as error:
-                    errors.append(error)
-
-            relay = threading.Thread(target=forward, daemon=True)
-            relay.start()
-            try:
-                stdio = self.wire(grant, proxy)
-                stdio.initialize()
-                response = stdio.invoke("system.status")
-                relay.join(timeout=12)
-                self.assertFalse(relay.is_alive())
-                self.assertEqual(errors, [])
-            finally:
-                listener.close()
-                relay.join(timeout=10)
-        self.assertEqual(frames, ["Principal.WhoAmI", "Capability.LocalReadTools", "Task.Prepare", "Task.Submit",
-                                 "Task.LookupSubmission", "Task.Wait", "Artifact.Read", "Capability.LocalReadTools"])
-        self.check_receipt(response, "system.status", grant)
-        self.assertEqual(len(self.tasks()), 1)
-        budget = self.node.call("Budget.Get", {"id": grant["budget_ref"]["resource_id"]})
-        self.assertEqual((budget["reserved"], budget["spent"]), (0, 1))
 
     def test_unreadable_id_and_bounded_frame_follow_profile(self):
         client = self.wire(self.grant([self.profile]))

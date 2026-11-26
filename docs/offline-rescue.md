@@ -54,6 +54,18 @@ psiosd --config /etc/psios/core.json compact-state --plan-file state-compaction.
 
 执行独占节点的状态锁，并重新核对原计划。SQLite 在本机原库完成压缩和 WAL 截断，再独立核对节点身份、提交头、数据库及相关制品。已有 Task、事件、授权与回执沿用原记录。容量检查保留权威存储预留，并为临时数据库及 WAL 计入额外空间。提交头变动、凭据轮换待处理或空间储备不足时，执行阶段会报告相应原因。最终回执报告压缩前后的文件大小。[SQLite VACUUM](https://www.sqlite.org/lang_vacuum.html) · [离线压缩验收](../tests/test_state_compaction.py)
 
+## 离线检查旧版任务输入的引用
+
+保存 1 至 16 个旧版 `Input` 或 `TaskInputManifest` 的完整引用 JSON 数组。停止守护进程后运行以下命令。
+
+```sh
+psiosd --config /etc/psios/core.json inspect-retained-inputs --references-file input-refs.json
+```
+
+命令固定并核对节点身份、提交头、连续性见证和原输入摘要，然后扫描私有副本的 SQLite 应用数据表。输出包含每项正文占用字节数及每张表中含该输入 ID 的行数。扫描包含历史资源及仍保存的接受记录，排除每项输入自己的那条版本记录。报告只计数并列出表名，原数据库和见证保持原样。
+
+字面匹配可能包含正文中顺带提到输入 ID 的记录。SQLite 自带的元数据、编码或压缩后的引用、外部文件、其他节点和备份副本需要分别核查。复制或扫描超限会拒绝输出清单，可用 `--max-copy-mib` 和 `--max-scan-mib` 调整有界工作量。
+
 ## 验证和恢复独立的卷备份
 
 原权威在线时，可授予操作者目标 Backup 上的 `backup.export`，再用当前 Backup 的 `ResourceRef` 导出经过核验的完整副本。导出命令接受 JSON 引用文件或标准输入，目标必须是私有父目录下的新目录。将导出回执中的 `manifest_digest` 保存到与副本独立的可信记录。手工转存既有副本时，也可以用 `psiosctl get BACKUP_ID` 读取同一摘要。[权限与分页](core-runtime.md#导出备份) · [在线导出与脱机恢复验收](../tests/test_backup_export.py)

@@ -48,6 +48,21 @@ enum Cmd {
         #[command(flatten)]
         options: CompactionOptions,
     },
+    /// Inventory exact retained legacy input references using a verified stopped-authority copy.
+    InspectRetainedInputs {
+        /// JSON array of exact legacy Input references, or standard input (-).
+        #[arg(long, default_value = "-")]
+        references_file: PathBuf,
+        /// Maximum combined SQLite and journal copy size in MiB.
+        #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(u32).range(1..=256))]
+        max_copy_mib: u32,
+        /// Maximum scanned stored text and blob bytes in MiB.
+        #[arg(long, default_value_t = 128, value_parser = clap::value_parser!(u32).range(1..=512))]
+        max_scan_mib: u32,
+        /// Parent for the private verification copy (defaults to TMPDIR).
+        #[arg(long)]
+        scratch_dir: Option<PathBuf>,
+    },
     /// Capture a verified database checkpoint from a stopped authority.
     Checkpoint {
         /// New checkpoint directory under a private, operator-owned parent.
@@ -189,6 +204,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let max_bytes = u64::from(options.max_copy_mib) * 1024 * 1024;
             let approved = read_document(&plan_file, "state compaction plan")?;
             let report = Store::compact_state(&cfg, &scratch, max_bytes, &approved)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Cmd::InspectRetainedInputs {
+            references_file,
+            max_copy_mib,
+            max_scan_mib,
+            scratch_dir,
+        } => {
+            let references = read_document(&references_file, "retained input reference list")?;
+            let scratch = scratch_dir.unwrap_or_else(std::env::temp_dir);
+            let report = Store::inspect_retained_inputs(
+                &cfg()?,
+                &scratch,
+                u64::from(max_copy_mib) * 1024 * 1024,
+                u64::from(max_scan_mib) * 1024 * 1024,
+                &references,
+            )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Cmd::Checkpoint {

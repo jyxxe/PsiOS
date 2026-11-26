@@ -266,6 +266,23 @@ pub(super) fn verified_witness(
     Ok((witness, rotation))
 }
 
+fn private_database_copy(
+    cfg: &Config,
+    scratch: &Path,
+    max_bytes: u64,
+) -> Result<(tempfile::TempDir, PathBuf, u64)> {
+    let parent = scratch_parent(scratch)?;
+    outside_authority(cfg, &parent)?;
+    let tmp = tempfile::Builder::new()
+        .prefix("psios-verify-")
+        .permissions(Permissions::from_mode(0o700))
+        .tempdir_in(parent)?;
+    let state = tmp.path().join("state");
+    private_dir(&state, true)?;
+    let bytes = copy_database(&cfg.state_dir, &state, max_bytes)?;
+    Ok((tmp, state, bytes))
+}
+
 impl Store {
     pub fn verify(cfg: &Config, scratch: &Path, max_bytes: u64) -> Result<Value> {
         Self::verify_copy(cfg, scratch, max_bytes, false)
@@ -277,15 +294,7 @@ impl Store {
 
     fn verify_copy(cfg: &Config, scratch: &Path, max_bytes: u64, rehearse: bool) -> Result<Value> {
         let _lock = lock_offline(cfg)?;
-        let parent = scratch_parent(scratch)?;
-        outside_authority(cfg, &parent)?;
-        let tmp = tempfile::Builder::new()
-            .prefix("psios-verify-")
-            .permissions(Permissions::from_mode(0o700))
-            .tempdir_in(parent)?;
-        let state = tmp.path().join("state");
-        private_dir(&state, true)?;
-        let bytes = copy_database(&cfg.state_dir, &state, max_bytes)?;
+        let (tmp, state, bytes) = private_database_copy(cfg, scratch, max_bytes)?;
         let (copy, identity) = checked_copy(&state)?;
         let (witness, rotation) = verified_witness(&copy, cfg)?;
         check_artifacts(&copy, &identity, &cfg.state_dir)?;
@@ -326,6 +335,44 @@ impl Store {
                 })?;
         }
         Ok(report)
+    }
+
+    pub fn inspect_retained_inputs(
+        cfg: &Config,
+        scratch: &Path,
+        max_copy_bytes: u64,
+        max_scanned_bytes: u64,
+        references: &Value,
+    ) -> Result<Value> {
+        require(
+            (1..=256 * 1024 * 1024).contains(&max_copy_bytes)
+                && (1..=512 * 1024 * 1024).contains(&max_scanned_bytes),
+            "InvalidArgument",
+            "retained input inventory limits are outside the supported range",
+        )?;
+        let _lock = lock_offline(cfg)?;
+        let (_tmp, state, copied_bytes) = private_database_copy(cfg, scratch, max_copy_bytes)?;
+        let (copy, identity) = checked_copy(&state)?;
+        let (witness, rotation) = verified_witness(&copy, cfg)?;
+        require(
+            witness == "Confirmed" && rotation == "None",
+            "RecoveryRequired",
+            "retained input inventory needs a confirmed authority witness and owner credential",
+        )?;
+        let observed = super::input_inventory::scan(&copy, references, max_scanned_bytes)?;
+        Ok(json!({
+            "scope":"StoredSqliteValues",
+            "node_id":identity.node_id,
+            "database_format":identity.database_format,
+            "recovery_incarnation":identity.recovery_incarnation,
+            "head":identity.head,
+            "sqlite_integrity":"Verified",
+            "foreign_keys":"Verified",
+            "witness":witness,
+            "copied_bytes":copied_bytes,
+            "inputs":observed["inputs"],
+            "scan":observed["scan"],
+        }))
     }
 }
 

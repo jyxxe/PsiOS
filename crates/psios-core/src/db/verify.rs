@@ -169,7 +169,7 @@ pub(super) fn check_artifacts(
         crate::apps::restore_image::verify(conn, state)?;
     }
     if identity.database_format >= crate::agent::tool_context::FORMAT {
-        crate::agent::tool_context::verify(conn)?;
+        crate::agent::tool_context::verify(conn, identity.database_format)?;
     }
     if identity.database_format >= crate::agent::inference::FORMAT {
         crate::agent::inference::verify(conn)?;

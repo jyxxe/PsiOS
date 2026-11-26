@@ -10,9 +10,11 @@ import unittest
 from support import Failure, Node, key, target
 
 
-class AgentToolContext(unittest.TestCase):
+class AgentToolContextFixture:
+    bin_dir = os.getenv("PSIOS_TEST_BIN_DIR", "target/debug")
+
     def setUp(self):
-        self.node = Node(os.getenv("PSIOS_TEST_BIN_DIR", "target/debug"))
+        self.node = Node(self.bin_dir)
         self.addCleanup(self.node.close)
         self.tools = ["node.inventory", "system.status"]
         self.skill = self.node.call("Skill.Publish", {
@@ -72,6 +74,72 @@ class AgentToolContext(unittest.TestCase):
     def budget(self):
         return self.node.call("Budget.Get", {"id": self.grant["budget_ref"]["resource_id"]},
                               self.agent["token"])["model_calls_used"]
+
+    def direct_claim(self, session, claim_key):
+        return self.node.call("Model.Claim", {"session_id": session["resource_id"], "key": claim_key},
+                              self.provider["token"])
+
+
+class AgentToolContext(AgentToolContextFixture, unittest.TestCase):
+    def test_default_replay_preserves_issued_task_view_after_real_eviction(self):
+        n = self.node
+        token = self.agent["token"]
+        for queued in (False, True):
+            with self.subTest(queued=queued):
+                session = self.open(context_policy="ReferencesOnly", provider_queue=queued)
+
+                def claim(claim_key):
+                    if queued:
+                        return self.claim(claim_key)
+                    return {**self.direct_claim(session, claim_key), "session_id": session["resource_id"]}
+
+                used = self.budget()
+                tool, result = self.observe(claim(key()), "system.status")
+                second_key = key()
+                issued = claim(second_key)
+                self.assertNotIn("context_digest", issued)
+                self.assertNotIn("previous_tools", issued["context"])
+                self.assertEqual(issued["context"]["last_tool"]["result"], {
+                    "availability": "Available", "artifact_refs": [result],
+                })
+                self.evict(tool)
+                status = n.call("Task.Get", {"id": tool}, token)
+                self.assertEqual(status["result"]["availability"], "Evicted")
+                self.assertEqual(self.budget(), used + 2)
+                n.stop(signal.SIGKILL)
+                if queued:
+                    with closing(sqlite3.connect(n.state / "state.db")) as conn:
+                        with conn:
+                            saved = conn.execute(
+                                "SELECT lease,session_ref,usage_ref,context_digest FROM model_context_snapshots "
+                                "WHERE lease=?", (issued["lease_id"],),
+                            ).fetchone()
+                            self.assertEqual(saved[0], issued["lease_id"])
+                            conn.execute("DELETE FROM model_context_snapshots WHERE lease=?", (saved[0],))
+                        try:
+                            invalid = subprocess.run(n.daemon + ["verify"], capture_output=True, timeout=20)
+                            self.assertNotEqual(invalid.returncode, 0, invalid.stdout)
+                            self.assertIn(b"default model lease checkpoint disagrees with its issuance format",
+                                          invalid.stderr)
+                        finally:
+                            with conn:
+                                conn.execute(
+                                    "INSERT INTO model_context_snapshots(lease,session_ref,usage_ref,context_digest) "
+                                    "VALUES(?,?,?,?)", saved,
+                                )
+                subprocess.run(n.daemon + ["verify"], check=True, capture_output=True, timeout=20)
+                n.start()
+                replay = claim(second_key)
+                self.assertEqual(replay, {**issued, "recovered": True})
+                self.assertEqual(self.budget(), used + 2)
+                receipt = self.decision(replay, {"action": "finish", "summary": "Reviewed original observation."})
+                self.assertEqual(receipt["lifecycle"], "Succeeded")
+                completed = claim(second_key)
+                self.assertEqual(completed["completed"], receipt)
+                self.assertNotIn("context", completed)
+                history = n.call("Session.History", {"id": session["resource_id"]}, token)
+                self.assertEqual(len(history["tasks"]), 1)
+                self.assertNotIn("context_digest", history["turns"][-1])
 
     def test_two_tools_replay_exactly_after_crash_and_release_expired_retention(self):
         n = self.node

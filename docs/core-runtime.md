@@ -702,6 +702,8 @@ Core 记录 Provider 的迟到证据，原 `Unknown`、工具任务和记账继�
 
 格式 65 把领取时的 Session 修订、ModelUsage 与规范化上下文摘要一起提交。领取结果和 `Session.History` 提供 `context_digest`。重发领取请求时从原修订重新生成上下文，校验摘要并复核当前权限。内容缺失、检查点损坏或上下文超限会以明确原因暂停自动队列中的该会话，其他会话可继续领取。原调用额度和工具回执仍可核对。[Unix API 与进程故障验收](../tests/test_agent_tool_context.py) · [格式 64 原地升级](../tests/agent_context_upgrade.py)
 
+格式 107 也为省略 `tool_context_window` 的普通领取固定签发时的 Task 修订及内部上下文摘要。领取及历史的默认 JSON 结构保持原样。若后续回收制品，`ReferencesOnly` 重放保留原租约的元数据视图，制品接口仍报告当前可用性。`LocalToolResults` 重放须重新通过授权并核验现有正文。对于升级前尚未结算的默认领取，若 Task 已改变修订或原视图无法核实，重放返回 `OutcomeUnknown`，此前已保留的模型决策仍可通过原租约结算。 [原地升级验收](../tests/default_context_upgrade.py)
+
 ### 显式授权私有 JSON 输入
 
 直接调用 `Session.Open` 可提交 `input_artifacts`，每项由唯一 `name`、完整资源引用 `reference` 和 `kind: "Json"` 组成。支持至多四个会话所有者发布的 `application/json` 制品，每份原始数据至多 16 KiB。Core 在会话建立和 Provider 领取时校验 JSON、原摘要及合并后上下文预算。会话表和历史查询保存引用及上下文摘要。

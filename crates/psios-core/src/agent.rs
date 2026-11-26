@@ -1,4 +1,5 @@
 //! The local runtime coordinates model decisions with (and never independently executes) broker Tasks.
+pub(crate) mod default_context;
 pub(crate) mod fallback;
 pub(crate) mod inference;
 pub(crate) mod late_decision;
@@ -298,11 +299,12 @@ pub fn history(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let s = db.of(&p.id, "Session")?;
     policy::owned(actor, &s)?;
     policy::can(db, actor, "task.read")?;
-    let mut turns=db.c.prepare("SELECT t.turn,t.lease,t.expires,t.task,t.receipt,c.context_digest,i.receipt
+    let mut turns=db.c.prepare("SELECT t.turn,t.lease,t.expires,t.task,t.receipt,
+        CASE WHEN ?2 THEN c.context_digest END,i.receipt
         FROM session_turns t LEFT JOIN model_context_snapshots c ON c.lease=t.lease
         LEFT JOIN model_inference_leases i ON i.lease=t.lease
         WHERE t.session=?1 ORDER BY t.turn")?
-        .query_map([&s.id],|r| {
+        .query_map(params![s.id, tool_context::enabled(&s)],|r| {
             let mut view = json!({"turn":r.get::<_,u32>(0)?,"lease_id":r.get::<_,String>(1)?,"expires_at":r.get::<_,String>(2)?,
                 "task_id":r.get::<_,Option<String>>(3)?,"decision":r.get::<_,Option<Value>>(4)?});
             if let Some(digest) = r.get::<_,Option<String>>(5)? {
@@ -422,52 +424,8 @@ fn context(db: &Db<'_>, s: &Doc, skill: &Doc, model: &Doc) -> Result<Value> {
     if tool_context::enabled(s) {
         return tool_context::build(db, s, skill, model);
     }
-    let maximum: usize = decode(&model.spec["max_context_bytes"])?;
-    let mut context = tool_context::base(s, skill);
-    let mut last = Value::Null;
-    if let Some(tid) = s.body["last_task"].as_str() {
-        let t = db.of(tid, "Task")?;
-        require(
-            t.owner == s.owner,
-            "PermissionDenied",
-            "tool result owner changed",
-        )?;
-        last = json!({"task_id":tid,"tool":t.spec["task_type"],"lifecycle":t.body["lifecycle"],"result":t.body["result"]});
-        if s.spec["context_policy"] == "LocalToolResults" && t.body["lifecycle"] == "Succeeded" {
-            artifact::require_task_result(&t.body["result"])?;
-        }
-        if s.spec["context_policy"] == "LocalToolResults"
-            && let Some(reference) = t.body["result"]["artifact_refs"].get(0)
-        {
-            let op = db.resolve(&t.body["operation_refs"][0])?;
-            let plan = db.resolve(&op.body["plan_ref"])?;
-            policy::tool_scope(
-                db,
-                &t.spec["delegation_ref"],
-                plan.body["allowed_effects"][0]["resource_ref"]["resource_id"]
-                    .as_str()
-                    .unwrap(),
-            )?;
-            let artifact = db.resolve(reference).map_err(artifact::dependency_error)?;
-            require(
-                artifact.owner == s.owner && artifact.kind == "Artifact",
-                "PermissionDenied",
-                "foreign tool result",
-            )?;
-            require(
-                artifact.spec["task_id"] == t.id
-                    && artifact.spec["run_id"] == t.body["current_run_id"],
-                "RecoveryRequired",
-                "tool artifact producer disagrees with the session task",
-            )?;
-            crate::apps::log_tail::authorize_task(db, &s.owner, &t)?;
-            last["local_tool_result"] =
-                artifact::read(db, &artifact, Some(maximum)).map_err(artifact::dependency_error)?;
-        }
-    }
-    context["last_tool"] = last;
-    tool_context::bound(&context, maximum)?;
-    Ok(context)
+    let task = default_context::latest_task(db.c, s)?;
+    default_context::build(db.c, Some(db), s, skill, model, task.as_ref())
 }
 pub fn claim(db: &Db<'_>, actor: &str, p: &Value) -> Result<Result<Value>> {
     let p: Claim = decode(p)?;
@@ -569,12 +527,15 @@ fn replay_claim(
     )?;
     provider_authority::require_current(db, s, model, &lease)?;
     session_inputs::require_provider(s, accepts_session_inputs)?;
-    let (ctx, digest) = if tool_context::enabled(s) {
-        let (ctx, digest) = tool_context::replay(db, s, skill, model, &lease, turn)?;
-        (ctx, Some(digest))
-    } else {
-        (context(db, s, skill, model)?, None)
-    };
+    let (ctx, digest) =
+        if let Some((ctx, digest)) = tool_context::replay(db, s, skill, model, &lease, turn)? {
+            (ctx, tool_context::enabled(s).then_some(digest))
+        } else {
+            (
+                default_context::replay_legacy(db, s, skill, model, &lease, turn)?,
+                None,
+            )
+        };
     let mut result = lease_info(&lease, &until, turn, ctx, true, digest.as_deref());
     inference::decorate_claim(db, model, &lease, &mut result)?;
     Ok(Some(result))
@@ -639,7 +600,7 @@ fn allocate_turn(
     b["current_lease"] = json!(lease);
     b["lease_until"] = json!(until);
     let bytes = canonical(&ctx);
-    let digest = tool_context::enabled(s).then(|| sha256(&bytes));
+    let digest = sha256(&bytes);
     let mut usage = json!({
         "session_id": s.id, "call_id": lease, "model_ref": m.reference(), "budget_ref": d.body["budget_ref"],
         "input_bytes": bytes.len(), "reserved_calls": 1, "issued_at": now()
@@ -647,16 +608,17 @@ fn allocate_turn(
     if window.metered {
         usage["reserved_lease_ms"] = json!(window.millis);
     }
-    if let Some(digest) = &digest {
-        usage["context_digest"] = json!(digest);
+    usage["context_digest"] = json!(digest);
+    if !tool_context::enabled(s) {
+        // The authority transaction keeps the Task used to build ctx stable.
+        let task = default_context::latest_task(db.c, s)?;
+        usage[default_context::TASK_REF] = json!(task.as_ref().map(Doc::reference));
     }
     if let Some(binding) = &serving_authority {
         usage["provider_authority_digest"] = json!(binding.digest());
     }
     let usage = db.record("ModelUsage", &s.owner, usage)?;
-    if let Some(digest) = &digest {
-        tool_context::bind(db, s, &lease, &usage, digest)?;
-    }
+    tool_context::bind(db, s, &lease, &usage, &digest)?;
     b["current_usage_ref"] = usage.reference();
     let issued = db.status(s, b)?;
     inference::bind(
@@ -667,7 +629,8 @@ fn allocate_turn(
         clock.boot.millis + window.millis,
         serving_authority.as_ref(),
     )?;
-    let mut result = lease_info(&lease, &until, turn, ctx, false, digest.as_deref());
+    let public_digest = tool_context::enabled(s).then_some(digest.as_str());
+    let mut result = lease_info(&lease, &until, turn, ctx, false, public_digest);
     inference::decorate_claim(db, m, &lease, &mut result)?;
     Ok(Ok(result))
 }

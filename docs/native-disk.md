@@ -166,7 +166,7 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 1 \
 
 ### 试启动后发布停机更新候选
 
-`native/stage_update.py` 适用于 Linux amd64 上的普通 OVMF 原生盘。先停止原来的来宾并卸载原盘。准备核验过的原盘构建回执、原 EFI 变量和目标 Core 与内核输入。输出路径应是操作者私有目录中尚未存在的名称。
+`native/stage_update.py` 适用于 Linux amd64 上的 OVMF 原生盘。先停止原来的来宾并卸载原盘。准备核验过的原盘构建回执、原 EFI 变量和目标 Core 与内核输入。输出路径应是操作者私有目录中尚未存在的名称。
 
 ```sh
 python3 native/stage_update.py next-release \
@@ -179,7 +179,9 @@ python3 native/stage_update.py next-release \
 
 控制器采集一次原盘，在私有副本上处理必要的 ext4 日志，再基于同一份快照生成两份盘。隔离试启动在禁用来宾网络的 QEMU、私有 EFI 变量和限额写时复制层上运行。控制器核对 `Ready`、部署摘要和正常关机，再用目标 Core 离线核对同一节点的迁移结果与见证。发布前重新检查原盘与 EFI 变量。保持原盘停机，直至控制器退出。
 
-成功后，`next-release` 同时出现 `candidate.raw`、`candidate-build.json` 和 `staged-update.json`。回执记录原始与规范化源摘要、试启动证明及正式候选摘要，状态为 `Staged`，回退方式为 `ManualRecoveryOnly`。正式启动、激活和回退由操作者单独执行。签名盘的自动分阶段发布与自动引导接管仍待开发。[分阶段更新验收](../tests/native_staged_update.py)
+签名原盘追加 `--secure-boot-key`、`--secure-boot-cert`、`--efi-stub` 和 `--efi-stub-sha256`，使用原登记证书及相应 Secure Boot 固件。两份 EFI 均使用同一证书签名。试启动在挂载可写状态前核对固件的 Secure Boot 执行状态，通过后才继续迁移。回执为试启动保存固件执行证据，为正式候选保存单独的签名与摘要。
+
+成功后，`next-release` 同时出现 `candidate.raw`、`candidate-build.json` 和 `staged-update.json`。回执记录原始与规范化源摘要、试启动证明及正式候选摘要，状态为 `Staged`，回退方式为 `ManualRecoveryOnly`。正式启动、激活和回退由操作者单独执行。自动引导接管仍待开发。[分阶段更新验收](../tests/native_staged_update.py)
 
 ### 启动正式候选盘
 

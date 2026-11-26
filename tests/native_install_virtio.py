@@ -126,7 +126,8 @@ def ubuntu_command(instance, target, rejected, port, serial_log):
            "-serial", f"file:{serial_log.name}", "-boot", "strict=on",
            "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=uefi-code.fd",
            "-drive", "if=pflash,format=raw,unit=1,file=uefi-vars.fd",
-           "-nic", f"user,model=virtio-net-pci,restrict=on,hostfwd=tcp:127.0.0.1:{port}-:22"]
+           "-netdev", f"user,id=management,restrict=on,hostfwd=tcp:127.0.0.1:{port}-:22",
+           "-device", "virtio-net-pci,netdev=management,romfile="]
     for name, path, fmt, serial, options in (
         ("ubuntu", "system.qcow2", "qcow2", "PSIOS-UBUNTU", ",bootindex=1"),
         ("seed", "seed.iso", "raw", "PSIOS-SEED", ""),

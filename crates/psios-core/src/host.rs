@@ -603,6 +603,7 @@ impl Work {
             self.action,
             Action::VerifyVolumeFile(_)
                 | Action::InspectFileRename(_)
+                | Action::InspectRestoredVolume(_)
                 | Action::InspectProcess(_)
                 | Action::ObserveNetworkProbe(_)
                 | Action::ListAppReleases(_)

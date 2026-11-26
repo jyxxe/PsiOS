@@ -190,7 +190,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = events::offsets::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = storage::restore_publication::DISPOSAL_FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -483,6 +483,9 @@ impl Store {
                 if ver < events::offsets::FORMAT {
                     db.c.execute_batch(events::offsets::SCHEMA)?;
                 }
+                if ver < storage::restore_publication::DISPOSAL_FORMAT {
+                    db.c.execute_batch(storage::restore_publication::DISPOSAL_SCHEMA)?;
+                }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;
         }
@@ -492,6 +495,10 @@ impl Store {
 
     pub(crate) fn reclaim_oci_archives(&self) -> Result<()> {
         artifact::files::reclaim(&self.conn, &self.config.state_dir)
+    }
+
+    pub(crate) fn transaction_is_uncertain(&self) -> bool {
+        self.sealed
     }
     /// Offline recovery requires the Linux service account, exclusive lock and a fresh witness.
     pub fn recover_owner(&mut self) -> Result<()> {

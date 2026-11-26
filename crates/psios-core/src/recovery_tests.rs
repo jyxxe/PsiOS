@@ -195,6 +195,149 @@ fn network_probe_projection_fences_older_receipts_and_rolls_back_with_task_resul
         .unwrap();
 }
 
+#[test]
+fn witnessed_unpublished_restore_reconciles_without_replaying_and_resumes_disposal() {
+    let directory = tempfile::tempdir().unwrap();
+    let (cfg, mut store) = initialized(directory.path());
+    let target = |reference: &Value| {
+        json!({
+            "id":reference["resource_id"],"expected_resource_version":reference["version"],
+        })
+    };
+    let volume = submit(
+        &mut store,
+        "volume.create",
+        json!({"name":"restore-stage-custody"}),
+    );
+    let volume = execute(&mut store, &volume);
+    let backup = submit(&mut store, "backup.create", target(&volume));
+    let backup = execute(&mut store, &backup);
+    let restoration = submit(&mut store, "backup.restore", target(&backup));
+    assert_eq!(claim(&mut store), restoration);
+    let work = dispatch(&mut store, &restoration);
+    let result = work.perform(|checkpoint| {
+        store.transaction("restore-checkpoint", |db| work.checkpoint(db, checkpoint))?;
+        Err(err(
+            "OutcomeUnknown",
+            "test interruption before the restore rename",
+        ))
+    });
+    assert_eq!(result.unwrap_err().0.code, "OutcomeUnknown");
+    let operation_id = work.op.id.clone();
+    let checkpoint = call(
+        &mut store,
+        "Resource.Get",
+        json!({"id":format!("restore-publication-{operation_id}")}),
+    )
+    .unwrap();
+    let volumes = cfg.state_dir.join("volumes");
+    let stage_name = checkpoint["value"]["placement"]["stage_name"]
+        .as_str()
+        .unwrap();
+    let staged = volumes.join(stage_name);
+    let final_path = volumes.join(checkpoint["value"]["receipt"]["id"].as_str().unwrap());
+    assert!(staged.is_dir() && !final_path.exists());
+    drop(store);
+
+    let mut store = Store::open(cfg.clone()).unwrap();
+    let retained = store
+        .transaction(
+            "restore-stage-custody",
+            storage::restore_publication::protected_stages,
+        )
+        .unwrap();
+    assert!(retained.contains(stage_name));
+    storage::reclaim_on_startup(&cfg, Some(&retained));
+    store
+        .transaction("recover-restore", broker::recover)
+        .unwrap();
+    let pending = call(&mut store, "Task.Get", json!({"id":restoration})).unwrap();
+    assert_eq!(pending["outcome_knowledge"], "Unknown");
+    assert!(staged.is_dir() && !final_path.exists());
+    let original = &pending["operation_refs"][0];
+    let tool = storage::restore_publication::INSPECT;
+    let grant = call(
+        &mut store,
+        "Grant.Issue",
+        json!({
+            "principal_id":"local-owner","actions":["task.submit","task.read",tool],
+            "tool_targets":[operation_id],"ttl_seconds":90,"units":4,
+        }),
+    )
+    .unwrap();
+    let request = call(
+        &mut store,
+        "Task.Prepare",
+        json!({
+            "tool":tool,"input":target(original),"key":id("restore-observation"),
+            "delegation_id":grant["delegation_ref"]["resource_id"],
+        }),
+    )
+    .unwrap();
+    let accepted = call(&mut store, "Task.Submit", request).unwrap();
+    let inspected = accepted["task_id"].as_str().unwrap();
+    let proof = execute(&mut store, inspected);
+    assert_eq!(proof["publication"], "NotApplied");
+    let decision = call(&mut store, "Task.Get", json!({"id":inspected})).unwrap();
+    let mut reconcile = target(original);
+    reconcile["evidence_ref"] = decision["result"]["artifact_refs"][0].clone();
+    fs::create_dir(&final_path).unwrap();
+    assert_eq!(
+        call(&mut store, "Operation.Reconcile", reconcile.clone())
+            .unwrap_err()
+            .0
+            .code,
+        "PreconditionFailed"
+    );
+    fs::remove_dir(&final_path).unwrap();
+    let known = call(&mut store, "Operation.Reconcile", reconcile).unwrap();
+    assert_eq!(
+        (
+            known["lifecycle"].as_str(),
+            known["outcome_knowledge"].as_str()
+        ),
+        (Some("Failed"), Some("Known"))
+    );
+    assert!(!final_path.exists());
+    let job = store
+        .transaction("restore-disposal-ready", |db| {
+            assert!(!db.c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM holds WHERE holder=?1)",
+                [&operation_id],
+                |r| r.get::<_, bool>(0)
+            )?);
+            use storage::restore_publication::{Disposal, next_disposal};
+            assert_eq!(
+                next_disposal(db, "")?.as_deref(),
+                Some(operation_id.as_str())
+            );
+            Disposal::open(db, &operation_id)
+        })
+        .unwrap();
+    let post_settlement = store
+        .transaction(
+            "discard-custody",
+            storage::restore_publication::protected_stages,
+        )
+        .unwrap();
+    assert!(post_settlement.contains(stage_name));
+    let trash = volumes.join(format!(".restore-discard-{operation_id}"));
+    fs::create_dir(&trash).unwrap();
+    assert!(job.run(&cfg).is_err());
+    assert!(staged.is_dir());
+    fs::remove_dir(&trash).unwrap();
+    // Resume a quarantine already renamed and partially unlinked before a crash.
+    fs::rename(&staged, &trash).unwrap();
+    fs::remove_file(trash.join("identity")).unwrap();
+    assert!(job.run(&cfg).unwrap());
+    let removed = job.run(&cfg).unwrap();
+    assert!(!removed);
+    assert!(!staged.exists() && !trash.exists() && !final_path.exists());
+    store
+        .transaction("restore-disposal-finished", |db| job.finish(db, removed))
+        .unwrap();
+}
+
 fn approve(s: &mut Store, task: &str) {
     let t = call(s, "Task.Get", json!({"id": task})).unwrap();
     let r = call(

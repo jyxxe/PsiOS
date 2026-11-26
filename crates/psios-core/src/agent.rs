@@ -10,6 +10,7 @@ pub(crate) mod pause;
 pub(crate) mod provider_authority;
 mod queue;
 mod registry;
+mod rejected_decision;
 pub(crate) mod session_inputs;
 pub(crate) mod tool_context;
 pub(crate) mod work_admission_status;
@@ -322,6 +323,7 @@ pub fn history(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         if let Some(observation) = late_decision::receipt(db.c, lease)? {
             turn["late_decision_observation"] = observation;
         }
+        rejected_decision::verify_receipt(db.c, &s.id, lease, &turn["decision"])?;
     }
     let tasks=db.c.prepare("SELECT task,turn,attempt FROM session_tasks WHERE session=?1 ORDER BY turn,attempt")?
        .query_map([&s.id],|r|Ok(json!({"task_id":r.get::<_,String>(0)?,"turn":r.get::<_,u32>(1)?,"attempt":r.get::<_,u32>(2)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -515,6 +517,7 @@ fn replay_claim(
         return Ok(None);
     };
     if let Some(receipt) = receipt {
+        rejected_decision::verify_receipt(db.c, &s.id, &lease, &receipt)?;
         return Ok(Some(json!({"turn":turn,"completed":receipt})));
     }
     if let Some(receipt) = inference::failure_receipt(db.c, &lease)? {
@@ -642,6 +645,7 @@ struct Respond {
     lease_id: String,
     decision: Value,
     usage: Option<ModelTokenUsage>,
+    decision_rejection_policy: Option<psios_api::ModelDecisionRejectionPolicy>,
 }
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -739,6 +743,7 @@ pub fn respond(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let prior:Option<(String,Value)>=db.c.query_row("SELECT decision_digest,receipt FROM session_turns WHERE lease=?1 AND session=?2 AND receipt IS NOT NULL",
         params![p.lease_id,s.id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
     if let Some((old, receipt)) = prior {
+        rejected_decision::verify_receipt(db.c, &s.id, &p.lease_id, &receipt)?;
         let previous_usage = receipt
             .get("usage_ref")
             .map(|r| db.resolve(r))
@@ -748,7 +753,10 @@ pub fn respond(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             .and_then(|d| d.body.get("reported_tokens"));
         let supplied = p.usage.map(|u| json!(u));
         require(
-            old == hash && prior_tokens == supplied.as_ref(),
+            old == hash
+                && prior_tokens == supplied.as_ref()
+                && (receipt.get("rejection").is_none()
+                    || receipt["rejection"]["policy"] == json!(p.decision_rejection_policy)),
             "IdempotencyConflict",
             "lease already bound to another decision",
         )?;
@@ -764,15 +772,28 @@ pub fn respond(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     )?;
     provider_authority::require_current(db, &s, &model, &p.lease_id)?;
     session_inputs::live_access(db, &s)?;
+    require(
+        p.decision_rejection_policy.is_none() || inference::strict(&model),
+        "UnsupportedCapability",
+        "known tool rejection requires the strict provider policy",
+    )?;
     let mut b = s.body.clone();
     let mut task = None;
+    let mut rejection = None;
     match decode::<Decision>(&p.decision)? {
+        Decision::Tool { tool, .. } if skill.spec["tool_refs"].get(&tool).is_none() => {
+            let policy = p
+                .decision_rejection_policy
+                .ok_or_else(|| err("PermissionDenied", "tool not declared by pinned skill"))?;
+            rejection = Some(rejected_decision::record(
+                &mut b,
+                policy,
+                &p.lease_id,
+                &tool,
+                &hash,
+            ));
+        }
         Decision::Tool { tool, input } => {
-            require(
-                skill.spec["tool_refs"].get(&tool).is_some(),
-                "PermissionDenied",
-                "tool not declared by pinned skill",
-            )?;
             let request = broker::prepare_claimed_model(
                 db,
                 &s.owner,
@@ -822,6 +843,11 @@ pub fn respond(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let mut receipt = json!({"session_ref":saved.reference(),"task_id":task,"decision_digest":hash,"output_bytes":bytes.len(),"lifecycle":state(&saved)});
     if let Some(reference) = usage_ref {
         receipt["usage_ref"] = reference;
+    }
+    if let Some(rejection) = rejection {
+        receipt["rejection"] = rejection;
+        receipt["outcome_knowledge"] = json!("Known");
+        db.audit(actor, "Model.Respond", Some(&s.id), "ToolNotDeclared")?;
     }
     db.c.execute("UPDATE session_turns SET task=?1,decision_digest=?2,receipt=?3 WHERE session=?4 AND lease=?5",
       params![task,hash,receipt,s.id,p.lease_id])?;

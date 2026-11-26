@@ -36,6 +36,8 @@ pub(super) fn decorate_claim(
         )?;
         if witnessed {
             reply["late_decision_observation"] = json!(true);
+            reply["decision_rejection_policy"] =
+                json!(psios_api::ModelDecisionRejectionPolicy::UndeclaredToolV1);
             reply["model_ref"] = model.reference();
         }
     }
@@ -341,7 +343,7 @@ pub(super) fn check_resume(db: &Db<'_>, session: &Doc, model: &Doc) -> Result<()
     Ok(())
 }
 
-fn predecessor(conn: &Connection, version: &Doc) -> Result<Doc> {
+pub(super) fn predecessor(conn: &Connection, version: &Doc) -> Result<Doc> {
     let missing = || {
         err(
             "RecoveryRequired",
@@ -468,5 +470,5 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
             )?;
         }
     }
-    Ok(())
+    super::rejected_decision::verify(conn)
 }

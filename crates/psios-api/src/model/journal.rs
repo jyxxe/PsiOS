@@ -17,6 +17,7 @@ const PENDING: &str = "psios-model-pending.json";
 const STAGING: &str = ".psios-model-pending.tmp";
 const LIMIT: u64 = 72 * 1024;
 const LATE_DECISION_FORMAT: u32 = 4;
+const DECISION_REJECTION_FORMAT: u32 = 5;
 
 fn storage_error(_: impl std::fmt::Display) -> Box<ApiError> {
     ApiError::new("StorageUnavailable", "provider decision journal I/O failed").into()
@@ -44,7 +45,10 @@ impl Pending {
         request: Delivery,
         late_decision_model_ref: Option<ResourceRef>,
     ) -> Self {
-        let format = if late_decision_model_ref.is_some() {
+        let format = if matches!(&request, Delivery::Decision(d) if d.decision_rejection_policy.is_some())
+        {
+            DECISION_REJECTION_FORMAT
+        } else if late_decision_model_ref.is_some() {
             LATE_DECISION_FORMAT
         } else {
             request.format()
@@ -61,6 +65,14 @@ impl Pending {
     }
 
     fn valid_format(&self) -> bool {
+        if matches!(&self.request, Delivery::Decision(d) if d.decision_rejection_policy.is_some()) {
+            return self.format == DECISION_REJECTION_FORMAT
+                && self.late_decision_model_ref.as_ref().is_some_and(|model| {
+                    self.queue_model
+                        .as_ref()
+                        .is_none_or(|queued| queued == model)
+                });
+        }
         if let Some(model) = &self.late_decision_model_ref {
             self.format == LATE_DECISION_FORMAT
                 && matches!(self.request, Delivery::Decision(_))
@@ -253,6 +265,18 @@ fn matches_decision(receipt: &Value, request: &DecisionRequest) -> bool {
     receipt["decision_digest"] == sha256(&bytes) && receipt["output_bytes"] == bytes.len()
 }
 
+fn matches_rejection(receipt: &Value, request: &DecisionRequest) -> bool {
+    receipt.get("rejection").is_none_or(|rejection| {
+        request.decision_rejection_policy.is_some()
+            && request.decision_rejection_policy
+                == serde_json::from_value(rejection["policy"].clone()).ok()
+            && rejection["code"] == "ToolNotDeclared"
+            && receipt["lifecycle"] == "Failed"
+            && receipt["outcome_knowledge"] == "Known"
+            && receipt.get("task_id").is_some_and(Value::is_null)
+    })
+}
+
 fn matches_observation(
     receipt: &Value,
     record: &Pending,
@@ -370,6 +394,7 @@ impl Client {
         match self.send_delivery(&record.request) {
             Ok(receipt) => {
                 if !matches_decision(&receipt, request)
+                    || !matches_rejection(&receipt, request)
                     || session_revision(&receipt["session_ref"], &request.session_id).is_none()
                 {
                     return Err(ApiError::new(
@@ -384,6 +409,14 @@ impl Client {
             Err(error)
                 if !error.retryable
                     && matches!(error.code.as_str(), "Fenced" | "PermissionDenied") => {}
+            // An older Core rejects the negotiated response field before
+            // looking up its receipt. Keep the exact request for a compatible Core.
+            Err(error)
+                if request.decision_rejection_policy.is_some()
+                    && error.code == "InvalidArgument" =>
+            {
+                return Err(error);
+            }
             Err(error) if should_check_lease(&error) => {
                 if let Some(queued) = &record.queue_model {
                     // Settled can also be a strict Unknown. It does not
@@ -397,7 +430,7 @@ impl Client {
             }
             Err(error) => return Err(error),
         }
-        match self.call("Model.ObserveLateDecision", json!(request)) {
+        match self.call("Model.ObserveLateDecision", request.late_observation()) {
             Ok(receipt) => {
                 if !matches_observation(&receipt, record, request, model) {
                     return Err(ApiError::new(

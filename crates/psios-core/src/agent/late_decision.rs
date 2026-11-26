@@ -184,6 +184,11 @@ pub(crate) fn receipt(conn: &Connection, lease: &str) -> Result<Option<Value>> {
 
 pub(crate) fn observe(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     let request: Respond = decode(params)?;
+    require(
+        params.get("decision_rejection_policy").is_none(),
+        "InvalidArgument",
+        "late observations do not use a decision settlement policy",
+    )?;
     label(&request.session_id)?;
     label(&request.lease_id)?;
     let lease = &request.lease_id;
@@ -297,7 +302,7 @@ fn policy_scope_or_fenced(
     Ok(())
 }
 
-fn sha256_digest(digest: &str) -> bool {
+pub(super) fn sha256_digest(digest: &str) -> bool {
     digest.strip_prefix("sha256:").is_some_and(|hex| {
         hex.len() == 64
             && hex

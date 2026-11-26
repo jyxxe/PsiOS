@@ -52,7 +52,7 @@ def boot_operator(console, operator, admin, build):
     return durable_fact(console)
 
 
-def isolated_boot(work, disk, code, original_vars, credentials, build, baseline, token):
+def isolated_boot(work, disk, code, original_vars, credentials, build, baseline, token, *, pace_commands=False):
     operator, admin = credentials
     with tempfile.TemporaryDirectory(dir=work, prefix="secure-boot-view-") as directory:
         view = Path(directory)
@@ -62,7 +62,7 @@ def isolated_boot(work, disk, code, original_vars, credentials, build, baseline,
         overlay = view / "boot.qcow2"
         succeeded(invoke(["qemu-img", "create", "-q", "-f", "qcow2", "-F", "raw",
                           "-b", str(disk), overlay], 30))
-        with secure_vm(view, overlay, disk_format="qcow2") as console:
+        with secure_vm(view, overlay, disk_format="qcow2", pace_commands=pace_commands) as console:
             observed = boot_operator(console, operator, admin, build)
             assert observed[0] == baseline[0], observed
             assert observed[1]["task_id"] == baseline[1]["task_id"] and observed[1]["deduplicated"] is True

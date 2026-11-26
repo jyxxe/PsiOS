@@ -644,6 +644,7 @@ fn resource_pressure(error: &std::io::Error) -> bool {
 
 pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     let mut db = Store::open(cfg.clone())?;
+    db.transaction("storage-reclamation-custody", |db| retirement::verify(db.c))?;
     db.reclaim_oci_archives()?;
     let backup_stages = db.transaction(
         "backup-stage-custody",

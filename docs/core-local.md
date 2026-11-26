@@ -161,6 +161,8 @@ volume.write、volume.delete、volume.activate、backup.delete、application.ins
 
 批准的 `volume.delete` 与 `backup.delete` 在改名前持久记录目录及父目录标识，随后把原目录原子移出活动路径。操作成功时资源进入 `Deleted`，`StorageRetirement` 进入 `PendingCleanup`。后台只回收已提交删除的原目录，遇到身份不符或挂载边界时保留回收记录并重试。可以通过 `storage-retirement-OPERATION_ID` 查询清理进度及 `Reclaimed` 的目录观测。
 
+Core 启动和 `psiosd verify` 双向核对待回收记录与回收队列，并验证原删除审批、执行凭据和目标修订。队列行缺失、指向已清理记录或无法证明原删除归属时，Core 报告 `RecoveryRequired`。合法的重试时间在校验和重启后继续生效。[队列损坏与重试验收](../tests/test_storage_retirement.py)
+
 结算中断时保留原目标的排他占用与目录证据。本机管理员可用 `Operation.Reconcile` 和未知 Operation 的当前修订复核已移出的原目录，或确认原目录仍处于活动路径。有匹配证据时结算同一个 Operation。缺少匹配证据时继续保留占用。格式 39 升级保留等待中的删除审批。[回执丢失和重启验收](../tests/test_storage_retirement.py) · [原审批迁移](../tests/storage_retirement_upgrade.py)
 
 ### 查询卷用量

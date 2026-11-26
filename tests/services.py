@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import sqlite3
 import subprocess
 import time
 
@@ -29,6 +30,18 @@ def main():
     completion = n.base / "allow-start"
     entered = n.base / "starting"
     ctl = ["systemctl", "--user"]
+
+    def checkpoint(receipt, verb, before):
+        saved = n.call("Resource.Resolve", {"reference": receipt["checkpoint_ref"]})["value"]
+        intent = n.call("Resource.Resolve", {"reference": saved["intent_ref"]})["value"]
+        assert saved["verb"] == verb and saved["before"]["active_state"] == before, saved
+        assert intent["tool"] == f"service.{verb}", intent
+        assert intent["service_ref"]["resource_id"] == service_id, intent
+        assert saved["before"]["manager_uid"] == os.geteuid(), saved
+        for field in ("unit", "manager", "manager_uid", "boot_id", "definition_digest"):
+            assert saved["before"][field] == receipt["observation"][field], (saved, receipt)
+        return intent
+
     try:
         path.write_text(f"""[Unit]
 Description=PsiOS test-owned barrier
@@ -60,10 +73,27 @@ ExecStart=/bin/sh -c 'touch {entered}; while test ! -f {completion}; do sleep .0
         assert fenced["conditions"][0]["type"] == "ApprovalInvalidated" and not entered.exists(), fenced
         path.write_text(original_unit)
         subprocess.run(ctl + ["daemon-reload"], check=True)
+
+        with sqlite3.connect(n.state / "state.db", timeout=10) as db:
+            db.execute("""CREATE TRIGGER refuse_start_checkpoint BEFORE INSERT ON versions
+                WHEN NEW.kind='HostServiceControlCheckpoint'
+                BEGIN SELECT RAISE(ABORT,'injected start checkpoint failure'); END""")
+        try:
+            denied_id = n.submit("service.start", target(service))
+            denied = n.wait(denied_id, autoapprove=True)
+            assert (denied["lifecycle"], denied["outcome_knowledge"], denied["conditions"][0]["type"]) == (
+                "Failed", "NotStarted", "StorageUnavailable"), denied
+            assert not entered.exists(), "systemd ran after the checkpoint was refused"
+            assert n.perform("service.inspect", target(service))["active_state"] == "inactive"
+        finally:
+            with sqlite3.connect(n.state / "state.db", timeout=10) as db:
+                db.execute("DROP TRIGGER refuse_start_checkpoint")
+
         prior = n.wait(n.submit("service.inspect", target(service)))
         assert prior["lifecycle"] == "Succeeded", prior
         old_evidence = prior["result"]["artifact_refs"][0]
-        start = n.submit("service.start", target(service))
+        start = n.call("Task.Retry", dict(target(n.get(denied_id)["reference"]), key=key()))["task_id"]
+        assert start != denied_id and n.wait(start)["lifecycle"] == "WaitingApproval"
         n.approve(start)
         eventually(entered.exists)
         assert n.call("Task.Get", {"id": start})["outcome_knowledge"] == "InFlight"
@@ -87,10 +117,15 @@ ExecStart=/bin/sh -c 'touch {entered}; while test ! -f {completion}; do sleep .0
         assert observed["active_state"] == "active" and observed["invocation_id"], observed
         # Readback, settling the old task and releasing the service hold happen without a second start.
         n.call("Operation.Reconcile", dict(**target(op), evidence_ref=evidence))
-        assert n.wait(start)["lifecycle"] == "Succeeded"
+        completed = n.wait(start)
+        assert completed["lifecycle"] == "Succeeded", completed
+        receipt = n.call("Artifact.Read", {"reference": completed["result"]["artifact_refs"][0]})
+        intent = checkpoint(receipt, "start", "inactive")
+        assert intent["operation_ref"]["resource_id"] == op["resource_id"], intent
         service = n.get(service_id)["reference"]
         stopped = n.perform("service.stop", target(service))
         assert stopped["observation"]["active_state"] == "inactive"
+        checkpoint(stopped, "stop", "active")
         agent, grant = n.agent(["task.submit", "task.read", "service.start"])
         req = n.prepare("service.start", target(stopped["service_ref"]), key(), agent["token"], grant["delegation_ref"]["resource_id"])
         live = n.call("Task.Submit", req, agent["token"])["task_id"]
@@ -111,7 +146,7 @@ ExecStart=/bin/sh -c 'touch {entered}; while test ! -f {completion}; do sleep .0
         failed = n.wait(n.submit("service.start", target(service)), autoapprove=True)
         assert failed["conditions"][0]["type"] == "PermissionDenied", failed
         assert n.perform("service.inspect", target(service))["active_state"] == "inactive"
-        print("PASS real systemd allowlist, blocked and concurrent workers, SIGKILL, fresh postcondition, recovery and stop")
+        print("PASS real systemd start/stop checkpoints, denied dispatch, concurrent workers and SIGKILL recovery")
     finally:
         completion.touch()
         subprocess.run(ctl + ["stop", unit], capture_output=True)

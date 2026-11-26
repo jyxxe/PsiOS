@@ -521,6 +521,7 @@ pub(crate) enum Checkpoint<'a> {
     OciRestart(&'a Value),
     OciImageRestore(&'a apps::restore_image::Dispatch),
     FileRename(&'a storage::file_move::Witness),
+    ServiceControl(&'a Value),
 }
 
 impl Work {
@@ -619,6 +620,11 @@ impl Work {
             (Action::RestoreReleaseImage(request), Checkpoint::OciImageRestore(dispatch)) => {
                 apps::restore_image::record(db, self, &target, request, dispatch)
             }
+            (action, Checkpoint::ServiceControl(before))
+                if node::service_control::is_control(action) =>
+            {
+                node::service_control::record(db, self, &target, before)
+            }
             (
                 Action::Delete(_) | Action::DeleteBackup(_),
                 Checkpoint::StorageDeletion(location),
@@ -673,7 +679,9 @@ impl Work {
             | Action::NetworkProbe(_)
             | Action::Mounts {}
             | Action::BlockLayout(_)
-            | Action::Devices {} => node::perform(self),
+            | Action::Devices {} => node::perform(self, |before| {
+                checkpoint(Checkpoint::ServiceControl(before))
+            }),
             Action::Start(_) => apps::start(self, |engine, container| {
                 checkpoint(Checkpoint::OciStart { engine, container })
             }),

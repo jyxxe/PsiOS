@@ -93,6 +93,54 @@ fn approve(s: &mut Store, task: &str) {
 const HOST_WRITE_BARRIER: &str = "PSIOS_TEST_CRASH_STATE";
 
 #[test]
+fn systemd_task_releases_its_hold_after_restart_before_the_command_checkpoint() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut config, store) = initialized(directory.path());
+    drop(store);
+    config.services.push(config::ServiceConfig {
+        unit: "psios-recovery-fixture.service".into(),
+        manager: config::Manager::User,
+        allow_control: true,
+        definition_digest: Some(format!("sha256:{}", "a".repeat(64))),
+    });
+    let mut store = Store::open(config.clone()).unwrap();
+    let id = "service-psios-recovery-fixture.service";
+    let service = call(&mut store, "Resource.Get", json!({"id":id})).unwrap()["reference"].clone();
+    let input = json!({"id":id,"expected_resource_version":service["version"]});
+    let original = submit(&mut store, "service.start", input.clone());
+    approve(&mut store, &original);
+    assert_eq!(claim(&mut store), original);
+    let work = dispatch(&mut store, &original);
+    assert_eq!(work.effect.body["phase"], "PermitBound");
+    let operation = work.op.id.clone();
+    drop(work);
+
+    drop(store);
+    let mut store = Store::open(config).unwrap();
+    store
+        .transaction("recover-fixture", broker::recover)
+        .unwrap();
+    let recovered = call(&mut store, "Task.Get", json!({"id":original})).unwrap();
+    assert_eq!(recovered["lifecycle"], "Failed");
+    assert_eq!(recovered["outcome_knowledge"], "NotStarted");
+    assert_eq!(recovered["conditions"][0]["type"], "LeaseLost");
+    store
+        .transaction("check-hold", |db| {
+            assert!(!db.c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM holds WHERE holder=?1)",
+                [&operation],
+                |r| r.get::<_, bool>(0)
+            )?);
+            Ok(())
+        })
+        .unwrap();
+    let next = submit(&mut store, "service.stop", input);
+    approve(&mut store, &next);
+    assert_eq!(claim(&mut store), next);
+    assert_ne!(dispatch(&mut store, &next).op.id, operation);
+}
+
+#[test]
 fn a_root_budget_slot_is_held_through_claim_and_dispatch() {
     let tmp = tempfile::tempdir().unwrap();
     let (_, mut store) = initialized(tmp.path());

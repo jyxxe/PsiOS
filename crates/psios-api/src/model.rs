@@ -54,7 +54,7 @@ pub struct ModelFailureReport {
 pub trait SessionModel {
     fn decide(&self, context: &Value) -> ApiResult<ModelDecision>;
 
-    /// Opt into receiving authorized artifact data in a directly claimed session.
+    /// Opt into receiving authorized session artifact data on direct or queued claims.
     fn accepts_session_inputs(&self) -> bool {
         false
     }
@@ -136,12 +136,7 @@ enum Turn {
     },
 }
 
-fn direct_claim_parameters(
-    session: &str,
-    key: &str,
-    provider: &(impl SessionModel + ?Sized),
-) -> Value {
-    let mut params = json!({"session_id":session,"key":key});
+fn claim_parameters(mut params: Value, provider: &(impl SessionModel + ?Sized)) -> Value {
     if provider.accepts_session_inputs() {
         params["accepts_session_inputs"] = json!(true);
     }
@@ -157,7 +152,7 @@ impl Client {
     ) -> ApiResult<Turn> {
         let claim = self.call(
             "Model.Claim",
-            direct_claim_parameters(session, key, provider),
+            claim_parameters(json!({"session_id":session,"key":key}), provider),
         )?;
         Self::decide_claim(session, claim, provider, None)
     }
@@ -195,9 +190,10 @@ impl Client {
             return Err(crate::invalid("model lease context digest differs"));
         }
         let context = &claim["context"];
-        if context.get("inputs").is_some()
-            && (expected_model.is_some() || !provider.accepts_session_inputs())
-        {
+        if expected_model.is_some_and(|model| context["model_ref"] != json!(model)) {
+            return Err(crate::invalid("model lease belongs to another model"));
+        }
+        if context.get("inputs").is_some() && !provider.accepts_session_inputs() {
             return Err(ApiError::new(
                 "UnsupportedCapability",
                 "model provider has not opted into session artifact inputs",
@@ -218,11 +214,6 @@ impl Client {
                 let model_ref: ResourceRef =
                     serde_json::from_value(context["model_ref"].clone())
                         .map_err(|_| crate::invalid("strict model lease has no model reference"))?;
-                if expected_model.is_some_and(|expected| expected != &model_ref) {
-                    return Err(crate::invalid(
-                        "strict model lease belongs to another model",
-                    ));
-                }
                 if observe_late && claim["model_ref"] != json!(model_ref) {
                     return Err(crate::invalid(
                         "late decision capability model reference differs",
@@ -356,7 +347,7 @@ mod tests {
     use std::cell::Cell;
 
     #[test]
-    fn direct_model_input_receipt_requires_explicit_provider_support() {
+    fn model_input_receipt_requires_explicit_provider_support() {
         struct InputProvider(Cell<bool>);
         impl SessionModel for InputProvider {
             fn decide(&self, context: &Value) -> ApiResult<ModelDecision> {
@@ -373,44 +364,50 @@ mod tests {
         }
 
         let provider = InputProvider(Cell::new(false));
-        assert_eq!(
-            direct_claim_parameters("session-fixture", "first", &NodeSurvey),
-            json!({"session_id":"session-fixture","key":"first"})
-        );
-        assert_eq!(
-            direct_claim_parameters("session-fixture", "first", &provider),
-            json!({"session_id":"session-fixture","key":"first","accepts_session_inputs":true})
-        );
-        let mut claim = json!({"lease_id":"lease-fixture","context":{
-            "session_id":"session-fixture","inputs":[{"value":{"inventory":true}}],
-        }});
-        assert!(
-            matches!(Client::decide_claim("session-fixture", claim.clone(), &NodeSurvey, None),
-                         Err(error) if error.code == "UnsupportedCapability")
-        );
         let queued = ResourceRef {
             resource_id: "model-fixture".into(),
             version: "r1".into(),
             digest: "sha256:fixture".into(),
         };
+        for original in [
+            json!({"session_id":"session-fixture","key":"first"}),
+            json!({"model_ref":queued,"key":"first"}),
+        ] {
+            assert_eq!(claim_parameters(original.clone(), &NodeSurvey), original);
+            let mut opted_in = original.clone();
+            opted_in["accepts_session_inputs"] = json!(true);
+            assert_eq!(claim_parameters(original, &provider), opted_in);
+        }
+        let mut claim = json!({"lease_id":"lease-fixture","context":{
+            "session_id":"session-fixture","model_ref":queued,"inputs":[{"value":{"inventory":true}}],
+        }});
+        for expected_model in [None, Some(&queued)] {
+            assert!(
+                matches!(Client::decide_claim("session-fixture", claim.clone(), &NodeSurvey, expected_model),
+                             Err(error) if error.code == "UnsupportedCapability")
+            );
+        }
+        let mut wrong_model = claim.clone();
+        wrong_model["context"]["model_ref"]["version"] = json!("r2");
         assert!(
-            matches!(Client::decide_claim("session-fixture", claim.clone(), &provider, Some(&queued)),
-                         Err(error) if error.code == "UnsupportedCapability")
+            Client::decide_claim("session-fixture", wrong_model, &provider, Some(&queued)).is_err()
         );
         assert!(!provider.0.get());
-        assert!(matches!(
-            Client::decide_claim("session-fixture", claim.clone(), &provider, None),
-            Ok(Turn::Deliver {
-                request: Delivery::Decision(_),
-                ..
-            })
-        ));
-        assert!(provider.0.get());
+        for expected_model in [None, Some(&queued)] {
+            assert!(matches!(
+                Client::decide_claim("session-fixture", claim.clone(), &provider, expected_model),
+                Ok(Turn::Deliver {
+                    request: Delivery::Decision(_),
+                    ..
+                })
+            ));
+            assert!(provider.0.replace(false));
+        }
 
         let receipt = json!({"task_id":"existing-task"});
         claim["completed"] = receipt.clone();
         assert!(
-            matches!(Client::decide_claim("session-fixture", claim, &NodeSurvey, None),
+            matches!(Client::decide_claim("session-fixture", claim, &NodeSurvey, Some(&queued)),
                          Ok(Turn::Completed(previous)) if previous == receipt)
         );
     }

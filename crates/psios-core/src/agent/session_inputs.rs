@@ -1,4 +1,4 @@
-//! Exact, separately authorized input data for one direct local Agent session.
+//! Exact, separately authorized input data for one local Agent session.
 use super::*;
 use crate::db::{resolve, row};
 use psios_api::ResourceRef;
@@ -192,7 +192,7 @@ pub(crate) fn retains(db: &Db<'_>, artifact: &str) -> Result<bool> {
     )?)
 }
 
-pub(crate) fn verify(conn: &Connection) -> Result<()> {
+pub(crate) fn verify(conn: &Connection, database_format: u32) -> Result<()> {
     let mut sessions = conn.prepare(
         "SELECT * FROM current WHERE kind='Session' AND spec->>'input_artifacts' IS NOT NULL",
     )?;
@@ -213,7 +213,7 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
                 && original.owner == session.owner
                 && original.spec == session.spec
                 && original.body["delegation_ref"] == session.body["delegation_ref"]
-                && session.spec["provider_queue"] != true
+                && (session.spec["provider_queue"] != true || database_format >= QUEUED_FORMAT)
                 && !session.spec["fallback_model_refs"]
                     .as_array()
                     .is_some_and(|refs| !refs.is_empty())

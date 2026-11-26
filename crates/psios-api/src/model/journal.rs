@@ -1,5 +1,5 @@
 //! A private, single-worker outbox for a completed local provider attempt.
-use super::{DecisionRequest, Delivery, SessionModel, Turn};
+use super::{DecisionRequest, Delivery, SessionModel, Turn, claim_parameters};
 use crate::{ApiError, ApiResult, Client, ResourceRef, canonical, parse, sha256};
 use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags, open, openat, renameat_with, unlinkat};
 use rustix::io::Errno;
@@ -475,7 +475,7 @@ impl Client {
             pending.verify_origin(&identity, Some(model))?;
             return self.deliver_record(&journal, &pending).map(Some);
         }
-        let mut params = json!({"model_ref": model, "key": key});
+        let mut params = claim_parameters(json!({"model_ref": model, "key": key}), provider);
         let method = if wait.is_zero() {
             "Model.ClaimNext"
         } else {

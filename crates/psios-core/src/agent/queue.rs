@@ -8,6 +8,8 @@ const MAX_SESSIONS_PER_MODEL: u32 = 128;
 struct ClaimNext {
     model_ref: Value,
     key: String,
+    #[serde(default)]
+    accepts_session_inputs: bool,
 }
 
 #[derive(Deserialize)]
@@ -131,7 +133,7 @@ pub fn claim_next(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
             &model,
             &clock,
             &key,
-            false,
+            p.accepts_session_inputs,
         )?
         .ok_or_else(|| err("RecoveryRequired", "provider claim index has no turn"))?;
         return Ok(reply(&id, replay));
@@ -141,12 +143,18 @@ pub fn claim_next(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
     if work_admission::draining(db)? {
         return Ok(json!({"available":false}));
     }
+    // ready_seq points to the indexed Session revision. Filter workers by
+    // capability before admission checks, without changing queue order.
     let runnable =
         db.c.prepare(
             "SELECT q.session FROM model_queue q
+         JOIN versions s ON s.seq=q.ready_seq AND s.id=q.session
          LEFT JOIN session_turns t ON t.lease=q.lease
          LEFT JOIN model_lease_times a ON a.lease=t.lease
          WHERE q.model=?1 AND q.ready_seq IS NOT NULL
+           AND (?6 OR json_type(s.spec,'$.input_artifacts') IS NULL OR
+                (json_type(s.spec,'$.input_artifacts')='array'
+                 AND json_array_length(s.spec,'$.input_artifacts')=0))
            AND (q.lease IS NULL OR
                 (NOT ?5 AND t.lease IS NOT NULL AND (t.boot_id IS NOT ?2 OR t.deadline_boot_ms<=?3 OR
                     (a.lease IS NOT NULL AND a.time_ns!=?4))))
@@ -159,6 +167,7 @@ pub fn claim_next(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
                 clock.boot.millis,
                 clock.time_ns,
                 inference::strict(&model),
+                p.accepts_session_inputs,
             ],
             |r| r.get::<_, String>(0),
         )?
@@ -167,6 +176,9 @@ pub fn claim_next(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
         db.cfg.check_admission_space()?;
         for id in runnable {
             let session = db.of(&id, "Session")?;
+            // Enforce disclosure against the current Session, independently
+            // of the derived scheduling index used to find candidates.
+            session_inputs::require_provider(&session, p.accepts_session_inputs)?;
             let dependencies = match deps(db, &session) {
                 Ok(value) => value,
                 Err(e) if e.0.code == "PermissionDenied" => {

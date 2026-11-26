@@ -164,6 +164,23 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 1 \
 
 串口输出一条以 `PSIOS-TRIAL/1 ` 开头的 JSON 状态。验收时要求 `status` 为 `Ready`，其中 `deployment_manifest_sha256` 须与 `trial-build.json` 相符，并确认虚机已正常退出。失败状态包含启动阶段。中断或缺少成功状态时可丢弃覆盖层及试启动 EFI 变量，原盘和原变量文件仍供独立引导。[真实 UEFI 试启动验收](../tests/native_upgrade.py)
 
+### 试启动后发布停机更新候选
+
+`native/stage_update.py` 适用于 Linux amd64 上的普通 OVMF 原生盘。先停止原来的来宾并卸载原盘。准备核验过的原盘构建回执、原 EFI 变量和目标 Core 与内核输入。输出路径应是操作者私有目录中尚未存在的名称。
+
+```sh
+python3 native/stage_update.py next-release \
+  --upgrade-from node.raw --previous-receipt node-build.json \
+  --previous-receipt-sha256 "$VERIFIED_PREVIOUS_RECEIPT_SHA256" \
+  --kernel-iso "$KERNEL_ISO" --core-archive "$TARGET_CORE_ARCHIVE" --core-sha256 "$TARGET_CORE_SHA256" \
+  --ovmf-code "$OVMF_CODE" --ovmf-code-sha256 "$VERIFIED_OVMF_CODE_SHA256" \
+  --ovmf-vars node-vars.fd --ovmf-vars-sha256 "$VERIFIED_NODE_VARS_SHA256"
+```
+
+控制器采集一次原盘，在私有副本上处理必要的 ext4 日志，再基于同一份快照生成两份盘。隔离试启动在禁用来宾网络的 QEMU、私有 EFI 变量和限额写时复制层上运行。控制器核对 `Ready`、部署摘要和正常关机，再用目标 Core 离线核对同一节点的迁移结果与见证。发布前重新检查原盘与 EFI 变量。保持原盘停机，直至控制器退出。
+
+成功后，`next-release` 同时出现 `candidate.raw`、`candidate-build.json` 和 `staged-update.json`。回执记录原始与规范化源摘要、试启动证明及正式候选摘要，状态为 `Staged`，回退方式为 `ManualRecoveryOnly`。正式启动、激活和回退由操作者单独执行。签名盘的自动分阶段发布与自动引导接管仍待开发。[分阶段更新验收](../tests/native_staged_update.py)
+
 ### 启动正式候选盘
 
 从保留的停机原盘独立构建正式候选，按本节开头的命令省略 `--trial-boot`。可比对两份回执中的原盘摘要、目标 Core 源码版本及迁移演练结果。使用新的 EFI 变量副本启动 `next.raw`，启动检查会再次执行真实迁移。登录后比对 `/psios-deployment.json` 摘要、节点 ID 和已有任务回执，再恢复工作流。原盘与候选盘共享节点身份和密钥，只启动其中一个。候选盘开始接受业务写入后，回退前需要另行处理候选盘内的新状态与外部效果。[双版本启动与保留数据测试](../tests/native_upgrade.py)

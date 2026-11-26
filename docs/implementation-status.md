@@ -17,6 +17,16 @@
 - 本机所有者可按主体和截止时间发现候选。固定分页水位内会逐页检查当前 Task 修订和保留关系，查询仅用制品清单计算候选字节数。预检签发短时计划，执行原子回收最多 16 个已结算的只读结果，保留原 Task 和独立回执。[候选验收](../tests/test_result_eviction_candidates.py) · [批量回滚与重放](../tests/test_task_result_eviction_batch.py)
 - 在途 Workflow、Agent 会话、Task 依赖、网络与恢复观测以及 WorkItem 审核按各自规则保存引用。已验证预检后新增证据会阻止整批回收、删除失败恢复原分块，以及在旧版结果和回执上执行升级。自动保留策略和整个历史账本的压缩仍待开发。[运行协议](core-runtime.md#批量回收任务结果字节) · [真实旧格式升级](../tests/result_eviction_candidates_upgrade.py)
 
+## 工作项查询和备用网口
+
+- 原生 Agent 可查询自己在获准项目内负责的工作项，并根据当前最低优先级选择执行。派发复核项目版本及授权。管理者仅能修改符合条件的就绪工作项，原优先级与审核决定保留在历史中。已验证撤权、并发修改、排队重启和真实格式 88→89 升级。[Agent 验收](../tests/test_agent_assigned_work.py) · [优先级验收](../tests/test_work_item_priority.py)
+- 本机所有者可对同一个操作主动回退备用网口。已用独立 Linux 网络命名空间验证原地址及真实 TCP 流量在超时前恢复。回执入库故障和守护进程强杀后，D-Bus 只有一次回退调用，网口保留占用直至授权对账。管理链路远程确认与 DNS 变更仍待验收。[NetworkManager 验收](../tests/network_trial_abort.py)
+
+## 原生安装与停机更新
+
+- 便携归档中的安装器核验新盘构建回执和镜像，按强制身份与精确审批写入空白整盘。已验证实际 Linux loop 块设备、分区内容先于 GPT 发布、中断对账与禁止重复写入，并在 OVMF 中引导真实写出的盘、登录及执行持久 Task。默认 Virtio 目标设备写入、物理安装和跨宿主启动对账仍待验收。[原生安装说明](native-disk.md#安装到空白块设备) · [端到端验收](../tests/native_install.py)
+- 普通 OVMF 停机更新从同一源盘快照生成试启动与正式候选，目标 Core 独立核验实际迁移后的状态和见证，通过后发布完整候选目录。真实格式 89→90 验收覆盖运行中源盘拒绝、候选与原盘各自启动、既有 Task 和用户数据，以及原盘和 EFI 变量摘要。签名盘的自动分阶段发布与自动引导接管仍待开发。[停机更新说明](native-disk.md#试启动后发布停机更新候选) · [OVMF 验收](../tests/native_staged_update.py)
+
 ## Agent Artifacts 应用化进度
 
 - 本机授权主体可分块暂存和发布通用字节，按提交偏移继续中断的上传。下载核对原始摘要，回收需要独立权限。原生 Agent 的成功模型会话可以将最终摘要发布为带模型、Skill、Provider 和租约来源的制品。已验证断线、重启、重复请求、配额、授权撤销及事务失败。[上传验收](../tests/test_artifact_ingress.py) · [模型输出发布验收](../tests/test_session_output.py)

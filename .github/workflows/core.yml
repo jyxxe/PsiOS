@@ -45,6 +45,8 @@ jobs:
           fi
           PSIOS_TEST_RESTORE_RENAME_FAULT=1 python3 -B -m unittest discover -s tests \
             -p test_storage_recovery.py -k checkpointed_unpublished_restore -v
+      - name: Refuse a stale service settlement after replacing a disposable systemd manager
+        run: sudo -n /usr/bin/python3 -B tests/service_manager_epoch.py --bin-dir "$PWD/target/debug"
       - name: Read live cgroup limits and verify pressure on a kernel without visible counters
         run: |
           sudo systemd-run --quiet --collect --wait --pipe --property=WorkingDirectory="$PWD" \

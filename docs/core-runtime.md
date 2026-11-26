@@ -143,6 +143,8 @@ Core 可选地先向该目标指定的解析器发出 TCP DNS 请求。按端点
 
 调用前与结算时的采样记录配置摘要、预期状态、systemd 配置的管理范围、UID 及 Linux 启动 ID。两次采样的管理范围、UID 和启动 ID 必须一致。重启证据还须含有效的新调用代次。系统重新启动或管理范围与 UID 改变后，旧操作保持待核实。持有宿主权限的程序仍可改变服务，回执记录 Core 实际看到的状态。Core 在启动调度器前核对未结算服务操作的排他占用。所有引用同一 `service.inspect` 制品的对账都已持久确认并通过校验时，管理员可回收该检查制品的数据。已在格式 69 前派发的操作沿用原对账和制品保留要求。[检查点拒绝和进程中断验收](../tests/service_restart.py)
 
+格式 77 起，新服务控制还在原检查点绑定 systemd 管理器的单调启动时间。通过同一配置的 `systemctl` 连接在单元查询前后读取 `UserspaceTimestampMonotonic`，将稳定值记录为 `manager_started_monotonic_us`。持久提交检查点前后都会复核管理器。一个新的管理器即使在同次 Linux 启动内让相同单元达到期望状态，也无法凭该观测确认旧操作。检查点已提交但管理器无法确认时，保持原操作未知并保留占用。较早派发的检查点保留其原有证据要求。该字段记录独立调用期间采样到的连续性，宿主管理任务仍须协调同一单元的外部写入。[systemd 管理器接口](https://www.freedesktop.org/software/systemd/man/255/org.freedesktop.systemd1.html) · [管理器替换验收](../tests/service_manager_epoch.py)
+
 `service.observe` 将指定 HostService 的实际运行状态写入 `HostServiceState`。显式授予目标服务上的 `service.observe`、`task.submit` 和 `task.read`，输入使用 HostService 的 `id` 和 `expected_spec_generation`。结果包含固定 `service_state_ref` 和本次观测。控制操作更新 HostService 的当前修订后，同一配置代次仍可继续采样。采样确认规格和 Linux 启动一致，按持久派发顺序发布，重复状态保持同一观察资源修订。
 
 订阅 `HostServiceState` 的资源事件可观察 `Active`、`Inactive`、`Failed` 等变化。systemd 明确报告单元缺失或屏蔽时可查询 `Missing`、`Masked`。使用现有 Schedule 的 `LifecycleEntered` 可将观测结果送入授权任务。观测和 Task 结果在同一事务中发布，已登记配置移除时状态变为 `Retired`。格式 36 创建状态并安装能力，配置完成后的初始状态为 `Unknown`。[真实服务、事件和故障验收](../tests/service_state.py)

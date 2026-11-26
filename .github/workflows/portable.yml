@@ -238,6 +238,20 @@ jobs:
             --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
             --installer "$RUNNER_TEMP/rescue-core/native/create.py"
 
+      - name: Verify enrolled firmware enforcement before publishing signed native updates
+        run: |
+          secure_tools="$RUNNER_TEMP/psios-secure-boot-tools"
+          export PATH="$secure_tools/root/usr/bin:$PATH"
+          export PYTHONPATH="$secure_tools/root/usr/lib/python3/dist-packages"
+          /usr/bin/python3 -B tests/native_signed_staged_update.py \
+            --controller "$RUNNER_TEMP/rescue-core/native/stage_update.py" \
+            --previous-installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" \
+            --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
+            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
+            --efi-stub "$secure_tools/root/usr/lib/systemd/boot/efi/linuxx64.efi.stub" \
+            --expected-source-format 5
+
       - name: Boot independently exported signed rescue media and enforce read-only inspection
         run: |
           secure_tools="$RUNNER_TEMP/psios-secure-boot-tools"

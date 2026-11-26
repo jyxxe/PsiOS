@@ -7,6 +7,7 @@ bb=/bin/busybox
 stage=bootstrap
 payload_verified=no
 trial_boot=no
+secure_boot_enforced=no
 # This path is in the EFI application's initramfs and is checked before
 # mounting any persistent filesystem. The kernel command line selects no mode.
 if [ -e /psios-trial-config.sha256 ] || [ -L /psios-trial-config.sha256 ]; then
@@ -77,6 +78,9 @@ run_trial() {
 
     stage=trial-report
     manifest_digest=$(sha256sum /psios-deployment.json)
+    if [ "$secure_boot_enforced" = yes ]; then
+        printf '\nPSIOS-SECURE-BOOT/1 Enforced\n' >/dev/console
+    fi
     printf '\nPSIOS-TRIAL/1 {"status":"Ready","deployment_manifest_sha256":"%s"}\n' \
         "${manifest_digest%% *}" >/dev/console
     trap - EXIT
@@ -95,6 +99,15 @@ if [ "$trial_boot" = yes ]; then
     for path in /psios-trial-config.sha256 /psios-trial-disk-id; do
         [ -f "$path" ] && [ ! -L "$path" ] || exit 1
     done
+fi
+requires_secure_boot=/psios-trial-secure-boot-required
+if [ -e "$requires_secure_boot" ] || [ -L "$requires_secure_boot" ]; then
+    stage=secure-boot-not-enforced
+    [ "$trial_boot" = yes ] && [ -f "$requires_secure_boot" ] && [ ! -L "$requires_secure_boot" ] || exit 1
+    # The pinned kernel reports EFI enforcement during early boot. This check
+    # runs before loading persisted code or mounting writable authority state.
+    "$bb" dmesg | "$bb" grep -Eiq 'secure boot enabled|locked down from EFI Secure Boot'
+    secure_boot_enforced=yes
 fi
 payload_verified=yes
 "$bb" hostname psios

@@ -1,23 +1,19 @@
 //! Bounded procfs observations tied to a process in the local node's PID view.
 pub(super) mod custody;
 
-use crate::{Result, err, now, require};
+use crate::{Result, err, linux_proc, now, require};
 use rustix::{
     fd::OwnedFd,
-    fs::{Dir, FileType, Mode, OFlags, ResolveFlags, fstat, fstatfs, open, openat2},
+    fs::{Dir, fstat},
     io::Errno,
     param::{clock_ticks_per_second, page_size},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{
-    fs::File,
-    io::{self, Read},
-};
+use std::io::{self, Read};
 
 pub(crate) const FORMAT: u32 = crate::events::query::SNAPSHOT_FORMAT + 1;
 pub const TOOL: &str = "node.process_inspect";
-const PROC_SUPER_MAGIC: u32 = 0x9fa0;
 const STAT_LIMIT: u64 = 4096;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -72,7 +68,7 @@ struct Proc {
 
 impl Proc {
     fn open(node_id: &str) -> Result<Self> {
-        let root = proc_root().map_err(|error| {
+        let root = linux_proc::root().map_err(|error| {
             if error.kind() == io::ErrorKind::Unsupported {
                 err("UnsupportedCapability", "local procfs is unavailable")
             } else {
@@ -81,7 +77,7 @@ impl Proc {
         })?;
         Ok(Self {
             node_id: node_id.into(),
-            boot_id: super::scalar("/proc/sys/kernel/random/boot_id")?,
+            boot_id: crate::linux_clock::boot_id_in(&root)?,
             view_id: fstat(&root).map_err(io::Error::from)?.st_dev.to_string(),
             root,
         })
@@ -102,50 +98,9 @@ impl Proc {
     }
 }
 
-const BELOW: ResolveFlags = ResolveFlags::BENEATH
-    .union(ResolveFlags::NO_SYMLINKS)
-    .union(ResolveFlags::NO_XDEV);
-
-pub(super) fn proc_root() -> io::Result<OwnedFd> {
-    let root = open(
-        "/proc",
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )?;
-    if fstatfs(&root)?.f_type as u32 != PROC_SUPER_MAGIC {
-        return Err(io::ErrorKind::Unsupported.into());
-    }
-    Ok(root)
-}
-
-pub(super) fn proc_directory(root: &OwnedFd, path: &str) -> io::Result<OwnedFd> {
-    openat2(
-        root,
-        path,
-        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
-        BELOW,
-    )
-    .map_err(io::Error::from)
-}
-
-pub(super) fn proc_file(root: &OwnedFd, path: &str) -> io::Result<File> {
-    let fd = openat2(
-        root,
-        path,
-        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty(),
-        BELOW,
-    )?;
-    if FileType::from_raw_mode(fstat(&fd)?.st_mode) != FileType::RegularFile {
-        return Err(io::ErrorKind::Unsupported.into());
-    }
-    Ok(File::from(fd))
-}
-
 fn read_at(root: &OwnedFd, path: &str, limit: u64) -> Result<String> {
     let mut bytes = Vec::new();
-    proc_file(root, path)
+    linux_proc::file(root, path)
         .map_err(stat_error)?
         .take(limit + 1)
         .read_to_end(&mut bytes)

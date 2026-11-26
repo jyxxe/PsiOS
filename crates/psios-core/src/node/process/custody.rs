@@ -1,6 +1,6 @@
 //! Pin the exact live process whose cgroup is named by a trusted host adapter.
-use super::{Identity, Proc, STAT_LIMIT, Sample, proc_directory, read_at, stat_error};
-use crate::{Result, err, require};
+use super::{Identity, Proc, STAT_LIMIT, Sample, read_at, stat_error};
+use crate::{Result, err, linux_proc, require};
 use rustix::{
     event::{PollFd, PollFlags, Timespec, poll},
     fd::OwnedFd,
@@ -54,7 +54,8 @@ impl Pinned {
                 stat_error(error)
             }
         })?;
-        let directory = proc_directory(&process.root, &pid.to_string()).map_err(stat_error)?;
+        let directory =
+            linux_proc::directory(&process.root, &pid.to_string()).map_err(stat_error)?;
         let reference = process.identity(pid, start_ticks(&directory, pid)?);
         Ok(Self {
             directory,

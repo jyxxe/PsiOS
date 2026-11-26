@@ -11,6 +11,7 @@ mod events;
 mod host;
 mod linux_cgroup;
 mod linux_clock;
+mod linux_proc;
 mod node;
 mod policy;
 mod project;

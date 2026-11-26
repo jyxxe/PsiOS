@@ -97,9 +97,7 @@ struct Namespace {
 
 fn namespace() -> Result<Namespace> {
     Ok(Namespace {
-        boot_id: fs::read_to_string("/proc/sys/kernel/random/boot_id")?
-            .trim()
-            .into(),
+        boot_id: crate::linux_clock::boot_id()?,
         network_namespace_inode: fs::metadata("/proc/self/ns/net")?.ino().to_string(),
     })
 }

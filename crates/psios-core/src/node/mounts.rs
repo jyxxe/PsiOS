@@ -3,7 +3,12 @@ use crate::{Result, err, now, require};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::{fs, io::Read, os::unix::fs::MetadataExt};
+use std::{
+    fs,
+    io::{BufRead, BufReader, Read},
+    os::unix::fs::MetadataExt,
+    path::Path,
+};
 
 const INPUT_LIMIT: u64 = 512 * 1024;
 const MOUNT_LIMIT: usize = 4096;
@@ -206,6 +211,91 @@ fn table(file: fs::File) -> Result<Vec<Mount>> {
     Ok(mounts)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BootIdMount {
+    NativeProc,
+    LocalLxc,
+}
+
+pub(crate) fn boot_id_mount(
+    file: fs::File,
+    mount_id: u64,
+    device: (u32, u32),
+    proc_device: (u32, u32),
+) -> Result<BootIdMount> {
+    // The kernel provides the unique mount ID of the held boot ID descriptor.
+    // Decode only that row and bound the search even in a large namespace.
+    let mut stream = BufReader::new(file.take(INPUT_LIMIT + 1));
+    let mut bytes = 0u64;
+    let mut line = Vec::new();
+    for _ in 0..MOUNT_LIMIT {
+        line.clear();
+        let length = stream.read_until(b'\n', &mut line)?;
+        if length == 0 {
+            break;
+        }
+        bytes += length as u64;
+        require(
+            bytes <= INPUT_LIMIT,
+            "QuotaExceeded",
+            "mount table exceeds the clock profile",
+        )?;
+        let raw = line.strip_suffix(b"\n").ok_or_else(malformed)?;
+        let first = raw
+            .split(|byte| *byte == b' ')
+            .next()
+            .ok_or_else(malformed)?;
+        if u64::from(number(first)?) == mount_id {
+            return classify_boot_mount(mount(raw)?, device, proc_device);
+        }
+    }
+    Err(err(
+        "UnsupportedCapability",
+        "Linux boot ID mount is outside the clock profile",
+    ))
+}
+
+fn classify_boot_mount(
+    observed: Mount,
+    device: (u32, u32),
+    proc_device: (u32, u32),
+) -> Result<BootIdMount> {
+    const BOOT_ID: &str = "/proc/sys/kernel/random/boot_id";
+    let outside = || {
+        err(
+            "UnsupportedCapability",
+            "Linux boot ID mount is outside the clock profile",
+        )
+    };
+    let (LinuxPath::Text(point), LinuxPath::Text(root)) =
+        (observed.mount_point, observed.filesystem_root)
+    else {
+        return Err(outside());
+    };
+    require(
+        observed.read_only && device == (observed.device.major, observed.device.minor),
+        "UnsupportedCapability",
+        "Linux boot ID mount lacks read-only custody",
+    )?;
+    if observed.filesystem_type == "proc"
+        && device == proc_device
+        && Path::new(BOOT_ID).starts_with(&point)
+        && point.strip_prefix("/proc") == Some(root.as_str())
+    {
+        return Ok(BootIdMount::NativeProc);
+    }
+    if matches!(observed.filesystem_type.as_str(), "devtmpfs" | "tmpfs")
+        && point == BOOT_ID
+        && root == "/.lxc-boot-id"
+        && ["nosuid", "nodev", "noexec"]
+            .iter()
+            .all(|flag| observed.flags.contains(flag))
+    {
+        return Ok(BootIdMount::LocalLxc);
+    }
+    Err(outside())
+}
+
 pub(crate) fn private_writable_data(file: fs::File, observed_mount_id: u64) -> Result<()> {
     let mut matched = false;
     for entry in table(file)? {
@@ -251,7 +341,7 @@ pub(super) fn observe() -> Result<Value> {
     )?;
     Ok(json!({
         "mount_namespace_inode": namespace.to_string(),
-        "boot_id": super::scalar("/proc/sys/kernel/random/boot_id")?,
+        "boot_id": crate::linux_clock::boot_id()?,
         "observed_at": now(),
         "mounts": mounts,
     }))
@@ -318,5 +408,41 @@ mod tests {
         let report = serde_json::to_value(mount(raw).unwrap()).unwrap();
         assert_eq!(report["filesystem_root"], "net:[4026531992]");
         assert_eq!(report["mount_point"], "/run/netns/managed");
+    }
+
+    #[test]
+    fn boot_id_mount_requires_the_original_proc_path_or_exact_lxc_file() {
+        let proc_dev = (0, 50);
+        let lxc_dev = (0, 5);
+        let read_only_proc = b"66 1 0:50 /sys /proc/sys ro,nosuid,nodev,noexec - proc proc rw";
+        let lxc = b"66 1 0:5 /.lxc-boot-id /proc/sys/kernel/random/boot_id ro,nosuid,nodev,noexec - devtmpfs udev rw";
+        assert!(matches!(
+            classify_boot_mount(mount(read_only_proc).unwrap(), proc_dev, proc_dev),
+            Ok(BootIdMount::NativeProc)
+        ));
+        assert!(matches!(
+            classify_boot_mount(mount(lxc).unwrap(), lxc_dev, proc_dev),
+            Ok(BootIdMount::LocalLxc)
+        ));
+        for (line, device) in [
+            ("66 1 0:4 /sys /proc/sys ro - proc proc rw", (0, 4)),
+            (
+                "66 1 0:50 /sys/kernel/random /proc/sys ro - proc proc rw",
+                proc_dev,
+            ),
+            (
+                "66 1 0:5 /other /proc/sys/kernel/random/boot_id ro,nosuid,nodev,noexec - tmpfs tmpfs rw",
+                lxc_dev,
+            ),
+            (
+                "66 1 0:5 /.lxc-boot-id /proc/sys/kernel/random/boot_id ro,nosuid,nodev - tmpfs tmpfs rw",
+                lxc_dev,
+            ),
+        ] {
+            let error = classify_boot_mount(mount(line.as_bytes()).unwrap(), device, proc_dev)
+                .err()
+                .unwrap();
+            assert_eq!(error.0.code, "UnsupportedCapability");
+        }
     }
 }

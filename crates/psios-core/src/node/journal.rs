@@ -3,7 +3,7 @@ use crate::{Result, config::Manager, err, host::Work, now, require};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, fs, process::Command};
+use std::{collections::BTreeSet, process::Command};
 
 pub const TOOL: &str = "service.logs";
 pub const SINCE_TOOL: &str = "service.logs_since";
@@ -100,10 +100,7 @@ pub fn read_since(work: &Work, query: &SinceQuery) -> Result<Value> {
 
 fn read_window(work: &Work, limit: u32, continuation: Option<&SinceQuery>) -> Result<Value> {
     let config = configured_service(work)?;
-    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
-    let boot = uuid::Uuid::parse_str(boot.trim())
-        .map_err(|_| err("DependencyUnavailable", "invalid Linux boot identity"))?;
-    let boot_id = boot.hyphenated().to_string();
+    let boot_id = crate::linux_clock::boot_id()?;
     if let Some(query) = continuation {
         require(
             query.boot_id == boot_id,
@@ -118,7 +115,7 @@ fn read_window(work: &Work, limit: u32, continuation: Option<&SinceQuery>) -> Re
     } else {
         "_SYSTEMD_UNIT"
     };
-    let boot_match = format!("--boot={}", boot.simple());
+    let boot_match = format!("--boot={}", boot_id.replace('-', ""));
     let unit_match = format!("{field}={}", config.unit);
     let output_fields = format!("--output-fields=MESSAGE,PRIORITY,_PID,{field},_SYSTEMD_OWNER_UID");
     let mut command = Command::new("/usr/bin/journalctl");

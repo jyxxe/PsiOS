@@ -354,6 +354,8 @@ jobs:
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format24" "$RUNNER_TEMP/psios-compatibility-target"
           python3 -B tests/grant_deadline_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
           sudo python3 -B tests/grant_time_namespace.py
+      - name: Verify clock source custody with native procfs and private replacements
+        run: sudo unshare --mount --propagation private python3 -B tests/kernel_clock_provenance.py
       - name: Resume a format 25 approval and fence writers without elapsed Task deadlines
         run: |
           mkdir "$RUNNER_TEMP/psios-format25"

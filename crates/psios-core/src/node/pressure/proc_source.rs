@@ -1,5 +1,5 @@
 //! Bind pressure counters and their namespace labels to the same procfs view.
-use crate::node::process;
+use crate::linux_proc;
 use rustix::{fd::OwnedFd, fs::readlinkat, io::Errno};
 use std::{fs::File, io};
 
@@ -17,7 +17,7 @@ pub(super) struct Identity {
 
 impl Source {
     pub(super) fn open() -> io::Result<Self> {
-        let root = process::proc_root()?;
+        let root = linux_proc::root()?;
         // The procfs PID can differ from getpid() in an inherited PID view.
         // Read the kernel's own link, then open only its numeric directory.
         let visible = readlinkat(&root, "self", Vec::new())?;
@@ -25,8 +25,8 @@ impl Source {
         if !canonical_number(pid) {
             return Err(io::ErrorKind::InvalidData.into());
         }
-        let process = process::proc_directory(&root, pid).map_err(unsupported_mount)?;
-        let namespaces = process::proc_directory(&process, "ns").map_err(unsupported_mount)?;
+        let process = linux_proc::directory(&root, pid).map_err(unsupported_mount)?;
+        let namespaces = linux_proc::directory(&process, "ns").map_err(unsupported_mount)?;
         Ok(Self {
             root,
             process,
@@ -35,11 +35,11 @@ impl Source {
     }
 
     pub(super) fn file(&self, path: &str) -> io::Result<File> {
-        process::proc_file(&self.root, path).map_err(unsupported_mount)
+        linux_proc::file(&self.root, path).map_err(unsupported_mount)
     }
 
     pub(super) fn membership(&self) -> io::Result<File> {
-        process::proc_file(&self.process, "cgroup").map_err(unsupported_mount)
+        linux_proc::file(&self.process, "cgroup").map_err(unsupported_mount)
     }
 
     pub(super) fn identity(&self) -> io::Result<Identity> {

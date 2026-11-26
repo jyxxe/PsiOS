@@ -71,6 +71,33 @@ fn execute(s: &mut Store, task: &str) -> Value {
 }
 
 #[test]
+fn volume_create_restart_before_checkpoint_fences_the_former_worker() {
+    let directory = tempfile::tempdir().unwrap();
+    let (config, mut store) = initialized(directory.path());
+    let task_id = submit(&mut store, "volume.create", json!({"name":"empty-create"}));
+    assert_eq!(claim(&mut store), task_id);
+    let former = dispatch(&mut store, &task_id);
+    assert_eq!(former.effect.body["phase"], "PermitBound");
+    let final_path = config
+        .state_dir
+        .join("volumes")
+        .join(format!("volume-{}", former.op.id));
+    assert!(!final_path.exists());
+    drop(store);
+    let mut store = Store::open(config).unwrap();
+    store.transaction("recover", broker::recover).unwrap();
+    let task = call(&mut store, "Task.Get", json!({"id":task_id})).unwrap();
+    assert_eq!(task["lifecycle"], "Failed");
+    assert_eq!(task["outcome_knowledge"], "NotStarted");
+    assert_eq!(task["conditions"][0]["type"], "LeaseLost");
+    let refused = former
+        .perform(|event| store.transaction("former-worker", |db| former.checkpoint(db, event)))
+        .unwrap_err();
+    assert_eq!(refused.0.code, "Fenced");
+    assert!(!final_path.exists());
+}
+
+#[test]
 fn work_item_evidence_dispatch_rolls_back_receipt_failures_and_keeps_exact_once_cas() {
     use rusqlite::params;
 
@@ -3851,20 +3878,22 @@ fn revoked_service_log_grants_cannot_publish_artifacts_or_late_bodies() {
 }
 
 #[test]
-fn cancellation_after_dispatch_preserves_successful_effect() {
+fn cancellation_after_publication_preserves_successful_effect() {
     let tmp = tempfile::tempdir().unwrap();
     let (_, mut s) = initialized(tmp.path());
     let task = submit(&mut s, "volume.create", json!({"name": "cancel-race"}));
     assert_eq!(claim(&mut s), task);
     let w = dispatch(&mut s, &task);
+    let receipt = w.perform(|event| s.transaction("checkpoint", |db| w.checkpoint(db, event)));
+    assert!(receipt.is_ok());
+    let current = call(&mut s, "Task.Get", json!({"id":task})).unwrap();
     let pending = call(
         &mut s,
         "Task.Cancel",
-        json!({"id": task, "expected_resource_version": w.task.version()}),
+        json!({"id": task, "expected_resource_version": current["task_revision"]}),
     )
     .unwrap();
     assert_eq!(pending["lifecycle"], "Cancelling");
-    let receipt = w.perform(|_| unreachable!("write has no host checkpoint"));
     s.transaction("finish", |db| broker::finish(db, &w, receipt))
         .unwrap();
     let done = call(&mut s, "Task.Get", json!({"id": task})).unwrap();

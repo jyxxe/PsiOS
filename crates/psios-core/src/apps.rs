@@ -485,7 +485,20 @@ impl Engine<'_> {
             return Ok(false);
         }
         let created = self.managed(w, cid, &w.op.id)?;
-        if created["State"]["Status"] != "created" || created["State"]["Running"] != false {
+        let state = &created["State"];
+        // This compensation is local to the worker that received Docker's full
+        // create ID and has not sent Start. A stopped invocation is insufficient.
+        if created["Name"] != format!("/psios-{}", w.target.id)
+            || state["Status"] != "created"
+            || state["Running"] != false
+            || state["Paused"] != false
+            || state["Restarting"] != false
+            || state["Dead"] != false
+            || state["Pid"] != 0
+            || state["StartedAt"] != "0001-01-01T00:00:00Z"
+            || created["RestartCount"] != 0
+            || self.identity()? != engine
+        {
             return Ok(false);
         }
         self.command(&["container", "rm", cid].map(String::from), true)?;
@@ -767,7 +780,7 @@ fn verify_isolation(w: &Work, v: &Value, s: &Install, user: &str) -> Result<()> 
             && h["LogConfig"]["Type"] == "local"
             && h["LogConfig"]["Config"]["max-size"] == "1m"
             && h["LogConfig"]["Config"]["max-file"] == "1",
-        "OutcomeUnknown",
+        "PreconditionFailed",
         "OCI instance configuration differs from the approved isolation profile",
     )?;
     health::verify_runtime(s.health_check.as_ref(), v)

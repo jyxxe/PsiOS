@@ -15,6 +15,7 @@ from oci_capture import TOOL as CAPTURE, denied
 from oci_health import verify_image_health
 from oci_mount_observation import exercise as verify_effective_mounts
 from oci_restart import verify_restart
+from oci_unstarted import verify_unstarted_rollback
 from oci_volume_rebind import verify_rebind
 from test_artifact_install import TOOL as ARTIFACT_INSTALL, grant as artifact_grant
 from test_artifact_ingress import chunk, upload_request
@@ -471,6 +472,18 @@ int main(void) {
             assert broken["lifecycle"] == "Failed" and broken["conditions"][0]["type"] == "RecoveryRequired", broken
             assert not subprocess.check_output(docker + ["ps", "-aq", "--filter", "label=io.psios.application=" + app_id]).strip()
         fence_after_container_creation(node, docker, app, staged_archive)
+        verify_unstarted_rollback(node, docker, app, volume)
+        # The lost removal intentionally leaves an unresolved operation. Give it
+        # its own authority so it cannot consume the later recovery queue fixture.
+        rollback_node = Node(binaries)
+        try:
+            rollback_volume = rollback_node.perform("volume.create", {"name": "unstarted-rollback-data"})
+            rollback_app = rollback_node.perform("application.install", dict(spec, name="unstarted-rollback",
+                                                                             volume=target(rollback_volume)))
+            app_ids.append(rollback_app["resource_id"])
+            verify_unstarted_rollback(rollback_node, docker, rollback_app, rollback_volume, lose_removal=True)
+        finally:
+            rollback_node.close()
         app = node.perform("application.start", target(app))
         changed_cid = node.perform("application.health", target(app))["container_id"]
         assert json.loads(subprocess.check_output(docker + ["inspect", changed_cid]))[0]["Image"] == upgraded_image

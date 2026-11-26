@@ -9,6 +9,7 @@ import subprocess
 from time import monotonic, sleep
 import uuid
 
+from project_upgrade import verify
 from service_journal import refuses
 from support import Failure, Node, key, target
 
@@ -104,8 +105,10 @@ class Reader:
         return artifact, self.node.call("Artifact.Read", {"reference": artifact}, self.token)
 
     def tail(self, service):
-        _, receipt = self.result(self.submit(TAIL, {**target(service), "limit": 1}, self.tail_grant))
-        return receipt
+        return self.tail_result(service)[1]
+
+    def tail_result(self, service):
+        return self.result(self.submit(TAIL, {**target(service), "limit": 1}, self.tail_grant))
 
     def page(self, params, *, cli=False):
         if not cli:
@@ -131,7 +134,7 @@ class Reader:
         assert not task["result"]["artifact_refs"], task
 
 
-def exercise(node, unit, addressed, other, outside):
+def exercise(node, unit, addressed, other, outside, upgrade_to=None):
     config = json.loads(node.config.read_text())
     configure(node, config, (unit, other))
     service_id, other_id = f"service-{unit}", f"service-{other}"
@@ -144,7 +147,7 @@ def exercise(node, unit, addressed, other, outside):
     anchor_message, outside_message = f"{trace}-anchor", f"{trace}-other-anchor"
     write_messages(unit, addressed, [anchor_message])
     write_messages(other, outside, [outside_message])
-    anchor = reader.tail(service)
+    anchor_ref, anchor = reader.tail_result(service)
     foreign = reader.tail(outside_service)
     assert rows(anchor) == [anchor_message] and rows(foreign) == [outside_message], (anchor, foreign)
     assert anchor["service_ref"] == service and foreign["service_ref"] == outside_service, (anchor, foreign)
@@ -153,6 +156,25 @@ def exercise(node, unit, addressed, other, outside):
     assert cursor != wrong_cursor and anchor["boot_id"] == foreign["boot_id"] == boot, (anchor, foreign)
     request = {**target(service), "boot_id": boot, "after_cursor": cursor, "limit": 32}
 
+    capability_id = f"tool-{SINCE}"
+    if upgrade_to is not None:
+        refuses("NotFound", lambda: node.get(capability_id))
+        node.stop(signal.SIGKILL)
+        previous = verify(node)
+        assert previous["database_format"] == 91 and not previous["migration_required"], previous
+        witness = (node.witness / "head").read_bytes()
+        node.binaries = upgrade_to.resolve()
+        node.daemon[0] = str(node.binaries / "psiosd")
+        pending = verify(node)
+        assert pending["database_format"] == 91 and pending["migration_required"], pending
+        assert pending["node_id"] == previous["node_id"]
+        assert (node.witness / "head").read_bytes() == witness
+        node.start()
+        assert node.get(service_id)["reference"] == service
+        assert node.call("Artifact.Read", {"reference": anchor_ref}, reader.token) == anchor
+
+    capability = node.get(capability_id)["resource"]["spec"]
+    assert capability["effect_class"] == "ReadOnly" and capability["requires_approval"] is False, capability
     refuses("PermissionDenied", lambda: node.prepare(SINCE, request))
     refuses("PermissionDenied", lambda: reader.prepare(SINCE, request, reader.tail_grant))
     refuses("InvalidArgument", lambda: reader.grant(SINCE, tool_targets=None))
@@ -222,14 +244,15 @@ def exercise(node, unit, addressed, other, outside):
     refuses("PermissionDenied", lambda: node.call("Task.Submit", prepared, reader.token))
     assert rows(reader.tail(fresh)) == later[-1:]
     node.stop()
-    report = json.loads(subprocess.check_output([*node.daemon, "verify"], timeout=20))
+    report = verify(node)
+    assert report["database_format"] >= 92, report
     assert report["migration_required"] is False and report["sqlite_integrity"] == "Verified", report
     assert report["foreign_keys"] == "Verified" and report["witness"] == "Confirmed", report
     print("PASS real scoped journal continuation across pages, Core restart, config changes and revocation")
 
 
-def main(binaries):
-    node = Node(binaries)
+def main(binaries, previous):
+    node = Node(previous or binaries)
     units = Path(f"/run/user/{os.geteuid()}/systemd/user")
     registered = []
     try:
@@ -246,7 +269,7 @@ def main(binaries):
                                  f"ExecStart=/bin/cat {json.dumps(str(payload))}\n")
         subprocess.run([*CTL, "daemon-reload"], check=True, timeout=15)
         (first, addressed), (second, outside) = registered
-        exercise(node, first.name, addressed, second.name, outside)
+        exercise(node, first.name, addressed, second.name, outside, binaries if previous else None)
     finally:
         try:
             try:
@@ -265,4 +288,6 @@ def main(binaries):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bin-dir", type=Path, default=Path("target/debug"))
-    main(parser.parse_args().bin_dir)
+    parser.add_argument("--previous-bin", type=Path)
+    args = parser.parse_args()
+    main(args.bin_dir, args.previous_bin)

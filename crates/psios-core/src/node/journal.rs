@@ -7,6 +7,7 @@ use std::{collections::BTreeSet, fs, process::Command};
 
 pub const TOOL: &str = "service.logs";
 pub const SINCE_TOOL: &str = "service.logs_since";
+pub(crate) const SINCE_FORMAT: u32 = crate::artifact::retention::delayed::FORMAT + 1;
 const MAX_ROWS: u32 = 32;
 const MAX_MESSAGE_BYTES: usize = 4096;
 const MAX_CURSOR_BYTES: usize = 1024;

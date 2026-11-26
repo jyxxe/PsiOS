@@ -172,6 +172,8 @@ Core 在请求 NetworkManager 回退前持久记录派发，核对原检查点�
 
 回执的 `entries` 从已核对的游标之后开始，`next_cursor` 指向最后一条返回记录。空页沿用原游标。若 `has_more` 为真，持该游标继续提交即可读取下一页。Core 要求当前启动、登记单元和管理器属主匹配，原位置丢失或属于另一单元时会拒绝续读。CLI 使用 `psiosctl submit service.logs_since --key KEY --delegation ID` 读取请求 JSON，SDK 使用同一 Task 接口。[真实分页验收](../tests/service_journal_since.py) · [journalctl 官方手册](https://www.freedesktop.org/software/systemd/man/latest/journalctl.html)
 
+格式 92 安装独立的续读能力描述。已经发放的尾读权限不变。尾读及续读在制品发布前再核对当前执行授权，迟到回执不保存日志正文。升级后的资源接口会遮蔽旧迟到回执中的日志正文。
+
 `service.restart` 需要目标 HostService 上单独授予的权限、当前资源版本和审批。将 `service.inspect` 的 `boot_id`、`invocation_id` 作为输入的 `expected_boot_id`、`expected_invocation_id`。执行前核对已批准的运行实例和配置定义，只对仍处于活跃状态的单元执行 `systemctl try-restart`。成功回执包含在同一次 Linux 启动中核验的新调用代次。
 
 丢失回执时，服务占用保留到对账完成。使用派发后最新的 `service.inspect` 制品作为 `Operation.Reconcile` 的证据。对账核验原配置和启动 ID，确认新代次已处于活跃状态，记录旧、新调用身份。期间保持原任务及幂等记录。格式 35 安装独立的重启能力。[真实重启与崩溃恢复验收](../tests/service_restart.py)

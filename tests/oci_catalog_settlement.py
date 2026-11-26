@@ -116,19 +116,25 @@ def verify_catalog_settlement(node, docker, spec, app_ids):
                               (f"use-{decision}",)).fetchone() == ("Bound",)
         return state
 
+    def inject_database_fault(sql):
+        node.stop()
+        try:
+            with closing(sqlite3.connect(db_path)) as db, db:
+                db.execute(sql)
+        finally:
+            node.start()
+
     def fail_receipt(tool, request):
         before = snapshot()
         original, task = prepared(tool, request)
-        with closing(sqlite3.connect(db_path)) as db, db:
-            db.execute(f"""CREATE TRIGGER interrupt_catalog_receipt BEFORE INSERT ON versions
-                WHEN NEW.kind='Artifact' AND NEW.spec->>'task_id'='{task}'
-                BEGIN SELECT RAISE(ABORT, 'injected OCI catalog receipt failure'); END""")
+        inject_database_fault(f"""CREATE TRIGGER interrupt_catalog_receipt BEFORE INSERT ON versions
+            WHEN NEW.kind='Artifact' AND NEW.spec->>'task_id'='{task}'
+            BEGIN SELECT RAISE(ABORT, 'injected OCI catalog receipt failure'); END""")
         try:
             node.approve(task)
             check_interrupted(task, before, "Failed", "StorageUnavailable")
         finally:
-            with closing(sqlite3.connect(db_path)) as db, db:
-                db.execute("DROP TRIGGER interrupt_catalog_receipt")
+            inject_database_fault("DROP TRIGGER interrupt_catalog_receipt")
         replay = node.call("Task.Submit", original)
         assert replay["deduplicated"] and replay["task_id"] == task, replay
 

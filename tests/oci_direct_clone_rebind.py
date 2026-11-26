@@ -1,6 +1,6 @@
 """Rebind a stopped OCI deployment to a verified clone recovered from a lost receipt."""
 
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 import json
 import os
 import signal
@@ -9,6 +9,8 @@ import subprocess
 from time import monotonic, sleep
 
 from oci_capture import denied
+from oci_recovery import endpoint
+from oci_unstarted import proxy
 from support import Failure, target
 
 
@@ -109,6 +111,67 @@ def expect_bytes(path, expected):
             return
         sleep(0.04)
     raise AssertionError(f"OCI fixture did not write expected bytes to {path}")
+
+
+def run_with_maintenance_snapshot(node, task_id, app, source, restored):
+    settings = json.loads(node.config.read_text())
+    socket = node.base / "rebind-maintenance.sock"
+    upstream = settings.get("docker_socket", "/var/run/docker.sock")
+    node.stop()
+    try:
+        with ExitStack() as stack:
+            barrier = proxy(
+                stack, socket, upstream,
+                lambda request: endpoint(request, b"GET", b"/containers/json") is not None,
+                status=b" 200 ", forward=True,
+            )
+            node.config.write_text(json.dumps(dict(settings, docker_socket=str(socket))))
+            node.start()
+            try:
+                node.approve(task_id)
+                assert barrier.confirmed.wait(10), "the Docker absence receipt did not reach the rebind barrier"
+                task = node.get(task_id)
+                assert task["value"]["lifecycle"] == "Running", task
+                operation, = task["value"]["operation_refs"]
+                gate = node.call("Node.WorkAdmission.Get", {})["reference"]
+                gate = node.call("Node.WorkAdmission.Set", {
+                    "expected_resource_version": gate["version"],
+                    "mode": "Draining", "reason": "inspect all three in-flight rebind holds",
+                })["reference"]
+                query = {"expected_resource_version": gate["version"], "limit": 16}
+                method = "Node.WorkAdmission.Blockers"
+                resources = (("Application", app), ("Volume", source), ("Volume", restored))
+                expected = sorted(({
+                    "resource_kind": kind, "resource_ref": reference, "holder_kind": "Operation",
+                    "holder_ref": operation, "task_ref": task["reference"],
+                } for kind, reference in resources), key=lambda entry: entry["resource_ref"]["resource_id"])
+                assert node.call(method, query)["exclusive_holds"] == {"items": expected, "truncated": False}
+
+                # A missing part of the three-resource hold must not become partial maintenance evidence.
+                values = (restored["resource_id"], operation["resource_id"])
+                with closing(sqlite3.connect(node.state / "state.db", timeout=10)) as db:
+                    with db:
+                        assert db.execute("DELETE FROM holds WHERE volume=? AND holder=?", values).rowcount == 1
+                    try:
+                        denied(node, "RecoveryRequired", method, query)
+                    finally:
+                        with db:
+                            db.execute("INSERT INTO holds VALUES (?,?)", values)
+                assert node.call(method, query)["exclusive_holds"]["items"] == expected
+                barrier.release.set()
+                receipt = result(node, task_id)
+                assert node.call(method, query)["exclusive_holds"] == {"items": [], "truncated": False}
+                node.call("Node.WorkAdmission.Set", {
+                    "expected_resource_version": gate["version"],
+                    "mode": "Open", "reason": "the original rebind has released custody",
+                })
+                return receipt
+            finally:
+                barrier.release.set()
+                node.stop()
+    finally:
+        node.config.write_text(json.dumps(settings))
+        node.start()
 
 
 def verify_direct_clone_rebind(node, docker, spec, app_ids):
@@ -241,8 +304,7 @@ def verify_direct_clone_rebind(node, docker, spec, app_ids):
     approval = node.get(pending["conditions"][0]["message"])["value"]
     plan = node.call("Resource.Resolve", {"reference": approval["plan_ref"]})["value"]
     assert [item["resource_ref"] for item in plan["preconditions"]] == [app, source, activated], plan
-    node.approve(accepted["task_id"])
-    receipt = result(node, accepted["task_id"])
+    receipt = run_with_maintenance_snapshot(node, accepted["task_id"], app, source, activated)
     assert receipt == {"application_ref": node.get(app_id)["reference"], "deployment_ref": receipt["deployment_ref"],
                        "previous_deployment_ref": deployment_ref, "source_volume_ref": source,
                        "restored_volume_ref": activated}, receipt

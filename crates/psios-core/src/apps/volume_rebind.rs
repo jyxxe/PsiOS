@@ -345,20 +345,12 @@ pub(crate) fn validate_observation(db: &Db<'_>, work: &Work, observed: &Value) -
         ));
     };
     input.prepare(db, &work.task.owner, &work.target)?;
-    let held: i64 = db.c.query_row(
-        "SELECT count(*) FROM holds WHERE holder=?1 AND volume IN (?2,?3,?4)",
-        params![
-            work.op.id,
-            work.target.id,
-            prepared.source.id,
-            prepared.restored.id
-        ],
-        |row| row.get(0),
-    )?;
-    require(
-        held == 3,
-        "RecoveryRequired",
-        "volume rebind lost exclusive custody",
+    check_custody(
+        db,
+        &work.op,
+        &work.target,
+        &prepared.source,
+        &prepared.restored,
     )?;
     require(
         observed["engine_id"]
@@ -369,6 +361,75 @@ pub(crate) fn validate_observation(db: &Db<'_>, work: &Work, observed: &Value) -
         "Conflict",
         "restored volume changed after verification",
     )
+}
+
+fn check_custody(
+    db: &Db<'_>,
+    operation: &Doc,
+    app: &Doc,
+    source: &Doc,
+    restored: &Doc,
+) -> Result<()> {
+    let held: i64 = db.c.query_row(
+        "SELECT count(*) FROM holds WHERE holder=?1 AND volume IN (?2,?3,?4)",
+        params![operation.id, app.id, source.id, restored.id],
+        |row| row.get(0),
+    )?;
+    require(
+        held == 3,
+        "RecoveryRequired",
+        "volume rebind lost exclusive custody",
+    )
+}
+
+pub(crate) fn verify_maintenance_hold(
+    db: &Db<'_>,
+    app: &Doc,
+    plan: &Doc,
+    input: &Value,
+    operation: &Doc,
+    held: &Doc,
+) -> Result<()> {
+    let invalid = || {
+        err(
+            "RecoveryRequired",
+            "maintenance rebind has inconsistent custody",
+        )
+    };
+    let input: Input = crate::decode(input).map_err(|_| invalid())?;
+    let (source, restored) = input.volumes(db, &plan.owner).map_err(|error| {
+        if matches!(
+            error.0.code.as_str(),
+            "InvalidArgument" | "NotFound" | "Conflict" | "PermissionDenied"
+        ) {
+            invalid()
+        } else {
+            error
+        }
+    })?;
+    let preconditions = [app, &source, &restored].map(|doc| {
+        let reference = doc.reference();
+        json!({"resource_ref":reference,"kind":"ContentDigest","expected":reference["digest"],
+              "enforcement":"ConditionalApply"})
+    });
+    require(
+        app.kind == "Application"
+            && input.target.id == app.id
+            && app.cas(&input.target.expected_resource_version).is_ok()
+            && db.of(&app.id, "Application")?.reference() == app.reference()
+            && app.spec["volume_id"] == source.id
+            && source.body["data_incarnation"].is_string()
+            && app.spec["data_incarnation"] == source.body["data_incarnation"]
+            && restored.body["data_incarnation"].is_string()
+            && restored.body["data_incarnation"] != source.body["data_incarnation"]
+            && plan.body["preconditions"] == json!(preconditions)
+            && [app, &source, &restored]
+                .iter()
+                .any(|doc| doc.reference() == held.reference()),
+        "RecoveryRequired",
+        "maintenance rebind does not hold this resource under the original plan",
+    )?;
+    check_custody(db, operation, app, &source, &restored)
 }
 
 pub(crate) fn settle(db: &Db<'_>, work: &Work, observed: &Value) -> Result<Value> {

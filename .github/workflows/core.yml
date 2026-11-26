@@ -567,7 +567,7 @@ jobs:
           python3 -B tests/agent_context_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
   work-item-migration:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 17
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -614,6 +614,13 @@ jobs:
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format95" "$RUNNER_TEMP/psios-compatibility-target"
           PSIOS_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
             python3 -B -m unittest discover -s tests -p test_task_preparation.py -k test_format95 -v
+      - name: Reclaim already revoked preparations on startup of the new daemon
+        run: |
+          mkdir "$RUNNER_TEMP/psios-preparation-before-sweep"
+          git archive d38f0bbba1c5714c36e79d36c4e8115875dfe986 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-preparation-before-sweep"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-preparation-before-sweep" "$RUNNER_TEMP/psios-compatibility-target"
+          PSIOS_PREPARATION_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
+            python3 -B -m unittest discover -s tests -p test_task_preparation_revocation.py -k test_startup -v
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

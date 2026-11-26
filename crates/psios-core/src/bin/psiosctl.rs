@@ -399,6 +399,19 @@ enum WorkItemCommand {
     Get {
         id: String,
     },
+    /// Read a fixed ascending page of immutable WorkItem revisions.
+    History {
+        id: String,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// Read a historical revision from its exact JSON reference on stdin or in a file.
+    Revision {
+        #[arg(default_value = "-")]
+        file: String,
+    },
     List {
         project_id: String,
         #[arg(long)]
@@ -658,6 +671,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     c.create_work_item(&serde_json::from_value(input(&file)?)?)?
                 }
                 WorkItemCommand::Get { id } => c.work_item(&id)?,
+                WorkItemCommand::History { id, cursor, limit } => {
+                    let page = c.work_item_history(&id, cursor.as_deref(), limit)?;
+                    println!("{}", serde_json::to_string_pretty(&page)?);
+                    return Ok(());
+                }
+                WorkItemCommand::Revision { file } => {
+                    c.work_item_revision(&serde_json::from_value(input(&file)?)?)?
+                }
                 WorkItemCommand::List {
                     project_id,
                     after_id,

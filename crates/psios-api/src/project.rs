@@ -84,6 +84,13 @@ pub struct ProjectPage {
 }
 pub type WorkItemPage = ProjectPage;
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkItemHistoryPage {
+    pub items: Vec<ProjectRecord>,
+    pub next_cursor: Option<String>,
+}
+
 impl Client {
     pub fn create_project(&self, request: &CreateProject) -> ApiResult<ProjectRecord> {
         self.project_request("Project.Create", request)
@@ -107,6 +114,24 @@ impl Client {
 
     pub fn work_item(&self, id: &str) -> ApiResult<ProjectRecord> {
         self.project_request("WorkItem.Get", &json!({"id":id}))
+    }
+
+    /// Read one exact historical WorkItem revision within current Project authority.
+    pub fn work_item_revision(&self, reference: &ResourceRef) -> ApiResult<ProjectRecord> {
+        self.project_request("WorkItem.RevisionGet", &json!({"reference":reference}))
+    }
+
+    /// Read a fixed ordered snapshot of WorkItem revisions, starting at creation.
+    pub fn work_item_history(
+        &self,
+        id: &str,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> ApiResult<WorkItemHistoryPage> {
+        self.project_request(
+            "WorkItem.History",
+            &json!({"id":id,"cursor":cursor,"limit":limit}),
+        )
     }
 
     pub fn work_items(

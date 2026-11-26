@@ -97,7 +97,8 @@ class Console:
 
 
 @contextmanager
-def boot(work, image, network_mac=None, extra_disk=None, tap=None, *, rtc_base=None):
+def boot(work, image, network_mac=None, extra_disk=None, tap=None, *, rtc_base=None,
+         disk_format="raw", vars_file="vars.fd"):
     # The privileged TAP fixture has a reproducible serial stall on hosted KVM.
     # Use a portable CPU emulator for that fixture; keep its real virtio and TAP.
     accel = "kvm" if tap is None and os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
@@ -105,17 +106,17 @@ def boot(work, image, network_mac=None, extra_disk=None, tap=None, *, rtc_base=N
            "-accel", accel, "-m", "768", "-smp", "2", "-display", "none",
            "-monitor", "none", "-serial", "stdio",
            "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=code.fd",
-           "-drive", "if=pflash,format=raw,unit=1,file=vars.fd"]
+           "-drive", f"if=pflash,format=raw,unit=1,file={vars_file}"]
     if rtc_base is not None:
         cmd += ["-rtc", f"base={rtc_base},clock=vm"]
     if extra_disk is not None:
         cmd += ["-boot", "strict=on",
                 "-drive", f"if=none,format=raw,id=additional,file={extra_disk.name}",
                 "-device", "virtio-blk-pci,drive=additional",
-                "-drive", f"if=none,format=raw,id=installed,file={image.name}",
+                "-drive", f"if=none,format={disk_format},id=installed,file={image.name}",
                 "-device", "virtio-blk-pci,drive=installed,bootindex=1"]
     else:
-        cmd += ["-boot", "order=c,strict=on", "-drive", f"if=virtio,format=raw,file={image.name}"]
+        cmd += ["-boot", "order=c,strict=on", "-drive", f"if=virtio,format={disk_format},file={image.name}"]
     if network_mac:
         network = (f"tap,id=network,ifname={tap},script=no,downscript=no" if tap
                    else "user,id=network,net=192.0.2.0/24,dhcpstart=192.0.2.20")

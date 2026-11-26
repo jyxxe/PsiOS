@@ -201,7 +201,10 @@ class ExistingSessionUpgrade(unittest.TestCase):
         n = Node(PRIOR_BINARIES)
         self.addCleanup(n.close)
         provider, _ = n.agent(["model.serve"])
-        agent, grant = n.agent(["session.run", "task.read", "task.submit", "node.inventory"])
+        agent = n.call("Agent.Register", {"name": "legacy-session-owner"})
+        grant = n.call("Grant.Issue", {"principal_id": agent["principal_id"],
+            "actions": ["session.run", "task.read", "task.submit", "node.inventory"],
+            "units": 2, "model_calls": 2, "ttl_seconds": 300})
         model = n.call("Model.Register", {"name": "replay-provider", "revision": "1",
             "provider_principal_id": provider["principal_id"], "inference_outcome_policy": "Strict",
             "lease_seconds": 60, "max_context_bytes": 4096, "max_output_bytes": 2048})

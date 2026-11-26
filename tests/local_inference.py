@@ -14,6 +14,7 @@ from model_delivery import interrupt_delivery
 from support import Node, key, target
 
 PINS = json.loads((Path(__file__).resolve().parent / "fixtures/local-inference.json").read_text())
+GENERATION_TOKENS = 192
 
 
 class LocalHTTP(http.client.HTTPConnection):
@@ -59,7 +60,7 @@ def exercise(node, endpoint, work, *, metered):
                      instructions="Call node.inventory with an empty input to obtain the local hardware inventory.",
                      license="MIT", source="operator"))
     config = dict(socket=str(endpoint), server_uid=os.geteuid(), model_ref=model, model_alias="psios-small",
-                  max_tokens=112, timeout_ms=30000)
+                  max_tokens=GENERATION_TOKENS, timeout_ms=30000)
     cfg = work / "local-model.json"
     credential = work / "provider.token"
     credential.write_text(provider["token"])
@@ -97,7 +98,7 @@ def exercise(node, endpoint, work, *, metered):
     for settings, error in [(dict(config, server_uid=(os.geteuid()+1) % 2**32), "PermissionDenied"),
                             (dict(config, model_ref=dict(model, version="r999")), "PreconditionFailed"),
                             (dict(config, socket=str(work / "absent.sock")), "DependencyUnavailable"),
-                            (dict(config, max_tokens=8), "PreconditionFailed")]:
+                            (dict(config, max_tokens=8), "local model response exhausted its output limit")]:
         sid = start()
         result = step(sid, settings)
         assert result.returncode != 0 and error in result.stderr, (error, result.stderr)
@@ -128,7 +129,8 @@ def exercise(node, endpoint, work, *, metered):
         assert usage["reported_tokens"] == retained_usage
         assert usage["measurement_source"] == "ProviderReported"
         assert usage["provider_principal_id"] == provider["principal_id"] and usage["budget_ref"] == grant["budget_ref"]
-        assert usage["reported_tokens"]["input_tokens"] > 0 and 0 < usage["reported_tokens"]["output_tokens"] <= 112
+        tokens = usage["reported_tokens"]
+        assert tokens["input_tokens"] > 0 and 0 < tokens["output_tokens"] <= GENERATION_TOKENS
         print(f"Recorded provider-reported input and output tokens {usage['reported_tokens']} on the original reservation.")
     else:
         assert "usage_ref" not in receipt
@@ -156,7 +158,8 @@ def exercise(node, endpoint, work, *, metered):
         assert receipt["session_ref"]["resource_id"] == queued, receipt
         assert node.wait(receipt["task_id"])["lifecycle"] == "Succeeded"
         usage = node.call("Resource.Resolve", {"reference": receipt["usage_ref"]})["value"]
-        assert usage["reported_tokens"]["input_tokens"] > 0 and usage["reported_tokens"]["output_tokens"] > 0
+        tokens = usage["reported_tokens"]
+        assert tokens["input_tokens"] > 0 and 0 < tokens["output_tokens"] <= GENERATION_TOKENS
         budget = node.call("Budget.Get", {"id": grant["budget_ref"]["resource_id"]}, agent["token"])
         assert (budget["model_calls_used"], budget["spent"]) == (7, 2), budget
         print(f"Verified autonomous provider discovery and real CPU inference for Session {queued}.")
@@ -174,7 +177,8 @@ if __name__ == "__main__":
         work = Path(tmp)
         endpoint = work / "inference.sock"
         cmd = [args.server.resolve(), "-m", args.weights.resolve(), "--host", endpoint, "--alias", "psios-small",
-               "-t", "2", "-c", "2048", "-np", "1", "-ngl", "0", "--no-webui"]
+               "-t", "2", "-c", "2048", "-np", "1", "-ngl", "0", "--no-webui",
+               "--seed", "1", "--no-cache-prompt"]
         with (work / "inference.log").open("w") as log, subprocess.Popen(cmd, stdout=log, stderr=log) as server:
             try:
                 ready(server, endpoint)

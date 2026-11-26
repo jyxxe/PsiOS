@@ -28,7 +28,7 @@ class LocalInferenceHandler(BaseHTTPRequestHandler):
             return
         decision = json.dumps(self.server.decision)
         response = {"model": "strict-fixture", "choices": [
-            {"finish_reason": "stop", "message": {"role": "assistant", "content": decision}},
+            {"finish_reason": self.server.finish_reason, "message": {"role": "assistant", "content": decision}},
         ]}
         if self.server.usage is not None:
             response["usage"] = self.server.usage
@@ -44,7 +44,7 @@ class LocalInferenceHandler(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def serve_inference(endpoint, *, drop_reply=False, gate=None, decision=None, usage=None):
+def serve_inference(endpoint, *, drop_reply=False, gate=None, decision=None, usage=None, finish_reason="stop"):
     with socketserver.UnixStreamServer(str(endpoint), LocalInferenceHandler) as service:
         service.requests = []
         service.drop_reply = drop_reply
@@ -53,6 +53,7 @@ def serve_inference(endpoint, *, drop_reply=False, gate=None, decision=None, usa
             "action": "finish", "summary": "Recovered with a fresh authorized call",
         }
         service.usage = usage
+        service.finish_reason = finish_reason
         thread = threading.Thread(target=service.serve_forever, kwargs={"poll_interval": 0.05})
         thread.start()
         try:
@@ -179,6 +180,37 @@ class StrictModelProvider(unittest.TestCase):
             self.assertEqual(len(calls), 1)
         self.assertEqual(self.history(session)["tasks"], [])
         self.assertEqual(len(self.history(session)["turns"]), 1)
+
+    def test_equivalent_sessions_share_prompt_and_truncation_is_never_resent(self):
+        node = self.node
+        completed = self.open_session()
+        interrupted = self.open_session()
+        with serve_inference(self.endpoint) as calls:
+            receipt = node.cli(self.provider_token, *self.step(completed, "complete"))
+            self.assertEqual(receipt["lifecycle"], "Succeeded")
+            self.assertEqual(len(calls), 1)
+            original_request = calls[0]
+            prompt_text = original_request["messages"][1]["content"]
+            self.assertEqual(json.loads(prompt_text), {
+                "goal": "Summarize the current state.", "instructions": "Provide a final summary.",
+                "permitted_tools": ["system.status"], "last_tool": None, "previous_tools": [],
+            })
+            for value in (completed, self.skill["resource_id"], self.model["resource_id"]):
+                self.assertNotIn(value, prompt_text)
+
+        command = self.step(interrupted, "truncated")
+        with serve_inference(self.endpoint, finish_reason="length") as calls:
+            failure = node.cli(self.provider_token, *command)
+            self.assertEqual((failure["outcome"], failure["lifecycle"], failure["outcome_knowledge"]),
+                             ("Unknown", "Paused", "Unknown"))
+            self.assertEqual(calls, [original_request])
+            node.stop(signal.SIGKILL)
+            node.start()
+            self.assertEqual(node.cli(self.provider_token, *command), failure)
+            self.assertEqual(calls, [original_request])
+        self.assertEqual(self.history(interrupted)["tasks"], [])
+        self.assertEqual(len(self.history(interrupted)["turns"]), 1)
+        self.assertEqual(self.budget()["model_calls_used"], 2)
 
     def test_worker_killed_after_post_cannot_create_another_inference_after_restart(self):
         node = self.node

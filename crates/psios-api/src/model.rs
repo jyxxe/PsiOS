@@ -286,6 +286,13 @@ impl Client {
         )
     }
 
+    pub fn pause_session(&self, session: &str, revision: &str, reason: &str) -> ApiResult<Value> {
+        self.call(
+            "Session.Pause",
+            json!({"id":session,"expected_resource_version":revision,"reason":reason}),
+        )
+    }
+
     pub fn model_turn(
         &self,
         session: &str,

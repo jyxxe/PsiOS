@@ -405,7 +405,15 @@ enum Cmd {
         #[arg(default_value = "-")]
         file: String,
     },
-    /// Resume a paused session after a recoverable pre-inference or tool content failure.
+    /// Pause a Session immediately or when its current Task settles.
+    SessionPause {
+        id: String,
+        #[arg(long)]
+        revision: String,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Resume an operator-paused Session or recoverable model or tool content failure.
     SessionResume {
         id: String,
         #[arg(long)]
@@ -955,6 +963,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::SessionUseFallback { id, revision, file } => {
             c.use_session_fallback(&id, &revision, &serde_json::from_value(input(&file)?)?)?
         }
+        Cmd::SessionPause {
+            id,
+            revision,
+            reason,
+        } => c.pause_session(&id, &revision, &reason)?,
         Cmd::SessionResume { id, revision } => c.resume_session(&id, &revision)?,
         Cmd::TaskResults { id } => c.task_results(&id)?,
         Cmd::TaskResultEvictionPlan { file } => serde_json::to_value(

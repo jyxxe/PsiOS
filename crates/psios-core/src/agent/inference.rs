@@ -37,6 +37,9 @@ pub(super) fn decorate_claim(
         if witnessed {
             reply["late_decision_observation"] = json!(true);
             reply["model_ref"] = model.reference();
+            if let Some(policy) = super::rejected_decision::offer(db.c, lease, model)? {
+                reply[super::rejected_decision::OFFER] = json!(policy);
+            }
         }
     }
     Ok(())
@@ -153,6 +156,9 @@ fn settle(
         json!({"lease_id":lease,"model_ref":model,"outcome":outcome,"source":source.text()});
     body["current_lease"] = Value::Null;
     body.as_object_mut().unwrap().remove("current_usage_ref");
+    body.as_object_mut()
+        .unwrap()
+        .remove(super::rejected_decision::OFFER);
     body.as_object_mut().unwrap().remove("lease_until");
     let saved = db.status(session, body)?;
     let receipt = json!({"session_ref":saved.reference(),"model_ref":model,"lease_id":lease,
@@ -341,7 +347,7 @@ pub(super) fn check_resume(db: &Db<'_>, session: &Doc, model: &Doc) -> Result<()
     Ok(())
 }
 
-fn predecessor(conn: &Connection, version: &Doc) -> Result<Doc> {
+pub(super) fn predecessor(conn: &Connection, version: &Doc) -> Result<Doc> {
     let missing = || {
         err(
             "RecoveryRequired",
@@ -382,7 +388,9 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
     let mut statement = conn.prepare(
         "SELECT i.lease,t.session,t.turn,i.session_revision,i.model,i.status,i.source,i.receipt,
             i.boot_id=t.boot_id AND i.deadline_boot_ms=t.deadline_boot_ms
-                AND (a.lease IS NULL OR i.time_ns=a.time_ns),t.expires,t.receipt IS NOT NULL,a.settled_ms
+                AND (a.lease IS NULL OR i.time_ns=a.time_ns),t.expires,t.receipt IS NOT NULL,a.settled_ms,
+            CASE WHEN t.receipt->'rejection' IS NOT NULL OR t.receipt->>'outcome_knowledge'='Known'
+                 THEN t.receipt END
          FROM model_inference_leases i JOIN session_turns t USING(lease)
          LEFT JOIN model_lease_times a USING(lease)",
     )?;
@@ -397,6 +405,7 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
             row,
         )?;
         let before_issue = predecessor(conn, &issued)?;
+        let _ = super::rejected_decision::issued_offer(&issued)?;
         let model = resolve(conn, &issued.spec["model_ref"])?;
         let usage = resolve(conn, &issued.body["current_usage_ref"])?;
         let status: String = record.get(5)?;
@@ -433,6 +442,9 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
                 "unreported strict model lease is no longer current",
             )?;
         }
+        if let Some(decision) = record.get::<_, Option<Value>>(12)? {
+            super::rejected_decision::verify_receipt(conn, &session, &lease, &decision)?;
+        }
         if let Some(receipt) = receipt {
             let settled = resolve(conn, &receipt["session_ref"])?;
             let before_settlement = predecessor(conn, &settled)?;
@@ -468,5 +480,5 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
             )?;
         }
     }
-    Ok(())
+    super::rejected_decision::verify_links(conn)
 }

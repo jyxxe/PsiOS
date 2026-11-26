@@ -28,6 +28,12 @@ pub struct ModelOutput {
     pub usage: Option<ModelTokenUsage>,
 }
 
+/// Versioned, authority-validated terminal rejection of a delivered decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelDecisionRejectionPolicy {
+    UndeclaredToolV1,
+}
+
 /// Outcome knowledge from the provider transport, separate from model output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelInferenceOutcome {
@@ -59,6 +65,11 @@ pub trait SessionModel {
         false
     }
 
+    /// Allow Core to seal a known rejection of a tool absent from the pinned Skill.
+    fn accepts_undeclared_tool_rejection(&self) -> bool {
+        false
+    }
+
     fn decide_with_usage(&self, context: &Value) -> ApiResult<ModelOutput> {
         Ok(ModelOutput {
             decision: self.decide(context)?,
@@ -83,6 +94,19 @@ struct DecisionRequest {
     decision: ModelDecision,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     usage: Option<ModelTokenUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    decision_rejection_policy: Option<ModelDecisionRejectionPolicy>,
+}
+
+impl DecisionRequest {
+    fn late_observation(&self) -> Value {
+        let mut request = json!(self);
+        request
+            .as_object_mut()
+            .unwrap()
+            .remove("decision_rejection_policy");
+        request
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -209,6 +233,11 @@ impl Client {
                 ));
             }
         };
+        let decision_rejection_policy = (observe_late
+            && provider.accepts_undeclared_tool_rejection()
+            && claim["decision_rejection_policy"]
+                == json!(ModelDecisionRejectionPolicy::UndeclaredToolV1))
+        .then_some(ModelDecisionRejectionPolicy::UndeclaredToolV1);
         let (output, late_decision_model_ref) = match claim.get("inference_outcome_policy") {
             Some(policy) if policy == "Strict" => {
                 let model_ref: ResourceRef =
@@ -251,6 +280,7 @@ impl Client {
                 usage: output
                     .usage
                     .filter(|_| claim["usage_format"] == "tokens.v1"),
+                decision_rejection_policy,
             }),
             late_decision_model_ref,
         })

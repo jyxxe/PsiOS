@@ -205,7 +205,7 @@ impl Inspection {
         connection: &mut engine::Connection,
         cid: Option<&str>,
     ) -> Result<Vec<String>> {
-        connection.identity(self.engine()).await?;
+        connection.require_linux_engine(self.engine()).await?;
         let name = format!("^/psios-{}$", self.app.id);
         let mut filters = vec![
             ("name", name),
@@ -230,7 +230,7 @@ impl Inspection {
                 "Docker names and original attempt selectors disagree",
             )?;
         }
-        connection.identity(self.engine()).await?;
+        connection.require_linux_engine(self.engine()).await?;
         Ok(expected)
     }
     async fn observe(&self, config: &Config, connection: &mut engine::Connection) -> Result<Value> {

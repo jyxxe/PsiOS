@@ -165,7 +165,7 @@ impl Connection {
         Ok((status, data))
     }
 
-    pub async fn identity(&mut self, expected: &str) -> Result<()> {
+    async fn bound_linux_info(&mut self, expected: &str) -> Result<Value> {
         let (status, data) = timeout(API_TIMEOUT, self.request(Method::GET, "/v1.44/info", None))
             .await
             .map_err(|_| unavailable())??;
@@ -178,11 +178,25 @@ impl Connection {
         require(
             info["ID"] == expected,
             "PreconditionFailed",
-            "local Docker Engine identity differs from the approved restore",
+            "local Docker Engine identity differs from the recorded engine",
         )?;
         require(
-            info["OSType"] == "linux"
-                && matches!(info["Architecture"].as_str(), Some("x86_64" | "amd64"))
+            info["OSType"] == "linux",
+            "UnsupportedCapability",
+            "the recorded Docker Engine must manage Linux containers",
+        )?;
+        Ok(info)
+    }
+
+    pub(in crate::apps) async fn require_linux_engine(&mut self, expected: &str) -> Result<()> {
+        self.bound_linux_info(expected).await?;
+        Ok(())
+    }
+
+    pub async fn identity(&mut self, expected: &str) -> Result<()> {
+        let info = self.bound_linux_info(expected).await?;
+        require(
+            matches!(info["Architecture"].as_str(), Some("x86_64" | "amd64"))
                 && matches!(info["Driver"].as_str(), Some("overlay2" | "vfs"))
                 && (info["Driver"] == "vfs" && info["DriverStatus"].is_null()
                     || info["DriverStatus"].as_array().is_some_and(|rows| {

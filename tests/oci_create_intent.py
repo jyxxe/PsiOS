@@ -112,7 +112,8 @@ def verify_lost_create(binaries, docker, spec, app_ids, *, lose_removal=False, e
         wrong_name = "psios-test-renamed-" + key()
         subprocess.run(docker+["rename",cid,wrong_name],check=True,timeout=10)
         try:
-            assert inspect(rig,"Failed")["conditions"][0]["type"]=="OutcomeUnknown"
+            wrong = inspect(rig, "Failed")
+            assert wrong["conditions"][0]["type"] == "OutcomeUnknown", wrong
         finally:
             subprocess.run(docker+["rename",cid,f"psios-{app_id}"],check=True,timeout=10)
         evidence, owned = inspect(rig)

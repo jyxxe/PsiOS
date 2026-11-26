@@ -202,6 +202,11 @@ pub(crate) fn migrate(db: &Db<'_>) -> Result<()> {
         db.c.query_row("SELECT coalesce(max(seq),0) FROM versions", [], |row| {
             row.get(0)
         })?;
+    require(
+        boundary > 0,
+        "RecoveryRequired",
+        "effective OCI mount observation requires a bootstrapped authority",
+    )?;
     db.c.execute(
         "INSERT INTO meta(key,value) VALUES(?1,?2)",
         params![EPOCH, boundary.to_string()],

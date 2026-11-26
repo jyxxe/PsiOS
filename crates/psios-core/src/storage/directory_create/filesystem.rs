@@ -239,7 +239,13 @@ impl Paths {
                 &staged,
                 Mode::from_raw_mode(info.mode() & 0o700) | Mode::SGID,
             )
-            .map_err(io::Error::from)?;
+            .map_err(|error| match error {
+                Errno::ACCESS | Errno::PERM => err(
+                    "UnsupportedCapability",
+                    "filesystem cannot preserve the requested setgid inheritance",
+                ),
+                _ => io::Error::from(error).into(),
+            })?;
         }
         let updated = staged.metadata()?;
         require(

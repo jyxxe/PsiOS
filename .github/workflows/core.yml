@@ -59,7 +59,7 @@ jobs:
       - name: Reconcile a volume directory after its interrupted rename
         run: |
           PSIOS_TEST_VOLUME_MKDIR_RENAME_FAULT=1 python3 -B -m unittest discover -s tests \
-            -p test_volume_mkdir_recovery.py -k killed_rename -v
+            -p test_volume_mkdir_recovery.py -k killed_ -v
       - name: Interrupt detached backup publication and verify durable catalog recovery
         run: |
           PSIOS_TEST_BACKUP_INTAKE_CUT=1 python3 -B -m unittest discover -s tests \

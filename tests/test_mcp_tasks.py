@@ -9,7 +9,7 @@ import subprocess
 import time
 import unittest
 
-from support import Node, key, target
+from support import Failure, Node, key, target
 from test_mcp_modern_stdio import CAPABILITIES_KEY, PROFILE, params, request, send
 from test_mcp_stdio import McpFixture, Wire
 
@@ -193,6 +193,81 @@ class McpTaskTests(McpTaskFixture, unittest.TestCase):
         self.assertEqual(rejected["structuredContent"], {"code": "IdempotencyKeyExpired"})
         self.assertEqual(len(self.tasks()), 1)
         self.assertEqual(n.call("Task.Get", {"id": original["resource_id"]})["lifecycle"], "Succeeded")
+
+    def test_bound_tool_result_stays_with_its_original_volume_revision(self):
+        n = self.node
+        token = self.agent["token"]
+
+        def grant_for(tool, targets):
+            return n.call("Grant.Issue", {
+                "principal_id": self.agent["principal_id"], "actions": ["task.submit", "task.read", tool],
+                "tool_targets": targets, "units": 3, "ttl_seconds": 120,
+            })
+
+        create = grant_for("volume.create", ["local"])
+        request = n.prepare("volume.create", {"name": "mcp-task-volume"}, token=token,
+                            delegation=create["delegation_ref"]["resource_id"])
+        created = n.wait(n.call("Task.Submit", request, token)["task_id"], autoapprove=True)
+        self.assertEqual(created["lifecycle"], "Succeeded", created)
+        [artifact] = created["result"]["artifact_refs"]
+        volume = n.call("Artifact.Read", {"reference": artifact}, token)
+        first = n.perform("volume.write", {**target(volume), "name": "sample", "content": "initial"})["volume_ref"]
+        grant = grant_for("volume.usage", [first["resource_id"]])
+        client = self.task_wire(grant, extra=("--volume-usage", first["resource_id"]))
+
+        def begin_usage(invocation):
+            accepted = self.task_call(client, "tools/call", {"name": "volume.usage"}, invocation=invocation)["result"]
+            self.assertEqual(accepted["resultType"], "task", accepted)
+            return accepted["taskId"]
+
+        invocation = key()
+        handle = begin_usage(invocation)
+        result = self.check_receipt(self.wait_status(client, handle)["result"], "volume.usage", grant)
+        self.assertEqual((result["result"]["volume_ref"], result["result"]["logical_file_bytes"]), (first, "7"))
+        [original] = n.call("Task.Results", {"id": result["task_id"]}, token)["result"]["artifact_refs"]
+
+        second = n.perform("volume.write", {**target(first), "name": "sample", "content": "new"})["volume_ref"]
+        self.assertNotEqual(second, first)
+        refused = self.task_call(client, "tasks/get", {"taskId": handle})
+        self.assertEqual(refused["error"]["code"], -32602, refused)
+        self.assertEqual(begin_usage(invocation), handle)
+        self.assertEqual(n.call("Artifact.Read", {"reference": original}, token), result["result"])
+
+        fresh = self.check_receipt(self.wait_status(client, begin_usage(key()))["result"], "volume.usage", grant)
+        self.assertNotEqual(fresh["task_id"], result["task_id"])
+        self.assertEqual((fresh["result"]["volume_ref"], fresh["result"]["logical_file_bytes"]), (second, "3"))
+
+    def test_retained_handle_limit_follows_the_agent_across_endpoints(self):
+        n = self.node
+        self.scheduling("Cordoned")
+        grant = self.grant([self.profile], units=40)
+        token = self.agent["token"]
+
+        def start(agent_token, credential, endpoint, invocation):
+            return n.call("McpTask.Start", {
+                "endpoint": endpoint, "delegation_id": credential["delegation_ref"]["resource_id"],
+                "invocation_key": invocation, "binding": {"tool": "system.status"}, "ttl_seconds": 300,
+            }, agent_token)
+
+        invocation = key()
+        original = start(token, grant, "diagnostics", invocation)
+        for attempt in range(31):
+            start(token, grant, f"diagnostics-{attempt % 2}", key())
+        limit = n.call("Budget.Get", {"id": grant["budget_ref"]["resource_id"]})
+        self.assertEqual((limit["reserved"], limit["spent"]), (32, 0))
+        self.assertEqual(start(token, grant, "diagnostics", invocation), original)
+        with self.assertRaises(Failure) as rejected:
+            start(token, grant, "separate-endpoint", key())
+        self.assertEqual(rejected.exception.code, "QuotaExceeded")
+        self.assertTrue(rejected.exception.args[0]["retryable"])
+        task_query = {"kind": "Task", "limit": 64}
+        self.assertEqual(len(n.call("Resource.List", task_query)["items"]), 32)
+        self.assertEqual(n.call("Budget.Get", {"id": grant["budget_ref"]["resource_id"]}), limit)
+
+        other, other_grant = n.agent(["task.submit", "task.read", "system.status"])
+        additional = start(other["token"], other_grant, "diagnostics", invocation)
+        self.assertNotEqual(additional["taskId"], original["taskId"])
+        self.assertEqual(len(n.call("Resource.List", task_query)["items"]), 33)
 
     @unittest.skipUnless(os.environ.get("PSIOS_TEST_MCP_PREVIOUS_BIN_DIR"), "requires genuine format 121 binaries")
     def test_format_121_task_receipt_survives_migration_and_old_writer_is_fenced(self):

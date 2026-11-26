@@ -429,6 +429,12 @@ fn snapshot(db: &Db<'_>, record: &Record, task: &Doc, details: bool) -> Result<V
             {
                 let (artifact, _) =
                     broker::result_access::resolve_artifact(db, &record.owner, reference)?;
+                require(
+                    artifact::is_task_output(&artifact, task)
+                        && artifact.spec["operation_id"] == record.spec.operation_ref.resource_id,
+                    "RecoveryRequired",
+                    "MCP task result lost its original Run or Operation lineage",
+                )?;
                 let value = artifact::read(db, &artifact, Some(MAX_RESULT))?;
                 json!({"task_id":task.id,"result":value})
             } else {

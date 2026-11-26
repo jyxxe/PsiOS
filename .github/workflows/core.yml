@@ -55,6 +55,14 @@ jobs:
           "$RUNNER_TEMP/psios-mcp-modern/bin/pip" install 'mcp==2.0.0'
           PSIOS_TEST_MCP_MODERN_SDK=1 "$RUNNER_TEMP/psios-mcp-modern/bin/python" -B -m unittest discover -s tests \
             -p test_mcp_modern_stdio.py -k test_official_python_modern_stdio_client -v
+      - name: Poll an actual durable MCP Task with the official TypeScript extension client
+        timeout-minutes: 3
+        run: |
+          sdk="$RUNNER_TEMP/psios-mcp-tasks"
+          npm install --prefix "$sdk" --ignore-scripts --no-audit --no-fund --save-exact \
+            node-linux-x64@22.20.0 @modelcontextprotocol/ext-tasks@0.2.3 @modelcontextprotocol/client@2.2.0
+          PSIOS_TEST_MCP_TASKS_SDK_DIR="$sdk" PSIOS_TEST_MCP_TASKS_NODE="$sdk/node_modules/node-linux-x64/bin/node" \
+            python3 -B -m unittest discover -s tests -p test_mcp_tasks.py -k test_official_typescript_tasks_client -v
       - name: Kill a restore at its filesystem publication boundary and reconcile it
         run: |
           if ! command -v strace; then
@@ -636,7 +644,7 @@ jobs:
           python3 -B tests/agent_context_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
   work-item-migration:
     runs-on: ubuntu-24.04
-    timeout-minutes: 17
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -822,6 +830,13 @@ jobs:
           git archive 19f6c5c07f9764159a26a350fdb1d8ff7c35a144 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format120"
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format120" "$RUNNER_TEMP/psios-compatibility-target"
           python3 -B tests/resource_event_workflow_overlap_upgrade.py --previous-bin-dir "$RUNNER_TEMP/psios-compatibility-target/debug"
+      - name: Preserve format 121 Tasks, Operations and results before enabling MCP Tasks
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format121"
+          git archive fda941da9cec1ec2962be9ffae05bbc41f15e0f0 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format121"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format121" "$RUNNER_TEMP/psios-compatibility-target"
+          PSIOS_TEST_MCP_PREVIOUS_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
+            python3 -B -m unittest discover -s tests -p test_mcp_tasks.py -k test_format_121_task_receipt_survives_migration -v
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

@@ -921,6 +921,13 @@ fn verify_review(conn: &Connection, item: &Doc, review: &Value) -> Result<()> {
     let before = crate::db::resolve(conn, &item.body["reviewed_item_ref"])?;
     let evidence = crate::db::resolve(conn, &item.body["reviewed_evidence_ref"])?;
     let closed = item.body["lifecycle"] == "Closed";
+    // History verifies the exact rejection transition. Later Ready revisions can retain
+    // that decision while changing priority.
+    let review_revision_matches = if accepted {
+        before.rev + if closed { 2 } else { 1 } == item.rev
+    } else {
+        before.rev < item.rev
+    };
     require(
         reviewer != assigned(item)?
             && reviewer != evidence.body["submitted_by"]
@@ -931,7 +938,7 @@ fn verify_review(conn: &Connection, item: &Doc, review: &Value) -> Result<()> {
             && before.id == item.id
             && before.owner == item.owner
             && before.spec == item.spec
-            && before.rev + if closed { 2 } else { 1 } == item.rev
+            && review_revision_matches
             && before.body["lifecycle"] == "InReview"
             && before.body["evidence_ref"] == evidence.reference()
             && evidence.kind == evidence::KIND

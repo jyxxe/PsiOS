@@ -555,6 +555,21 @@ jobs:
           git archive 115272446e50768ecd3585d9e339bcca52d3bdf7 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format64"
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format64" "$RUNNER_TEMP/psios-compatibility-target"
           python3 -B tests/agent_context_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
+  work-item-migration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Preserve format 88 assignments and tool results while adding priority
+        run: |
+          rustup toolchain install 1.100.0 --profile minimal
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo +1.100.0 build --locked --workspace
+          mkdir "$RUNNER_TEMP/psios-format88"
+          git archive a3d7b4784163defb171de8516b5d640897e42911 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format88"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format88" "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/work_item_priority_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

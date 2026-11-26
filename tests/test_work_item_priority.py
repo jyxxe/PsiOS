@@ -207,6 +207,30 @@ class WorkItemPriorityTests(unittest.TestCase):
                          before)
         self.verify()
 
+    def test_reprioritization_preserves_the_exact_rejected_review(self):
+        _, original = self.item("Revisit a rejected observation", priority="Low")
+        execution = self.grant(self.contributor, ["task.submit", "task.read", STATUS], [self.profile["resource_id"]])
+        _, task_id = self.submit(STATUS, {}, execution)
+        task, artifact, _ = self.result(task_id)
+        pending = self.call("WorkItem.SubmitEvidence", {
+            **target(original["reference"]), "task_ref": task, "artifact_ref": artifact,
+        }, self.contributor)
+        self.grant(self.reviewer, ["task.results.read"], [task_id])
+        rejected = self.call("WorkItem.Review", {**target(pending["reference"]), "accept": False}, self.reviewer)
+        decision = rejected["value"]["review"]
+        self.assertFalse(decision["accepted"], rejected)
+        self.assertEqual(rejected["value"]["lifecycle"], "Ready")
+        promoted = self.set_priority(rejected, "Urgent")
+        settled = self.set_priority(promoted, "Normal")
+        self.assertEqual(settled["value"]["review"], decision)
+        self.restart()
+        self.assertEqual(self.get(original)["value"]["review"], decision)
+        history = self.call("WorkItem.History", {"id": original["reference"]["resource_id"]})["items"]
+        self.assertEqual([entry["reference"] for entry in history[-3:]],
+                         [rejected["reference"], promoted["reference"], settled["reference"]])
+        self.assertEqual([entry["value"]["review"] for entry in history[-3:]], [decision] * 3)
+        self.verify()
+
     def test_assigned_tool_applies_live_threshold_after_queue_restart(self):
         _, normal = self.item("Default normal")
         _, low = self.item("Low check", priority="Low")

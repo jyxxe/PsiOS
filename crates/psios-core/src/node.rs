@@ -6,16 +6,16 @@ pub mod network;
 pub mod pressure;
 pub mod process;
 pub(crate) mod service_control;
+pub(crate) mod service_manager;
 pub mod service_state;
 use crate::{
-    config::Manager,
     db::{Db, Doc},
     host::{Action, ServiceRestart, Work},
     policy, *,
 };
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, fs, path::Path, process::Command};
+use std::{collections::BTreeMap, fs, path::Path};
 
 pub(crate) const RESTART_TOOL: &str = "service.restart";
 
@@ -213,26 +213,9 @@ pub(crate) fn restarted(observation: &Value, request: &ServiceRestart) -> bool {
 
 fn service(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Result<Value> {
     let cfg = configured_service(w)?;
-    let manager = if cfg.manager == Manager::User {
-        "--user"
-    } else {
-        "--system"
-    };
     let command = |verb: &str, args: &[&str], effect: bool| -> Result<Vec<u8>> {
-        let mut cmd = Command::new("/usr/bin/systemctl");
-        cmd.env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("LC_ALL", "C");
-        if cfg.manager == Manager::User {
-            cmd.env(
-                "XDG_RUNTIME_DIR",
-                format!("/run/user/{}", rustix::process::geteuid().as_raw()),
-            );
-        }
-        cmd.args([manager, "--no-pager", "--no-ask-password", verb])
-            .args(args)
-            .arg("--")
-            .arg(&cfg.unit);
+        let mut cmd = service_manager::command(&cfg.manager, verb);
+        cmd.args(args).arg("--").arg(&cfg.unit);
         let out = crate::command::capture(cmd, effect, "systemd", 30)?;
         require(
             !out.truncated,
@@ -245,7 +228,9 @@ fn service(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Result<Va
         )?;
         Ok(out.stdout)
     };
+    let manager_sample = || service_manager::sample(&cfg.manager);
     let inspect = || -> Result<Value> {
+        let started = manager_sample()?;
         let bytes = command(
             "show",
             &["--property=Id,LoadState,ActiveState,SubState,MainPID,InvocationID,NeedDaemonReload"],
@@ -277,12 +262,25 @@ fn service(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Result<Va
             )?;
             None
         };
+        let final_sample = manager_sample()?;
+        require(
+            started.is_some() == final_sample.is_some(),
+            "DependencyUnavailable",
+            "systemd manager startup time was unavailable during unit observation",
+        )?;
+        require(
+            started == final_sample,
+            "PreconditionFailed",
+            "systemd manager changed during unit observation",
+        )?;
         let boot = service_control::boot_id()?;
-        Ok(
-            json!({"unit":cfg.unit,"manager":cfg.manager,"manager_uid":service_control::manager_uid(&cfg.manager),
+        let mut observation = json!({"unit":cfg.unit,"manager":cfg.manager,"manager_uid":service_control::manager_uid(&cfg.manager),
               "boot_id":boot,"load_state":load_state,"active_state":props.get("ActiveState"),"sub_state":props.get("SubState"),
-          "definition_digest":definition,"needs_reload":props.get("NeedDaemonReload")!=Some(&"no"),"main_pid":props.get("MainPID"),"invocation_id":props.get("InvocationID"),"observed_at":now()}),
-        )
+          "definition_digest":definition,"needs_reload":props.get("NeedDaemonReload")!=Some(&"no"),"main_pid":props.get("MainPID"),"invocation_id":props.get("InvocationID"),"observed_at":now()});
+        if let Some(started) = started {
+            observation[service_manager::STARTED] = json!(started);
+        }
+        Ok(observation)
     };
     let before = inspect()?;
     let Some(control) = service_control::Control::from_action(&w.action) else {
@@ -304,7 +302,28 @@ fn service(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Result<Va
         "ApprovalInvalidated",
         "systemd definition changed or needs a reload",
     )?;
+    let check_manager = || -> Result<()> {
+        let current = manager_sample()?;
+        let expected = service_manager::timestamp(&before);
+        require(
+            expected.is_some() && current.is_some(),
+            "DependencyUnavailable",
+            "systemd manager startup time is unavailable",
+        )?;
+        require(
+            expected == current.as_deref(),
+            "PreconditionFailed",
+            "systemd manager changed before unit control",
+        )
+    };
+    check_manager()?;
     checkpoint(&before)?;
+    check_manager().map_err(|_| {
+        err(
+            "OutcomeUnknown",
+            "checkpointed systemd manager could not be confirmed before unit control",
+        )
+    })?;
     command(control.verb(), &[], true)?;
     let observed =
         inspect().map_err(|_| err("OutcomeUnknown", "unit change requires reconciliation"))?;

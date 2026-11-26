@@ -20,7 +20,7 @@ pub(crate) use execution::finish;
 pub(crate) use execution::{claim, dispatch, dispatch_failed, finish_host, settlement_failed};
 use psios_api::{VERSION, canonical, contract, digest, id, sha256};
 pub(crate) use recovery::{
-    inspected as inspect_recovery, reconcile, recover, release_unstarted_claim,
+    inspected as inspect_recovery, prepare_reconcile, reconcile, recover, release_unstarted_claim,
 };
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};

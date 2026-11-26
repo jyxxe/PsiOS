@@ -1,5 +1,6 @@
 //! Durable evidence of the exact authorized call into a systemd manager.
 use super::*;
+use crate::config::Manager;
 use crate::db::{find, resolve, row};
 use rusqlite::{Connection, params};
 mod settlement;
@@ -452,6 +453,9 @@ fn same_manager(before: &Value, after: &Value) -> bool {
     ]
     .iter()
     .all(|field| before[*field] == after[*field])
+        && before.get(service_manager::STARTED).is_none_or(|value| {
+            service_manager::timestamp(after).is_some() && *value == after[service_manager::STARTED]
+        })
 }
 
 pub(super) fn confirms(control: Control, service: &Doc, before: &Value, after: &Value) -> bool {
@@ -497,6 +501,7 @@ pub(crate) fn record(db: &Db<'_>, work: &Work, target: &Doc, before: &Value) -> 
             && db.of(&work.task.id, "Task")?.reference() == work.task.reference()
             && target.reference() == intent.body["service_ref"]
             && matches_service(target, before)
+            && service_manager::timestamp(before).is_some()
             && before["manager_uid"] == manager_uid(&manager)
             && before["boot_id"] == boot_id()?
             && expected_invocation(&work.action, before),
@@ -548,8 +553,16 @@ fn checkpoint_link(conn: &Connection, op: &Doc, intent: &Doc) -> Result<Option<D
     let prepared = resolve(conn, &original.body["operation_ref"])?;
     let mut started = initial.body.clone();
     started["phase"] = json!("EffectStarted");
+    let before = &checkpoint.body["before"];
+    let startup_bound = match service_manager::cutover(conn)? {
+        Some(cutover) if position(conn, &initial)? > cutover => {
+            service_manager::timestamp(before).is_some()
+        }
+        _ => before.get(service_manager::STARTED).is_none(),
+    };
     require(
-        checkpoint.kind == CHECKPOINT
+        startup_bound
+            && checkpoint.kind == CHECKPOINT
             && checkpoint.rev == 1
             && checkpoint.owner == op.owner
             && checkpoint.spec["operation_id"] == op.id
@@ -637,7 +650,121 @@ pub(crate) fn confirmed(
     Ok(Some(checkpoint))
 }
 
+pub(crate) struct ReconcileProbe {
+    operation_ref: Value,
+    checkpoint_ref: Value,
+    evidence_ref: Value,
+    manager: Manager,
+}
+
+pub(crate) struct ReconcileSample {
+    probe: ReconcileProbe,
+    boot_id: String,
+    started: String,
+}
+
+impl ReconcileProbe {
+    pub(crate) fn read(self) -> Result<ReconcileSample> {
+        let unavailable = || {
+            err(
+                "OutcomeUnknown",
+                "live systemd manager startup time is unavailable",
+            )
+        };
+        let boot_id = boot_id().map_err(|_| unavailable())?;
+        let started = service_manager::sample(&self.manager)
+            .map_err(|_| unavailable())?
+            .ok_or_else(unavailable)?;
+        Ok(ReconcileSample {
+            probe: self,
+            boot_id,
+            started,
+        })
+    }
+}
+
+pub(crate) fn prepare_reconcile_probe(
+    db: &Db<'_>,
+    op: &Doc,
+    evidence: Option<&Value>,
+) -> Result<Option<ReconcileProbe>> {
+    let Some(intent) = intent(db.c, op)? else {
+        return Ok(None);
+    };
+    let target = db.resolve(&intent.body["service_ref"])?;
+    let control = Control::from_tool(&intent.body["tool"])
+        .ok_or_else(|| err("RecoveryRequired", "not a managed systemd control"))?;
+    let checkpoint = checkpoint(db.c, op, &intent, &target, control)?.ok_or_else(|| {
+        err(
+            "RecoveryRequired",
+            "systemd operation has no committed checkpoint",
+        )
+    })?;
+    if service_manager::timestamp(&checkpoint.body["before"]).is_none() {
+        return Ok(None);
+    }
+    held(db, &target, op)?;
+    require(
+        db.of(&target.id, "HostService")?.reference() == target.reference(),
+        "RecoveryRequired",
+        "original systemd service revision is unavailable",
+    )?;
+    let evidence = db.resolve(evidence.ok_or_else(|| {
+        err(
+            "PreconditionFailed",
+            "a fresh inspection artifact is required",
+        )
+    })?)?;
+    require(
+        evidence.kind == "Artifact",
+        "PreconditionFailed",
+        "expected a retained inspection artifact",
+    )?;
+    Ok(Some(ReconcileProbe {
+        operation_ref: op.reference(),
+        checkpoint_ref: checkpoint.reference(),
+        evidence_ref: evidence.reference(),
+        manager: decode(&target.spec["manager"])?,
+    }))
+}
+
+pub(crate) fn require_live_manager(
+    op: &Doc,
+    checkpoint: &Doc,
+    proof: &Doc,
+    observation: &Value,
+    sample: Option<&ReconcileSample>,
+) -> Result<Option<Value>> {
+    let before = &checkpoint.body["before"];
+    let Some(expected) = service_manager::timestamp(before) else {
+        return Ok(None);
+    };
+    let manager: Manager = decode(&before["manager"])?;
+    require(
+        sample.is_some_and(|live| {
+            live.probe.operation_ref == op.reference()
+                && live.probe.checkpoint_ref == checkpoint.reference()
+                && live.probe.evidence_ref == proof.reference()
+                && live.probe.manager == manager
+                && live.boot_id == before["boot_id"]
+                && live.boot_id == observation["boot_id"]
+                && live.started == expected
+        }),
+        "OutcomeUnknown",
+        "live systemd manager does not match the checkpointed invocation",
+    )?;
+    Ok(manager_evidence(before))
+}
+
+fn manager_evidence(observation: &Value) -> Option<Value> {
+    service_manager::timestamp(observation).map(|started| {
+        json!({"manager":observation["manager"],"manager_uid":observation["manager_uid"],
+            "boot_id":observation["boot_id"],(service_manager::STARTED):started})
+    })
+}
+
 pub(crate) fn verify(conn: &Connection) -> Result<()> {
+    service_manager::cutover(conn)?;
     let mut statement = conn.prepare(
         "SELECT body->>'operation_id' FROM versions WHERE kind='Effect' AND rev=1 AND seq>?1
           AND body->>'action' IN ('service.start','service.stop','service.restart')",
@@ -678,6 +805,7 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
 }
 
 pub(crate) fn verify_active_holds(db: &Db<'_>) -> Result<()> {
+    let manager_cutover = service_manager::cutover(db.c)?;
     let mut active = db.c.prepare(
         "SELECT t.id,t.owner,q.operation,q.phase FROM queue q JOIN current t ON t.id=q.task
          WHERE q.phase IN ('Dispatched','Unknown') AND t.kind='Task'
@@ -702,9 +830,21 @@ pub(crate) fn verify_active_holds(db: &Db<'_>) -> Result<()> {
             "RecoveryRequired",
             "systemd operation disagrees with its active queue entry",
         )?;
-        let (effect, _) = original_effect(db.c, &op)?;
+        let (effect, seq) = original_effect(db.c, &op)?;
         let service = db.resolve(&effect.body["resource_ref"])?;
         held(db, &service, &op)?;
+        if manager_cutover.is_some_and(|cutover| seq > cutover) {
+            let dispatch = intent(db.c, &op)?
+                .ok_or_else(|| err("RecoveryRequired", "systemd control intent is missing"))?;
+            let control = Control::from_tool(&effect.body["action"])
+                .ok_or_else(|| err("RecoveryRequired", "systemd control verb is invalid"))?;
+            let saved = checkpoint(db.c, &op, &dispatch, &service, control)?;
+            require(
+                phase != "Unknown" || saved.is_some(),
+                "RecoveryRequired",
+                "unknown systemd control has no invocation checkpoint",
+            )?;
+        }
     }
     Ok(())
 }
@@ -749,6 +889,30 @@ mod tests {
                 "{field}"
             );
         }
+        let mut versioned = initial.clone();
+        versioned[service_manager::STARTED] = json!("123456");
+        assert!(!confirms(
+            Control::Restart,
+            &service,
+            &versioned,
+            &restarted
+        ));
+        let mut new_manager = restarted.clone();
+        new_manager[service_manager::STARTED] = json!("124456");
+        assert!(confirms(Control::Restart, &service, &initial, &new_manager));
+        assert!(!confirms(
+            Control::Restart,
+            &service,
+            &versioned,
+            &new_manager
+        ));
+        new_manager[service_manager::STARTED] = versioned[service_manager::STARTED].clone();
+        assert!(confirms(
+            Control::Restart,
+            &service,
+            &versioned,
+            &new_manager
+        ));
         assert!(confirms(Control::Start, &service, &initial, &initial));
         restarted["active_state"] = json!("inactive");
         assert!(confirms(Control::Stop, &service, &initial, &restarted));

@@ -1,4 +1,5 @@
 //! Retire an approved filesystem identity before asynchronous physical reclamation.
+use super::reclamation::Cursor;
 use super::{
     MAX_MANIFEST, child, copy_hash, filename, open_manifest, registered_root, regular,
     remove_contents, same_source, unknown,
@@ -12,7 +13,7 @@ use crate::{
     now, policy, require,
 };
 use psios_api::canonical;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 use rustix::fs::{
     AtFlags, FileType, Mode, OFlags, RenameFlags, open, renameat_with, statat, unlinkat,
 };
@@ -349,33 +350,17 @@ pub(crate) enum PhysicalResult {
     AlreadyAbsent,
 }
 
-#[derive(Default)]
-pub(crate) struct Cursor {
-    through: Option<String>,
-    after: (String, String),
-}
-
 pub(crate) fn next(db: &Db<'_>, cursor: &mut Cursor) -> Result<Option<Reclamation>> {
-    let current = now();
-    let through = cursor.through.get_or_insert_with(|| current.clone());
-    let cutoff = current.as_str().min(through.as_str());
-    let position =
-        db.c.query_row(
-            "SELECT ready_after,retirement FROM storage_reclamations
+    let Some(id) = cursor.select_due(
+        db.c,
+        "SELECT ready_after,retirement FROM storage_reclamations
            WHERE ready_after<=?1 AND (ready_after,retirement)>(?2,?3)
            ORDER BY ready_after,retirement LIMIT 1",
-            params![cutoff, cursor.after.0, cursor.after.1],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-    let Some(position) = position else {
-        *cursor = Cursor::default();
+    )?
+    else {
         return Ok(None);
     };
-    // Advance even if this row cannot be validated or its receipt cannot be
-    // committed. The durable row remains eligible on the next pass.
-    cursor.after = position;
-    let job = db.of(&cursor.after.1, KIND)?;
+    let job = db.of(id, KIND)?;
     let operation_id = job.spec["operation_id"]
         .as_str()
         .ok_or_else(|| err("RecoveryRequired", "reclamation has no deletion operation"))?;

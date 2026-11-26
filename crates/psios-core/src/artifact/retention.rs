@@ -119,15 +119,10 @@ pub fn describe(db: &Db<'_>, artifact: &Doc, shared: bool) -> Result<Value> {
     }))
 }
 
-fn require_read_only(conn: &Connection, task: &Doc) -> Result<()> {
+fn read_only_tool<'a>(conn: &Connection, task: &'a Doc) -> Result<&'a str> {
     let tool = task.spec["task_type"]
         .as_str()
         .ok_or_else(|| err("RecoveryRequired", "producing Task has no tool identity"))?;
-    require(
-        policy::readonly(tool),
-        "PreconditionFailed",
-        "write results are retained as effect evidence",
-    )?;
     let operations = task.body["operation_refs"]
         .as_array()
         .filter(|refs| !refs.is_empty())
@@ -160,7 +155,7 @@ fn require_read_only(conn: &Connection, task: &Doc) -> Result<()> {
             "the dispatched capability retained effect evidence",
         )?;
     }
-    Ok(())
+    Ok(tool)
 }
 
 pub fn evict(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
@@ -219,7 +214,11 @@ pub(super) fn prepare_candidate(db: &Db<'_>, task: Doc) -> Result<Candidate> {
         "PreconditionFailed",
         "eviction requires a settled Task with available results",
     )?;
-    require_read_only(db.c, &task)?;
+    require(
+        policy::readonly(read_only_tool(db.c, &task)?),
+        "PreconditionFailed",
+        "write results are retained as effect evidence",
+    )?;
     require(
         !workflow::retains_result(db, &task)?,
         "Conflict",

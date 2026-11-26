@@ -104,7 +104,7 @@ fn member(
         "RecoveryRequired",
         "batch eviction lost its exact previously available Task",
     )?;
-    retention::require_read_only(conn, previous)?;
+    retention::read_only_tool(conn, previous)?;
     retention::validate_record(eviction, updated)?;
     let mut expected = previous.body.clone();
     expected["result"]["availability"] = json!("Evicted");
@@ -290,6 +290,18 @@ mod tests {
             let prepared = super::super::prepare(db, policy::OWNER, &json!({
                 "task_refs":[ready.reference(),other.reference()], "reason":"evict two read results",
             }))?;
+            let token = prepared["plan_token"].as_str().unwrap();
+            let mut expired = super::super::open(db, policy::OWNER, token)?;
+            expired.valid_until = crate::after(-1);
+            let expired = super::super::seal(db, &expired)?;
+            assert_eq!(super::super::apply(db, policy::OWNER, &json!({"plan_token":expired}))
+                .unwrap_err().0.code, "DeadlineExceeded");
+            let mut foreign_clock = super::super::open(db, policy::OWNER, token)?;
+            foreign_clock.time_namespace = "different-time-namespace".into();
+            let foreign_clock = super::super::seal(db, &foreign_clock)?;
+            assert_eq!(super::super::apply(db, policy::OWNER, &json!({"plan_token":foreign_clock}))
+                .unwrap_err().0.code, "DeadlineExceeded");
+            assert_eq!(db.of(&ready.id, "Task")?.reference(), ready.reference());
             let batch = super::super::apply(db, policy::OWNER, &json!({"plan_token":prepared["plan_token"]}))?;
             check(db.c)?;
 

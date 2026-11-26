@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use psios_api::{
     Client, LocalInventoryModel, OciImageCaptureRequest, OciPublisherSignature, ResourceRef,
-    SessionModel, StatusProvider, TaskOutputRequirement, parse,
+    SessionModel, StatusProvider, TaskOutputRequirement, WorkItemPriority, parse,
 };
 use psios_core::{Config, DEFAULT_BACKUP_MAX_BYTES, MAX_BACKUP_BYTES};
 use serde_json::{Value, json};
@@ -509,6 +509,14 @@ enum WorkItemCommand {
         revision: String,
         assignee: String,
     },
+    /// Change the priority of a ready work item at its current revision.
+    Reprioritize {
+        id: String,
+        #[arg(long)]
+        revision: String,
+        #[arg(value_enum)]
+        priority: PriorityInput,
+    },
     /// End open work with a recorded reason.
     Abandon {
         id: String,
@@ -523,6 +531,25 @@ enum WorkItemCommand {
 enum ReviewDecision {
     Accept,
     Reject,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum PriorityInput {
+    Low,
+    Normal,
+    High,
+    Urgent,
+}
+
+impl From<PriorityInput> for WorkItemPriority {
+    fn from(priority: PriorityInput) -> Self {
+        match priority {
+            PriorityInput::Low => Self::Low,
+            PriorityInput::Normal => Self::Normal,
+            PriorityInput::High => Self::High,
+            PriorityInput::Urgent => Self::Urgent,
+        }
+    }
 }
 
 fn input(path: &str) -> Result<Value, Box<dyn std::error::Error>> {
@@ -808,6 +835,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     revision,
                     assignee,
                 } => c.reassign_work_item(&id, &revision, &assignee)?,
+                WorkItemCommand::Reprioritize {
+                    id,
+                    revision,
+                    priority,
+                } => c.reprioritize_work_item(&id, &revision, priority.into())?,
                 WorkItemCommand::Abandon {
                     id,
                     revision,

@@ -64,6 +64,15 @@ pub enum WorkItemCriterion {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+pub enum WorkItemPriority {
+    Low,
+    #[default]
+    Normal,
+    High,
+    Urgent,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateWorkItem {
@@ -74,6 +83,8 @@ pub struct CreateWorkItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub assignee_principal_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<WorkItemPriority>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -102,6 +113,8 @@ pub struct AssignedWorkRequest {
     pub limit: Option<u32>,
     #[serde(default)]
     pub include_blocked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_priority: Option<WorkItemPriority>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -298,6 +311,18 @@ impl Client {
         self.project_request(
             "WorkItem.Reassign",
             &json!({"id":id,"expected_resource_version":revision,"assignee_principal_id":assignee_principal_id}),
+        )
+    }
+
+    pub fn reprioritize_work_item(
+        &self,
+        id: &str,
+        revision: &str,
+        priority: WorkItemPriority,
+    ) -> ApiResult<ProjectRecord> {
+        self.project_request(
+            "WorkItem.Reprioritize",
+            &json!({"id":id,"expected_resource_version":revision,"priority":priority}),
         )
     }
 

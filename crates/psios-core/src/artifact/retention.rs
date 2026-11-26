@@ -1,8 +1,9 @@
 pub(crate) mod batch;
+pub(crate) mod selection;
 
 use super::{CHUNK_BYTES, Manifest, is_task_output, repair, stored_digest};
 use crate::{
-    Result, agent,
+    Error, Result, agent,
     db::{Db, Doc, find},
     decode, err, label, now, policy, require, workflow,
 };
@@ -21,6 +22,52 @@ struct Evict {
     id: String,
     expected_resource_version: String,
     reason: String,
+}
+
+pub(super) enum CandidateMetadata {
+    Ready(u128),
+    Pinned,
+    Ineligible,
+}
+
+// Tag ordinary exclusions where they are decided. A nested reference or custody
+// check may return the same public error code for damaged authoritative metadata.
+enum CandidateError {
+    Pinned(Error),
+    Ineligible(Error),
+    Fault(Error),
+}
+
+type CandidateResult<T> = std::result::Result<T, CandidateError>;
+
+impl From<Error> for CandidateError {
+    fn from(error: Error) -> Self {
+        Self::Fault(error)
+    }
+}
+
+impl From<rusqlite::Error> for CandidateError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Fault(error.into())
+    }
+}
+
+impl From<CandidateError> for Error {
+    fn from(error: CandidateError) -> Self {
+        match error {
+            CandidateError::Pinned(error)
+            | CandidateError::Ineligible(error)
+            | CandidateError::Fault(error) => error,
+        }
+    }
+}
+
+fn eligible(condition: bool, message: &str) -> CandidateResult<()> {
+    require(condition, "PreconditionFailed", message).map_err(CandidateError::Ineligible)
+}
+
+fn unpinned(condition: bool, message: &str) -> CandidateResult<()> {
+    require(condition, "Conflict", message).map_err(CandidateError::Pinned)
 }
 
 pub(super) struct Candidate {
@@ -119,7 +166,7 @@ pub fn describe(db: &Db<'_>, artifact: &Doc, shared: bool) -> Result<Value> {
     }))
 }
 
-fn read_only_tool<'a>(conn: &Connection, task: &'a Doc) -> Result<&'a str> {
+fn read_only_tool<'a>(conn: &Connection, task: &'a Doc) -> CandidateResult<&'a str> {
     let tool = task.spec["task_type"]
         .as_str()
         .ok_or_else(|| err("RecoveryRequired", "producing Task has no tool identity"))?;
@@ -149,9 +196,8 @@ fn read_only_tool<'a>(conn: &Connection, task: &'a Doc) -> Result<&'a str> {
             "RecoveryRequired",
             "operation does not pin the producing capability",
         )?;
-        require(
+        eligible(
             capability.spec["effect_class"] == "ReadOnly",
-            "PreconditionFailed",
             "the dispatched capability retained effect evidence",
         )?;
     }
@@ -199,11 +245,14 @@ fn require_current(db: &Db<'_>, task: &Doc) -> Result<()> {
     )
 }
 
-/// Checks live retention and content, keeping only metadata needed by this transaction.
-pub(super) fn prepare_candidate(db: &Db<'_>, task: Doc) -> Result<Candidate> {
-    require_current(db, &task)?;
-    let prior = task_receipt(db.c, &task)?;
-    require(
+fn inspect_candidate(
+    db: &Db<'_>,
+    task: &Doc,
+    mut inspect_payload: impl FnMut(&Doc, &Manifest<'_>) -> Result<()>,
+) -> CandidateResult<u128> {
+    require_current(db, task)?;
+    let prior = task_receipt(db.c, task)?;
+    eligible(
         prior.is_none()
             && matches!(
                 task.body["lifecycle"].as_str(),
@@ -211,32 +260,26 @@ pub(super) fn prepare_candidate(db: &Db<'_>, task: Doc) -> Result<Candidate> {
             )
             && task.body["outcome_knowledge"] == "Known"
             && task.body["result"]["availability"] == "Available",
-        "PreconditionFailed",
         "eviction requires a settled Task with available results",
     )?;
-    require(
-        policy::readonly(read_only_tool(db.c, &task)?),
-        "PreconditionFailed",
+    eligible(
+        policy::readonly(read_only_tool(db.c, task)?),
         "write results are retained as effect evidence",
     )?;
-    require(
-        !workflow::retains_result(db, &task)?,
-        "Conflict",
+    unpinned(
+        !workflow::retains_result(db, task)?,
         "an active WorkflowRun retains the task result",
     )?;
-    require(
-        !agent::retains_result(db, &task)?,
-        "Conflict",
+    unpinned(
+        !agent::retains_result(db, task)?,
         "an active Agent session retains the task result",
     )?;
-    require(
+    unpinned(
         !crate::broker::dependencies::retains_result(db, &task.id)?,
-        "Conflict",
         "an unsettled Task requires this producer's result",
     )?;
-    require(
+    unpinned(
         !crate::apps::stop::retains_result(db, &task.id)?,
-        "Conflict",
         "an admitted OCI stop continuation retains the exit evidence",
     )?;
     let refs = task.body["result"]["artifact_refs"]
@@ -248,13 +291,12 @@ pub(super) fn prepare_candidate(db: &Db<'_>, task: Doc) -> Result<Candidate> {
                 "available task result has no artifact references",
             )
         })?;
-    let mut artifacts = Vec::with_capacity(refs.len());
     let mut seen = BTreeSet::new();
     let mut bytes = 0u128;
     for reference in refs {
         let artifact = db.resolve(reference)?;
         require(
-            is_task_output(&artifact, &task),
+            is_task_output(&artifact, task),
             "RecoveryRequired",
             "task result refers to a foreign artifact",
         )?;
@@ -263,34 +305,74 @@ pub(super) fn prepare_candidate(db: &Db<'_>, task: Doc) -> Result<Candidate> {
             "RecoveryRequired",
             "task result contains duplicate artifact identities",
         )?;
-        require(
+        unpinned(
             !crate::node::network::probe::state::retains_artifact(db.c, &artifact)?,
-            "Conflict",
             "a network probe retains its latest measurement for verification",
         )?;
-        require(
+        unpinned(
             !crate::project::evidence::retains_artifact(db.c, &artifact)?,
-            "Conflict",
             "a work item retains this artifact during review and acceptance",
         )?;
-        let mut evidence = db.c.prepare(
+        let mut evidence = db.c.prepare_cached(
             "SELECT * FROM versions WHERE kind='RecoveryEvidence'
                AND json_extract(body,'$.evidence.observation_ref.resource_id')=?1",
         )?;
         for record in evidence.query_map([&artifact.id], crate::db::row)? {
-            require(
+            unpinned(
                 task.spec["task_type"] == "service.inspect"
                     && crate::node::service_control::releases_inspection(db, &artifact, &record?)?,
-                "Conflict",
                 "an Operation retains this artifact as reconciliation evidence",
             )?;
         }
         let manifest = Manifest::read(&artifact)?.ok_or_else(|| {
-            err(
+            CandidateError::Ineligible(err(
                 "UnsupportedCapability",
                 "legacy inline artifact content cannot be evicted",
-            )
+            ))
         })?;
+        // Removal operates on SQLite chunks. File-backed artifacts have separate custody.
+        require(
+            !super::files::managed(&artifact),
+            "RecoveryRequired",
+            "artifact chunk is missing or has changed size",
+        )?;
+        inspect_payload(&artifact, &manifest)?;
+        bytes = bytes
+            .checked_add(manifest.size as u128)
+            .ok_or_else(|| err("RecoveryRequired", "task result byte count overflow"))?;
+    }
+    Ok(bytes)
+}
+
+pub(super) fn candidate_metadata(db: &Db<'_>, task: &Doc) -> Result<CandidateMetadata> {
+    match inspect_candidate(db, task, |_, _| Ok(())) {
+        Ok(bytes) => Ok(CandidateMetadata::Ready(bytes)),
+        Err(CandidateError::Pinned(_)) => Ok(CandidateMetadata::Pinned),
+        Err(CandidateError::Ineligible(_)) => Ok(CandidateMetadata::Ineligible),
+        Err(CandidateError::Fault(error)) => {
+            if matches!(
+                error.0.code.as_str(),
+                "Conflict"
+                    | "InvalidArgument"
+                    | "NotFound"
+                    | "PermissionDenied"
+                    | "PreconditionFailed"
+            ) {
+                Err(err(
+                    "RecoveryRequired",
+                    format!("result eviction candidate metadata: {}", error.0.message),
+                ))
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+/// Checks live retention and content, keeping only metadata needed by this transaction.
+pub(super) fn prepare_candidate(db: &Db<'_>, task: Doc) -> Result<Candidate> {
+    let mut artifacts = Vec::new();
+    let bytes = inspect_candidate(db, &task, |artifact, manifest| {
         manifest.verify(db.c)?;
         let stored: i64 = db.c.query_row(
             "SELECT count(*) FROM artifact_chunks WHERE artifact_id=?1 AND artifact_rev=?2",
@@ -302,15 +384,13 @@ pub(super) fn prepare_candidate(db: &Db<'_>, task: Doc) -> Result<Candidate> {
             "RecoveryRequired",
             "artifact payload count disagrees with the retained manifest",
         )?;
-        bytes = bytes
-            .checked_add(manifest.size as u128)
-            .ok_or_else(|| err("RecoveryRequired", "task result byte count overflow"))?;
         artifacts.push(CandidateArtifact {
             chunks: manifest.chunks.len(),
-            id: artifact.id,
+            id: artifact.id.clone(),
             rev: artifact.rev,
         });
-    }
+        Ok(())
+    })?;
     Ok(Candidate {
         task,
         artifacts,

@@ -423,7 +423,9 @@ fn matches_service(service: &Doc, observation: &Value) -> bool {
             Some("user") => uid.is_some_and(|uid| u32::try_from(uid).is_ok()),
             _ => false,
         })
-        && observation["boot_id"].as_str().is_some_and(valid_boot_id)
+        && observation["boot_id"]
+            .as_str()
+            .is_some_and(block::valid_boot)
         && observation["definition_digest"].is_string()
         && observation["definition_digest"] == service.spec["definition_digest"]
         && observation["load_state"] == "loaded"

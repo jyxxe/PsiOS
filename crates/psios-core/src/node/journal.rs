@@ -115,7 +115,8 @@ fn read_window(work: &Work, limit: u32, continuation: Option<&SinceQuery>) -> Re
     } else {
         "_SYSTEMD_UNIT"
     };
-    let boot_match = format!("--boot={}", boot_id.replace('-', ""));
+    let boot_hex = boot_id.replace('-', "");
+    let boot_match = format!("--boot={boot_hex}");
     let unit_match = format!("{field}={}", config.unit);
     let output_fields = format!("--output-fields=MESSAGE,PRIORITY,_PID,{field},_SYSTEMD_OWNER_UID");
     let mut command = Command::new("/usr/bin/journalctl");
@@ -151,7 +152,6 @@ fn read_window(work: &Work, limit: u32, continuation: Option<&SinceQuery>) -> Re
         "service journal result exceeds output limit",
     )?;
 
-    let boot_hex = boot.simple().to_string();
     let mut entries = Vec::new();
     for line in output
         .stdout

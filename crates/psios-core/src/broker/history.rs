@@ -4,7 +4,9 @@ pub(crate) fn redact_late_receipt(db: &Db<'_>, doc: &mut Doc) -> Result<()> {
     if doc.kind != "LateReceipt" {
         return Ok(());
     }
-    let receipt = &doc.body["evidence"]["receipt"];
+    let Some(receipt) = doc.body["evidence"].get("receipt") else {
+        return Ok(());
+    };
     let application_logs = receipt.get("last_logs").is_some() || receipt.get("stdout").is_some();
     let service_logs = receipt.get("entries").is_some();
     let service_observation = receipt.get("unit").is_some()
@@ -12,15 +14,19 @@ pub(crate) fn redact_late_receipt(db: &Db<'_>, doc: &mut Doc) -> Result<()> {
         && receipt.get("active_state").is_some();
     let node_pressure =
         receipt["kernel"]["source"] == "LinuxProcfs" && receipt.get("core_cgroup").is_some();
-    if !(application_logs || service_logs || service_observation || node_pressure) {
-        return Ok(());
-    }
     let effect = db.resolve(&doc.body["effect_ref"])?;
     let sensitive = match effect.body["action"].as_str() {
         Some(apps::log_tail::TOOL | "application.stop") => application_logs,
         Some(node::journal::TOOL | node::journal::SINCE_TOOL) => service_logs,
         Some(node::service_state::TOOL) => service_observation,
         Some(node::pressure::TOOL) => node_pressure,
+        Some(
+            "volume.read"
+            | "volume.read_chunk"
+            | "volume.files"
+            | "volume.usage"
+            | storage::file_integrity::TOOL,
+        ) => true,
         _ => false,
     };
     if sensitive {

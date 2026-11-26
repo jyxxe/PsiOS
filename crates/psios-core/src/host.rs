@@ -792,32 +792,33 @@ impl Work {
         {
             self.checkpoint_authority(db)?;
         }
-        if matches!(
-            self.action,
-            Action::VerifyVolumeFile(_)
-                | Action::InspectFileRename(_)
-                | Action::InspectRestoredVolume(_)
-                | Action::InspectProcess(_)
-                | Action::Pressure {}
-                | Action::TrackBlockDevice(_)
-                | Action::ObserveBlockDevice(_)
-                | Action::ServiceObserve(_)
-                | Action::ServiceLogs(_)
-                | Action::ServiceLogsSince(_)
-                | Action::ServiceResources(_)
-                | Action::ObserveNetworkProbe(_)
-                | Action::InspectNetworkTrial(_)
-                | Action::ListAssignedWork(_)
-                | Action::ListAppReleases(_)
-                | Action::InstallArtifact(_)
-                | Action::StageArtifactRelease(_)
-                | Action::RetireRelease(_)
-                | Action::RebindRestoredVolume(_)
-                | Action::CaptureOciImage(_)
-                | Action::InspectReleaseImageRestore(_)
-                | Action::InspectOciCreate(_)
-                | Action::Logs(_)
-        ) {
+        if storage::read_holds::reader(&self.action)
+            || matches!(
+                self.action,
+                Action::InspectFileRename(_)
+                    | Action::InspectRestoredVolume(_)
+                    | Action::InspectProcess(_)
+                    | Action::Pressure {}
+                    | Action::TrackBlockDevice(_)
+                    | Action::ObserveBlockDevice(_)
+                    | Action::ServiceObserve(_)
+                    | Action::ServiceLogs(_)
+                    | Action::ServiceLogsSince(_)
+                    | Action::ServiceResources(_)
+                    | Action::ObserveNetworkProbe(_)
+                    | Action::InspectNetworkTrial(_)
+                    | Action::ListAssignedWork(_)
+                    | Action::ListAppReleases(_)
+                    | Action::InstallArtifact(_)
+                    | Action::StageArtifactRelease(_)
+                    | Action::RetireRelease(_)
+                    | Action::RebindRestoredVolume(_)
+                    | Action::CaptureOciImage(_)
+                    | Action::InspectReleaseImageRestore(_)
+                    | Action::InspectOciCreate(_)
+                    | Action::Logs(_)
+            )
+        {
             self.checkpoint_authority(db)?;
         }
         Ok(())

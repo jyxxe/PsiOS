@@ -3679,6 +3679,111 @@ fn revoked_pressure_scope_fences_the_sample_and_late_evidence() {
 }
 
 #[test]
+fn volume_read_chunks_cannot_publish_from_fenced_runs_or_old_late_receipts() {
+    let directory = tempfile::tempdir().unwrap();
+    let (config, mut store) = initialized(directory.path());
+    let creation = submit(
+        &mut store,
+        "volume.create",
+        json!({"name":"late-volume-read"}),
+    );
+    let volume = execute(&mut store, &creation);
+    let root = config
+        .state_dir
+        .join("volumes")
+        .join(volume["resource_id"].as_str().unwrap())
+        .join("data");
+    let payload = b"private volume bytes";
+    fs::write(root.join("sample"), payload).unwrap();
+    let input = json!({"target":{
+        "id":volume["resource_id"],"expected_resource_version":volume["version"]},
+        "path":"sample","offset":0,"limit":1024});
+    let prior = submit(&mut store, "volume.read_chunk", input.clone());
+    let prior_result = execute(&mut store, &prior);
+    let prior_status = call(&mut store, "Task.Get", json!({"id":prior})).unwrap();
+    let prior_artifact = &prior_status["result"]["artifact_refs"][0];
+
+    let grant = call(
+        &mut store,
+        "Grant.Issue",
+        json!({
+            "principal_id":policy::OWNER,"actions":["task.submit","task.read","volume.read_chunk"],
+            "tool_targets":[volume["resource_id"]],"units":1,"ttl_seconds":90,
+        }),
+    )
+    .unwrap();
+    let prepared = call(
+        &mut store,
+        "Task.Prepare",
+        json!({
+            "tool":"volume.read_chunk","input":input,"key":id("volume-read-authority"),
+            "delegation_id":grant["delegation_ref"]["resource_id"],
+        }),
+    )
+    .unwrap();
+    let accepted = call(&mut store, "Task.Submit", prepared).unwrap();
+    let task = accepted["task_id"].as_str().unwrap();
+    assert_eq!(claim(&mut store), task);
+    let work = dispatch(&mut store, task);
+    let sample = work
+        .perform(|_| unreachable!("chunk read has no host checkpoint"))
+        .unwrap();
+    assert_eq!(sample["data_base64"], STANDARD.encode(payload));
+
+    call(
+        &mut store,
+        "Grant.Revoke",
+        json!({"id":grant["grant_ref"]["resource_id"],
+            "expected_resource_version":grant["grant_ref"]["version"],
+        }),
+    )
+    .unwrap();
+    let legacy = store.transaction("fenced-volume-read", |db| {
+        broker::finish(db, &work, Ok(sample.clone()))?;
+        broker::finish(db, &work, Ok(sample.clone()))?;
+        let accounted: bool = db.c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM volume_read_holds WHERE task=?1)
+               OR EXISTS(SELECT 1 FROM versions WHERE kind='Artifact' AND spec->>'task_id'=?1)",
+            [task], |row| row.get(0),
+        )?;
+        assert!(!accounted);
+        let late: Value = db.c.query_row(
+            "SELECT body FROM versions WHERE kind='LateReceipt' AND body->'operation_ref'->>'resource_id'=?1",
+            [&work.op.id], |row| row.get(0),
+        )?;
+        assert_eq!(late["evidence"], json!({"code":"Fenced"}));
+        Ok(db.record("LateReceipt", &work.task.owner, json!({
+            "run_ref":work.run.reference(),"operation_ref":work.op.reference(),
+            "effect_ref":work.effect.reference(),"evidence":{"receipt":sample},
+        }))?.reference())
+    }).unwrap();
+    let settled = call(&mut store, "Task.Get", json!({"id":task})).unwrap();
+    assert_eq!(settled["lifecycle"], "Failed");
+    assert_eq!(settled["outcome_knowledge"], "Known");
+    assert_eq!(settled["conditions"][0]["type"], "PermissionDenied");
+    assert_eq!(settled["result"]["artifact_refs"], json!([]));
+    let retained = call(
+        &mut store,
+        "Artifact.Read",
+        json!({"reference":prior_artifact}),
+    )
+    .unwrap();
+    assert_eq!(retained, prior_result);
+    for (method, params) in [
+        ("Resource.Get", json!({"id":legacy["resource_id"]})),
+        ("Resource.Resolve", json!({"reference":legacy})),
+    ] {
+        let redacted = call(&mut store, method, params).unwrap();
+        assert_eq!(redacted["reference"], legacy);
+        assert_eq!(redacted["value"]["evidence"], json!({"code":"Fenced"}));
+        assert_eq!(
+            redacted["resource"]["spec"]["evidence"],
+            json!({"code":"Fenced"})
+        );
+    }
+}
+
+#[test]
 fn service_observation_keeps_superseded_reads_and_redacts_fenced_evidence() {
     let directory = tempfile::tempdir().unwrap();
     let mut config = Config::local(&directory.path().join("core"));

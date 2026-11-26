@@ -89,7 +89,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
             }
         }
         "Resource.Get" | "Resource.Resolve" | "Resource.List" | "Resource.Watch" | "Event.Poll"
-        | "Event.Ack" | "Event.Offset" => {
+        | "Event.Ack" | "Event.Offset" | "Event.OffsetList" | "Event.OffsetDelete" => {
             policy::can(db, actor, "resource.read")?;
             policy::can(db, actor, "task.read")?;
             if method == "Resource.Watch" || method.starts_with("Event.") {
@@ -99,7 +99,9 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
                 "Resource.List" => events::list(db, actor, p),
                 "Event.Poll" | "Resource.Watch" => events::poll(db, actor, p),
                 "Event.Ack" => events::ack(db, actor, p),
-                "Event.Offset" => events::offset(db, actor, p),
+                "Event.Offset" => events::offsets::get(db, actor, p),
+                "Event.OffsetList" => events::offsets::list(db, actor, p),
+                "Event.OffsetDelete" => events::offsets::delete(db, actor, p),
                 _ => {
                     let mut d = if method == "Resource.Get" {
                         let p: ById = decode(p)?;

@@ -190,7 +190,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = apps::health::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = events::offsets::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -479,6 +479,9 @@ impl Store {
                 }
                 if ver < apps::health::FORMAT {
                     apps::health::migrate(db)?;
+                }
+                if ver < events::offsets::FORMAT {
+                    db.c.execute_batch(events::offsets::SCHEMA)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

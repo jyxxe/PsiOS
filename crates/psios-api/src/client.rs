@@ -167,6 +167,40 @@ impl Client {
         }
     }
 
+    /// Read this principal's confirmed event offset and its revision.
+    pub fn event_offset(&self, consumer: &str) -> ApiResult<Value> {
+        self.call(
+            "Event.Offset",
+            json!({"id":consumer,"include_revision":true}),
+        )
+    }
+
+    /// List confirmed consumer revisions for maintenance.
+    pub fn event_offsets(
+        &self,
+        owner: Option<&str>,
+        after: Option<&str>,
+        limit: Option<u32>,
+    ) -> ApiResult<Value> {
+        self.call(
+            "Event.OffsetList",
+            json!({"owner":owner,"after":after,"limit":limit}),
+        )
+    }
+
+    /// Remove exactly the confirmed revision returned by the authority.
+    pub fn delete_event_offset(
+        &self,
+        consumer: &str,
+        expected_revision: &str,
+        owner: Option<&str>,
+    ) -> ApiResult<Value> {
+        self.call(
+            "Event.OffsetDelete",
+            json!({"consumer":consumer,"expected_revision":expected_revision,"owner":owner}),
+        )
+    }
+
     /// Report the submitting principal's open Task count and admission limit.
     pub fn task_admission(&self) -> ApiResult<Value> {
         self.call("Task.Admission", json!({}))

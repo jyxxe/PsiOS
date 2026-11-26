@@ -1,3 +1,4 @@
+pub(crate) mod offsets;
 pub(crate) mod query;
 pub(crate) mod scopes;
 
@@ -447,6 +448,9 @@ pub fn ack(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "Conflict",
         "consumer checkpoint changed",
     )?;
+    if old.is_none() {
+        offsets::check_admission(db, actor)?;
+    }
     if let Some((token, record)) = old {
         let Checkpoint {
             kind,
@@ -482,24 +486,13 @@ pub fn ack(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         })
         .transpose()?;
     db.c.execute(
-        "INSERT INTO event_offsets(owner,consumer,cursor,scope) VALUES(?1,?2,?3,?4)
-        ON CONFLICT(owner,consumer) DO UPDATE SET cursor=excluded.cursor,scope=excluded.scope",
-        params![actor, p.consumer, p.cursor, record],
+        "INSERT INTO event_offsets(owner,consumer,cursor,scope,checkpoint_revision) VALUES(?1,?2,?3,?4,?5)
+        ON CONFLICT(owner,consumer) DO UPDATE SET cursor=excluded.cursor,scope=excluded.scope,
+            checkpoint_revision=excluded.checkpoint_revision",
+        params![actor, p.consumer, p.cursor, record, offsets::new_revision()],
     )?;
     Ok(json!({"cursor": p.cursor}))
 }
-pub fn offset(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
-    let p: ById = decode(p)?;
-    let cursor: Option<String> =
-        db.c.query_row(
-            "SELECT cursor FROM event_offsets WHERE owner=?1 AND consumer=?2",
-            params![actor, p.id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(json!({"cursor": cursor}))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -175,6 +175,9 @@ pub(super) fn check_artifacts(
     if identity.database_format >= crate::project::milestone::FORMAT {
         crate::project::milestone::verify::check(conn)?;
     }
+    if identity.database_format >= crate::project::hierarchy::FORMAT {
+        crate::project::hierarchy::verify(conn)?;
+    }
     if identity.database_format >= crate::node::service_control::FORMAT {
         crate::node::service_control::verify(conn)?;
     }

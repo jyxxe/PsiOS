@@ -73,6 +73,8 @@ pub struct CreateWorkItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub assignee_principal_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocked_by: Vec<String>,
     pub criterion: WorkItemCriterion,
@@ -201,6 +203,19 @@ impl Client {
         self.project_request(
             "WorkItem.List",
             &json!({"project_id":project_id,"after_id":after_id,"limit":limit}),
+        )
+    }
+
+    /// List direct children in the same authorized Project.
+    pub fn work_item_children(
+        &self,
+        id: &str,
+        after_id: Option<&str>,
+        limit: Option<u32>,
+    ) -> ApiResult<WorkItemPage> {
+        self.project_request(
+            "WorkItem.Children",
+            &json!({"id":id,"after_id":after_id,"limit":limit}),
         )
     }
 

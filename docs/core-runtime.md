@@ -499,6 +499,10 @@ jq -n --argjson definition "$definition" --arg grant "$grant" --arg until "$(dat
 
 指派者离开项目后，项目管理者可用 `psiosctl work-item reassign ID --revision REV PRINCIPAL` 将没有在审证据的 `Ready` 工作项交给有明确项目授权的 Contributor。新指派者仍需通过普通 Task 权限执行任务并提交自己的结果。`work-item abandon ID --revision REV --reason REASON` 终止未关闭的工作项。原审核和证据记录保留，在审产物解除保留，依赖项仍显示阻塞。并发修改使用同一版本检查。
 
+原生 Agent 可在版本化 Skill 中声明 `project.submit_evidence`，再通过普通 Session 的工具派发提交证据。Session 的委托需包含该工具，目标范围含精确 WorkItem ID。执行者还需独立持有对所属 Project 的 `project.read` 和 `project.contribute`，并且是当前指派者。启用 `tool_context_window` 后，模型可从已成功 Task 的上下文获取 `task_ref` 和 `artifact_refs`，连同当前 WorkItem 的 `id` 和 `expected_resource_version` 提交。第三方 Agent 也可用 `Client::submit_work_item_evidence_task` 或 `psiosctl submit project.submit_evidence` 走同一 Task 路径。
+
+Core 在真正派发时重查项目成员、授权和工作项修订。在同一事务提交证据、Task 回执和预算扣减。成功回执含更新后工作项的固定引用和 `InReview` 状态。提交失败时依旧可由原 Task 查询错误，独立评审继续沿用 `WorkItem.Review` 的结果授权。[Agent 工具与故障验收](../tests/test_agent_work_item_evidence.py)
+
 当前支持单节点和单个 TaskResult 验收条件。里程碑、多条件验收、外部 Issue 与 CI 同步仍待实现。[多主体与重启验收](../tests/test_project_work_items.py) · [Project 规范](v1/docs/11-workflows-projects.md#118-project-与-workitem)
 
 ## 本机会话

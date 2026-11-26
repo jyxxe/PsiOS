@@ -505,7 +505,11 @@ Core 在真正派发时重查项目成员、授权和工作项修订。在同一
 
 `psiosctl work-item history ID --limit 32` 按修订顺序返回固定快照。下一页使用 `--cursor` 和上页的 `next_cursor`，快照可跨守护进程重启继续。成员名单或授权范围变化时，Core 会重新校验访问，旧游标失效。`psiosctl work-item revision` 从标准输入接收一份完整资源引用，返回当时持久保存的指派、审核与终止状态。精确证据引用仍需生产 Task 的独立结果权限。即使制品字节已回收，授权主体仍可查看原证据元数据。[历史与授权验收](../tests/test_work_item_history.py)
 
-当前支持单节点和单个 TaskResult 验收条件。里程碑、多条件验收、外部 Issue 与 CI 同步仍待实现。[多主体与重启验收](../tests/test_project_work_items.py) · [Project 规范](v1/docs/11-workflows-projects.md#118-project-与-workitem)
+项目管理者可用 `Milestone.Create` 按 `project_id`、`expected_project_version`、`key`、`title` 和 `work_item_ids` 组织 1 至 32 个同一项目下已有的工作项。CLI 提供 `milestone create`、`milestone get ID` 和 `milestone list PROJECT_ID`，查询继承当前项目成员资格和精确读取授权。创建后，Milestone 固定这组工作项的身份。
+
+`psiosctl milestone close ID --revision REV` 需要每个工作项已经通过独立评审并由管理者关闭。Core 记录实际已关闭的工作项版本。`milestone abandon ID --revision REV --reason REASON` 保留结束原因和原工作项关联。Milestone 与工作项各自结算，证据制品的保留继续沿用原 WorkItem 规则。[里程碑生命周期验收](../tests/test_project_milestones.py)
+
+当前支持单节点和单个 TaskResult 验收条件。多条件验收、外部 Issue 与 CI 同步仍待实现。[多主体与重启验收](../tests/test_project_work_items.py) · [Project 规范](v1/docs/11-workflows-projects.md#118-project-与-workitem)
 
 ## 本机会话
 

@@ -125,6 +125,53 @@ class StorageRetirementTests(unittest.TestCase):
         self.assertEqual(self.state(self.volume)["lifecycle"], "Deleted")
         self.assertEqual(self.operation(task_id), op)
 
+    def test_reclamation_receipt_failure_does_not_strand_later_backup(self):
+        n = self.n
+        unrelated = n.perform("volume.create", {"name": "independent-backup-source"})
+        source_data = n.state / "volumes" / unrelated["resource_id"] / "data" / "keep"
+        source_data.write_bytes(b"independent business data")
+        backup = n.perform("backup.create", target(unrelated))
+        backup_directory = n.state / "backups" / backup["resource_id"]
+        self.assertTrue(backup_directory.is_dir())
+
+        blocked = self.volume["resource_id"]
+        self.trigger("NEW.kind='StorageRetirement' AND NEW.body->>'lifecycle'='Reclaimed' "
+                     f"AND NEW.spec->'target_ref'->>'resource_id'='{blocked}'")
+        first = n.submit("volume.delete", target(self.volume))
+        first_task = n.wait(first, autoapprove=True)
+        self.assertEqual((first_task["lifecycle"], first_task["outcome_knowledge"]),
+                         ("Succeeded", "Known"), first_task)
+        first_op = self.operation(first)
+        first_record = f"storage-retirement-{first_op['resource_id']}"
+        first_directory = self.original.parent / f".retired-{first_op['resource_id']}"
+        self.wait_for(lambda: not first_directory.exists(), "physical volume reclamation did not finish")
+        self.assertEqual(n.get(first_record)["value"]["lifecycle"], "PendingCleanup")
+
+        n.stop(signal.SIGKILL)
+        n.start()
+        self.assertEqual(n.get(first_record)["value"]["lifecycle"], "PendingCleanup")
+        second = n.submit("backup.delete", target(backup))
+        second_task = n.wait(second, autoapprove=True)
+        self.assertEqual((second_task["lifecycle"], second_task["outcome_knowledge"]),
+                         ("Succeeded", "Known"), second_task)
+        second_op = self.operation(second)
+        second_record = f"storage-retirement-{second_op['resource_id']}"
+        second_directory = backup_directory.parent / f".retired-{second_op['resource_id']}"
+        self.wait_for(lambda: n.get(second_record)["value"]["lifecycle"] == "Reclaimed",
+                      "the failed first receipt prevented independent backup reclamation")
+        self.assertFalse(backup_directory.exists())
+        self.assertFalse(second_directory.exists())
+        self.assertEqual(n.get(first_record)["value"]["lifecycle"], "PendingCleanup")
+        self.assertFalse(first_directory.exists())
+        self.assertEqual(source_data.read_bytes(), b"independent business data")
+
+        self.drop_trigger()
+        self.wait_for(lambda: n.get(first_record)["value"]["lifecycle"] == "Reclaimed",
+                      "the original durable volume receipt did not settle after removing the fault")
+        self.assertEqual(n.get(first_record)["value"]["observation"], "DirectoryAlreadyAbsent")
+        self.assertEqual(self.operation(first), first_op)
+        self.assertEqual(self.operation(second), second_op)
+
 
 if __name__ == "__main__":
     unittest.main()

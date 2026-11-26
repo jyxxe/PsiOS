@@ -1408,9 +1408,13 @@ fn storage_deletion_interrupted_before_rename_can_settle_without_replaying() {
         let retirement_id = format!("storage-retirement-{}", work.op.id);
         let record = call(&mut reopened, "Resource.Get", json!({"id":retirement_id})).unwrap();
         assert_eq!(record["value"]["lifecycle"], "NotApplied");
+        let mut cleanup = storage::retirement::Cursor::default();
         assert!(
             reopened
-                .transaction("no-cleanup", storage::retirement::next)
+                .transaction("no-cleanup", |db| storage::retirement::next(
+                    db,
+                    &mut cleanup
+                ))
                 .unwrap()
                 .is_none()
         );
@@ -1421,7 +1425,9 @@ fn storage_deletion_interrupted_before_rename_can_settle_without_replaying() {
         assert_eq!(receipt["volume_ref"]["resource_id"], volume["resource_id"]);
         assert!(!directory.exists());
         let job = reopened
-            .transaction("inspect-cleanup", storage::retirement::next)
+            .transaction("inspect-cleanup", |db| {
+                storage::retirement::next(db, &mut cleanup)
+            })
             .unwrap()
             .unwrap();
         let parent = directory.parent().unwrap();

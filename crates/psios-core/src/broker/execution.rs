@@ -347,7 +347,7 @@ pub fn dispatch(db: &Db<'_>, task: &str) -> Result<Option<Work>> {
             "operation_id": op.id,
             "resource_ref": target,
             "action": tool,
-            "phase": if node::service_control::is_tool(tool) || apps::stop::is_tool(tool) || tool == apps::restart::TOOL || tool == node::network::trial::TOOL || tool == apps::volume_rebind::TOOL || matches!(tool, apps::create_recovery::CREATE | apps::create_recovery::CLEANUP | storage::entry_retirement::TOOL) { "PermitBound" } else { "EffectStarted" },
+            "phase": if node::service_control::is_tool(tool) || apps::stop::is_tool(tool) || tool == apps::restart::TOOL || tool == node::network::trial::TOOL || tool == apps::volume_rebind::TOOL || matches!(tool, apps::create_recovery::CREATE | apps::create_recovery::CLEANUP | storage::entry_retirement::TOOL | storage::restore_publication::CREATE) { "PermitBound" } else { "EffectStarted" },
             "outcome_knowledge": "InFlight",
             "evidence_refs": []
         }),
@@ -535,6 +535,14 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
     };
     let entry_unprepared = matches!(w.action, Action::RemoveEntry(_))
         && storage::entry_retirement::not_prepared(db, &db.of(&w.op.id, "Operation")?)?;
+    let volume_create_started = if matches!(w.action, Action::Create { .. }) {
+        Some(!storage::restore_publication::not_published(
+            db,
+            &db.of(&w.op.id, "Operation")?,
+        )?)
+    } else {
+        None
+    };
     let rebind = matches!(w.action, Action::RebindRestoredVolume(_));
     require(
         !atomic_authority || t.body["lifecycle"] == "Running",
@@ -560,6 +568,7 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
         && (stop_started == Some(false)
             || create_undispatched
             || cleanup_started == Some(false)
+            || volume_create_started == Some(false)
             || entry_unprepared)
     {
         close(db, &t, "Cancelled", "NotStarted", None, None)?;
@@ -577,6 +586,11 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
         require(
             !create_undispatched && cleanup_started!=Some(false),
             "Fenced", "OCI create or cleanup result has no command checkpoint",
+        )?;
+        require(
+            volume_create_started != Some(false),
+            "Fenced",
+            "new volume result has no publication checkpoint",
         )?;
         require(
             service_started != Some(false),
@@ -649,6 +663,7 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                 || create_undispatched
                 || cleanup_started == Some(false)
                 || entry_unprepared
+                || volume_create_started == Some(false)
                 || rebind;
             let e = if (stop_started == Some(true) || cleanup_started == Some(true))
                 && e.0.code != "OutcomeUnknown"
@@ -666,6 +681,16 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                 err(
                     "OutcomeUnknown",
                     "unable to settle the checkpointed OCI restart",
+                )
+            } else if volume_create_started == Some(true) && e.0.code != "OutcomeUnknown" {
+                err(
+                    "OutcomeUnknown",
+                    "unable to settle the checkpointed volume publication",
+                )
+            } else if volume_create_started == Some(false) && e.0.code == "OutcomeUnknown" {
+                err(
+                    "StorageUnavailable",
+                    "volume publication did not reach its checkpoint",
                 )
             } else {
                 e

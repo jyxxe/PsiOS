@@ -20,12 +20,23 @@ fn epoch(conn: &Connection) -> Result<i64> {
         .ok_or_else(|| err("RecoveryRequired", "restore custody epoch is invalid"))
 }
 
-fn active(conn: &Connection, operation: &str, epoch: i64) -> Result<Option<String>> {
+fn active(
+    conn: &Connection,
+    operation: &str,
+    epoch: i64,
+    create_epoch: Option<i64>,
+) -> Result<Option<String>> {
     let op = needed(conn, operation)?;
     let task_id = op.spec["task_id"]
         .as_str()
         .ok_or_else(|| err("RecoveryRequired", "restore operation has no Task"))?;
     let task = needed(conn, task_id)?;
+    let effect = resolve(conn, &op.body["effect_refs"][0])?;
+    let dispatch_sequence = effect_dispatch_seq(conn, &effect.id)?;
+    let create = task.spec["task_type"] == CREATE;
+    if create && create_epoch.is_none_or(|epoch| dispatch_sequence <= epoch) {
+        return Ok(None);
+    }
     let queued: Option<(String, String)> = conn
         .query_row(
             "SELECT operation,phase FROM queue WHERE task=?1",
@@ -34,12 +45,12 @@ fn active(conn: &Connection, operation: &str, epoch: i64) -> Result<Option<Strin
         )
         .optional()?;
     let (binding, source) = Source::load(conn, &op)?;
-    let effect = resolve(conn, &op.body["effect_refs"][0])?;
-    let held: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM holds WHERE volume=?1 AND holder=?2)",
-        params![source.id, operation],
-        |r| r.get(0),
-    )?;
+    let held = create
+        || conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM holds WHERE volume=?1 AND holder=?2)",
+            params![source.id, operation],
+            |r| r.get::<_, bool>(0),
+        )?;
     require(
         held && op.kind == "Operation"
             && task.kind == "Task"
@@ -47,7 +58,7 @@ fn active(conn: &Connection, operation: &str, epoch: i64) -> Result<Option<Strin
             && task.spec["task_type"] == binding.tool()
             && task.body["operation_refs"][0] == op.reference()
             && task.body["outcome_knowledge"] == op.body["outcome_knowledge"]
-            && needed(conn, &source.id)?.reference() == source.reference()
+            && (create || needed(conn, &source.id)?.reference() == source.reference())
             && effect.kind == "Effect"
             && effect.owner == op.owner
             && effect.body["operation_id"] == operation
@@ -59,12 +70,7 @@ fn active(conn: &Connection, operation: &str, epoch: i64) -> Result<Option<Strin
                         || phase == "Unknown" && op.body["outcome_knowledge"] == "Unknown")
             }),
         "RecoveryRequired",
-        "active restore queue, effect and backup hold disagree",
-    )?;
-    let dispatch_sequence: i64 = conn.query_row(
-        "SELECT seq FROM versions WHERE id=?1 AND rev=1",
-        [&effect.id],
-        |r| r.get(0),
+        "active volume publication queue, effect and source custody disagree",
     )?;
     let intent = find(conn, &intent_id(operation))?;
     require(
@@ -77,7 +83,7 @@ fn active(conn: &Connection, operation: &str, epoch: i64) -> Result<Option<Strin
     )?;
     let checkpoint = find(conn, &checkpoint_id(operation))?;
     if let Some(checkpoint) = checkpoint {
-        let placement = verify_custody(&op, &checkpoint, intent.as_ref())?;
+        let placement = verify_custody(conn, &op, &checkpoint, intent.as_ref())?;
         binding.check_receipt(&op, &checkpoint.body["receipt"])?;
         let staged = placement.stage_name()?;
         require(
@@ -89,12 +95,21 @@ fn active(conn: &Connection, operation: &str, epoch: i64) -> Result<Option<Strin
         Ok(staged.map(str::to_owned))
     } else {
         require(
-            intent.is_none_or(|intent| intent.body.get("checkpoint_ref").is_none()),
+            intent.is_none_or(|intent| intent.body.get("checkpoint_ref").is_none())
+                && (!create || effect.body["phase"] == "PermitBound"),
             "RecoveryRequired",
             "witnessed restore checkpoint is missing",
         )?;
         Ok(None)
     }
+}
+
+fn effect_dispatch_seq(conn: &Connection, effect: &str) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT seq FROM versions WHERE id=?1 AND rev=1",
+        [effect],
+        |row| row.get(0),
+    )?)
 }
 
 pub(crate) fn protected_stages(db: &Db<'_>) -> Result<HashSet<String>> {
@@ -103,6 +118,7 @@ pub(crate) fn protected_stages(db: &Db<'_>) -> Result<HashSet<String>> {
 
 fn selected(conn: &Connection) -> Result<HashSet<String>> {
     let epoch = epoch(conn)?;
+    let create_epoch = creation::cutover(conn)?;
     // A missing index row must not make its still-owned stage look abandoned.
     // The authorization and physical-completion facts remain durable after
     // the bounded pending-work index is trimmed.
@@ -121,14 +137,18 @@ fn selected(conn: &Connection) -> Result<HashSet<String>> {
     let mut names = HashSet::new();
     let mut work = conn.prepare(
         "SELECT q.operation FROM queue q JOIN current t ON q.task=t.id
-           WHERE q.phase IN ('Dispatched','Unknown') AND t.spec->>'task_type' IN ('backup.restore','volume.clone')
+           WHERE q.phase IN ('Dispatched','Unknown') AND t.spec->>'task_type' IN ('backup.restore','volume.clone','volume.create')
          UNION
          SELECT h.holder FROM holds h CROSS JOIN current o CROSS JOIN current t
            WHERE h.holder=o.id AND o.kind='Operation'
-             AND t.id=o.spec->>'task_id' AND t.spec->>'task_type' IN ('backup.restore','volume.clone')",
+             AND t.id=o.spec->>'task_id' AND t.spec->>'task_type' IN ('backup.restore','volume.clone')
+         UNION
+         SELECT t.body->'operation_refs'->0->>'resource_id' FROM current t
+           WHERE ?1 AND t.kind='Task' AND t.spec->>'task_type'='volume.create'
+             AND t.body->>'outcome_knowledge' IN ('InFlight','Unknown')",
     )?;
-    for operation in work.query_map([], |r| r.get::<_, String>(0))? {
-        if let Some(name) = active(conn, &operation?, epoch)? {
+    for operation in work.query_map([create_epoch.is_some()], |r| r.get::<_, String>(0))? {
+        if let Some(name) = active(conn, &operation?, epoch, create_epoch)? {
             names.insert(name);
         }
     }
@@ -192,6 +212,133 @@ pub(crate) fn verify_clones(conn: &Connection) -> Result<()> {
     verify_clones_inner(conn).map_err(custody_error)
 }
 
+pub(crate) fn verify_creates(conn: &Connection) -> Result<()> {
+    verify_creates_inner(conn).map_err(custody_error)
+}
+
+fn verify_creates_inner(conn: &Connection) -> Result<()> {
+    let epoch = creation::cutover(conn)?.ok_or_else(|| {
+        err(
+            "RecoveryRequired",
+            "new volume custody format is unavailable",
+        )
+    })?;
+    let mut operations = conn.prepare(
+        "SELECT * FROM versions WHERE kind='Effect' AND rev=1 AND seq>?1 AND body->>'action'='volume.create'",
+    )?;
+    for effect in operations.query_map([epoch], row)? {
+        let effect = effect?;
+        let operation = needed(conn, field_of(&effect.body, "operation_id")?)?;
+        let task = needed(conn, field_of(&operation.spec, "task_id")?)?;
+        let current_effect = resolve(conn, &operation.body["effect_refs"][0])?;
+        let (binding, source) = Source::load(conn, &operation)?;
+        let intent = needed(conn, &intent_id(&operation.id))?;
+        require(
+            effect.body["phase"] == "PermitBound"
+                && effect.owner == operation.owner
+                && effect.body["resource_ref"] == source.reference()
+                && current_effect.id == effect.id
+                && current_effect.kind == "Effect"
+                && task.body["operation_refs"] == json!([operation.reference()])
+                && task.body["outcome_knowledge"] == operation.body["outcome_knowledge"]
+                && binding.tool() == CREATE
+                && belongs(&intent, &operation, INTENT)
+                && binding.matches(&intent, &source, false),
+            "RecoveryRequired",
+            "volume creation has no exact original Effect, Task and intent",
+        )?;
+        let volume_id = format!("volume-{}", operation.id);
+        let volume = find(conn, &volume_id)?;
+        let Some(checkpoint) = find(conn, &checkpoint_id(&operation.id))? else {
+            require(
+                intent.body.get("checkpoint_ref").is_none()
+                    && current_effect.body["phase"] == "PermitBound"
+                    && matches!(
+                        operation.body["outcome_knowledge"].as_str(),
+                        Some("InFlight" | "NotStarted")
+                    )
+                    && volume.is_none(),
+                "RecoveryRequired",
+                "volume creation lost its witnessed publication checkpoint",
+            )?;
+            continue;
+        };
+        verify_custody(conn, &operation, &checkpoint, Some(&intent))?;
+        let receipt = &checkpoint.body["receipt"];
+        binding.check_receipt(&operation, receipt)?;
+        require(
+            binding.matches(&checkpoint, &source, true),
+            "RecoveryRequired",
+            "volume creation checkpoint does not match its original pool and request",
+        )?;
+        if let Some(volume) = volume {
+            let initial = conn.query_row(
+                "SELECT * FROM versions WHERE id=?1 AND rev=1",
+                [&volume.id],
+                row,
+            )?;
+            require(
+                operation.body["outcome_knowledge"] == "Known"
+                    && matches!(
+                        operation.body["lifecycle"].as_str(),
+                        Some("Succeeded" | "Cancelled")
+                    )
+                    && initial.kind == "Volume"
+                    && initial.owner == operation.owner
+                    && initial.body["lifecycle"] == "Available"
+                    && initial.body["data_incarnation"] == receipt["incarnation"]
+                    && initial.body["capacity_bytes"] == receipt["capacity"]
+                    && initial.body["pool_id"] == source.id
+                    && initial.body["attachment_refs"] == json!([])
+                    && initial.spec
+                        == json!({"name":intent.body["create_source"]["name"],
+                        "device":receipt["device"],"inode":receipt["inode"],"pool_id":source.id})
+                    && volume.body["data_incarnation"] == initial.body["data_incarnation"]
+                    && volume.spec["device"] == initial.spec["device"]
+                    && volume.spec["inode"] == initial.spec["inode"],
+                "RecoveryRequired",
+                "cataloged volume disagrees with its original empty creation",
+            )?;
+        } else if operation.body["outcome_knowledge"] == "Known" {
+            let references = current_effect.body["evidence_refs"].as_array();
+            let mut nonpublication = false;
+            for reference in references.into_iter().flatten() {
+                let evidence = resolve(conn, reference)?;
+                if evidence.kind == "RecoveryEvidence"
+                    && evidence.body["evidence"]["conclusion"] == NOT_APPLIED
+                {
+                    Disposal::authenticate(conn, &operation.id, evidence)?;
+                    nonpublication = true;
+                }
+            }
+            require(
+                nonpublication,
+                "RecoveryRequired",
+                "settled volume creation has neither a Volume nor verified non-publication",
+            )?;
+        } else {
+            require(
+                matches!(
+                    operation.body["outcome_knowledge"].as_str(),
+                    Some("InFlight" | "Unknown")
+                ),
+                "RecoveryRequired",
+                "volume creation checkpoint lacks a truthful outcome",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn field_of<'a>(body: &'a Value, key: &str) -> Result<&'a str> {
+    body[key].as_str().ok_or_else(|| {
+        err(
+            "RecoveryRequired",
+            format!("volume creation is missing {key}"),
+        )
+    })
+}
+
 struct CloneCustody {
     binding: Source,
     source: Doc,
@@ -210,7 +357,7 @@ fn clone_custody(conn: &Connection, op: &Doc) -> Result<CloneCustody> {
     )?;
     let checkpoint = find(conn, &checkpoint_id(&op.id))?;
     if let Some(checkpoint) = &checkpoint {
-        verify_custody(op, checkpoint, Some(&intent))?;
+        verify_custody(conn, op, checkpoint, Some(&intent))?;
         require(
             binding.matches(checkpoint, &source, true),
             "RecoveryRequired",

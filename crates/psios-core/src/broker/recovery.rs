@@ -143,6 +143,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                     || create_undispatched
                     || trial_unstarted
                     || entry_unprepared
+                    || restore_unpublished && tool == storage::restore_publication::CREATE
                 {
                     "NotStarted"
                 } else {
@@ -152,6 +153,8 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                     "LeaseLost",
                     if backup_unpublished {
                         "backup interrupted before publication was authorized"
+                    } else if restore_unpublished && tool == storage::restore_publication::CREATE {
+                        "volume creation interrupted before publication was checkpointed"
                     } else if restore_unpublished {
                         "restore interrupted before volume publication was authorized"
                     } else if trial_unstarted {
@@ -450,6 +453,9 @@ fn reconcile_action(db: &Db<'_>, task: &Doc) -> Result<Action> {
 }
 
 fn reconcile_target(db: &Db<'_>, op: &Doc, action: &Action) -> Result<Doc> {
+    if matches!(action, Action::Create { .. }) {
+        return storage::restore_publication::original_create_pool(db, op);
+    }
     let (target_id, expected) = match action {
         Action::Write(p) => (&p.id, &p.expected_resource_version),
         Action::Append(p) => (&p.target.id, &p.target.expected_resource_version),
@@ -554,7 +560,7 @@ pub(crate) fn reconcile(
             )?;
             storage::publication::reconcile(db, &op, &target, &proof, &observation)?
         }
-        Action::Restore(_) | Action::CloneVolume(_) => {
+        Action::Create { .. } | Action::Restore(_) | Action::CloneVolume(_) => {
             let (proof, observation) = inspected(
                 db,
                 req.evidence_ref.as_ref(),
@@ -565,7 +571,7 @@ pub(crate) fn reconcile(
             let (applied, result, evidence) =
                 storage::restore_publication::reconcile(db, &op, &target, &proof, &observation)?;
             if !applied {
-                reason = Some(err("LeaseLost", "restored volume was not published"));
+                reason = Some(err("LeaseLost", "volume was not published"));
             }
             (result, evidence)
         }

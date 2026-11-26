@@ -54,6 +54,14 @@ fn configured(session: &Doc) -> Result<Vec<Input>> {
     Ok(inputs)
 }
 
+pub(super) fn require_provider(session: &Doc, accepts_inputs: bool) -> Result<()> {
+    require(
+        accepts_inputs || configured(session)?.is_empty(),
+        "UnsupportedCapability",
+        "model provider has not opted into session artifact inputs",
+    )
+}
+
 fn source(conn: &Connection, session: &Doc, input: &Input) -> Result<Doc> {
     let artifact = resolve(conn, &json!(input.reference))?;
     require(

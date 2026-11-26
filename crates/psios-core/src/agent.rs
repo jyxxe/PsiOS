@@ -362,6 +362,8 @@ pub fn cancel(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
 struct Claim {
     session_id: String,
     key: String,
+    #[serde(default)]
+    accepts_session_inputs: bool,
 }
 fn provider_model(db: &Db<'_>, s: &Doc, actor: &str) -> Result<Doc> {
     let m = db.resolve(&s.spec["model_ref"])?;
@@ -438,7 +440,15 @@ pub fn claim(db: &Db<'_>, actor: &str, p: &Value) -> Result<Result<Value>> {
     let clock = lease::Clock::sample()?;
     let expired = inference::expire_addressed(db, &s, &clock)?;
     let session = expired.as_ref().unwrap_or(&s);
-    if let Some(previous) = replay_claim(db, session, skill, model, &clock, &p.key)? {
+    if let Some(previous) = replay_claim(
+        db,
+        session,
+        skill,
+        model,
+        &clock,
+        &p.key,
+        p.accepts_session_inputs,
+    )? {
         return Ok(Ok(previous));
     }
     if session.body["pause_reason"] == "ModelOutcomeUnknown" {
@@ -461,6 +471,7 @@ pub fn claim(db: &Db<'_>, actor: &str, p: &Value) -> Result<Result<Value>> {
         "Conflict",
         "session already leased, waiting for a task or closed",
     )?;
+    session_inputs::require_provider(&s, p.accepts_session_inputs)?;
     db.cfg.check_admission_space()?;
     require(
         model_has_slot(db, &clock, model)?,
@@ -497,6 +508,7 @@ fn replay_claim(
     model: &Doc,
     clock: &lease::Clock,
     key: &str,
+    accepts_session_inputs: bool,
 ) -> Result<Option<Value>> {
     let previous: Option<(String, String, u32, Option<Value>)> = db.c.query_row(
         "SELECT lease,expires,turn,receipt FROM session_turns WHERE session=?1 AND claim_key=?2",
@@ -518,6 +530,7 @@ fn replay_claim(
         "model lease no longer current",
     )?;
     provider_authority::require_current(db, s, model, &lease)?;
+    session_inputs::require_provider(s, accepts_session_inputs)?;
     let (ctx, digest) = if tool_context::enabled(s) {
         let (ctx, digest) = tool_context::replay(db, s, skill, model, &lease, turn)?;
         (ctx, Some(digest))

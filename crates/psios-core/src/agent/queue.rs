@@ -131,6 +131,7 @@ pub fn claim_next(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
             &model,
             &clock,
             &key,
+            false,
         )?
         .ok_or_else(|| err("RecoveryRequired", "provider claim index has no turn"))?;
         return Ok(reply(&id, replay));

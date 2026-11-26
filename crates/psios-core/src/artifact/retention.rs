@@ -215,6 +215,11 @@ pub fn evict(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
             "Conflict",
             "a network probe retains its latest measurement for verification",
         )?;
+        require(
+            !crate::project::evidence::retains_artifact(db.c, &artifact)?,
+            "Conflict",
+            "a work item retains this artifact during review and acceptance",
+        )?;
         let mut evidence = db.c.prepare(
             "SELECT * FROM versions WHERE kind='RecoveryEvidence'
                AND json_extract(body,'$.evidence.observation_ref.resource_id')=?1",

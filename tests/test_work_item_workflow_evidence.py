@@ -139,6 +139,26 @@ class WorkItemWorkflowEvidenceTests(unittest.TestCase):
         self.assertEqual(created["value"]["criterion"], criterion, created)
         self.assertEqual(created["value"]["lifecycle"], "Ready", created)
 
+        manager = self.call("Agent.Register", {"name": "project-manager-without-workflow"})
+        manager_id = manager["principal_id"]
+        current = self.call("Project.SetMember", {
+            **target(self.project["reference"]), "principal_id": manager_id, "role": "Manager",
+        })
+        self.grant(manager_id, ["project.read", "project.manage"], [self.project_id])
+        self.grant(manager_id, ["task.read"], [self.profile["resource_id"]])
+        for definition_ref in (definition, {**definition, "resource_id": "missing-workflow"}):
+            self.denied("PermissionDenied", "WorkItem.Create", {
+                **creation, "key": key(), "expected_project_version": current["reference"]["version"],
+                "criterion": {**criterion, "definition_ref": definition_ref},
+            }, manager)
+        self.call("Project.SetMember", {
+            **target(current["reference"]), "principal_id": manager_id, "role": "Contributor",
+        })
+        self.grant(manager_id, ["project.read", "project.contribute"], [self.project_id])
+        self.denied("PermissionDenied", "WorkItem.Reassign", {
+            **target(item), "assignee_principal_id": manager_id,
+        })
+
         workflow = self.run_workflow(definition)
         expected_task, output, step_key = self.step_output(workflow, "observe")
         wrong_step, wrong_step_output, _ = self.step_output(workflow, "comparison")

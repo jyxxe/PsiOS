@@ -7,16 +7,21 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import resource
+import selectors
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import time
 import boot_media
 from boot_media import pinned_copy, regular_file
 
 
 HERE = Path(__file__).resolve().parent
+REPORT_LIMIT = 2 * 1024 * 1024
+BOOT_TIMEOUT = 180
+REPORT_MARKER = b"\nPSIOS-RESCUE/1\n"
 
 
 def guest_path(value):
@@ -71,6 +76,49 @@ def prepare(work, args, require_secure_boot):
                        input=b"psios-rescue\npsiosd\nrescue-settings\nrescue.json\n", stdout=out, check=True)
 
 
+def capture_report(command, *, cwd, pass_fds=(), preexec_fn=None, timeout=BOOT_TIMEOUT, limit=REPORT_LIMIT):
+    """Capture the report UART with one byte budget and one deadline for the child."""
+    deadline = time.monotonic() + timeout
+    serial = bytearray()
+    with subprocess.Popen(command, cwd=cwd, pass_fds=pass_fds, stdin=subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, preexec_fn=preexec_fn) as process:
+        try:
+            with selectors.DefaultSelector() as ready:
+                ready.register(process.stdout, selectors.EVENT_READ)
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not ready.select(remaining):
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    chunk = os.read(process.stdout.fileno(), min(8192, limit + 1 - len(serial)))
+                    if not chunk:
+                        break
+                    serial.extend(chunk)
+                    if len(serial) > limit:
+                        raise ValueError(f"rescue QEMU report exceeded {limit} bytes")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout)
+            status = process.wait(timeout=remaining)
+            return subprocess.CompletedProcess(command, status, bytes(serial))
+        except subprocess.TimeoutExpired:
+            raise subprocess.TimeoutExpired(command, timeout) from None
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+
+
+def unique_report(serial, firmware, accelerator):
+    # OVMF also mirrors its own boot messages to the report UART.
+    output = serial.replace(b"\r\n", b"\n")
+    count = output.count(REPORT_MARKER)
+    if count != 1:
+        raise ValueError("rescue inspection failed: no unique guest report "
+                         f"(firmware={firmware}, accelerator={accelerator}, "
+                         f"markers={count}, stdout_bytes={len(serial)})")
+    return output
+
+
 def inspect(args):
     with regular_file(args.image) as disk, tempfile.TemporaryDirectory(prefix="psios-rescue-") as tmp:
         work = Path(tmp)
@@ -82,7 +130,7 @@ def inspect(args):
         # Hand QEMU the exact already-open read-only file. Raw format disables
         # backing-file discovery and the guest gets no interface to the network.
         fd = disk.fileno()
-        kvm = signing is None and os.access("/dev/kvm", os.R_OK | os.W_OK)
+        accelerator = "kvm" if signing is None and os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
         if args.firmware == "direct":
             boot = ["-machine", "pc", "-kernel", "kernel", "-initrd", "initrd", "-append", boot_media.CMDLINE]
         else:
@@ -90,7 +138,7 @@ def inspect(args):
             boot = boot_media.firmware_args(args.firmware, work, args.ovmf_dir, args.ovmf_vars)
             boot += ["-cdrom", "rescue.iso", "-boot", "order=d,strict=on"]
         command = ["qemu-system-x86_64", "-nodefaults", "-no-user-config", "-no-reboot",
-                   *boot, "-accel", "kvm" if kvm else "tcg", "-m", "768", "-smp", "2",
+                   *boot, "-accel", accelerator, "-m", "768", "-smp", "2",
                    "-display", "none", "-monitor", "none", "-nic", "none", "-serial", "null", "-serial", "stdio",
                    "-add-fd", f"fd={fd},set=1", "-blockdev", "driver=file,node-name=disk,filename=/dev/fdset/1,read-only=on,locking=on",
                    "-blockdev", "driver=raw,node-name=source,file=disk,read-only=on"]
@@ -112,17 +160,12 @@ def inspect(args):
                         "-blockdev", "driver=qcow2,node-name=view,file=changes,backing=source"]
             drive = "view"
         command += ["-device", f"virtio-blk-pci,drive={drive},werror=report,rerror=report"]
-        result = subprocess.run(command, cwd=work, pass_fds=(fd,), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                preexec_fn=limit_child, timeout=180)
+        result = capture_report(command, cwd=work, pass_fds=(fd,), preexec_fn=limit_child)
         if limit_child is not None and result.returncode == -signal.SIGXFSZ:
             raise ValueError("journal overlay file size limit reached")
         result.check_returncode()
-        # OVMF also mirrors its own boot messages to the report UART.
-        output = result.stdout.replace(b"\r\n", b"\n")
-        marker = b"\nPSIOS-RESCUE/1\n"
-        if output.count(marker) != 1:
-            raise ValueError("rescue inspection failed: no unique guest report")
-        status, _, body = output.partition(marker)[2].strip().partition(b"\n")
+        output = unique_report(result.stdout, args.firmware, accelerator)
+        status, _, body = output.partition(REPORT_MARKER)[2].strip().partition(b"\n")
         success = {b"OK": None} if args.journal_overlay_mib is None else {
             b"OK clean": "Clean", b"OK replayed": "ReplayedOnTemporaryOverlay"}
         if status.strip() not in success:

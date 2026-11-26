@@ -196,6 +196,11 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Project.Get" => project::get_project(db, actor, p),
         "Project.List" => project::directory::list(db, actor, p),
         "Project.SetMember" => project::set_member(db, actor, p),
+        "Milestone.Create" => project::milestone::create(db, actor, p),
+        "Milestone.Get" => project::milestone::get(db, actor, p),
+        "Milestone.List" => project::milestone::list(db, actor, p),
+        "Milestone.Close" => project::milestone::close(db, actor, p),
+        "Milestone.Abandon" => project::milestone::abandon(db, actor, p),
         "WorkItem.Create" => project::create_item(db, actor, p),
         "WorkItem.Get" => project::get_item(db, actor, p),
         "WorkItem.History" => project::history::list(db, actor, p),
@@ -312,6 +317,9 @@ impl Store {
                     | "Workflow.Resume"
                     | "Project.Create"
                     | "Project.SetMember"
+                    | "Milestone.Create"
+                    | "Milestone.Close"
+                    | "Milestone.Abandon"
                     | "WorkItem.Create"
                     | "WorkItem.SubmitEvidence"
                     | "WorkItem.Review"
@@ -335,7 +343,10 @@ impl Store {
             ) {
                 let target = if method.starts_with("Conversation.") {
                     r.params["id"].as_str().or_else(|| out["id"].as_str())
-                } else if method.starts_with("Project.") || method.starts_with("WorkItem.") {
+                } else if method.starts_with("Project.")
+                    || method.starts_with("WorkItem.")
+                    || method.starts_with("Milestone.")
+                {
                     out["reference"]["resource_id"].as_str()
                 } else {
                     None

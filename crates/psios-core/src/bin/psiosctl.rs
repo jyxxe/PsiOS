@@ -114,6 +114,11 @@ enum Cmd {
         #[command(subcommand)]
         command: ProjectCommand,
     },
+    /// Manage a Project milestone and its grouped WorkItems.
+    Milestone {
+        #[command(subcommand)]
+        command: MilestoneCommand,
+    },
     /// Manage an assigned WorkItem and review actual Task results.
     WorkItem {
         #[command(subcommand)]
@@ -390,6 +395,39 @@ enum ProjectCommand {
 }
 
 #[derive(Subcommand)]
+enum MilestoneCommand {
+    /// Create a milestone from a JSON declaration on stdin or in a file.
+    Create {
+        #[arg(default_value = "-")]
+        file: String,
+    },
+    Get {
+        id: String,
+    },
+    List {
+        project_id: String,
+        #[arg(long)]
+        after_id: Option<String>,
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// Accept the milestone once all grouped WorkItems are closed.
+    Close {
+        id: String,
+        #[arg(long)]
+        revision: String,
+    },
+    /// End the milestone without accepting its WorkItems.
+    Abandon {
+        id: String,
+        #[arg(long)]
+        revision: String,
+        #[arg(long)]
+        reason: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum WorkItemCommand {
     /// Create an assigned WorkItem using a JSON declaration from a file or stdin.
     Create {
@@ -662,6 +700,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 ProjectCommand::SetMember { file } => {
                     c.set_project_member(&serde_json::from_value(input(&file)?)?)?
                 }
+            };
+            serde_json::to_value(record)?
+        }
+        Cmd::Milestone { command } => {
+            let record = match command {
+                MilestoneCommand::Create { file } => {
+                    c.create_milestone(&serde_json::from_value(input(&file)?)?)?
+                }
+                MilestoneCommand::Get { id } => c.milestone(&id)?,
+                MilestoneCommand::List {
+                    project_id,
+                    after_id,
+                    limit,
+                } => {
+                    let page = c.milestones(&project_id, after_id.as_deref(), limit)?;
+                    println!("{}", serde_json::to_string_pretty(&page)?);
+                    return Ok(());
+                }
+                MilestoneCommand::Close { id, revision } => c.close_milestone(&id, &revision)?,
+                MilestoneCommand::Abandon {
+                    id,
+                    revision,
+                    reason,
+                } => c.abandon_milestone(&id, &revision, &reason)?,
             };
             serde_json::to_value(record)?
         }

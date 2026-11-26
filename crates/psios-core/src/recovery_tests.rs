@@ -87,7 +87,13 @@ fn network_probe_projection_fences_older_receipts_and_rolls_back_with_task_resul
     let mut store = Store::open(cfg).unwrap();
     let listing = call(&mut store, "Resource.List", json!({"kind":"NetworkProbe"})).unwrap();
     let probe = &listing["items"][0];
-    let state_id = format!("state-{}", probe["resource_id"].as_str().unwrap());
+    let states = call(
+        &mut store,
+        "Resource.List",
+        json!({"kind":"NetworkProbeState"}),
+    )
+    .unwrap();
+    let state_id = states["items"][0]["resource_id"].as_str().unwrap();
     let tool = node::network::probe::state::TOOL;
     let grant = call(
         &mut store,

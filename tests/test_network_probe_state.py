@@ -50,6 +50,12 @@ class NetworkProbeStateTests(unittest.TestCase):
                  and doc["value"]["lifecycle"] == "Registered"]
         return data["reference"]
 
+    def state_id(self, probe):
+        refs = self.node.call("Resource.List", {"kind": KIND})["items"]
+        state, = [ref["resource_id"] for ref in refs
+                  if self.node.get(ref["resource_id"])["resource"]["spec"]["probe_ref"] == probe]
+        return state
+
     def grant(self, reference, tool=TOOL):
         return self.node.call("Grant.Issue", {
             "principal_id": self.actor["principal_id"], "actions": ["task.submit", "task.read", tool],
@@ -111,7 +117,7 @@ class NetworkProbeStateTests(unittest.TestCase):
         self.configure(dict(name="primary", endpoint=address), dict(name="other", endpoint=address))
         probe = self.probe("primary")
         other = self.probe("other")
-        state_id = "state-" + probe["resource_id"]
+        state_id = self.state_id(probe)
         initial = n.get(state_id)
         self.assertEqual(initial["value"]["lifecycle"], "Unknown")
         self.assertEqual(initial["resource"]["kind"], KIND)
@@ -222,7 +228,7 @@ class NetworkProbeStateTests(unittest.TestCase):
         self.configure(dict(name="held", endpoint=self.endpoint(service), timeout_ms=5000,
                             dns=dict(name=QNAME, resolver=self.endpoint(resolver))))
         probe = self.probe("held")
-        state_id = "state-" + probe["resource_id"]
+        state_id = self.state_id(probe)
         initial = n.get(state_id)
         self.assertEqual(initial["value"]["lifecycle"], "Unknown")
         grant = self.grant(probe)
@@ -253,7 +259,7 @@ class NetworkProbeStateTests(unittest.TestCase):
         listener = self.socket(listening=True)
         self.configure(dict(name="isolated", endpoint=self.endpoint(listener)))
         probe = self.probe("isolated")
-        state_id = "state-" + probe["resource_id"]
+        state_id = self.state_id(probe)
         grant = self.grant(probe)
 
         def measure(lifecycle, reason, tcp):
@@ -305,7 +311,6 @@ class NetworkProbeStateTests(unittest.TestCase):
         listener = self.socket(listening=True)
         self.configure(dict(name="upgrade", endpoint=self.endpoint(listener)))
         probe = self.probe("upgrade")
-        state_id = "state-" + probe["resource_id"]
         legacy = self.grant(probe, STATELESS_TOOL)
         token = self.actor["token"]
         probe_view = n.call("NetworkProbe.Get", {"id": probe["resource_id"]}, token)
@@ -319,7 +324,8 @@ class NetworkProbeStateTests(unittest.TestCase):
                 self.assertEqual(connection.recv(1), b"")
 
         def verify():
-            return json.loads(subprocess.check_output(n.daemon + ["verify"], timeout=15))
+            output = subprocess.check_output(n.daemon + ["verify", "--scratch-dir", str(n.base)], timeout=15)
+            return json.loads(output)
 
         old_task = self.submit(probe, legacy, STATELESS_TOOL)
         old_result = self.result(old_task)
@@ -336,6 +342,7 @@ class NetworkProbeStateTests(unittest.TestCase):
         self.assertEqual(n.call("NetworkProbe.Get", {"id": probe["resource_id"]}, token), probe_view)
         self.assertEqual(self.result(old_task), old_result)
         self.assertEqual(n.get(legacy["grant_ref"]["resource_id"])["reference"], legacy["grant_ref"])
+        state_id = self.state_id(probe)
         initial = n.get(state_id)
         self.assertEqual(initial["resource"]["spec"]["probe_ref"], probe)
         self.assertEqual(initial["value"], {"lifecycle": "Unknown", "reason": None, "observed_at": None})

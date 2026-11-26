@@ -5,7 +5,9 @@ use crate::{
     db::{Db, find, resolve},
     policy,
 };
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use psios_api::{canonical, sha256};
+use ring::digest::{SHA256, digest};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 
@@ -19,7 +21,9 @@ pub(crate) const SCHEMA: &str = "CREATE TABLE network_probe_positions (
 const KIND: &str = "NetworkProbeState";
 
 fn state_id(probe: &Doc) -> String {
-    format!("state-{}", probe.id)
+    // Exact Watch cursors carry the ID and must fit the v1 256-character limit.
+    let hashed = digest(&SHA256, probe.id.as_bytes());
+    format!("state-{}", URL_SAFE_NO_PAD.encode(&hashed.as_ref()[..16]))
 }
 
 fn context(probe: &Doc, boot: &Value, namespace_inode: &Value) -> String {
@@ -51,7 +55,9 @@ pub(super) fn sync(db: &Db<'_>, probe: &Doc, host: &super::super::Namespace) -> 
     let state = db.find(&id)?;
     if let Some(state) = &state {
         require(
-            state.kind == KIND && state.owner == policy::SYSTEM,
+            state.kind == KIND
+                && state.owner == policy::SYSTEM
+                && state.spec["probe_ref"]["resource_id"] == probe.id,
             "RecoveryRequired",
             "network probe state identity is already used",
         )?;

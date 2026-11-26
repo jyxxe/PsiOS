@@ -48,6 +48,10 @@ jobs:
           fi
           PSIOS_TEST_RESTORE_RENAME_FAULT=1 python3 -B -m unittest discover -s tests \
             -p test_storage_recovery.py -k checkpointed_unpublished_restore -v
+      - name: Kill a single-copy clone at the atomic publication boundary
+        run: |
+          PSIOS_TEST_CLONE_RENAME_FAULT=1 python3 -B -m unittest discover -s tests \
+            -p test_volume_clone_recovery.py -k kill_before_atomic_publication -v
       - name: Interrupt detached backup publication and verify durable catalog recovery
         run: |
           PSIOS_TEST_BACKUP_INTAKE_CUT=1 python3 -B -m unittest discover -s tests \
@@ -223,6 +227,8 @@ jobs:
               python3 -B -m unittest discover -s tests -p test_platform.py -k test_pauses_new_work -v
             TMPDIR="$1" PSIOS_TEST_CAPACITY_ALLOCATION=1 runuser -u "$2" -- \
               python3 -B -m unittest discover -s tests -p test_backup.py -k test_restore_preflights -v
+            TMPDIR="$1" PSIOS_TEST_CAPACITY_ALLOCATION=1 runuser -u "$2" -- \
+              python3 -B -m unittest discover -s tests -p test_volume_clone.py -k test_bounded_pool -v
             TMPDIR="$1" PSIOS_TEST_CAPACITY_ALLOCATION=1 runuser -u "$2" -- \
               python3 -B -m unittest discover -s tests -p test_storage_reserve.py -v
             TMPDIR="$1" PSIOS_TEST_CAPACITY_ALLOCATION=1 runuser -u "$2" -- \
@@ -741,6 +747,16 @@ jobs:
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format110" "$RUNNER_TEMP/psios-compatibility-target"
           sudo unshare --mount --propagation private python3 -B tests/block_device_retirement_upgrade.py \
             --previous-bin-dir "$RUNNER_TEMP/psios-compatibility-target/debug"
+      - name: Fence format 113 before it can reclaim a witnessed clone stage
+        run: |
+          if ! command -v strace; then
+            sudo timeout 180 apt-get install -y --no-install-recommends strace
+          fi
+          mkdir "$RUNNER_TEMP/psios-format113"
+          git archive 4dbf9a075c9e8ab58ff8a57c5912f800d8c60f80 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format113"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format113" "$RUNNER_TEMP/psios-compatibility-target"
+          PSIOS_TEST_CLONE_RENAME_FAULT=1 PSIOS_VOLUME_CLONE_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
+            python3 -B -m unittest discover -s tests -p test_volume_clone_recovery.py -k kill_before_atomic_publication -v
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

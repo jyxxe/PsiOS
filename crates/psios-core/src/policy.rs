@@ -73,6 +73,7 @@ pub const TOOLS: &[&str] = &[
     "backup.verify",
     "backup.delete",
     "backup.restore",
+    storage::cloning::TOOL,
     storage::restore_publication::INSPECT,
     "application.install",
     apps::artifact_install::TOOL,
@@ -177,6 +178,7 @@ pub fn approval(tool: &str) -> bool {
             | "volume.remove_entry"
             | storage::file_move::TOOL
             | "volume.mkdir"
+            | storage::cloning::TOOL
             | "application.stage_release"
             | apps::artifact_install::STAGE_TOOL
             | "application.select_release"
@@ -246,6 +248,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | storage::file_move::INSPECT
                     | storage::export::ACTION
                     | storage::publication::INSPECT
+                    | storage::cloning::TOOL
                     | storage::restore_publication::INSPECT
                     | apps::restart::TOOL
                     | apps::stop::TOOL
@@ -698,6 +701,7 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
                     || action == node::RESTART_TOOL
                     || action == node::service_state::TOOL
                     || action == node::network::probe::state::TOOL
+                    || action == storage::cloning::TOOL
                     || action == storage::restore_publication::INSPECT
                     || action == storage::file_integrity::TOOL
                     || action == storage::file_move::TOOL

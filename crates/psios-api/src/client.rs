@@ -526,6 +526,25 @@ impl Client {
         )
     }
 
+    /// Prepare a detached local volume clone for separate submission and approval.
+    pub fn prepare_volume_clone(
+        &self,
+        source: &ResourceRef,
+        name: &str,
+        key: &str,
+        delegation_id: &str,
+        deadline_at: Option<&str>,
+    ) -> ApiResult<Value> {
+        self.call(
+            "Task.Prepare",
+            json!({"tool":"volume.clone","key":key,"delegation_id":delegation_id,
+            "deadline_at":deadline_at,"input":{
+                "target":{"id":source.resource_id,"expected_resource_version":source.version},
+                "name":name,
+            }}),
+        )
+    }
+
     /// Prepare removal for separate Task submission and approval.
     pub fn prepare_oci_stop_continuation(
         &self,

@@ -42,7 +42,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             && tool == "backup.create"
             && storage::publication::not_published(db, &operation(db, &t)?)?;
         let restore_unpublished = phase == "Dispatched"
-            && tool == "backup.restore"
+            && storage::restore_publication::is_tool(tool)
             && storage::restore_publication::not_published(db, &operation(db, &t)?)?;
         let trial_unstarted = phase == "Dispatched"
             && tool == node::network::trial::TOOL
@@ -454,6 +454,7 @@ fn reconcile_target(db: &Db<'_>, op: &Doc, action: &Action) -> Result<Doc> {
         Action::Write(p) => (&p.id, &p.expected_resource_version),
         Action::Append(p) => (&p.target.id, &p.target.expected_resource_version),
         Action::RemoveEntry(p) => (&p.target.id, &p.target.expected_resource_version),
+        Action::CloneVolume(p) => (&p.target.id, &p.target.expected_resource_version),
         Action::RenameFile(p) => (&p.target.id, &p.target.expected_resource_version),
         Action::Start(p)
         | Action::Stop(p)
@@ -553,7 +554,7 @@ pub(crate) fn reconcile(
             )?;
             storage::publication::reconcile(db, &op, &target, &proof, &observation)?
         }
-        Action::Restore(_) => {
+        Action::Restore(_) | Action::CloneVolume(_) => {
             let (proof, observation) = inspected(
                 db,
                 req.evidence_ref.as_ref(),
@@ -791,7 +792,7 @@ pub(crate) fn reconcile(
         }
     };
     let evidence=db.record("RecoveryEvidence",&t.owner,json!({"operation_ref":op.reference(),"target_ref":target.reference(),"verified_at":now(),"evidence":proof_details}))?;
-    if t.spec["task_type"] == "backup.restore" {
+    if storage::restore_publication::is_tool(field(&t.spec, "task_type")) {
         storage::restore_publication::queue_disposal(db, &op, &evidence)?;
     }
     let artifact = artifact::publish(

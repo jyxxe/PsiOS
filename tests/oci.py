@@ -17,6 +17,7 @@ from oci_health import verify_image_health
 from oci_mount_observation import exercise as verify_effective_mounts
 from oci_restart import verify_restart
 from oci_unstarted import verify_unstarted_rollback
+from oci_volume_clone import verify_volume_clone
 from oci_volume_rebind import verify_rebind
 from test_artifact_install import TOOL as ARTIFACT_INSTALL, grant as artifact_grant
 from test_artifact_ingress import chunk, upload_request
@@ -550,6 +551,7 @@ int main(void) {
         assert node.perform("volume.read", dict(**target(restored), name="starts"))["content"] == "first\nsecond\nupgraded\nfirst\n"
         node.perform("volume.activate", target(restored))
         verify_rebind(node, docker, spec, app_ids)
+        verify_volume_clone(node, docker, spec, app_ids)
         verify_restart(node, docker, spec, app_ids)
         verify_image_health(node, docker)
         if os.getenv("PSIOS_TEST_OCI_EFFECTIVE_MOUNTS") == "1":

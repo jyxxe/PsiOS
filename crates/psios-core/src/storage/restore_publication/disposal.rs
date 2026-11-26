@@ -57,7 +57,9 @@ impl Disposal {
         let prior = resolve(conn, &evidence.body["operation_ref"])?;
         let effect = resolve(conn, &op.body["effect_refs"][0])?;
         let intent = find(conn, &intent_id(operation))?;
+        let (binding, source) = Source::load(conn, &op)?;
         let placement = verify_custody(&op, &checkpoint, intent.as_ref())?;
+        binding.check_receipt(&op, &checkpoint.body["receipt"])?;
         require(
             placement.stage_name()?.is_some()
                 && op.kind == "Operation"
@@ -68,7 +70,8 @@ impl Disposal {
                 && evidence.rev == 1
                 && evidence.owner == op.owner
                 && evidence.body["evidence"]["conclusion"] == NOT_APPLIED
-                && evidence.body["target_ref"] == checkpoint.body["backup_ref"]
+                && evidence.body["target_ref"] == source.reference()
+                && binding.matches(&checkpoint, &source, true)
                 && prior.kind == "Operation"
                 && prior.id == operation
                 && prior.owner == op.owner
@@ -78,8 +81,8 @@ impl Disposal {
                 && effect.kind == "Effect"
                 && effect.owner == op.owner
                 && effect.body["operation_id"] == operation
-                && effect.body["action"] == "backup.restore"
-                && effect.body["resource_ref"] == checkpoint.body["backup_ref"]
+                && effect.body["action"] == binding.tool()
+                && effect.body["resource_ref"] == source.reference()
                 && effect.body["phase"] == "EffectReconciled"
                 && effect.body["evidence_refs"]
                     .as_array()

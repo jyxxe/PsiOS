@@ -276,6 +276,20 @@ enum Cmd {
         #[arg(default_value = "-")]
         file: String,
     },
+    /// Prepare a single-copy local volume clone. Submit and approve it separately.
+    VolumePrepareClone {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        delegation: String,
+        #[arg(long)]
+        deadline_at: Option<String>,
+        /// JSON source Volume ResourceRef from a file or stdin.
+        #[arg(default_value = "-")]
+        file: String,
+    },
     /// Prepare a Task to capture a local OCI image. Submit and approve it separately.
     ApplicationPrepareImageCapture {
         /// Full SHA-256 configuration digest of the local image.
@@ -1132,6 +1146,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 signature.as_ref(),
             )?
         }
+        Cmd::VolumePrepareClone {
+            name,
+            key,
+            delegation,
+            deadline_at,
+            file,
+        } => c.prepare_volume_clone(
+            &serde_json::from_value(input(&file)?)?,
+            &name,
+            &key,
+            &delegation,
+            deadline_at.as_deref(),
+        )?,
         Cmd::ApplicationPrepareImageCapture {
             image_id,
             engine_id,

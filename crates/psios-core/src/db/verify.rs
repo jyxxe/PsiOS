@@ -129,6 +129,9 @@ pub(super) fn check_artifacts(
     if identity.database_format >= crate::storage::entry_retirement::FORMAT {
         crate::storage::entry_retirement::verify(conn)?;
     }
+    if identity.database_format >= crate::storage::cloning::FORMAT {
+        crate::storage::restore_publication::verify_clones(conn)?;
+    }
     if identity.database_format >= crate::apps::volume_rebind::FORMAT {
         crate::apps::volume_rebind::verify::check(conn)?;
     }

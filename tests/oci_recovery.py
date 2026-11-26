@@ -12,7 +12,7 @@ import subprocess
 import threading
 from urllib.parse import parse_qs, urlsplit
 
-from support import Failure, target
+from support import Failure, key, target
 
 
 def kernel_group(docker, container):

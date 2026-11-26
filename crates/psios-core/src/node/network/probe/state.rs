@@ -13,6 +13,7 @@ use serde_json::Value;
 
 pub(crate) const TOOL: &str = "node.observe_network_probe";
 pub(crate) const FORMAT: u32 = crate::apps::restart::CUSTODY_FORMAT + 1;
+pub(crate) const RESULT_BYTES: i64 = 64 * 1024;
 pub(crate) const SCHEMA: &str = "CREATE TABLE network_probe_positions (
     probe TEXT PRIMARY KEY, context TEXT NOT NULL,
     dispatched_seq INTEGER NOT NULL CHECK(dispatched_seq>=0),
@@ -230,6 +231,14 @@ pub(crate) fn bind_result(db: &Db<'_>, work: &Work, result: &Value, artifact: &D
     )
 }
 
+pub(crate) fn retains_artifact(conn: &Connection, artifact: &Doc) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM network_probe_positions WHERE artifact_ref=?1)",
+        [artifact.reference()],
+        |row| row.get(0),
+    )?)
+}
+
 fn current(conn: &Connection, id: &Value) -> Result<Doc> {
     let id = id.as_str().ok_or_else(|| {
         err(
@@ -326,6 +335,7 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
                 && task.spec["task_type"] == TOOL
                 && task.body["lifecycle"] == "Succeeded"
                 && task.body["outcome_knowledge"] == "Known"
+                && task.body["result"]["availability"] == "Available"
                 && task.body["result"]["artifact_refs"] == json!([artifact.reference()])
                 && run.kind == "Run"
                 && run.owner == task.owner
@@ -351,32 +361,27 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
             "RecoveryRequired",
             "network probe receipt lineage disagrees with its settled observation",
         )?;
-        match artifact::checkpoint_bytes(conn, &artifact, 64 * 1024) {
-            Err(e) if e.0.code == "ResultEvicted" => {}
-            Err(e) => return Err(e),
-            Ok(bytes) => {
-                let result: Value = serde_json::from_slice(&bytes)?;
-                let measurement = &result["measurement"];
-                let statuses = normalized(&measurement["observation"]);
-                require(
-                    result["network_probe_state_ref"] == state.reference()
-                        && matches!(
-                            result["projection"].as_str(),
-                            Some("Published" | "Unchanged")
-                        )
-                        && measurement["target_ref"] == probe.reference()
-                        && context(
-                            &probe,
-                            &measurement["boot_id"],
-                            &measurement["network_namespace_inode"],
-                        ) == scope
-                        && state.body["lifecycle"] == statuses.0
-                        && state.body["reason"] == statuses.1,
-                    "RecoveryRequired",
-                    "network probe state does not match its observation",
-                )?;
-            }
-        }
+        let bytes = artifact::checkpoint_bytes(conn, &artifact, RESULT_BYTES as usize)?;
+        let result: Value = serde_json::from_slice(&bytes)?;
+        let measurement = &result["measurement"];
+        let statuses = normalized(&measurement["observation"]);
+        require(
+            result["network_probe_state_ref"] == state.reference()
+                && matches!(
+                    result["projection"].as_str(),
+                    Some("Published" | "Unchanged")
+                )
+                && measurement["target_ref"] == probe.reference()
+                && context(
+                    &probe,
+                    &measurement["boot_id"],
+                    &measurement["network_namespace_inode"],
+                ) == scope
+                && state.body["lifecycle"] == statuses.0
+                && state.body["reason"] == statuses.1,
+            "RecoveryRequired",
+            "network probe state does not match its observation",
+        )?;
     }
     let missing: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM current WHERE kind=?1 AND body->>'lifecycle'='Registered'

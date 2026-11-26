@@ -38,10 +38,10 @@ class NetworkProbeStateTests(unittest.TestCase):
         host, port = stream.getsockname()
         return f"{host}:{port}"
 
-    def configure(self, *probes):
+    def configure(self, *probes, **settings):
         self.node.stop()
         config = json.loads(self.node.config.read_text())
-        self.node.config.write_text(json.dumps(dict(config, network_probes=probes)))
+        self.node.config.write_text(json.dumps(dict(config, network_probes=probes, **settings)))
         self.node.start()
 
     def probe(self, name):
@@ -105,7 +105,8 @@ class NetworkProbeStateTests(unittest.TestCase):
         listener.settimeout(0.15)
         try:
             with self.assertRaises(TimeoutError):
-                listener.accept()
+                connection, _ = listener.accept()
+                connection.close()
         finally:
             listener.settimeout(previous)
 
@@ -114,7 +115,8 @@ class NetworkProbeStateTests(unittest.TestCase):
         n = self.node
         stream = self.socket()
         address = self.endpoint(stream)
-        self.configure(dict(name="primary", endpoint=address), dict(name="other", endpoint=address))
+        self.configure(dict(name="primary", endpoint=address), dict(name="other", endpoint=address),
+                       read_result_bytes_per_principal=4 * 1024 * 1024)
         probe = self.probe("primary")
         other = self.probe("other")
         state_id = self.state_id(probe)
@@ -123,8 +125,6 @@ class NetworkProbeStateTests(unittest.TestCase):
         self.assertEqual(initial["resource"]["kind"], KIND)
         self.assertEqual(initial["resource"]["spec"]["probe_ref"], probe)
         self.assertNotIn(address, json.dumps(initial))
-        cursor = n.call("Resource.List", {"kind": KIND, "id": state_id})["watch_start_cursor"]
-
         grant = self.grant(probe)
         self.rejects("PermissionDenied", self.submit, probe, grant, STATELESS_TOOL)
         self.rejects("PermissionDenied", self.submit, other, grant)
@@ -146,6 +146,7 @@ class NetworkProbeStateTests(unittest.TestCase):
                       "condition": {"kind": "LifecycleEntered", "lifecycle": "Healthy"},
                       "expires_at": timestamp(45), "max_triggers": 2},
         })["reference"]
+        cursor = n.call("Resource.List", {"kind": KIND, "id": state_id})["watch_start_cursor"]
 
         closed = self.result(self.submit(probe, grant))
         refused = n.get(state_id)
@@ -157,7 +158,8 @@ class NetworkProbeStateTests(unittest.TestCase):
         self.assertNotIn(address, json.dumps(refused))
 
         stream.listen()
-        opened = self.result(self.submit(probe, grant))
+        opened_task = self.submit(probe, grant)
+        opened = self.result(opened_task)
         healthy = n.get(state_id)
         self.assertEqual(opened["projection"], "Published")
         self.assertEqual(opened["network_probe_state_ref"], healthy["reference"])
@@ -174,11 +176,20 @@ class NetworkProbeStateTests(unittest.TestCase):
         self.assertEqual(trigger["source_event"]["event_id"], page["events"][1]["event_id"])
         self.assertNotIn(address, json.dumps(page["events"]))
 
-        repeated = self.result(self.submit(probe, grant))
+        def evict(task):
+            return n.call("Task.EvictResults", dict(target(n.get(task)["reference"]), reason="test aging"))
+
+        self.rejects("Conflict", evict, opened_task)
+        repeated_task = self.submit(probe, grant)
+        repeated = self.result(repeated_task)
         self.assertEqual((repeated["projection"], repeated["network_probe_state_ref"]), ("Unchanged", healthy["reference"]))
         self.assertEqual(n.call("Resource.Watch", {"cursor": page["cursor"]})["events"], [])
+        evict(opened_task)
+        self.assertEqual(n.wait(opened_task)["result"]["availability"], "Evicted")
+        self.rejects("Conflict", evict, repeated_task)
         n.stop(signal.SIGKILL)
-        subprocess.run(n.daemon + ["verify"], check=True, stdout=subprocess.DEVNULL, timeout=15)
+        subprocess.run(n.daemon + ["verify", "--scratch-dir", str(n.base)],
+                       check=True, stdout=subprocess.DEVNULL, timeout=15)
         n.start()
         self.assertEqual(n.get(state_id), healthy)
         self.assertEqual(self.wait_trigger(schedule), trigger_ref)
@@ -190,6 +201,8 @@ class NetworkProbeStateTests(unittest.TestCase):
         reset = n.get(state_id)
         self.assertEqual(reset["value"]["lifecycle"], "Unknown")
         self.assertEqual(reset["resource"]["spec"]["probe_ref"], current)
+        evict(repeated_task)
+        self.assertEqual(n.wait(repeated_task)["result"]["availability"], "Evicted")
         self.rejects("Conflict", self.submit, probe, grant)
         self.configure()
         self.assertEqual(n.get(state_id)["value"]["lifecycle"], "Retired")

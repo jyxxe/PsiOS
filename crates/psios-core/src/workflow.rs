@@ -161,6 +161,10 @@ fn stable_id(kind: &str, input: &Value) -> String {
     format!("{kind}-{}", &digest[7..])
 }
 
+pub(crate) fn brokered_run_id(authority: &str, actor: &str, task: &str) -> String {
+    stable_id("workflow-run", &json!([authority, actor, "Task", task]))
+}
+
 fn run_view(d: &Doc) -> Value {
     json!({"reference": d.reference(), "definition_ref": d.spec["definition_ref"],
            "deadline_at": d.spec["deadline_at"], "state": d.body})
@@ -395,12 +399,11 @@ fn start_run(db: &Db<'_>, actor: &str, request: Start, origin: Option<&Doc>) -> 
     let deadline = instant(&request.deadline_at)?;
     let deadline_at = deadline.to_rfc3339_opts(SecondsFormat::AutoSi, true);
     let authority = db.meta("authority")?;
-    let identity = if origin.is_some() {
-        json!([authority, actor, "Task", request.key])
+    let id = if origin.is_some() {
+        brokered_run_id(&authority, actor, &request.key)
     } else {
-        json!([authority, actor, request.key])
+        stable_id("workflow-run", &json!([authority, actor, request.key]))
     };
-    let id = stable_id("workflow-run", &identity);
     let creation = sha256(&canonical(&json!([
         request.definition_ref,
         request.delegation_id,

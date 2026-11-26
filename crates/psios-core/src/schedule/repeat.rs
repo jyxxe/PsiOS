@@ -1,7 +1,7 @@
 use super::{
     Window, admission_delay,
     calendar::{Calendar, CalendarPlan},
-    due_ms, instant, remove_pending, timestamp, trigger_id,
+    due_ms, instant, remove_pending, timestamp, trigger_id, workflow_overlap,
 };
 use crate::{
     Result,
@@ -33,6 +33,13 @@ impl Missed {
 pub(super) enum Overlap {
     Allow,
     Skip,
+    SkipWhileWorkflowActive,
+}
+
+impl Overlap {
+    pub(super) fn workflow(self) -> bool {
+        matches!(self, Self::SkipWhileWorkflowActive)
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -41,7 +48,7 @@ pub(super) struct Repeat {
     interval_seconds: u32,
     count: u32,
     missed: Missed,
-    overlap: Overlap,
+    pub(super) overlap: Overlap,
 }
 
 impl Repeat {
@@ -218,20 +225,47 @@ impl Series {
                 schedule,
                 &mut body,
                 &self.occurrence(&schedule.id, offset, window),
-                phase,
-                Some(reason),
-                None,
+                Outcome {
+                    phase,
+                    reason: Some(reason),
+                    receipt: None,
+                    overlap_evidence: None,
+                },
             )?;
         }
         self.advance(db, schedule, body, count, None)?;
         Ok(true)
     }
 
-    pub(super) fn overlapping(&self, db: &Db<'_>, schedule: &Doc) -> Result<bool> {
-        if matches!(self.overlap, Overlap::Allow) {
-            return Ok(false);
-        }
-        super::previous_task_active(db, schedule)
+    pub(super) fn skip_overlap(&self, db: &Db<'_>, schedule: &Doc) -> Result<bool> {
+        let (reason, evidence) = match self.overlap {
+            Overlap::Allow => return Ok(false),
+            Overlap::Skip if super::previous_task_active(db, schedule)? => {
+                ("PreviousTaskActive", None)
+            }
+            Overlap::Skip => return Ok(false),
+            Overlap::SkipWhileWorkflowActive => {
+                let Some(block) = workflow_overlap::blocked(db.c, schedule)? else {
+                    return Ok(false);
+                };
+                (block.reason, Some(block.evidence))
+            }
+        };
+        let mut body = schedule.body.clone();
+        record(
+            db,
+            schedule,
+            &mut body,
+            &self.next,
+            Outcome {
+                phase: "Skipped",
+                reason: Some(reason),
+                receipt: None,
+                overlap_evidence: evidence,
+            },
+        )?;
+        self.advance(db, schedule, body, 1, None)?;
+        Ok(true)
     }
 
     pub(super) fn settle(
@@ -243,7 +277,18 @@ impl Series {
         receipt: Option<Value>,
     ) -> Result<()> {
         let mut body = schedule.body.clone();
-        record(db, schedule, &mut body, &self.next, phase, reason, receipt)?;
+        record(
+            db,
+            schedule,
+            &mut body,
+            &self.next,
+            Outcome {
+                phase,
+                reason,
+                receipt,
+                overlap_evidence: None,
+            },
+        )?;
         let rejection = if phase == "Rejected" { reason } else { None };
         self.advance(db, schedule, body, 1, rejection)
     }
@@ -296,26 +341,41 @@ impl Series {
     }
 }
 
+struct Outcome<'a> {
+    phase: &'a str,
+    reason: Option<&'a str>,
+    receipt: Option<Value>,
+    overlap_evidence: Option<Value>,
+}
+
 fn record(
     db: &Db<'_>,
     schedule: &Doc,
     body: &mut Value,
     timing: &Occurrence,
-    phase: &str,
-    reason: Option<&str>,
-    receipt: Option<Value>,
+    outcome: Outcome<'_>,
 ) -> Result<()> {
+    let Outcome {
+        phase,
+        reason,
+        receipt,
+        overlap_evidence,
+    } = outcome;
     if let Some(receipt) = &receipt {
         body["last_task_id"] = receipt["task_id"].clone();
+    }
+    let mut state = json!({"schedule_id": schedule.id, "ordinal": timing.ordinal, "run_at": timing.run_at,
+                  "deadline_at": timing.deadline_at, "lifecycle": phase, "reason": reason,
+                  "task_receipt": receipt, "settled_at": now()});
+    if let Some(evidence) = overlap_evidence {
+        state["overlap_evidence"] = evidence;
     }
     let trigger = db.create(
         "ScheduleTrigger",
         &timing.trigger_id,
         &schedule.owner,
         json!({"schedule_id": schedule.id, "definition_revision": "r1", "timing": timing}),
-        json!({"schedule_id": schedule.id, "ordinal": timing.ordinal, "run_at": timing.run_at,
-               "deadline_at": timing.deadline_at, "lifecycle": phase, "reason": reason,
-               "task_receipt": receipt, "settled_at": now()}),
+        state,
     )?;
     body["trigger_refs"]
         .as_array_mut()

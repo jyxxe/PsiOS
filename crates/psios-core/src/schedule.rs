@@ -3,6 +3,7 @@ pub(crate) mod admission_delay;
 mod calendar;
 mod repeat;
 mod resource_event;
+pub(crate) mod workflow_overlap;
 
 use crate::{
     ById, Conditional, Error, Result, Store, broker,
@@ -154,6 +155,18 @@ pub fn create(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     let p: Create = decode(params)?;
     label(&p.key)?;
     policy::active(db, actor)?;
+    let workflow_overlap = p
+        .repeat
+        .as_ref()
+        .is_some_and(|series| series.overlap.workflow())
+        || p.calendar
+            .as_ref()
+            .is_some_and(|series| series.overlap.workflow());
+    require(
+        !workflow_overlap || p.tool == crate::workflow::START_TOOL,
+        "InvalidArgument",
+        "SkipWhileWorkflowActive requires a workflow.start schedule",
+    )?;
     if let Some(event) = &p.event {
         require(
             p.run_at.is_none()
@@ -465,8 +478,8 @@ fn fire(db: &Db<'_>, attempt: &mut Option<Attempt>) -> Result<()> {
         if series.skip_outdated(db, &schedule, at, expired_through)? {
             return Ok(());
         }
-        if series.overlapping(db, &schedule)? {
-            return series.settle(db, &schedule, "Skipped", Some("PreviousTaskActive"), None);
+        if series.skip_overlap(db, &schedule)? {
+            return Ok(());
         }
     } else if expired_through.is_some() {
         settle(db, &schedule, "Expired", Some("DeadlineExceeded"), None)?;

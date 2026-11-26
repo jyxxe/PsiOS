@@ -65,8 +65,9 @@ class AgentSessionInputs(unittest.TestCase):
     def opened(self, body):
         return self.n.call("Session.Open", body, self.agent["token"])["reference"]
 
-    def claimed(self, session, claim_key, provider=None):
-        return self.n.call("Model.Claim", {"session_id": session["resource_id"], "key": claim_key},
+    def claimed(self, session, claim_key, provider=None, *, accept=True):
+        support = {"accepts_session_inputs": True} if accept else {}
+        return self.n.call("Model.Claim", {"session_id": session["resource_id"], "key": claim_key, **support},
                            (provider or self.provider)["token"])
 
     def respond(self, session, claim, decision):
@@ -91,6 +92,10 @@ class AgentSessionInputs(unittest.TestCase):
         self.refuse("PermissionDenied", "Model.Claim", {"session_id": session["resource_id"], "key": "outside"},
                     outsider["token"])
         self.refuse("Conflict", "Artifact.Withdraw", self.withdrawal(), self.agent["token"])
+        self.refuse("UnsupportedCapability", "Model.Claim", {"session_id": session["resource_id"], "key": "first"},
+                    self.provider["token"])
+        self.assertEqual(n.call("Budget.Get", {"id": grant["budget_ref"]["resource_id"]},
+                                self.agent["token"])["model_calls_used"], 0)
         first = self.claimed(session, "first")
         self.assertEqual(first["context"]["inputs"], [
             {"name": "approved-input", "reference": self.artifact, "kind": "Json", "value": self.data},
@@ -109,6 +114,8 @@ class AgentSessionInputs(unittest.TestCase):
         with closing(sqlite3.connect(n.state / "state.db")) as conn, conn:
             conn.execute("UPDATE artifact_chunks SET payload=? WHERE artifact_id=?", (original, *payload_key))
         n.start()
+        self.refuse("UnsupportedCapability", "Model.Claim", {"session_id": session["resource_id"], "key": "first"},
+                    self.provider["token"])
         replay = self.claimed(session, "first")
         self.assertEqual(replay, {**first, "recovered": True})
 
@@ -130,7 +137,7 @@ class AgentSessionInputs(unittest.TestCase):
         self.assertEqual(len(history["tasks"]), 1)
         self.assertNotIn(self.data["private_ticket"], json.dumps(history))
         n.call("Artifact.Withdraw", self.withdrawal(), self.agent["token"])
-        completed_replay = self.claimed(session, "first")
+        completed_replay = self.claimed(session, "first", accept=False)
         self.assertEqual(completed_replay["completed"], result)
         self.assertNotIn("context", completed_replay)
         n.stop()
@@ -146,7 +153,8 @@ class AgentSessionInputs(unittest.TestCase):
         n.stop(signal.SIGKILL)
         n.start()
         self.refuse("PermissionDenied", "Model.Claim",
-                    {"session_id": session["resource_id"], "key": "first"}, self.provider["token"])
+                    {"session_id": session["resource_id"], "key": "first",
+                     "accepts_session_inputs": True}, self.provider["token"])
         self.refuse("PermissionDenied", "Model.Respond",
                     {"session_id": session["resource_id"], "lease_id": first["lease_id"],
                      "decision": {"action": "tool", "tool": "node.inventory", "input": {}}}, self.provider["token"])
@@ -163,7 +171,9 @@ class AgentSessionInputs(unittest.TestCase):
         for scope in [self.artifact["resource_id"], self.model["resource_id"]]:
             params = self.opening(self.authorize(omit=[scope]))
             self.refuse("PermissionDenied", "Session.Open", params, token)
-        self.refuse("PermissionDenied", "Session.Open", self.opening(self.authorize(wildcard=True)), token)
+        with self.assertRaises(Failure) as unscoped_grant:
+            self.authorize(wildcard=True)
+        self.assertEqual(unscoped_grant.exception.code, "InvalidArgument")
         foreign = n.call("Agent.Register", {"name": "foreign-input-owner"})
         self.grant(foreign, ["artifact.upload"], [self.node_id])
         foreign_ref = self.upload(b'{"outside":true}', foreign)
@@ -191,7 +201,7 @@ class ExistingSessionUpgrade(unittest.TestCase):
         n = Node(PRIOR_BINARIES)
         self.addCleanup(n.close)
         provider, _ = n.agent(["model.serve"])
-        agent, grant = n.agent(["session.run", "task.read", "node.inventory"])
+        agent, grant = n.agent(["session.run", "task.read", "task.submit", "node.inventory"])
         model = n.call("Model.Register", {"name": "replay-provider", "revision": "1",
             "provider_principal_id": provider["principal_id"], "inference_outcome_policy": "Strict",
             "lease_seconds": 60, "max_context_bytes": 4096, "max_output_bytes": 2048})

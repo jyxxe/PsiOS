@@ -90,9 +90,14 @@ fn access(db: &Db<'_>, session: &Doc, inputs: &[Input]) -> Result<()> {
     })?;
     let delegation = policy::delegation(db, &session.owner, delegation_id, ACTION)?;
     policy::delegation(db, &session.owner, delegation_id, artifact::ingress::READ)?;
+    let grant_id = delegation.body["grant_id"]
+        .as_str()
+        .ok_or_else(|| err("RecoveryRequired", "session input delegation lacks a grant"))?;
+    let grant = db.of(grant_id, "Grant")?;
     require(
         delegation.reference() == session.body["delegation_ref"]
-            && delegation.body["tool_targets"].is_array(),
+            && (grant.spec["tool_targets"].is_array()
+                || delegation.body["tool_targets"].is_array()),
         "PermissionDenied",
         "session input requires the original explicit disclosure delegation",
     )?;

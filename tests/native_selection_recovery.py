@@ -177,14 +177,35 @@ def synced_proof(trace):
     return re.search(rf'fsync\({publish[1]}<[^>\n]+>\)\s+= 0', trace_text[publish.end():]) is not None
 
 
+def missing_boot_materials(pid, expected):
+    opened = set()
+    try:
+        with os.scandir(f"/proc/{pid}/fd") as descriptors:
+            for descriptor in descriptors:
+                try:
+                    info = descriptor.stat()
+                except FileNotFoundError:
+                    continue
+                opened.add((info.st_dev, info.st_ino))
+    except FileNotFoundError:
+        pass
+    return sorted(name for name, identity in expected.items() if identity not in opened)
+
+
 def stop_after_durable_proof(fixture, state, selected, trace):
     directory = state / f"generation-{selected['generation']}"
     proof_path = directory / BOOT_PROOF
     assert not proof_path.exists()
+    expected = {}
+    for name in MATERIALIZED:
+        info = (directory / name).stat()
+        expected[name] = (info.st_dev, info.st_ino)
+    missing = sorted(expected)
+    pid = None
     descriptor = None
 
     def observe():
-        nonlocal descriptor
+        nonlocal descriptor, pid, missing
         issued = optional_record(state / RECORD)
         if issued is None or issued["status"] != "BootIssued":
             return None
@@ -195,19 +216,21 @@ def stop_after_durable_proof(fixture, state, selected, trace):
                 pid, descriptor, args = child
                 assert b"-smp" in args and args[args.index(b"-smp") + 1] == b"1", args
                 assert b"-nic" in args and args[args.index(b"-nic") + 1] == b"none", args
-                expected = {(file.st_dev, file.st_ino) for file in ((directory / name).stat() for name in MATERIALIZED)}
-                inherited = set()
-                for handle in Path(f"/proc/{pid}/fd").iterdir():
-                    try:
-                        opened = handle.stat()
-                    except FileNotFoundError:
-                        continue
-                    inherited.add((opened.st_dev, opened.st_ino))
-                assert expected <= inherited, "QEMU did not inherit the selected boot materials"
+        if descriptor is not None and missing:
+            # QEMU can duplicate a descriptor between reading the fd
+            # directory and resolving its entries. Keep the same child until
+            # all exact files have been observed or that child has exited.
+            sampled = missing_boot_materials(pid, expected)
+            assert not select.select([descriptor], [], [], 0)[0], (
+                f"QEMU {pid} exited before all selected materials were observed; "
+                f"still missing from live observation: {', '.join(missing)}"
+            )
+            missing = sampled
         record = optional_record(proof_path)
         if record is None or not synced_proof(trace):
             return None
         assert descriptor is not None, "selector wrote proof without observed QEMU startup"
+        assert not missing, f"selector wrote proof before observing selected materials: {', '.join(missing)}"
         assert select.select([descriptor], [], [], 0)[0], "QEMU still running after clean boot proof publication"
         return record, issued
 

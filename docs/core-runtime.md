@@ -707,7 +707,7 @@ Provider 可用 Rust SDK 的 `model_turn_durable`，或运行 `psiosctl model-st
 
 Core 记录 Provider 的迟到证据，原 `Unknown`、工具任务和记账继续沿用各自权威记录。传输或写入中断时，SDK 保留原本地决策。收到对应的持久回执或明确终止答复后释放暂存。旧日志沿用原投递格式。[迟到证据验收](../tests/test_model_late_decision.py)
 
-严格 Provider 的领取回执可声明 `decision_rejection_policy: "UndeclaredToolV1"`。Provider 可在 `Model.Respond` 中传回该值，使 Core 在工具未由固定 Skill 声明时结算该决策。回执的 Session 是 `Failed / Known`，附 `rejection.code: "ToolNotDeclared"`、决策摘要、字节数及可用的用量引用。Core 不创建 Task、审批或 Operation。同一请求可重放，改变决策或经报告的用量会返回 `IdempotencyConflict`。未传该值的请求仍收到 `PermissionDenied`，可在原租约期限内更正决策。
+严格 Provider 的领取回执可声明 `decision_rejection_policy: "UndeclaredToolV1"`，Core 在签发该租约时把能力与原 Session 修订一起保存。Provider 可在 `Model.Respond` 中传回该值，使 Core 在工具未由固定 Skill 声明时结算该决策。回执的 Session 是 `Failed / Known`，附 `rejection.code: "ToolNotDeclared"`、决策摘要、字节数及可用的用量引用。Core 不创建 Task、审批或 Operation。同一请求可重放，改变决策或经报告的用量会返回 `IdempotencyConflict`。未传该值的请求仍收到 `PermissionDenied`，可在原租约期限内更正决策。升级前签发的租约沿用原领取回执。
 
 Rust SDK 的 `SessionModel::accepts_undeclared_tool_rejection` 默认关闭。启用后，只有领取回执声明该版本时才会发送该字段。SDK 暂存使用私有格式 5，包含协商后的原请求。收到匹配的拒绝回执即可清理暂存并继续领取。在升级前建立的格式 1 至 4 暂存继续按原规则投递。旧 Core 无法解析该请求字段时，新 SDK 保留格式 5 的原文件。降级前先结算格式 5 的未决投递，或保留原目录，之后用支持它的 Core 和 SDK 恢复。Core 数据库格式沿用现有严格 `Responded` 账本。[真实 SDK 与进程故障验收](../crates/psios-core/tests/model_rejection.rs)
 

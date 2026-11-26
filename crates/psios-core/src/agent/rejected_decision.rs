@@ -2,7 +2,7 @@
 use super::{inference, late_decision::sha256_digest, provider_authority, state};
 use crate::{
     Result,
-    db::{find, resolve, row},
+    db::{Doc, find, resolve, row},
     err, require,
 };
 use psios_api::{ModelDecisionRejectionPolicy as Policy, ModelTokenUsage, sha256};
@@ -11,6 +11,38 @@ use serde_json::{Value, json};
 
 const CODE: &str = "ToolNotDeclared";
 const MARKER: &str = "model_decision_rejection";
+pub(super) const OFFER: &str = "decision_rejection_policy";
+
+pub(super) fn issued_offer(issued: &Doc) -> Result<Option<Policy>> {
+    issued
+        .body
+        .get(OFFER)
+        .map(|value| serde_json::from_value::<Policy>(value.clone()).map_err(|_| invalid()))
+        .transpose()
+}
+
+pub(super) fn offer(conn: &Connection, lease: &str, model: &Doc) -> Result<Option<Policy>> {
+    let issued = conn
+        .prepare_cached(
+            "SELECT v.* FROM model_inference_leases i JOIN session_turns t USING(lease)
+         JOIN versions v ON v.id=t.session AND v.rev=i.session_revision
+         WHERE i.lease=?1 AND i.model=?2",
+        )?
+        .query_row(params![lease, model.id], row)
+        .optional()?;
+    let Some(issued) = issued else {
+        return Ok(None);
+    };
+    require(
+        issued.kind == "Session"
+            && state(&issued) == "ModelInFlight"
+            && issued.body["current_lease"] == lease
+            && issued.spec["model_ref"] == model.reference(),
+        "RecoveryRequired",
+        "decision rejection offer lost its original issued model lease",
+    )?;
+    issued_offer(&issued)
+}
 
 pub(super) fn record(
     body: &mut Value,
@@ -115,6 +147,7 @@ pub(super) fn verify_receipt(
                 .all(|tool| sha256(tool.as_bytes()) != tool_digest)
             && receipt == &expected_receipt
             && issued.kind == "Session"
+            && issued_offer(&issued)? == Some(policy)
             && state(&issued) == "ModelInFlight"
             && issued.body["current_lease"] == lease
             && issued.body["turn"] == turn

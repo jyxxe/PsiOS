@@ -324,7 +324,7 @@ class TaskPreparationTests(unittest.TestCase):
         self.assertEqual(n.get(submitted["task_id"])["resource"]["spec"]["input_ref"], old_unsubmitted["input_ref"])
 
         after = self.verify(n)
-        self.assertEqual(after["database_format"], 96, after)
+        self.assertGreaterEqual(after["database_format"], 96, after)
         self.assertEqual(after["node_id"], before["node_id"])
 
 

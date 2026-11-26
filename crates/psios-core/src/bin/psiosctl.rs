@@ -217,6 +217,9 @@ enum Cmd {
         declared_media_type: String,
         #[arg(long, default_value_t = 600)]
         ttl_seconds: u32,
+        /// Exact upload Delegation ResourceRef JSON file.
+        #[arg(long)]
+        delegation_ref: Option<String>,
     },
     /// Register an Ed25519 public key for an existing publisher principal.
     ArtifactPublisherKeyRegister {
@@ -990,14 +993,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             key,
             declared_media_type,
             ttl_seconds,
+            delegation_ref,
         } => {
             let mut source = fs::File::open(source)?;
-            serde_json::to_value(c.upload_artifact(
-                &key,
-                &declared_media_type,
-                ttl_seconds,
-                &mut source,
-            )?)?
+            let receipt = if let Some(path) = delegation_ref {
+                let reference = serde_json::from_value(input(&path)?)?;
+                c.upload_artifact_with_delegation(
+                    &key,
+                    &declared_media_type,
+                    ttl_seconds,
+                    &reference,
+                    &mut source,
+                )?
+            } else {
+                c.upload_artifact(&key, &declared_media_type, ttl_seconds, &mut source)?
+            };
+            serde_json::to_value(receipt)?
         }
         Cmd::ArtifactPublisherKeyRegister {
             principal_id,

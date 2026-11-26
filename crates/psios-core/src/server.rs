@@ -383,6 +383,17 @@ fn reclaim_storage(s: Shared, stop: Arc<AtomicBool>, config: Config) -> Result<(
                     false
                 }
             };
+        if !stop.load(Ordering::Acquire)
+            && let Err(error) = state(&s)?.transaction(
+                "artifact-upload-authority",
+                crate::artifact::ingress::authority::reclaim,
+            )
+        {
+            eprintln!(
+                "psiosd artifact upload authority reclamation: {}",
+                error.0.code
+            );
+        }
         let ready = state(&s)?.transaction(&correlation, |db| {
             crate::artifact::ingress::expire(db)?;
             retirement::next(db)

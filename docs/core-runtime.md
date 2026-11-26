@@ -15,6 +15,7 @@
 - `Task.History` 使用 `id` 和可选 `limit`。下一页带回 `through_version` 和服务器返回的 `next_after_version`（请求字段为 `after_version`），读取同一历史区间。每个修订包含当时的 `result_availability`。`Task.Archive` 使用任务 ID 和修订，将已结算的终态移出调度表，保留幂等回执、历史、Run 和结果。当前仍需为结果及审计历史预留磁盘空间。
 - `Event.Wait` 复用 Event.Poll 的授权游标，支持 1 至 10000 毫秒的 `timeout_ms` 和可选 `limit`。`psiosctl watch CURSOR --wait-ms 5000` 可直接使用。提交后通知订阅者，等待时释放数据库锁，撤权和超时重新检查。事件、任务、信箱和模型领取共用每个守护进程的 8 个等待名额。
 - `Resource.List` 可同时按 `kind` 和精确 `id` 取得固定快照。CLI 使用 `psiosctl list Node --id NODE_ID`，SDK 使用 `Client::resource_snapshot`。将返回的 `watch_start_cursor` 传给 `Resource.Watch`、`Client::watch_resources` 或 `psiosctl watch`，只接收该筛选范围内可读的事件。可选 `timeout_ms` 启用等待。`Event.Ack` 为同一消费者保留筛选范围，`CursorExpired` 时重新取得快照。格式 44 按资源、类型及所有者索引修订序列，按源序合并主体与系统的可见事件。原有有效游标可跨升级继续投递。[确切资源与撤权验收](../tests/test_resource_watch.py) · [已确认游标升级](../tests/indexed_events_upgrade.py)
+- 格式 73 为超过游标长度限制的精确筛选保存短期作用域。每个主体最多同时保留 64 个、每个权威最多 2048 个，重复筛选复用作用域。游标失效后，可用同一筛选的新快照更新该消费者的确认位置。`Event.Ack` 仍核对筛选范围及位置。[长筛选与确认恢复验收](../tests/test_bounded_watch_scopes.py)
 - 格式 52 开始，新建的多资源快照按资源首次提交顺序分页，每项解析为快照边界时的修订。高频状态更新不会改变既有资源在列表中的位置。升级前签发的有效分页游标继续使用原有顺序，事件订阅继续按修订提交顺序投递。[固定快照和事件续读](../tests/resource_snapshot_upgrade.py)
 - `Task.Wait` 接受 Task 的 `id`、1 至 10000 毫秒的 `timeout_ms` 和可选 `after_version`。传入此前读到的 `task_revision` 可等待新修订。省略时等待 `Succeeded`、`Failed`、`Cancelled`、`Paused` 或 `WaitingApproval`。到期返回最新快照。每次唤醒均复核 `Task.Get` 的同一读取权限，连接关闭会释放名额。CLI 和 Rust SDK 的完成等待使用此接口，等待名额用完时按退避间隔读取任务。
 

@@ -1,4 +1,5 @@
 pub(crate) mod query;
+pub(crate) mod scopes;
 
 use crate::{
     db::{Db, row},
@@ -70,13 +71,20 @@ impl Cursor {
         ))?;
         let mode = Self::signing_mode(&self.mode, self.resource.is_some());
         let key = Self::key(db, &self.actor, mode, &self.epoch)?;
-        Ok(format!(
+        let token = format!(
             "{}.{}",
             URL_SAFE_NO_PAD.encode(&data),
             URL_SAFE_NO_PAD.encode(hmac::sign(&key, &data))
-        ))
+        );
+        if matches!(self.mode.as_str(), "page" | "watch") && token.len() > scopes::MAX_TOKEN {
+            return scopes::sign(db, self);
+        }
+        Ok(token)
     }
     fn read(db: &Db<'_>, token: &str, actor: &str, mode: &str) -> Result<Self> {
+        if token.starts_with(scopes::PREFIX) {
+            return scopes::read(db, token, actor, mode);
+        }
         let bad = || {
             err(
                 "CursorExpired",
@@ -254,7 +262,7 @@ pub fn list(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             snapshot: format!("{ORDERED_SNAPSHOT_PREFIX}{}", uuid::Uuid::new_v4().simple()),
             high: latest_sequence(db)?,
             position: 0,
-            until: chrono::Utc::now().timestamp() + 600,
+            until: chrono::Utc::now().timestamp() + scopes::TOKEN_TTL,
         }
     };
     let (sql, values) = query::selection(&c, query::View::Snapshot, n + 1);
@@ -325,7 +333,7 @@ pub fn poll(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         contract("event", &event)?;
         events.push(event);
     }
-    c.until = chrono::Utc::now().timestamp() + 600;
+    c.until = chrono::Utc::now().timestamp() + scopes::TOKEN_TTL;
     Ok(json!({"events": events, "cursor": c.sign(db)?}))
 }
 #[derive(Deserialize)]
@@ -335,29 +343,117 @@ struct Ack {
     previous: Option<String>,
     cursor: String,
 }
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Checkpoint {
+    kind: String,
+    resource: Option<String>,
+    snapshot: String,
+    position: i64,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoredCheckpoint {
+    scope: Checkpoint,
+    tag: String,
+}
+
+impl Checkpoint {
+    fn scope_key(db: &Db<'_>) -> hmac::Key {
+        let root = hmac::Key::new(hmac::HMAC_SHA256, &db.keys[32..]);
+        hmac::Key::new(
+            hmac::HMAC_SHA256,
+            hmac::sign(&root, b"psios/event-offset/1").as_ref(),
+        )
+    }
+
+    fn message(&self, actor: &str, consumer: &str, token: &str) -> Result<Vec<u8>> {
+        Ok(serde_json::to_vec(&(actor, consumer, token, self))?)
+    }
+
+    fn seal(self, db: &Db<'_>, actor: &str, consumer: &str, token: &str) -> Result<String> {
+        let tag = URL_SAFE_NO_PAD.encode(hmac::sign(
+            &Self::scope_key(db),
+            &self.message(actor, consumer, token)?,
+        ));
+        Ok(serde_json::to_string(&StoredCheckpoint {
+            scope: self,
+            tag,
+        })?)
+    }
+
+    fn stored(
+        db: &Db<'_>,
+        actor: &str,
+        consumer: &str,
+        token: &str,
+        record: Option<&str>,
+    ) -> Result<Self> {
+        let corrupt = || err("RecoveryRequired", "stored checkpoint is unreadable");
+        if token.starts_with(scopes::PREFIX) {
+            // Acknowledgements outlive scope leases and their original
+            // authorization epoch. Their scope is kept with the witnessed offset.
+            let StoredCheckpoint { scope, tag } =
+                serde_json::from_str(record.ok_or_else(corrupt)?).map_err(|_| corrupt())?;
+            let tag = URL_SAFE_NO_PAD.decode(tag).map_err(|_| corrupt())?;
+            hmac::verify(
+                &Self::scope_key(db),
+                &scope.message(actor, consumer, token)?,
+                &tag,
+            )
+            .map_err(|_| corrupt())?;
+            return Ok(scope);
+        }
+        require(
+            record.is_none(),
+            "RecoveryRequired",
+            "legacy checkpoint has an unexpected scope record",
+        )?;
+        let (payload, _) = token.split_once('.').ok_or_else(corrupt)?;
+        let payload = URL_SAFE_NO_PAD.decode(payload).map_err(|_| corrupt())?;
+        let CursorPayload(kind, snapshot, _, position, _, resource) =
+            serde_json::from_slice(&payload).map_err(|_| corrupt())?;
+        Ok(Self {
+            kind,
+            resource,
+            snapshot,
+            position,
+        })
+    }
+}
+
 pub fn ack(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let p: Ack = decode(p)?;
     label(&p.consumer)?;
     let next = Cursor::read(db, &p.cursor, actor, "watch")?;
-    let old: Option<String> =
+    let old: Option<(String, Option<String>)> =
         db.c.query_row(
-            "SELECT cursor FROM event_offsets WHERE owner=?1 AND consumer=?2",
+            "SELECT cursor,scope FROM event_offsets WHERE owner=?1 AND consumer=?2",
             params![actor, p.consumer],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    if old.as_ref() == Some(&p.cursor) {
+    let old_token = old.as_ref().map(|(cursor, _)| cursor.as_str());
+    if let Some((token, record)) = &old
+        && token == &p.cursor
+    {
+        Checkpoint::stored(db, actor, &p.consumer, &p.cursor, record.as_deref())?;
         return Ok(json!({"cursor": p.cursor}));
     }
-    require(old == p.previous, "Conflict", "consumer checkpoint changed")?;
-    if let Some(old) = old {
-        // This value was authenticated at its original commit and is read from witnessed storage.
-        // Its old signature cannot authorize a new read after a policy epoch changes.
-        let corrupt = || err("RecoveryRequired", "stored checkpoint is unreadable");
-        let (payload, _) = old.split_once('.').ok_or_else(corrupt)?;
-        let payload = URL_SAFE_NO_PAD.decode(payload).map_err(|_| corrupt())?;
-        let CursorPayload(kind, snapshot, _, position, _, resource) =
-            serde_json::from_slice(&payload).map_err(|_| corrupt())?;
+    require(
+        old_token == p.previous.as_deref(),
+        "Conflict",
+        "consumer checkpoint changed",
+    )?;
+    if let Some((token, record)) = old {
+        let Checkpoint {
+            kind,
+            resource,
+            snapshot,
+            position,
+        } = Checkpoint::stored(db, actor, &p.consumer, &token, record.as_deref())?;
         require(
             kind == next.kind && resource == next.resource,
             "Conflict",
@@ -372,7 +468,24 @@ pub fn ack(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             "checkpoint would skip scope or move backwards",
         )?;
     }
-    db.c.execute("INSERT INTO event_offsets VALUES(?1,?2,?3) ON CONFLICT(owner,consumer) DO UPDATE SET cursor=excluded.cursor",params![actor,p.consumer,p.cursor])?;
+    let record = p
+        .cursor
+        .starts_with(scopes::PREFIX)
+        .then(|| {
+            Checkpoint {
+                kind: next.kind,
+                resource: next.resource,
+                snapshot: next.snapshot,
+                position: next.position,
+            }
+            .seal(db, actor, &p.consumer, &p.cursor)
+        })
+        .transpose()?;
+    db.c.execute(
+        "INSERT INTO event_offsets(owner,consumer,cursor,scope) VALUES(?1,?2,?3,?4)
+        ON CONFLICT(owner,consumer) DO UPDATE SET cursor=excluded.cursor,scope=excluded.scope",
+        params![actor, p.consumer, p.cursor, record],
+    )?;
     Ok(json!({"cursor": p.cursor}))
 }
 pub fn offset(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {

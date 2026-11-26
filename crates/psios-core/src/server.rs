@@ -249,6 +249,7 @@ fn worker(s: Shared, changes: Arc<Changes>, stop: Arc<AtomicBool>, tick: Duratio
 
 fn timer(s: Shared, stop: Arc<AtomicBool>) -> Result<()> {
     let mut next_model_expiry = Instant::now();
+    let mut next_cursor_expiry = Instant::now() + Duration::from_secs(30);
     while !stop.load(Ordering::Acquire) {
         {
             let mut store = state(&s)?;
@@ -264,6 +265,14 @@ fn timer(s: Shared, stop: Arc<AtomicBool>) -> Result<()> {
                     eprintln!("psiosd model lease expiry: {}", error.0.code);
                 }
                 next_model_expiry = Instant::now() + Duration::from_secs(1);
+            }
+            if Instant::now() >= next_cursor_expiry {
+                if let Err(error) =
+                    store.transaction("watch-scope-expiry", crate::events::scopes::reclaim)
+                {
+                    eprintln!("psiosd watch scope expiry: {}", error.0.code);
+                }
+                next_cursor_expiry = Instant::now() + Duration::from_secs(30);
             }
         }
         thread::park_timeout(Duration::from_millis(250));
@@ -390,6 +399,7 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     let (listener, _endpoint) = bind(&cfg.socket)?;
     crate::storage::reclaim_on_startup(&cfg);
     db.transaction("restart-recovery", |db| {
+        crate::events::scopes::reclaim(db)?;
         crate::node::service_control::verify_active_holds(db)?;
         broker::recover(db)
     })?;

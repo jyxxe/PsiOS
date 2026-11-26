@@ -267,10 +267,10 @@ def lose_stop_receipt(n, app, cid, volume):
 
 
 @contextmanager
-def stop_proxy(node, settings, name, match, *, forward=False):
+def stop_proxy(node, settings, name, match, *, forward=False, status=b" 204 "):
     socket_path = node.base / (name + ".sock")
     upstream = settings.get("docker_socket", "/var/run/docker.sock")
-    with ReceiptBarrier(socket_path, upstream, match, forward=forward) as barrier:
+    with ReceiptBarrier(socket_path, upstream, match, status=status, forward=forward) as barrier:
         server = threading.Thread(target=barrier.serve_forever, daemon=True)
         server.start()
         try:

@@ -12,6 +12,7 @@ import threading
 from support import Failure, Node, key, target
 from oci_recovery import ReceiptBarrier, check_kernel_limits, continue_after_lost_stop, lose_start_receipt, lose_stop_receipt
 from oci_capture import TOOL as CAPTURE, denied
+from oci_catalog_settlement import verify_catalog_settlement, verify_catalog_upgrade
 from oci_create_intent import verify_create_format_upgrade, verify_lost_create
 from oci_direct_clone_rebind import verify_direct_clone_rebind
 from oci_direct_clone_rebind_upgrade import verify_direct_clone_rebind_upgrade
@@ -326,7 +327,8 @@ def check_log_isolation(node, app, owner, install_grant, container):
     return app
 
 
-def main(binaries, previous_binaries=None, create_recovery_only=False, direct_clone_prior=None):
+def main(binaries, previous_binaries=None, create_recovery_only=False, direct_clone_prior=None,
+         catalog_only=False, catalog_prior=None):
     node = Node(binaries)
     tag = "psios-acceptance:" + key()
     upgraded_tag = tag + "-upgrade"
@@ -362,6 +364,14 @@ int main(void) {
         spec = dict(image_id=image_id, name="acceptance", release_version="1.0.0", argv=["/probe"],
                     environment={"TEST_NAME": "first"}, license_expression="0BSD", volume=target(volume),
                     cpu_millicores=200, memory_max_bytes=33554432, pids_max=16, ephemeral_max_bytes=1048576)
+        if catalog_prior:
+            verify_catalog_upgrade(catalog_prior, binaries, spec, app_ids)
+            return
+        if catalog_only:
+            verify_catalog_settlement(node, docker, spec, app_ids)
+            node.stop()
+            subprocess.run(node.daemon + ["verify"], check=True, stdout=subprocess.DEVNULL, timeout=15)
+            return
         if direct_clone_prior:
             verify_direct_clone_rebind_upgrade(direct_clone_prior, binaries, docker, spec, app_ids)
             return
@@ -559,6 +569,7 @@ int main(void) {
         verify_volume_clone(node, docker, spec, app_ids)
         verify_direct_clone_rebind(node, docker, spec, app_ids)
         verify_restart(node, docker, spec, app_ids)
+        verify_catalog_settlement(node, docker, spec, app_ids)
         verify_image_health(node, docker)
         if os.getenv("PSIOS_TEST_OCI_EFFECTIVE_MOUNTS") == "1":
             verify_effective_mounts(node, docker, spec, app_ids)
@@ -587,5 +598,8 @@ if __name__ == "__main__":
     parser.add_argument("--previous-bin-dir", help="same database format, prior OCI evidence policy")
     parser.add_argument("--create-recovery-only", action="store_true")
     parser.add_argument("--direct-clone-prior-bin-dir", help="run the direct clone proof upgrade with real prior Core")
+    parser.add_argument("--catalog-only", action="store_true", help="verify direct OCI catalog settlement against Docker")
+    parser.add_argument("--catalog-previous-bin-dir", help="verify OCI catalog upgrade with real format 123 Core")
     args = parser.parse_args()
-    main(args.bin_dir, args.previous_bin_dir, args.create_recovery_only, args.direct_clone_prior_bin_dir)
+    main(args.bin_dir, args.previous_bin_dir, args.create_recovery_only, args.direct_clone_prior_bin_dir,
+         args.catalog_only, args.catalog_previous_bin_dir)

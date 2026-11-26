@@ -1,7 +1,7 @@
 //! Scoped, immutable work-item history pages.
 pub(crate) mod revision;
 
-use super::{ITEM, READ, access_item, digest, invalid_state, maintenance, project_id};
+use super::{ITEM, READ, access_item, digest, invalid_state, maintenance, parent_id, project_id};
 use crate::{
     Result,
     db::{Db, Doc, row},
@@ -84,13 +84,17 @@ fn projection(item: &Doc) -> Value {
         json!({"reviewer_principal_id":review["reviewer_principal_id"],
             "accepted":review["accepted"],"reviewed_at":review["reviewed_at"]})
     };
-    json!({
+    let mut value = json!({
         "schema_version":psios_api::VERSION,"project_id":item.spec["project_id"],
         "assignee_principal_id":item.spec["assignee_principal_id"],"lifecycle":item.body["lifecycle"],
         "updated_by_principal_id":item.body["updated_by_principal_id"],"updated_at":item.stamp,
         "assignment":maintenance::assignment_view(item),"abandonment":maintenance::abandonment_view(item),
         "review":review,"has_evidence":item.body.get("evidence_ref").is_some(),
-    })
+    });
+    if let Some(parent) = parent_id(item) {
+        value["parent_id"] = json!(parent);
+    }
+    value
 }
 
 #[cfg(test)]

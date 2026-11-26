@@ -206,6 +206,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "WorkItem.History" => project::history::list(db, actor, p),
         "WorkItem.RevisionGet" => project::history::revision::get(db, actor, p),
         "WorkItem.List" => project::list_items(db, actor, p),
+        "WorkItem.Children" => project::hierarchy::children(db, actor, p),
         "WorkItem.SubmitEvidence" => project::submit_evidence(db, actor, p),
         "WorkItem.Review" => project::review(db, actor, p),
         "WorkItem.Close" => project::close(db, actor, p),

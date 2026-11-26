@@ -450,6 +450,14 @@ enum WorkItemCommand {
         #[arg(default_value = "-")]
         file: String,
     },
+    /// List the direct children of this work item.
+    Children {
+        id: String,
+        #[arg(long)]
+        after_id: Option<String>,
+        #[arg(long)]
+        limit: Option<u32>,
+    },
     List {
         project_id: String,
         #[arg(long)]
@@ -740,6 +748,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 WorkItemCommand::Revision { file } => {
                     c.work_item_revision(&serde_json::from_value(input(&file)?)?)?
+                }
+                WorkItemCommand::Children {
+                    id,
+                    after_id,
+                    limit,
+                } => {
+                    let page = c.work_item_children(&id, after_id.as_deref(), limit)?;
+                    println!("{}", serde_json::to_string_pretty(&page)?);
+                    return Ok(());
                 }
                 WorkItemCommand::List {
                     project_id,

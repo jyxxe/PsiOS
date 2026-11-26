@@ -2,6 +2,7 @@
 pub(crate) mod agent_tool;
 pub(crate) mod directory;
 pub(crate) mod evidence;
+pub(crate) mod hierarchy;
 pub(crate) mod history;
 mod maintenance;
 pub(crate) mod milestone;
@@ -154,6 +155,10 @@ fn project_id(item: &Doc) -> Result<&str> {
     item.spec["project_id"].as_str().ok_or_else(invalid_state)
 }
 
+fn parent_id(item: &Doc) -> Option<&str> {
+    item.spec["parent_work_item_id"].as_str()
+}
+
 fn assigned(item: &Doc) -> Result<&str> {
     item.spec["assignee_principal_id"]
         .as_str()
@@ -228,6 +233,9 @@ fn item_view(db: &Db<'_>, item: &Doc, actor: &str, include_evidence: bool) -> Re
         "assignment":maintenance::assignment_view(item),"abandonment":maintenance::abandonment_view(item),
         "created_by_principal_id":item.spec["created_by_principal_id"],"updated_by_principal_id":item.body["updated_by_principal_id"],
     });
+    if let Some(parent) = parent_id(item) {
+        value["parent_id"] = json!(parent);
+    }
     if include_evidence && let Some(evidence) = evidence::view(db, item, actor)? {
         value["evidence"] = evidence;
     }
@@ -475,9 +483,12 @@ pub(crate) fn create_item(db: &Db<'_>, actor: &str, params: &Value) -> Result<Va
         "InvalidArgument",
         "work item blockers must be distinct, bounded and exclude the item itself",
     )?;
-    let fields = json!({"project_id":project.id,"title":request.title,"description":description,
+    let mut fields = json!({"project_id":project.id,"title":request.title,"description":description,
         "assignee_principal_id":request.assignee_principal_id,"blocked_by":blockers,"criterion":request.criterion,
         "created_by_principal_id":actor});
+    if let Some(parent) = &request.parent_id {
+        fields["parent_work_item_id"] = json!(parent);
+    }
     let creation = digest(&fields);
     if let Some(existing) = db.find(&id)? {
         require(
@@ -508,8 +519,8 @@ pub(crate) fn create_item(db: &Db<'_>, actor: &str, params: &Value) -> Result<Va
         "QuotaExceeded",
         "project work item limit reached",
     )?;
-    // Every immutable blocker already exists in the same project. No create can add a cycle.
-    for blocker in blockers {
+    // Every immutable blocker already exists in the same project.
+    for blocker in &blockers {
         label(blocker)?;
         require(
             db.find(blocker)?.is_some_and(|item| {
@@ -520,6 +531,30 @@ pub(crate) fn create_item(db: &Db<'_>, actor: &str, params: &Value) -> Result<Va
             "InvalidArgument",
             "every work item blocker must belong to the same project",
         )?;
+    }
+    if let Some(parent) = &request.parent_id {
+        label(parent)?;
+        let parent = db
+            .find(parent)?
+            .filter(|item| {
+                item.id != id
+                    && item.kind == ITEM
+                    && item.spec["project_id"] == project.id
+                    && item.owner == project.owner
+            })
+            .ok_or_else(|| {
+                err(
+                    "InvalidArgument",
+                    "parent must be a work item in the same project",
+                )
+            })?;
+        require(
+            parent.body["lifecycle"] == "Ready",
+            "PreconditionFailed",
+            "only a ready work item may receive a child",
+        )?;
+        let blocker_ids = blockers.into_iter().cloned().collect::<Vec<_>>();
+        hierarchy::validate_new_child(db, &project, &parent.id, &blocker_ids)?;
     }
     db.cfg.check_admission_space()?;
     let mut spec = fields;
@@ -566,13 +601,17 @@ pub(crate) fn list_items(db: &Db<'_>, actor: &str, params: &Value) -> Result<Val
     let items = statement
         .query_map(params![project.id, after, i64::from(limit + 1)], row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    item_page(db, actor, &project, &items, limit)
+}
+
+fn item_page(db: &Db<'_>, actor: &str, project: &Doc, items: &[Doc], limit: u32) -> Result<Value> {
     let mut size = 0;
     let mut page = Vec::new();
     for item in items.iter().take(limit as usize) {
         require(
-            item.owner == project.owner,
+            item.kind == ITEM && item.owner == project.owner && project_id(item)? == project.id,
             "RecoveryRequired",
-            "work item owner differs from its project authority",
+            "work item page differs from its project authority",
         )?;
         let view = item_view(db, item, actor, false)?;
         size += serde_json::to_vec(&view)?.len();
@@ -673,13 +712,14 @@ pub(crate) fn review(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> 
 
 pub(crate) fn close(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     let request: Conditional = decode(params)?;
-    let (_, item) = access_item(db, actor, &request.id, MANAGE)?;
+    let (project, item) = access_item(db, actor, &request.id, MANAGE)?;
     item.cas(&request.expected_resource_version)?;
     require(
         item.body["lifecycle"] == "Verified" && item.body["review"]["accepted"] == true,
         "PreconditionFailed",
         "closing a work item requires independent verified evidence",
     )?;
+    hierarchy::require_children_closed(db, &project, &item)?;
     let evidence = db.resolve(&item.body["evidence_ref"])?;
     evidence::release(db, &item, &evidence)?;
     let mut state = item.body.clone();
@@ -742,6 +782,11 @@ pub(crate) fn verify(conn: &Connection, format: u32) -> Result<()> {
         )?;
         verify_principal(conn, assigned(&item)?)?;
         let original = verify_document(conn, &item)?;
+        require(
+            format >= hierarchy::FORMAT || original.spec.get("parent_work_item_id").is_none(),
+            "RecoveryRequired",
+            "work item parent requires the hierarchy format",
+        )?;
         let criterion: Criterion =
             decode(&original.spec["criterion"]).map_err(|_| invalid_state())?;
         criterion_target(conn, &criterion).map_err(|_| invalid_state())?;

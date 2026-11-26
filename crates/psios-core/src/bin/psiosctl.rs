@@ -73,6 +73,13 @@ enum Cmd {
     EventOffset {
         consumer: String,
     },
+    /// Confirm a processed watch position against the previous confirmed cursor.
+    EventAck {
+        consumer: String,
+        cursor: String,
+        #[arg(long)]
+        previous: Option<String>,
+    },
     /// List confirmed event consumer revisions.
     EventOffsets {
         /// Revoked principal ID for local-owner maintenance.
@@ -792,6 +799,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Cmd::Watch { cursor, wait_ms } => c.watch_resources(&cursor, None, wait_ms)?,
         Cmd::EventOffset { consumer } => c.event_offset(&consumer)?,
+        Cmd::EventAck {
+            consumer,
+            cursor,
+            previous,
+        } => c.acknowledge_events(&consumer, &cursor, previous.as_deref())?,
         Cmd::EventOffsets {
             owner,
             after,

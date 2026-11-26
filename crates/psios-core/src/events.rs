@@ -86,6 +86,16 @@ impl Cursor {
         if token.starts_with(scopes::PREFIX) {
             return scopes::read(db, token, actor, mode);
         }
+        let cursor = Self::read_inline(db, token, actor, mode)?;
+        require(
+            cursor.until > chrono::Utc::now().timestamp(),
+            "CursorExpired",
+            "cursor expired or outside authorized query",
+        )?;
+        Ok(cursor)
+    }
+
+    fn read_inline(db: &Db<'_>, token: &str, actor: &str, mode: &str) -> Result<Self> {
         let bad = || {
             err(
                 "CursorExpired",
@@ -101,9 +111,6 @@ impl Cursor {
         let signing_mode = Self::signing_mode(mode, resource.is_some());
         hmac::verify(&Self::key(db, actor, signing_mode, &epoch)?, &data, &tag)
             .map_err(|_| bad())?;
-        if chrono::Utc::now().timestamp() >= until {
-            return Err(bad());
-        }
         Ok(Self {
             mode: mode.into(),
             actor: actor.into(),
@@ -428,7 +435,6 @@ impl Checkpoint {
 pub fn ack(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let p: Ack = decode(p)?;
     label(&p.consumer)?;
-    let next = Cursor::read(db, &p.cursor, actor, "watch")?;
     let old: Option<(String, Option<String>)> =
         db.c.query_row(
             "SELECT cursor,scope FROM event_offsets WHERE owner=?1 AND consumer=?2",
@@ -440,9 +446,17 @@ pub fn ack(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     if let Some((token, record)) = &old
         && token == &p.cursor
     {
-        Checkpoint::stored(db, actor, &p.consumer, &p.cursor, record.as_deref())?;
+        let checkpoint = Checkpoint::stored(db, actor, &p.consumer, token, record.as_deref())?;
+        // A committed receipt can outlive its watch lease. The same signed
+        // cursor can confirm receipt only within its original authorization epoch.
+        if token.starts_with(scopes::PREFIX) {
+            scopes::verify_acknowledged(db, actor, token, &checkpoint)?;
+        } else {
+            Cursor::read_inline(db, token, actor, "watch")?;
+        }
         return Ok(json!({"cursor": p.cursor}));
     }
+    let next = Cursor::read(db, &p.cursor, actor, "watch")?;
     require(
         old_token == p.previous.as_deref(),
         "Conflict",
@@ -491,6 +505,7 @@ pub fn ack(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             checkpoint_revision=excluded.checkpoint_revision",
         params![actor, p.consumer, p.cursor, record, offsets::new_revision()],
     )?;
+    db.audit(actor, "Event.Ack", None, "Allowed")?;
     Ok(json!({"cursor": p.cursor}))
 }
 #[cfg(test)]
@@ -503,5 +518,72 @@ mod tests {
         let decoded: CursorPayload = serde_json::from_str(legacy).unwrap();
         assert!(decoded.5.is_none());
         assert_eq!(serde_json::to_string(&decoded).unwrap(), legacy);
+    }
+
+    #[test]
+    fn expired_inline_ack_confirms_only_the_exact_committed_position() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = crate::Config::local(&directory.path().join("authority"));
+        crate::Store::init(&config).unwrap();
+        let mut store = crate::Store::open(config).unwrap();
+        store
+            .transaction("expired-ack-receipt", |db| {
+                let actor = policy::OWNER;
+                let page = list(db, actor, &json!({"kind":"Node"}))?;
+                let mut cursor = Cursor::read(
+                    db,
+                    page["watch_start_cursor"].as_str().unwrap(),
+                    actor,
+                    "watch",
+                )?;
+                // Represent the same committed row after the signed wall-clock
+                // deadline without waiting for the production watch TTL.
+                cursor.until = chrono::Utc::now().timestamp() - 1;
+                let token = cursor.sign(db)?;
+                assert!(!token.starts_with(scopes::PREFIX));
+                db.c.execute(
+                    "INSERT INTO event_offsets(owner,consumer,cursor) VALUES(?1,'confirmed',?2)",
+                    params![actor, token],
+                )?;
+                let request = json!({"consumer":"confirmed","cursor":token});
+                let before = offsets::get(
+                    db,
+                    actor,
+                    &json!({"id":"confirmed","include_revision":true}),
+                )?;
+                assert_eq!(ack(db, actor, &request)?, json!({"cursor":token}));
+                assert_eq!(
+                    offsets::get(
+                        db,
+                        actor,
+                        &json!({"id":"confirmed","include_revision":true})
+                    )?,
+                    before
+                );
+                assert_eq!(
+                    poll(db, actor, &json!({"cursor":token}))
+                        .unwrap_err()
+                        .0
+                        .code,
+                    "CursorExpired"
+                );
+                assert_eq!(
+                    ack(db, actor, &json!({"consumer":"new","cursor":token}))
+                        .unwrap_err()
+                        .0
+                        .code,
+                    "CursorExpired"
+                );
+                db.c.execute(
+                    "UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='epoch'",
+                    [],
+                )?;
+                assert_eq!(
+                    ack(db, actor, &request).unwrap_err().0.code,
+                    "CursorExpired"
+                );
+                Ok(())
+            })
+            .unwrap();
     }
 }

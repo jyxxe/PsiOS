@@ -175,6 +175,19 @@ impl Client {
         )
     }
 
+    /// Confirm a processed watch position against the prior confirmed cursor.
+    pub fn acknowledge_events(
+        &self,
+        consumer: &str,
+        cursor: &str,
+        previous: Option<&str>,
+    ) -> ApiResult<Value> {
+        self.call(
+            "Event.Ack",
+            json!({"consumer":consumer,"cursor":cursor,"previous":previous}),
+        )
+    }
+
     /// List confirmed consumer revisions for maintenance.
     pub fn event_offsets(
         &self,

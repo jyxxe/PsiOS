@@ -108,6 +108,14 @@ class BoundedWatchScopes(unittest.TestCase):
             self.assertEqual(expired.rowcount, 1)
         n.start()
         self.assertEqual(n.call("Event.Offset", {"id": request["consumer"]}), saved)
+        offset = n.call("Event.Offset", {"id": request["consumer"], "include_revision": True})
+        recovered = n.cli(n.witness / "owner.token", "event-ack", request["consumer"], saved["cursor"])
+        self.assertEqual(recovered, saved)
+        self.assertEqual(n.call("Event.Offset", {"id": request["consumer"], "include_revision": True}), offset)
+        commits = [event for event in n.call("Audit.List", {"limit": 128})
+                   if event["method"] == "Event.Ack" and event["decision"] == "Allowed"]
+        self.assertEqual(len(commits), 1)
+        self.rejected("CursorExpired", "Event.Ack", dict(request, consumer="another-consumer"))
         self.rejected("CursorExpired", "Resource.Watch", saved)
 
         renewed = n.call("Resource.List", scope)
@@ -115,6 +123,7 @@ class BoundedWatchScopes(unittest.TestCase):
         self.assertNotEqual(renewed_lease, initial_lease)
         _, grant = n.agent(["task.read"])
         n.call("Grant.Revoke", target(grant["grant_ref"]))
+        self.rejected("CursorExpired", "Event.Ack", request)
         self.rejected("CursorExpired", "Resource.Watch", {"cursor": renewed["watch_start_cursor"]})
         self.assertEqual(n.call("Event.Offset", {"id": request["consumer"]}), saved)
 

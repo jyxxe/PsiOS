@@ -376,7 +376,6 @@ impl Store {
                     | "Task.CancelOrigin"
                     | "Task.Archive"
                     | "Task.Retry"
-                    | "Event.Ack"
             ) {
                 let target = if method.starts_with("Conversation.") {
                     r.params["id"].as_str().or_else(|| out["id"].as_str())

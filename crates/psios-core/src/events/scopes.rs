@@ -19,6 +19,45 @@ const PER_AUTHORITY: i64 = 2048;
 #[derive(Serialize, Deserialize)]
 struct Payload(String, String, i64, i64, i64);
 
+struct CompactToken {
+    payload: Payload,
+    data: Vec<u8>,
+    tag: Vec<u8>,
+}
+
+impl CompactToken {
+    fn read(token: &str) -> Result<Self> {
+        require(
+            token.len() <= MAX_TOKEN,
+            "CursorExpired",
+            "invalid compact resource cursor",
+        )?;
+        let (data, tag) = token
+            .strip_prefix(PREFIX)
+            .and_then(|value| value.split_once('.'))
+            .ok_or_else(expired)?;
+        let data = URL_SAFE_NO_PAD.decode(data).map_err(|_| expired())?;
+        let tag = URL_SAFE_NO_PAD.decode(tag).map_err(|_| expired())?;
+        let payload: Payload = serde_json::from_slice(&data).map_err(|_| expired())?;
+        if payload.0.len() != 22 {
+            return Err(expired());
+        }
+        Ok(Self { payload, data, tag })
+    }
+
+    fn verify(&self, key: &hmac::Key, kind: &str, resource: Option<&str>) -> Result<()> {
+        let message = authenticated(&self.data, kind, resource)?;
+        hmac::verify(key, &message, &self.tag).map_err(|_| expired())
+    }
+}
+
+fn expired() -> Error {
+    err(
+        "CursorExpired",
+        "cursor expired or outside authorized query",
+    )
+}
+
 fn signing_mode(mode: &str) -> Option<&'static str> {
     match mode {
         "page" => Some("page-scope-reference"),
@@ -121,29 +160,11 @@ pub(super) fn sign(db: &Db<'_>, cursor: &Cursor) -> Result<String> {
 }
 
 pub(super) fn read(db: &Db<'_>, token: &str, actor: &str, mode: &str) -> Result<Cursor> {
-    let bad = || {
-        err(
-            "CursorExpired",
-            "cursor expired or outside authorized query",
-        )
-    };
-    let signing_mode = signing_mode(mode).ok_or_else(bad)?;
-    require(
-        token.len() <= MAX_TOKEN,
-        "CursorExpired",
-        "invalid compact resource cursor",
-    )?;
-    let (data, tag) = token
-        .strip_prefix(PREFIX)
-        .and_then(|value| value.split_once('.'))
-        .ok_or_else(bad)?;
-    let data = URL_SAFE_NO_PAD.decode(data).map_err(|_| bad())?;
-    let tag = URL_SAFE_NO_PAD.decode(tag).map_err(|_| bad())?;
-    let Payload(id, snapshot, high, position, until) =
-        serde_json::from_slice(&data).map_err(|_| bad())?;
-    let now = chrono::Utc::now().timestamp();
-    if id.len() != 22 || until <= now {
-        return Err(bad());
+    let signing_mode = signing_mode(mode).ok_or_else(expired)?;
+    let token = CompactToken::read(token)?;
+    let Payload(id, _, _, _, until) = &token.payload;
+    if *until <= chrono::Utc::now().timestamp() {
+        return Err(expired());
     }
     let epoch = db.meta("epoch")?;
     let (kind, resource): (String, String) =
@@ -154,15 +175,14 @@ pub(super) fn read(db: &Db<'_>, token: &str, actor: &str, mode: &str) -> Result<
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?
-        .ok_or_else(bad)?;
+        .ok_or_else(expired)?;
     let resource = (!resource.is_empty()).then_some(resource);
-    let message = authenticated(&data, &kind, resource.as_deref())?;
-    hmac::verify(
+    token.verify(
         &Cursor::key(db, actor, signing_mode, &epoch)?,
-        &message,
-        &tag,
-    )
-    .map_err(|_| bad())?;
+        &kind,
+        resource.as_deref(),
+    )?;
+    let Payload(_, snapshot, high, position, until) = token.payload;
     Ok(Cursor {
         mode: mode.into(),
         actor: actor.into(),
@@ -175,6 +195,19 @@ pub(super) fn read(db: &Db<'_>, token: &str, actor: &str, mode: &str) -> Result<
         position,
         until,
     })
+}
+
+pub(super) fn verify_acknowledged(
+    db: &Db<'_>,
+    actor: &str,
+    token: &str,
+    checkpoint: &Checkpoint,
+) -> Result<()> {
+    CompactToken::read(token)?.verify(
+        &Cursor::key(db, actor, "watch-scope-reference", &db.meta("epoch")?)?,
+        &checkpoint.kind,
+        checkpoint.resource.as_deref(),
+    )
 }
 
 #[cfg(test)]

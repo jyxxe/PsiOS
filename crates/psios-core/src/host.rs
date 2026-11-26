@@ -596,6 +596,7 @@ pub struct Work {
     pub(crate) stop_cleanup: Option<apps::stop::Prepared>,
     pub(crate) volume_rebind: Option<apps::volume_rebind::Prepared>,
     pub(crate) mount_observation_required: bool,
+    pub(crate) service_resources_node_id: Option<String>,
     network_trial_inspection: Option<node::network::trial::Inspection>,
 }
 pub(crate) enum Output {
@@ -1114,6 +1115,9 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     } else {
         None
     };
+    let service_resources_node_id = matches!(a, Action::ServiceResources(_))
+        .then(|| db.meta("authority"))
+        .transpose()?;
     let w = Work {
         start_checkpoint,
         publication_checkpoint,
@@ -1134,6 +1138,7 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
         stop_cleanup,
         volume_rebind,
         mount_observation_required,
+        service_resources_node_id,
         network_trial_inspection,
     };
     node::reserve(db, &w)?;

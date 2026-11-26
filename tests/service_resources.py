@@ -197,6 +197,19 @@ TasksMax=40
         before = int(dict(line.split() for line in (group / "cpu.stat").read_text().splitlines())["usage_usec"])
         measured = observe(node, token, authority, query)
         assert_kernel(measured, service, props, unit_slice, before, manager)
+        process_ref = measured["main_process_ref"]
+        node_id = node.call("Node.Get", {})["reference"]["resource_id"]
+        assert process_ref["node_id"] == node_id, process_ref
+        rejected("PermissionDenied", lambda: node.prepare("node.process_inspect", process_ref, token=token,
+                    delegation=authority["delegation_ref"]["resource_id"]))
+        inspect_grant = node.call("Grant.Issue", {"principal_id": principal, "tool_targets": [node_id],
+            "actions": ["task.submit", "task.read", "node.process_inspect"], "units": 1, "ttl_seconds": 120})
+        inspect = node.prepare("node.process_inspect", process_ref, token=token,
+                               delegation=inspect_grant["delegation_ref"]["resource_id"])
+        observed = node.wait(node.call("Task.Submit", inspect, token)["task_id"])
+        assert observed["lifecycle"] == "Succeeded", observed
+        result, = observed["result"]["artifact_refs"]
+        assert node.call("Artifact.Read", {"reference": result}, token)["process_ref"] == process_ref
         if masked_system:
             node.stop()
             with mask_cgroup():

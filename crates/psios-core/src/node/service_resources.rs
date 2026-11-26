@@ -213,14 +213,12 @@ pub(super) fn observe(work: &Work, query: &Query) -> Result<Value> {
         "PreconditionFailed",
         "service invocation belongs to another Linux boot",
     )?;
-    let node_id = work.task.spec["origin_ref"]["authority_id"]
-        .as_str()
-        .ok_or_else(|| {
-            err(
-                "RecoveryRequired",
-                "service resource task lacks a node identity",
-            )
-        })?;
+    let node_id = work.service_resources_node_id.as_deref().ok_or_else(|| {
+        err(
+            "RecoveryRequired",
+            "service resource task lacks a node identity",
+        )
+    })?;
     let epoch = manager_epoch(config)?;
     let invocation = Invocation::get(config, query)?;
     let relative = group_relative(&invocation.group_path)?;

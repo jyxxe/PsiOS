@@ -772,7 +772,7 @@ pub fn cancel_origin(db: &Db<'_>, actor: &str, s: &Value) -> Result<Value> {
         check_key(s, &old)?;
         if let Some(r) = old.receipt {
             let t = db.get(field(&r, "task_id"))?;
-            return Ok(cancel_task(db, &t)?.body);
+            return Ok(cancel_task(db, actor, &t)?.body);
         }
         require(old.cancelled, "InternalError", "invalid submission record")?;
     } else {

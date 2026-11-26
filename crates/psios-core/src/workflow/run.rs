@@ -527,7 +527,7 @@ fn fail(db: &Db<'_>, run: &Doc, body: Value, reason: &str) -> Result<Doc> {
 fn stop(db: &Db<'_>, run: &Doc, mut body: Value, reason: &str) -> Result<Doc> {
     body["stop_reason"] = json!(reason);
     for (_, id) in active_tasks(db, run)? {
-        let task = broker::cancel_task(db, &db.of(&id, "Task")?)?;
+        let task = broker::cancel_task(db, &run.owner, &db.of(&id, "Task")?)?;
         session_join::stopped_launch(db, run, &task)?;
         record_task(db, run, &mut body, &task)?;
     }

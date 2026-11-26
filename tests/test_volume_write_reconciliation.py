@@ -1,14 +1,16 @@
 """Recover actual volume writes after the publication syscall boundary."""
 import base64
 from contextlib import closing
+import json
 import os
 import signal
 import sqlite3
 import struct
+import subprocess
 import time
 import unittest
 
-from support import Failure, Node, target
+from support import Failure, Node, key, target
 
 
 @unittest.skipUnless(os.getenv("PSIOS_TEST_VOLUME_WRITE_CUT") == "1",
@@ -32,6 +34,131 @@ class DurableVolumeWriteReconciliation(unittest.TestCase):
                     self.check_publication(node, tool)
                 finally:
                     node.close()
+
+    def test_cancel_after_killed_write_keeps_original_effect_until_reconciled(self):
+        for by_origin in (False, True):
+            with self.subTest(by_origin=by_origin):
+                node = Node(os.environ.get("PSIOS_TEST_BIN_DIR", "target/debug"))
+                try:
+                    self.check_cancelled_write(node, by_origin)
+                finally:
+                    node.close()
+
+    def check_cancelled_write(self, node, by_origin):
+        volume = node.perform("volume.create", {"name": "cancel-after-lost-receipt"})
+        payload = node.state / "volumes" / volume["resource_id"] / "data" / "record"
+        node.stop()
+        self.start_traced(node, payload.parent, "error=EIO:signal=SIGKILL", node.base / "cancel.trace")
+        request = node.prepare("volume.write", {**target(volume), "name": payload.name, "content": "published"})
+        receipt = node.call("Task.Submit", request)
+        task_id = receipt["task_id"]
+        self.assertEqual(node.wait(task_id)["lifecycle"], "WaitingApproval")
+        try:
+            node.approve(task_id)
+        except (ConnectionError, struct.error):
+            pass  # The process can die before it acknowledges the approval.
+        self.assertEqual(node.process.wait(20), -signal.SIGKILL)
+        self.assertEqual(payload.read_bytes(), b"published")
+        inode = payload.stat()
+
+        node.start()
+        pending = node.wait(task_id)
+        self.assertEqual((pending["lifecycle"], pending["outcome_knowledge"]), ("Paused", "Unknown"))
+        [operation] = pending["operation_refs"]
+        run_id = pending["current_run_id"]
+        op_before = node.get(operation["resource_id"])
+        run_before = node.get(run_id)
+
+        def custody():
+            with closing(sqlite3.connect(node.state / "state.db")) as database:
+                return database.execute(
+                    "SELECT q.phase,q.operation,h.holder,b.reserved,b.spent FROM queue q "
+                    "JOIN holds h ON h.holder=q.operation AND h.volume=? "
+                    "JOIN budgets b ON b.id=q.budget WHERE q.task=?",
+                    (volume["resource_id"], task_id),
+                ).fetchone()
+
+        held = custody()
+        self.assertIsNotNone(held)
+        self.assertEqual(held[:3], ("Unknown", operation["resource_id"], operation["resource_id"]))
+        old_target = {"id": task_id, "expected_resource_version": pending["task_revision"]}
+        origin_cancel = {name: request[name] for name in (
+            "schema_version", "origin_ref", "idempotency_key", "request_digest", "cancel_scope_id",
+        )}
+        origin_cancel.update(cancel_request_id=key(), reason="Cancel after publication receipt was lost")
+        if by_origin:
+            with self.assertRaises(Failure) as mismatch:
+                node.call("Task.CancelOrigin", dict(origin_cancel, request_digest="sha256:" + "0" * 64))
+            self.assertEqual(mismatch.exception.code, "IdempotencyConflict")
+            self.assertEqual(node.wait(task_id), pending)
+            cancelled = node.call("Task.CancelOrigin", origin_cancel)
+        else:
+            cancelled = node.call("Task.Cancel", old_target)
+
+        current_target = dict(old_target, expected_resource_version=cancelled["task_revision"])
+        self.assertNotEqual(current_target, old_target)
+        self.assertEqual(cancelled, dict(pending, lifecycle="Cancelled", task_revision=cancelled["task_revision"]))
+        self.assertEqual(node.get(operation["resource_id"]), op_before)
+        self.assertEqual(node.get(run_id), run_before)
+        self.assertEqual(node.get(volume["resource_id"])["reference"], volume)
+        self.assertEqual(custody(), held)
+        with self.assertRaises(Failure) as stale:
+            node.call("Task.Cancel", old_target)
+        self.assertEqual(stale.exception.code, "Conflict")
+        self.assertEqual(node.call("Task.Cancel", current_target), cancelled)
+        self.assertEqual(node.call("Task.Wait", {"id": task_id, "timeout_ms": 1000,
+                                               "after_version": pending["task_revision"]}), cancelled)
+        for method, extra, code in (
+            ("Task.Retry", {"key": key()}, "OutcomeUnknown"),
+            ("Task.Archive", {}, "PreconditionFailed"),
+            ("Task.EvictResults", {"reason": "must retain unresolved custody"}, "PreconditionFailed"),
+        ):
+            with self.assertRaises(Failure) as refused:
+                node.call(method, {**current_target, **extra})
+            self.assertEqual(refused.exception.code, code, refused.exception)
+
+        node.stop(signal.SIGKILL)
+        verified = json.loads(subprocess.check_output(node.daemon + ["verify"], timeout=20))
+        self.assertEqual(verified["sqlite_integrity"], "Verified", verified)
+        node.start()
+        self.assertEqual(node.wait(task_id), cancelled)
+        self.assertEqual(custody(), held)
+        if by_origin:
+            self.assertEqual(node.call("Task.CancelOrigin", origin_cancel), cancelled)
+        replay = node.call("Task.Submit", request)
+        self.assertTrue(replay["deduplicated"])
+        self.assertEqual(replay["task_id"], task_id)
+
+        settled = node.call("Operation.Reconcile", target(operation))
+        self.assertEqual((settled["lifecycle"], settled["outcome_knowledge"]), ("Cancelled", "Known"))
+        self.assertEqual(settled["effect_refs"][0]["resource_id"],
+                         op_before["value"]["effect_refs"][0]["resource_id"])
+        done = node.wait(task_id)
+        self.assertEqual((done["lifecycle"], done["outcome_knowledge"], done["current_run_id"]),
+                         ("Cancelled", "Known", run_id))
+        self.assertIsNone(custody())
+        with closing(sqlite3.connect(node.state / "state.db")) as database:
+            self.assertEqual(database.execute(
+                "SELECT q.phase,b.reserved,b.spent FROM queue q JOIN budgets b ON b.id=q.budget WHERE q.task=?",
+                (task_id,),
+            ).fetchone(), ("Done", *held[3:]))
+        [result] = done["result"]["artifact_refs"]
+        proof = node.get(result["resource_id"])["resource"]["spec"]["reconciliation_evidence_ref"]
+        recorded = node.get(proof["resource_id"])["value"]
+        self.assertEqual(recorded["operation_ref"], operation)
+        self.assertEqual(recorded["evidence"]["file_revision"]["inode"], str(inode.st_ino))
+        self.assertEqual(recorded["evidence"]["conclusion"], "ObservedPostcondition")
+        self.assertEqual(payload.read_bytes(), b"published")
+        self.assertEqual((payload.stat().st_ino, payload.stat().st_mtime_ns), (inode.st_ino, inode.st_mtime_ns))
+        with self.assertRaises(Failure) as duplicate:
+            node.call("Operation.Reconcile", target(operation))
+        self.assertEqual(duplicate.exception.code, "Conflict")
+        self.assertEqual(node.wait(task_id), done)
+        if by_origin:
+            self.assertEqual(node.call("Task.CancelOrigin", origin_cancel), done)
+        node.stop()
+        verified = json.loads(subprocess.check_output(node.daemon + ["verify"], timeout=20))
+        self.assertEqual(verified["sqlite_integrity"], "Verified", verified)
 
     def check_publication(self, node, tool):
         volume = node.perform("volume.create", {"name": tool})

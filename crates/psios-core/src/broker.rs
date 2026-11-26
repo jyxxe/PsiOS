@@ -262,13 +262,64 @@ fn close(
     agent::task_closed(db, &t)?;
     Ok(t)
 }
-pub(crate) fn cancel_task(db: &Db<'_>, t: &Doc) -> Result<Doc> {
+
+fn cancel_unresolved(db: &Db<'_>, actor: &str, task: &Doc) -> Result<Doc> {
+    let missing = || {
+        err(
+            "RecoveryRequired",
+            "unresolved task lost its original operation or run",
+        )
+    };
+    let operation_id: String =
+        db.c.query_row(
+            "SELECT operation FROM queue WHERE task=?1 AND phase='Unknown'",
+            [&task.id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten()
+        .ok_or_else(missing)?;
+    let operation = db.find(&operation_id)?.ok_or_else(missing)?;
+    let run_id = task.body["current_run_id"].as_str().ok_or_else(missing)?;
+    let run = db.find(run_id)?.ok_or_else(missing)?;
+    require(
+        operation.kind == "Operation"
+            && operation.owner == task.owner
+            && operation.spec["task_id"] == task.id
+            && operation.body["outcome_knowledge"] == "Unknown"
+            && task.body["operation_refs"] == json!([operation.reference()])
+            && run.kind == "Run"
+            && run.owner == task.owner
+            && run.body["task_id"] == task.id
+            && run.body["lifecycle"] == "Lost"
+            && run.body["outcome_knowledge"] == "Unknown"
+            && run.body["operation_refs"] == task.body["operation_refs"],
+        "RecoveryRequired",
+        "unresolved task no longer matches its original operation and run",
+    )?;
+
+    // Close the Task lifecycle without moving the effect's recovery boundary.
+    let mut body = task.body.clone();
+    body["lifecycle"] = json!("Cancelled");
+    let cancelled = db.status(task, body)?;
+    db.audit(
+        actor,
+        "Task.RecordCancellation",
+        Some(&task.id),
+        "PendingReconciliation",
+    )?;
+    agent::task_closed(db, &cancelled)?;
+    Ok(cancelled)
+}
+
+pub(crate) fn cancel_task(db: &Db<'_>, actor: &str, t: &Doc) -> Result<Doc> {
     if t.spec["task_type"] == node::network::trial::TOOL
         && let Some(cancelled) = network_trial::cancel(db, t)?
     {
         return Ok(cancelled);
     }
     match field(&t.body, "lifecycle") {
+        "Paused" if t.body["outcome_knowledge"] == "Unknown" => cancel_unresolved(db, actor, t),
         "Succeeded" | "Failed" | "Cancelled" | "Paused" | "Cancelling" => Ok(t.clone()),
         "Running" => {
             let phase: String =
@@ -291,5 +342,5 @@ pub fn cancel(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let t = db.of(&p.id, "Task")?;
     policy::owned(actor, &t)?;
     t.cas(&p.expected_resource_version)?;
-    Ok(cancel_task(db, &t)?.body)
+    Ok(cancel_task(db, actor, &t)?.body)
 }

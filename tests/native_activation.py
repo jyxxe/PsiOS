@@ -333,17 +333,19 @@ def exercise(args, work):
     interrupted_boot(fixture, work)
     state, managed, activated_boot = verified_boot(fixture, work, candidate, frozen, prior, admin)
     from native_selection import exercise_selection
+    from native_selection_recovery import exercise_selection_recovery
     from native_selection_successor import exercise_successor
     selected_dir, selected = exercise_selection(work, args.selector, state, secret)
     successor_dir, successor, successor_build, successor_first_boot = exercise_successor(
         args, work, selected_dir, selected, secret)
+    _, recovered = exercise_selection_recovery(work, args.selector, state, secret)
     secret.unlink()
 
     booted = verify_guest(work, successor_dir / "managed.raw", successor_dir / "managed-ovmf-code.fd",
                           successor_dir / "managed-efi-vars.fd", operator, admin, successor_build, prior, token)
     rebooted = verify_guest(work, old, code, vars_file, operator, admin, old_build, prior, token)
     assert len({prior[3], activated_boot, selected["proof"]["boot_id"], successor_first_boot,
-                successor["proof"]["boot_id"], booted, rebooted}) == 7
+                successor["proof"]["boot_id"], recovered["proof"]["boot_id"], booted, rebooted}) == 8
     assert digest_map(frozen) == frozen and digest_map(bundle) == bundle
     assert managed_bytes(state) == managed
     print("PASS native activation, selected deployment boot, crash fencing, original bytes and durable guest data")

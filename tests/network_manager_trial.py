@@ -266,6 +266,7 @@ unmanaged-devices=*;except:interface-name:{DEVICE}
   <policy user="root">
     <allow own="*"/>
     <allow send_destination="*"/>
+    <allow receive_sender="*"/>
   </policy>
 </busconfig>
 """)

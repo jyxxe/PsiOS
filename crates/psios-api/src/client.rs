@@ -41,7 +41,7 @@ pub struct Client {
 pub fn task_wait_ready(task: &Value) -> bool {
     matches!(
         task["lifecycle"].as_str(),
-        Some("Succeeded" | "Failed" | "Cancelled" | "Paused" | "WaitingApproval")
+        Some("Succeeded" | "Failed" | "Cancelled" | "Paused" | "WaitingApproval" | "WaitingInput")
     )
 }
 

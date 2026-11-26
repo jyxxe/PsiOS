@@ -77,10 +77,11 @@ impl<'a> Scope<'a> {
     fn load(conn: &'a Connection, schedule: &'a Doc, rule: &'a Rule) -> Result<Self> {
         let source = db::resolve(conn, &rule.source_ref).map_err(|_| invalid())?;
         let origin = &schedule.spec["request"]["origin_ref"];
-        let elapsed: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM authorization_deadlines WHERE resource=?1)",
+        let (authority, elapsed): (String, bool) = conn.query_row(
+            "SELECT value,EXISTS(SELECT 1 FROM authorization_deadlines WHERE resource=?1)
+             FROM meta WHERE key='authority'",
             [&schedule.id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         check(
             schedule.kind == "Schedule"
@@ -91,6 +92,7 @@ impl<'a> Scope<'a> {
                 && schedule.spec["request"]["deadline_at"] == rule.expires_at
                 && origin["origin_type"] == "Schedule"
                 && origin["origin_id"] == schedule.id
+                && origin["authority_id"] == authority
                 && elapsed
                 && schedule.body["overlap"] == MODE
                 && schedule.body["max_triggers"] == rule.max_triggers
@@ -235,7 +237,7 @@ impl<'a> Scope<'a> {
                     })
                     && updated.doc.body["trigger_refs"]
                         .as_array()
-                        .is_some_and(|saved| saved == &refs[..=index])
+                        .is_some_and(|saved| saved.as_slice() == &refs[..=index])
                     && updated.doc.body["pending_trigger_ref"].is_null()
                     && updated.doc.body["source_ref"] == source_ref,
             )?;

@@ -25,7 +25,13 @@ fn needed(conn: &Connection, id: &str) -> Result<Doc> {
     find(conn, id)?.ok_or_else(|| err("RecoveryRequired", "work item evidence resource is missing"))
 }
 
-fn proof(conn: &Connection, item: &Doc, task: &Doc, artifact: &Doc) -> Result<Production> {
+fn proof(
+    conn: &Connection,
+    item: &Doc,
+    task: &Doc,
+    artifact: &Doc,
+    sealed_run: Option<&Value>,
+) -> Result<Production> {
     let criterion = &item.spec["criterion"];
     require(
         task.kind == "Task"
@@ -45,10 +51,13 @@ fn proof(conn: &Connection, item: &Doc, task: &Doc, artifact: &Doc) -> Result<Pr
         "PreconditionFailed",
         "task tool does not satisfy the work item criterion",
     )?;
-    let run = needed(
-        conn,
-        task.body["current_run_id"].as_str().unwrap_or_default(),
-    )?;
+    let run = match sealed_run {
+        Some(reference) => resolve(conn, reference)?,
+        None => needed(
+            conn,
+            task.body["current_run_id"].as_str().unwrap_or_default(),
+        )?,
+    };
     let operation = resolve(conn, &task.body["operation_refs"][0])?;
     let plan = resolve(conn, &operation.body["plan_ref"])?;
     let allowed = &plan.body["allowed_effects"][0];
@@ -78,6 +87,7 @@ fn proof(conn: &Connection, item: &Doc, task: &Doc, artifact: &Doc) -> Result<Pr
     };
     require(
         run.kind == "Run"
+            && run.id == task.body["current_run_id"]
             && run.owner == task.owner
             && run.body["task_id"] == task.id
             && run.body["outcome_knowledge"] == "Known"
@@ -200,7 +210,7 @@ pub(super) fn attach(
     )?;
     let (artifact, shared) = result_access::resolve_artifact(db, actor, artifact_ref)?;
     let task = db.resolve(task_ref)?;
-    let provenance = proof(db.c, item, &task, &artifact)?;
+    let provenance = proof(db.c, item, &task, &artifact, None)?;
     log_tail::authorize_task(db, actor, &task)?;
     let current = live_output(db.c, &task, &artifact)?;
     require(
@@ -235,7 +245,13 @@ fn attached(conn: &Connection, item: &Doc) -> Result<Attached> {
     let original = resolve(conn, &evidence.body["work_item_ref"])?;
     let task = resolve(conn, &evidence.body["task_ref"])?;
     let artifact = resolve(conn, &evidence.body["artifact_ref"])?;
-    let provenance = proof(conn, item, &task, &artifact)?;
+    let provenance = proof(
+        conn,
+        item,
+        &task,
+        &artifact,
+        Some(&evidence.body["run_ref"]),
+    )?;
     require(
         item.kind == "WorkItem"
             && evidence.kind == KIND
@@ -245,7 +261,6 @@ fn attached(conn: &Connection, item: &Doc) -> Result<Attached> {
             && evidence.body["work_item_id"] == item.id
             && evidence.body["project_id"] == item.spec["project_id"]
             && evidence.body["criterion"] == item.spec["criterion"]
-            && evidence.body["run_ref"] == provenance.run.reference()
             && evidence.body["operation_ref"] == provenance.operation.reference()
             && original.kind == "WorkItem"
             && original.id == item.id
@@ -300,6 +315,15 @@ pub(super) fn release(db: &Db<'_>, item: &Doc, evidence: &Doc) -> Result<()> {
         "work item evidence changed before releasing its retention pin",
     )?;
     live_output(db.c, &attached.task, &attached.artifact).map(|_| ())
+}
+
+pub(super) fn abandon(db: &Db<'_>, item: &Doc) -> Result<()> {
+    require(
+        pinned(item),
+        "PreconditionFailed",
+        "work item has no active evidence to abandon",
+    )?;
+    attached(db.c, item).map(|_| ())
 }
 
 pub(super) fn view(db: &Db<'_>, item: &Doc, actor: &str) -> Result<Option<Value>> {
@@ -452,30 +476,34 @@ mod tests {
     use crate::{Config, Store, broker};
     use psios_api::{Request, VERSION, id};
 
-    #[test]
-    fn active_evidence_keeps_its_original_output_across_task_metadata_revisions() {
+    fn call(store: &mut Store, token: &str, method: &str, params: Value) -> Value {
+        store
+            .request(
+                rustix::process::geteuid().as_raw(),
+                Request {
+                    schema_version: VERSION.into(),
+                    request_id: id("project-evidence-test"),
+                    token: token.into(),
+                    method: method.into(),
+                    params,
+                },
+            )
+            .unwrap()
+    }
+
+    fn successful_task() -> (tempfile::TempDir, Store, String, String) {
         let directory = tempfile::tempdir().unwrap();
         let config = Config::local(&directory.path().join("core"));
         Store::init(&config).unwrap();
         let token = std::fs::read_to_string(config.witness_dir.join("owner.token")).unwrap();
         let mut store = Store::open(config).unwrap();
-        let mut call = |method: &str, params: Value| {
-            store.request(
-                rustix::process::geteuid().as_raw(),
-                Request {
-                    schema_version: VERSION.into(),
-                    request_id: id("project-evidence-test"),
-                    token: token.clone(),
-                    method: method.into(),
-                    params,
-                },
-            )
-        };
         let prepared = call(
+            &mut store,
+            &token,
             "Task.Prepare",
             json!({"tool":"system.status","input":{},"key":id("project-evidence-source"),"delegation_id":"owner-delegation"}),
-        ).unwrap();
-        let submitted = call("Task.Submit", prepared).unwrap();
+        );
+        let submitted = call(&mut store, &token, "Task.Submit", prepared);
         let task_id = submitted["task_id"].as_str().unwrap();
         assert_eq!(
             store
@@ -498,10 +526,15 @@ mod tests {
                 broker::finish(db, &work, result)
             })
             .unwrap();
+        (directory, store, token, task_id.into())
+    }
 
+    #[test]
+    fn active_evidence_keeps_its_original_output_across_task_metadata_revisions() {
+        let (_directory, mut store, _token, task_id) = successful_task();
         store
             .transaction("verify-work-item-output", |db| {
-                let issued = db.of(task_id, "Task")?;
+                let issued = db.of(&task_id, "Task")?;
                 let output = db.resolve(&issued.body["result"]["artifact_refs"][0])?;
                 let mut body = issued.body.clone();
                 body["conditions"] = json!([broker::condition(
@@ -525,5 +558,72 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn abandonment_releases_missing_payload_and_reassignment_preserves_rejected_proof() {
+        let (_directory, mut store, token, task_id) = successful_task();
+        let reader = call(
+            &mut store,
+            &token,
+            "Agent.Register",
+            json!({"name":"evidence-maintenance-reader"}),
+        );
+        let reader = reader["principal_id"].as_str().unwrap();
+        call(
+            &mut store,
+            &token,
+            "Grant.Issue",
+            json!({
+                "principal_id":reader, "actions":[result_access::ACTION],
+                "tool_targets":[task_id],"ttl_seconds":120,"units":1,
+            }),
+        );
+        store.transaction("work-item-abandonment-evidence", |db| {
+            let task = db.of(&task_id, "Task")?;
+            let output = db.resolve(&task.body["result"]["artifact_refs"][0])?;
+            let operation = db.resolve(&task.body["operation_refs"][0])?;
+            let plan = db.resolve(&operation.body["plan_ref"])?;
+            let spec = json!({"project_id":"evidence-maintenance-project","assignee_principal_id":policy::OWNER,
+                "criterion":{"kind":"TaskResult","tool":"system.status",
+                             "target_ref":plan.body["allowed_effects"][0]["resource_ref"]}});
+            let submitted = |name: &str| -> Result<(Doc,Doc)> {
+                let ready = db.create("WorkItem", name, policy::OWNER, spec.clone(), json!({"lifecycle":"Ready"}))?;
+                let evidence = attach(db, &ready, policy::OWNER, &task.reference(), &output.reference())?;
+                let item = db.status(&ready, json!({"lifecycle":"InReview","evidence_ref":evidence.reference()}))?;
+                Ok((item, evidence))
+            };
+            let (abandoning, original) = submitted("abandoned-evidence-test")?;
+            let (rejected, rejected_evidence) = submitted("reassigned-evidence-test")?;
+            release(db, &rejected, &rejected_evidence)?;
+            let rejected = db.status(&rejected, json!({"lifecycle":"Ready"}))?;
+            let mut reassigned = spec.clone();
+            reassigned["assignee_principal_id"] = json!(reader);
+            let new = db.update(&rejected, reassigned, rejected.body.clone())?;
+            assert!(view(db, &new, reader)?.is_none());
+            verify(db.c)?;
+
+            // Model lost result bytes together with a later observation of unavailability.
+            // The original sealed task, run and artifact references still exist.
+            assert!(db.c.execute("DELETE FROM artifact_chunks WHERE artifact_id=?1", [&output.id])? > 0);
+            let mut unavailable = task.body.clone();
+            unavailable["result"]["availability"] = json!("Unavailable");
+            db.status(&task, unavailable)?;
+            let run = db.resolve(&original.body["run_ref"])?;
+            let mut changed = run.body.clone();
+            changed["conditions"] = json!([broker::condition("MetadataVerified","run metadata was checked")]);
+            db.status(&run, changed)?;
+            assert!(verify_payload(db, &output).is_err());
+            assert!(retains_artifact(db.c, &output)?);
+            assert_eq!(release(db, &abandoning, &original).unwrap_err().0.code, "PreconditionFailed");
+            abandon(db, &abandoning)?;
+            let abandoned = db.status(&abandoning, json!({"lifecycle":"Abandoned","evidence_ref":original.reference()}))?;
+            assert!(!retains_artifact(db.c, &output)?);
+            let visible = view(db, &abandoned, reader)?.unwrap();
+            assert_eq!(visible["task_ref"], task.reference());
+            assert_eq!(visible["artifact_ref"], output.reference());
+            assert!(view(db, &abandoned, policy::SYSTEM)?.is_none());
+            verify(db.c)
+        }).unwrap();
     }
 }

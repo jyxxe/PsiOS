@@ -12,14 +12,16 @@ from support import Failure, Node, key, target
 from test_artifact_ingress import chunk, upload_request
 
 
+PRIOR_BINARIES = os.getenv("PSIOS_SESSION_INPUT_PRIOR_BIN_DIR")
+
+
 class AgentSessionInputs(unittest.TestCase):
     def setUp(self):
         self.n = Node(os.getenv("PSIOS_TEST_BIN_DIR", "target/debug"))
         self.addCleanup(self.n.close)
         self.node_id = self.n.call("Node.Get", {})["reference"]["resource_id"]
         self.agent = self.n.call("Agent.Register", {"name": "private-input-owner"})
-        self.uploading = self.grant(self.agent, ["artifact.upload", "artifact.read", "artifact.withdraw", "task.read"],
-                                    [self.node_id])
+        self.grant(self.agent, ["artifact.upload", "artifact.read", "artifact.withdraw", "task.read"], [self.node_id])
         self.provider, _ = self.n.agent(["model.serve"])
         self.model = self.register_model()
         self.skill = self.n.call("Skill.Publish", {"name": "data-dependent-inventory", "version": "1",
@@ -181,3 +183,41 @@ class AgentSessionInputs(unittest.TestCase):
         self.assertEqual(n.call("Budget.Get", {"id": owned["budget_ref"]["resource_id"]},
                                 token)["model_calls_used"], 0)
         n.call("Artifact.Withdraw", self.withdrawal(), token)
+
+
+@unittest.skipUnless(PRIOR_BINARIES, "requires the verified prior format-99 Core")
+class ExistingSessionUpgrade(unittest.TestCase):
+    def test_old_inflight_session_replays_exact_context_without_input_negotiation(self):
+        n = Node(PRIOR_BINARIES)
+        self.addCleanup(n.close)
+        provider, _ = n.agent(["model.serve"])
+        agent, grant = n.agent(["session.run", "task.read", "node.inventory"])
+        model = n.call("Model.Register", {"name": "replay-provider", "revision": "1",
+            "provider_principal_id": provider["principal_id"], "inference_outcome_policy": "Strict",
+            "lease_seconds": 60, "max_context_bytes": 4096, "max_output_bytes": 2048})
+        skill = n.call("Skill.Publish", {"name": "replay-skill", "version": "1", "license": "0BSD",
+            "source": "local-test", "tools": ["node.inventory"], "instructions": "Review the summary."})
+        session = n.call("Session.Open", {"key": key(), "goal": "Review the pre-upgrade session.",
+            "skill_ref": skill, "model_ref": model, "context_policy": "ReferencesOnly", "tool_context_window": 1,
+            "max_turns": 2, "delegation_id": grant["delegation_ref"]["resource_id"]}, agent["token"])["reference"]
+        request = {"session_id": session["resource_id"], "key": "before-storage-inputs"}
+        first = n.call("Model.Claim", request, provider["token"])
+        self.assertNotIn("inputs", first["context"])
+        n.stop(signal.SIGKILL)
+        old = json.loads(subprocess.check_output(n.daemon + ["verify"], timeout=20))
+        self.assertEqual(old["database_format"], 99)
+
+        n.daemon[0] = os.path.abspath(os.path.join(os.getenv("PSIOS_TEST_BIN_DIR", "target/debug"), "psiosd"))
+        staged = json.loads(subprocess.check_output(n.daemon + ["verify"], timeout=20))
+        self.assertTrue(staged["migration_required"])
+        n.start()
+        replay = n.call("Model.Claim", request, provider["token"])
+        self.assertEqual(replay, {**first, "recovered": True})
+        result = n.call("Model.Respond", {"session_id": session["resource_id"], "lease_id": replay["lease_id"],
+            "decision": {"action": "finish", "summary": "Retained original request."}}, provider["token"])
+        self.assertEqual(result["lifecycle"], "Succeeded")
+        n.stop()
+        current = json.loads(subprocess.check_output(n.daemon + ["verify"], timeout=20))
+        self.assertGreaterEqual(current["database_format"], 100)
+        self.assertEqual(current["node_id"], old["node_id"])
+        self.assertFalse(current["migration_required"])

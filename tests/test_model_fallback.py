@@ -1,19 +1,25 @@
 """Pre-authorized local model failover with a real Task checkpoint and independent providers."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import json
 import os
 import signal
+import sqlite3
+import subprocess
 import unittest
 
 from support import Failure, Node, key, target
 
 
-def register_provider(node, name):
+def register_provider(node, name, *, strict=False):
     provider, _ = node.agent(["model.serve"])
-    model = node.call("Model.Register", {
+    profile = {
         "name": name, "revision": "v1", "provider_principal_id": provider["principal_id"],
         "max_context_bytes": 131072, "max_output_bytes": 8192, "lease_seconds": 20, "max_in_flight": 1,
-    })
+    }
+    if strict:
+        profile["inference_outcome_policy"] = "Strict"
+    model = node.call("Model.Register", profile)
     return provider, model
 
 
@@ -41,12 +47,12 @@ class ModelFallbackTests(unittest.TestCase):
         self.actions = ["task.submit", "task.read", "session.run", "system.status", "agent.session.start"]
         self.grant = self.issue([self.primary_model, self.alternate_model])
 
-    def issue(self, models, allow=True):
+    def issue(self, models, allow=True, *, calls=5):
         actions = self.actions + (["session.failover"] if allow else [])
         return self.n.call("Grant.Issue", {
             "principal_id": self.owner["principal_id"], "actions": actions,
             "tool_targets": [m["resource_id"] for m in models] + [self.skill["resource_id"], "profile-local"],
-            "units": 8, "model_calls": 5, "model_lease_ms": 100_000, "ttl_seconds": 180,
+            "units": 8, "model_calls": calls, "model_lease_ms": 100_000, "ttl_seconds": 180,
         })
 
     def blueprint(self, **overrides):
@@ -76,6 +82,125 @@ class ModelFallbackTests(unittest.TestCase):
 
     def handoff_request(self, session, model=None):
         return {**target(session), "model_ref": model or self.alternate_model}
+
+    def strict_pair(self):
+        self.primary, self.primary_model = register_provider(self.n, "strict-handoff-primary", strict=True)
+        self.alternate, self.alternate_model = register_provider(self.n, "strict-handoff-alternate", strict=True)
+        self.grant = self.issue([self.primary_model, self.alternate_model])
+
+    def report(self, claim, outcome):
+        return self.n.call("Model.ReportFailure", {"session_id": claim["session_id"],
+            "model_ref": self.primary_model, "lease_id": claim["lease_id"], "outcome": outcome},
+            self.primary["token"])
+
+    def verify_stopped(self):
+        result = subprocess.run(self.n.daemon + ["verify"], capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["sqlite_integrity"], "Verified")
+
+    def test_witnessed_not_started_can_handoff_after_primary_retirement(self):
+        self.strict_pair()
+        n = self.n
+        session = self.open()["resource_id"]
+        first = self.claim(self.primary, self.primary_model)
+        result = submit_decision(n, self.primary, first, {"action": "tool", "tool": "system.status", "input": {}})
+        written = n.wait(result["task_id"])
+        self.assertEqual((written["lifecycle"], written["outcome_knowledge"]), ("Succeeded", "Known"), written)
+        artifact, = written["result"]["artifact_refs"]
+        claim = self.claim(self.primary, self.primary_model)
+        self.assertEqual(claim["turn"], 2)
+        self.assertEqual(claim["context"]["last_tool"]["task_id"], result["task_id"])
+        self.denied("PreconditionFailed", "Session.UseFallback",
+                    self.handoff_request(self.observe(session)["reference"]), self.owner)
+        report = self.report(claim, "NotStarted")
+        paused = self.observe(session)
+        self.assertEqual(report["session_ref"], paused["reference"])
+        self.assertEqual(paused["session"]["model_inference_failure"]["lease_id"], claim["lease_id"])
+        extended = n.call("Session.Extend", {**target(paused["reference"]), "max_turns": 5}, self.owner["token"])
+        self.assertEqual(extended["session"]["pause_reason"], "ModelNotStarted")
+        n.call("Model.Retire", target(self.primary_model))
+        self.denied("PreconditionFailed", "Session.Resume", target(extended["reference"]), self.owner)
+        self.denied("Conflict", "Session.UseFallback", self.handoff_request(paused["reference"]), self.owner)
+        self.denied("PermissionDenied", "Session.UseFallback", self.handoff_request(extended["reference"]),
+                    self.alternate)
+
+        budget_params = {"id": self.grant["budget_ref"]["resource_id"]}
+        before = n.call("Budget.Get", budget_params)
+        request = self.handoff_request(extended["reference"])
+        accepted = n.call("Session.UseFallback", request, self.owner["token"])
+        successor = accepted["successor"]["reference"]["resource_id"]
+        self.assertNotEqual(successor, session)
+        state = accepted["successor"]["session"]
+        self.assertEqual((state["lifecycle"], state["turn"], state["max_turns"]), ("AwaitingModel", 2, 5))
+        self.assertEqual(state["model_ref"], self.alternate_model)
+        self.assertEqual(state["budget_ref"], self.grant["budget_ref"])
+        self.assertNotIn("model_inference_failure", state)
+        self.assertNotIn("pause_reason", state)
+        self.assertEqual(self.observe(session)["session"]["model_inference_failure"],
+                         paused["session"]["model_inference_failure"])
+        self.assertEqual(n.call("Budget.Get", budget_params), before)
+
+        n.stop(signal.SIGKILL)
+        self.verify_stopped()
+        self.reject_other_pause_revision(session, extended["reference"])
+        self.verify_stopped()
+        n.start()
+        self.assertEqual(n.call("Session.UseFallback", request, self.owner["token"]), accepted)
+        fresh = self.claim(self.alternate, self.alternate_model)
+        self.assertEqual((fresh["session_id"], fresh["turn"]), (successor, 3))
+        self.assertNotEqual(fresh["lease_id"], claim["lease_id"])
+        self.assertEqual(fresh["context"]["last_tool"]["result"]["artifact_refs"], [artifact])
+        finished = submit_decision(n, self.alternate, fresh, {"action": "finish", "summary": "Verified local status"})
+        self.assertEqual(finished["lifecycle"], "Succeeded")
+        self.assertEqual(n.call("Budget.Get", budget_params)["model_calls_used"], before["model_calls_used"] + 1)
+        history = n.call("Session.History", {"id": session}, self.owner["token"])
+        self.assertEqual(history["turns"][1]["inference_failure"], report)
+        self.assertEqual(n.call("Session.UseFallback", request, self.owner["token"]), accepted)
+        n.stop()
+        self.verify_stopped()
+
+    def reject_other_pause_revision(self, session, replacement):
+        path = self.n.state / "state.db"
+        witness = f"model-handoff-{session}"
+        update = "UPDATE versions SET body=? WHERE id=? AND rev=1"
+        with closing(sqlite3.connect(path, timeout=10)) as db, db:
+            raw, = db.execute("SELECT body FROM versions WHERE id=? AND rev=1", (witness,)).fetchone()
+            body = json.loads(raw)
+            self.assertNotEqual(body["not_started_session_ref"], replacement)
+            body["not_started_session_ref"] = replacement
+            db.execute(update, (json.dumps(body), witness))
+        try:
+            refused = subprocess.run(self.n.daemon + ["verify"], capture_output=True, text=True, timeout=20)
+            self.assertNotEqual(refused.returncode, 0, refused)
+            self.assertIn("RecoveryRequired", refused.stderr)
+            self.assertIn("model handoff lost its exact NotStarted lineage", refused.stderr)
+        finally:
+            with closing(sqlite3.connect(path, timeout=10)) as db, db:
+                db.execute(update, (raw, witness))
+
+    def test_not_started_handoff_refuses_exhausted_budget_and_revoked_owner_authority(self):
+        self.strict_pair()
+        n = self.n
+        limited = self.issue([self.primary_model, self.alternate_model], calls=1)
+        session = self.open(limited)["resource_id"]
+        claim = self.claim(self.primary, self.primary_model)
+        self.assertEqual(claim["session_id"], session)
+        report = self.report(claim, "NotStarted")
+        request = self.handoff_request(report["session_ref"])
+        self.denied("QuotaExceeded", "Session.UseFallback", request, self.owner)
+        self.assertEqual(self.observe(session)["reference"], report["session_ref"])
+        self.assertFalse(self.claim(self.alternate, self.alternate_model)["available"])
+        n.call("Grant.Revoke", target(limited["grant_ref"]))
+        self.denied("PermissionDenied", "Session.UseFallback", request, self.owner)
+
+        unknown = self.open()["resource_id"]
+        live = self.claim(self.primary, self.primary_model)
+        self.assertEqual(live["session_id"], unknown)
+        failed = self.report(live, "Unknown")
+        self.denied("PreconditionFailed", "Session.UseFallback", self.handoff_request(failed["session_ref"]),
+                    self.owner)
+        self.assertEqual(self.observe(unknown)["reference"], failed["session_ref"])
+        self.assertFalse(self.claim(self.alternate, self.alternate_model)["available"])
 
     def test_handoff_preserves_verified_task_result_fences_processor_and_keeps_budget(self):
         n = self.n

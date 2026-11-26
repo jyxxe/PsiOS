@@ -795,6 +795,8 @@ Schedule 和 Workflow 可以固定同样的制品引用，并通过各自已有�
 
 调用 `Session.UseFallback` 时提交原会话 ID、当前修订和备选 Model 引用。Rust SDK 使用 `Client::use_session_fallback`，CLI 使用 `psiosctl session-use-fallback ID --revision VERSION MODEL_REF_FILE`。Core 在一个事务中关闭原会话并创建后继，保留已确认的 Task 引用和结果保留关系。交接沿用原共享预算，已使用的轮次也计入上限。原 Provider 的未结算租约立即失去提交权限。该次调用的预扣仍计入共享预算，原 Provider 的并发名额占用至租期结束。等待 Task 或含未知效果的会话先走原 Task 结算流程。此接口使用显式交接，备选 Provider 按原会话的队列设置接手。[双 Provider、任务和重启验收](../tests/test_model_fallback.py) · [格式 46 升级](../tests/model_fallback_upgrade.py)
 
+严格租约已收到原 Provider 有授权且可核验的 `NotStarted` 回执时，所有者可直接交接至预授权备选模型。原 Model 之后退役仍可核验该历史回执。Core 验证当前会话委托、备选模型的 Provider 权限、剩余预算与原无效果回执，保留原轮次和已确认工具结果。后继会话在实际领取新租约时计费。原租约尚在途或结果为 `Unknown` 时仍拒绝交接。[严格失败回执及备选模型验收](../tests/test_model_fallback.py)
+
 ### 持久的 Provider 队列
 
 调用 `Session.Open` 时显式提供 `"provider_queue":true`，允许选定 Model 的 Provider 自动领取该会话。Provider 可用独立凭据和上述 `model.json` 运行以下命令。省略 `--once` 时，进程持续等待并处理可领取的轮次。

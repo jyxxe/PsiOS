@@ -316,6 +316,87 @@ pub(super) fn not_started(session: &Doc) -> bool {
         && session.body["outcome_knowledge"] == NOT_STARTED
 }
 
+pub(super) fn handoff_receipt(conn: &Connection, session: &Doc, model: &Doc) -> Result<Value> {
+    let receipt_error = || {
+        err(
+            "RecoveryRequired",
+            "model handoff lost the original NotStarted receipt",
+        )
+    };
+    let failure = &session.body["model_inference_failure"];
+    let lease = failure["lease_id"].as_str().ok_or_else(receipt_error)?;
+    let (issued_revision, turn, receipt): (i64, u32, Value) = conn
+        .query_row(
+            "SELECT i.session_revision,t.turn,i.receipt
+             FROM model_inference_leases i JOIN session_turns t USING(lease)
+             WHERE i.lease=?1 AND i.model=?2 AND t.session=?3
+               AND i.status='NotStarted' AND i.source='Provider' AND i.receipt IS NOT NULL
+               AND t.receipt IS NULL AND t.decision_digest IS NULL AND t.task IS NULL
+               AND NOT EXISTS(SELECT 1 FROM session_tasks WHERE session=t.session AND turn=t.turn)",
+            params![lease, model.id, session.id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?
+        .ok_or_else(receipt_error)?;
+    let issued = conn
+        .query_row(
+            "SELECT * FROM versions WHERE id=?1 AND rev=?2",
+            params![session.id, issued_revision],
+            row,
+        )
+        .optional()?
+        .ok_or_else(receipt_error)?;
+    let settled = resolve(conn, &receipt["session_ref"]).map_err(|_| receipt_error())?;
+    let before = predecessor(conn, &settled)?;
+    let model_ref = model.reference();
+    require(
+        not_started(session)
+            && session.body["current_lease"].is_null()
+            && session.body["turn"] == turn
+            && model.kind == "Model"
+            && strict(model)
+            && session.spec["model_ref"] == model_ref
+            && failure
+                == &json!({"lease_id":lease,"model_ref":model_ref,"outcome":NOT_STARTED,"source":"Provider"})
+            && issued.kind == "Session"
+            && issued.owner == session.owner
+            && issued.spec == session.spec
+            && state(&issued) == "ModelInFlight"
+            && issued.body["current_lease"] == lease
+            && issued.body["turn"] == turn
+            && same_pending_turn(&issued, &before, lease, turn)
+            && settled.kind == "Session"
+            && settled.id == session.id
+            && settled.owner == session.owner
+            && settled.spec == session.spec
+            && settled.rev <= session.rev
+            && not_started(&settled)
+            && settled.body["turn"] == turn
+            && settled.body["current_lease"].is_null()
+            && &settled.body["model_inference_failure"] == failure
+            && receipt
+                == json!({"session_ref":settled.reference(),"model_ref":model_ref,"lease_id":lease,
+                "outcome":NOT_STARTED,"lifecycle":"Paused","outcome_knowledge":NOT_STARTED}),
+        "RecoveryRequired",
+        "model handoff lost the original NotStarted receipt",
+    )?;
+    require(
+        provider_authority::issued_binding(conn, &issued, model, lease)?.is_some(),
+        "PreconditionFailed",
+        "model handoff requires a report from an originally witnessed provider",
+    )?;
+    Ok(settled.reference())
+}
+
+fn same_pending_turn(issued: &Doc, before: &Doc, lease: &str, turn: u32) -> bool {
+    before.rev >= issued.rev
+        && state(before) == "ModelInFlight"
+        && before.body["current_lease"] == lease
+        && before.body["turn"] == turn
+        && before.body["current_usage_ref"] == issued.body["current_usage_ref"]
+        && before.body["lease_until"] == issued.body["lease_until"]
+}
+
 pub(super) fn check_resume(db: &Db<'_>, session: &Doc, model: &Doc) -> Result<()> {
     require(
         has_turn(session),
@@ -338,6 +419,10 @@ pub(super) fn check_resume(db: &Db<'_>, session: &Doc, model: &Doc) -> Result<()
         "RecoveryRequired",
         "model failure receipt disagrees with this session",
     )?;
+    check_model_budget(db, session, model)
+}
+
+pub(super) fn check_model_budget(db: &Db<'_>, session: &Doc, model: &Doc) -> Result<()> {
     let budget = session.body["budget_ref"]["resource_id"]
         .as_str()
         .ok_or_else(|| err("RecoveryRequired", "model budget reference is missing"))?;
@@ -461,13 +546,7 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
                     && settled.id == issued.id
                     && settled.rev > issued.rev
                     && settled.spec == issued.spec
-                    && before_settlement.rev >= issued.rev
-                    && state(&before_settlement) == "ModelInFlight"
-                    && before_settlement.body["current_lease"] == lease
-                    && before_settlement.body["turn"] == turn
-                    && before_settlement.body["current_usage_ref"]
-                        == issued.body["current_usage_ref"]
-                    && before_settlement.body["lease_until"] == issued.body["lease_until"]
+                    && same_pending_turn(&issued, &before_settlement, &lease, turn)
                     && state(&settled) == lifecycle
                     && settled.body["turn"] == turn
                     && settled.body["current_lease"].is_null()

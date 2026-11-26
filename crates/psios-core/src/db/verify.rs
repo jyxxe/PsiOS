@@ -188,6 +188,7 @@ pub(super) fn check_artifacts(
     }
     if identity.database_format >= crate::agent::provider_authority::FORMAT {
         crate::agent::provider_authority::verify(conn)?;
+        crate::agent::fallback::verify_not_started(conn)?;
     }
     if identity.database_format >= crate::agent::late_decision::FORMAT {
         crate::agent::late_decision::verify(conn)?;

@@ -42,8 +42,13 @@ def exercise(previous, current):
 
             legacy = node.daemon[:]
             node.daemon[0] = str(current.resolve() / "psiosd")
-            before = json.loads(subprocess.check_output(node.daemon + ["verify"], timeout=20))
+            before = json.loads(subprocess.check_output(
+                node.daemon + ["verify", "--rehearse-migration"], timeout=20))
             assert before["database_format"] == 110 and before["migration_required"], before
+            rehearsal = before["migration_rehearsal"]
+            assert rehearsal["source_format"] == 110 and rehearsal["status"] == "Verified", before
+            target_format = rehearsal["target_format"]
+            assert target_format >= 111, before
             node.start()
             assert node.get(kept["resource_id"]) == kept_before
             assert node.call("BlockDevice.Get", {"id": old["resource_id"]}) == old_state
@@ -54,10 +59,10 @@ def exercise(previous, current):
             assert retired["state"]["retired_from_ref"] == kept, retired
             node.stop()
             after = json.loads(subprocess.check_output(node.daemon + ["verify"], timeout=20))
-            assert after["database_format"] == 111 and not after["migration_required"], after
+            assert after["database_format"] == target_format and not after["migration_required"], after
             refused = subprocess.run(legacy + ["check"], text=True, capture_output=True, timeout=20)
             assert refused.returncode and "SchemaVersionUnsupported" in refused.stderr, refused
-        print("PASS format-110 active block backfill, terminal history, exact retirement and old-writer refusal")
+        print(f"PASS format-110 to {target_format} block backfill, terminal history, retirement and old-writer refusal")
     finally:
         node.close()
 

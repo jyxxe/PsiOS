@@ -62,6 +62,9 @@ if git -C "$repo" cat-file -e "$sha:images/native/README.txt" 2>/dev/null; then
     if git -C "$repo" cat-file -e "$sha:images/native/core-cgroup" 2>/dev/null; then
         native_files+=(core-cgroup)
     fi
+    if git -C "$repo" cat-file -e "$sha:images/native/install.py" 2>/dev/null; then
+        native_files+=(install.py install_source.py install_target.py)
+    fi
     git -C "$repo" archive "$sha:images/native" "${native_files[@]}" | tar --same-permissions -xf - -C native
     checks+=("${native_files[@]/#/native/}")
     members+=(native)

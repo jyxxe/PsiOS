@@ -104,20 +104,24 @@ def _number(fd, name):
     return int(value)
 
 
+def filesystem_type(fd):
+    with Path(f"/proc/self/fdinfo/{fd}").open("rb") as info:
+        mount = next((line.split()[1] for line in info if line.startswith(b"mnt_id:\t")), None)
+    if mount is not None:
+        with Path("/proc/self/mountinfo").open("rb") as mounts:
+            for index, line in enumerate(mounts):
+                if index >= 8192:
+                    break
+                if line.split(b" ", 1)[0] == mount:
+                    _, _, details = line.partition(b" - ")
+                    return details.split(b" ", 1)[0]
+    return b""
+
+
 def _sysfs_device():
     with _directory(SYSFS) as fd:
-        with Path(f"/proc/self/fdinfo/{fd}").open("rb") as info:
-            mount = next((line.split()[1] for line in info if line.startswith(b"mnt_id:\t")), None)
-        if mount is not None:
-            with Path("/proc/self/mountinfo").open("rb") as mounts:
-                for index, line in enumerate(mounts):
-                    if index >= 8192:
-                        break
-                    if line.split(b" ", 1)[0] == mount:
-                        _, separator, filesystem = line.partition(b" - ")
-                        if separator and filesystem.split(b" ", 1)[0] == b"sysfs":
-                            return os.fstat(fd).st_dev
-                        break
+        if filesystem_type(fd) == b"sysfs":
+            return os.fstat(fd).st_dev
     raise ValueError("installation target requires the Linux sysfs device tree")
 
 

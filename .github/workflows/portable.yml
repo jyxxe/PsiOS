@@ -78,7 +78,7 @@ jobs:
       - name: Download and configure rescue VM prerequisites
         run: |
           packages=(qemu-system-x86 qemu-utils genisoimage cpio e2fsprogs fdisk acl dnsmasq-base
-                    xorriso grub-common grub-efi-amd64-bin dosfstools mtools ovmf seabios openssl)
+                    xorriso grub-common grub-efi-amd64-bin dosfstools mtools ovmf seabios openssl strace)
           missing=()
           for pkg in "${packages[@]}"; do
             if [[ $(dpkg-query -W -f='${db:Status-Status}' "$pkg" 2>/dev/null) != installed ]]; then missing+=("$pkg"); fi
@@ -114,6 +114,14 @@ jobs:
       - name: Recover both DST fold occurrences on a UEFI disk after power cuts
         run: |
           python3 tests/native_calendar.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+
+      - name: Install to an isolated blank block device, recover missing receipts and boot it
+        run: |
+          if [[ ! -c /dev/loop-control ]]; then sudo modprobe loop; fi
+          sudo -n python3 -B tests/native_install.py \
+            --installer "$RUNNER_TEMP/rescue-core/native/install.py" \
+            --builder "$RUNNER_TEMP/rescue-core/native/create.py" \
             --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
 
       - name: Enforce native Core cgroup quotas and retain them during upgrade

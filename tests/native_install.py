@@ -124,6 +124,7 @@ class OwnedLoop:
     def __exit__(self, *_):
         try:
             device = self.binding().st_rdev
+            os.fsync(self.fd)
             fcntl.ioctl(self.fd, LOOP_CLR_FD, 0)
         finally:
             os.close(self.fd)
@@ -277,6 +278,26 @@ def rejected_media(work, fixture):
         assert disk.digest(fixture.size) == before
 
 
+def rejected_state_storage(work, fixture):
+    def inspect(directory):
+        return command([*fixture.tool, "inspect", "--state-dir", str(directory)])
+
+    parent = state_dir(work, "unsafe-parent")
+    nested = state_dir(parent, "nested-state")
+    parent.chmod(0o777)
+    try:
+        deny(inspect(nested), r"protected root-owned parent")
+    finally:
+        parent.chmod(0o700)
+
+    volatile = state_dir(work, "volatile-state")
+    checked(command(["mount", "-t", "tmpfs", "-o", "size=4m,mode=0700", "tmpfs", str(volatile)]))
+    try:
+        deny(inspect(volatile), r"persistent local filesystem")
+    finally:
+        checked(command(["umount", "--", str(volatile)]))
+
+
 def replacement(work, fixture):
     backing = sparse(work, "previous.raw", fixture.size)
     directory = state_dir(work, "replacement")
@@ -304,7 +325,7 @@ def successful_apply(work, fixture):
                          "--receipt", fixture.receipt, "--receipt-sha256", fixture.receipt_sha,
                          "--target", disk.path), r"loop.*(explicit|opt.?in)")
         assert not (opt_in / "operation.json").exists()
-        fixture.plan(state_dir(work, "wrong-receipt"), disk, denial=r"receipt.*(sha|digest)|digest",
+        fixture.plan(state_dir(work, "wrong-receipt"), disk, denial=r"(SHA-256|receipt).*mismatch|digest",
                      receipt_sha="0" * 64)
         plan = fixture.plan(directory, disk)
         plan_data = stored(directory)
@@ -319,7 +340,8 @@ def successful_apply(work, fixture):
         assert json.loads(stored(directory)) == applied
         fixture.assert_verified(disk, applied)
         assert trace_fd_calls(effects, disk.path, ("pwrite64",)), "missing real target writes"
-        assert trace_fd_calls(effects, disk.path, ("fsync",)), "target was never fsynced"
+        flushes = trace_fd_calls(effects, disk.path, ("fsync",))
+        assert len(flushes) == 2 and all(line.endswith("= 0") for line in flushes), flushes
 
         replay = work / "verified-replay-trace.txt"
         durable = stored(directory)
@@ -327,6 +349,12 @@ def successful_apply(work, fixture):
         no_target_writes(replay, disk)
         assert stored(directory) == durable
         assert json.loads(checked(fixture.run(directory, "inspect", disk))) == applied
+
+        damaged = state_dir(work, "damaged-receipt")
+        record = damaged / "operation.json"
+        record.write_text(json.dumps({**applied, "image_readback_sha256": "0" * 64}))
+        record.chmod(0o600)
+        deny(fixture.run(damaged, "inspect", disk), r"verified receipt")
     return backing, effects, disk.path
 
 
@@ -347,8 +375,13 @@ def partial_write(work, fixture):
         assert (status["status"], status["plan_digest"]) == ("WriteIssued", plan["plan_digest"]), status
         partial = disk.digest(fixture.size)
         assert partial not in (before, fixture.source_sha), "fault did not leave a genuinely partial write"
-        with fixture.source.open("rb") as source:
-            assert os.pread(disk.fd, 512, 0) == source.read(512)
+        partitions = plan["plan"]["source"]["partitions"]
+        first = min(part["start_sector"] for part in partitions) * 512
+        last = max(part["start_sector"] + part["sector_count"] for part in partitions) * 512
+        assert os.pread(disk.fd, first, 0) == bytes(first), "primary GPT was published before payload flush"
+        assert os.pread(disk.fd, fixture.size - last, last) == bytes(fixture.size - last), (
+            "backup GPT was published before payload flush"
+        )
 
         issued = stored(directory)
         for action in ("apply", "inspect"):
@@ -365,9 +398,8 @@ def partial_write(work, fixture):
 
 def completed_before_receipt(work, fixture, successful_trace, successful_device):
     all_fsyncs = [line for line in successful_trace.read_text().splitlines() if line.startswith("fsync(")]
-    target_fsync, = trace_fd_calls(successful_trace, successful_device, ("fsync",))
-    assert target_fsync.endswith("= 0"), target_fsync
-    next_fsync = all_fsyncs.index(target_fsync) + 2
+    _, target_fsync = trace_fd_calls(successful_trace, successful_device, ("fsync",))
+    next_fsync = max(index for index, line in enumerate(all_fsyncs) if line == target_fsync) + 2
     assert next_fsync <= len(all_fsyncs), all_fsyncs
     # Kill on the first receipt-journal fsync after the real target fsync.
     backing = sparse(work, "completed-before-receipt.raw", fixture.size)
@@ -378,8 +410,8 @@ def completed_before_receipt(work, fixture, successful_trace, successful_device)
         stopped = fixture.apply(directory, disk, plan, trace=trace,
                                 inject=f"fsync:error=EINTR:signal=SIGKILL:when={next_fsync}")
         assert stopped.returncode in (-signal.SIGKILL, 128 + signal.SIGKILL), stopped
-        flushed, = trace_fd_calls(trace, disk.path, ("fsync",))
-        assert flushed.endswith("= 0"), flushed
+        flushes = trace_fd_calls(trace, disk.path, ("fsync",))
+        assert len(flushes) == 2 and all(line.endswith("= 0") for line in flushes), flushes
         issued = json.loads(stored(directory))
         assert (issued["status"], issued["plan_digest"]) == ("WriteIssued", plan["plan_digest"]), issued
         assert disk.digest(fixture.size) == fixture.source_sha
@@ -414,11 +446,12 @@ def source_fixture(args, work):
 def exercise(args, work):
     source, receipt, approval, secret = source_fixture(args, work)
     fixture = Installer(args.installer.resolve(strict=True), source, receipt, approval)
+    rejected_state_storage(work, fixture)
     rejected_media(work, fixture)
     replacement(work, fixture)
     installed, trace, device = successful_apply(work, fixture)
-    partial_write(work, fixture)
     completed_before_receipt(work, fixture, trace, device)
+    partial_write(work, fixture)
 
     if not args.no_boot:
         for source_name, target_name in (("OVMF_CODE_4M.fd", "code.fd"), ("OVMF_VARS_4M.fd", "vars.fd")):

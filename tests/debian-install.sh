@@ -89,6 +89,8 @@ lookup=$(echo '{"destination":"127.0.0.1"}' | ctl submit node.route_lookup --del
 ctl wait "$lookup" | jq -e '{reference: .result.artifact_refs[0]}' | ctl call Artifact.Read |
     jq -e '.outcome == "Resolved" and .route.table > 0 and .route.kind == 2 and .route.destination.address == "127.0.0.1"' >/dev/null
 
+python3 -B "$(dirname "${BASH_SOURCE[0]}")/debian-network-probe.py" "$config"
+
 systemctl stop psiosd
 runuser -u psios -- psiosd --config "$config" verify |
     jq -e --arg id "$node" '.node_id == $id and .witness == "Confirmed"' >/dev/null

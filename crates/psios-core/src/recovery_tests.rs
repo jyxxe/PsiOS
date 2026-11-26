@@ -2181,6 +2181,24 @@ fn settle_oci_catalog(s: &mut Store, task: &str) -> Value {
     .unwrap()
 }
 
+fn witness_fixture_create(
+    db: &crate::db::Db<'_>,
+    work: &host::Work,
+    engine: &str,
+    container: &str,
+) -> Result<()> {
+    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+    work.checkpoint(
+        db,
+        host::Checkpoint::OciCreateIssued {
+            engine,
+            attempt: &"ca".repeat(32),
+            boot: boot.trim(),
+        },
+    )?;
+    work.checkpoint(db, host::Checkpoint::OciCreateAcknowledged(container))
+}
+
 #[test]
 fn oci_restart_custody_fences_missing_holds_and_corrupt_bound_samples() {
     let directory = tempfile::tempdir().unwrap();
@@ -2199,10 +2217,11 @@ fn oci_restart_custody_fences_missing_holds_and_corrupt_bound_samples() {
     let container = "b".repeat(64);
     let app = store
         .transaction("restart-fixture-start", |db| {
+            witness_fixture_create(db, &start, "restart-fixture-engine", &container)?;
             start.checkpoint(
                 db,
                 host::Checkpoint::OciStart {
-                    engine: "restart-engine",
+                    engine: "restart-fixture-engine",
                     container: &container,
                 },
             )?;
@@ -2210,7 +2229,7 @@ fn oci_restart_custody_fences_missing_holds_and_corrupt_bound_samples() {
                 db,
                 &start,
                 Ok(
-                    json!({"engine_id":"restart-engine","container_id":container,
+                    json!({"engine_id":"restart-fixture-engine","container_id":container,
             "process_running":true,"observed_at":now()}),
                 ),
             )?;
@@ -2220,7 +2239,7 @@ fn oci_restart_custody_fences_missing_holds_and_corrupt_bound_samples() {
     let grant = call(&mut store,"Grant.Issue",json!({"principal_id":"local-owner","units":4,"ttl_seconds":90,
         "actions":["task.submit","task.read",apps::restart::TOOL],"tool_targets":[app["resource_id"]]})).unwrap();
     let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap();
-    let observed = json!({"application_ref":app,"engine_id":"restart-engine","container_id":container,
+    let observed = json!({"application_ref":app,"engine_id":"restart-fixture-engine","container_id":container,
         "start_operation_id":start.op.id,"boot_id":boot.trim(),"started_at":"2026-11-25T12:00:00Z",
         "process_id":1,"process_running":true,"runtime_state":"Running","readiness":"Unknown","health":"Unknown",
         "effective_limits":{"source":"DockerCgroupV1"},"observed_at":now()});
@@ -2287,14 +2306,15 @@ fn oci_stop_recovery_rejects_missing_and_mismatched_active_custody() {
     assert_eq!(claim(&mut store), start);
     let start = dispatch(&mut store, &start);
     let container = "a".repeat(64);
-    let running = json!({"engine_id":"oci-test-engine","container_id":container,
+    let running = json!({"engine_id":"oci-stop-fixture-engine","container_id":container,
         "process_running":true,"observed_at":now()});
     let app = store
         .transaction("start-fixture", |db| {
+            witness_fixture_create(db, &start, "oci-stop-fixture-engine", &container)?;
             start.checkpoint(
                 db,
                 host::Checkpoint::OciStart {
-                    engine: "oci-test-engine",
+                    engine: "oci-stop-fixture-engine",
                     container: &container,
                 },
             )?;
@@ -2318,7 +2338,7 @@ fn oci_stop_recovery_rejects_missing_and_mismatched_active_custody() {
     assert_eq!(claim(&mut store), stop_task);
     let stop = dispatch(&mut store, stop_task);
     assert_ne!(stop.op.id, initial_stop.op.id);
-    let before = json!({"engine_id":"oci-test-engine","container_id":container,
+    let before = json!({"engine_id":"oci-stop-fixture-engine","container_id":container,
         "start_operation_id":start.op.id,"started_at":"2026-11-25T12:00:00Z",
         "docker_state":"running","process_running":true,"runtime_state":"Running"});
     store
@@ -2615,6 +2635,16 @@ fn publisher_verification_persists_after_revocation_and_fences_new_launches() {
     approve(&mut s, &start);
     assert_eq!(claim(&mut s), start);
     let starting = dispatch(&mut s, &start);
+    let created_container = "ca".repeat(32);
+    s.transaction("publisher-fixture-created", |db| {
+        witness_fixture_create(
+            db,
+            &starting,
+            "publisher-fixture-engine",
+            &created_container,
+        )
+    })
+    .unwrap();
     call(
         &mut s,
         "Artifact.PublisherKey.Revoke",
@@ -2626,8 +2656,8 @@ fn publisher_verification_persists_after_revocation_and_fences_new_launches() {
         starting.checkpoint(
             db,
             host::Checkpoint::OciStart {
-                engine: "test-engine",
-                container: "test-created-instance",
+                engine: "publisher-fixture-engine",
+                container: &created_container,
             },
         )
     });

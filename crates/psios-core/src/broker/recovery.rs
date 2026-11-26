@@ -4,6 +4,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
     apps::mount_observation::verify_active(db.c)?;
     apps::stop::verify_active(db.c)?;
     apps::restart::verify_active(db.c)?;
+    apps::create_recovery::verify_active(db.c)?;
     node::network::trial::verify_active(db.c, crate::db::CURRENT_FORMAT)?;
     artifact::retention::delayed::verify_pending(db.c)?;
     network_trial::recover_parked(db)?;
@@ -51,6 +52,16 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
         let stop_undispatched = phase == "Dispatched"
             && matches!(tool, "application.stop" | apps::stop::TOOL)
             && apps::stop::not_dispatched(db, &operation(db, &t)?)?;
+        let create_undispatched = phase == "Dispatched"
+            && match tool {
+                apps::create_recovery::CREATE => {
+                    apps::create_recovery::not_dispatched(db, &operation(db, &t)?)?
+                }
+                apps::create_recovery::CLEANUP => {
+                    apps::create_recovery::cleanup_not_dispatched(db, &t)?
+                }
+                _ => false,
+            };
         let service_undispatched = phase == "Dispatched"
             && node::service_control::is_tool(tool)
             && node::service_control::not_dispatched(db, &operation(db, &t)?)?;
@@ -73,6 +84,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             && !trial_unstarted
             && !restart_undispatched
             && !stop_undispatched
+            && !create_undispatched
             && !service_undispatched
             && !image_undispatched
             && !deletion_unprepared
@@ -105,6 +117,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             || trial_unstarted
             || restart_undispatched
             || stop_undispatched
+            || create_undispatched
             || service_undispatched
             || image_undispatched
             || deletion_unprepared
@@ -121,6 +134,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                 if service_undispatched
                     || stop_undispatched
                     || restart_undispatched
+                    || create_undispatched
                     || trial_unstarted
                 {
                     "NotStarted"
@@ -139,6 +153,8 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                         "OCI restart interrupted before its invocation was checkpointed"
                     } else if stop_undispatched {
                         "OCI stop or cleanup interrupted before its dispatch was checkpointed"
+                    } else if create_undispatched {
+                        "OCI create or cleanup interrupted before dispatch"
                     } else if service_undispatched {
                         "systemd control interrupted before its invocation was checkpointed"
                     } else if image_undispatched {
@@ -421,6 +437,7 @@ fn reconcile_target(db: &Db<'_>, op: &Doc, action: &Action) -> Result<Doc> {
         Action::NetworkTrial(p) => (&p.id, &p.expected_resource_version),
         Action::RestartApp(p) => (&p.id, &p.expected_resource_version),
         Action::ContinueOciStop(p) => (&p.target.id, &p.target.expected_resource_version),
+        Action::DiscardOciCreate(p) => (&p.target.id, &p.target.expected_resource_version),
         Action::RestoreReleaseImage(p) => (&p.target.id, &p.target.expected_resource_version),
         _ => {
             return Err(err(
@@ -432,6 +449,8 @@ fn reconcile_target(db: &Db<'_>, op: &Doc, action: &Action) -> Result<Doc> {
     let target = db.get(target_id)?;
     let held: bool = if let Action::ContinueOciStop(request) = action {
         apps::stop::cleanup_held(db, request, op)?
+    } else if let Action::DiscardOciCreate(request) = action {
+        apps::create_recovery::cleanup_held(db, request, op)?
     } else {
         db.c.query_row(
             "SELECT EXISTS(SELECT 1 FROM holds WHERE volume=?1 AND holder=?2)",
@@ -617,6 +636,18 @@ pub(crate) fn reconcile(
                 evidence["live_manager"] = live_manager;
             }
             (result, evidence)
+        }
+        Action::DiscardOciCreate(request) => {
+            apps::create_recovery::reconcile_cleanup(db, &op, &request, req.evidence_ref.as_ref())?
+        }
+        Action::Start(_) if apps::create_recovery::eligible_original(db, &op)? => {
+            let recovered =
+                apps::create_recovery::reconcile_original(db, &op, req.evidence_ref.as_ref())?;
+            reason = Some(err(
+                "LeaseLost",
+                "original unstarted OCI create was removed",
+            ));
+            recovered
         }
         Action::Start(_) | Action::Stop(_) => {
             let (proof, observation) = if matches!(action, Action::Stop(_)) {

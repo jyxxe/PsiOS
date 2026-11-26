@@ -283,6 +283,10 @@ fn inspect_candidate(
         !crate::apps::stop::retains_result(db, &task.id)?,
         "an admitted OCI stop continuation retains the exit evidence",
     )?;
+    unpinned(
+        !crate::apps::create_recovery::retains_result(db, &task.id)?,
+        "an admitted OCI create disposal retains its candidate observation",
+    )?;
     let refs = task.body["result"]["artifact_refs"]
         .as_array()
         .filter(|refs| !refs.is_empty())

@@ -201,6 +201,10 @@ pub enum Action {
     PublishSessionSummary(artifact::session_output::Request),
     #[serde(rename = "application.start")]
     Start(Target),
+    #[serde(rename = "application.inspect_start_create")]
+    InspectOciCreate(Target),
+    #[serde(rename = "application.discard_start_create")]
+    DiscardOciCreate(apps::create_recovery::Request),
     #[serde(rename = "application.stop")]
     Stop(Target),
     #[serde(rename = "application.continue_stop")]
@@ -330,6 +334,29 @@ impl Action {
                     policy::owned(actor, &volume)?;
                     resources.push(volume.reference());
                 }
+            }
+            Self::InspectOciCreate(_) => {
+                policy::tool_scope(db, delegation, &primary.id)?;
+                resources.extend(apps::create_recovery::audience(db, primary)?);
+            }
+            Self::DiscardOciCreate(request) => {
+                policy::tool_scope(db, delegation, &primary.id)?;
+                let operation = request.operation_ref["resource_id"]
+                    .as_str()
+                    .ok_or_else(|| {
+                        err(
+                            "InvalidArgument",
+                            "expected an exact original operation reference",
+                        )
+                    })?;
+                policy::tool_scope(db, delegation, operation)?;
+                let original = apps::create_recovery::original(db, request, primary)?;
+                resources.push(original.reference());
+                resources.extend(
+                    apps::create_recovery::audience(db, &original)?
+                        .into_iter()
+                        .skip(1),
+                );
             }
             Self::Restore(_) => resources.push(db.of("local", "StoragePool")?.reference()),
             Self::InstallArtifact(input) => {
@@ -489,6 +516,18 @@ impl Action {
                 (&t.id, Some(&t.expected_resource_version), "Operation")
             }
             Self::RestartApp(p) => (&p.id, Some(&p.expected_resource_version), "Application"),
+            Self::InspectOciCreate(p) => {
+                policy::admin(actor)?;
+                (&p.id, Some(&p.expected_resource_version), "Operation")
+            }
+            Self::DiscardOciCreate(p) => {
+                policy::admin(actor)?;
+                (
+                    &p.target.id,
+                    Some(&p.target.expected_resource_version),
+                    "Application",
+                )
+            }
             Self::ContinueOciStop(p) => {
                 policy::admin(actor)?;
                 (
@@ -594,6 +633,8 @@ pub struct Work {
     pub(crate) restore_image: Option<apps::restore_image::Prepared>,
     pub(crate) restore_image_inspection: Option<apps::restore_image::Recorded>,
     pub(crate) stop_cleanup: Option<apps::stop::Prepared>,
+    pub(crate) create_inspection: Option<apps::create_recovery::Inspection>,
+    pub(crate) create_cleanup: Option<apps::create_recovery::Prepared>,
     pub(crate) volume_rebind: Option<apps::volume_rebind::Prepared>,
     pub(crate) mount_observation_required: bool,
     pub(crate) service_resources_node_id: Option<String>,
@@ -604,6 +645,13 @@ pub(crate) enum Output {
     OciImage(Box<apps::capture::Captured>),
 }
 pub(crate) enum Checkpoint<'a> {
+    OciCreateIssued {
+        engine: &'a str,
+        attempt: &'a str,
+        boot: &'a str,
+    },
+    OciCreateAcknowledged(&'a str),
+    OciCreateRemoval(&'a Value),
     OciStart {
         engine: &'a str,
         container: &'a str,
@@ -709,6 +757,7 @@ impl Work {
                 | Action::RebindRestoredVolume(_)
                 | Action::CaptureOciImage(_)
                 | Action::InspectReleaseImageRestore(_)
+                | Action::InspectOciCreate(_)
                 | Action::Logs(_)
         ) {
             self.checkpoint_authority(db)?;
@@ -725,11 +774,35 @@ impl Work {
             )?;
             return node::network::trial::record(db, self, boundary);
         }
+        if let Checkpoint::OciCreateAcknowledged(container) = event {
+            require(
+                matches!(self.action, Action::Start(_)),
+                "Fenced",
+                "create acknowledgement is outside its operation",
+            )?;
+            return apps::create_recovery::acknowledge(db, self, container);
+        }
         let target = self.checkpoint_authority(db)?;
         match (&self.action, event) {
+            (
+                Action::Start(_),
+                Checkpoint::OciCreateIssued {
+                    engine,
+                    attempt,
+                    boot,
+                },
+            ) => {
+                apps::check_selected_publisher(db, &target)?;
+                apps::create_recovery::issue(db, self, engine, attempt, boot)
+            }
+            (Action::DiscardOciCreate(request), Checkpoint::OciCreateRemoval(sample)) => {
+                apps::create_recovery::record_cleanup(db, self, request, sample)
+            }
             (Action::Start(_), Checkpoint::OciStart { engine, container }) => {
                 apps::check_selected_publisher(db, &target)?;
-                let evidence = json!({"start_operation_id":self.op.id, "effect_ref":self.effect.reference(),
+                let acknowledged = apps::create_recovery::allow_start(db, self, engine, container)?;
+                let evidence = json!({"start_operation_id":self.op.id, "effect_ref":acknowledged.body["started_effect_ref"],
+                    "create_ack_ref":acknowledged.reference(),
                     "application_ref":target.reference(),"volume_ref":self.volume.as_ref().map(Doc::reference),
                     "engine_id":engine, "container_id":container,"mount_observation_required":self.mount_observation_required});
                 db.create(
@@ -845,9 +918,9 @@ impl Work {
             | Action::Devices {} => node::perform(self, |before| {
                 checkpoint(Checkpoint::ServiceControl(before))
             }),
-            Action::Start(_) => apps::start(self, |engine, container| {
-                checkpoint(Checkpoint::OciStart { engine, container })
-            }),
+            Action::Start(_) => apps::start(self, checkpoint),
+            Action::InspectOciCreate(_) => apps::create_recovery::inspect(self),
+            Action::DiscardOciCreate(_) => apps::create_recovery::cleanup(self, checkpoint),
             Action::Backup(_) => storage::backup(
                 self,
                 |receipt, device, inode| {
@@ -1118,6 +1191,16 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     let service_resources_node_id = matches!(a, Action::ServiceResources(_))
         .then(|| db.meta("authority"))
         .transpose()?;
+    let create_inspection = if matches!(a, Action::InspectOciCreate(_)) {
+        Some(apps::create_recovery::inspection(db, &target)?)
+    } else {
+        None
+    };
+    let create_cleanup = if let Action::DiscardOciCreate(request) = &a {
+        Some(apps::create_recovery::prepare(db, &target, request)?)
+    } else {
+        None
+    };
     let w = Work {
         start_checkpoint,
         publication_checkpoint,
@@ -1136,6 +1219,8 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
         restore_image,
         restore_image_inspection,
         stop_cleanup,
+        create_inspection,
+        create_cleanup,
         volume_rebind,
         mount_observation_required,
         service_resources_node_id,
@@ -1151,6 +1236,12 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     }
     if matches!(w.action, Action::Restore(_)) {
         storage::restore_publication::begin(db, &w)?;
+    }
+    if matches!(w.action, Action::Start(_)) {
+        apps::create_recovery::begin(db, &w)?;
+    }
+    if let Some(prepared) = &w.create_cleanup {
+        apps::create_recovery::begin_cleanup(db, &w, prepared)?;
     }
     if matches!(w.action, Action::RestartApp(_)) {
         apps::restart::begin(db, &w)?;
@@ -1187,6 +1278,8 @@ pub fn apply(db: &Db<'_>, w: &Work, receipt: &Value) -> Result<Value> {
         Action::RestoreReleaseImage(_) => apps::restore_image::settle(db, w, receipt),
         Action::RebindRestoredVolume(_) => apps::volume_rebind::settle(db, w, receipt),
         Action::ContinueOciStop(_) => apps::stop::settle_cleanup(db, w, receipt),
+        Action::InspectOciCreate(_) => Ok(receipt.clone()),
+        Action::DiscardOciCreate(_) => apps::create_recovery::settle_cleanup(db, w, receipt),
         Action::Stage { .. }
         | Action::StageArtifactRelease(_)
         | Action::Select { .. }

@@ -708,6 +708,13 @@ jobs:
           git archive c7a37a1cca055e02847d563fc2e9a0d2c1314b05 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format106"
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format106" "$RUNNER_TEMP/psios-compatibility-target"
           python3 -B tests/default_context_upgrade.py --previous-bin-dir "$RUNNER_TEMP/psios-compatibility-target/debug"
+      - name: Preserve legacy unresolved OCI create while fencing new exact cleanup
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format108"
+          git archive ab1c7b6f2f8b2d54e7f3d8ffc005b9719ffe3e20 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format108"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format108" "$RUNNER_TEMP/psios-compatibility-target"
+          PSIOS_OCI_CREATE_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
+            python3 -B tests/oci.py --create-recovery-only
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

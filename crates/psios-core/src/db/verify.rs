@@ -217,6 +217,9 @@ pub(super) fn check_artifacts(
     if identity.database_format >= crate::node::service_control::FORMAT {
         crate::node::service_control::verify(conn)?;
     }
+    if identity.database_format >= crate::apps::create_recovery::FORMAT {
+        crate::apps::create_recovery::verify(conn)?;
+    }
     if identity.database_format >= crate::apps::stop::FORMAT {
         crate::apps::stop::verify(conn)?;
     }

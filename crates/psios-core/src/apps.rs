@@ -12,6 +12,7 @@ use std::{collections::BTreeMap, process::Command};
 pub(crate) mod artifact_install;
 pub(crate) mod capture;
 mod cgroup;
+pub(crate) mod create_recovery;
 pub(crate) mod health;
 pub(crate) mod inventory;
 pub(crate) mod log_tail;
@@ -163,7 +164,22 @@ pub fn profiles(db: &Db<'_>) -> Result<()> {
     Ok(())
 }
 pub fn launch_spec(db: &Db<'_>, app: &Doc, authorizing_start: bool) -> Result<Install> {
-    let deployment = db.resolve(&app.spec["deployment_ref"])?;
+    launch_from_history(db.c, app, |release, spec| {
+        release_retirement::available(db, release)?;
+        artifact_install::check_release_source(db, release)?;
+        if authorizing_start {
+            publisher::check_launch(db, release, spec)?;
+        }
+        Ok(())
+    })
+}
+
+fn launch_from_history(
+    conn: &rusqlite::Connection,
+    app: &Doc,
+    verify_source: impl FnOnce(&Doc, &Doc) -> Result<()>,
+) -> Result<Install> {
+    let deployment = crate::db::resolve(conn, &app.spec["deployment_ref"])?;
     require(
         deployment.kind == "Deployment"
             && deployment.spec["application_id"] == app.id
@@ -173,9 +189,9 @@ pub fn launch_spec(db: &Db<'_>, app: &Doc, authorizing_start: bool) -> Result<In
         "PreconditionFailed",
         "invalid deployment selection",
     )?;
-    let release = db.resolve(&deployment.spec["release_ref"])?;
-    let spec = db.resolve(&release.body["release_spec_ref"])?;
-    let image = db.resolve(&release.body["artifact_ref"])?;
+    let release = crate::db::resolve(conn, &deployment.spec["release_ref"])?;
+    let spec = crate::db::resolve(conn, &release.body["release_spec_ref"])?;
+    let image = crate::db::resolve(conn, &release.body["artifact_ref"])?;
     require(
         release.kind == "ApplicationRelease"
             && release.body["application_id"] == app.id
@@ -185,11 +201,7 @@ pub fn launch_spec(db: &Db<'_>, app: &Doc, authorizing_start: bool) -> Result<In
         "PreconditionFailed",
         "release references do not describe this deployment",
     )?;
-    release_retirement::available(db, &release)?;
-    artifact_install::check_release_source(db, &release)?;
-    if authorizing_start {
-        publisher::check_launch(db, &release, &spec)?;
-    }
+    verify_source(&release, &spec)?;
     let r = &spec.body["resources"];
     let count = |k: &str| {
         r[k].as_str()
@@ -207,7 +219,7 @@ pub fn launch_spec(db: &Db<'_>, app: &Doc, authorizing_start: bool) -> Result<In
         "memory_max_bytes": count("memory_max_bytes")?,
         "pids_max": count("pids_max")?,
         "ephemeral_max_bytes": count("ephemeral_max_bytes")?,
-        "health_check": health::release(db.c, &release, &spec, &image)?
+        "health_check": health::release(conn, &release, &spec, &image)?
     }))?;
     validate(&launch)?;
     Ok(launch)
@@ -480,7 +492,7 @@ impl Engine<'_> {
         )?;
         Ok(true)
     }
-    fn discard_unstarted(&self, w: &Work, cid: &str, engine: &str) -> Result<bool> {
+    fn discard_unstarted(&self, w: &Work, cid: &str, engine: &str, attempt: &str) -> Result<bool> {
         if self.identity()? != engine {
             return Ok(false);
         }
@@ -489,6 +501,7 @@ impl Engine<'_> {
         // This compensation is local to the worker that received Docker's full
         // create ID and has not sent Start. A stopped invocation is insufficient.
         if created["Name"] != format!("/psios-{}", w.target.id)
+            || created["Config"]["Labels"]["io.psios.create-attempt"] != attempt
             || state["Status"] != "created"
             || state["Running"] != false
             || state["Paused"] != false
@@ -553,7 +566,10 @@ pub fn pending_start(db: &Db<'_>, app: &Doc) -> Result<Option<Doc>> {
     Ok(Some(checkpoint))
 }
 
-pub fn start(w: &Work, checkpoint: impl FnOnce(&str, &str) -> Result<()>) -> Result<Value> {
+pub fn start(
+    w: &Work,
+    mut checkpoint: impl FnMut(host::Checkpoint<'_>) -> Result<()>,
+) -> Result<Value> {
     let e = Engine(&w.cfg);
     let s = w
         .launch
@@ -575,6 +591,7 @@ pub fn start(w: &Work, checkpoint: impl FnOnce(&str, &str) -> Result<()>) -> Res
     )?;
     let user = format!("{uid}:{gid}");
     let cname = format!("psios-{}", w.target.id);
+    let attempt = create_recovery::new_attempt()?;
     let mut args = [
         "create",
         "--pull=never",
@@ -603,6 +620,7 @@ pub fn start(w: &Work, checkpoint: impl FnOnce(&str, &str) -> Result<()>) -> Res
     args.extend([
         format!("--label=io.psios.application={}", w.target.id),
         format!("--label=io.psios.operation={}", w.op.id),
+        format!("--label=io.psios.create-attempt={attempt}"),
         format!("--pids-limit={}", s.pids_max),
         format!("--memory={}", s.memory_max_bytes),
         format!("--memory-swap={}", s.memory_max_bytes),
@@ -629,6 +647,11 @@ pub fn start(w: &Work, checkpoint: impl FnOnce(&str, &str) -> Result<()>) -> Res
     }
     args.extend([format!("--entrypoint={}", s.argv[0]), s.image_id.clone()]);
     args.extend(s.argv[1..].iter().cloned());
+    checkpoint(host::Checkpoint::OciCreateIssued {
+        engine: &engine.id,
+        attempt: &attempt,
+        boot: &restart::boot_id()?,
+    })?;
     let created = e.command(&args, true)?;
     let cid = String::from_utf8_lossy(&created.stdout).trim().to_owned();
     require(
@@ -636,15 +659,32 @@ pub fn start(w: &Work, checkpoint: impl FnOnce(&str, &str) -> Result<()>) -> Res
         "OutcomeUnknown",
         "invalid OCI create receipt",
     )?;
+    require(
+        e.identity().is_ok_and(|actual| actual == engine.id),
+        "OutcomeUnknown",
+        "engine changed before the create acknowledgement",
+    )?;
+    checkpoint(host::Checkpoint::OciCreateAcknowledged(&cid)).map_err(|_| {
+        err(
+            "OutcomeUnknown",
+            "create acknowledgement could not be committed",
+        )
+    })?;
     let v = e.managed(w, &cid, &w.op.id).map_err(|_| {
         err(
             "OutcomeUnknown",
             "created instance identity requires reconciliation",
         )
     })?;
+    require(
+        v["Config"]["Labels"]["io.psios.create-attempt"] == attempt,
+        "OutcomeUnknown",
+        "created OCI attempt identity differs from the checkpoint",
+    )?;
     if let Err(error) = verify_isolation(w, &v, s, &user) {
         if error.0.code == "PreconditionFailed"
-            && e.discard_unstarted(w, &cid, &engine.id).unwrap_or(false)
+            && e.discard_unstarted(w, &cid, &engine.id, &attempt)
+                .unwrap_or(false)
         {
             return Err(error);
         }
@@ -655,11 +695,16 @@ pub fn start(w: &Work, checkpoint: impl FnOnce(&str, &str) -> Result<()>) -> Res
         "OutcomeUnknown",
         "engine changed after container creation",
     )?;
-    if let Err(denial) = checkpoint(&engine.id, &cid) {
+    if let Err(denial) = checkpoint(host::Checkpoint::OciStart {
+        engine: &engine.id,
+        container: &cid,
+    }) {
         if matches!(
             denial.0.code.as_str(),
             "PermissionDenied" | "RecoveryRequired" | "ResultEvicted"
-        ) && e.discard_unstarted(w, &cid, &engine.id).unwrap_or(false)
+        ) && e
+            .discard_unstarted(w, &cid, &engine.id, &attempt)
+            .unwrap_or(false)
         {
             return Err(denial);
         }
@@ -711,11 +756,11 @@ fn no_entries(value: &Value) -> bool {
     value.is_null() || value.as_array().is_some_and(Vec::is_empty)
 }
 
-fn approved_mounts(w: &Work, v: &Value) -> bool {
+fn approved_mounts(data: Option<&std::path::Path>, v: &Value) -> bool {
     let h = &v["HostConfig"];
     let mounts = &v["Mounts"];
     let declarations = &h["Mounts"];
-    let Some(data) = &w.data else {
+    let Some(data) = data else {
         return no_entries(mounts) && no_entries(declarations);
     };
     let Some(source) = data.to_str() else {
@@ -742,6 +787,15 @@ fn approved_mounts(w: &Work, v: &Value) -> bool {
 }
 
 fn verify_isolation(w: &Work, v: &Value, s: &Install, user: &str) -> Result<()> {
+    verify_static_isolation(w.data.as_deref(), v, s, user)
+}
+
+fn verify_static_isolation(
+    data: Option<&std::path::Path>,
+    v: &Value,
+    s: &Install,
+    user: &str,
+) -> Result<()> {
     let h = &v["HostConfig"];
     let no_extra_access = [
         "Binds",
@@ -759,7 +813,7 @@ fn verify_isolation(w: &Work, v: &Value, s: &Install, user: &str) -> Result<()> 
             if matches!(option.as_str(), Some("no-new-privileges" | "no-new-privileges:true")))
     });
     require(
-        approved_mounts(w, v)
+        approved_mounts(data, v)
             && h["Tmpfs"] == json!({"/tmp":tmpfs_options(s.ephemeral_max_bytes)})
             && v["Config"]["User"] == user
             && h["NetworkMode"] == "none"

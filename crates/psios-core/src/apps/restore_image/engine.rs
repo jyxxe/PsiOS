@@ -92,7 +92,7 @@ fn unavailable() -> crate::Error {
     )
 }
 
-pub(super) fn runtime() -> Result<tokio::runtime::Runtime> {
+pub(in crate::apps) fn runtime() -> Result<tokio::runtime::Runtime> {
     Builder::new_current_thread()
         .enable_io()
         .enable_time()
@@ -100,7 +100,7 @@ pub(super) fn runtime() -> Result<tokio::runtime::Runtime> {
         .map_err(|_| unavailable())
 }
 
-pub(super) struct Connection {
+pub(in crate::apps) struct Connection {
     sender: SendRequest<RequestBody>,
     driver: JoinHandle<()>,
 }
@@ -165,7 +165,7 @@ impl Connection {
         Ok((status, data))
     }
 
-    pub async fn identity(&mut self, expected: &str) -> Result<()> {
+    async fn bound_linux_info(&mut self, expected: &str) -> Result<Value> {
         let (status, data) = timeout(API_TIMEOUT, self.request(Method::GET, "/v1.44/info", None))
             .await
             .map_err(|_| unavailable())??;
@@ -178,11 +178,25 @@ impl Connection {
         require(
             info["ID"] == expected,
             "PreconditionFailed",
-            "local Docker Engine identity differs from the approved restore",
+            "local Docker Engine identity differs from the recorded engine",
         )?;
         require(
-            info["OSType"] == "linux"
-                && matches!(info["Architecture"].as_str(), Some("x86_64" | "amd64"))
+            info["OSType"] == "linux",
+            "UnsupportedCapability",
+            "the recorded Docker Engine must manage Linux containers",
+        )?;
+        Ok(info)
+    }
+
+    pub(in crate::apps) async fn require_linux_engine(&mut self, expected: &str) -> Result<()> {
+        self.bound_linux_info(expected).await?;
+        Ok(())
+    }
+
+    pub async fn identity(&mut self, expected: &str) -> Result<()> {
+        let info = self.bound_linux_info(expected).await?;
+        require(
+            matches!(info["Architecture"].as_str(), Some("x86_64" | "amd64"))
                 && matches!(info["Driver"].as_str(), Some("overlay2" | "vfs"))
                 && (info["Driver"] == "vfs" && info["DriverStatus"].is_null()
                     || info["DriverStatus"].as_array().is_some_and(|rows| {
@@ -199,7 +213,7 @@ impl Connection {
         )
     }
 
-    pub async fn observe(&mut self, binding: &Binding) -> Result<Presence> {
+    pub(super) async fn observe(&mut self, binding: &Binding) -> Result<Presence> {
         let uri = format!("/v1.44/images/{}/json", binding.image_id);
         let (status, data) = timeout(API_TIMEOUT, self.request(Method::GET, &uri, None))
             .await
@@ -232,6 +246,90 @@ impl Connection {
         Ok(Presence::Present)
     }
 
+    pub(in crate::apps) async fn matching_containers(
+        &mut self,
+        filter: &str,
+        selector: &str,
+    ) -> Result<Vec<String>> {
+        let filter = serde_json::json!({(filter):[selector]}).to_string();
+        let mut encoded = String::new();
+        for byte in filter.bytes() {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+                encoded.push(char::from(byte));
+            } else {
+                use std::fmt::Write as _;
+                write!(encoded, "%{byte:02X}").expect("writing to String cannot fail");
+            }
+        }
+        let (status, data) = timeout(
+            API_TIMEOUT,
+            self.request(
+                Method::GET,
+                &format!("/v1.44/containers/json?all=1&filters={encoded}"),
+                None,
+            ),
+        )
+        .await
+        .map_err(|_| unavailable())??;
+        require(
+            status == StatusCode::OK,
+            "DependencyUnavailable",
+            "cannot list exact Docker candidate",
+        )?;
+        let rows: Vec<Value> = serde_json::from_slice(&data).map_err(|_| unavailable())?;
+        rows.iter()
+            .map(|row| {
+                row["Id"]
+                    .as_str()
+                    .filter(|id| super::super::create_recovery::cid_ok(id))
+                    .map(str::to_owned)
+                    .ok_or_else(unavailable)
+            })
+            .collect()
+    }
+
+    pub(in crate::apps) async fn inspect_container(&mut self, cid: &str) -> Result<Value> {
+        require(
+            super::super::create_recovery::cid_ok(cid),
+            "InvalidArgument",
+            "OCI container ID is not exact",
+        )?;
+        let (status, data) = timeout(
+            API_TIMEOUT,
+            self.request(Method::GET, &format!("/v1.44/containers/{cid}/json"), None),
+        )
+        .await
+        .map_err(|_| unavailable())??;
+        require(
+            status == StatusCode::OK,
+            "DependencyUnavailable",
+            "cannot inspect exact Docker candidate",
+        )?;
+        psios_api::parse(&data).map_err(Into::into)
+    }
+
+    pub(in crate::apps) async fn remove_unforced_container(&mut self, cid: &str) -> Result<()> {
+        require(
+            super::super::create_recovery::cid_ok(cid),
+            "InvalidArgument",
+            "OCI container ID is not exact",
+        )?;
+        let response = timeout(
+            API_TIMEOUT,
+            self.request(
+                Method::DELETE,
+                &format!("/v1.44/containers/{cid}?force=false&v=false"),
+                None,
+            ),
+        )
+        .await;
+        require(
+            matches!(response, Ok(Ok((StatusCode::NO_CONTENT, _)))),
+            "OutcomeUnknown",
+            "Docker did not acknowledge exact unforced removal",
+        )
+    }
+
     pub async fn ready(&mut self) -> Result<()> {
         timeout(API_TIMEOUT, self.sender.ready())
             .await
@@ -239,7 +337,7 @@ impl Connection {
             .map_err(|_| unavailable())
     }
 
-    pub async fn load(&mut self, input: Input, image_id: &str) -> Result<()> {
+    pub(super) async fn load(&mut self, input: Input, image_id: &str) -> Result<()> {
         let (status, data) = timeout(
             LOAD_TIMEOUT,
             self.request(Method::POST, "/v1.44/images/load?quiet=1", Some(input)),

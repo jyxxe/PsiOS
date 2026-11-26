@@ -172,6 +172,10 @@ impl Attestation {
             .map_err(|_| err("PermissionDenied", "backup transfer signature is invalid"))
     }
 
+    pub(super) fn fingerprint(&self) -> &str {
+        &self.attestation.signer_fingerprint
+    }
+
     pub(super) fn matches(&self, intake: &Intake) -> bool {
         self.attestation.backup_ref.resource_id == intake.backup_id
             && self.attestation.source_volume_ref == intake.source
@@ -237,22 +241,10 @@ impl ReceiverAdmission {
         conn: &Connection,
         intake_id: &str,
         info: &Intake,
+        recipient: &str,
         requested: Option<&Self>,
     ) -> Result<()> {
-        let key = stored_key(conn, intake_id)?;
-        require(
-            info.transfer.is_some() == key.is_some(),
-            "RecoveryRequired",
-            "backup transfer lost its witnessed signer custody",
-        )?;
-        if let Some((envelope, key)) = info.transfer.as_ref().zip(key.as_ref()) {
-            envelope.verify_signature(key).map_err(|_| {
-                err(
-                    "RecoveryRequired",
-                    "stored backup transfer signer custody is invalid",
-                )
-            })?;
-        }
+        let key = verify_retained(conn, intake_id, info, recipient, true)?;
         require(
             info.transfer.as_ref() == requested.map(|admission| &admission.envelope)
                 && key.as_ref() == requested.map(|request| &request.public_key),
@@ -260,6 +252,35 @@ impl ReceiverAdmission {
             "backup intake is already bound to a different transfer proof",
         )
     }
+}
+
+pub(super) fn verify_retained(
+    conn: &Connection,
+    intake_id: &str,
+    info: &Intake,
+    recipient: &str,
+    signed_format: bool,
+) -> Result<Option<[u8; 32]>> {
+    let key = if signed_format {
+        stored_key(conn, intake_id)?
+    } else {
+        None
+    };
+    require(
+        info.transfer.is_some() == key.is_some(),
+        "RecoveryRequired",
+        "backup transfer lost its witnessed signer custody",
+    )?;
+    if let Some((envelope, key)) = info.transfer.as_ref().zip(key.as_ref()) {
+        require(
+            envelope.attestation.recipient_authority_id == recipient
+                && envelope.matches(info)
+                && envelope.verify_signature(key).is_ok(),
+            "RecoveryRequired",
+            "stored backup transfer signer custody is invalid",
+        )?;
+    }
+    Ok(key)
 }
 
 fn stored_key(conn: &Connection, intake_id: &str) -> Result<Option<[u8; 32]>> {

@@ -264,6 +264,12 @@ Rust SDK 的 `Client::prepare_oci_stop_continuation` 与 `psiosctl application-p
 
 管理员提交 `NotApplied` 证据后，Core 复核当前路径及元数据，在同一事务内将原 Task 结算为已知失败，释放备份占用并登记暂存清理。后台按原目录身份隔离并删除暂存卷，清理中断后可继续。待录证和待清理的恢复占用共同受节点级 128 项限额约束。任何再次恢复都要重新获得执行许可，原请求仍返回原结算。[文件系统提交边界强杀验收](../tests/test_storage_recovery.py)
 
+### 将停止的 OCI 应用切换到恢复卷
+
+先用 `backup.restore` 建立独立卷，再用 `volume.activate` 核实并激活它。`application.rebind_restored_volume` 接受应用的 `target` 以及当前卷和恢复卷的完整 `source_volume_ref`、`restored_volume_ref`。两个卷须同属该应用的数据谱系，恢复卷须保持原激活修订。为本机管理员签发包含 `task.submit`、`task.read` 和该操作的委托，并将 `tool_targets` 限于应用、当前卷、恢复卷的 ID。使用该委托提交 Task，再审批包含三个精确引用的计划。
+
+Core 独占两个卷和应用，核对恢复证明、当前文件树和 OCI 容器缺席，然后在同一事务提交新 Deployment 和 Task 回执。原应用 ID、Release 和旧数据卷保留。应用保持停止，可用新的应用修订另行提交 `application.start`。格式 99 增加该能力及离线检查。能力范围是同一节点上经验证的单卷 OCI 恢复。 [真实 OCI 验收](../tests/oci_volume_rebind.py)
+
 ### 导出备份
 
 通过 `Grant.Issue` 把 `backup.export` 授予指定主体，并在 `tool_targets` 中列出获准访问的 Backup ID。主体可使用该 Backup 当前修订的 `ResourceRef` 调用 `Backup.Export`。权限包含清单和备份数据。通用资源查询与卷访问仍按各自权限裁决。

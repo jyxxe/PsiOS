@@ -632,6 +632,12 @@ jobs:
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format97" "$RUNNER_TEMP/psios-compatibility-target"
           PSIOS_WORKFLOW_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
             python3 -B -m unittest discover -s tests -p test_workflow.py -k test_format97 -v
+      - name: Preserve the authority and exact approval boundary for recovered application data
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format98"
+          git archive 89cf272b3791cc13d7fe5c4899a50fb47a08bbfd Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format98"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format98" "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/oci_rebind_upgrade.py --previous-bin-dir "$RUNNER_TEMP/psios-compatibility-target/debug"
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

@@ -31,6 +31,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                 apps::artifact_install::TOOL
                     | apps::artifact_install::STAGE_TOOL
                     | apps::release_retirement::TOOL
+                    | apps::volume_rebind::TOOL
             );
         // Export is read-only at Docker; the authority publishes the archive with its receipt.
         let capture_uncommitted = phase == "Dispatched" && tool == apps::capture::TOOL;

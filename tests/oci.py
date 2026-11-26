@@ -14,6 +14,7 @@ from oci_recovery import ReceiptBarrier, check_kernel_limits, continue_after_los
 from oci_capture import TOOL as CAPTURE, denied
 from oci_health import verify_image_health
 from oci_restart import verify_restart
+from oci_volume_rebind import verify_rebind
 from test_artifact_install import TOOL as ARTIFACT_INSTALL, grant as artifact_grant
 from test_artifact_ingress import chunk, upload_request
 from test_oci_publisher import local_signature
@@ -526,6 +527,7 @@ int main(void) {
         assert restored["resource_id"] != volume["resource_id"]
         assert node.perform("volume.read", dict(**target(restored), name="starts"))["content"] == "first\nsecond\nupgraded\nfirst\n"
         node.perform("volume.activate", target(restored))
+        verify_rebind(node, docker, spec, app_ids)
         verify_restart(node, docker, spec, app_ids)
         verify_image_health(node, docker)
         node.stop()

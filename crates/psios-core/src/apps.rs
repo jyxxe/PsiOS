@@ -22,6 +22,7 @@ pub(crate) mod restart;
 pub(crate) mod restore_archive;
 pub(crate) mod restore_image;
 pub(crate) mod stop;
+pub(crate) mod volume_rebind;
 
 fn environment(env: &BTreeMap<String, String>) -> Result<()> {
     require(
@@ -165,7 +166,9 @@ pub fn launch_spec(db: &Db<'_>, app: &Doc, authorizing_start: bool) -> Result<In
     require(
         deployment.kind == "Deployment"
             && deployment.spec["application_id"] == app.id
-            && deployment.spec["release_ref"] == app.spec["release_ref"],
+            && deployment.spec["release_ref"] == app.spec["release_ref"]
+            && deployment.spec["volume_id"] == app.spec["volume_id"]
+            && deployment.spec["data_incarnation"] == app.spec["data_incarnation"],
         "PreconditionFailed",
         "invalid deployment selection",
     )?;
@@ -399,15 +402,21 @@ impl Engine<'_> {
         self.absent(w, cid, engine)
     }
     fn absent(&self, w: &Work, cid: &str, engine: &str) -> Result<bool> {
+        self.application_absent(&w.target.id, Some(cid), engine)
+    }
+    fn application_absent(&self, app: &str, cid: Option<&str>, engine: &str) -> Result<bool> {
         require(
             self.identity()? == engine,
             "PreconditionFailed",
             "OCI engine identity changed",
         )?;
         for filter in [
-            format!("id={cid}"),
-            format!("label=io.psios.application={}", w.target.id),
-        ] {
+            cid.map(|cid| format!("id={cid}")),
+            Some(format!("label=io.psios.application={app}")),
+        ]
+        .into_iter()
+        .flatten()
+        {
             let args = [
                 "container",
                 "ls",
@@ -1265,6 +1274,7 @@ fn select_deployment(
         json!({"lifecycle": "Superseded", "desired_state": "Stopped"}),
     )?;
     let mut config = previous.spec.clone();
+    config.as_object_mut().unwrap().remove("restore_rebind");
     config["environment"] = environment;
     config["release_ref"] = release.reference();
     spec["release_ref"] = release.reference();

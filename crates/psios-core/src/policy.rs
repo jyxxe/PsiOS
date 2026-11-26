@@ -77,6 +77,7 @@ pub const TOOLS: &[&str] = &[
     apps::restore_image::INSPECT,
     artifact::session_output::TOOL,
     "application.start",
+    apps::volume_rebind::TOOL,
     "application.stop",
     apps::stop::TOOL,
     apps::restart::TOOL,
@@ -181,6 +182,7 @@ pub fn approval(tool: &str) -> bool {
             | apps::capture::TOOL
             | apps::restore_image::TOOL
             | "application.start"
+            | apps::volume_rebind::TOOL
             | apps::restart::TOOL
             | apps::stop::TOOL
             | "application.uninstall"
@@ -221,6 +223,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | apps::artifact_install::STAGE_TOOL
                     | apps::inventory::TOOL
                     | apps::release_retirement::TOOL
+                    | apps::volume_rebind::TOOL
                     | node::block::TOOL
                     | "backup.verify"
                     | storage::file_integrity::TOOL
@@ -650,6 +653,7 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
                     || action == storage::file_move::INSPECT
                     || action == apps::restart::TOOL
                     || action == apps::stop::TOOL
+                    || action == apps::volume_rebind::TOOL
                     || action == apps::restart::INSPECT
                     || action == agent::fallback::ACTION
             }))

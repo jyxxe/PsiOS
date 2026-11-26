@@ -56,7 +56,7 @@ pub(super) fn cancel(db: &Db<'_>, task: &Doc) -> Result<Option<Doc>> {
         return Ok(None);
     }
     let op = operation(db, task)?;
-    if trial::confirmation_issued(db, &op)? {
+    if trial::terminal_issued(db, &op)? {
         let mut body = task.body.clone();
         body["lifecycle"] = json!("Cancelling");
         return Ok(Some(db.status(task, body)?));
@@ -154,6 +154,56 @@ pub(crate) fn finish_network_trial_confirm(
             db,
             &task,
             "NetworkManager did not confirm the checkpoint destruction",
+            false,
+        )?;
+    }
+    Ok(db.of(&op.id, "Operation")?.body)
+}
+
+pub(crate) fn prepare_network_trial_rollback(
+    db: &Db<'_>,
+    actor: &str,
+    params: &Value,
+) -> Result<trial::Rollback> {
+    trial::prepare_rollback(db, actor, params)
+}
+
+pub(crate) fn authorize_network_trial_rollback(
+    db: &Db<'_>,
+    actor: &str,
+    params: &Value,
+    job: &trial::Rollback,
+) -> Result<()> {
+    trial::authorize_rollback(db, actor, params, job)
+}
+
+pub(crate) fn finish_network_trial_rollback(
+    db: &Db<'_>,
+    actor: &str,
+    job: &trial::Rollback,
+    result: Result<trial::RollbackReceipt>,
+) -> Result<Value> {
+    let (op, result) = trial::rollback_result(db, actor, job, result)?;
+    let task = db.of(field(&op.spec, "task_id"), "Task")?;
+    if let Some((acknowledgement, body)) = result {
+        let run = db.of(field(&task.body, "current_run_id"), "Run")?;
+        artifact::capacity::check_result(db, &task, &body)?;
+        let artifact = artifact::publish(
+            db,
+            &task.owner,
+            json!({"task_id":task.id,"operation_id":op.id,"run_id":run.id,
+                "effect_id":op.body["effect_refs"][0]["resource_id"]}),
+            &body,
+        )?;
+        artifact::capacity::retain(db, &task, &artifact)?;
+        trial::record_rollback(db, &op, job, &acknowledgement, &artifact)?;
+        close(db, &task, "Cancelled", "Known", None, Some(&artifact))?;
+        db.audit(actor, "NetworkTrial.Rollback", Some(&op.id), "RolledBack")?;
+    } else {
+        unknown(
+            db,
+            &task,
+            "NetworkManager rollback acknowledgement or original profile could not be verified",
             false,
         )?;
     }

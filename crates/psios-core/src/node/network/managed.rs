@@ -10,7 +10,11 @@ pub(crate) use link::Link;
 pub(crate) use profile::Profile;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, thread, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    thread,
+    time::Duration,
+};
 
 const DEVICE: &str = "org.freedesktop.NetworkManager.Device";
 const DEVICE_PATH: &str = "/org/freedesktop/NetworkManager/Devices/";
@@ -62,6 +66,23 @@ pub(crate) struct Activation {
 pub(crate) struct Observation {
     pub checkpoint_present: bool,
     pub active: Active,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RollbackReceipt {
+    pub results: BTreeMap<String, u32>,
+    pub observed: Observation,
+}
+
+impl RollbackReceipt {
+    pub(crate) fn matches(&self, scope: &Snapshot) -> bool {
+        self.results.len() == 1
+            && self.results.get(&scope.device_path) == Some(&0)
+            && !self.observed.checkpoint_present
+            && self.observed.active.profile_uuid == scope.baseline.profile_uuid
+            && bus::numbered_path(&json!(self.observed.active.path), ACTIVE_PATH).is_ok()
+    }
 }
 
 fn mode() -> crate::Error {
@@ -347,14 +368,14 @@ fn checkpoint_present(bus: &Bus, checkpoint: &Checkpoint) -> Result<bool> {
     Ok(manager_paths(bus, "Checkpoints", CHECKPOINT_PATH, 128)?.contains(&checkpoint.path))
 }
 
-fn require_checkpoint_available(bus: &Bus, device: &str) -> Result<()> {
+fn require_checkpoint_available(bus: &Bus, device: &str, owned: Option<&str>) -> Result<()> {
     let paths = manager_paths(
         bus,
         "Checkpoints",
         CHECKPOINT_PATH,
         MAX_CHECKPOINTS_TO_INSPECT,
     )?;
-    for path in &paths {
+    for path in paths.iter().filter(|path| Some(path.as_str()) != owned) {
         let checkpoint = bus.get_all(path, CHECKPOINT)?;
         let devices = bus::field(&checkpoint, "Devices", "ao")?
             .as_array()
@@ -435,7 +456,7 @@ pub(crate) fn checkpoint(
         "PreconditionFailed",
         "NetworkManager baseline changed before checkpoint creation",
     )?;
-    require_checkpoint_available(&bus, &scope.device_path)?;
+    require_checkpoint_available(&bus, &scope.device_path, None)?;
     bus.verify_owner()?;
     let started = boottime(&bus)?;
     before_effect(started)?;
@@ -701,41 +722,7 @@ pub(crate) fn observe_recovery(
             "OutcomeUnknown",
             "NetworkManager checkpoint disappeared before its known deadline",
         )?;
-        let candidate = scope
-            .profiles
-            .iter()
-            .find(|profile| profile.uuid != scope.baseline.profile_uuid)
-            .ok_or_else(mode)?;
-        let connections = manager_paths(&bus, "ActiveConnections", ACTIVE_PATH, 16)?;
-        for path in &connections {
-            let details = bus.get_all(path, ACTIVE)?;
-            let selected = activation.is_some_and(|activation| path == &activation.active.path);
-            let uuid = bus::text(bus::field(&details, "Uuid", "s")?)?;
-            let devices = bus::field(&details, "Devices", "ao")?
-                .as_array()
-                .ok_or_else(|| {
-                    err(
-                        "DependencyUnavailable",
-                        "invalid NetworkManager active devices",
-                    )
-                })?;
-            if selected
-                || (uuid == candidate.uuid
-                    && (devices.is_empty()
-                        || devices.iter().any(|device| device == &scope.device_path)))
-            {
-                require(
-                    bus::field(&details, "State", "u")? == 4,
-                    "OutcomeUnknown",
-                    "the trial candidate may still become active",
-                )?;
-            }
-        }
-        require(
-            manager_paths(&bus, "ActiveConnections", ACTIVE_PATH, 16)? == connections,
-            "OutcomeUnknown",
-            "NetworkManager active connections changed during rollback verification",
-        )?;
+        no_pending_candidate(&bus, scope, activation)?;
     }
     if !observed.checkpoint_present {
         let details = device_details(&bus, &scope.device_path, &scope.link)?;
@@ -746,6 +733,141 @@ pub(crate) fn observe_recovery(
         )?;
     }
     Ok(observed)
+}
+
+fn no_pending_candidate(
+    bus: &Bus,
+    scope: &Snapshot,
+    activation: Option<&Activation>,
+) -> Result<()> {
+    let candidate = scope
+        .profiles
+        .iter()
+        .find(|profile| profile.uuid != scope.baseline.profile_uuid)
+        .ok_or_else(mode)?;
+    let connections = manager_paths(bus, "ActiveConnections", ACTIVE_PATH, 16)?;
+    for path in &connections {
+        let details = bus.get_all(path, ACTIVE)?;
+        let selected = activation.is_some_and(|activation| path == &activation.active.path);
+        let uuid = bus::text(bus::field(&details, "Uuid", "s")?)?;
+        let devices = bus::field(&details, "Devices", "ao")?
+            .as_array()
+            .ok_or_else(|| {
+                err(
+                    "DependencyUnavailable",
+                    "invalid NetworkManager active devices",
+                )
+            })?;
+        if selected
+            || (uuid == candidate.uuid
+                && (devices.is_empty()
+                    || devices.iter().any(|device| device == &scope.device_path)))
+        {
+            require(
+                bus::field(&details, "State", "u")? == 4,
+                "OutcomeUnknown",
+                "the trial candidate may still become active",
+            )?;
+        }
+    }
+    require(
+        manager_paths(bus, "ActiveConnections", ACTIVE_PATH, 16)? == connections,
+        "OutcomeUnknown",
+        "NetworkManager active connections changed during rollback verification",
+    )
+}
+
+fn await_rollback(
+    bus: &Bus,
+    scope: &Snapshot,
+    checkpoint: &Checkpoint,
+    activation: &Activation,
+) -> Result<Observation> {
+    let stop_at = boottime(bus)?
+        .saturating_add(5_000)
+        .min(checkpoint.deadline_boottime_ms);
+    loop {
+        require(
+            boottime(bus)? < stop_at,
+            "OutcomeUnknown",
+            "NetworkManager rollback did not stabilize in time",
+        )?;
+        let details = device_details(bus, &scope.device_path, &scope.link)?;
+        if bus::field(&details, "State", "u")? == 100
+            && bus::field(&details, "IpInterface", "s")? == scope.link.interface
+        {
+            let observed = observe_on(bus, &details, scope, checkpoint)?;
+            if !observed.checkpoint_present
+                && observed.active.profile_uuid == scope.baseline.profile_uuid
+            {
+                match no_pending_candidate(bus, scope, Some(activation)) {
+                    Ok(()) => {
+                        require_checkpoint_available(bus, &scope.device_path, None)?;
+                        let details = device_details(bus, &scope.device_path, &scope.link)?;
+                        require(
+                            observe_on(bus, &details, scope, checkpoint)? == observed
+                                && boottime(bus)? < stop_at,
+                            "OutcomeUnknown",
+                            "NetworkManager baseline changed during rollback verification",
+                        )?;
+                        return Ok(observed);
+                    }
+                    Err(error) if error.0.code == "OutcomeUnknown" => (),
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+pub(crate) fn rollback(
+    scope: &Snapshot,
+    checkpoint: &Checkpoint,
+    activation: &Activation,
+    before_effect: impl FnOnce() -> Result<()>,
+) -> Result<RollbackReceipt> {
+    bound_activation(scope, checkpoint, activation)?;
+    let bus = context(scope)?;
+    let guard = || -> Result<()> {
+        let details = device_details(&bus, &scope.device_path, &scope.link)?;
+        require(
+            active(
+                &bus,
+                &scope.device_path,
+                &details,
+                &scope.link,
+                &scope.profiles,
+            )? == activation.active,
+            "PreconditionFailed",
+            "NetworkManager trial connection changed before rollback",
+        )?;
+        guarded_checkpoint(&bus, scope, checkpoint)?;
+        // Rolling back an older checkpoint can discard a newer overlapping one.
+        require_checkpoint_available(&bus, &scope.device_path, Some(&checkpoint.path))?;
+        bus.verify_owner()?;
+        deadline(&bus, checkpoint)
+    };
+    guard()?;
+    before_effect()?;
+    guard().map_err(uncertain)?;
+    let reply = bus
+        .mutate("CheckpointRollback", &["o", &checkpoint.path], "a{su}")
+        .map_err(uncertain)?
+        .ok_or_else(|| {
+            err(
+                "OutcomeUnknown",
+                "NetworkManager rollback acknowledgement missing",
+            )
+        })?;
+    let results: BTreeMap<String, u32> = crate::decode(&reply).map_err(uncertain)?;
+    require(
+        results.len() == 1 && results.get(&scope.device_path) == Some(&0),
+        "OutcomeUnknown",
+        "NetworkManager rollback did not acknowledge the exact trial device",
+    )?;
+    let observed = await_rollback(&bus, scope, checkpoint, activation).map_err(uncertain)?;
+    Ok(RollbackReceipt { results, observed })
 }
 
 pub(crate) fn commit(

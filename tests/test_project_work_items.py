@@ -40,6 +40,7 @@ class ProjectWorkItemTests(unittest.TestCase):
         self.assertEqual(rejected.exception.code, code, rejected.exception)
 
     def create_room(self):
+        self.grant({"principal_id": "local-owner"}, ["chat.invite", "chat.read"])
         return self.call("Conversation.OpenRoom", {
             "key": key(), "name": "independent-room", "capacity": 4, "ttl_seconds": 180,
         })

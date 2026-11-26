@@ -53,8 +53,7 @@ def receipt_lineage(prepared):
     signed = "secure_boot" in candidate
     candidate_formats = (3, 4, 5, 6) if signed else (2, 4, 5, 6)
     require(trial.get("boot_mode") == create.TRIAL_BOOT_MODE and trial.get("format") == create.TRIAL_RECEIPT_FORMAT
-            and candidate.get("format") in candidate_formats and "boot_mode" not in candidate
-            and "secure_boot_enforcement_required" not in candidate,
+            and candidate.get("format") in candidate_formats and "boot_mode" not in candidate,
             "expected native trial and normal candidate receipts")
     if signed:
         trust = candidate["secure_boot"]
@@ -62,10 +61,13 @@ def receipt_lineage(prepared):
                 and trust["scheme"] == create.boot_media.SECURE_BOOT_SCHEME
                 and all(isinstance(trust[name], str) and re.fullmatch(r"[0-9a-f]{64}", trust[name])
                         for name in ("certificate_sha256", "efi_stub_sha256"))
-                and trial.get("secure_boot") == trust and trial.get("secure_boot_enforcement_required") is True,
+                and trial.get("secure_boot") == trust
+                and candidate.get("secure_boot_enforcement_required") is True
+                and trial.get("secure_boot_enforcement_required") is True,
                 "signed trial and candidate trust receipts or enforcement requirements disagree")
     else:
-        require("secure_boot" not in trial and "secure_boot_enforcement_required" not in trial,
+        require("secure_boot" not in trial and "secure_boot_enforcement_required" not in candidate
+                and "secure_boot_enforcement_required" not in trial,
                 "unsigned candidate has incompatible trial trust")
     require(all(trial[name] == candidate[name] for name in
                 ("geometry_mib", "state_uuid", "home_uuid", "source_commit", "upgrade"))

@@ -17,6 +17,7 @@ mod space;
 pub(crate) use space::check_restore_capacity;
 mod checkpoint;
 mod compact;
+mod input_inventory;
 mod verify;
 
 pub struct Store {

@@ -614,6 +614,8 @@ jobs:
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format95" "$RUNNER_TEMP/psios-compatibility-target"
           PSIOS_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
             python3 -B -m unittest discover -s tests -p test_task_preparation.py -k test_format95 -v
+          PSIOS_LEGACY_INPUT_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
+            python3 -B -m unittest discover -s tests -p test_retained_input_inventory.py -k test_inventory_distinguishes -v
       - name: Reclaim already revoked preparations on startup of the new daemon
         run: |
           mkdir "$RUNNER_TEMP/psios-preparation-before-sweep"

@@ -350,6 +350,45 @@ class VolumeMkdirRecovery(unittest.TestCase):
             pass
         self.assertEqual(n.process.wait(25), -signal.SIGKILL)
         self.verify_stopped()
+        n.start()
+        original, operation = self.paused(job)
+        stage = self.stage(operation, published=False)
+        self.assertFalse(self.leaf.exists())
+        self.assertTrue(stage.is_dir())
+        self.assertEqual(list(stage.iterdir()), [])
+        lines = trace.read_text().splitlines()
+        attempted = [line for line in lines if "renameat2(" in line and f'"{stage.name}"' in line
+                     and f'"{self.leaf.name}"' in line and "RENAME_NOREPLACE" in line]
+        self.assertEqual(len(attempted), 1, lines)
+        thread = attempted[0].split(maxsplit=1)[0]
+        self.assertTrue(any(line.split(maxsplit=1)[0] == thread and "killed by SIGKILL" in line
+                            for line in lines if line.strip()), lines)
+
+        settled = n.call("Operation.Reconcile", target(operation))
+        self.assertEqual((settled["lifecycle"], settled["outcome_knowledge"]), ("Failed", "Known"), settled)
+        failed = n.wait(job)
+        self.assertEqual((failed["lifecycle"], failed["outcome_knowledge"], failed["conditions"][0]["type"]),
+                         ("Failed", "Known", "LeaseLost"), failed)
+        self.assertEqual(failed["current_run_id"], original["current_run_id"])
+        self.assertEqual(self.receipt(failed), {"path": self.path, "created": False})
+        deadline = time.monotonic() + 12
+        while (stage.exists() or self.holds_volume(operation)) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(stage.exists())
+        self.assertFalse(self.holds_volume(operation))
+        self.assertFalse(self.leaf.exists())
+        self.assertEqual(n.get(self.volume["resource_id"])["reference"], self.volume)
+        self.assert_protected()
+        self.assert_replay(request, accepted)
+        self.assertEqual(n.wait(job), failed)
+        self.assertFalse(self.leaf.exists())
+
+        new = n.perform(TOOL, {"target": target(self.volume), "path": self.path})
+        self.assertEqual(new["receipt"], {"path": self.path})
+        self.assertEqual(list(self.leaf.iterdir()), [])
+        self.assert_protected()
+        n.stop()
+        self.verify_stopped()
 
 
 @unittest.skipUnless(PRIOR_BIN, "requires genuine format 119 binaries")
@@ -396,42 +435,3 @@ class VolumeMkdirUpgrade(unittest.TestCase):
         writer = subprocess.run(previous + ["serve"], capture_output=True, text=True, timeout=20)
         self.assertNotEqual(writer.returncode, 0, writer)
         self.assertIn("SchemaVersionUnsupported", writer.stderr)
-        n.start()
-        original, operation = self.paused(job)
-        stage = self.stage(operation, published=False)
-        self.assertFalse(self.leaf.exists())
-        self.assertTrue(stage.is_dir())
-        self.assertEqual(list(stage.iterdir()), [])
-        lines = trace.read_text().splitlines()
-        attempted = [line for line in lines if "renameat2(" in line and f'"{stage.name}"' in line
-                     and f'"{self.leaf.name}"' in line and "RENAME_NOREPLACE" in line]
-        self.assertEqual(len(attempted), 1, lines)
-        thread = attempted[0].split(maxsplit=1)[0]
-        self.assertTrue(any(line.split(maxsplit=1)[0] == thread and "killed by SIGKILL" in line
-                            for line in lines if line.strip()), lines)
-
-        settled = n.call("Operation.Reconcile", target(operation))
-        self.assertEqual((settled["lifecycle"], settled["outcome_knowledge"]), ("Failed", "Known"), settled)
-        failed = n.wait(job)
-        self.assertEqual((failed["lifecycle"], failed["outcome_knowledge"], failed["conditions"][0]["type"]),
-                         ("Failed", "Known", "LeaseLost"), failed)
-        self.assertEqual(failed["current_run_id"], original["current_run_id"])
-        self.assertEqual(self.receipt(failed), {"path": self.path, "created": False})
-        deadline = time.monotonic() + 12
-        while (stage.exists() or self.holds_volume(operation)) and time.monotonic() < deadline:
-            time.sleep(0.05)
-        self.assertFalse(stage.exists())
-        self.assertFalse(self.holds_volume(operation))
-        self.assertFalse(self.leaf.exists())
-        self.assertEqual(n.get(self.volume["resource_id"])["reference"], self.volume)
-        self.assert_protected()
-        self.assert_replay(request, accepted)
-        self.assertEqual(n.wait(job), failed)
-        self.assertFalse(self.leaf.exists())
-
-        new = n.perform(TOOL, {"target": target(self.volume), "path": self.path})
-        self.assertEqual(new["receipt"], {"path": self.path})
-        self.assertEqual(list(self.leaf.iterdir()), [])
-        self.assert_protected()
-        n.stop()
-        self.verify_stopped()

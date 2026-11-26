@@ -359,6 +359,7 @@ fn timer(s: Shared, stop: Arc<AtomicBool>) -> Result<()> {
 fn reclaim_storage(s: Shared, stop: Arc<AtomicBool>, config: Config) -> Result<()> {
     let mut archive_cursor = String::new();
     let mut restore_cursor = String::new();
+    let mut retirement_cursor = retirement::Cursor::default();
     let mut eviction_cursor = crate::artifact::retention::delayed::Cursor::default();
     while !stop.load(Ordering::Acquire) {
         let correlation = id("storage-reclaim");
@@ -402,7 +403,7 @@ fn reclaim_storage(s: Shared, stop: Arc<AtomicBool>, config: Config) -> Result<(
         }
         let ready = state(&s)?.transaction(&correlation, |db| {
             crate::artifact::ingress::expire(db)?;
-            retirement::next(db)
+            retirement::next(db, &mut retirement_cursor)
         });
         let delay = match ready {
             Ok(Some(job)) if !stop.load(Ordering::Acquire) => {

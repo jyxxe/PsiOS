@@ -129,12 +129,14 @@ pub(crate) fn observe(work: &Work) -> Result<Value> {
         "PreconditionFailed",
         "engine or kernel changed during instance inspection",
     )?;
-    Ok(json!({
+    let mut observation = json!({
         "application_ref":work.target.reference(),"engine_id":profile.id,"container_id":cid,
         "start_operation_id":start_op,"boot_id":boot,"started_at":started_at,"process_id":pid,
-        "process_running":true,"runtime_state":"Running","readiness":"Unknown","health":"Unknown",
+        "process_running":true,"runtime_state":"Running",
         "effective_limits":limits,"observed_at":now()
-    }))
+    });
+    super::health::status(&mut observation, launch.health_check.as_ref(), state);
+    Ok(observation)
 }
 
 fn changed(before: &Value, after: &Value) -> bool {
@@ -307,7 +309,7 @@ fn confirmed(db: &Db<'_>, op: &Doc, app: &Doc, after: &Value) -> Result<Doc> {
 
 pub(crate) fn settle(db: &Db<'_>, op: &Doc, app: &Doc, after: &Value) -> Result<Value> {
     let checkpoint = confirmed(db, op, app, after)?;
-    apply_confirmed(db, op, app, &checkpoint, after)
+    apply_confirmed(db, op, app, &checkpoint, after, false)
 }
 
 fn apply_confirmed(
@@ -316,6 +318,7 @@ fn apply_confirmed(
     app: &Doc,
     checkpoint: &Doc,
     after: &Value,
+    recovered: bool,
 ) -> Result<Value> {
     let instance = db.resolve(&app.body["instance_ref"])?;
     require(
@@ -336,9 +339,12 @@ fn apply_confirmed(
     let mut state = app.body.clone();
     state["instance_ref"] = instance.reference();
     state["last_observation"] = after.clone();
-    for field in ["runtime_state", "readiness", "health", "observed_at"] {
+    for field in ["runtime_state", "observed_at"] {
         state[field] = after[field].clone();
     }
+    let (health, readiness) = super::health::projection(after, recovered);
+    state["health"] = json!(health);
+    state["readiness"] = json!(readiness);
     state["last_restart_checkpoint_ref"] = checkpoint.reference();
     Ok(db.status(app, state)?.reference())
 }
@@ -352,7 +358,7 @@ pub(crate) fn reconcile(
 ) -> Result<(Value, Value)> {
     let checkpoint = confirmed(db, op, app, after)?;
     Ok((
-        apply_confirmed(db, op, app, &checkpoint, after)?,
+        apply_confirmed(db, op, app, &checkpoint, after, true)?,
         json!({
             "observation_ref":observation.reference(),"checkpoint_ref":checkpoint.reference(),
             "conclusion":"ObservedContainerRestart"

@@ -12,6 +12,7 @@ import threading
 from support import Failure, Node, key, target
 from oci_recovery import ReceiptBarrier, check_kernel_limits, continue_after_lost_stop, lose_start_receipt, lose_stop_receipt
 from oci_capture import TOOL as CAPTURE, denied
+from oci_health import verify_image_health
 from oci_restart import verify_restart
 from test_artifact_install import TOOL as ARTIFACT_INSTALL, grant as artifact_grant
 from test_artifact_ingress import chunk, upload_request
@@ -500,6 +501,7 @@ int main(void) {
         assert node.perform("volume.read", dict(**target(restored), name="starts"))["content"] == "first\nsecond\nupgraded\nfirst\n"
         node.perform("volume.activate", target(restored))
         verify_restart(node, docker, spec, app_ids)
+        verify_image_health(node, docker)
         node.stop()
         subprocess.run(node.daemon + ["verify"], check=True, stdout=subprocess.DEVNULL, timeout=15)
         print("PASS live OCI lifecycle, scoped restart, isolated execution, release rollback, external exit, receipt recovery, volume holds and verified backup restore")

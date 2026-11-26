@@ -66,6 +66,7 @@ pub struct Install {
     pub pids_max: u32,
     pub ephemeral_max_bytes: u64,
     pub volume: Option<Target>,
+    pub(crate) health_check: Option<apps::health::Probe>,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "tool", content = "input", deny_unknown_fields)]
@@ -511,6 +512,7 @@ pub struct Work {
     pub data: Option<PathBuf>,
     pub inline: Option<Value>,
     pub launch: Option<Install>,
+    pub(crate) oci_health_check: Option<apps::health::Probe>,
     pub start_checkpoint: Option<Doc>,
     pub publication_checkpoint: Option<Doc>,
     pub volume: Option<Doc>,
@@ -935,6 +937,13 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     } else {
         None
     };
+    let oci_health_check = if matches!(a, Action::Health(_) | Action::Refresh(_))
+        && target.body["lifecycle"] == "Running"
+    {
+        apps::health::selected(db, &target)?
+    } else {
+        None
+    };
     let restore_image_inspection = if matches!(a, Action::InspectReleaseImageRestore(_)) {
         Some(apps::restore_image::pending(db, &target)?)
     } else {
@@ -949,6 +958,7 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
         start_checkpoint,
         publication_checkpoint,
         launch,
+        oci_health_check,
         task,
         run,
         op,

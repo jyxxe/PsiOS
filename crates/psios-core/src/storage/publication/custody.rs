@@ -2,8 +2,8 @@
 use super::placement::present;
 use super::{
     CHECKPOINT, Doc, INTENT, MAX_ENTRIES, MemberSet, NAMED_STAGE, NOT_APPLIED, Placement, Result,
-    Value, backup_id, belongs, check_receipt, checkpoint_id, err, filename, intent_id, json,
-    member, member_digest, member_name, members, params, require,
+    Value, backup_id, belongs, check_receipt, checkpoint_id, err, filename, intent_id, member,
+    member_digest, member_name, members, params, require,
 };
 use crate::{
     Config,
@@ -59,12 +59,12 @@ pub(super) fn reserve(
     checkpoint: &Doc,
     placement: &Placement,
 ) -> Result<()> {
-    let count: usize =
+    let count: i64 =
         db.c.query_row("SELECT count(*) FROM backup_stage_custody", [], |row| {
             row.get(0)
         })?;
     require(
-        count < MAX_STAGES,
+        count < MAX_STAGES as i64,
         "QuotaExceeded",
         "backup stage custody limit reached",
     )?;

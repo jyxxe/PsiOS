@@ -123,8 +123,33 @@ python3 native/create.py next.raw --upgrade-from node.raw --previous-receipt nod
 
 安装器用 QEMU 的一致性读锁复制源盘，检查原 GPT 布局、旧 EFI 摘要、文件系统 UUID 和部署标记。待重放的 ext4 内部日志在固定大小的私有分区副本上重放，随后执行只读文件系统检查。新版本 Core 由独立救援内核在只读候选盘上核验权威及见证。通过后替换候选盘的 EFI 分区，保留原 GPT、状态、卷、凭据、站点配置和主目录。回执记录源盘摘要、目标制品摘要、升级前的数据库格式及已重放日志的分区。活动的 QEMU 写入、身份不匹配或需要进一步修复时停止发布。创建完成后可核对 `initial_image_sha256`。[QEMU 文件锁](https://www.qemu.org/docs/master/system/qemu-block-drivers.html#disk-image-file-locking) · [ext4 日志重放](https://man7.org/linux/man-pages/man8/e2fsck.8.html) · [救援核验](offline-rescue.md)
 
-发布前，救援环境还用目标版本的 Core 和保留的配置，在容量受限的内存文件系统中演练实际数据库迁移及见证结算。副本通过完整性、外键、制品、凭据、同一节点身份及目标格式检查后，`upgrade.verified_authority.migration_rehearsal` 记录来源格式、目标格式、原配置字节的 SHA-256 和核验结果。迁移演练失败会阻止候选盘发布。演练只打开私有副本，不启动守护进程、调度任务或运行外部效果。候选盘在正式启动时执行真实迁移，业务接管仍以启动后的本机验收为准。[停机升级与失败验收](../tests/native_upgrade.py)
+发布前，救援环境用目标版本的 Core 和保留的配置，在容量受限的内存文件系统中演练实际数据库迁移及见证结算。副本通过完整性、外键、制品、凭据、同一节点身份及目标格式检查后，`upgrade.verified_authority.migration_rehearsal` 记录来源格式、目标格式、原配置字节的 SHA-256 和核验结果。迁移演练失败会阻止候选盘发布。演练只打开私有副本，不启动守护进程、调度任务或运行外部效果。[停机升级与失败验收](../tests/native_upgrade.py)
 
 回执版本 2 的 `geometry_mib` 用来逐项核对原 GPT 与镜像总长。升级盘沿用核对后的容量和分区位置。回执版本 1 按原始 323 MiB 布局检查。可在来宾用 `df -h /var/lib /home/psios` 查看两个文件系统的可用空间。[独立容量和断电升级验收](../tests/native_capacity.py)
 
-保留原盘，使用 EFI 变量文件的副本启动 `next.raw`。启动检查会按新 Core 的格式要求迁移候选盘。登录后比对 `/psios-deployment.json` 摘要、节点 ID 和已有任务回执，再恢复工作流。原盘与候选盘共享节点身份和密钥，只启动其中一个。验收失败且尚未产生需保留的新写入时，可停掉候选盘并用原盘及对应的 EFI 变量文件重新启动。候选盘开始接受业务写入后，回退前需要另行处理候选盘内的新状态与外部效果。[双版本启动与保留数据测试](../tests/native_upgrade.py)
+### 隔离试启动
+
+如需核对目标 EFI 制品实际引导和迁移，可从同一停机原盘构建独立的试启动镜像。构建和试启动期间保持原盘停机，并卸载通过 loop 等方式挂载的原盘分区。将试启动镜像作为只读后备文件，在一次性 qcow2 覆盖层和原 EFI 变量文件的私有副本中运行。为这次 VM 启动禁用网卡。
+
+```sh
+umask 077
+python3 native/create.py trial.raw --trial-boot --upgrade-from node.raw \
+  --previous-receipt node-build.json --kernel-iso alpine-virt.iso \
+  --core-archive psios-core-linux-amd64.tar.gz --core-sha256 "$VERIFIED_CORE_SHA256" \
+  > trial-build.json
+qemu-img create -f qcow2 -F raw -b "$(realpath trial.raw)" trial.qcow2
+cp node-vars.fd trial-vars.fd
+qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 1 \
+  -drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+  -drive if=pflash,format=raw,unit=1,file=trial-vars.fd \
+  -drive if=virtio,format=qcow2,file=trial.qcow2 -boot order=c,strict=on \
+  -display none -serial stdio -monitor none -nic none
+```
+
+试启动回执使用格式 7，`boot_mode` 为 `IsolatedTrial`，`trial_disk_uuid` 记录试启动盘的新 GPT 磁盘 UUID。引导模式和磁盘 UUID 随 initramfs 发布。系统在挂载可写状态前核对 GPT UUID，试启动 EFI 即使被复制到原盘也会拒绝打开原盘状态。使用 Secure Boot 时，沿用原证书和登记配置，将相同签名参数传给构建器，并使用相应固件代码文件。试启动核对持久 Core 配置，在覆盖层由目标版本的 `psiosd check` 执行真实迁移。检查超时为 120 秒，另有 5 秒终止宽限。持久服务配置、Core API、调度和来宾网络保持停用，迁移后卸载文件系统并自动关机。
+
+串口输出一条以 `PSIOS-TRIAL/1 ` 开头的 JSON 状态。验收时要求 `status` 为 `Ready`，其中 `deployment_manifest_sha256` 须与 `trial-build.json` 相符，并确认虚机已正常退出。失败状态包含启动阶段。中断或缺少成功状态时可丢弃覆盖层及试启动 EFI 变量，原盘和原变量文件仍供独立引导。[真实 UEFI 试启动验收](../tests/native_upgrade.py)
+
+### 启动正式候选盘
+
+从保留的停机原盘独立构建正式候选，按本节开头的命令省略 `--trial-boot`。可比对两份回执中的原盘摘要、目标 Core 源码版本及迁移演练结果。使用新的 EFI 变量副本启动 `next.raw`，启动检查会再次执行真实迁移。登录后比对 `/psios-deployment.json` 摘要、节点 ID 和已有任务回执，再恢复工作流。原盘与候选盘共享节点身份和密钥，只启动其中一个。候选盘开始接受业务写入后，回退前需要另行处理候选盘内的新状态与外部效果。[双版本启动与保留数据测试](../tests/native_upgrade.py)

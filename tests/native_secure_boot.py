@@ -15,19 +15,20 @@ import uuid
 import pefile
 
 from native_disk import Console, REPO, password, sha
+from native_upgrade import trial_report
 
 EFI_FILE = "::/EFI/BOOT/BOOTX64.EFI"
 
 
 @contextmanager
-def secure_vm(work, image):
-    shutil.copyfile(work / "enrolled.fd", work / "vars.fd")
+def secure_vm(work, image, *, disk_format="raw", vars_file="vars.fd"):
+    shutil.copyfile(work / "enrolled.fd", work / vars_file)
     cmd = ["qemu-system-x86_64", "-nodefaults", "-no-user-config", "-no-reboot", "-machine", "q35,smm=on",
            "-accel", "tcg", "-m", "768", "-smp", "2", "-display", "none", "-monitor", "none", "-serial", "stdio",
            "-global", "driver=cfi.pflash01,property=secure,value=on", "-nic", "none",
            "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=code.fd",
-           "-drive", "if=pflash,format=raw,unit=1,file=vars.fd",
-           "-drive", f"if=virtio,format=raw,file={image.name}", "-boot", "order=c,strict=on"]
+           "-drive", f"if=pflash,format=raw,unit=1,file={vars_file}",
+           "-drive", f"if=virtio,format={disk_format},file={image.name}", "-boot", "order=c,strict=on"]
     with subprocess.Popen(cmd, cwd=work, stdin=subprocess.PIPE, stdout=subprocess.PIPE) as vm:
         try:
             yield Console(vm)
@@ -84,6 +85,46 @@ def signing_args(args, key, cert):
             "--efi-stub", args.efi_stub, "--efi-stub-sha256", sha(args.efi_stub)]
 
 
+def exercise_signed_trial(args, work, upgrade, security, original):
+    trial = work / "signed-trial.raw"
+    receipt = json.loads(subprocess.check_output(
+        [*installer(args, trial, args.archive), *upgrade, *security, "--trial-boot"], timeout=330
+    ))
+    assert (receipt["format"], receipt["boot_mode"]) == (7, "IsolatedTrial"), receipt
+    assert receipt["secure_boot"] == original["secure_boot"], receipt
+    initial_vars = sha(work / "enrolled.fd")
+    overlay = work / "signed-trial.qcow2"
+    subprocess.run(["qemu-img", "create", "-q", "-f", "qcow2", "-F", "raw", "-b", str(trial), overlay],
+                   check=True, timeout=30)
+    with secure_vm(work, overlay, disk_format="qcow2", vars_file="trial-vars.fd") as c:
+        report = trial_report(c)
+        assert report == {
+            "status": "Ready", "deployment_manifest_sha256": receipt["deployment_manifest_sha256"]
+        }, report
+    assert sha(trial) == receipt["initial_image_sha256"] and sha(work / "enrolled.fd") == initial_vars
+
+    # A modified trial initrd cannot change the signed early boot decision.
+    signed = work / "original.efi"
+    subprocess.run(["mcopy", "-i", f"{trial}@@1048576", EFI_FILE, signed], check=True)
+    assert sha(signed) == receipt["efi_application_sha256"]
+    pe = pefile.PE(str(signed), fast_load=True)
+    initrd, = [section for section in pe.sections if section.Name.rstrip(b"\x00") == b".initrd"]
+    content = bytearray(signed.read_bytes())
+    content[initrd.PointerToRawData + 32] ^= 1
+    altered = work / "altered.efi"
+    altered.write_bytes(content)
+    damaged = work / "damaged.raw"
+    subprocess.run(["qemu-img", "convert", "-m", "1", "-f", "raw", "-O", "raw", trial, damaged],
+                   check=True, timeout=90)
+    subprocess.run(["mcopy", "-o", "-i", f"{damaged}@@1048576", altered, EFI_FILE], check=True)
+    damaged_digest = sha(damaged)
+    with secure_vm(work, damaged, vars_file="trial-vars.fd") as c:
+        rejected_by_firmware(c)
+    assert sha(damaged) == damaged_digest and sha(work / "enrolled.fd") == initial_vars
+    damaged.unlink()
+    print("PASS enrolled Secure Boot trial and firmware rejection of its altered initrd", flush=True)
+
+
 def exercise(args, work):
     operator, op_hash = password(work, "operator.hash")
     admin, root_hash = password(work, "root.hash")
@@ -113,25 +154,6 @@ def exercise(args, work):
         c.send("poweroff")
         assert c.vm.wait(35) == 0
 
-    # Change bytes within the authenticated initrd of a disposable disk copy.
-    signed = work / "original.efi"
-    subprocess.run(["mcopy", "-i", f"{image}@@1048576", EFI_FILE, signed], check=True)
-    assert sha(signed) == receipt["efi_application_sha256"]
-    pe = pefile.PE(str(signed), fast_load=True)
-    initrd, = [s for s in pe.sections if s.Name.rstrip(b"\x00") == b".initrd"]
-    content = bytearray(signed.read_bytes())
-    content[initrd.PointerToRawData + 32] ^= 1
-    altered = work / "altered.efi"
-    altered.write_bytes(content)
-    damaged = work / "damaged.raw"
-    subprocess.run(["qemu-img", "convert", "-m", "1", "-f", "raw", "-O", "raw", image, damaged], check=True)
-    subprocess.run(["mcopy", "-o", "-i", f"{damaged}@@1048576", altered, EFI_FILE], check=True)
-    damaged_digest = sha(damaged)
-    with secure_vm(work, damaged) as c:
-        rejected_by_firmware(c)
-    assert sha(damaged) == damaged_digest
-    damaged.unlink()
-
     before = sha(image)
     receipt_path = work / "previous.json"
     receipt_path.write_text(json.dumps(receipt))
@@ -147,6 +169,8 @@ def exercise(args, work):
                            capture_output=True, text=True)
     assert older.returncode and "unsupported previous build receipt format" in older.stderr, older
     assert not upgraded.exists() and sha(image) == before
+    exercise_signed_trial(args, work, upgrade, security, receipt)
+    assert sha(image) == before
     new = json.loads(subprocess.check_output([*base, *upgrade, *security]))
     assert new["format"] == 3 and new["secure_boot"] == receipt["secure_boot"], new
     assert new["source_commit"] != receipt["source_commit"], new
@@ -159,7 +183,7 @@ def exercise(args, work):
         c.login("psios", operator)
         assert json.loads(c.run("psiosctl whoami"))["authority_id"] == identity
         assert json.loads(c.run("cat /psios-deployment.json"))["core_source_commit"] == new["source_commit"]
-    print(f"PASS enforced UEFI Secure Boot, rejection of an altered initrd and signed upgrade of authority {identity}")
+    print(f"PASS enforced UEFI Secure Boot and signed upgrade of authority {identity}")
 
 
 if __name__ == "__main__":

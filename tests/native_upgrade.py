@@ -76,14 +76,14 @@ def trial_rejected_overlay(work, trial_disk):
 
 
 def trial_report(console):
-    before = console.until(TRIAL)
+    before = console.until(TRIAL, timeout=170)
     report = json.loads(console.until(b"\n"))
     tail, _ = console.vm.communicate(timeout=35)
     rest = console.buf + tail
     assert console.vm.returncode == 0, rest[-512:]
     assert TRIAL not in rest, rest[-512:]
     transcript = before + rest
-    for unexpected in (SERVICE_MARKER.encode(), b"login: ", b"udhcpc:"):
+    for unexpected in (SERVICE_MARKER.encode(), b"login: ", b"psiosd ready", b"udhcpc:"):
         assert unexpected not in transcript, transcript[-1024:]
     return report
 

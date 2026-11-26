@@ -16,6 +16,7 @@ use zeroize::Zeroizing;
 mod space;
 pub(crate) use space::check_restore_capacity;
 mod checkpoint;
+mod compact;
 mod verify;
 
 pub struct Store {

@@ -1,4 +1,5 @@
 //! Bounded, read-only observations in the daemon's network namespace.
+pub(crate) mod enrollment;
 mod kernel;
 mod lookup;
 pub(crate) mod probe;

@@ -82,6 +82,7 @@ pub fn sync(db: &Db<'_>) -> Result<()> {
         let retired = db.status(&d, body)?;
         service_state::sync(db, &retired, boot.trim())?;
     }
+    network::enrollment::sync(db)?;
     network::probe::sync(db, &id)
 }
 

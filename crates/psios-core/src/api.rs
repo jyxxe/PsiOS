@@ -41,6 +41,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Node.Get" => node::get(db, actor, p),
         "Node.Configure" => node::configure(db, actor, p),
         "NetworkProbe.Get" => node::network::probe::get(db, actor, p),
+        "NetworkLink.Get" => node::network::enrollment::get(db, actor, p),
         "Skill.Publish" => agent::skill(db, actor, p),
         "Skill.Retire" => agent::retire(db, actor, p, "Skill"),
         "Model.Register" => agent::model(db, actor, p),

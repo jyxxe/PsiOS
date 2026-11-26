@@ -2,7 +2,7 @@ use crate::*;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     net::SocketAddr,
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
@@ -42,6 +42,8 @@ pub struct Config {
     pub services: Vec<ServiceConfig>,
     #[serde(default)]
     pub network_probes: Vec<NetworkProbeConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_link: Option<NetworkLinkConfig>,
     #[serde(default = "default_docker")]
     pub docker_socket: PathBuf,
     #[serde(default = "default_oci_capture_bytes")]
@@ -85,6 +87,62 @@ pub struct NetworkProbeConfig {
     #[serde(default = "default_probe_timeout")]
     pub timeout_ms: u64,
     pub dns: Option<DnsProbeConfig>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkLinkConfig {
+    pub interface: String,
+    pub mac: String,
+    pub original_uuid: String,
+    pub candidate_uuid: String,
+    pub confirmation_seconds: u32,
+}
+
+impl NetworkLinkConfig {
+    fn validate(&self) -> Result<()> {
+        let iface = self.interface.as_bytes();
+        require(
+            (1..=15).contains(&iface.len())
+                && iface[0].is_ascii_alphanumeric()
+                && iface
+                    .iter()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(byte))
+                && self.interface != "lo",
+            "InvalidArgument",
+            "network link requires a valid non-loopback interface name",
+        )?;
+        let mac: Vec<&str> = self.mac.split(':').collect();
+        require(
+            mac.len() == 6
+                && mac.iter().all(|octet| {
+                    octet.len() == 2
+                        && octet
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+                && u8::from_str_radix(mac[0], 16).is_ok_and(|first| first & 1 == 0)
+                && self.mac != "00:00:00:00:00:00",
+            "InvalidArgument",
+            "network link requires a canonical nonzero unicast MAC",
+        )?;
+        let profile_id = |value: &str| {
+            uuid::Uuid::parse_str(value)
+                .is_ok_and(|id| !id.is_nil() && id.hyphenated().to_string() == value)
+        };
+        require(
+            profile_id(&self.original_uuid)
+                && profile_id(&self.candidate_uuid)
+                && self.original_uuid != self.candidate_uuid,
+            "InvalidArgument",
+            "network link requires two distinct canonical profile UUIDs",
+        )?;
+        require(
+            (20..=120).contains(&self.confirmation_seconds),
+            "InvalidArgument",
+            "network confirmation window must be between 20 and 120 seconds",
+        )
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -152,6 +210,7 @@ impl Config {
             workers: default_workers(),
             services: Vec::new(),
             network_probes: Vec::new(),
+            network_link: None,
             tick_ms: default_tick(),
             docker_socket: default_docker(),
             oci_capture_max_bytes: default_oci_capture_bytes(),
@@ -161,7 +220,23 @@ impl Config {
         }
     }
     pub fn load(path: &Path) -> Result<Self> {
-        let c: Self = decode(&psios_api::parse(&fs::read(path)?)?)?;
+        let mut source = File::open(path)?;
+        let mut bytes = Vec::new();
+        source.read_to_end(&mut bytes)?;
+        let c: Self = decode(&psios_api::parse(&bytes)?)?;
+        if c.network_link.is_some() {
+            let opened = source.metadata()?;
+            let current = fs::symlink_metadata(path)?;
+            require(
+                current.is_file()
+                    && opened.dev() == current.dev()
+                    && opened.ino() == current.ino()
+                    && opened.uid() == 0
+                    && opened.mode() & 0o022 == 0,
+                "PermissionDenied",
+                "network link enrollment requires a root-owned configuration file protected from writes",
+            )?;
+        }
         c.validate()?;
         Ok(c)
     }
@@ -218,6 +293,9 @@ impl Config {
             "invalid service allowlist or missing control definition digest",
         )?;
         node::network::probe::validate(&self.network_probes)?;
+        if let Some(link) = &self.network_link {
+            link.validate()?;
+        }
         require(
             (1..=storage::oci_archive::MAX_BYTES).contains(&self.oci_capture_max_bytes),
             "InvalidArgument",

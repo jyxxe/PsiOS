@@ -1,5 +1,6 @@
 """Transfer exact private JSON to an authorized model provider through the real Unix API."""
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 import json
 import os
@@ -186,7 +187,7 @@ class AgentSessionInputs(SessionInputFixture, unittest.TestCase):
         n.call("Session.Cancel", target(current["reference"]), self.agent["token"])
         n.call("Artifact.Withdraw", self.withdrawal(), self.agent["token"])
 
-    def test_task_retry_atomically_reacquires_the_original_input_hold(self):
+    def test_task_retry_checks_both_session_limits_before_reacquiring_input(self):
         n = self.n
         token = self.agent["token"]
         new_volume = self.grant(self.agent, ["task.submit", "task.read", "volume.create"], None)
@@ -202,7 +203,7 @@ class AgentSessionInputs(SessionInputFixture, unittest.TestCase):
                             "task.submit", "volume.read"],
                             [self.node_id, self.model["resource_id"], self.artifact["resource_id"],
                              volume["resource_id"]])
-        session = self.opened(self.opening(scoped, skill_ref=skill))
+        session = self.opened(self.opening(scoped, skill_ref=skill, provider_queue=True))
         first = self.claimed(session, "before-host-failure")
         source = n.state / "volumes" / volume["resource_id"] / "data"
         displaced = source.with_name("temporarily-missing-data")
@@ -214,21 +215,76 @@ class AgentSessionInputs(SessionInputFixture, unittest.TestCase):
             self.assertEqual(failed["lifecycle"], "Failed", failed)
         finally:
             displaced.rename(source)
-        current = n.call("Session.Get", {"id": session["resource_id"]}, token)
+        current = self.session(session)
         self.assertEqual(current["session"]["lifecycle"], "Failed", current)
-        with closing(sqlite3.connect(n.state / "state.db")) as conn:
-            self.assertEqual(conn.execute("SELECT count(*) FROM session_input_holds WHERE session=?",
-                             (session["resource_id"],)).fetchone(), (0,))
 
         params = {**target(current["reference"]), "task_id": response["task_id"], "key": key()}
-        accepted = n.call("Session.RetryTask", params, token)
+        budget_id = scoped["budget_ref"]["resource_id"]
+        session_id = session["resource_id"]
+
+        def admission_state():
+            with closing(sqlite3.connect(n.state / "state.db")) as conn:
+                children = conn.execute(
+                    "SELECT task FROM session_tasks WHERE session=? ORDER BY turn, attempt", (session_id,)
+                ).fetchall()
+                holds, = conn.execute(
+                    "SELECT count(*) FROM session_input_holds WHERE session=?", (session_id,)
+                ).fetchone()
+            return children, holds, n.call("Budget.Get", {"id": budget_id}, token)
+
+        def provider_queue_size():
+            with closing(sqlite3.connect(n.state / "state.db")) as conn:
+                count, = conn.execute(
+                    "SELECT count(*) FROM model_queue WHERE model=?", (self.model["resource_id"],)
+                ).fetchone()
+            return count
+
+        before = admission_state()
+        self.assertEqual(before[:2], ([(response["task_id"],)], 0))
+        self.assertEqual(provider_queue_size(), 0)
+        owner_opening = self.opening(scoped, skill_ref=skill, input_artifacts=[])
+        manual = [self.opened({**owner_opening, "key": key()}) for _ in range(32)]
+        self.refuse("QuotaExceeded", "Session.RetryTask", params, token)
+        self.assertEqual(self.session(session), current)
+        self.assertEqual(admission_state(), before)
+        n.call("Session.Cancel", target(manual.pop()), token)
+
+        queued = []
+        for _ in range(4):
+            peer, peer_grant = n.agent(["session.run", "task.submit", "task.read", "node.inventory"])
+            opening = self.opening(peer_grant, input_artifacts=[], provider_queue=True)
+            for _ in range(32):
+                ref = n.call("Session.Open", {**opening, "key": key()}, peer["token"])["reference"]
+                queued.append((ref, peer["token"]))
+        self.assertEqual(provider_queue_size(), 128)
+        self.refuse("QueueFull", "Session.RetryTask", params, token)
+        self.assertEqual(self.session(session), current)
+        self.assertEqual(admission_state(), before)
+        ref, peer_token = queued[-1]
+        n.call("Session.Cancel", target(ref), peer_token)
+        self.assertEqual(provider_queue_size(), 127)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(n.call, "Session.RetryTask", params, token) for _ in range(2)]
+            accepted, replay = sorted((future.result() for future in futures), key=lambda x: x["deduplicated"])
+        self.assertFalse(accepted["deduplicated"])
+        self.assertEqual(replay, {**accepted, "deduplicated": True})
         self.refuse("Conflict", "Artifact.Withdraw", self.withdrawal(), token)
         settled = n.wait(accepted["task_id"])
         self.assertEqual(settled["lifecycle"], "Succeeded", settled)
+        self.assertEqual(provider_queue_size(), 128)
+        after = admission_state()
+        self.assertEqual(after[:2], ([(response["task_id"],), (accepted["task_id"],)], 1))
+        self.assertEqual(after[2]["spent"], before[2]["spent"] + 1)
+        self.assertEqual(after[2]["reserved"], before[2]["reserved"])
+        self.assertEqual(after[2]["model_calls_used"], before[2]["model_calls_used"])
         self.assertEqual(n.call("Session.RetryTask", params, token), {**accepted, "deduplicated": True})
         n.stop(signal.SIGKILL)
         subprocess.run(n.daemon + ["verify"], check=True, capture_output=True, timeout=20)
         n.start()
+        self.assertEqual(provider_queue_size(), 128)
+        self.assertEqual(n.call("Session.RetryTask", params, token), {**accepted, "deduplicated": True})
+        self.assertEqual(admission_state(), after)
         second = self.claimed(session, "after-exact-task-retry")
         self.assertEqual(second["context"]["inputs"], first["context"]["inputs"])
         final = self.respond(session, second, {"action": "finish", "summary": "Read after storage recovered."})

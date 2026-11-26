@@ -135,6 +135,22 @@ fn state(d: &Doc) -> &str {
 fn response(d: &Doc) -> Value {
     json!({"reference":d.reference(),"session":d.body})
 }
+
+fn check_principal_capacity(db: &Db<'_>, actor: &str) -> Result<()> {
+    const MAX_ACTIVE_SESSIONS: u32 = 32;
+    let count: u32 = db.c.query_row(
+        "SELECT count(*) FROM current WHERE owner=?1 AND kind='Session'
+         AND body->>'lifecycle' NOT IN ('Failed','Succeeded','Cancelled')",
+        [actor],
+        |row| row.get(0),
+    )?;
+    require(
+        count < MAX_ACTIVE_SESSIONS,
+        "QuotaExceeded",
+        "active sessions per principal exceeded",
+    )
+}
+
 fn deps(db: &Db<'_>, s: &Doc) -> Result<(Doc, Doc, Doc)> {
     require(
         s.body["checkpoint_version"] == "1",
@@ -224,12 +240,7 @@ fn open_session(
         )?;
         return Ok(response(&existing));
     }
-    let count:u32=db.c.query_row("SELECT count(*) FROM current WHERE owner=?1 AND kind='Session' AND body->>'lifecycle' NOT IN ('Failed','Succeeded','Cancelled')",[actor],|r|r.get(0))?;
-    require(
-        count < 32,
-        "QuotaExceeded",
-        "active sessions per principal exceeded",
-    )?;
+    check_principal_capacity(db, actor)?;
     if o.provider_queue {
         db.cfg.check_admission_space()?;
         let model = registry::pinned(db, &o.model_ref, "Model")?;
@@ -1031,6 +1042,10 @@ pub fn retry_task(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "QuotaExceeded",
         "turn tool retry limit exhausted",
     )?;
+    check_principal_capacity(db, actor)?;
+    if s.spec["provider_queue"] == true {
+        queue::check_capacity(db, &model.id)?;
+    }
     let mut b = s.body.clone();
     tool_context::prepare_retry(db, &s, &model, &previous, turn, &mut b)?;
     session_inputs::admit(db, &s)?;

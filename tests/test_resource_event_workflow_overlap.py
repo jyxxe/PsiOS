@@ -9,9 +9,15 @@ import sqlite3
 import subprocess
 import time
 import unittest
+import uuid
 
 from support import Failure, Node, key, target
 from test_schedule import timestamp
+
+
+CURSOR_ERROR = "protected Workflow event schedule disagrees with its pending cursor marker"
+CLOCK_ERROR = "protected Workflow event schedule lost its original elapsed cutoff"
+SUBMISSION_ERROR = "protected Workflow event trigger lost its authoritative Task submission"
 
 
 class ResourceEventWorkflowOverlap(unittest.TestCase):
@@ -76,6 +82,22 @@ class ResourceEventWorkflowOverlap(unittest.TestCase):
         self.assertEqual(report["sqlite_integrity"], "Verified", report)
         self.assertFalse(report["migration_required"], report)
 
+    def reject_persisted_change(self, change, restore, message, *, startup=True):
+        self.assertIsNotNone(self.n.process.poll())
+        path = self.n.state / "state.db"
+        with closing(sqlite3.connect(path, timeout=10)) as db, db:
+            self.assertEqual(db.execute(*change).rowcount, 1)
+        try:
+            commands = ("verify", "serve") if startup else ("verify",)
+            for command in commands:
+                denied = subprocess.run(self.n.daemon + [command], capture_output=True, text=True, timeout=20)
+                self.assertNotEqual(denied.returncode, 0, denied)
+                self.assertIn("RecoveryRequired", denied.stderr)
+                self.assertIn(message, denied.stderr)
+        finally:
+            with closing(sqlite3.connect(path, timeout=10)) as db, db:
+                self.assertEqual(db.execute(*restore).rowcount, 1)
+
     def change_source(self, queue_limit):
         n = self.n
         self.assertIsNotNone(n.process.poll())
@@ -90,6 +112,26 @@ class ResourceEventWorkflowOverlap(unittest.TestCase):
 
     def get_schedule(self, schedule_id):
         return self.n.call("Schedule.Get", {"id": schedule_id})
+
+    def queue_blocker(self):
+        other = self.n.perform("volume.create", {"name": "event-workflow-admission-blocker"})
+        blocker = self.n.submit("volume.write", {**target(other), "name": "held", "content": "not written"})
+        held = self.n.wait(blocker)
+        self.assertEqual((held["lifecycle"], held["outcome_knowledge"]), ("WaitingApproval", "NotStarted"), held)
+        held_file = self.n.state / "volumes" / other["resource_id"] / "data" / "held"
+        return held, held_file
+
+    def pending_event(self, schedule_id):
+        deferred = self.until(lambda: self.get_schedule(schedule_id),
+                              lambda row: row["state"]["pending_trigger_ref"] is not None)
+        pending_ref = deferred["state"]["pending_trigger_ref"]
+        self.assertEqual(pending_ref["version"], "r1")
+        pending = self.n.call("Schedule.TriggerGet", {"id": pending_ref["resource_id"]})
+        self.assertEqual(pending["reference"], pending_ref)
+        self.assertEqual((pending["state"]["lifecycle"], pending["state"]["task_receipt"]), ("Pending", None))
+        self.assertEqual(deferred["state"]["source_ref"], self.source)
+        self.assertFalse(deferred["state"]["trigger_refs"])
+        return deferred, pending
 
     def wait_triggers(self, schedule_id, count):
         schedule = self.until(lambda: self.get_schedule(schedule_id),
@@ -248,25 +290,15 @@ class ResourceEventWorkflowOverlap(unittest.TestCase):
 
     def test_waiting_event_keeps_original_revision_and_skip_points_to_its_settlement(self):
         n = self.n
-        other = n.perform("volume.create", {"name": "event-workflow-admission-blocker"})
-        blocker = n.submit("volume.write", {**target(other), "name": "held", "content": "not written"})
-        held = n.wait(blocker)
-        self.assertEqual((held["lifecycle"], held["outcome_knowledge"]), ("WaitingApproval", "NotStarted"), held)
-        held_file = n.state / "volumes" / other["resource_id"] / "data" / "held"
+        held, held_file = self.queue_blocker()
+        blocker = held["task_id"]
         baseline_tasks = self.ids("Task")
         request, schedule_id = self.create(count=2, max_runtime=60)
 
         self.stop()
         first_source = self.change_source(1)
-        deferred = self.until(lambda: self.get_schedule(schedule_id),
-                              lambda row: row["state"]["pending_trigger_ref"] is not None)
-        pending_ref = deferred["state"]["pending_trigger_ref"]
-        self.assertEqual(pending_ref["version"], "r1")
-        pending = n.call("Schedule.TriggerGet", {"id": pending_ref["resource_id"]})
-        self.assertEqual(pending["reference"], pending_ref)
-        self.assertEqual((pending["state"]["lifecycle"], pending["state"]["task_receipt"]), ("Pending", None))
-        self.assertEqual(deferred["state"]["source_ref"], self.source)
-        self.assertFalse(deferred["state"]["trigger_refs"])
+        deferred, pending = self.pending_event(schedule_id)
+        pending_ref = pending["reference"]
         self.assert_source_events([pending], [first_source])
         self.assertEqual(self.ids("Task"), baseline_tasks)
         self.assertFalse(self.ids("WorkflowRun"))
@@ -311,6 +343,16 @@ class ResourceEventWorkflowOverlap(unittest.TestCase):
         self.stop()
         self.verify_stopped()
         self.reject_changed_pending_source(pending_ref, triggers[1]["state"]["source_event"]["source_seq"])
+        with closing(sqlite3.connect(n.state / "state.db", timeout=10)) as db:
+            digest, scope = db.execute("SELECT digest,scope FROM submissions WHERE task=?", (launch_id,)).fetchone()
+        self.assertEqual(scope, schedule_id)
+        self.assertEqual(digest, first["state"]["task_receipt"]["request_digest"])
+        change_digest = "UPDATE submissions SET digest=? WHERE task=?"
+        self.reject_persisted_change((change_digest, ("sha256:" + "0" * 64, launch_id)),
+                                 (change_digest, (digest, launch_id)), SUBMISSION_ERROR, startup=False)
+        change_scope = "UPDATE submissions SET scope=? WHERE task=?"
+        self.reject_persisted_change((change_scope, (self.source["resource_id"], launch_id)),
+                                 (change_scope, (scope, launch_id)), SUBMISSION_ERROR, startup=False)
         self.verify_stopped()
         n.start()
         self.assertEqual(n.call("Schedule.Create", request), complete)
@@ -335,6 +377,82 @@ class ResourceEventWorkflowOverlap(unittest.TestCase):
         finally:
             with closing(sqlite3.connect(path, timeout=10)) as db, db:
                 db.execute("UPDATE versions SET body=? WHERE id=? AND rev=?", (raw, *location))
+
+    def test_protected_cursor_and_clock_refuse_drift_then_original_pending_event_cancels(self):
+        n = self.n
+        held, held_file = self.queue_blocker()
+        baseline_tasks = self.ids("Task")
+        request, schedule_id = self.create(count=2, max_runtime=60)
+        opening = n.call("Node.WorkAdmission.Get", {})["reference"]
+        draining = n.call("Node.WorkAdmission.Set", {"expected_resource_version": opening["version"],
+            "mode": "Draining", "reason": "keep a real new source event unexamined"})
+
+        self.stop()
+        source = self.change_source(1)
+        self.assertFalse(self.get_schedule(schedule_id)["state"]["trigger_refs"])
+        self.assertIsNone(self.get_schedule(schedule_id)["state"]["pending_trigger_ref"])
+        self.stop()
+        self.verify_stopped()
+
+        pending_table = "pending_event_schedules"
+        path = n.state / "state.db"
+        with closing(sqlite3.connect(path, timeout=10)) as db:
+            index = db.execute("SELECT schedule,source,source_rev,deadline_ms FROM pending_event_schedules "
+                               "WHERE schedule=?", (schedule_id,)).fetchone()
+        self.assertEqual(index[:3], (schedule_id, self.source["resource_id"], int(self.source["version"][1:])))
+        advanced = int(source["version"][1:])
+        self.assertEqual(advanced, index[2] + 1)
+        change_cursor = f"UPDATE {pending_table} SET source_rev=? WHERE schedule=?"
+        self.reject_persisted_change((change_cursor, (advanced, schedule_id)),
+                                 (change_cursor, (index[2], schedule_id)), CURSOR_ERROR)
+        self.verify_stopped()
+
+        n.start()
+        self.assertEqual(n.call("Node.Get", {})["reference"], source)
+        n.call("Node.WorkAdmission.Set", {"expected_resource_version": draining["reference"]["version"],
+            "mode": "Open", "reason": "let the full queue park its source event"})
+        deferred, pending = self.pending_event(schedule_id)
+        self.assert_source_events([pending], [source])
+        self.assertEqual(self.ids("Task"), baseline_tasks)
+        self.assertEqual(self.budget(), (0, 0))
+
+        self.stop()
+        self.verify_stopped()
+        self.reject_persisted_change((f"DELETE FROM {pending_table} WHERE schedule=?", (schedule_id,)),
+                                 (f"INSERT INTO {pending_table}(schedule,source,source_rev,deadline_ms) VALUES(?,?,?,?)",
+                                  index), CURSOR_ERROR)
+        with closing(sqlite3.connect(path, timeout=10)) as db:
+            original_boot, = db.execute("SELECT boot_id FROM authorization_deadlines WHERE resource=?",
+                                        (schedule_id,)).fetchone()
+        change_boot = "UPDATE authorization_deadlines SET boot_id=? WHERE resource=?"
+        self.reject_persisted_change((change_boot, (str(uuid.uuid4()), schedule_id)),
+                                 (change_boot, (original_boot, schedule_id)), CLOCK_ERROR)
+        self.verify_stopped()
+
+        n.start()
+        self.assertEqual(self.pending_event(schedule_id), (deferred, pending))
+        cancelled = n.call("Schedule.Cancel", target(deferred["reference"]))
+        self.assertEqual(cancelled["state"]["lifecycle"], "Cancelled")
+        self.assertEqual(cancelled["state"]["source_ref"], self.source)
+        self.assertIsNone(cancelled["state"]["pending_trigger_ref"])
+        _, (closed,) = self.wait_triggers(schedule_id, 1)
+        self.assertEqual(closed["reference"]["resource_id"], pending["reference"]["resource_id"])
+        self.assertEqual(closed["reference"]["version"], "r2")
+        self.assertEqual((closed["state"]["lifecycle"], closed["state"]["reason"], closed["state"]["task_receipt"]),
+                         ("Cancelled", None, None))
+        self.assertEqual(closed["state"]["source_event"], pending["state"]["source_event"])
+        self.assertNotIn("overlap_evidence", closed["state"])
+        self.stop()
+        self.verify_stopped()
+        n.start()
+        self.assertEqual(n.call("Schedule.Create", request), cancelled)
+        self.assertEqual(self.wait_triggers(schedule_id, 1), (cancelled, [closed]))
+        self.assertEqual(self.ids("Task"), baseline_tasks)
+        self.assertFalse(self.ids("WorkflowRun"))
+        self.assertEqual(self.budget(), (0, 0))
+        self.assertEqual(n.wait(held["task_id"]), held)
+        self.assertFalse(held_file.exists())
+        self.assertFalse(self.file.exists())
 
     def test_unknown_physical_write_still_blocks_after_child_workflow_deadline(self):
         request, schedule_id = self.create(count=2, max_runtime=8)

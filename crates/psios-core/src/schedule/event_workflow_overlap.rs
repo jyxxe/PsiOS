@@ -1,13 +1,13 @@
 //! Validate resource-event custody separately from the shared Workflow launch proof.
 use super::{
-    due_ms, instant,
+    due_ms, elapsed, instant,
     resource_event::{Rule, pending_body, trigger_spec, verify_source},
     workflow_overlap::{self, Block, MODE},
 };
 use crate::{
     Result, broker,
-    db::{self, Doc, row},
-    err, policy,
+    db::{self, Db, Doc, row},
+    err, policy, require,
     workflow::START_TOOL,
 };
 use psios_api::canonical;
@@ -15,6 +15,59 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 
 pub(crate) const FORMAT: u32 = crate::storage::directory_create::FORMAT + 1;
+pub(crate) const SCHEMA: &str = "CREATE TABLE protected_event_schedule_cursors(
+    schedule TEXT PRIMARY KEY, source_rev INTEGER NOT NULL CHECK(source_rev>0)) STRICT;";
+const CURSOR_ERROR: &str =
+    "protected Workflow event schedule disagrees with its pending cursor marker";
+const CLOCK_ERROR: &str = "protected Workflow event schedule lost its original elapsed cutoff";
+const SUBMISSION_ERROR: &str =
+    "protected Workflow event trigger lost its authoritative Task submission";
+
+fn protected(schedule: &Doc) -> bool {
+    schedule.spec["event"]["overlap"] == MODE
+        || schedule.spec["event"].is_object() && schedule.body["overlap"] == MODE
+}
+
+pub(super) fn bind_clock(db: &Db<'_>, id: &str, spec: &mut Value) -> Result<()> {
+    let anchor =
+        elapsed::Anchor::capture(db.c, id)?.ok_or_else(|| err("RecoveryRequired", CLOCK_ERROR))?;
+    spec["event_workflow_clock"] = json!(anchor);
+    Ok(())
+}
+
+pub(super) fn register_cursor(db: &Db<'_>, schedule: &Doc, source_rev: i64) -> Result<()> {
+    db.c.execute(
+        "INSERT INTO protected_event_schedule_cursors(schedule,source_rev) VALUES(?1,?2)",
+        params![schedule.id, source_rev],
+    )?;
+    Ok(())
+}
+
+pub(super) fn advance_cursor(db: &Db<'_>, schedule: &Doc, prev: i64, next: i64) -> Result<()> {
+    if protected(schedule) {
+        require(db.c.execute(
+            "UPDATE protected_event_schedule_cursors SET source_rev=?3 WHERE schedule=?1 AND source_rev=?2",
+            params![schedule.id, prev, next],
+        )? == 1, "RecoveryRequired", CURSOR_ERROR)?;
+    }
+    Ok(())
+}
+
+pub(super) fn remove_cursor(db: &Db<'_>, schedule: &Doc) -> Result<()> {
+    if protected(schedule) {
+        let rule: Rule = crate::decode(&schedule.spec["event"]).map_err(|_| invalid())?;
+        verify_cursor(db.c, schedule, &rule)?;
+        require(
+            db.c.execute(
+                "DELETE FROM protected_event_schedule_cursors WHERE schedule=?1",
+                [&schedule.id],
+            )? == 1,
+            "RecoveryRequired",
+            CURSOR_ERROR,
+        )?;
+    }
+    Ok(())
+}
 
 fn invalid() -> crate::Error {
     err(
@@ -60,6 +113,14 @@ struct Occurrence {
     copied_seq: Option<i64>,
 }
 
+struct Submission {
+    task: String,
+    receipt: Value,
+    digest: String,
+    scope: String,
+    cancelled: bool,
+}
+
 impl Occurrence {
     fn doc(&self) -> &Doc {
         &self.version.doc
@@ -71,18 +132,18 @@ struct Scope<'a> {
     schedule: &'a Doc,
     rule: &'a Rule,
     source: Doc,
+    enrolled_seq: i64,
 }
 
 impl<'a> Scope<'a> {
     fn load(conn: &'a Connection, schedule: &'a Doc, rule: &'a Rule) -> Result<Self> {
         let source = db::resolve(conn, &rule.source_ref).map_err(|_| invalid())?;
+        let first = Version::exact(conn, &schedule.id, 1)?;
         let origin = &schedule.spec["request"]["origin_ref"];
-        let (authority, elapsed): (String, bool) = conn.query_row(
-            "SELECT value,EXISTS(SELECT 1 FROM authorization_deadlines WHERE resource=?1)
-             FROM meta WHERE key='authority'",
-            [&schedule.id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
+        let authority: String =
+            conn.query_row("SELECT value FROM meta WHERE key='authority'", [], |r| {
+                r.get(0)
+            })?;
         check(
             schedule.kind == "Schedule"
                 && rule.protects_workflow()
@@ -93,18 +154,35 @@ impl<'a> Scope<'a> {
                 && origin["origin_type"] == "Schedule"
                 && origin["origin_id"] == schedule.id
                 && origin["authority_id"] == authority
-                && elapsed
                 && schedule.body["overlap"] == MODE
                 && schedule.body["max_triggers"] == rule.max_triggers
                 && (1..=32).contains(&rule.max_triggers)
                 && schedule.body["expires_at"] == rule.expires_at
-                && policy::visible(&schedule.owner, &source),
+                && policy::visible(&schedule.owner, &source)
+                && first.doc.kind == schedule.kind
+                && first.doc.owner == schedule.owner
+                && first.doc.spec == schedule.spec
+                && first.doc.body["lifecycle"] == "Pending"
+                && first.doc.body["source_ref"] == rule.source_ref
+                && first.doc.body["trigger_refs"] == json!([])
+                && first.doc.body["pending_trigger_ref"].is_null(),
+        )?;
+        require(
+            elapsed::Anchor::matches(
+                conn,
+                &schedule.id,
+                &schedule.spec["event_workflow_clock"],
+                0,
+            )?,
+            "RecoveryRequired",
+            CLOCK_ERROR,
         )?;
         Ok(Self {
             conn,
             schedule,
             rule,
             source,
+            enrolled_seq: first.seq,
         })
     }
 
@@ -138,6 +216,7 @@ impl<'a> Scope<'a> {
                 && doc.owner == self.schedule.owner
                 && doc.generation == 1
                 && doc.spec == trigger_spec(self.schedule)
+                && self.enrolled_seq < event_seq
                 && event_seq < version.seq
                 && db::find(self.conn, &doc.id)?.is_some_and(|current| current.rev == doc.rev),
         )?;
@@ -159,7 +238,7 @@ impl<'a> Scope<'a> {
             ) && doc.body["settled_at"]
                 .as_str()
                 .is_some_and(|at| instant(at).is_ok())
-                && (phase == "Triggered") == doc.body["reason"].is_null(),
+                && matches!(phase, "Triggered" | "Cancelled") == doc.body["reason"].is_null(),
         )?;
         let copied_seq = if doc.rev == 2 {
             let original = Version::exact(self.conn, &doc.id, 1)?;
@@ -252,11 +331,26 @@ impl<'a> Scope<'a> {
             "SELECT source,source_rev,deadline_ms FROM pending_event_schedules WHERE schedule=?1",
             [&self.schedule.id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         ).optional()?;
+        let marker: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT source_rev FROM protected_event_schedule_cursors WHERE schedule=?1",
+                [&self.schedule.id],
+                |r| r.get(0),
+            )
+            .optional()?;
         if self.schedule.body["lifecycle"] != "Pending" {
-            check(values.is_none() && self.schedule.body["pending_trigger_ref"].is_null())?;
+            require(
+                values.is_none()
+                    && marker.is_none()
+                    && self.schedule.body["pending_trigger_ref"].is_null(),
+                "RecoveryRequired",
+                CURSOR_ERROR,
+            )?;
             return Ok(None);
         }
-        let (id, rev, deadline) = values.ok_or_else(invalid)?;
+        let (id, rev, deadline) = values.ok_or_else(|| err("RecoveryRequired", CURSOR_ERROR))?;
+        require(marker == Some(rev), "RecoveryRequired", CURSOR_ERROR)?;
         let cursor = Version::exact(self.conn, &id, rev)?;
         let last_source =
             db::resolve(self.conn, &self.schedule.body["source_ref"]).map_err(|_| invalid())?;
@@ -291,17 +385,29 @@ impl<'a> Scope<'a> {
         let template = &self.schedule.spec["request"];
         let origin =
             String::from_utf8(canonical(&template["origin_ref"])).map_err(|_| invalid())?;
-        let row: Option<(String, Value)> = self.conn.query_row(
-            "SELECT task,receipt FROM submissions WHERE owner=?1 AND origin=?2 AND key=?3 AND receipt IS NOT NULL",
-            params![self.schedule.owner, origin, doc.id], |r| Ok((r.get(0)?, r.get(1)?)),
+        let row: Option<Submission> = self.conn.query_row(
+            "SELECT task,receipt,digest,scope,cancelled FROM submissions WHERE owner=?1 AND origin=?2 AND key=?3 AND receipt IS NOT NULL",
+            params![self.schedule.owner, origin, doc.id], |r| Ok(Submission {
+                task: r.get(0)?, receipt: r.get(1)?, digest: r.get(2)?, scope: r.get(3)?, cancelled: r.get(4)?,
+            }),
         ).optional()?;
         if doc.body["lifecycle"] != "Triggered" {
-            return check(row.is_none() && doc.body["task_receipt"].is_null());
+            return require(
+                row.is_none() && doc.body["task_receipt"].is_null(),
+                "RecoveryRequired",
+                SUBMISSION_ERROR,
+            );
         }
-        let (task, receipt) = row.ok_or_else(invalid)?;
+        let Submission {
+            task,
+            receipt,
+            digest,
+            scope,
+            cancelled,
+        } = row.ok_or_else(|| err("RecoveryRequired", SUBMISSION_ERROR))?;
         let accepted = Version::exact(self.conn, &task, 1)?;
         let expected = broker::retime_scheduled(template, &doc.id, &self.rule.expires_at)?;
-        check(
+        require(
             doc.body["task_receipt"] == receipt
                 && receipt["task_id"] == task
                 && receipt["idempotency_key"] == doc.id
@@ -309,14 +415,24 @@ impl<'a> Scope<'a> {
                 && receipt["origin_ref"] == expected["origin_ref"]
                 && receipt["request_digest"] == expected["request_digest"]
                 && receipt["deduplicated"] == false
+                && !cancelled
+                && scope == self.schedule.id
+                && expected["request_digest"] == digest
                 && accepted.doc.kind == "Task"
                 && accepted.doc.owner == self.schedule.owner
                 && accepted.doc.spec == expected
                 && occurrence.copied_seq.unwrap_or(occurrence.event_seq) < accepted.seq
                 && accepted.seq < occurrence.version.seq
                 && accepted.correlation == occurrence.version.correlation,
+            "RecoveryRequired",
+            SUBMISSION_ERROR,
         )
     }
+}
+
+pub(super) fn verify_cursor(conn: &Connection, schedule: &Doc, rule: &Rule) -> Result<()> {
+    let scope = Scope::load(conn, schedule, rule)?;
+    require(scope.cursor()?.is_some(), "RecoveryRequired", CURSOR_ERROR)
 }
 
 pub(super) fn verify_pending(
@@ -342,7 +458,7 @@ pub(super) fn blocked(
     let scope = Scope::load(conn, schedule, rule)?;
     let cursor = scope.cursor()?.ok_or_else(invalid)?;
     let (seq, rev) = verify_source(conn, schedule, rule, &scope.source, id, event)?;
-    check(Some(rev) == cursor.checked_add(1))?;
+    check(scope.enrolled_seq < seq && Some(rev) == cursor.checked_add(1))?;
     let pending_ref = &schedule.body["pending_trigger_ref"];
     if !pending_ref.is_null() {
         let pending = scope.check_pending(cursor, pending_ref)?;
@@ -371,20 +487,37 @@ pub(super) fn blocked(
 /// Inspect only the bounded pending event index, before the shared timer starts.
 pub(crate) fn check_active(conn: &Connection) -> Result<()> {
     let bound = i64::from(crate::config::MAX_QUEUE_LIMIT) + 1;
-    let mut index =
-        conn.prepare("SELECT schedule FROM pending_event_schedules ORDER BY schedule LIMIT ?1")?;
-    let ids = index.query_map([bound], |r| r.get::<_, String>(0))?;
-    for (offset, id) in ids.enumerate() {
-        check(offset < crate::config::MAX_QUEUE_LIMIT as usize)?;
-        let Some(schedule) = db::find(conn, &id?)? else {
+    let orphan: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM
+             (SELECT schedule FROM protected_event_schedule_cursors ORDER BY schedule LIMIT ?1) m
+            LEFT JOIN pending_event_schedules p ON p.schedule=m.schedule WHERE p.schedule IS NULL)",
+        [bound],
+        |r| r.get(0),
+    )?;
+    require(!orphan, "RecoveryRequired", CURSOR_ERROR)?;
+    let mut index = conn.prepare(
+        "SELECT p.schedule,m.schedule IS NOT NULL FROM pending_event_schedules p
+         LEFT JOIN protected_event_schedule_cursors m ON m.schedule=p.schedule ORDER BY p.schedule LIMIT ?1",
+    )?;
+    let ids = index.query_map([bound], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?))
+    })?;
+    for (offset, entry) in ids.enumerate() {
+        require(
+            offset < crate::config::MAX_QUEUE_LIMIT as usize,
+            "RecoveryRequired",
+            CURSOR_ERROR,
+        )?;
+        let (id, marked) = entry?;
+        let Some(schedule) = db::find(conn, &id)?.filter(protected) else {
+            require(!marked, "RecoveryRequired", CURSOR_ERROR)?;
             continue;
         };
-        if schedule.spec["event"]["overlap"] != MODE && schedule.body["overlap"] != MODE {
-            continue;
-        }
         let rule: Rule = crate::decode(&schedule.spec["event"]).map_err(|_| invalid())?;
         let scope = Scope::load(conn, &schedule, &rule)?;
-        let cursor = scope.cursor()?.ok_or_else(invalid)?;
+        let cursor = scope
+            .cursor()?
+            .ok_or_else(|| err("RecoveryRequired", CURSOR_ERROR))?;
         let pending = &schedule.body["pending_trigger_ref"];
         if !pending.is_null() {
             let pending = scope.check_pending(cursor, pending)?;
@@ -395,6 +528,7 @@ pub(crate) fn check_active(conn: &Connection) -> Result<()> {
 }
 
 pub(crate) fn verify(conn: &Connection) -> Result<()> {
+    check_active(conn)?;
     let mut query = conn.prepare(
         "SELECT * FROM current WHERE kind='Schedule'
          AND (spec->'event'->>'overlap'=?1 OR (spec->'event' IS NOT NULL AND body->>'overlap'=?1))",
@@ -403,16 +537,6 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
         let schedule = schedule?;
         let rule: Rule = crate::decode(&schedule.spec["event"]).map_err(|_| invalid())?;
         let scope = Scope::load(conn, &schedule, &rule)?;
-        let first = Version::exact(conn, &schedule.id, 1)?;
-        check(
-            first.doc.kind == schedule.kind
-                && first.doc.owner == schedule.owner
-                && first.doc.spec == schedule.spec
-                && first.doc.body["lifecycle"] == "Pending"
-                && first.doc.body["source_ref"] == rule.source_ref
-                && first.doc.body["trigger_refs"] == json!([])
-                && first.doc.body["pending_trigger_ref"].is_null(),
-        )?;
         let history = scope.history()?;
         let cursor = scope.cursor()?;
         let pending = &schedule.body["pending_trigger_ref"];

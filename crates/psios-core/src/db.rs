@@ -570,6 +570,9 @@ impl Store {
                 if ver < storage::directory_create::FORMAT {
                     db.c.execute_batch(storage::directory_create::SCHEMA)?;
                 }
+                if ver < schedule::event_workflow_overlap::FORMAT {
+                    db.c.execute_batch(schedule::event_workflow_overlap::SCHEMA)?;
+                }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;
         }

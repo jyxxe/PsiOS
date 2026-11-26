@@ -112,26 +112,31 @@ pub(super) fn create(db: &Db<'_>, actor: &str, p: &Create, supplied: &Rule) -> R
         &rule.expires_at,
     )?;
     let tool = db.of(&format!("tool-{}", p.tool), "Capability")?;
+    let mut spec = json!({"creation_digest":creation,"event":rule,"request":template,"tool_ref":tool.reference()});
     let mut state = json!({
         "lifecycle":"Pending", "source_ref":source.reference(), "expires_at":rule.expires_at,
         "trigger_refs":[], "pending_trigger_ref":null, "max_triggers":rule.max_triggers,
         "last_task_id":null,"reason":null
     });
-    if rule.protects_workflow() {
+    let protected = rule.protects_workflow();
+    let register_clock =
+        || policy::deadline::Clock::sample()?.register_until(db, &id, &rule.expires_at, None);
+    if protected {
         state["overlap"] = json!(rule.overlap);
+        register_clock()?;
+        super::event_workflow_overlap::bind_clock(db, &id, &mut spec)?;
     }
-    let schedule = db.create(
-        "Schedule",
-        &id,
-        actor,
-        json!({"creation_digest":creation,"event":rule,"request":template,"tool_ref":tool.reference()}),
-        state,
-    )?;
-    policy::deadline::Clock::sample()?.register_until(db, &id, &rule.expires_at, None)?;
+    let schedule = db.create("Schedule", &id, actor, spec, state)?;
+    if !protected {
+        register_clock()?;
+    }
     db.c.execute(
         "INSERT INTO pending_event_schedules VALUES(?1,?2,?3,?4)",
         params![id, source.id, source.rev, due_ms(expires)],
     )?;
+    if protected {
+        super::event_workflow_overlap::register_cursor(db, &schedule, source.rev)?;
+    }
     Ok(reference(&schedule))
 }
 
@@ -261,6 +266,7 @@ fn advance_source(db: &Db<'_>, schedule: &Doc, previous: i64, next: i64) -> Resu
         "RecoveryRequired",
         "event schedule cursor changed during settlement",
     )?;
+    super::event_workflow_overlap::advance_cursor(db, schedule, previous, next)?;
     admission_delay::clear(db, &schedule.id)
 }
 
@@ -368,6 +374,9 @@ fn fire(db: &Db<'_>, rejected: &mut Option<Attempt>) -> Result<()> {
         "RecoveryRequired",
         "event schedule index disagrees with its rule",
     )?;
+    if rule.protects_workflow() {
+        super::event_workflow_overlap::verify_cursor(db.c, &schedule, &rule)?;
+    }
     if work.expired {
         settle(db, &schedule, "Expired", Some("DeadlineExceeded"), None)?;
         return Ok(());

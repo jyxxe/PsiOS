@@ -267,9 +267,13 @@ class VolumeCreateCustody(unittest.TestCase):
         checkpoint, stage, final = self.checkpoint(node, operation, name, pool)
         self.exact_directory(stage, checkpoint)
         self.assertFalse(final.exists())
-        self.assertTrue(any("renameat2(" in line and f'"{stage.name}"' in line and f'"{final.name}"' in line
-                            and "RENAME_NOREPLACE" in line and "INJECTED" in line
-                            for line in trace.read_text().splitlines()), trace.read_text())
+        traced = trace.read_text().splitlines()
+        attempted = [line for line in traced if "renameat2(" in line and f'"{stage.name}"' in line
+                     and f'"{final.name}"' in line and "RENAME_NOREPLACE" in line]
+        self.assertEqual(len(attempted), 1, traced)
+        thread = attempted[0].split(maxsplit=1)[0]
+        self.assertTrue(any(line.split(maxsplit=1)[0] == thread and "killed by SIGKILL" in line
+                            for line in traced if line.strip()), traced)
 
         other = stage.with_name("operator-owned-directory")
         other.mkdir(mode=0o700)

@@ -189,7 +189,6 @@ def supervise(binaries):
     original_boot = BOOT_ID.read_text().strip()
     with tempfile.TemporaryDirectory(dir="/tmp", prefix="psios-manager-epoch-") as temp:
         root = Path(temp)
-        root.chmod(0o711)
         home = root / "home"
         home.mkdir(mode=0o700)
         scratch_bin = root / "bin"
@@ -213,6 +212,8 @@ def supervise(binaries):
             uid, gid = account.pw_uid, account.pw_gid
             assert uid not in (0, caller_uid) and account.pw_dir == str(home), account
             manager = f"user@{uid}.service"
+            os.chown(root, 0, gid)
+            root.chmod(0o750)
             os.chown(home, uid, gid)
             ready_in, ready_out = os.pipe()
             resume_in, resume_out = os.pipe()

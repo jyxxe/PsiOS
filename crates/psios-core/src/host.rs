@@ -77,6 +77,8 @@ pub enum Action {
     StartAgentSession(agent::SessionBlueprint),
     #[serde(rename = "workflow.start")]
     StartWorkflow(workflow::StartBlueprint),
+    #[serde(rename = "project.submit_evidence")]
+    SubmitWorkItemEvidence(project::agent_tool::Input),
     #[serde(rename = "node.inventory")]
     Inventory {},
     #[serde(rename = "node.pressure")]
@@ -215,6 +217,7 @@ impl Action {
             Self::RestoreReleaseImage(request) => request.validate()?,
             Self::StartAgentSession(blueprint) => blueprint.validate()?,
             Self::StartWorkflow(blueprint) => blueprint.validate()?,
+            Self::SubmitWorkItemEvidence(input) => input.validate()?,
             Self::Processes(p) => p.validate()?,
             Self::InspectProcess(p) => p.validate()?,
             Self::Interfaces(q) => q.validate()?,
@@ -340,6 +343,7 @@ impl Action {
             Self::Status {} => return db.get(policy::PROFILE),
             Self::StartAgentSession(blueprint) => return blueprint.model(db),
             Self::StartWorkflow(blueprint) => return blueprint.definition(db, actor),
+            Self::SubmitWorkItemEvidence(input) => return input.target(db, actor),
             Self::NetworkProbe(target) | Self::ObserveNetworkProbe(target) => {
                 return node::network::probe::target(db, target);
             }
@@ -732,6 +736,10 @@ impl Work {
             return Ok(v.clone());
         }
         match &self.action {
+            Action::SubmitWorkItemEvidence(_) => Err(err(
+                "RecoveryRequired",
+                "work item evidence requires the authority transaction",
+            )),
             Action::ServiceInspect(_)
             | Action::ServiceObserve(_)
             | Action::ServiceLogs(_)
@@ -1051,6 +1059,7 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
 }
 pub fn apply(db: &Db<'_>, w: &Work, receipt: &Value) -> Result<Value> {
     match w.action {
+        Action::SubmitWorkItemEvidence(_) => Ok(receipt.clone()),
         Action::ObserveNetworkProbe(_) => node::network::probe::state::publish(db, w, receipt),
         Action::ServiceObserve(_) => node::service_state::publish(db, w, receipt),
         Action::ServiceStart(_) | Action::ServiceStop(_) | Action::ServiceRestart(_) => {

@@ -1,4 +1,5 @@
 //! Private project membership, work-item dependencies, and local review decisions.
+pub(crate) mod agent_tool;
 pub(crate) mod directory;
 pub(crate) mod evidence;
 mod maintenance;
@@ -498,6 +499,10 @@ pub(crate) fn list_items(db: &Db<'_>, actor: &str, params: &Value) -> Result<Val
 
 pub(crate) fn submit_evidence(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     let request: SubmitWorkItemEvidence = decode(params)?;
+    item_view(db, &attach_evidence(db, actor, &request)?, actor, true)
+}
+
+fn evidence_target(db: &Db<'_>, actor: &str, request: &SubmitWorkItemEvidence) -> Result<Doc> {
     let (_, item) = access_item(db, actor, &request.id, CONTRIBUTE)?;
     item.cas(&request.expected_resource_version)?;
     require(
@@ -515,13 +520,18 @@ pub(crate) fn submit_evidence(db: &Db<'_>, actor: &str, params: &Value) -> Resul
         "PreconditionFailed",
         "work item has unresolved blockers",
     )?;
+    Ok(item)
+}
+
+fn attach_evidence(db: &Db<'_>, actor: &str, request: &SubmitWorkItemEvidence) -> Result<Doc> {
+    let item = evidence_target(db, actor, request)?;
     db.cfg.check_admission_space()?;
     let evidence = evidence::attach(
         db,
         &item,
         actor,
-        &serde_json::to_value(request.task_ref)?,
-        &serde_json::to_value(request.artifact_ref)?,
+        &serde_json::to_value(&request.task_ref)?,
+        &serde_json::to_value(&request.artifact_ref)?,
     )?;
     let mut state = item.body.clone();
     state["lifecycle"] = json!("InReview");
@@ -531,7 +541,7 @@ pub(crate) fn submit_evidence(db: &Db<'_>, actor: &str, params: &Value) -> Resul
     for key in ["review", "reviewed_item_ref", "reviewed_evidence_ref"] {
         fields.remove(key);
     }
-    item_view(db, &db.status(&item, state)?, actor, true)
+    db.status(&item, state)
 }
 
 pub(crate) fn review(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {

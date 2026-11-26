@@ -320,10 +320,10 @@ pub fn history(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         let lease = turn["lease_id"]
             .as_str()
             .ok_or_else(|| err("RecoveryRequired", "model history is missing its lease ID"))?;
+        rejected_decision::verify_receipt(db.c, &s.id, lease, &turn["decision"])?;
         if let Some(observation) = late_decision::receipt(db.c, lease)? {
             turn["late_decision_observation"] = observation;
         }
-        rejected_decision::verify_receipt(db.c, &s.id, lease, &turn["decision"])?;
     }
     let tasks=db.c.prepare("SELECT task,turn,attempt FROM session_tasks WHERE session=?1 ORDER BY turn,attempt")?
        .query_map([&s.id],|r|Ok(json!({"task_id":r.get::<_,String>(0)?,"turn":r.get::<_,u32>(1)?,"attempt":r.get::<_,u32>(2)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;

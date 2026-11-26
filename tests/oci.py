@@ -328,7 +328,7 @@ def check_log_isolation(node, app, owner, install_grant, container):
 
 
 def main(binaries, previous_binaries=None, create_recovery_only=False, direct_clone_prior=None,
-         catalog_only=False, catalog_prior=None):
+         catalog_only=False, catalog_prior=None, observation_only=False):
     node = Node(binaries)
     tag = "psios-acceptance:" + key()
     upgraded_tag = tag + "-upgrade"
@@ -364,6 +364,9 @@ int main(void) {
         spec = dict(image_id=image_id, name="acceptance", release_version="1.0.0", argv=["/probe"],
                     environment={"TEST_NAME": "first"}, license_expression="0BSD", volume=target(volume),
                     cpu_millicores=200, memory_max_bytes=33554432, pids_max=16, ephemeral_max_bytes=1048576)
+        if observation_only:
+            verify_restart(node, docker, spec, app_ids, observation_only=True)
+            return
         if catalog_prior:
             verify_catalog_upgrade(catalog_prior, binaries, spec, app_ids)
             return
@@ -600,6 +603,7 @@ if __name__ == "__main__":
     parser.add_argument("--direct-clone-prior-bin-dir", help="run the direct clone proof upgrade with real prior Core")
     parser.add_argument("--catalog-only", action="store_true", help="verify direct OCI catalog settlement against Docker")
     parser.add_argument("--catalog-previous-bin-dir", help="verify OCI catalog upgrade with real format 123 Core")
+    parser.add_argument("--runtime-observation-only", action="store_true", help="verify OCI observation publication against Docker")
     args = parser.parse_args()
     main(args.bin_dir, args.previous_bin_dir, args.create_recovery_only, args.direct_clone_prior_bin_dir,
-         args.catalog_only, args.catalog_previous_bin_dir)
+         args.catalog_only, args.catalog_previous_bin_dir, args.runtime_observation_only)

@@ -287,6 +287,8 @@ Core 通过已打开的目录和文件描述符流式校验私有普通文件。
 
 `health_check_ref` 固定经核验的镜像探针。原始批准、固定发布物和镜像摘要共同绑定是否启用及全部参数。容器启动前核对生效配置。探针沿用应用的非 root UID、只读根文件系统、挂载和网络隔离。Docker 单独管理启动探针进程的等待时间。`application.health`、`application.refresh`、`application.inspect_instance` 和启动核实均按当前容器调用的近期样本报告健康和就绪。初始检查未完成时，健康为 `Unknown`，就绪为 `NotReady`。通过历史证据对账后，已启用探针的运行应用保持 `Unknown`，直到下次观测。探针的标准输出和错误输出留在 Docker 引擎内。[Docker 健康监视实现](https://raw.githubusercontent.com/moby/moby/v28.5.2/daemon/health.go)
 
+Core 在发布这三项应用观测前复核原执行许可和当前目标修订。授权撤回或任务取消会阻止样本进入新制品或应用状态，并保留既有应用与运行实例修订。已合法发布的制品沿用其读取权限。[真实 Docker 观测验收](../tests/oci_restart.py)
+
 格式 71 将重启检查点与原执行许可、单次批准、Run、应用及绑定卷修订关联。Core 先提交 `EffectStarted` 和检查点，再请求 Docker 重启。调用前中断以 `NotStarted` 结算并释放本次应用占用。丢失调用回执时，原 Operation 保持待核实。Core 启动前检查未结算操作的应用占用及现有卷绑定。离线核验同时核对历史应用、实例及确认记录，允许在任务归档后继续校验。格式 43 至 70 的重启沿用当时记录的证据。旧版在结算失败后可能留有缺少检查点的未知结果，仍需保持占用并等待单独核实。[检查点失效与离线验收](../tests/oci_restart.py)
 
 ### 恢复 OCI 停止操作

@@ -1,4 +1,5 @@
 """Actual engine acceptance for scoped OCI restart and lost receipt recovery."""
+from contextlib import closing
 import json
 import os
 import signal
@@ -6,11 +7,62 @@ import sqlite3
 import subprocess
 from uuid import uuid4
 
-from oci_recovery import check_kernel_limits
+from oci_recovery import check_kernel_limits, endpoint, stop_proxy
 from support import Failure, target
 
 
-def verify_restart(node, docker, spec, app_ids):
+def verify_observation_authority(node, app, volume, container):
+    settings = json.loads(node.config.read_text())
+    assert not settings.get("oci_effective_volume_observation"), settings
+    app_id = app["resource_id"]
+    before = node.get(app_id)
+    instance_id = before["value"]["instance_ref"]["resource_id"]
+    instance_before = node.get(instance_id)
+
+    def inspect(request):
+        path = endpoint(request, b"GET", b"/json")
+        return path is not None and path.path.split(b"/")[-3:] == [b"containers", container.encode(), b"json"]
+
+    for index, (tool, cancel) in enumerate([
+        ("application.health", False),
+        ("application.inspect_instance", False),
+        ("application.refresh", False),
+        ("application.refresh", True),
+    ]):
+        grant = node.call("Grant.Issue", {
+            "principal_id": "local-owner", "actions": ["task.submit", "task.read", tool],
+            "tool_targets": [app_id, volume["resource_id"]], "ttl_seconds": 120, "units": 2,
+        })
+        with stop_proxy(node, settings, f"oci-observation-{index}", inspect,
+                        forward=True, status=b" 200 ") as barrier:
+            prepared = node.prepare(tool, target(app), delegation=grant["delegation_ref"]["resource_id"])
+            task = node.call("Task.Submit", prepared)["task_id"]
+            assert barrier.confirmed.wait(12), f"Docker did not return the real inspection for {tool}"
+            running = node.get(task)
+            assert running["value"]["lifecycle"] == "Running", running
+            if cancel:
+                node.call("Task.Cancel", target(running["reference"]))
+            else:
+                node.call("Grant.Revoke", target(grant["grant_ref"]))
+            barrier.release.set()
+            settled = node.wait(task)
+            expected = ("Cancelled", ["Fenced"]) if cancel else ("Failed", ["PermissionDenied"])
+            actual = (settled["lifecycle"], [item["type"] for item in settled["conditions"]])
+            assert actual == expected, (tool, settled)
+            assert settled["result"]["artifact_refs"] == [], settled
+            with closing(sqlite3.connect(node.state / "state.db")) as db:
+                assert not db.execute(
+                    "SELECT 1 FROM current WHERE kind='Artifact' AND spec->>'task_id'=?",
+                    (task,),
+                ).fetchone()
+            assert node.get(app_id) == before
+            assert node.get(instance_id) == instance_before
+        node.start()
+        assert node.wait(task) == settled
+        assert node.get(app_id) == before and node.get(instance_id) == instance_before
+
+
+def verify_restart(node, docker, spec, app_ids, *, observation_only=False):
     volume = node.perform("volume.create", {"name": "oci-restart-data"})
     app = node.perform("application.install", dict(spec, name="restart-acceptance", volume=target(volume),
                                                    environment={"TEST_NAME": "restart"}))
@@ -62,6 +114,13 @@ def verify_restart(node, docker, spec, app_ids):
     first, old_proof = inspect(app)
     cid = first["container_id"]
     assert real_start(cid) == first["started_at"] and starts.read_text() == "restart\n", first
+    verify_observation_authority(node, app, volume, cid)
+    assert node.call("Artifact.Read", {"reference": old_proof}) == first
+    print("PASS real OCI runtime observations fenced at publication with prior proof retained", flush=True)
+    if observation_only:
+        stopped = node.perform("application.stop", target(app))
+        node.perform("application.uninstall", target(stopped))
+        return
     bad = dict(params(app, first), expected_started_at="1970-01-01T00:00:00Z")
     refused = node.wait(submit("application.restart", bad), autoapprove=True)
     assert (refused["lifecycle"], refused["outcome_knowledge"], refused["conditions"][0]["type"]) == (

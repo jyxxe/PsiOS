@@ -491,7 +491,8 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
             | Action::ListAssignedWork(_)
     );
     let t = db.get(&w.task.id)?;
-    let catalog = apps::catalog::is_tool(field(&t.spec, "task_type"));
+    let tool = field(&t.spec, "task_type");
+    let catalog = apps::catalog::is_tool(tool);
     if t.body["current_run_id"] != w.run.id
         || t.body["outcome_knowledge"] != "InFlight"
         || w.run.body["recovery_incarnation"] != db.incarnation
@@ -508,6 +509,7 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
         let receipt = match result {
             Ok(_)
                 if storage::read_holds::reader(&w.action)
+                    || apps::is_runtime_observation(tool)
                     || matches!(
                         w.action,
                         Action::InspectProcess(_)

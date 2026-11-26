@@ -17,6 +17,7 @@ pub(crate) fn redact_late_receipt(db: &Db<'_>, doc: &mut Doc) -> Result<()> {
     let effect = db.resolve(&doc.body["effect_ref"])?;
     let sensitive = match effect.body["action"].as_str() {
         Some(apps::log_tail::TOOL | "application.stop") => application_logs,
+        Some(tool) if apps::is_runtime_observation(tool) => true,
         Some(node::journal::TOOL | node::journal::SINCE_TOOL) => service_logs,
         Some(node::service_state::TOOL) => service_observation,
         Some(node::pressure::TOOL) => node_pressure,

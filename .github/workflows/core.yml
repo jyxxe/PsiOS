@@ -38,6 +38,13 @@ jobs:
         run: |
           python3 tests/system.py
           python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Kill a restore at its filesystem publication boundary and reconcile it
+        run: |
+          if ! command -v strace; then
+            sudo timeout 180 apt-get install -y --no-install-recommends strace
+          fi
+          PSIOS_TEST_RESTORE_RENAME_FAULT=1 python3 -B -m unittest discover -s tests \
+            -p test_storage_recovery.py -k checkpointed_unpublished_restore -v
       - name: Read live cgroup limits and verify pressure on a kernel without visible counters
         run: |
           sudo systemd-run --quiet --collect --wait --pipe --property=WorkingDirectory="$PWD" \

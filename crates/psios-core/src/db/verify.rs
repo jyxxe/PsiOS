@@ -195,6 +195,9 @@ pub(super) fn check_artifacts(
     if identity.database_format >= crate::workflow::admission_delay::FORMAT {
         crate::workflow::admission_delay::verify(conn)?;
     }
+    if identity.database_format >= crate::workflow::session_join::FORMAT {
+        crate::workflow::session_join::verify(conn)?;
+    }
     if identity.database_format >= crate::agent::session_inputs::FORMAT {
         crate::agent::session_inputs::verify(conn, identity.database_format)?;
     }

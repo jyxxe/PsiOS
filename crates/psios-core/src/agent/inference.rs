@@ -17,7 +17,7 @@ pub(super) enum Policy {
     Strict,
 }
 
-pub(super) fn strict(model: &Doc) -> bool {
+pub(crate) fn strict(model: &Doc) -> bool {
     model.spec["inference_outcome_policy"] == STRICT
 }
 

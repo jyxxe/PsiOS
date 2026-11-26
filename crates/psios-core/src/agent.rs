@@ -20,7 +20,9 @@ use crate::{
     broker,
     db::{Db, Doc},
     node::work_admission,
-    policy, *,
+    policy,
+    workflow::session_join,
+    *,
 };
 pub(crate) use lease::pending_for_grant;
 use psios_api::{ModelTokenUsage, canonical, id, sha256};
@@ -161,7 +163,7 @@ fn deps(db: &Db<'_>, s: &Doc) -> Result<(Doc, Doc, Doc)> {
     Ok((d, skill, m))
 }
 pub fn open(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
-    open_session(db, actor, p, None)
+    open_session(db, actor, p, None, None)
 }
 
 pub(crate) fn open_for_task(
@@ -170,11 +172,18 @@ pub(crate) fn open_for_task(
     blueprint: &SessionBlueprint,
 ) -> Result<Value> {
     let p = blueprint.opening(task)?;
-    let admitted = open_session(db, &task.owner, &p, Some(task))?;
+    let join = session_join::launch(db, task)?;
+    let admitted = open_session(db, &task.owner, &p, Some(task), join.as_ref())?;
     Ok(json!({"session_ref":admitted["reference"]}))
 }
 
-fn open_session(db: &Db<'_>, actor: &str, p: &Value, origin_task: Option<&Doc>) -> Result<Value> {
+fn open_session(
+    db: &Db<'_>,
+    actor: &str,
+    p: &Value,
+    origin_task: Option<&Doc>,
+    join: Option<&session_join::Binding>,
+) -> Result<Value> {
     let o: Open = decode(p)?;
     label(&o.key)?;
     label(&o.delegation_id)?;
@@ -194,6 +203,9 @@ fn open_session(db: &Db<'_>, actor: &str, p: &Value, origin_task: Option<&Doc>) 
         session_inputs::require_task_holds(db.c, task, &o.input_artifacts)?;
     }
     let mut spec = p.clone();
+    if let Some(join) = join {
+        session_join::stamp(&mut spec, join)?;
+    }
     if with_inputs {
         spec["tool_context_window"] = json!(context_window);
     }
@@ -240,6 +252,9 @@ fn open_session(db: &Db<'_>, actor: &str, p: &Value, origin_task: Option<&Doc>) 
         state["tool_context_refs"] = json!([]);
     }
     let session = db.create("Session", &sid, actor, spec, state)?;
+    if let (Some(binding), Some(task)) = (join, origin_task) {
+        session_join::seal_launch(db, binding, task, &session)?;
+    }
     let (_, skill, model) = deps(db, &session)?;
     fallback::check_open(db, &session, &model, &o.fallback_model_refs)?;
     if with_inputs {
@@ -461,6 +476,7 @@ pub fn claim(db: &Db<'_>, actor: &str, p: &Value) -> Result<Result<Value>> {
             Err(failure)
         };
     }
+    session_join::execution(db, session, &clock)?;
     if work_admission::draining(db)? {
         return Ok(Err(work_admission::closed()));
     }
@@ -528,6 +544,7 @@ fn replay_claim(
         "Fenced",
         "model lease no longer current",
     )?;
+    session_join::execution(db, s, clock)?;
     provider_authority::require_current(db, s, model, &lease)?;
     session_inputs::require_provider(s, accepts_session_inputs)?;
     let (ctx, digest) =
@@ -570,7 +587,21 @@ fn allocate_turn(
 ) -> Result<std::result::Result<Value, model_time::ClaimRefusal>> {
     let (d, _, m) = dependencies;
     let budget = d.body["budget_ref"]["resource_id"].as_str().unwrap();
-    let configured_ms = m.spec["lease_seconds"].as_i64().unwrap() * 1000;
+    let mut configured_ms = m.spec["lease_seconds"].as_i64().unwrap() * 1000;
+    let refreshed = session_join::is_bound(s)
+        .then(lease::Clock::sample)
+        .transpose()?;
+    let clock = refreshed.as_ref().unwrap_or(clock);
+    if let Some(deadline) = session_join::execution(db, s, clock)? {
+        let stamp = chrono::Utc::now().timestamp_millis();
+        let remaining = clock.bounded_utc_ms(db, &s.id, &json!(deadline), stamp)? - stamp;
+        configured_ms = configured_ms.min(remaining);
+        require(
+            configured_ms > 0,
+            "DeadlineExceeded",
+            "owning workflow deadline passed",
+        )?;
+    }
     let window = match model_time::window(db, budget, clock, configured_ms)? {
         Ok(window) => window,
         Err(refusal) => return Ok(Err(refusal)),
@@ -800,12 +831,11 @@ pub fn respond(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             ));
         }
         Decision::Tool { tool, input } => {
-            let request = broker::prepare_claimed_model(
-                db,
-                &s.owner,
-                &json!({"tool":tool,"input":input,"key":p.lease_id,"delegation_id":s.spec["delegation_id"]}),
-                &p.lease_id,
-            )?;
+            let mut request = json!({"tool":tool,"input":input,"key":p.lease_id,"delegation_id":s.spec["delegation_id"]});
+            if let Some(deadline) = session_join::execution(db, &s, &clock)? {
+                request["deadline_at"] = json!(deadline);
+            }
+            let request = broker::prepare_claimed_model(db, &s.owner, &request, &p.lease_id)?;
             let receipt = broker::submit_claimed_model_tool(db, &s, &p.lease_id, &request)?;
             task = receipt["task_id"].as_str().map(str::to_owned);
             b["last_task"] = receipt["task_id"].clone();
@@ -984,6 +1014,7 @@ pub fn retry_task(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     if let Some(id) = prior {
         return Ok(json!({"task_id":id,"deduplicated":true}));
     }
+    session_join::execution(db, &s, &lease::Clock::sample()?)?;
     s.cas(&req.expected_resource_version)?;
     require(
         state(&s) == "Failed" && s.body["last_task"] == req.task_id,
@@ -1025,6 +1056,7 @@ pub fn check_dispatch(db: &Db<'_>, t: &Doc) -> Result<()> {
     if let Some(sid) = session_for_task(db, &t.id)? {
         let s = db.of(&sid, "Session")?;
         deps(db, &s)?;
+        session_join::execution(db, &s, &lease::Clock::sample()?)?;
         require(
             state(&s) == "WaitingTask" && s.body["last_task"] == t.id,
             "Fenced",

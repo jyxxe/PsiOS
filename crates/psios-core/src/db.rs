@@ -192,7 +192,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = storage::cloning::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = workflow::session_join::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -557,6 +557,9 @@ impl Store {
                 }
                 if ver < storage::entry_retirement::FORMAT {
                     db.c.execute_batch(storage::entry_retirement::SCHEMA)?;
+                }
+                if ver < workflow::session_join::FORMAT {
+                    db.c.execute_batch(workflow::session_join::SCHEMA)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

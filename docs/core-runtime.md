@@ -567,6 +567,14 @@ Task 成功时返回 `session_ref`，会话记录原 Task 引用。会话进入�
 
 `Workflow.Start` 接受 `key`、`definition_ref`、`delegation_id` 和带偏移的 `deadline_at`。委托须授予 `workflow.manage`、`task.submit`、`task.read` 和各步所需工具，覆盖实际目标，且在最终截止时间内有效。每步在派发时重查原授权、预算、工具引用和目标版本。Workflow 串行释放已满足依赖的步骤，由普通 Task 执行与审批。
 
+### 等待原生 Agent 会话完成
+
+工作流可在 `agent.session.start` 步骤中指定 `"completion":"SessionTerminal"`。DSL 4 要求固定的 Strict Model，以及不含嵌套 Agent 或工作流启动的 Skill。该模式使用原工作流委托和共享预算。省略 `completion` 时，启动 Task 创建会话后即满足该步骤的依赖条件。
+
+Core 在启动 Task 结算时写入原工作流与 Session 的绑定。步骤可通过 `Workflow.Get` 查询 `session_ref` 和 `session_lifecycle`。会话成功结算且关联任务和模型调用都已核实时，后继步骤才可提交。结果未知时，工作流保留原会话与证据，停止派发后继步骤。步骤的任务制品仍是启动回执。
+
+会话的模型租约和后续工具任务继承工作流的 UTC 截止时间及同次内核启动的经过时间上限。工作流取消或到期时会取消绑定的原 Session。已派发的操作依照原任务和模型租约的规则结算，未核实的效果保持 `Unknown`。格式 115 拒绝旧写入器打开包含该状态的数据库。[本机会话与工作流验收](../tests/test_workflow_session_join.py)
+
 新 WorkflowRun 在接受时保存同一内核启动内的经过时间截止点，每步 Task 继承该上限。封锁调度期间也会结算到期实例。尚未开始的实例以 `Failed/NotStarted` 和 `DeadlineExceeded` 结算，恢复调度后仍保留原回执与预算；已有在途效果按原 Task 取消和对账规则处理。格式 26 的工作流继续使用原 UTC 截止时间。跨内核启动也使用原 UTC 截止时间。[原生盘回拨验收](../tests/native_grant_deadline.py) · [格式 26 升级](../tests/workflow_deadline_upgrade.py)
 
 步骤遇到可重试的队列或容量限制时，Core 将原 WorkflowRun 移到其他就绪运行之后，并在同一 Linux 启动和时间命名空间内等待 1 秒再试。同一主体的队列满载时，其他有空余配额的运行可以继续。格式 98 持久保存这次延期，重启后沿用原步骤提交键及预算。延期期间继续结算到期运行和已接受子任务的状态。[跨主体调度与重启验收](../tests/test_workflow.py)

@@ -91,18 +91,35 @@ pub fn claim_status(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> 
         "Settled"
     } else {
         let session = db.of(&id, "Session")?;
-        if state(&session) == "ModelInFlight"
+        let current = if state(&session) == "ModelInFlight"
             && session.spec["model_ref"] == model.reference()
             && session.body["current_lease"] == p.lease_id
-            && Clock::sample()?.current(db, &session)?
-            && provider_authority::current(db, &session, &model, &p.lease_id)?
         {
-            "Pending"
+            let clock = Clock::sample()?;
+            clock.current(db, &session)?
+                && join_access(db, &session, &clock)?
+                && provider_authority::current(db, &session, &model, &p.lease_id)?
         } else {
-            "Fenced"
-        }
+            false
+        };
+        if current { "Pending" } else { "Fenced" }
     };
     Ok(json!({"status":status}))
+}
+
+fn join_access(db: &Db<'_>, session: &Doc, clock: &Clock) -> Result<bool> {
+    match session_join::execution(db, session, clock) {
+        Ok(_) => Ok(true),
+        Err(error)
+            if matches!(
+                error.0.code.as_str(),
+                "DeadlineExceeded" | "PermissionDenied" | "Fenced"
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub fn claim_next(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
@@ -176,6 +193,9 @@ pub fn claim_next(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
         db.cfg.check_admission_space()?;
         for id in runnable {
             let session = db.of(&id, "Session")?;
+            if !join_access(db, &session, &clock)? {
+                continue;
+            }
             // Enforce disclosure against the current Session, independently
             // of the derived scheduling index used to find candidates.
             session_inputs::require_provider(&session, p.accepts_session_inputs)?;
@@ -227,7 +247,12 @@ pub fn claim_next(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
                 }
                 Err(e) => return Err(e),
             };
-            match allocate_turn(db, &session, &dependencies, &clock, &key, true, context)? {
+            let allocated =
+                match allocate_turn(db, &session, &dependencies, &clock, &key, true, context) {
+                    Err(error) if error.0.code == "DeadlineExceeded" => continue,
+                    result => result?,
+                };
+            match allocated {
                 Ok(result) => {
                     db.audit(actor, "Model.ClaimNext", Some(&id), "Allowed")?;
                     return Ok(reply(&id, result));

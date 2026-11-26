@@ -4,6 +4,7 @@ mod binding;
 mod condition;
 mod output;
 pub(crate) mod run;
+pub(crate) mod session_join;
 
 use crate::{
     ById, Result, broker,
@@ -67,6 +68,8 @@ struct Step {
     when: Option<Predicate>,
     #[serde(default, skip_serializing_if = "Bindings::is_empty")]
     inputs_from: Bindings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    completion: Option<session_join::Completion>,
 }
 
 impl Step {
@@ -75,7 +78,12 @@ impl Step {
     }
 
     fn dsl_version(&self) -> u8 {
-        dsl_version(&self.inputs_from, &self.when, &self.after_selected)
+        dsl_version(
+            &self.inputs_from,
+            &self.when,
+            &self.after_selected,
+            self.completion,
+        )
     }
 }
 
@@ -114,13 +122,20 @@ struct PreparedStep {
     when: Option<Predicate>,
     #[serde(default, skip_serializing_if = "Bindings::is_empty")]
     inputs_from: Bindings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    completion: Option<session_join::Completion>,
     tool_ref: Value,
     request: Value,
 }
 
 impl PreparedStep {
     fn dsl_version(&self) -> u8 {
-        dsl_version(&self.inputs_from, &self.when, &self.after_selected)
+        dsl_version(
+            &self.inputs_from,
+            &self.when,
+            &self.after_selected,
+            self.completion,
+        )
     }
 }
 
@@ -128,8 +143,11 @@ fn dsl_version(
     bindings: &Bindings,
     condition: &Option<Predicate>,
     after_selected: &[String],
+    completion: Option<session_join::Completion>,
 ) -> u8 {
-    if !bindings.is_empty() {
+    if completion.is_some() {
+        4
+    } else if !bindings.is_empty() {
         3
     } else if condition.is_some() || !after_selected.is_empty() {
         2
@@ -182,6 +200,9 @@ fn plan(db: &Db<'_>, steps: Vec<Step>) -> Result<Vec<FrozenStep>> {
             predicate.validate(&step.after)?;
         }
         binding::validate(step)?;
+        if step.completion.is_some() {
+            session_join::validate(db, &step.tool, &step.input)?;
+        }
     }
     let mut visited = BTreeSet::new();
     while visited.len() < steps.len() {
@@ -307,7 +328,7 @@ fn authorized_definition(db: &Db<'_>, actor: &str, reference: &Value) -> Result<
     policy::owned(actor, &definition)?;
     require(
         definition.kind == DEFINITION
-            && matches!(definition.spec["dsl_version"].as_u64(), Some(1..=3)),
+            && matches!(definition.spec["dsl_version"].as_u64(), Some(1..=4)),
         "UnsupportedCapability",
         "unsupported workflow definition",
     )?;
@@ -455,6 +476,9 @@ fn start_run(db: &Db<'_>, actor: &str, request: Start, origin: Option<&Doc>) -> 
         .map(|FrozenStep { step, tool_ref }| {
             check_tool(db, &step.tool, &tool_ref)?;
             let action = Action::parse(&step.tool, &step.input)?;
+            if step.completion.is_some() {
+                session_join::validate(db, &step.tool, &step.input)?;
+            }
             let target = action.target(db, actor)?;
             action.audience(db, actor, &delegation.reference(), &target)?;
             let step_key = stable_id("workflow-step", &json!([id, step.id]));
@@ -476,6 +500,7 @@ fn start_run(db: &Db<'_>, actor: &str, request: Start, origin: Option<&Doc>) -> 
                 after_selected: step.after_selected,
                 when: step.when,
                 inputs_from: step.inputs_from,
+                completion: step.completion,
                 tool_ref,
                 request: task,
             })

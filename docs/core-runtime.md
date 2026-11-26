@@ -327,7 +327,7 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 
 直接 `Task.Prepare` 将输入按主体暂存在本机，返回现有 v1 提交请求。暂存跟随进程重启，期限最多十分钟，并受请求和授权原期限限制。每主体最多 128 个、单节点最多 1024 个暂存请求，各自的暂存输入上限为 8 MiB 和 64 MiB。主体可用获准的 `Resource.Get` 或 `Resource.Resolve` 预览自己的输入。Task 受理事务才发布持久输入、Task、Operation、预算使用及依赖保留关系。重复使用相同的输入在持久存储中共用内容，提交仍按各自的精确预备请求检查。
 
-`Task.LookupSubmission` 可查询原受理回执、当前可用窗口或过期结果。同键同请求在有效期内复用原窗口，更改已暂存键的请求会返回 `IdempotencyConflict`。未受理请求过期后，主体可显式重新执行 `Task.Prepare` 以获得新窗口。已受理记录和取消墓碑继续约束原键。用 `Task.DiscardPreparation` 或 `psiosctl task-discard-preparation REQUEST.json` 丢弃尚未受理的精确请求，并永久关闭该键。已经受理时返回当前受理状态。调度、Workflow 及格式 95 的已持久化输入仍可按原引用使用。
+`Task.LookupSubmission` 可查询原受理回执、当前可用窗口或过期结果。可用窗口受请求截止时间、暂存期限和整条委托链的实时时钟及已用时间共同约束。使用早期 Core 保留输入的直接请求须能解析该调用者拥有的精确输入版本和摘要。无法核实输入时返回 `Indeterminate`，客户端应保留原键并停止自动重传。同键同请求在有效期内复用原窗口，更改已暂存键的请求会返回 `IdempotencyConflict`。未受理请求过期后，主体可显式重新执行 `Task.Prepare` 以获得新窗口。已受理记录和取消墓碑继续约束原键。用 `Task.DiscardPreparation` 或 `psiosctl task-discard-preparation REQUEST.json` 丢弃尚未受理的精确请求，并永久关闭该键。已经受理时返回当前受理状态。调度、Workflow 及格式 95 的已持久化输入仍可按原引用使用。
 
 `Task.Admission` 可传入 `include_preparations: true` 查看当前主体暂存的请求数、输入字节数及限制。CLI 使用 `psiosctl task-admission --include-preparations`。授权撤销在受理入口立即生效。守护进程启动及授权世代更新后，后台分批复核仍保留的暂存，回收失效授权对应的请求和已无其他引用的暂存输入。仍有效的授权范围继续使用原请求和期限。
 

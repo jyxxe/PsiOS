@@ -7,7 +7,7 @@ use crate::{
     policy::{self, deadline::Clock},
     require,
 };
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Utc};
 use psios_api::{canonical, digest, sha256};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::{Value, json};
@@ -208,19 +208,16 @@ pub(super) fn window(
     actor: &str,
     origin: &str,
     request: &Value,
-) -> Result<Option<String>> {
+) -> Result<Option<i64>> {
     let sample = Sample::now()?;
-    live_request(db, actor, origin, request, &sample)?
-        .map(|preparation| {
+    Ok(
+        live_request(db, actor, origin, request, &sample)?.map(|preparation| {
             let left = preparation.deadline_boot_ms - sample.clock.boot.millis;
-            let until = preparation
+            preparation
                 .expires_utc_ms
-                .min(sample.utc_ms.saturating_add(left));
-            DateTime::<Utc>::from_timestamp_millis(until)
-                .map(|at| at.to_rfc3339_opts(SecondsFormat::Millis, true))
-                .ok_or_else(invalid)
-        })
-        .transpose()
+                .min(sample.utc_ms.saturating_add(left))
+        }),
+    )
 }
 
 pub(crate) fn preview(db: &Db<'_>, actor: &str, id: &str) -> Result<Option<Doc>> {
@@ -261,10 +258,10 @@ pub(crate) fn preview(db: &Db<'_>, actor: &str, id: &str) -> Result<Option<Doc>>
     Ok(None)
 }
 
-fn timestamp_ms(raw: &str) -> Result<i64> {
+pub(super) fn timestamp_ms(raw: &str) -> Result<i64> {
     DateTime::parse_from_rfc3339(raw)
         .map(|at| at.timestamp_millis())
-        .map_err(|_| err("InvalidArgument", "preparation deadline is not RFC 3339"))
+        .map_err(|_| err("InvalidArgument", "request deadline is not RFC 3339"))
 }
 
 fn deadlines(
@@ -277,36 +274,26 @@ fn deadlines(
     let mut until = sample
         .utc_ms
         .saturating_add(TTL_MS)
-        .min(timestamp_ms(field(&delegation.body, "valid_until")?)?)
-        .min(timestamp_ms(field(&grant.spec, "valid_until")?)?);
+        .min(policy::submission_window(
+            db,
+            delegation,
+            &grant,
+            &sample.clock,
+            sample.utc_ms,
+        )?);
     if let Some(at) = request["deadline_at"].as_str() {
         until = until.min(timestamp_ms(at)?);
     }
-    let mut deadline = sample
-        .clock
-        .boot
-        .millis
-        .saturating_add(until.saturating_sub(sample.utc_ms));
-    for source in [&delegation.id, &grant.id] {
-        if let Some((namespace, upper)) = db.c.query_row(
-            "SELECT time_ns,deadline_boot_ms FROM authorization_deadlines WHERE resource=?1 AND boot_id=?2",
-            params![source, sample.clock.boot.boot_id],
-            |r| Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?)),
-        ).optional()? {
-            require(namespace == sample.clock.time_ns, "DeadlineExceeded", "preparation authorization belongs to another time namespace")?;
-            deadline = deadline.min(upper);
-        }
-    }
     require(
-        deadline > sample.clock.boot.millis,
+        until > sample.utc_ms,
         "DeadlineExceeded",
         "preparation has no remaining authorization window",
     )?;
-    until = until.min(
-        sample
-            .utc_ms
-            .saturating_add(deadline - sample.clock.boot.millis),
-    );
+    let deadline = sample
+        .clock
+        .boot
+        .millis
+        .saturating_add(until - sample.utc_ms);
     Ok((until, deadline))
 }
 

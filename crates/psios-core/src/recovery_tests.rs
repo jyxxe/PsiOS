@@ -1426,6 +1426,130 @@ fn storage_deletion_interrupted_before_rename_can_settle_without_replaying() {
 }
 
 #[test]
+fn task_submission_window_checks_the_exact_ancestors_elapsed_cutoff() {
+    let root = tempfile::tempdir().unwrap();
+    let (config, mut store) = initialized(root.path());
+    let parent = call(
+        &mut store,
+        "Agent.Register",
+        json!({"name":"window-parent"}),
+    )
+    .unwrap();
+    let intermediate = call(
+        &mut store,
+        "Agent.Register",
+        json!({"name":"window-intermediate"}),
+    )
+    .unwrap();
+    let leaf = call(&mut store, "Agent.Register", json!({"name":"window-leaf"})).unwrap();
+    call(
+        &mut store,
+        "Grant.Issue",
+        json!({"principal_id":leaf["principal_id"],"actions":["task.read"],"units":1,"ttl_seconds":180}),
+    )
+    .unwrap();
+    let actions = json!(["task.submit", "task.read", "system.status"]);
+    let grant = call(
+        &mut store,
+        "Grant.Issue",
+        json!({"principal_id":parent["principal_id"], "actions":actions, "units":2, "ttl_seconds":180,
+            "allow_delegation":true, "max_delegation_depth":2, "tool_targets":["profile-local"]}),
+    )
+    .unwrap();
+    let upstream = call_as(
+        &mut store,
+        "Delegation.Create",
+        json!({"parent_id":grant["delegation_ref"]["resource_id"], "principal_id":intermediate["principal_id"],
+            "actions":actions, "ttl_seconds":160, "allow_delegation":true}),
+        parent["token"].as_str().unwrap().to_owned(),
+    )
+    .unwrap();
+    let delegation = call_as(
+        &mut store,
+        "Delegation.Create",
+        json!({"parent_id":upstream["resource_id"], "principal_id":leaf["principal_id"],
+            "actions":actions, "ttl_seconds":120}),
+        intermediate["token"].as_str().unwrap().to_owned(),
+    )
+    .unwrap();
+    let token = leaf["token"].as_str().unwrap().to_owned();
+    let prepare = |store: &mut Store, key| {
+        call_as(
+            store,
+            "Task.Prepare",
+            json!({"key":key,"tool":"system.status","input":{},"delegation_id":delegation["resource_id"]}),
+            token.clone(),
+        )
+        .unwrap()
+    };
+    let existing = prepare(&mut store, "long-lived-draft");
+    let lookup = |store: &mut Store, request: &Value| {
+        call_as(
+            store,
+            "Task.LookupSubmission",
+            request.clone(),
+            token.clone(),
+        )
+        .unwrap()
+    };
+    let remaining = |reply: Value| {
+        assert_eq!(reply["status"], "AbsentWithinWindow", "{reply}");
+        let until =
+            chrono::DateTime::parse_from_rfc3339(reply["window_not_after"].as_str().unwrap())
+                .unwrap();
+        (until.to_utc() - chrono::Utc::now()).num_milliseconds()
+    };
+    assert!(remaining(lookup(&mut store, &existing)) > 75_000);
+    let adjust = |store: &mut Store, remaining_ms: i64| {
+        store
+            .transaction("test-intermediate-deadline", |db| {
+                let cutoff = policy::deadline::Clock::sample()?.boot.millis + remaining_ms;
+                assert_eq!(
+                    db.c.execute(
+                        "UPDATE authorization_deadlines SET deadline_boot_ms=?1 WHERE resource=?2",
+                        rusqlite::params![cutoff, upstream["resource_id"].as_str().unwrap()],
+                    )?,
+                    1
+                );
+                Ok(cutoff)
+            })
+            .unwrap()
+    };
+    let capped = adjust(&mut store, 25_000);
+    let updated = prepare(&mut store, "bounded-fresh-draft");
+    store
+        .transaction("inspect-preparation-cutoff", |db| {
+            let stored: i64 = db.c.query_row(
+                "SELECT deadline_boot_ms FROM task_preparations WHERE owner=?1 AND key=?2",
+                rusqlite::params![
+                    leaf["principal_id"].as_str().unwrap(),
+                    "bounded-fresh-draft"
+                ],
+                |r| r.get(0),
+            )?;
+            assert_eq!(stored, capped);
+            Ok(())
+        })
+        .unwrap();
+    drop(store);
+    let mut store = Store::open(config).unwrap();
+    for request in [&existing, &updated] {
+        assert!((0..=25_000).contains(&remaining(lookup(&mut store, request))));
+    }
+    adjust(&mut store, -1);
+    for request in [existing, updated] {
+        assert_eq!(lookup(&mut store, &request)["status"], "Expired");
+        assert_eq!(
+            call_as(&mut store, "Task.Submit", request, token.clone())
+                .unwrap_err()
+                .0
+                .code,
+            "PermissionDenied"
+        );
+    }
+}
+
+#[test]
 fn elapsed_approval_is_refused_before_the_queue_sweep() {
     let tmp = tempfile::tempdir().unwrap();
     let (_, mut store) = initialized(tmp.path());

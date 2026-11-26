@@ -1,5 +1,6 @@
 use crate::{Result, db::Db, err, linux_clock::BootClock, require};
 use rusqlite::{OptionalExtension, params};
+use serde_json::Value;
 use std::{fs, io, os::unix::fs::MetadataExt};
 
 pub(crate) struct Clock {
@@ -80,5 +81,39 @@ impl Clock {
             params![resource, self.boot.boot_id, self.time_ns, self.boot.millis],
             |row| row.get(0),
         )?)
+    }
+
+    pub(crate) fn bounded_utc_ms(
+        &self,
+        db: &Db<'_>,
+        resource: &str,
+        utc: &Value,
+        sampled_utc_ms: i64,
+    ) -> Result<i64> {
+        let absolute = utc
+            .as_str()
+            .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+            .ok_or_else(|| {
+                err(
+                    "RecoveryRequired",
+                    "stored authorization deadline is invalid",
+                )
+            })?
+            .timestamp_millis();
+        let elapsed: Option<(String, i64)> =
+            db.c.query_row(
+                "SELECT time_ns,deadline_boot_ms FROM authorization_deadlines
+                 WHERE resource=?1 AND boot_id=?2",
+                params![resource, self.boot.boot_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(match elapsed {
+            Some((namespace, _)) if namespace != self.time_ns => absolute.min(sampled_utc_ms),
+            Some((_, cutoff)) => {
+                absolute.min(sampled_utc_ms.saturating_add(cutoff.saturating_sub(self.boot.millis)))
+            }
+            None => absolute,
+        })
     }
 }

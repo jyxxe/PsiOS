@@ -28,7 +28,11 @@ def another_direct_request(existing):
     identity = key()
     request = {**existing, "origin_ref": {**existing["origin_ref"], "origin_id": identity},
                "idempotency_key": identity, "cancel_scope_id": identity}
-    del request["request_digest"]
+    return reseal(request)
+
+
+def reseal(request):
+    request = {name: value for name, value in request.items() if name != "request_digest"}
     body = json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
     request["request_digest"] = "sha256:" + hashlib.sha256(b"psios/task-submit/1\n" + body).hexdigest()
     return request
@@ -326,6 +330,43 @@ class TaskPreparationTests(unittest.TestCase):
         after = self.verify(n)
         self.assertGreaterEqual(after["database_format"], 96, after)
         self.assertEqual(after["node_id"], before["node_id"])
+
+    @unittest.skipUnless(PRIOR_BINARIES, "set PSIOS_PRIOR_BIN_DIR to actual format 95 binaries")
+    def test_legacy_lookup_requires_exact_input_and_reports_request_cutoff(self):
+        n = self.start_node(PRIOR_BINARIES)
+        cutoff = in_seconds(8)
+        pending = self.prepare(n, tool="node.processes", data={"limit": 2}, deadline=cutoff)
+        received = self.prepare(n, deadline=cutoff)
+        accepted = n.call("Task.Submit", received)
+        n.stop(signal.SIGKILL)
+        n.daemon[0] = str(Path(BINARIES, "psiosd").absolute())
+        n.start()
+
+        open_window = self.lookup(n, pending, "AbsentWithinWindow")
+        end = datetime.fromisoformat(open_window["window_not_after"])
+        self.assertLessEqual(end, datetime.fromisoformat(cutoff))
+        self.assertLessEqual((datetime.fromisoformat(cutoff) - end).total_seconds(), 0.002)
+        bad_ref = {**pending["input_ref"], "version": "r99"}
+        wrong = self.lookup(n, reseal({**pending, "input_ref": bad_ref}), "Indeterminate")
+        self.assertNotIn("window_not_after", wrong)
+        self.assertNotIn("accepted", wrong)
+
+        actor, grant = n.agent(["task.submit", "task.read", "node.processes"])
+        identity = key()
+        foreign_request = reseal({
+            **pending, "idempotency_key": identity, "cancel_scope_id": identity,
+            "origin_ref": {"authority_id": actor["principal_id"], "origin_type": "Service", "origin_id": identity},
+            "delegation_ref": grant["delegation_ref"], "budget_ref": grant["budget_ref"],
+        })
+        foreign = self.lookup(n, foreign_request, "Indeterminate", actor["token"])
+        self.assertEqual(foreign["reason"], wrong["reason"])
+
+        time.sleep(max(0, (datetime.fromisoformat(cutoff) - datetime.now(timezone.utc)).total_seconds()) + 0.05)
+        ended = self.lookup(n, pending, "Expired")
+        self.assertNotIn("window_not_after", ended)
+        self.denied(n, "DeadlineExceeded", "Task.Submit", pending)
+        self.assertEqual(self.lookup(n, received, "Found")["accepted"], accepted)
+        self.verify(n)
 
 
 if __name__ == "__main__":

@@ -35,7 +35,7 @@ const PAGE_BYTES: usize = 256 * 1024;
 struct ListItems {
     project_id: String,
     after_id: Option<String>,
-    limit: Option<usize>,
+    limit: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -465,11 +465,11 @@ pub(crate) fn list_items(db: &Db<'_>, actor: &str, params: &Value) -> Result<Val
     }
     let mut statement = db.c.prepare("SELECT * FROM current WHERE kind='WorkItem' AND spec->>'project_id'=?1 AND id>?2 ORDER BY id LIMIT ?3")?;
     let items = statement
-        .query_map(params![project.id, after, limit + 1], row)?
+        .query_map(params![project.id, after, i64::from(limit + 1)], row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut size = 0;
     let mut page = Vec::new();
-    for item in items.iter().take(limit) {
+    for item in items.iter().take(limit as usize) {
         require(
             item.owner == project.owner,
             "RecoveryRequired",

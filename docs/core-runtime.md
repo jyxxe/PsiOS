@@ -487,6 +487,18 @@ jq -n --argjson definition "$definition" --arg grant "$grant" --arg until "$(dat
 
 `Workflow.Get` 返回运行修订、定义引用、截止时间、分支判定以及各步骤的 Task 回执和已观察修订。可执行的后继在全部必需前驱已知成功后进入准入。前驱出现未知效果时保留 `Blocked/Unknown`，原 Operation 完成对账后继续。用 `Workflow.Cancel` 提交 ID 和当前修订可关闭派发并取消在途 Task，已经发生的效果仍可从原 Task 和 Operation 查阅。[审批、撤权和队列验收](../tests/test_workflow.py) · [早期 DAG 升级验收](../tests/workflow_upgrade.py)
 
+## 本机 Project 与工作项验收
+
+本机所有者通过 `Project.Create` 建立私有 Project。使用 `psiosctl project create` 从标准输入发送 `{"key":"local-ops","title":"本机运维"}`，得到稳定 ID 和资源修订。随后用 `Grant.Issue` 给实际操作者签发 `project.read` 和所需的 `project.manage`、`project.contribute` 或 `project.review`。`tool_targets` 必须列出已有的 Project ID。所有者也需要为日常调用签发相应的限定授权。
+
+`Project.SetMember` 用当前 Project 修订指定 `Viewer`、`Contributor`、`Reviewer` 或 `Manager`。传入显式的 `"role":null` 移除成员。每次项目操作都同时验证当前成员角色和授权。Project、Conversation、Task 结果和宿主资源按各自的权限读取。普通 `Resource` 和 `Event` 查询不会返回 Project 的私有记录。
+
+`WorkItem.Create` 指定 `project_id`、`expected_project_version`、`key`、`title`、`assignee_principal_id`，以及有界的可选 `blocked_by`。`criterion` 设为 `{"kind":"TaskResult","tool":"system.status","target_ref":…}`，其中 `target_ref` 是该受管目标的完整引用。依赖必须指向同一 Project 中已存在的工作项。用 `psiosctl work-item list PROJECT_ID` 或 `work-item get ID` 查询工作项、未结束的依赖和当前修订。
+
+指派者用 `WorkItem.SubmitEvidence` 提交自己的已知成功 Task 和实际输出 Artifact 的固定引用。Core 校验计划、执行尝试、操作结算和制品摘要，再把工作项从 `Ready` 推进至 `InReview`。独立评审者需另有针对生产 Task 的 `task.results.read`，可通过 `psiosctl work-item review ID --revision REV accept` 进入 `Verified`，或以 `reject` 退回 `Ready`。项目管理者通过 `work-item close ID --revision REV` 接受结束。依赖项在被依赖的工作项关闭后才可提交。`InReview` 和 `Verified` 保留已提交的制品字节，拒绝或关闭解除保留。关闭后，审核结论以及经独立结果权限核准的证据元数据仍可查询。
+
+当前支持单节点、单个 TaskResult 验收条件和固定指派。里程碑、多条件验收、外部 Issue 与 CI 同步仍待实现。[多主体与重启验收](../tests/test_project_work_items.py) · [Project 规范](v1/docs/11-workflows-projects.md#118-project-与-workitem)
+
 ## 本机会话
 
 ### 私聊

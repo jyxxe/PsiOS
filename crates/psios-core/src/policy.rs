@@ -82,6 +82,11 @@ pub const TOOLS: &[&str] = &[
     "application.health",
     "application.logs",
 ];
+pub(crate) const PROJECT_READ: &str = "project.read";
+pub(crate) const PROJECT_MANAGE: &str = "project.manage";
+pub(crate) const PROJECT_CONTRIBUTE: &str = "project.contribute";
+pub(crate) const PROJECT_REVIEW: &str = "project.review";
+
 pub const COMMON: &[&str] = &[
     "task.submit",
     "task.read",
@@ -91,6 +96,10 @@ pub const COMMON: &[&str] = &[
     chat::INVITE,
     chat::READ,
     chat::SEND,
+    PROJECT_READ,
+    PROJECT_MANAGE,
+    PROJECT_CONTRIBUTE,
+    PROJECT_REVIEW,
     "resource.read",
     artifact::ingress::UPLOAD,
     artifact::ingress::READ,
@@ -226,6 +235,10 @@ fn bootstrap_actions() -> Vec<String> {
                     | chat::INVITE
                     | chat::READ
                     | chat::SEND
+                    | PROJECT_READ
+                    | PROJECT_MANAGE
+                    | PROJECT_CONTRIBUTE
+                    | PROJECT_REVIEW
             )
         })
         .map(|a| a.to_string())
@@ -367,8 +380,15 @@ pub fn admin(actor: &str) -> Result<()> {
         "local owner authorization required",
     )
 }
+pub(crate) const PRIVATE_RESOURCE_KINDS: &[&str] = &[
+    apps::log_tail::PRIVATE_KIND,
+    "Project",
+    "WorkItem",
+    "WorkItemEvidence",
+];
+
 pub fn visible(actor: &str, d: &Doc) -> bool {
-    d.kind != apps::log_tail::PRIVATE_KIND
+    !PRIVATE_RESOURCE_KINDS.contains(&d.kind.as_str())
         && (actor == OWNER || d.owner == actor || d.owner == SYSTEM)
 }
 pub fn owned(actor: &str, d: &Doc) -> Result<()> {
@@ -572,6 +592,17 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         .actions
         .iter()
         .any(|action| action == broker::result_access::ACTION);
+    let has_project_action = p.actions.iter().any(|action| {
+        matches!(
+            action.as_str(),
+            PROJECT_READ | PROJECT_MANAGE | PROJECT_CONTRIBUTE | PROJECT_REVIEW
+        )
+    });
+    require(
+        !has_project_action || (!reads_results && p.tool_targets.is_some()),
+        "InvalidArgument",
+        "project actions require exact Project targets and a separate Task result grant",
+    )?;
     require(
         !(reads_results
             || p.actions.iter().any(|action| {
@@ -614,6 +645,8 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         for id in ids {
             if reads_results {
                 db.of(id, "Task")?;
+            } else if has_project_action {
+                db.of(id, "Project")?;
             } else {
                 db.get(id)?;
             }

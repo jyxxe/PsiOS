@@ -192,6 +192,15 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Workflow.Get" => workflow::get(db, actor, p, "WorkflowRun"),
         "Workflow.Cancel" => workflow::cancel(db, actor, p),
         "Workflow.Resume" => workflow::resume(db, actor, p),
+        "Project.Create" => project::create_project(db, actor, p),
+        "Project.Get" => project::get_project(db, actor, p),
+        "Project.SetMember" => project::set_member(db, actor, p),
+        "WorkItem.Create" => project::create_item(db, actor, p),
+        "WorkItem.Get" => project::get_item(db, actor, p),
+        "WorkItem.List" => project::list_items(db, actor, p),
+        "WorkItem.SubmitEvidence" => project::submit_evidence(db, actor, p),
+        "WorkItem.Review" => project::review(db, actor, p),
+        "WorkItem.Close" => project::close(db, actor, p),
         "Conversation.OpenDirect" => chat::open(db, actor, p),
         "Conversation.OpenRoom" => chat::open_room(db, actor, p),
         "Conversation.List" => chat::list(db, actor, p),
@@ -296,6 +305,12 @@ impl Store {
                     | "Workflow.Start"
                     | "Workflow.Cancel"
                     | "Workflow.Resume"
+                    | "Project.Create"
+                    | "Project.SetMember"
+                    | "WorkItem.Create"
+                    | "WorkItem.SubmitEvidence"
+                    | "WorkItem.Review"
+                    | "WorkItem.Close"
                     | "Conversation.OpenDirect"
                     | "Conversation.OpenRoom"
                     | "Conversation.Invite"
@@ -313,6 +328,8 @@ impl Store {
             ) {
                 let target = if method.starts_with("Conversation.") {
                     r.params["id"].as_str().or_else(|| out["id"].as_str())
+                } else if method.starts_with("Project.") || method.starts_with("WorkItem.") {
+                    out["reference"]["resource_id"].as_str()
                 } else {
                     None
                 };

@@ -168,6 +168,10 @@ pub(super) fn check_artifacts(
     if identity.database_format >= crate::agent::provider_authority::FORMAT {
         crate::agent::provider_authority::verify(conn)?;
     }
+    if identity.database_format >= crate::project::FORMAT {
+        crate::project::verify(conn)?;
+        crate::project::evidence::verify(conn)?;
+    }
     if identity.database_format >= crate::node::service_control::FORMAT {
         crate::node::service_control::verify(conn)?;
     }

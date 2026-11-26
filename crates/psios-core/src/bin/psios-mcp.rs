@@ -137,12 +137,9 @@ impl Adapter {
             "key":id("mcp-call"),"delegation_id":self.scope.delegation_id,"deadline_at":deadline}),
             )
             .map_err(|error| tool_error(&error.code, None))?;
-        if abandoned() {
-            return Err(tool_error("Cancelled", None));
-        }
         let accepted = self
             .client
-            .submit_prepared(prepared)
+            .submit_prepared_while(prepared, || !abandoned())
             .map_err(|error| tool_error(&error.code, None))?;
         let task_id = accepted["task_id"]
             .as_str()
@@ -419,6 +416,6 @@ fn main() -> io::Result<()> {
     };
     match options.protocol {
         Protocol::Legacy => serve(adapter, io::stdin().lock(), io::stdout().lock()),
-        Protocol::Modern => modern::serve(adapter, io::stdin().lock(), io::stdout()),
+        Protocol::Modern => modern::serve(adapter, io::stdout()),
     }
 }

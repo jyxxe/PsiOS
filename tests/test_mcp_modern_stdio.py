@@ -178,6 +178,14 @@ class ModernMcpStdioTests(McpFixture, unittest.TestCase):
         self.assertNotEqual(blocked.process.wait(timeout=5), 0)
         self.assertEqual(self.tasks(), [])
 
+    def test_worker_stdout_failure_exits_with_stdin_held_open(self):
+        client = self.wire(self.grant([self.profile]))
+        client.process.stdout.close()
+        send(client, "discover", "server/discover", params())
+        self.assertNotEqual(client.process.wait(timeout=5), 0)
+        self.assertFalse(client.process.stdin.closed)
+        self.assertEqual(self.tasks(), [])
+
     @unittest.skipUnless(os.environ.get("PSIOS_TEST_MCP_MODERN_SDK") == "1", "requires official MCP SDK 2.0.0")
     def test_official_python_modern_stdio_client(self):
         import asyncio

@@ -140,6 +140,29 @@ struct Job {
     active: Active,
 }
 
+enum TransportEvent {
+    Frame(Vec<u8>),
+    EndOfInput,
+    Failed(io::Error),
+}
+
+fn read_frames(events: mpsc::SyncSender<TransportEvent>) {
+    let mut input = io::stdin().lock();
+    loop {
+        let mut line = Vec::new();
+        let result = Read::take(&mut input, (MAX_LINE + 1) as u64).read_until(b'\n', &mut line);
+        let event = match result {
+            Ok(0) => TransportEvent::EndOfInput,
+            Ok(_) => TransportEvent::Frame(line),
+            Err(error) => TransportEvent::Failed(error),
+        };
+        let terminal = !matches!(event, TransportEvent::Frame(_));
+        if events.send(event).is_err() || terminal {
+            return;
+        }
+    }
+}
+
 struct Transport<W> {
     output: W,
     active: Option<Active>,
@@ -236,11 +259,7 @@ impl<W: AsFd> Transport<W> {
     }
 }
 
-pub(super) fn serve(
-    mut adapter: Adapter,
-    mut input: impl BufRead,
-    output: impl AsFd + Send + 'static,
-) -> io::Result<()> {
+pub(super) fn serve(mut adapter: Adapter, output: impl AsFd + Send + 'static) -> io::Result<()> {
     fcntl_setfl(&output, fcntl_getfl(&output)? | OFlags::NONBLOCK)?;
     let transport = Arc::new(Mutex::new(Transport {
         output,
@@ -248,6 +267,11 @@ pub(super) fn serve(
         closed: false,
     }));
     let (work, jobs) = mpsc::sync_channel::<Job>(1);
+    let (transport_events, events) = mpsc::sync_channel(1);
+    let input_events = transport_events.clone();
+    let _input = thread::Builder::new()
+        .name("mcp-stdin".into())
+        .spawn(move || read_frames(input_events))?;
     let output = Arc::clone(&transport);
     let _worker = thread::Builder::new()
         .name("mcp-request".into())
@@ -266,26 +290,39 @@ pub(super) fn serve(
                 // frame is committed to the output stream it may already be visible.
                 if let Some(response) = response
                     && !active.cancelled.load(Ordering::Acquire)
-                    && write_frame(&state.output, &response).is_err()
+                    && let Err(error) = write_frame(&state.output, &response)
                 {
                     state.closed = true;
+                    // Wake the coordinator even if the peer has left stdin open.
+                    drop(state);
+                    let _ = transport_events.send(TransportEvent::Failed(error));
                     return;
                 }
                 state.active = None;
             }
         })?;
 
-    let mut line = Vec::new();
-    loop {
-        line.clear();
-        let read = Read::take(&mut input, (MAX_LINE + 1) as u64).read_until(b'\n', &mut line)?;
+    for event in events {
         let mut state = transport
             .lock()
             .map_err(|_| io::Error::other("local MCP transport unavailable"))?;
-        if read == 0 || state.closed {
-            state.closed = true;
-            return Ok(());
+        if state.closed {
+            return match event {
+                TransportEvent::Failed(error) => Err(error),
+                _ => Err(io::Error::other("MCP output closed")),
+            };
         }
+        let line = match event {
+            TransportEvent::Frame(line) => line,
+            TransportEvent::Failed(error) => {
+                state.closed = true;
+                return Err(error);
+            }
+            TransportEvent::EndOfInput => {
+                state.closed = true;
+                return Ok(());
+            }
+        };
         if line.len() > MAX_LINE || line.last() != Some(&b'\n') {
             state.closed = true;
             return write_frame(
@@ -301,6 +338,7 @@ pub(super) fn serve(
             )?,
         }
     }
+    Ok(())
 }
 
 fn cancel_task(client: &Client, id: &str) {

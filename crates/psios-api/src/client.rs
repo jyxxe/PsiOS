@@ -643,35 +643,19 @@ impl Client {
 
     /// Admit an exact Task.Prepare envelope, consulting its original key if the response is lost.
     pub fn submit_prepared(&self, request: Value) -> ApiResult<Value> {
-        match self.call("Task.Submit", request.clone()) {
-            Err(e) if e.code == "DependencyUnavailable" => {
-                let state = self
-                    .call("Task.LookupSubmission", request.clone())
-                    .map_err(|_| {
-                        ApiError::new(
-                            "OutcomeUnknown",
-                            "submission lookup indeterminate; retain original key",
-                        )
-                    })?;
-                match state["status"].as_str() {
-                    Some("Found") => {
-                        let mut receipt = state["accepted"].clone();
-                        receipt["deduplicated"] = json!(true);
-                        Ok(receipt)
-                    }
-                    Some("AbsentWithinWindow") => self.call("Task.Submit", request),
-                    Some("Expired") => Err(ApiError::new(
-                        "IdempotencyKeyExpired",
-                        "submission namespace expired",
-                    )
-                    .into()),
-                    _ => Err(
-                        ApiError::new("OutcomeUnknown", "submission lookup indeterminate").into(),
-                    ),
-                }
-            }
-            result => result,
-        }
+        self.submit_prepared_while(request, || true)
+    }
+
+    /// Check `may_send` before each submission send. A lost first response
+    /// still triggers an original-key lookup and returns any accepted receipt.
+    pub fn submit_prepared_while(
+        &self,
+        request: Value,
+        may_send: impl Fn() -> bool,
+    ) -> ApiResult<Value> {
+        admit_prepared(request, may_send, |method, params| {
+            self.call(method, params)
+        })
     }
     pub fn wait(&self, task: &str, timeout: Duration) -> ApiResult<Value> {
         let start = std::time::Instant::now();
@@ -708,6 +692,44 @@ impl Client {
         }
     }
 }
+
+fn admit_prepared(
+    request: Value,
+    may_send: impl Fn() -> bool,
+    mut call: impl FnMut(&str, Value) -> ApiResult<Value>,
+) -> ApiResult<Value> {
+    let cancelled = || ApiError::new("Cancelled", "no further submission requested").into();
+    if !may_send() {
+        return Err(cancelled());
+    }
+    match call("Task.Submit", request.clone()) {
+        Err(error) if error.code == "DependencyUnavailable" => {
+            let state = call("Task.LookupSubmission", request.clone()).map_err(|_| {
+                ApiError::new(
+                    "OutcomeUnknown",
+                    "submission lookup indeterminate; retain original key",
+                )
+            })?;
+            match state["status"].as_str() {
+                Some("Found") => {
+                    let mut receipt = state["accepted"].clone();
+                    receipt["deduplicated"] = json!(true);
+                    Ok(receipt)
+                }
+                Some("AbsentWithinWindow") if may_send() => call("Task.Submit", request),
+                Some("AbsentWithinWindow") => Err(cancelled()),
+                Some("Expired") => Err(ApiError::new(
+                    "IdempotencyKeyExpired",
+                    "submission namespace expired",
+                )
+                .into()),
+                _ => Err(ApiError::new("OutcomeUnknown", "submission lookup indeterminate").into()),
+            }
+        }
+        result => result,
+    }
+}
+
 /// Providers select a registered tool and structured input. psiosd owns execution and policy.
 pub trait AgentProvider {
     fn propose(&self, status: &Value, capabilities: &Value) -> ApiResult<(String, Value)>;
@@ -752,5 +774,65 @@ impl Client {
             json!({"reference": task["result"]["artifact_refs"][0]}),
         )?;
         Ok(json!({"task": task, "result": artifact}))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn prepared_submission_observes_original_receipts_after_cancellation() {
+        let request = json!({"idempotency_key":"exact-submission-key"});
+        for (status, cancellation) in [
+            ("Found", true),
+            ("AbsentWithinWindow", true),
+            ("AbsentWithinWindow", false),
+        ] {
+            let may_send = Cell::new(true);
+            let mut calls = Vec::new();
+            let result = admit_prepared(
+                request.clone(),
+                || may_send.get(),
+                |method, params| {
+                    assert_eq!(params, request);
+                    calls.push(method.to_owned());
+                    match calls.len() {
+                        1 => Err(ApiError::new("DependencyUnavailable", "receipt missing").into()),
+                        2 => {
+                            may_send.set(!cancellation);
+                            Ok(json!({"status":status,"accepted":{"task_id":"original"}}))
+                        }
+                        3 => Ok(json!({"task_id":"retry"})),
+                        _ => panic!("unexpected submission call"),
+                    }
+                },
+            );
+            assert_eq!(&calls[..2], ["Task.Submit", "Task.LookupSubmission"]);
+            match (status, cancellation) {
+                ("Found", true) => {
+                    assert_eq!(calls.len(), 2);
+                    assert_eq!(
+                        result.unwrap(),
+                        json!({"task_id":"original","deduplicated":true})
+                    );
+                }
+                (_, true) => {
+                    assert_eq!(calls.len(), 2);
+                    assert_eq!(result.unwrap_err().code, "Cancelled");
+                }
+                (_, false) => {
+                    assert_eq!(&calls[2..], ["Task.Submit"]);
+                    assert_eq!(result.unwrap()["task_id"], "retry");
+                }
+            }
+        }
+        assert_eq!(
+            admit_prepared(request, || false, |_, _| panic!("unexpected first send"))
+                .unwrap_err()
+                .code,
+            "Cancelled"
+        );
     }
 }

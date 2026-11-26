@@ -3,6 +3,8 @@ use super::*;
 pub fn recover(db: &Db<'_>) -> Result<()> {
     apps::stop::verify_active(db.c)?;
     apps::restart::verify_active(db.c)?;
+    node::network::trial::verify_active(db.c)?;
+    network_trial::recover_parked(db)?;
     let active = db
         .c
         .prepare("SELECT task,phase,attempt FROM queue WHERE phase IN ('Claimed','Dispatched')")?
@@ -37,6 +39,9 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
         let restore_unpublished = phase == "Dispatched"
             && tool == "backup.restore"
             && storage::restore_publication::not_published(db, &operation(db, &t)?)?;
+        let trial_unstarted = phase == "Dispatched"
+            && tool == node::network::trial::TOOL
+            && node::network::trial::not_started(db, &operation(db, &t)?)?;
         let restart_undispatched = phase == "Dispatched"
             && tool == apps::restart::TOOL
             && apps::restart::not_dispatched(db, &operation(db, &t)?)?;
@@ -62,6 +67,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             && !capture_uncommitted
             && !backup_unpublished
             && !restore_unpublished
+            && !trial_unstarted
             && !restart_undispatched
             && !stop_undispatched
             && !service_undispatched
@@ -93,6 +99,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             || capture_uncommitted
             || backup_unpublished
             || restore_unpublished
+            || trial_unstarted
             || restart_undispatched
             || stop_undispatched
             || service_undispatched
@@ -108,7 +115,11 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                 } else {
                     "Failed"
                 },
-                if service_undispatched || stop_undispatched || restart_undispatched {
+                if service_undispatched
+                    || stop_undispatched
+                    || restart_undispatched
+                    || trial_unstarted
+                {
                     "NotStarted"
                 } else {
                     "Known"
@@ -119,6 +130,8 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                         "backup interrupted before publication was authorized"
                     } else if restore_unpublished {
                         "restore interrupted before volume publication was authorized"
+                    } else if trial_unstarted {
+                        "network trial stopped before its checkpoint invocation"
                     } else if restart_undispatched {
                         "OCI restart interrupted before its invocation was checkpointed"
                     } else if stop_undispatched {
@@ -314,15 +327,48 @@ fn reconcile_request(db: &Db<'_>, actor: &str, params: &Value) -> Result<(Reconc
     Ok((req, op))
 }
 
+pub(crate) enum ReconcileProbe {
+    Service(node::service_control::ReconcileProbe),
+    Network(Box<node::network::trial::Inspection>),
+}
+
+pub(crate) enum ReconcileSample {
+    Service(node::service_control::ReconcileSample),
+    Network(node::network::trial::ReconcileSample),
+}
+
+impl ReconcileProbe {
+    pub(crate) fn read(self) -> Result<ReconcileSample> {
+        match self {
+            Self::Service(probe) => probe.read().map(ReconcileSample::Service),
+            Self::Network(probe) => probe.live().map(ReconcileSample::Network),
+        }
+    }
+}
+
 pub(crate) fn prepare_reconcile(
     db: &Db<'_>,
     actor: &str,
     params: &Value,
-) -> Result<Option<node::service_control::ReconcileProbe>> {
+) -> Result<Option<ReconcileProbe>> {
     let (req, op) = reconcile_request(db, actor, params)?;
     let task = db.of(field(&op.spec, "task_id"), "Task")?;
     if node::service_control::is_tool(field(&task.spec, "task_type")) {
-        node::service_control::prepare_reconcile_probe(db, &op, req.evidence_ref.as_ref())
+        Ok(
+            node::service_control::prepare_reconcile_probe(db, &op, req.evidence_ref.as_ref())?
+                .map(ReconcileProbe::Service),
+        )
+    } else if task.spec["task_type"] == node::network::trial::TOOL {
+        inspected(
+            db,
+            req.evidence_ref.as_ref(),
+            &op,
+            &op,
+            node::network::trial::INSPECT,
+        )?;
+        Ok(Some(ReconcileProbe::Network(Box::new(
+            node::network::trial::inspect(db, &op)?,
+        ))))
     } else {
         Ok(None)
     }
@@ -333,7 +379,7 @@ pub(crate) fn reconcile(
     db: &Db<'_>,
     actor: &str,
     params: &Value,
-    manager: Result<Option<node::service_control::ReconcileSample>>,
+    sample: Result<Option<ReconcileSample>>,
 ) -> Result<Value> {
     let (req, op) = reconcile_request(db, actor, params)?;
     let t = db.of(field(&op.spec, "task_id"), "Task")?;
@@ -355,6 +401,7 @@ pub(crate) fn reconcile(
         | Action::Restore(p)
         | Action::Backup(p) => (&p.id, &p.expected_resource_version),
         Action::ServiceRestart(p) => (&p.id, &p.expected_resource_version),
+        Action::NetworkTrial(p) => (&p.id, &p.expected_resource_version),
         Action::RestartApp(p) => (&p.id, &p.expected_resource_version),
         Action::ContinueOciStop(p) => (&p.target.id, &p.target.expected_resource_version),
         Action::RestoreReleaseImage(p) => (&p.target.id, &p.target.expected_resource_version),
@@ -382,6 +429,25 @@ pub(crate) fn reconcile(
     )?;
     let mut reason = None;
     let (result, proof_details) = match action {
+        Action::NetworkTrial(_) => {
+            let (proof, artifact) = inspected(
+                db,
+                req.evidence_ref.as_ref(),
+                &op,
+                &op,
+                node::network::trial::INSPECT,
+            )?;
+            let live = match sample? {
+                Some(ReconcileSample::Network(live)) => Some(live),
+                _ => None,
+            };
+            let (applied, result, evidence) =
+                node::network::trial::reconcile(db, &op, &proof, artifact, live)?;
+            if !applied {
+                reason = Some(err("LeaseLost", "the original network profile is restored"));
+            }
+            (result, evidence)
+        }
         Action::Delete(_) | Action::DeleteBackup(_) => {
             require(
                 req.evidence_ref.is_none(),
@@ -473,7 +539,10 @@ pub(crate) fn reconcile(
             let checkpoint =
                 node::service_control::confirmed(db, &op, &target, &action, &observation)?;
             let live_manager = if let Some(checkpoint) = &checkpoint {
-                let manager = manager?;
+                let manager = match sample? {
+                    Some(ReconcileSample::Service(manager)) => Some(manager),
+                    _ => None,
+                };
                 node::service_control::require_live_manager(
                     &op,
                     checkpoint,

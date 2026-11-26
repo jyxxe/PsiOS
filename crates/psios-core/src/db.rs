@@ -190,7 +190,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = node::service_manager::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = node::network::trial::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,

@@ -4,6 +4,7 @@ pub(crate) mod concurrency;
 pub(crate) mod dependencies;
 mod execution;
 mod history;
+mod network_trial;
 pub(crate) use history::{archive, history};
 mod recovery;
 pub(crate) mod result_access;
@@ -18,9 +19,14 @@ pub(crate) use approval::decide;
 #[cfg(test)]
 pub(crate) use execution::finish;
 pub(crate) use execution::{claim, dispatch, dispatch_failed, finish_host, settlement_failed};
+pub(crate) use network_trial::{
+    authorize_network_trial_confirm, expire_network_trials, finish_network_trial_confirm,
+    network_trial_confirmation, prepare_network_trial_confirm,
+};
 use psios_api::{VERSION, canonical, contract, digest, id, sha256};
 pub(crate) use recovery::{
-    inspected as inspect_recovery, prepare_reconcile, reconcile, recover, release_unstarted_claim,
+    ReconcileProbe, ReconcileSample, inspected as inspect_recovery, prepare_reconcile, reconcile,
+    recover, release_unstarted_claim,
 };
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
@@ -33,7 +39,7 @@ pub(crate) use submission::{
 fn field<'v>(v: &'v Value, k: &str) -> &'v str {
     v[k].as_str().expect("validated persisted field")
 }
-fn condition(code: &str, msg: &str) -> Value {
+pub(crate) fn condition(code: &str, msg: &str) -> Value {
     json!({
         "type": code,
         "status": "True",
@@ -228,6 +234,11 @@ fn close(
     Ok(t)
 }
 pub(crate) fn cancel_task(db: &Db<'_>, t: &Doc) -> Result<Doc> {
+    if t.spec["task_type"] == node::network::trial::TOOL
+        && let Some(cancelled) = network_trial::cancel(db, t)?
+    {
+        return Ok(cancelled);
+    }
     match field(&t.body, "lifecycle") {
         "Succeeded" | "Failed" | "Cancelled" | "Paused" | "Cancelling" => Ok(t.clone()),
         "Running" => {

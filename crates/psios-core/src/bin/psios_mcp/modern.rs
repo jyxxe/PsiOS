@@ -113,7 +113,7 @@ fn dispatch(adapter: &mut Adapter, request: Request, id: &Value, cancelled: &Ato
             .map(|tools| {
                 let tools: Vec<_> = tools
                     .into_iter()
-                    .map(|tool| descriptor(tool, Protocol::Modern))
+                    .map(|tool| descriptor(tool.binding, Protocol::Modern))
                     .collect();
                 json!({"tools":tools})
             })

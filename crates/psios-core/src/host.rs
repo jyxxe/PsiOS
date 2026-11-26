@@ -801,6 +801,7 @@ impl Work {
                     | Action::Pressure {}
                     | Action::TrackBlockDevice(_)
                     | Action::ObserveBlockDevice(_)
+                    | Action::ServiceInspect(_)
                     | Action::ServiceObserve(_)
                     | Action::ServiceLogs(_)
                     | Action::ServiceLogsSince(_)

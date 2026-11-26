@@ -10,7 +10,10 @@ mod work_admission;
 mod work_admission_blockers;
 pub use artifact::{ArtifactRepairReceipt, ArtifactUploadReceipt};
 pub use backup::{BackupChunk, BackupMember, BackupMemberReceipt};
-pub use mcp::{LocalReadTool, LocalReadToolsRequest};
+pub use mcp::{
+    LocalReadBinding, LocalReadTool, LocalReadToolsRequest, ResolveLocalReadToolsRequest,
+    ResolvedLocalReadTool,
+};
 pub use model::*;
 pub use project::*;
 pub use retention::*;

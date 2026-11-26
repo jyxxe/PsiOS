@@ -3950,7 +3950,7 @@ fn revoked_service_resource_grant_fences_the_result_and_late_receipt() {
 }
 
 #[test]
-fn revoked_service_log_grants_cannot_publish_artifacts_or_late_bodies() {
+fn revoked_service_inspection_and_log_grants_cannot_publish_artifacts_or_late_bodies() {
     let directory = tempfile::tempdir().unwrap();
     let mut cfg = Config::local(&directory.path().join("core"));
     let unit = "psios-journal-revocation-fixture.service";
@@ -3968,7 +3968,11 @@ fn revoked_service_log_grants_cannot_publish_artifacts_or_late_bodies() {
     let node = call(&mut store, "Node.Get", json!({})).unwrap();
     let boot = &node["state"]["boot_id"];
 
-    for tool in [node::journal::TOOL, node::journal::SINCE_TOOL] {
+    for tool in [
+        "service.inspect",
+        node::journal::TOOL,
+        node::journal::SINCE_TOOL,
+    ] {
         let grant = call(
             &mut store,
             "Grant.Issue",
@@ -3979,14 +3983,19 @@ fn revoked_service_log_grants_cannot_publish_artifacts_or_late_bodies() {
         let mut input = json!({
             "id":service_id,"expected_resource_version":service["version"],
         });
-        let mut receipt = json!({
-            "service_ref":service,"unit":unit,"manager":"user","boot_id":boot,
-            "limit":16,"observed_at":now(),
-            "entries":[{
-                "journal_cursor":"i=2","realtime_usec":"2","priority":6,"pid":42,
-                "message":{"encoding":"Utf8","data":"private journal output"}
-            }],
-        });
+        let mut receipt = if tool == "service.inspect" {
+            json!({"unit":unit,"manager":"user","boot_id":boot,"load_state":"loaded",
+                "active_state":"active","main_pid":"42","observed_at":now()})
+        } else {
+            json!({
+                "service_ref":service,"unit":unit,"manager":"user","boot_id":boot,
+                "limit":16,"observed_at":now(),
+                "entries":[{
+                    "journal_cursor":"i=2","realtime_usec":"2","priority":6,"pid":42,
+                    "message":{"encoding":"Utf8","data":"private journal output"}
+                }],
+            })
+        };
         // Only the returned bytes are a fixture. Claim, dispatch, revocation
         // and settlement below run through the normal authority.
         if tool == node::journal::SINCE_TOOL {

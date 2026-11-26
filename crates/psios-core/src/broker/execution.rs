@@ -493,6 +493,7 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                             | Action::Pressure {}
                             | Action::TrackBlockDevice(_)
                             | Action::ObserveBlockDevice(_)
+                            | Action::ServiceInspect(_)
                             | Action::ServiceObserve(_)
                             | Action::ServiceLogs(_)
                             | Action::ServiceLogsSince(_)

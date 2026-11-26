@@ -1,15 +1,54 @@
-use crate::{Result, db::Db, decode, host::Action, label, policy, require};
-use psios_api::{LocalReadTool, LocalReadToolsRequest};
+use crate::{
+    Result,
+    db::{Db, Doc},
+    decode, err,
+    host::Action,
+    label, policy, require,
+};
+use psios_api::{
+    LocalReadBinding, LocalReadTool, LocalReadToolsRequest, ResolveLocalReadToolsRequest,
+    ResolvedLocalReadTool, ResourceRef,
+};
 use serde_json::{Value, json};
+use std::collections::HashSet;
 
-pub(crate) fn discover(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
-    let request: LocalReadToolsRequest = decode(params)?;
+fn agent(db: &Db<'_>, actor: &str) -> Result<()> {
     let principal = db.of(actor, "Principal")?;
     require(
         principal.spec["principal_type"] == "Agent" && principal.body["lifecycle"] == "Active",
         "PermissionDenied",
         "local read tool discovery requires an active Agent principal",
-    )?;
+    )
+}
+
+fn task_authority(db: &Db<'_>, actor: &str, delegation_id: &str) -> Result<bool> {
+    for action in ["task.submit", "task.read"] {
+        match policy::delegation(db, actor, delegation_id, action) {
+            Err(error) if error.0.code == "PermissionDenied" => return Ok(false),
+            other => {
+                other?;
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn read_only(db: &Db<'_>, name: &str) -> Result<()> {
+    let registered = db.of(&format!("tool-{name}"), "Capability")?;
+    require(
+        policy::readonly(name)
+            && !policy::approval(name)
+            && registered.body["capability_id"] == name
+            && registered.spec["effect_class"] == "ReadOnly"
+            && registered.spec["requires_approval"] == false,
+        "RecoveryRequired",
+        "local read tool disagrees with its capability registration",
+    )
+}
+
+pub(crate) fn discover(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
+    let request: LocalReadToolsRequest = decode(params)?;
+    agent(db, actor)?;
     label(&request.delegation_id)?;
     require(
         matches!(request.tools.as_slice(), [_] | [_, _])
@@ -17,30 +56,15 @@ pub(crate) fn discover(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value
         "InvalidArgument",
         "one or two distinct local read tools required",
     )?;
-    let delegation = |action| policy::delegation(db, actor, &request.delegation_id, action);
-    for action in ["task.submit", "task.read"] {
-        match delegation(action) {
-            Err(error) if error.0.code == "PermissionDenied" => return Ok(json!({"tools":[]})),
-            other => {
-                other?;
-            }
-        }
+    if !task_authority(db, actor, &request.delegation_id)? {
+        return Ok(json!({"tools":[]}));
     }
     let mut visible = Vec::<LocalReadTool>::new();
     for tool in request.tools {
         let name = tool.name();
         let checked = (|| -> Result<()> {
-            let delegation = delegation(name)?;
-            let registered = db.of(&format!("tool-{name}"), "Capability")?;
-            require(
-                policy::readonly(name)
-                    && !policy::approval(name)
-                    && registered.body["capability_id"] == name
-                    && registered.spec["effect_class"] == "ReadOnly"
-                    && registered.spec["requires_approval"] == false,
-                "RecoveryRequired",
-                "local read tool disagrees with its capability registration",
-            )?;
+            let delegation = policy::delegation(db, actor, &request.delegation_id, name)?;
+            read_only(db, name)?;
             let action = Action::parse(name, &json!({}))?;
             let target = action.target(db, actor)?;
             action.audience(db, actor, &delegation.reference(), &target)?;
@@ -48,6 +72,100 @@ pub(crate) fn discover(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value
         })();
         match checked {
             Ok(()) => visible.push(tool),
+            Err(error) if error.0.code == "PermissionDenied" => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(json!({"tools":visible}))
+}
+
+fn explicitly_scoped(db: &Db<'_>, delegation: &Doc, target: &str) -> Result<bool> {
+    let grant_id = delegation.body["grant_id"]
+        .as_str()
+        .ok_or_else(|| err("RecoveryRequired", "delegation has no root grant"))?;
+    let grant = db.of(grant_id, "Grant")?;
+    Ok([&grant.spec, &delegation.body].into_iter().any(|scope| {
+        scope["tool_targets"]
+            .as_array()
+            .is_some_and(|targets| targets.iter().any(|id| id == target))
+    }))
+}
+
+fn resolve_binding(
+    db: &Db<'_>,
+    actor: &str,
+    delegation: &Doc,
+    binding: &LocalReadBinding,
+) -> Result<Option<ResolvedLocalReadTool>> {
+    let name = binding.name();
+    read_only(db, name)?;
+    let exact: Option<ResourceRef> = if let Some((id, kind)) = binding.target() {
+        if !explicitly_scoped(db, delegation, id)? {
+            return Ok(None);
+        }
+        policy::tool_scope(db, &delegation.reference(), id)?;
+        let Some(target) = db.find(id)? else {
+            return Ok(None);
+        };
+        let lifecycle = if kind == "Volume" {
+            "Available"
+        } else {
+            "Registered"
+        };
+        if target.kind != kind || target.body["lifecycle"] != lifecycle {
+            return Ok(None);
+        }
+        Some(decode(&target.reference())?)
+    } else {
+        None
+    };
+    let input = binding
+        .task_input(exact.as_ref())
+        .ok_or_else(|| err("RecoveryRequired", "local read tool target is inconsistent"))?;
+    let action = Action::parse(name, &input)?;
+    let target = action.target(db, actor)?;
+    action.audience(db, actor, &delegation.reference(), &target)?;
+    let target_ref = decode(&target.reference())?;
+    require(
+        exact.is_none_or(|reference| reference == target_ref),
+        "RecoveryRequired",
+        "local read tool resolved a different target",
+    )?;
+    Ok(Some(ResolvedLocalReadTool {
+        tool: name.to_owned(),
+        target_ref,
+    }))
+}
+
+pub(crate) fn resolve(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
+    let request: ResolveLocalReadToolsRequest = decode(params)?;
+    agent(db, actor)?;
+    label(&request.delegation_id)?;
+    let mut tools = HashSet::new();
+    require(
+        (1..=4).contains(&request.bindings.len())
+            && request
+                .bindings
+                .iter()
+                .all(|binding| tools.insert(binding.name())),
+        "InvalidArgument",
+        "one to four distinct local read tools required",
+    )?;
+    for binding in &request.bindings {
+        if let Some((id, _)) = binding.target() {
+            label(id)?;
+        }
+    }
+    if !task_authority(db, actor, &request.delegation_id)? {
+        return Ok(json!({"tools":[]}));
+    }
+    let mut visible = Vec::new();
+    for binding in request.bindings {
+        let resolution = policy::delegation(db, actor, &request.delegation_id, binding.name())
+            .and_then(|delegation| resolve_binding(db, actor, &delegation, &binding));
+        match resolution {
+            Ok(Some(tool)) => visible.push(tool),
+            Ok(None) => {}
             Err(error) if error.0.code == "PermissionDenied" => {}
             Err(error) => return Err(error),
         }

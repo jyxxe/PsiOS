@@ -232,9 +232,16 @@ class AgentSessionInputs(unittest.TestCase):
         text_ref = self.upload(b'{"looks":"structured"}', self.agent, "text/plain")
         self.refuse("PermissionDenied", "Session.Open",
                     self.opening(self.authorize(artifact=text_ref), artifact=text_ref), token)
+        ambiguous = self.upload(b'{"value":1,"value":2}', self.agent)
+        self.refuse("InvalidArgument", "Session.Open",
+                    self.opening(self.authorize(artifact=ambiguous), artifact=ambiguous), token)
         large = self.upload(json.dumps({"value": "x" * 17000}).encode(), self.agent)
         self.refuse("QuotaExceeded", "Session.Open",
                     self.opening(self.authorize(artifact=large), artifact=large), token)
+        limited = self.register_model(context_bytes=1024)
+        medium = self.upload(json.dumps({"value": "x" * 900}).encode(), self.agent)
+        self.refuse("QuotaExceeded", "Session.Open",
+                    self.opening(self.authorize(artifact=medium, model=limited), artifact=medium, model=limited), token)
         repeated = self.opening(owned)
         repeated["input_artifacts"] *= 2
         self.refuse("InvalidArgument", "Session.Open", repeated, token)

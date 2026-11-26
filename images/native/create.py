@@ -97,6 +97,7 @@ class CoreLimits:
 class TrialInput:
     disk_uuid: uuid.UUID
     configuration_sha256: str
+    secure_boot_required: bool = False
 
 
 @dataclass(frozen=True)
@@ -292,6 +293,9 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
         (work / "psios-trial-config.sha256").write_text(f"{trial.configuration_sha256}  /psios-trial-core.json\n")
         (work / "psios-trial-disk-id").write_text(trial.disk_uuid.bytes_le.hex() + "\n")
         files.extend(["psios-trial-config.sha256", "psios-trial-disk-id"])
+        if trial.secure_boot_required:
+            (work / "psios-trial-secure-boot-required").write_text("required\n")
+            files.append("psios-trial-secure-boot-required")
     for script in boot_scripts:
         shutil.copyfile(HERE / script, work / f"psios-{script}")
     files.extend(f"psios-{script}" for script in boot_scripts)
@@ -312,6 +316,8 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
         inputs["core_limits"] = asdict(core_limits)
     if trial:
         inputs.update(boot_mode=TRIAL_BOOT_MODE, trial_disk_uuid=str(trial.disk_uuid))
+        if trial.secure_boot_required:
+            inputs["secure_boot_enforcement_required"] = True
     manifest = work / "psios-deployment.json"
     manifest.write_text(json.dumps(inputs, sort_keys=True, separators=(",", ":")) + "\n")
     # BusyBox can verify the exact extracted bytes without a JSON interpreter.
@@ -606,8 +612,8 @@ def verify_authority(work, disk, core_config):
     return report
 
 
-def prepare_trial_disk(work, disk, layout, configuration):
-    trial = TrialInput(uuid.uuid4(), hashlib.sha256(configuration).hexdigest())
+def prepare_trial_disk(work, disk, layout, configuration, *, secure_boot_required=False):
+    trial = TrialInput(uuid.uuid4(), hashlib.sha256(configuration).hexdigest(), secure_boot_required)
     # A trial EFI payload can only open its own copied authority writable.
     boot_media.run(work, ["sfdisk", "--disk-id", disk, str(trial.disk_uuid)])
     validate_layout(work, disk, layout)
@@ -643,6 +649,8 @@ def finish_disk(work, disk, output, *, signing, upgrade):
     if "boot_mode" in manifest:
         receipt.update(format=TRIAL_RECEIPT_FORMAT, boot_mode=manifest["boot_mode"],
                        trial_disk_uuid=manifest["trial_disk_uuid"])
+        if "secure_boot_enforcement_required" in manifest:
+            receipt["secure_boot_enforcement_required"] = True
     if upgrade is not None:
         receipt["upgrade"] = deepcopy(upgrade)
     return receipt
@@ -651,16 +659,25 @@ def finish_disk(work, disk, output, *, signing, upgrade):
 def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
     """Prepare two private EFI variants of one stopped source; publish neither."""
     prior, layout, core_limits = read_receipt(args.previous_receipt)
-    if "secure_boot" in prior or any(getattr(args, name, None) is not None for name in (
-            "secure_boot_key", "secure_boot_cert", "efi_stub", "efi_stub_sha256")):
-        raise ValueError("staged updates currently support only unsigned native deployments")
     work = work.absolute()
+    requested = tuple(getattr(args, name, None) for name in (
+        "secure_boot_key", "secure_boot_cert", "efi_stub", "efi_stub_sha256"))
+    existing = prior.get("secure_boot")
+    if not existing and any(value is not None for value in requested):
+        raise ValueError("a signed staged update requires a signed original deployment")
+    signing = None
+    if existing:
+        if not all(requested):
+            raise ValueError("a signed original deployment requires the Secure Boot signing inputs")
+        signing = boot_media.prepare_secure_boot(work, *requested)
+        if signing.certificate_sha256 != existing["certificate_sha256"]:
+            raise ValueError("a signed staged update requires the original enrolled certificate")
     candidate_work, trial_work = work / "candidate", work / "trial"
     for directory in (candidate_work, trial_work):
         directory.mkdir(mode=0o700)
     candidate_disk, trial_disk = candidate_work / "installed.raw", trial_work / "installed.raw"
     source_digest, replayed, configuration = source_snapshot(
-        candidate_work, candidate_disk, source_fd, prior, layout, None)
+        candidate_work, candidate_disk, source_fd, prior, layout, signing)
     normalized = sha256(candidate_disk)
     with candidate_disk.open("rb") as frozen, trial_disk.open("xb") as clone:
         copy_mib(frozen, clone, layout.image_mib, replace=False)
@@ -669,7 +686,8 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
         raise ValueError("trial disk clone does not match the normalized source")
     for disk in (candidate_disk, trial_disk):
         disk.chmod(0o600)
-    trial = prepare_trial_disk(trial_work, trial_disk, layout, configuration)
+    trial = prepare_trial_disk(trial_work, trial_disk, layout, configuration,
+                               secure_boot_required=signing is not None)
 
     base = prepare_boot_inputs(candidate_work, args)
     (trial_work / "bin").mkdir()
@@ -679,13 +697,16 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
     instance, home_id = prior["state_uuid"], prior["home_uuid"]
     network_profile = prior.get("network_profile")
     for directory, mode in ((candidate_work, None), (trial_work, trial)):
-        assemble_ramfs(directory, args, base, instance, home_id, layout, None, network_profile,
+        assemble_ramfs(directory, args, base, instance, home_id, layout, signing, network_profile,
                        core_limits=core_limits, trial=mode)
     candidate_manifest = json.loads((candidate_work / "psios-deployment.json").read_bytes())
     trial_manifest = json.loads((trial_work / "psios-deployment.json").read_bytes())
     del trial_manifest["boot_mode"], trial_manifest["trial_disk_uuid"]
     del trial_manifest["payload_sha256"]["/psios-trial-config.sha256"]
     del trial_manifest["payload_sha256"]["/psios-trial-disk-id"]
+    if signing:
+        del trial_manifest["secure_boot_enforcement_required"]
+        del trial_manifest["payload_sha256"]["/psios-trial-secure-boot-required"]
     if trial_manifest != candidate_manifest:
         raise ValueError("trial and candidate boot inputs disagree")
 
@@ -693,8 +714,8 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
     upgrade = {"previous_image_sha256": source_digest, "previous_source_commit": prior["source_commit"],
                "normalized_source_sha256": normalized, "verified_authority": authority,
                "replayed_ext4_partitions": replayed}
-    candidate_receipt = finish_disk(candidate_work, candidate_disk, candidate_disk, signing=None, upgrade=upgrade)
-    trial_receipt = finish_disk(trial_work, trial_disk, trial_disk, signing=None, upgrade=upgrade)
+    candidate_receipt = finish_disk(candidate_work, candidate_disk, candidate_disk, signing=signing, upgrade=upgrade)
+    trial_receipt = finish_disk(trial_work, trial_disk, trial_disk, signing=signing, upgrade=upgrade)
     return PreparedUpdate(candidate_disk, trial_disk, candidate_receipt, trial_receipt,
                           candidate_work / "bin/psiosd", configuration, normalized, candidate_work / "base.iso")
 

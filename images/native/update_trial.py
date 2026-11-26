@@ -22,6 +22,7 @@ CONSOLE_LIMIT = 128 * 1024
 REPORT_LIMIT = 64 * 1024
 TRIAL_MARKER = b"PSIOS-TRIAL/1"
 RESCUE_MARKER = b"PSIOS-RESCUE/1"
+SECURE_BOOT_MARKER = b"PSIOS-SECURE-BOOT/1"
 
 
 def require(condition, message):
@@ -49,10 +50,23 @@ def json_report(body):
 
 def receipt_lineage(prepared):
     candidate, trial = prepared.candidate_receipt, prepared.trial_receipt
+    signed = "secure_boot" in candidate
+    candidate_formats = (3, 4, 5, 6) if signed else (2, 4, 5, 6)
     require(trial.get("boot_mode") == create.TRIAL_BOOT_MODE and trial.get("format") == create.TRIAL_RECEIPT_FORMAT
-            and candidate.get("format") in (2, 4, 5, 6) and "boot_mode" not in candidate
-            and "secure_boot" not in trial and "secure_boot" not in candidate,
-            "expected matching unsigned native trial and normal candidate receipts")
+            and candidate.get("format") in candidate_formats and "boot_mode" not in candidate
+            and "secure_boot_enforcement_required" not in candidate,
+            "expected native trial and normal candidate receipts")
+    if signed:
+        trust = candidate["secure_boot"]
+        require(isinstance(trust, dict) and set(trust) == {"scheme", "certificate_sha256", "efi_stub_sha256"}
+                and trust["scheme"] == create.boot_media.SECURE_BOOT_SCHEME
+                and all(isinstance(trust[name], str) and re.fullmatch(r"[0-9a-f]{64}", trust[name])
+                        for name in ("certificate_sha256", "efi_stub_sha256"))
+                and trial.get("secure_boot") == trust and trial.get("secure_boot_enforcement_required") is True,
+                "signed trial and candidate trust receipts or enforcement requirements disagree")
+    else:
+        require("secure_boot" not in trial and "secure_boot_enforcement_required" not in trial,
+                "unsigned candidate has incompatible trial trust")
     require(all(trial[name] == candidate[name] for name in
                 ("geometry_mib", "state_uuid", "home_uuid", "source_commit", "upgrade"))
             and all(trial.get(name) == candidate.get(name) for name in ("network_profile", "core_limits"))
@@ -148,7 +162,7 @@ def run_guest(work, command, fds, purpose, *, file_limit=None):
         return bytes(serial).replace(b"\r\n", b"\n")
 
 
-def verify_ready(serial, expected_manifest):
+def verify_ready(serial, expected_manifest, *, secure_boot_required=False):
     prefix = TRIAL_MARKER + b" "
     lines = [line for line in serial.split(b"\n")[:-1] if line.startswith(prefix)]
     require(serial.count(TRIAL_MARKER) == len(lines) == 1, "trial did not emit one complete boot report")
@@ -159,6 +173,11 @@ def verify_ready(serial, expected_manifest):
             raise ValueError(f"native trial failed at {stage}")
     require(report == {"status": "Ready", "deployment_manifest_sha256": expected_manifest},
             "native trial did not attest the expected Ready deployment")
+    if secure_boot_required:
+        enforced = b"\n" + SECURE_BOOT_MARKER + b" Enforced\n"
+        require(serial.count(SECURE_BOOT_MARKER) == 1 and serial.count(enforced) == 1
+                and serial.index(enforced) < serial.index(prefix),
+                "native trial did not attest firmware Secure Boot enforcement")
 
 
 def boot_trial(work, disk, code, vars_file, receipt, size):
@@ -177,8 +196,12 @@ def boot_trial(work, disk, code, vars_file, receipt, size):
                    timeout=20, preexec_fn=limit)
     (work / "changes.qcow2").chmod(0o600)
     disk_fd, code_fd = disk.fileno(), code.fileno()
+    secure_boot_required = receipt.get("secure_boot_enforcement_required") is True
+    machine = ["-machine", "q35"]
+    if secure_boot_required:
+        machine = ["-machine", "q35,smm=on", "-global", "driver=cfi.pflash01,property=secure,value=on"]
     command = virtual_machine() + [
-        "-machine", "q35", "-boot", "order=c,strict=on", "-serial", "stdio",
+        *machine, "-boot", "order=c,strict=on", "-serial", "stdio",
         "-add-fd", f"fd={code_fd},set=2", "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=/dev/fdset/2",
         "-drive", "if=pflash,format=raw,unit=1,file=vars.fd",
         *readonly_disk(disk_fd, "base"),
@@ -186,7 +209,7 @@ def boot_trial(work, disk, code, vars_file, receipt, size):
         "-blockdev", "driver=qcow2,node-name=trial,file=changes,backing=base",
         *virtio_disk("trial")]
     serial = run_guest(work, command, (disk_fd, code_fd), "native trial", file_limit=limit)
-    verify_ready(serial, receipt["deployment_manifest_sha256"])
+    verify_ready(serial, receipt["deployment_manifest_sha256"], secure_boot_required=secure_boot_required)
 
 
 def verify_trial_filesystem(work, image, receipt, layout, configuration):
@@ -276,8 +299,11 @@ def prove_trial(work: Path, prepared, firmware_code: Path, firmware_vars: Path) 
         require(digest(trial) == prepared.trial_receipt["initial_image_sha256"]
                 and digest(code) == code_hash and digest(vars_file) == vars_hash,
                 "private trial backing or pinned firmware inputs changed")
-    return {"status": "Verified", "boot_mode": create.TRIAL_BOOT_MODE,
-            "configuration_sha256": config_hash, "trial_disk_uuid": prepared.trial_receipt["trial_disk_uuid"],
-            "state_uuid": prepared.trial_receipt["state_uuid"], "home_uuid": prepared.trial_receipt["home_uuid"],
-            "firmware_code_sha256": code_hash, "firmware_vars_sha256": vars_hash, "core_sha256": core_hash,
-            "verified_authority": authority}
+    proof = {"status": "Verified", "boot_mode": create.TRIAL_BOOT_MODE,
+             "configuration_sha256": config_hash, "trial_disk_uuid": prepared.trial_receipt["trial_disk_uuid"],
+             "state_uuid": prepared.trial_receipt["state_uuid"], "home_uuid": prepared.trial_receipt["home_uuid"],
+             "firmware_code_sha256": code_hash, "firmware_vars_sha256": vars_hash, "core_sha256": core_hash,
+             "verified_authority": authority}
+    if "secure_boot" in prepared.trial_receipt:
+        proof["secure_boot"] = {"status": "Enforced", **prepared.trial_receipt["secure_boot"]}
+    return proof

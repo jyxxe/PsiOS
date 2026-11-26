@@ -119,6 +119,19 @@ def exercise(node, manager):
         "tool": TRIAL, "input": target(link), "key": key(), "delegation_id": "owner-delegation",
     })
 
+    # A separate local controller already owns a checkpoint for this exact link.
+    foreign_seconds = 90
+    foreign = manager.checkpoint(foreign_seconds)
+    try:
+        check_contender(node, link, delegation)
+        assert manager.only_checkpoint(foreign_seconds) == foreign
+        assert boottime() < foreign.deadline
+        manager.assert_profile(ORIGINAL)
+    finally:
+        if manager.checkpoints() == [foreign.path]:
+            manager.confirm_checkpoint(foreign)
+    assert manager.checkpoints() == []
+
     request = node.prepare(TRIAL, target(link), delegation=delegation)
     task_id = node.call("Task.Submit", request)["task_id"]
     pending = node.call("Task.Get", {"id": task_id})

@@ -512,6 +512,8 @@ Task 成功时返回 `session_ref`，会话记录原 Task 引用。会话进入�
 
 新 WorkflowRun 在接受时保存同一内核启动内的经过时间截止点，每步 Task 继承该上限。封锁调度期间也会结算到期实例。尚未开始的实例以 `Failed/NotStarted` 和 `DeadlineExceeded` 结算，恢复调度后仍保留原回执与预算；已有在途效果按原 Task 取消和对账规则处理。格式 26 的工作流继续使用原 UTC 截止时间。跨内核启动也使用原 UTC 截止时间。[原生盘回拨验收](../tests/native_grant_deadline.py) · [格式 26 升级](../tests/workflow_deadline_upgrade.py)
 
+步骤遇到可重试的队列或容量限制时，Core 将原 WorkflowRun 移到其他就绪运行之后，并在同一 Linux 启动和时间命名空间内等待 1 秒再试。同一主体的队列满载时，其他有空余配额的运行可以继续。格式 98 持久保存这次延期，重启后沿用原步骤提交键及预算。延期期间继续结算到期运行和已接受子任务的状态。[跨主体调度与重启验收](../tests/test_workflow.py)
+
 ```bash
 node=$(ctl node | jq -er .reference.resource_id)
 grant=$(jq -n --arg node "$node" '{principal_id:"local-owner",tool_targets:["profile-local",$node],

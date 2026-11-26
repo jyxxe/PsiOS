@@ -5,13 +5,19 @@ from contextlib import closing
 from datetime import datetime
 import hmac
 import json
+import os
+from pathlib import Path
 import signal
 import sqlite3
+import subprocess
 import time
 import unittest
 
 from support import Failure, Node, key, target
 from test_schedule import timestamp
+
+BINARIES = os.getenv("PSIOS_TEST_BIN_DIR", "target/debug")
+PRIOR_BINARIES = os.getenv("PSIOS_WORKFLOW_PRIOR_BIN_DIR")
 
 
 def step(name, tool="system.status", input=None, after=(), when=None, after_selected=()):
@@ -25,7 +31,7 @@ def step(name, tool="system.status", input=None, after=(), when=None, after_sele
 
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
-        self.node = Node("target/debug")
+        self.node = Node(BINARIES)
         self.addCleanup(self.node.close)
 
     def grant(self, actions=("system.status",), targets=("profile-local",), units=3, actor="local-owner"):
@@ -619,3 +625,111 @@ class WorkflowTests(unittest.TestCase):
         finished = self.wait(run, "Succeeded")
         self.assertEqual(len({s["task_receipt"]["task_id"] for s in finished["state"]["steps"]}), 2)
         self.assertEqual(self.budget(scope), (0, 2))
+
+    def test_workflow_owner_queue_pressure_does_not_block_another_principal(self):
+        self.exercise_admission_fairness()
+
+    @unittest.skipUnless(PRIOR_BINARIES, "set PSIOS_WORKFLOW_PRIOR_BIN_DIR to actual format 97 binaries")
+    def test_format97_pending_workflows_gain_fair_admission_after_upgrade(self):
+        self.node.close()
+        self.node = Node(PRIOR_BINARIES)
+        self.addCleanup(self.node.close)
+        self.exercise_admission_fairness(upgrade=True)
+
+    def exercise_admission_fairness(self, *, upgrade=False):
+        n = self.node
+        n.stop()
+        n.config.write_text(json.dumps(dict(json.loads(n.config.read_text()), queue_limit=4,
+                                            principal_queue_limit=1)))
+        n.start()
+        volume = n.perform("volume.create", {"name": "workflow-admission-fairness"})
+        held = n.submit("volume.write", {**target(volume), "name": "held", "content": "hold"})
+        self.assertEqual(n.wait(held)["lifecycle"], "WaitingApproval")
+
+        blocked_scope = self.grant(units=1)
+        blocked_def = self.define([step("older")])
+        blocked_request = self.request(blocked_def, blocked_scope)
+        blocked = n.call("Workflow.Start", blocked_request)
+        blocked_id = blocked["reference"]["resource_id"]
+        pending_sql = "SELECT run_rev,step FROM workflow_admission_deferrals WHERE run=?"
+        with closing(sqlite3.connect(n.state / "state.db")) as conn:
+            original_spec = conn.execute("SELECT spec FROM versions WHERE id=? AND rev=1", (blocked_id,)).fetchone()
+            original = json.loads(original_spec[0])["steps"][0]["request"]
+            if not upgrade:
+                deadline = time.monotonic() + 6
+                while conn.execute(pending_sql, (blocked_id,)).fetchone() != (1, "older"):
+                    self.assertLess(time.monotonic(), deadline, "older ready run did not hit its owner's full queue")
+                    time.sleep(0.05)
+
+        independent = n.call("Agent.Register", {"name": "independent-workflow"})
+        independent_scope = self.grant(units=1, actor=independent["principal_id"])
+        independent_def = self.define([step("later")], independent["token"])
+        later = n.call("Workflow.Start", self.request(independent_def, independent_scope), independent["token"])
+        before = None
+        before_incarnation = None
+        if upgrade:
+            # The old scheduler repeatedly attempts only the older ready run.
+            # Verify that the second owner has quota and both runs stay Ready
+            # over several timer ticks before upgrading their exact authority.
+            self.assertEqual(n.call("Task.Admission", {})["ordinary"], {"used": 1, "limit": 1})
+            self.assertEqual(n.call("Task.Admission", {}, independent["token"])["ordinary"],
+                             {"used": 0, "limit": 1})
+            stalled_until = time.monotonic() + 1.1
+            while time.monotonic() < stalled_until:
+                self.assertEqual(self.fetch(blocked), blocked)
+                self.assertEqual(self.fetch(later), later)
+                time.sleep(0.05)
+            self.assertEqual(self.budget(blocked_scope), (0, 0))
+            self.assertEqual(self.budget(independent_scope), (0, 0))
+            n.stop(signal.SIGKILL)
+            n.daemon[0] = str(Path(BINARIES, "psiosd").absolute())
+            before = json.loads(subprocess.check_output(n.daemon + ["verify"], timeout=20))
+            self.assertEqual(before["database_format"], 97, before)
+            self.assertTrue(before["migration_required"], before)
+            with closing(sqlite3.connect(n.state / "state.db")) as conn:
+                before_incarnation, = conn.execute("SELECT value FROM meta WHERE key='incarnation'").fetchone()
+            n.start()
+
+        finished_later = self.wait(later, "Succeeded")
+        later_receipt = self.phases(finished_later)["later"]["task_receipt"]
+        self.assertEqual(self.budget(independent_scope), (0, 1))
+        self.assertEqual(self.fetch(blocked), blocked)
+        self.assertEqual(self.budget(blocked_scope), (0, 0))
+        self.assertEqual(n.wait(held)["lifecycle"], "WaitingApproval")
+
+        n.stop(signal.SIGKILL)
+        with closing(sqlite3.connect(n.state / "state.db")) as conn:
+            self.assertEqual(conn.execute(pending_sql, (blocked_id,)).fetchone(), (1, "older"))
+            self.assertEqual(conn.execute("SELECT count(*) FROM current WHERE kind='Task' "
+                                          "AND body->'origin_ref'->>'origin_id'=?", (blocked_id,)).fetchone(), (0,))
+            if before_incarnation is not None:
+                self.assertEqual(conn.execute("SELECT value FROM meta WHERE key='incarnation'").fetchone(),
+                                 (before_incarnation,))
+        verified = json.loads(subprocess.check_output(n.daemon + ["verify"], timeout=20))
+        self.assertGreaterEqual(verified["database_format"], 98, verified)
+        self.assertFalse(verified["migration_required"], verified)
+        if before is not None:
+            self.assertEqual(verified["node_id"], before["node_id"])
+        with closing(sqlite3.connect(n.state / "state.db")) as conn, conn:
+            conn.execute("UPDATE workflow_admission_deferrals SET run_rev=2 WHERE run=?", (blocked_id,))
+        invalid = subprocess.run(n.daemon + ["verify"], capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertIn("RecoveryRequired", invalid.stderr)
+        with closing(sqlite3.connect(n.state / "state.db")) as conn, conn:
+            conn.execute("UPDATE workflow_admission_deferrals SET run_rev=1 WHERE run=?", (blocked_id,))
+        n.start()
+        self.assertEqual(self.fetch(blocked), blocked)
+        self.assertEqual(self.phases(self.fetch(later))["later"]["task_receipt"], later_receipt)
+
+        n.call("Task.Cancel", target(n.get(held)["reference"]))
+        finished = self.wait(blocked, "Succeeded")
+        receipt = self.phases(finished)["older"]["task_receipt"]
+        self.assertEqual(receipt["origin_ref"], original["origin_ref"])
+        self.assertEqual(receipt["idempotency_key"], original["idempotency_key"])
+        self.assertEqual(receipt["request_digest"], original["request_digest"])
+        self.assertEqual(n.call("Workflow.Start", blocked_request), finished)
+        self.assertEqual(self.budget(blocked_scope), (0, 1))
+        with closing(sqlite3.connect(n.state / "state.db")) as conn:
+            self.assertIsNone(conn.execute(pending_sql, (blocked_id,)).fetchone())
+            self.assertEqual(conn.execute("SELECT count(*) FROM submissions WHERE task=?",
+                                          (receipt["task_id"],)).fetchone(), (1,))

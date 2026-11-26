@@ -625,6 +625,13 @@ jobs:
             python3 -B -m unittest discover -s tests -p test_task_preparation_revocation.py -k test_startup -v
           PSIOS_ARTIFACT_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
             python3 -B -m unittest discover -s tests -p test_bound_artifact_upload.py -k test_legacy_partial -v
+      - name: Restore fair admission for existing format 97 workflows under owner queue pressure
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format97"
+          git archive 10dde6edc9b835260075a73fe6d25b85b0c220d0 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format97"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format97" "$RUNNER_TEMP/psios-compatibility-target"
+          PSIOS_WORKFLOW_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
+            python3 -B -m unittest discover -s tests -p test_workflow.py -k test_format97 -v
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

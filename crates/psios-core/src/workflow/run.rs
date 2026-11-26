@@ -1,4 +1,4 @@
-use super::{ACTION, PreparedStep, RUN, binding, check_tool, run_view};
+use super::{ACTION, PreparedStep, RUN, admission_delay, binding, check_tool, run_view};
 use crate::{
     Conditional, Result, Store, artifact, broker,
     db::{Db, Doc},
@@ -94,7 +94,25 @@ pub fn tick(store: &mut Store) -> Result<()> {
     let mut rejection = None;
     match store.transaction(&correlation, |db| advance(db, &mut rejection)) {
         Ok(()) => Ok(()),
-        Err(error) if error.0.retry_condition == "SameRequestAfterBackoff" => Ok(()),
+        Err(error) if error.0.retry_condition == "SameRequestAfterBackoff" => {
+            let Some(rejection) = rejection else {
+                return Ok(());
+            };
+            // The admission transaction rolled back without accepting the
+            // step. Defer just this run so another ready run can try.
+            match store.transaction(&correlation, |db| {
+                admission_delay::defer(db, &rejection.run, &rejection.version, &rejection.step)
+            }) {
+                Err(error)
+                    if error.0.code == "StorageUnavailable"
+                        && !store.transaction_is_uncertain() =>
+                {
+                    eprintln!("psiosd workflow admission deferral: {}", error.0.code);
+                    Ok(())
+                }
+                result => result,
+            }
+        }
         Err(error) => {
             let Some(rejection) = rejection else {
                 return Err(error);
@@ -149,20 +167,25 @@ fn advance(db: &Db<'_>, rejection: &mut Option<Rejection>) -> Result<()> {
     let work =
         db.c.query_row(
             "WITH candidates AS (
-                 SELECT w.*, (w.stopping=0 AND (w.deadline_ms<=?1 OR coalesce(
+                 SELECT w.*, delay.boot_id AS deferred_boot_id, delay.time_ns AS deferred_time_ns,
+                     delay.deferred_boot_ms, (w.stopping=0 AND (w.deadline_ms<=?1 OR coalesce(
                      elapsed.time_ns!=?3 OR elapsed.deadline_boot_ms<=?4,0))) AS expired,
                      (SELECT a.task FROM active_workflow_tasks a WHERE a.run=w.run
                       AND a.task_rev != coalesce((SELECT rev FROM versions WHERE id=a.task
                           ORDER BY rev DESC LIMIT 1),-1) ORDER BY a.step LIMIT 1) AS changed_task
                  FROM active_workflows w LEFT JOIN authorization_deadlines elapsed
                        ON elapsed.resource=w.run AND elapsed.boot_id=?2
+                 LEFT JOIN workflow_admission_deferrals delay ON delay.run=w.run
              )
              SELECT w.run,w.changed_task,w.expired FROM candidates w
              WHERE w.expired OR w.changed_task IS NOT NULL OR
                    (?5 AND w.stopping=0 AND w.result_blocked=0 AND w.ready_ms IS NOT NULL
+                    AND (w.deferred_boot_id IS NULL OR w.deferred_boot_id!=?2
+                         OR w.deferred_time_ns!=?3 OR w.deferred_boot_ms NOT BETWEEN ?6 AND ?4)
                     AND (SELECT count(*) FROM active_workflow_tasks a WHERE a.run=w.run)<w.max_parallel_steps)
              ORDER BY w.expired DESC,(w.changed_task IS NOT NULL) DESC,w.ready_ms,w.run LIMIT 1",
-            params![stamp, clock.boot.boot_id, clock.time_ns, clock.boot.millis, enabled],
+            params![stamp, clock.boot.boot_id, clock.time_ns, clock.boot.millis, enabled,
+                clock.boot.millis - admission_delay::BACKOFF_MS + 1],
             |row| {
                 Ok(Work {
                     run: row.get(0)?,
@@ -265,6 +288,7 @@ fn dispatch(
             "UPDATE active_workflows SET ready_ms=NULL WHERE run=?1",
             [&run.id],
         )?;
+        admission_delay::clear(db, run)?;
         return Ok(());
     };
     *rejection = Some(Rejection {
@@ -489,6 +513,7 @@ fn stop(db: &Db<'_>, run: &Doc, mut body: Value, reason: &str) -> Result<Doc> {
 }
 
 fn publish(db: &Db<'_>, run: &Doc, mut body: Value, stamp: i64) -> Result<Doc> {
+    admission_delay::clear(db, run)?;
     let active = active_tasks(db, run)?;
     let stopping = body["stop_reason"].as_str().map(str::to_owned);
     if active.is_empty() {

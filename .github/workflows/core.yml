@@ -678,6 +678,12 @@ jobs:
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format104" "$RUNNER_TEMP/psios-compatibility-target"
           PSIOS_BACKUP_TRANSFER_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
             python3 -B -m unittest discover -s tests -p test_backup_transfer.py -k test_old_writer -v
+      - name: Preserve model claims while upgrading brokered input custody
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format105"
+          git archive a0b5a6c5f222b349178b7532c85dd7ff7b7b7cb7 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format105"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format105" "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/brokered_session_inputs_upgrade.py --previous-bin-dir "$RUNNER_TEMP/psios-compatibility-target/debug"
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

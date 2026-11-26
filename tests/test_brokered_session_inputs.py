@@ -281,3 +281,67 @@ class BrokeredSessionInputs(SessionInputFixture, unittest.TestCase):
         self.assertEqual(self.queued("no-repeated-trigger", accept=True), {"available": False})
         n.stop()
         self.verify_stopped()
+
+    def test_waiting_approval_preserves_input_custody_through_restart_and_write(self):
+        n = self.n
+        caller = self.agent["token"]
+        creation = self.grant(self.agent, ["volume.create", "task.submit", "task.read"], None)
+        request = n.prepare("volume.create", {"name": "brokered-approval-volume"}, token=caller,
+                            delegation=creation["delegation_ref"]["resource_id"])
+        created = n.wait(n.call("Task.Submit", request, caller)["task_id"])
+        self.assertEqual(created["lifecycle"], "Succeeded", created)
+        volume_ref, = created["result"]["artifact_refs"]
+        volume = n.call("Artifact.Read", {"reference": volume_ref}, caller)
+        self.skill = n.call("Skill.Publish", {"name": "private-input-approved-write", "version": "1",
+            "license": "0BSD", "source": "local-test", "tools": ["volume.write"],
+            "instructions": "Request the volume write described by the fixed JSON input."})
+        self.data = {"tool": "volume.write", "name": "approved-record", "content": "Scoped test write.",
+                     "private_ticket": "opaque-approval-fixture"}
+        self.artifact = self.upload(json.dumps(self.data).encode(), self.agent)
+        grant = self.grant(self.agent, [TOOL, "session.run", "session.context.read", "artifact.read",
+                                       "task.submit", "task.read", "volume.write"],
+                           [self.node_id, self.model["resource_id"], self.skill["resource_id"],
+                            self.artifact["resource_id"], volume["resource_id"]])
+        launch = n.call("Task.Submit", self.prepare_launch(grant), caller)
+        session, _ = self.launch_receipt(launch["task_id"])
+        first = self.claim_exact_input(session, "approval-input")
+        disclosed = first["context"]["inputs"][0]["value"]
+        decision = {"action": "tool", "tool": disclosed["tool"],
+                    "input": {**target(volume), "name": disclosed["name"], "content": disclosed["content"]}}
+        accepted = self.respond(session, first, decision)
+        write_id = accepted["task_id"]
+        self.assertNotEqual(write_id, launch["task_id"])
+        waiting = n.wait(write_id)
+        self.assertEqual((waiting["lifecycle"], waiting["outcome_knowledge"]),
+                         ("WaitingApproval", "NotStarted"), waiting)
+        parked = self.session(session)
+        self.assertEqual((parked["session"]["lifecycle"], parked["session"]["last_task"]),
+                         ("WaitingTask", write_id), parked)
+        path = n.state / "volumes" / volume["resource_id"] / "data" / disclosed["name"]
+        self.assertFalse(path.exists())
+        self.assert_custody(session_id=session["resource_id"])
+        self.refuse("Conflict", "Artifact.Withdraw", self.withdrawal(), caller)
+
+        n.stop(signal.SIGKILL)
+        self.verify_stopped()
+        n.start()
+        self.assertEqual(n.call("Task.Get", {"id": write_id}), waiting)
+        self.assertEqual(self.session(session), parked)
+        self.assertEqual(self.respond(session, first, decision), accepted)
+        self.assertEqual(self.queued("no-new-turn-before-approval", accept=True), {"available": False})
+        self.assertFalse(path.exists())
+        self.refuse("Conflict", "Artifact.Withdraw", self.withdrawal(), caller)
+        n.approve(write_id)
+        written = n.wait(write_id)
+        self.assertEqual((written["lifecycle"], written["outcome_knowledge"]), ("Succeeded", "Known"), written)
+        self.assertEqual(path.read_text(encoding="utf-8"), disclosed["content"])
+        self.refuse("Conflict", "Artifact.Withdraw", self.withdrawal(), caller)
+
+        final = self.claim_exact_input(session, "finish-approved-write")
+        self.assertEqual(final["context"]["last_tool"]["task_id"], write_id)
+        complete = self.respond(session, final, {"action": "finish", "summary": "Approved write verified."})
+        self.assertEqual(complete["lifecycle"], "Succeeded", complete)
+        self.assert_custody()
+        n.call("Artifact.Withdraw", self.withdrawal(), caller)
+        n.stop()
+        self.verify_stopped()

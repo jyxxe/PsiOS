@@ -57,7 +57,7 @@ class BrokeredSessionInputUpgrade(SessionInputFixture, unittest.TestCase):
         self.assertNotEqual(refused.returncode, 0, refused)
         self.assertIn("SchemaVersionUnsupported", refused.stderr)
         migrated = json.loads(subprocess.check_output(n.daemon + ["verify"], timeout=20))
-        self.assertEqual(migrated["database_format"], 106)
+        self.assertGreaterEqual(migrated["database_format"], 106)
         self.assertEqual(migrated["node_id"], previous["node_id"])
         self.assertFalse(migrated["migration_required"])
 

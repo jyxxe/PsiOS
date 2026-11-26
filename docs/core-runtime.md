@@ -65,7 +65,7 @@ ctl wait "$task" | jq '{reference:.result.artifact_refs[0]}' | ctl call Artifact
 
 `kernel` 记录内核可见的 CPU、内存和 I/O PSI、最近 10/60/300 秒的停顿比例、累计微秒及 OOM kill 计数。系统级 CPU PSI 只返回 `some`。`core_cgroup` 记录包含 `psiosd` 的 cgroup v2 的设备号、inode、各项 PSI、CPU 时间和节流、内存与交换用量、配置限额、OOM 事件及 PID 用量和限额。限额是该 cgroup 的本地控制值。计算继承后的有效上限还要检查父级。发起者无权另选 PID 或文件路径。[Linux PSI](https://docs.kernel.org/accounting/psi.html) · [Linux cgroup v2](https://docs.kernel.org/admin-guide/cgroup-v2.html)
 
-结果包含节点引用、boot ID、挂载与 cgroup 命名空间和 `CLOCK_BOOTTIME` 的采样起止点。各项按 `Observed`、`Unsupported`、`Denied` 或 `Unavailable` 报告。若复核发现守护进程已离开采样的 cgroup，则该组结果报告 `ChangedDuringObservation`。这些样本用于诊断。任务准入继续使用权威的配置阈值和预算。[真实限额、授权和内核降级验收](../tests/test_pressure.py) · [格式 21 升级](../tests/pressure_upgrade.py)
+结果包含节点引用、该节点记录的 boot ID、挂载与 cgroup 命名空间和 `CLOCK_BOOTTIME` 的采样起止点。读数来自已核验的 procfs 和 cgroup v2 文件。被其他挂载遮蔽的计数项会报告不可用状态，其余计数可独立返回。各项按 `Observed`、`Unsupported`、`Denied` 或 `Unavailable` 报告。若复核发现守护进程已离开采样的 cgroup，则该组结果报告 `ChangedDuringObservation`。结果发布前再次核对授权。任务准入继续使用权威的配置阈值和预算。[真实限额、授权和内核降级验收](../tests/test_pressure.py) · [格式 21 升级](../tests/pressure_upgrade.py)
 
 ### 网络接口与地址
 

@@ -1,7 +1,9 @@
 """Exercise the authorised pressure task against the running Linux kernel."""
+from contextlib import ExitStack, contextmanager
 import os
 from pathlib import Path
 import signal
+import subprocess
 import time
 import unittest
 
@@ -34,6 +36,15 @@ def psi_totals(path):
         return {line.split()[0]: int(line.rsplit("total=", 1)[1]) for line in path.read_text().splitlines()}
     except FileNotFoundError:
         return {}
+
+
+@contextmanager
+def private_bind(source, target):
+    subprocess.run(["mount", "--bind", source, target], check=True, timeout=8)
+    try:
+        yield
+    finally:
+        subprocess.run(["umount", target], check=True, timeout=8)
 
 
 class PressureTests(unittest.TestCase):
@@ -110,6 +121,60 @@ class PressureTests(unittest.TestCase):
             self.assertGreater(values["pids"]["current"]["value"], 0)
             self.assertGreater(values["cpu"]["stat"]["value"]["usage_usec"], 0)
             self.assertIn("oom_kill", values["memory"]["local_events"]["value"])
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_REPLACE_PRESSURE") == "1", "requires a private mount namespace")
+    def test_grafted_pressure_sources_do_not_hide_independent_kernel_data(self):
+        namespace = Path("/proc/self/ns/mnt").readlink()
+        self.assertNotEqual(namespace, Path(f"/proc/{os.getppid()}/ns/mnt").readlink())
+        for line in Path("/proc/self/mountinfo").read_text().splitlines():
+            fields = line.split(" - ", 1)[0].split()
+            if fields[4] in ("/", "/proc", "/proc/pressure"):
+                self.assertFalse(any(field.startswith("shared:") for field in fields[6:]), line)
+
+        node = self.node
+        # A regression may block the worker on a foreign FIFO. Keep cleanup
+        # bounded and target only this fixture's daemon in that case.
+        self.addCleanup(node.stop, signal.SIGKILL)
+        _, baseline = artifact(node, submit(node, self.grant))
+        for key in ("cpu", "memory", "io", "oom_kills"):
+            self.assertEqual(baseline["kernel"][key]["status"], "Observed", baseline)
+        substitutions = node.base / "foreign-counters"
+        substitutions.mkdir()
+        fake_cpu = substitutions / "cpu"
+        fake_cpu.write_text("some avg10=7.00 avg60=8.00 avg300=9.00 total=987654321\n")
+        fake_vmstat = substitutions / "vmstat"
+        fake_vmstat.write_text("oom_kill 987654321\n")
+        waiting = substitutions / "memory"
+        os.mkfifo(waiting, mode=0o600)
+
+        with ExitStack() as mounted:
+            for source, target in ((fake_cpu, "/proc/pressure/cpu"), (waiting, "/proc/pressure/memory"),
+                                   (fake_vmstat, "/proc/vmstat")):
+                mounted.enter_context(private_bind(source, target))
+            self.assertEqual(Path("/proc/pressure/cpu").read_bytes(), fake_cpu.read_bytes())
+            self.assertEqual(Path("/proc/vmstat").read_bytes(), fake_vmstat.read_bytes())
+            self.assertTrue(Path("/proc/pressure/memory").is_fifo())
+            started = time.monotonic()
+            _, observed = artifact(node, submit(node, self.grant))
+            self.assertLess(time.monotonic() - started, 7)
+            for key in ("cpu", "memory", "oom_kills"):
+                self.assertEqual(observed["kernel"][key], {"status": "Unsupported"}, observed)
+            io = observed["kernel"]["io"]
+            self.assertEqual(io["status"], "Observed", observed)
+            for kind, upper in psi_totals(Path("/proc/pressure/io")).items():
+                self.assertLessEqual(baseline["kernel"]["io"]["value"][kind]["total_us"],
+                                     io["value"][kind]["total_us"])
+                self.assertLessEqual(io["value"][kind]["total_us"], upper)
+            self.assertEqual(observed["core_cgroup"]["status"], baseline["core_cgroup"]["status"])
+            if observed["core_cgroup"]["status"] == "Observed":
+                self.assertEqual(observed["core_cgroup"]["value"]["inode"], baseline["core_cgroup"]["value"]["inode"])
+            for key in ("boot_id", "mount_namespace_inode", "cgroup_namespace_inode"):
+                self.assertEqual(observed[key], baseline[key])
+
+        _, restored = artifact(node, submit(node, self.grant))
+        for key in ("cpu", "memory", "io", "oom_kills"):
+            self.assertEqual(restored["kernel"][key]["status"], "Observed", restored)
+        node.stop()
 
     def test_scopes_artifact_and_revocation_through_restart(self):
         node = self.node

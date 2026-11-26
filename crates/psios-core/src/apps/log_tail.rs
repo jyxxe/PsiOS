@@ -28,7 +28,9 @@ pub(crate) fn redact_late_receipt(db: &Db<'_>, doc: &mut Doc) -> Result<()> {
     let receipt = &doc.body["evidence"]["receipt"];
     let application_logs = receipt.get("last_logs").is_some() || receipt.get("stdout").is_some();
     let service_logs = receipt.get("entries").is_some();
-    if doc.kind == "LateReceipt" && (application_logs || service_logs) {
+    let node_pressure =
+        receipt["kernel"]["source"] == "LinuxProcfs" && receipt.get("core_cgroup").is_some();
+    if doc.kind == "LateReceipt" && (application_logs || service_logs || node_pressure) {
         let effect = db.resolve(&doc.body["effect_ref"])?;
         let action = effect.body["action"].as_str();
         if (application_logs && matches!(action, Some(TOOL | "application.stop")))
@@ -37,6 +39,7 @@ pub(crate) fn redact_late_receipt(db: &Db<'_>, doc: &mut Doc) -> Result<()> {
                     action,
                     Some(crate::node::journal::TOOL | crate::node::journal::SINCE_TOOL)
                 ))
+            || (node_pressure && action == Some(crate::node::pressure::TOOL))
         {
             doc.body["evidence"] = json!({"code":"Fenced"});
             doc.spec["evidence"] = doc.body["evidence"].clone();

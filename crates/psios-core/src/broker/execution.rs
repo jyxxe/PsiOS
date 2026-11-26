@@ -482,6 +482,7 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                 if matches!(
                     w.action,
                     Action::InspectProcess(_)
+                        | Action::Pressure {}
                         | Action::TrackBlockDevice(_)
                         | Action::ObserveBlockDevice(_)
                         | Action::ServiceLogs(_)
@@ -584,6 +585,9 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
             host::Output::Receipt(receipt) => {
                 if rebind {
                     apps::volume_rebind::validate_observation(db, w, receipt)?;
+                }
+                if matches!(w.action, Action::Pressure {}) {
+                    node::pressure::check_receipt(w, receipt)?;
                 }
                 artifact::capacity::check_result(db, &t, receipt)?;
             }

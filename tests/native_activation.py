@@ -102,10 +102,15 @@ def child_fd(controller):
         try:
             try:
                 executable = os.readlink(f"/proc/{pid}/exe")
-                cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+                raw_cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
             except (FileNotFoundError, ProcessLookupError):
                 continue
-            if Path(executable).name != "qemu-system-x86_64":
+            # Linux can expose the new executable before its argument memory
+            # is readable. An exiting child can also have an empty cmdline.
+            if Path(executable).name != "qemu-system-x86_64" or not raw_cmdline.endswith(b"\0"):
+                continue
+            cmdline = raw_cmdline[:-1].split(b"\0")
+            if Path(os.fsdecode(cmdline[0])).name != "qemu-system-x86_64" or select.select([pidfd], [], [], 0)[0]:
                 continue
             return pid, os.dup(pidfd), cmdline
         finally:

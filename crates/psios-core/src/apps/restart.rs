@@ -8,7 +8,7 @@ use crate::{
     now, require,
 };
 use chrono::DateTime;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -56,7 +56,7 @@ impl Request {
     }
 }
 
-fn boot_id() -> Result<String> {
+pub(super) fn boot_id() -> Result<String> {
     let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
     let boot = boot.trim();
     require(
@@ -135,6 +135,7 @@ pub(crate) fn observe(work: &Work) -> Result<Value> {
         "process_running":true,"runtime_state":"Running",
         "effective_limits":limits,"observed_at":now()
     });
+    e.observe_mount(work, &profile, cid, start_op, state, &mut observation)?;
     super::health::status(&mut observation, launch.health_check.as_ref(), state);
     Ok(observation)
 }
@@ -216,6 +217,24 @@ pub(crate) fn begin(db: &Db<'_>, work: &Work) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn pending_mount_requirement(db: &Db<'_>, app: &Doc) -> Result<bool> {
+    let operation: Option<String> =
+        db.c.query_row(
+            "SELECT q.operation FROM holds h JOIN queue q ON q.operation=h.holder
+         JOIN current t ON t.id=q.task WHERE h.volume=?1
+           AND q.phase IN ('Dispatched','Unknown') AND t.spec->>'task_type'=?2",
+            params![app.id, TOOL],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(operation) = operation else {
+        return Ok(false);
+    };
+    Ok(db
+        .find(&checkpoint_id(&operation))?
+        .is_some_and(|record| super::mount_observation::required(&record)))
+}
+
 pub(crate) fn not_dispatched(db: &Db<'_>, op: &Doc) -> Result<bool> {
     let record = journal::load(db.c, op, journal::epoch(db.c)?)?;
     record.custody.holds(db.c, op, true)?;
@@ -229,6 +248,12 @@ pub(crate) fn record(db: &Db<'_>, work: &Work, request: &Request, before: &Value
         record.modern
             && record.checkpoint.is_none()
             && record.custody.sample(before)
+            && (!work.mount_observation_required
+                || record
+                    .custody
+                    .volume
+                    .as_ref()
+                    .is_some_and(|volume| super::mount_observation::matches(volume, before)))
             && request.matches(before)
             && before["boot_id"] == boot_id()?
             && record.custody.app.reference() == work.target.reference()
@@ -259,6 +284,7 @@ pub(crate) fn record(db: &Db<'_>, work: &Work, request: &Request, before: &Value
         json!({"operation_id":work.op.id}),
         json!({"plan_ref":work.op.body["plan_ref"],"effect_id":work.effect.id,"before":before,
             "volume_ref":record.custody.volume.as_ref().map(Doc::reference),"intent_ref":record.intent.reference(),
+            "mount_observation_required":work.mount_observation_required,
             "started_effect_ref":effect.reference(),"started_operation_ref":op.reference()}),
     )?;
     let mut intent = record.intent.body.clone();
@@ -300,6 +326,13 @@ fn confirmed(db: &Db<'_>, op: &Doc, app: &Doc, after: &Value) -> Result<Doc> {
         record.custody.app.reference() == app.reference()
             && record.custody.running(after)
             && changed(&checkpoint.body["before"], after)
+            && (!(super::mount_observation::required(&checkpoint)
+                || db.cfg.oci_effective_volume_observation && record.custody.volume.is_some())
+                || record
+                    .custody
+                    .volume
+                    .as_ref()
+                    .is_some_and(|volume| super::mount_observation::matches(volume, after)))
             && (!record.modern || after["boot_id"] == boot_id()?),
         "OutcomeUnknown",
         "inspection does not confirm restart of the checkpointed invocation",

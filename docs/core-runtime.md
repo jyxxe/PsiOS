@@ -228,6 +228,10 @@ Core 通过已打开的目录和文件描述符流式校验私有普通文件。
 
 ### 重启正在运行的 OCI 实例
 
+配置 `oci_effective_volume_observation: true` 可为带卷的 OCI 启动、重启与检查启用 Linux 实际挂载核验。此配置默认关闭。启用需要本机 cgroup v2 和服务 UID 对容器进程的 `/proc` 观测权限。Core 在启动后固定进程身份，对照卷已登记的设备与 inode，核实独立挂载命名空间中的 `/data` 是私有、可写且没有嵌套挂载。运行实例的 `mount_observation` 保存卷引用、挂载 ID、启动标识和采样时间。
+
+原启动或重启的检查点会保留核验要求。若 Docker 已执行启动而无法核实挂载，操作维持 `OutcomeUnknown` 并保留占用。重新对账须取得同一容器现有运行的有效核验样本。内核返回访问拒绝、报告不同 inode 或容器已退出时，旧操作继续等待处置。[真实挂载和故障验收](../tests/oci_mount_observation.py)
+
 `application.inspect_instance` 校验实际容器、发布配置、卷挂载、Linux 启动身份和有效资源限制。将结果中的 `boot_id`、`started_at` 分别作为 `expected_boot_id`、`expected_started_at`，连同应用 ID 与当前修订提交 `application.restart`。两项能力均需显式授权。应用绑定卷时，授权目标同时包含应用和卷。
 
 重启需独立审批。Core 在调用 OCI 引擎前核对启动身份并持久记录检查点，在回执中保存同一容器和 Linux 启动下的新启动身份。未知结果保留应用与卷的操作约束。用新的观察制品对账，确认后登记在原 Task 与 Operation 下。[真实 OCI 引擎验收](../tests/oci_restart.py)

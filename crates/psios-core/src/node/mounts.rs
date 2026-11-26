@@ -177,12 +177,9 @@ fn mount(line: &[u8]) -> Result<Mount> {
     })
 }
 
-pub(super) fn observe() -> Result<Value> {
-    let namespace = fs::metadata(MOUNT_NAMESPACE)?.ino();
+fn table(file: fs::File) -> Result<Vec<Mount>> {
     let mut input = Vec::new();
-    fs::File::open("/proc/self/mountinfo")?
-        .take(INPUT_LIMIT + 1)
-        .read_to_end(&mut input)?;
+    file.take(INPUT_LIMIT + 1).read_to_end(&mut input)?;
     require(
         input.len() as u64 <= INPUT_LIMIT,
         "QuotaExceeded",
@@ -202,10 +199,55 @@ pub(super) fn observe() -> Result<Value> {
     require(
         mounts
             .windows(2)
-            .all(|pair| pair[0].mount_id < pair[1].mount_id)
-            && fs::metadata(MOUNT_NAMESPACE)?.ino() == namespace,
+            .all(|pair| pair[0].mount_id < pair[1].mount_id),
         "Conflict",
         "mount identity changed during observation",
+    )?;
+    Ok(mounts)
+}
+
+pub(crate) fn private_writable_data(file: fs::File, observed_mount_id: u64) -> Result<()> {
+    let mut matched = false;
+    for entry in table(file)? {
+        let point = match entry.mount_point {
+            LinuxPath::Text(name) => name.into_bytes(),
+            LinuxPath::Bytes { base64 } => STANDARD.decode(base64).map_err(|_| malformed())?,
+        };
+        if point == b"/data" {
+            require(
+                !matched
+                    && u64::from(entry.mount_id) == observed_mount_id
+                    && !entry.read_only
+                    && !entry.superblock_read_only
+                    && entry.propagation.shared_group.is_none()
+                    && entry.propagation.master_group.is_none()
+                    && entry.propagation.propagate_from_group.is_none()
+                    && !entry.propagation.unbindable,
+                "PreconditionFailed",
+                "effective OCI /data mount is not the approved private writable mount",
+            )?;
+            matched = true;
+        }
+        require(
+            !point.starts_with(b"/data/"),
+            "PreconditionFailed",
+            "effective OCI data mount includes an unapproved nested mount",
+        )?;
+    }
+    require(
+        matched,
+        "PreconditionFailed",
+        "effective OCI /data mount is missing",
+    )
+}
+
+pub(super) fn observe() -> Result<Value> {
+    let namespace = fs::metadata(MOUNT_NAMESPACE)?.ino();
+    let mounts = table(fs::File::open("/proc/self/mountinfo")?)?;
+    require(
+        fs::metadata(MOUNT_NAMESPACE)?.ino() == namespace,
+        "Conflict",
+        "mount namespace changed during observation",
     )?;
     Ok(json!({
         "mount_namespace_inode": namespace.to_string(),
@@ -218,6 +260,29 @@ pub(super) fn observe() -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Seek, Write};
+
+    #[test]
+    fn checks_the_effective_private_writable_data_mount() {
+        let check = |line: &str, id| {
+            let mut table = tempfile::tempfile().unwrap();
+            table.write_all(line.as_bytes()).unwrap();
+            table.rewind().unwrap();
+            private_writable_data(table, id)
+        };
+        let data = "77 51 8:5 /owned /data rw,relatime - ext4 local rw\n";
+        check(data, 77).unwrap();
+        let nested = "78 77 8:5 /other /data/extra rw - ext4 local rw\n";
+        for (bad, id) in [
+            (data.to_owned(), 78),
+            (data.replace("rw,relatime", "ro,relatime"), 77),
+            (data.replace("local rw", "local ro"), 77),
+            (data.replace(" - ", " shared:7 - "), 77),
+            (format!("{data}{nested}"), 77),
+        ] {
+            assert_eq!(check(&bad, id).unwrap_err().0.code, "PreconditionFailed");
+        }
+    }
 
     #[test]
     fn parses_kernel_escapes_and_keeps_mount_and_superblock_flags_separate() {

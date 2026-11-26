@@ -8,11 +8,13 @@ use crate::{
     err, now, policy, require,
 };
 use psios_api::MAX_FRAME;
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 
 pub(crate) const SCHEMA: &str = include_str!("evidence.sql");
 pub(crate) const KIND: &str = "WorkItemEvidence";
+const MAX_SUBMISSIONS: i64 = 8;
+const MAX_ARTIFACT_ASSOCIATIONS: i64 = 64;
 
 struct Production {
     run: Doc,
@@ -113,13 +115,25 @@ fn proof(conn: &Connection, item: &Doc, task: &Doc, artifact: &Doc) -> Result<Pr
     Ok(Production { run, operation })
 }
 
-fn live_output(conn: &Connection, task: &Doc, artifact: &Doc) -> Result<()> {
+fn live_output(conn: &Connection, task: &Doc, artifact: &Doc) -> Result<Doc> {
+    artifact::retention::require_content(conn, artifact)?;
+    let current = needed(conn, &task.id)?;
     require(
-        needed(conn, &task.id)?.reference() == task.reference(),
+        current.kind == "Task"
+            && current.owner == task.owner
+            && current.spec == task.spec
+            && current.body["lifecycle"] == "Succeeded"
+            && current.body["outcome_knowledge"] == "Known"
+            && current.body["operation_refs"] == task.body["operation_refs"]
+            && current.body["current_run_id"] == task.body["current_run_id"]
+            && current.body["result"]["availability"] == "Available"
+            && current.body["result"]["artifact_refs"]
+                .as_array()
+                .is_some_and(|refs| refs.contains(&artifact.reference())),
         "PreconditionFailed",
-        "task result revision changed",
+        "the original successful task output is no longer available",
     )?;
-    artifact::retention::require_content(conn, artifact)
+    Ok(current)
 }
 
 fn verify_payload(db: &Db<'_>, artifact: &Doc) -> Result<()> {
@@ -140,6 +154,38 @@ fn result_access(
     Ok((artifact, shared))
 }
 
+fn artifact_associations(conn: &Connection, artifact: &str) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT count(*) FROM (
+            SELECT 1 FROM versions INDEXED BY work_item_evidence_by_artifact
+             WHERE kind='WorkItemEvidence' AND body->'artifact_ref'->>'resource_id'=?1 LIMIT ?2
+         )",
+        params![artifact, MAX_ARTIFACT_ASSOCIATIONS + 1],
+        |row| row.get(0),
+    )?)
+}
+
+fn check_admission(conn: &Connection, item: &str, artifact: &str) -> Result<()> {
+    let submissions: i64 = conn.query_row(
+        "SELECT count(*) FROM (
+            SELECT 1 FROM versions INDEXED BY work_item_evidence_by_item
+             WHERE kind='WorkItemEvidence' AND body->>'work_item_id'=?1 LIMIT ?2
+         )",
+        params![item, MAX_SUBMISSIONS],
+        |row| row.get(0),
+    )?;
+    require(
+        submissions < MAX_SUBMISSIONS,
+        "QuotaExceeded",
+        "work item has reached its retained evidence submission limit",
+    )?;
+    require(
+        artifact_associations(conn, artifact)? < MAX_ARTIFACT_ASSOCIATIONS,
+        "QuotaExceeded",
+        "task output has reached its retained work item evidence limit",
+    )
+}
+
 pub(super) fn attach(
     db: &Db<'_>,
     item: &Doc,
@@ -156,7 +202,13 @@ pub(super) fn attach(
     let task = db.resolve(task_ref)?;
     let provenance = proof(db.c, item, &task, &artifact)?;
     log_tail::authorize_task(db, actor, &task)?;
-    live_output(db.c, &task, &artifact)?;
+    let current = live_output(db.c, &task, &artifact)?;
+    require(
+        current.reference() == task.reference(),
+        "PreconditionFailed",
+        "evidence submission requires the current task revision",
+    )?;
+    check_admission(db.c, &item.id, &artifact.id)?;
     verify_payload(db, &artifact)?;
     if shared {
         result_access::audit_read(db, actor, "WorkItem.SubmitEvidence", &artifact.id)?;
@@ -247,7 +299,7 @@ pub(super) fn release(db: &Db<'_>, item: &Doc, evidence: &Doc) -> Result<()> {
         "RecoveryRequired",
         "work item evidence changed before releasing its retention pin",
     )?;
-    live_output(db.c, &attached.task, &attached.artifact)
+    live_output(db.c, &attached.task, &attached.artifact).map(|_| ())
 }
 
 pub(super) fn view(db: &Db<'_>, item: &Doc, actor: &str) -> Result<Option<Value>> {
@@ -275,6 +327,15 @@ pub(super) fn view(db: &Db<'_>, item: &Doc, actor: &str) -> Result<Option<Value>
 }
 
 pub(crate) fn retains_artifact(conn: &Connection, artifact: &Doc) -> Result<bool> {
+    let associations = artifact_associations(conn, &artifact.id)?;
+    if associations == 0 {
+        return Ok(false);
+    }
+    require(
+        associations <= MAX_ARTIFACT_ASSOCIATIONS,
+        "RecoveryRequired",
+        "task output exceeds its verified work item evidence limit",
+    )?;
     let mut items = conn.prepare(
         "SELECT w.* FROM versions e INDEXED BY work_item_evidence_by_artifact
          CROSS JOIN current w
@@ -298,16 +359,76 @@ pub(crate) fn retains_artifact(conn: &Connection, artifact: &Doc) -> Result<bool
 }
 
 pub(crate) fn verify(conn: &Connection) -> Result<()> {
-    verify_items(conn).map_err(|error| {
-        if error.0.code == "RecoveryRequired" {
-            error
-        } else {
-            err(
-                "RecoveryRequired",
-                format!("work item evidence verification: {}", error.0.message),
-            )
-        }
-    })
+    verify_history(conn)
+        .and_then(|()| verify_items(conn))
+        .map_err(|error| {
+            if error.0.code == "RecoveryRequired" {
+                error
+            } else {
+                err(
+                    "RecoveryRequired",
+                    format!("work item evidence verification: {}", error.0.message),
+                )
+            }
+        })
+}
+
+fn verify_history(conn: &Connection) -> Result<()> {
+    let invalid: bool = conn.query_row(
+        "SELECT EXISTS (
+            SELECT 1 FROM versions INDEXED BY work_item_evidence_by_item
+             WHERE kind='WorkItemEvidence' GROUP BY body->>'work_item_id'
+             HAVING count(*)>?1 OR typeof(body->>'work_item_id')<>'text'
+         ) OR EXISTS (
+            SELECT 1 FROM versions INDEXED BY work_item_evidence_by_artifact
+             WHERE kind='WorkItemEvidence' GROUP BY body->'artifact_ref'->>'resource_id'
+             HAVING count(*)>?2 OR typeof(body->'artifact_ref'->>'resource_id')<>'text'
+         )",
+        params![MAX_SUBMISSIONS, MAX_ARTIFACT_ASSOCIATIONS],
+        |row| row.get(0),
+    )?;
+    require(
+        !invalid,
+        "RecoveryRequired",
+        "work item evidence history exceeds its bounds or has an invalid association",
+    )?;
+    let mut submitted = conn.prepare(
+        "SELECT * FROM versions WHERE kind='WorkItem' AND body->>'lifecycle'='InReview'",
+    )?;
+    let mut indexed = 0i64;
+    for item in submitted.query_map([], row)? {
+        let item = item?;
+        let evidence = resolve(conn, &item.body["evidence_ref"])?;
+        let original = resolve(conn, &evidence.body["work_item_ref"])?;
+        require(
+            evidence.kind == KIND
+                && evidence.rev == 1
+                && original.id == item.id
+                && original.kind == "WorkItem"
+                && original.rev.checked_add(1) == Some(item.rev)
+                && original.spec == item.spec
+                && original.body["lifecycle"] == "Ready"
+                && original.body["evidence_ref"].is_null()
+                && evidence.owner == item.spec["assignee_principal_id"]
+                && evidence.body["submitted_by"] == evidence.owner
+                && evidence.body["criterion"] == item.spec["criterion"]
+                && evidence.body["work_item_id"] == item.id
+                && evidence.body["project_id"] == item.spec["project_id"],
+            "RecoveryRequired",
+            "work item evidence is outside its original submission revision",
+        )?;
+        indexed += 1;
+    }
+    let total: i64 = conn.query_row(
+        "SELECT count(*) FROM versions INDEXED BY work_item_evidence_by_item WHERE kind='WorkItemEvidence'",
+        [],
+        |row| row.get(0),
+    )?;
+    require(
+        indexed == total,
+        "RecoveryRequired",
+        "work item history has unbound evidence",
+    )
 }
 
 fn verify_items(conn: &Connection) -> Result<()> {
@@ -323,4 +444,86 @@ fn verify_items(conn: &Connection) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Config, Store, broker};
+    use psios_api::{Request, VERSION, id};
+
+    #[test]
+    fn active_evidence_keeps_its_original_output_across_task_metadata_revisions() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = Config::local(&directory.path().join("core"));
+        Store::init(&config).unwrap();
+        let token = std::fs::read_to_string(config.witness_dir.join("owner.token")).unwrap();
+        let mut store = Store::open(config).unwrap();
+        let mut call = |method: &str, params: Value| {
+            store.request(
+                rustix::process::geteuid().as_raw(),
+                Request {
+                    schema_version: VERSION.into(),
+                    request_id: id("project-evidence-test"),
+                    token: token.clone(),
+                    method: method.into(),
+                    params,
+                },
+            )
+        };
+        let prepared = call(
+            "Task.Prepare",
+            json!({"tool":"system.status","input":{},"key":id("project-evidence-source"),"delegation_id":"owner-delegation"}),
+        ).unwrap();
+        let submitted = call("Task.Submit", prepared).unwrap();
+        let task_id = submitted["task_id"].as_str().unwrap();
+        assert_eq!(
+            store
+                .transaction("claim-evidence-source", broker::claim)
+                .unwrap()
+                .as_deref(),
+            Some(task_id)
+        );
+        let work = store
+            .transaction("dispatch-evidence-source", |db| {
+                broker::dispatch(db, task_id)
+            })
+            .unwrap()
+            .unwrap();
+        let result = work.perform(|checkpoint| {
+            store.transaction("witness-source", |db| work.checkpoint(db, checkpoint))
+        });
+        store
+            .transaction("finish-evidence-source", |db| {
+                broker::finish(db, &work, result)
+            })
+            .unwrap();
+
+        store
+            .transaction("verify-work-item-output", |db| {
+                let issued = db.of(task_id, "Task")?;
+                let output = db.resolve(&issued.body["result"]["artifact_refs"][0])?;
+                let mut body = issued.body.clone();
+                body["conditions"] = json!([broker::condition(
+                    "ArchiveVerified",
+                    "task metadata was checked"
+                )]);
+                let advanced = db.status(&issued, body)?;
+                assert_ne!(issued.reference(), advanced.reference());
+                assert_eq!(
+                    live_output(db.c, &issued, &output)?.reference(),
+                    advanced.reference()
+                );
+
+                let mut body = advanced.body.clone();
+                body["current_run_id"] = json!("different-run");
+                db.status(&advanced, body)?;
+                assert_eq!(
+                    live_output(db.c, &issued, &output).unwrap_err().0.code,
+                    "PreconditionFailed"
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
 }

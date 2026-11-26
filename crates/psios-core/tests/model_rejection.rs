@@ -200,7 +200,7 @@ fn rejected_decision_replays_without_tool_effect_or_second_inference() {
         .call(
             "Grant.Issue",
             json!({"principal_id":actor["principal_id"],
-        "actions":["session.run","task.submit","task.read","system.status"],"units":4,
+        "actions":["session.run","task.submit","task.read","resource.read","system.status"],"units":4,
         "ttl_seconds":180,"model_calls":4,"model_lease_ms":120000}),
         )
         .unwrap();

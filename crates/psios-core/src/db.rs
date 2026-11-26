@@ -467,6 +467,9 @@ impl Store {
                 if ver < apps::stop::FORMAT {
                     apps::stop::migrate(db)?;
                 }
+                if ver < apps::restart::CUSTODY_FORMAT {
+                    apps::restart::migrate(db)?;
+                }
                 if ver < node::network::probe::state::FORMAT {
                     db.c.execute_batch(node::network::probe::state::SCHEMA)?;
                     node::network::probe::sync(db, &db.meta("authority")?)?;

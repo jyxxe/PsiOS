@@ -10,7 +10,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 
 pub(crate) const TOOL: &str = "node.observe_network_probe";
-pub(crate) const FORMAT: u32 = 72;
+pub(crate) const FORMAT: u32 = crate::apps::restart::CUSTODY_FORMAT + 1;
 pub(crate) const SCHEMA: &str = "CREATE TABLE network_probe_positions (
     probe TEXT PRIMARY KEY, context TEXT NOT NULL,
     dispatched_seq INTEGER NOT NULL CHECK(dispatched_seq>=0),

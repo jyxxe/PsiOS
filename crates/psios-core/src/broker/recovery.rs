@@ -2,6 +2,7 @@ use super::*;
 
 pub fn recover(db: &Db<'_>) -> Result<()> {
     apps::stop::verify_active(db.c)?;
+    apps::restart::verify_active(db.c)?;
     let active = db
         .c
         .prepare("SELECT task,phase,attempt FROM queue WHERE phase IN ('Claimed','Dispatched')")?
@@ -107,7 +108,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                 } else {
                     "Failed"
                 },
-                if service_undispatched || stop_undispatched {
+                if service_undispatched || stop_undispatched || restart_undispatched {
                     "NotStarted"
                 } else {
                     "Known"

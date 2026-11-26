@@ -162,6 +162,11 @@ fn close(
             {
                 refs.push(confirmation.reference());
             }
+            if t.spec["task_type"] == apps::restart::TOOL
+                && let Some(confirmation) = apps::restart::record_settlement(db, &op, a)?
+            {
+                refs.push(confirmation.reference());
+            }
             b["evidence_refs"] = json!(refs);
         }
         *r = db.status(&e, b)?.reference();

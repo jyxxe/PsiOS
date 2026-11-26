@@ -345,7 +345,7 @@ pub fn dispatch(db: &Db<'_>, task: &str) -> Result<Option<Work>> {
             "operation_id": op.id,
             "resource_ref": target,
             "action": tool,
-            "phase": if node::service_control::is_tool(tool) || apps::stop::is_tool(tool) { "PermitBound" } else { "EffectStarted" },
+            "phase": if node::service_control::is_tool(tool) || apps::stop::is_tool(tool) || tool == apps::restart::TOOL { "PermitBound" } else { "EffectStarted" },
             "outcome_knowledge": "InFlight",
             "evidence_refs": []
         }),
@@ -415,6 +415,13 @@ pub fn settlement_failed(db: &Db<'_>, w: &Work) -> Result<()> {
         err(
             "StorageUnavailable",
             "OCI stop or cleanup did not reach its command checkpoint",
+        )
+    } else if matches!(w.action, Action::RestartApp(_))
+        && apps::restart::not_dispatched(db, &db.of(&w.op.id, "Operation")?)?
+    {
+        err(
+            "StorageUnavailable",
+            "OCI restart did not reach its invocation checkpoint",
         )
     } else if node::service_control::is_control(&w.action)
         && node::service_control::not_dispatched(db, &db.of(&w.op.id, "Operation")?)?
@@ -492,6 +499,11 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
     } else {
         None
     };
+    let restart_started = if matches!(w.action, Action::RestartApp(_)) {
+        Some(apps::restart::worker_started(db, w, &t)?)
+    } else {
+        None
+    };
     if cancelled && stop_started == Some(false) {
         close(db, &t, "Cancelled", "NotStarted", None, None)?;
         return Ok(());
@@ -506,6 +518,7 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
             "Fenced",
             "systemd result has no committed invocation",
         )?;
+        require(restart_started != Some(false), "Fenced", "OCI restart result has no committed invocation")?;
         if stop_started == Some(false) {
             w.check_absent_stop_settlement(db)?;
         }
@@ -552,7 +565,9 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
             )?;
         }
         Err(e) => {
-            let undispatched = service_started == Some(false) || stop_started == Some(false);
+            let undispatched = service_started == Some(false)
+                || stop_started == Some(false)
+                || restart_started == Some(false);
             let e = if stop_started == Some(true) && e.0.code != "OutcomeUnknown" {
                 err(
                     "OutcomeUnknown",
@@ -562,6 +577,11 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                 err(
                     "OutcomeUnknown",
                     "unable to settle the checkpointed systemd invocation",
+                )
+            } else if restart_started == Some(true) && e.0.code != "OutcomeUnknown" {
+                err(
+                    "OutcomeUnknown",
+                    "unable to settle the checkpointed OCI restart",
                 )
             } else {
                 e

@@ -168,13 +168,7 @@ fn completed_launch(
     let effect = db::resolve(conn, &operation.body["effect_refs"][0])?;
     let plan = db::resolve(conn, &operation.body["plan_ref"])?;
     let input = db::resolve(conn, &task.spec["input_ref"])?;
-    let blueprint = broker::dependencies::tool_input(&input)?;
-    let definition = &blueprint["definition_ref"];
-    let maximum = blueprint["max_runtime_seconds"]
-        .as_u64()
-        .and_then(|value| u32::try_from(value).ok())
-        .filter(|value| *value > 0)
-        .ok_or_else(invalid)?;
+    let definition = &broker::dependencies::tool_input(&input)?["definition_ref"];
     require(
         artifact::is_json(&receipt)
             && artifact::is_task_output(&receipt, task)
@@ -210,9 +204,6 @@ fn completed_launch(
     let original = db::resolve(conn, &body["origin_task_ref"])?;
     let issued_operation = db::resolve(conn, &original.body["operation_refs"][0])?;
     let child = state_at(conn, &opened.id, before)?;
-    let runtime_cutoff = deadline(&json!(opened.created))?
-        .checked_add_signed(chrono::TimeDelta::seconds(i64::from(maximum)))
-        .ok_or_else(invalid)?;
     let elapsed: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM authorization_deadlines WHERE resource=?1)
           AND EXISTS(SELECT 1 FROM authorization_deadlines WHERE resource=?2)
@@ -246,7 +237,6 @@ fn completed_launch(
                 == json!({"workflow_run_ref":opened.reference(),"origin_task_ref":original.reference(),
                           "definition_ref":definition,"deadline_at":opened.spec["deadline_at"]})
             && deadline(&opened.spec["deadline_at"])? <= deadline(&plan.body["deadline_at"])?
-            && deadline(&opened.spec["deadline_at"])? <= runtime_cutoff
             && elapsed,
         "RecoveryRequired",
         "workflow overlap child differs from its exact launch or deadline",

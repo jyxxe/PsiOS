@@ -126,6 +126,9 @@ pub(super) fn check_artifacts(
     identity: &DatabaseIdentity,
     state: &Path,
 ) -> Result<()> {
+    if identity.database_format >= crate::storage::retirement::FORMAT {
+        crate::storage::retirement::verify(conn)?;
+    }
     if identity.database_format >= crate::storage::entry_retirement::FORMAT {
         crate::storage::entry_retirement::verify(conn)?;
     }

@@ -520,6 +520,8 @@ jobs:
           git archive fa13dd4285b494416dd1928da8729b13bebe3cd3 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format39"
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format39" "$RUNNER_TEMP/psios-compatibility-target"
           python3 -B tests/task_concurrency_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
+          PSIOS_TEST_STORAGE_RETIREMENT_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
+            python3 -B -m unittest discover -s tests -p test_storage_retirement.py -k test_format_39_pending_cleanup -v
       - name: Verify a format 40 result as a pinned Task dependency
         run: |
           mkdir "$RUNNER_TEMP/psios-format40"

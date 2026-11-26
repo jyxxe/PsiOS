@@ -13,7 +13,7 @@ use crate::{
     now, policy, require,
 };
 use psios_api::canonical;
-use rusqlite::params;
+use rusqlite::{Connection, params};
 use rustix::fs::{
     AtFlags, FileType, Mode, OFlags, RenameFlags, open, renameat_with, statat, unlinkat,
 };
@@ -28,6 +28,8 @@ use std::{
 pub(crate) const FORMAT: u32 = 39;
 pub(crate) const SCHEMA: &str = include_str!("retirement.sql");
 const KIND: &str = "StorageRetirement";
+mod custody;
+pub(crate) use custody::verify;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Identity {
@@ -163,8 +165,8 @@ pub(crate) fn begin(db: &Db<'_>, work: &Work) -> Result<()> {
     Ok(())
 }
 
-fn record(db: &Db<'_>, op: &Doc) -> Result<Doc> {
-    let retirement = db.find(&id(&op.id))?.ok_or_else(|| {
+fn record(conn: &Connection, op: &Doc) -> Result<Doc> {
+    let retirement = crate::db::find(conn, &id(&op.id))?.ok_or_else(|| {
         err(
             "RecoveryRequired",
             "storage deletion checkpoint unavailable",
@@ -184,14 +186,14 @@ fn record(db: &Db<'_>, op: &Doc) -> Result<Doc> {
 
 pub(crate) fn not_prepared(db: &Db<'_>, op: &Doc) -> Result<bool> {
     match db.find(&id(&op.id))? {
-        Some(_) => Ok(record(db, op)?.body["lifecycle"] == "Preparing"),
+        Some(_) => Ok(record(db.c, op)?.body["lifecycle"] == "Preparing"),
         None => Ok(false),
     }
 }
 
 pub(crate) fn abandon(db: &Db<'_>, op: &Doc) -> Result<()> {
     if db.find(&id(&op.id))?.is_some() {
-        let retirement = record(db, op)?;
+        let retirement = record(db.c, op)?;
         if matches!(
             retirement.body["lifecycle"].as_str(),
             Some("Preparing" | "Prepared")
@@ -207,7 +209,7 @@ pub(crate) fn abandon(db: &Db<'_>, op: &Doc) -> Result<()> {
 
 pub(crate) fn prepare(db: &Db<'_>, work: &Work, identity: &Location) -> Result<()> {
     current_hold(db, &work.op, &work.target)?;
-    let retirement = record(db, &work.op)?;
+    let retirement = record(db.c, &work.op)?;
     require(
         retirement.body["lifecycle"] == "Preparing"
             && retirement.spec["target_ref"] == work.target.reference(),
@@ -264,7 +266,7 @@ pub(crate) fn retire(
 
 fn prepared(db: &Db<'_>, op: &Doc, target: &Doc) -> Result<Doc> {
     current_hold(db, op, target)?;
-    let retirement = record(db, op)?;
+    let retirement = record(db.c, op)?;
     require(
         retirement.body["lifecycle"] == "Prepared"
             && retirement.spec["target_ref"] == target.reference(),
@@ -360,30 +362,12 @@ pub(crate) fn next(db: &Db<'_>, cursor: &mut Cursor) -> Result<Option<Reclamatio
     else {
         return Ok(None);
     };
-    let job = db.of(id, KIND)?;
-    let operation_id = job.spec["operation_id"]
-        .as_str()
-        .ok_or_else(|| err("RecoveryRequired", "reclamation has no deletion operation"))?;
-    let operation = db.of(operation_id, "Operation")?;
-    let record = record(db, &operation)?;
-    let target = db.resolve(&record.body["deleted_ref"])?;
-    require(
-        job.id == record.id
-            && record.body["lifecycle"] == "PendingCleanup"
-            && operation.body["outcome_knowledge"] == "Known"
-            && target.body["lifecycle"] == "Deleted"
-            && record.spec["target_ref"]["resource_id"] == target.id
-            && db.get(&target.id)?.reference() == target.reference(),
-        "RecoveryRequired",
-        "reclamation is not bound to a committed deletion",
+    let ready_after: String = db.c.query_row(
+        "SELECT ready_after FROM storage_reclamations WHERE retirement=?1",
+        [id],
+        |row| row.get(0),
     )?;
-    let location = decode(&record.body["location"])?;
-    Ok(Some(Reclamation {
-        record,
-        target,
-        operation: operation.id,
-        location,
-    }))
+    Ok(Some(custody::selected(db.c, id, &ready_after)?))
 }
 
 impl Reclamation {
@@ -439,9 +423,14 @@ impl Reclamation {
                 body["reclaimed_at"] = json!(now());
                 body["observation"] = json!(observation);
                 db.status(&self.record, body)?;
-                db.c.execute(
+                let removed = db.c.execute(
                     "DELETE FROM storage_reclamations WHERE retirement=?1",
                     [&self.record.id],
+                )?;
+                require(
+                    removed == 1,
+                    "RecoveryRequired",
+                    "storage reclamation lost its queued receipt",
                 )?;
                 db.audit(
                     policy::SYSTEM,
@@ -461,9 +450,14 @@ impl Reclamation {
                         &error.code,
                     )?;
                 }
-                db.c.execute(
+                let updated = db.c.execute(
                     "UPDATE storage_reclamations SET ready_after=?1 WHERE retirement=?2",
                     params![after(30), self.record.id],
+                )?;
+                require(
+                    updated == 1,
+                    "RecoveryRequired",
+                    "storage reclamation lost its queued retry",
                 )?;
             }
         }

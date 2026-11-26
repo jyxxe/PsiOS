@@ -16,12 +16,15 @@ TOOL = "application.rebind_restored_volume"
 def verify_rebind(node, docker, specification, app_ids):
     source = node.perform("volume.create", {"name": "rebind-source"})
     source_id = source["resource_id"]
-    node.perform("volume.write", dict(**target(source), name="starts", content="verified backup\n"))
-    source = node.get(source_id)["reference"]
     app = node.perform("application.install", dict(specification, name="rebind-app", volume=target(source),
                                                   environment={"TEST_NAME": "recovered"}))
     app_id = app["resource_id"]
     app_ids.append(app_id)
+    app = node.perform("application.start", target(app))
+    app = node.perform("application.stop", target(app))
+    source = node.get(source_id)["reference"]
+    node.perform("volume.write", dict(**target(source), name="starts", content="verified backup\n"))
+    source = node.get(source_id)["reference"]
     original = node.get(app_id)
     original_release = original["resource"]["spec"]["release_ref"]
     original_deployment = original["resource"]["spec"]["deployment_ref"]
@@ -91,7 +94,8 @@ def verify_rebind(node, docker, specification, app_ids):
     node.approve(pending)
     invalid = node.wait(pending)
     assert (invalid["lifecycle"], invalid["outcome_knowledge"], invalid["conditions"][0]["type"]) == (
-        "Failed", "NotStarted", "ApprovalInvalidated"), invalid
+        "Failed", "NotStarted", "Conflict"), invalid
+    assert node.get(app_id)["reference"] == app and absent()
 
     stray = subprocess.check_output(docker + ["create", "--network", "none", "--label",
         "io.psios.application=" + app_id, specification["image_id"], "/probe"], text=True, timeout=10).strip()

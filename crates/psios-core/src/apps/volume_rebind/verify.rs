@@ -5,7 +5,7 @@ use crate::{
     err, require,
 };
 use rusqlite::{Connection, OptionalExtension, params};
-use serde_json::{Value, json};
+use serde_json::json;
 
 fn record_missing() -> crate::Error {
     err(

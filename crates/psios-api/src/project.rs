@@ -2,6 +2,8 @@ use crate::{ApiResult, Client, ResourceRef, invalid};
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
+pub const WORK_ITEM_EVIDENCE_TOOL: &str = "project.submit_evidence";
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateProject {
@@ -124,6 +126,18 @@ impl Client {
         request: &SubmitWorkItemEvidence,
     ) -> ApiResult<ProjectRecord> {
         self.project_request("WorkItem.SubmitEvidence", request)
+    }
+
+    /// Submit evidence through a durable Task under an exact WorkItem tool grant.
+    pub fn submit_work_item_evidence_task(
+        &self,
+        request: &SubmitWorkItemEvidence,
+        key: &str,
+        delegation: &str,
+    ) -> ApiResult<Value> {
+        let input =
+            serde_json::to_value(request).map_err(|_| invalid("invalid evidence request"))?;
+        self.submit(WORK_ITEM_EVIDENCE_TOOL, input, key, delegation)
     }
 
     pub fn review_work_item(

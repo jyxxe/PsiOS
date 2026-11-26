@@ -9,7 +9,7 @@ use psios_api::{ResourceRef, SubmitWorkItemEvidence};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-pub(crate) const TOOL: &str = "project.submit_evidence";
+pub(crate) use psios_api::WORK_ITEM_EVIDENCE_TOOL as TOOL;
 pub(crate) const FORMAT: u32 = super::MAINTENANCE_FORMAT + 1;
 
 #[derive(Debug, Clone, Deserialize)]

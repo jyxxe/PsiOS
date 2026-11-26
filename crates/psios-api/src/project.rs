@@ -55,6 +55,12 @@ pub enum WorkItemCriterion {
         tool: String,
         target_ref: ResourceRef,
     },
+    WorkflowTaskResult {
+        definition_ref: ResourceRef,
+        step_id: String,
+        tool: String,
+        target_ref: ResourceRef,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -190,7 +190,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = project::milestone::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = project::workflow_proof::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,

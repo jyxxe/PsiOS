@@ -679,6 +679,12 @@ Core 记录 Provider 的迟到证据，原 `Unknown`、工具任务和记账继�
 
 `Session.History` 返回模型轮次、子任务和尝试关系。`Session.Cancel` 关闭后续派发并取消已链接的任务。`Session.Extend` 通过 CAS 增加本次会话的轮次上限，根授权额度独立生效。对于可安全重试的失败子任务，`Session.RetryTask` 使用会话 ID、会话预期修订、原 `task_id` 和新 `key`，沿用同一模型决策，在原任务和会话历史中追加记录。未知写入继续占用原目标，等待核实。
 
+### 在安全点暂停会话
+
+`Session.Pause` 接受 `id`、`expected_resource_version` 和 `reason`。CLI 使用 `psiosctl session-pause ID --revision VERSION --reason REASON`。可领取的会话立即进入 `Paused`，其 `pause_reason` 为 `OperatorPaused`。正等待工具任务的会话先保存 `operator_pause.after_task_id`，原 Task 按现有审批和授权流程结算。若原任务成功，会话在下一轮前暂停。失败或取消仍使用原任务终态，结果未知时继续等待原操作对账。
+
+在途模型调用须按现有租约规则结算。暂停期间的会话不产生新模型租约，原预算、结果和附加输入仍按其当前保留规则处理。使用 `psiosctl session-resume ID --revision VERSION` 复核原委托和上下文，再恢复领取。领取时继续执行节点的全局准入限制。轮次额度耗尽时可先用 `Session.Extend` 增加上限，此操作保留暂停。[安全点验收](../tests/test_agent_safe_point_pause.py)
+
 ### 有界的多轮工具上下文
 
 `Session.Open` 和 `agent.session.start` 可指定 `tool_context_window`，保留最近 1 至 4 个已确认成功的工具轮次。原来的 `last_tool` 继续提供最新工具结果，`previous_tools` 从旧到新排列其余轮次，包含固定的 Task 修订、制品引用和实际尝试号。省略该字段继续使用单条上下文。普通调用、自动队列和原有的显式模型交接共用同一窗口。

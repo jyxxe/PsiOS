@@ -5,6 +5,7 @@ pub(crate) mod late_decision;
 mod lease;
 pub mod mail;
 pub(crate) mod model_time;
+pub(crate) mod pause;
 pub(crate) mod provider_authority;
 mod queue;
 mod registry;
@@ -254,6 +255,7 @@ pub fn extend(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     require(
         matches!(state(&s), "AwaitingModel" | "ModelInFlight" | "WaitingTask")
             || s.body["pause_reason"] == "ModelTurnLimit"
+            || pause::parked(&s)
             || inference::not_started(&s),
         "PreconditionFailed",
         "session cannot be extended",
@@ -307,23 +309,36 @@ pub fn resume(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     policy::owned(actor, &session)?;
     session.cas(&p.expected_resource_version)?;
     let not_started = inference::not_started(&session);
+    let operator_paused = pause::parked(&session);
     require(
         state(&session) == "Paused"
-            && (not_started
+            && (operator_paused
+                || not_started
                 || artifact::is_content_unavailable(
                     session.body["pause_reason"].as_str().unwrap_or_default(),
                 )),
         "PreconditionFailed",
-        "session is not waiting for a retryable model or tool outcome",
+        "session is not operator-paused or waiting for a retryable outcome",
     )?;
     let (_, skill, model) = deps(db, &session)?;
     if not_started {
         inference::check_resume(db, &session, &model)?;
     }
+    if operator_paused {
+        require(
+            has_turn(&session),
+            "QuotaExceeded",
+            "session turn limit reached",
+        )?;
+    }
     context(db, &session, &skill, &model)?;
     let mut body = session.body.clone();
     body["lifecycle"] = json!("AwaitingModel");
-    body.as_object_mut().unwrap().remove("pause_reason");
+    if operator_paused {
+        pause::clear(&mut body);
+    } else {
+        body.as_object_mut().unwrap().remove("pause_reason");
+    }
     if not_started {
         body.as_object_mut()
             .unwrap()
@@ -350,6 +365,7 @@ pub fn cancel(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     let mut b = s.body.clone();
     b["lifecycle"] = json!("Cancelled");
     b["current_lease"] = Value::Null;
+    pause::clear(&mut b);
     let cancelled = db.status(&s, b)?;
     if let Some(task) = s.body["last_task"].as_str() {
         broker::cancel_task(db, &db.of(task, "Task")?)?;
@@ -840,8 +856,9 @@ pub fn task_closed(db: &Db<'_>, t: &Doc) -> Result<()> {
         b["task_ref"] = t.reference();
         b["result"] = t.body["result"].clone();
         b["outcome_knowledge"] = t.body["outcome_knowledge"].clone();
+        let parked = pause::reached(&s, t, &mut b);
         if state(&s) != "Cancelled" {
-            b["lifecycle"] = json!(if t.body["outcome_knowledge"] == "Unknown" {
+            b["lifecycle"] = json!(if t.body["outcome_knowledge"] == "Unknown" || parked {
                 "Paused"
             } else if t.body["lifecycle"] == "Succeeded" && s.body["turn"] == s.body["max_turns"] {
                 b["pause_reason"] = json!("ModelTurnLimit");

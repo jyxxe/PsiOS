@@ -124,7 +124,13 @@ class AgentSafePointPauseTests(unittest.TestCase):
         self.decision(first, claim, {"action": "finish", "summary": "Resumed successfully."})
 
     def test_pending_approval_settles_exact_task_before_pause_without_new_model_call(self):
-        volume = self.n.perform("volume.create", {"name": "agent-pause-volume"})
+        creation = self.issue(["volume.create", "task.submit", "task.read"])
+        request = self.n.prepare("volume.create", {"name": "agent-pause-volume"}, token=self.actor_token,
+                                 delegation=creation["delegation_ref"]["resource_id"])
+        created = self.n.wait(self.n.call("Task.Submit", request, self.actor_token)["task_id"])
+        self.assertEqual(created["lifecycle"], "Succeeded", created)
+        artifact, = created["result"]["artifact_refs"]
+        volume = self.n.call("Artifact.Read", {"reference": artifact}, self.actor_token)
         path = self.n.state / "volumes" / volume["resource_id"] / "data" / "approved"
         session = self.opened(max_turns=1)
         lease = self.claim(session, "original")

@@ -19,6 +19,27 @@ fn ancestors(db: &Db<'_>, leaf: &Doc) -> Result<Vec<Doc>> {
     }
     Ok(path)
 }
+
+pub(crate) fn submission_window(
+    db: &Db<'_>,
+    leaf: &Doc,
+    grant: &Doc,
+    clock: &deadline::Clock,
+    sampled_utc_ms: i64,
+) -> Result<i64> {
+    let mut cutoff =
+        clock.bounded_utc_ms(db, &grant.id, &grant.spec["valid_until"], sampled_utc_ms)?;
+    for delegation in std::iter::once(leaf).chain(ancestors(db, leaf)?.iter()) {
+        cutoff = cutoff.min(clock.bounded_utc_ms(
+            db,
+            &delegation.id,
+            &delegation.body["valid_until"],
+            sampled_utc_ms,
+        )?);
+    }
+    Ok(cutoff)
+}
+
 pub fn delegation(db: &Db<'_>, actor: &str, id: &str, action: &str) -> Result<Doc> {
     let d = db.of(id, "Delegation")?;
     require(

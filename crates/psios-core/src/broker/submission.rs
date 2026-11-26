@@ -570,7 +570,7 @@ pub fn lookup(db: &Db<'_>, actor: &str, s: &Value) -> Result<Value> {
     policy::can(db, actor, "task.read")?;
     let d = db.resolve(&s["delegation_ref"])?;
     require(
-        d.kind == "Delegation" && d.owner == actor,
+        d.kind == "Delegation" && d.owner == actor && d.body["budget_ref"] == s["budget_ref"],
         "PermissionDenied",
         "invalid submission namespace",
     )?;
@@ -585,7 +585,9 @@ pub fn lookup(db: &Db<'_>, actor: &str, s: &Value) -> Result<Value> {
         "request_digest": s["request_digest"],
         "namespace_ref": d.reference()
     });
-    let active = match policy::delegation(db, actor, &d.id, field(s, "task_type")) {
+    let authority = policy::delegation(db, actor, &d.id, "task.submit")
+        .and_then(|_| policy::delegation(db, actor, &d.id, field(s, "task_type")));
+    let active = match authority {
         Ok(_) => true,
         Err(e) if e.0.code == "PermissionDenied" => false,
         Err(e) => return Err(e),
@@ -602,22 +604,80 @@ pub fn lookup(db: &Db<'_>, actor: &str, s: &Value) -> Result<Value> {
             out["status"] = json!("Expired");
             out["reason"] = json!("Cancellation tombstone")
         }
-    } else if preparation::is_prepared(&s["input_ref"]) {
-        if let Some(window) = preparation::window(db, actor, &origin, s)? {
-            out["status"] = json!("AbsentWithinWindow");
-            out["window_not_after"] = json!(window);
-            out["consistency_evidence_ref"] = grant.reference()
-        } else {
-            out["status"] = json!("Expired");
-            out["reason"] = json!("Task preparation is unavailable or expired")
-        }
     } else {
-        out["status"] = json!("AbsentWithinWindow");
-        out["window_not_after"] = d.body["valid_until"].clone();
-        out["consistency_evidence_ref"] = grant.reference()
+        match lookup_window(db, actor, &origin, s, &d, &grant)? {
+            LookupWindow::Open(until) => {
+                out["status"] = json!("AbsentWithinWindow");
+                out["window_not_after"] = json!(until);
+                out["consistency_evidence_ref"] = grant.reference()
+            }
+            LookupWindow::Closed(reason) => {
+                out["status"] = json!("Expired");
+                out["reason"] = json!(reason)
+            }
+            LookupWindow::UnverifiedInput => {
+                out["status"] = json!("Indeterminate");
+                out["reason"] = json!("Exact submission input could not be verified")
+            }
+        }
     }
     contract("task-lookup", &out)?;
     Ok(out)
+}
+
+enum LookupWindow {
+    Open(String),
+    Closed(&'static str),
+    UnverifiedInput,
+}
+
+fn lookup_window(
+    db: &Db<'_>,
+    actor: &str,
+    origin: &str,
+    request: &Value,
+    delegation: &Doc,
+    grant: &Doc,
+) -> Result<LookupWindow> {
+    let staged_end = if preparation::is_prepared(&request["input_ref"]) {
+        let Some(end) = preparation::window(db, actor, origin, request)? else {
+            return Ok(LookupWindow::Closed(
+                "Task preparation is unavailable or expired",
+            ));
+        };
+        Some(end)
+    } else {
+        None
+    };
+    let clock = policy::deadline::Clock::sample()?;
+    let utc = chrono::Utc::now().timestamp_millis();
+    let mut until = policy::submission_window(db, delegation, grant, &clock, utc)?;
+    if let Some(raw) = request["deadline_at"].as_str() {
+        until = until.min(preparation::timestamp_ms(raw)?);
+    }
+    if let Some(end) = staged_end {
+        until = until.min(end);
+    }
+    if until <= utc {
+        return Ok(LookupWindow::Closed("Submission deadline passed"));
+    }
+    if staged_end.is_none() {
+        // An older direct client can still reference a retained Input. Missing
+        // revisions, digest mismatches and foreign input all have one outcome.
+        match db.resolve(&request["input_ref"]) {
+            Ok(input) if input_owner(actor, &input).is_ok() => {}
+            Ok(_) => return Ok(LookupWindow::UnverifiedInput),
+            Err(error) if error.0.code == "PreconditionFailed" => {
+                return Ok(LookupWindow::UnverifiedInput);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(until)
+        .ok_or_else(|| err("RecoveryRequired", "submission window is out of range"))?;
+    Ok(LookupWindow::Open(
+        at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    ))
 }
 
 pub fn discard_preparation(db: &Db<'_>, actor: &str, s: &Value) -> Result<Value> {

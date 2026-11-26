@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 pub(crate) mod deadline;
 mod delegations;
 mod secrets;
+pub(crate) use delegations::submission_window;
 pub use delegations::{delegate, delegation, revoke_delegation, tool_scope};
 pub use secrets::{mac, secret_put, secret_revoke, secret_rotate};
 

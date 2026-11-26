@@ -704,6 +704,22 @@ Core 在真正派发时重查项目成员、授权和工作项修订。在同一
 
 房间容量计算包括未到期的待接受邀请。节点限制会话总量、成员记录和保留正文。群聊当前提供本机持久文本、明确邀请和拉取，后续接入线程、订阅投递、附件与 Agent 唤醒。[群聊权限、并发与恢复](../tests/test_chat_rooms.py) · [格式 19 原地升级](../tests/rooms_upgrade.py)
 
+## 通过 MCP STDIO 调用本机只读工具
+
+`psios-mcp` 提供 MCP `2025-11-25` 的本地 C1 工具接入，支持初始化握手、`ping`、`tools/list` 和 `tools/call`。从 Debian 软件包使用 `/usr/bin/psios-mcp`，或通过 `cargo build --locked -p psios-core --bin psios-mcp` 构建。将可执行文件的绝对路径和以下参数填入 MCP 客户端的 STDIO 配置。[MCP 生命周期](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle) · [STDIO 传输](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) · [工具协议](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)
+
+```sh
+psios-mcp --socket /run/psios/api.sock --service-uid PSIOS_UID \
+  --token-file /path/to/private-agent.token --delegation DELEGATION_ID \
+  --tool system.status --tool node.pressure
+```
+
+使用专用 `Agent.Register` 凭据，保存为调用用户拥有的私有普通文件。指定 `psiosd` 的实际数字 UID。通过 `Grant.Issue` 为该主体授予 `task.submit`、`task.read` 和希望使用的工具。`tool_targets` 必须覆盖实际目标：`system.status` 使用 `profile-local`，`node.pressure` 使用 `Node.Get` 返回的 Node ID。省略 `--tool` 时选择 `system.status`。两种工具只接受空参数。`tools/list` 核验配置指定的委托及其目标，不创建 Task 或草稿。
+
+调用使用正常的 `Task.Prepare`、`Task.Submit`、任务等候和 `Artifact.Read`，并在返回结果前重新核对指定授权。成功结果包含本地 Task ID 和受权结果。提交回执丢失时，SDK 用原始提交键查找已接受的 Task 或核对是否可重试。连接关闭或客户端取消通知不改变已经提交的只读 Task。它可在授权与 30 秒 Task 截止时间内继续，由 Core 保存结果。本地所有者可按原 Task 修订调用 `Task.Cancel`。适配器对结果等待 10 秒，Core Unix 套接字无法立即连接时返回传输错误，连接建立后沿用 SDK 的读写超时。每个 STDIO 连接串行处理，限制单帧 64 KiB，并按秒限制该连接的工具调用次数。
+
+这个接入面提供同步工具调用。MCP Tasks、跨连接调用映射和 HTTP 沿用各自的独立协议要求。[独立 STDIO 客户端、官方 Python 客户端和原 Task 验收](../tests/test_mcp_stdio.py)
+
 ## 运行一个持久的 Agent 会话
 
 以下示例接续启动指南中的 `ctl` 函数和 `workdir`。模型提供者和 Agent 是两个独立凭据。模型提供者只获得处理模型步骤的权限。

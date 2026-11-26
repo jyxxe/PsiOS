@@ -83,6 +83,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
             let _: Empty = decode(p)?;
             policy::discover(db, actor)
         }
+        "Capability.LocalReadTools" => local_read_tools::discover(db, actor, p),
         "Tool.Call" => {
             let p: ToolCall = decode(p)?;
             let d = policy::delegation(db, actor, &p.delegation_id, &p.tool)?;

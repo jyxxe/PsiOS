@@ -1,4 +1,5 @@
 //! Bind WorkItem acceptance to the original task receipt without granting result access.
+use super::workflow_proof;
 use crate::{
     Result,
     apps::log_tail,
@@ -47,7 +48,10 @@ fn proof(
         "evidence requires an exact successful output of the assigned principal",
     )?;
     require(
-        criterion["kind"] == "TaskResult" && task.spec["task_type"] == criterion["tool"],
+        matches!(
+            criterion["kind"].as_str(),
+            Some("TaskResult" | "WorkflowTaskResult")
+        ) && task.spec["task_type"] == criterion["tool"],
         "PreconditionFailed",
         "task tool does not satisfy the work item criterion",
     )?;
@@ -218,20 +222,21 @@ pub(super) fn attach(
         "PreconditionFailed",
         "evidence submission requires the current task revision",
     )?;
+    let workflow_witness = workflow_proof::witness(db.c, item, &task, &artifact, None)?;
     check_admission(db.c, &item.id, &artifact.id)?;
     verify_payload(db, &artifact)?;
     if shared {
         result_access::audit_read(db, actor, "WorkItem.SubmitEvidence", &artifact.id)?;
     }
-    db.record(
-        KIND,
-        actor,
-        json!({"work_item_id":item.id, "project_id":item.spec["project_id"],
-            "work_item_ref":item.reference(), "criterion":item.spec["criterion"],
-            "task_ref":task.reference(), "artifact_ref":artifact.reference(),
-            "operation_ref":provenance.operation.reference(), "run_ref":provenance.run.reference(),
-            "submitted_by":actor, "submitted_at":now()}),
-    )
+    let mut body = json!({"work_item_id":item.id, "project_id":item.spec["project_id"],
+        "work_item_ref":item.reference(), "criterion":item.spec["criterion"],
+        "task_ref":task.reference(), "artifact_ref":artifact.reference(),
+        "operation_ref":provenance.operation.reference(), "run_ref":provenance.run.reference(),
+        "submitted_by":actor, "submitted_at":now()});
+    if let Some(witness) = workflow_witness {
+        body["workflow_witness"] = witness;
+    }
+    db.record(KIND, actor, body)
 }
 
 struct Attached {
@@ -270,6 +275,7 @@ fn attached(conn: &Connection, item: &Doc) -> Result<Attached> {
         "RecoveryRequired",
         "work item does not bind its exact evidence and original task",
     )?;
+    workflow_proof::witness(conn, item, &task, &artifact, Some(&evidence))?;
     Ok(Attached {
         evidence,
         task,
@@ -342,7 +348,9 @@ pub(super) fn view(db: &Db<'_>, item: &Doc, actor: &str) -> Result<Option<Value>
                 if shared {
                     result_access::audit_read(db, actor, "WorkItem.Evidence", &artifact.id)?;
                 }
-                Some(attached.evidence.body)
+                let mut details = attached.evidence.body;
+                workflow_proof::redact(db, actor, &mut details)?;
+                Some(details)
             }
             Err(error) if error.0.code == "PermissionDenied" => None,
             Err(error) => return Err(error),
@@ -441,6 +449,12 @@ fn verify_history(conn: &Connection) -> Result<()> {
             "RecoveryRequired",
             "work item evidence is outside its original submission revision",
         )?;
+        if item.spec["criterion"]["kind"] == "WorkflowTaskResult"
+            || evidence.body.get("workflow_witness").is_some()
+        {
+            // Rejected submissions retain their exact evidence history after the byte pin is released.
+            attached(conn, &item)?;
+        }
         indexed += 1;
     }
     let total: i64 = conn.query_row(
@@ -491,12 +505,17 @@ mod tests {
             .unwrap()
     }
 
-    fn successful_task() -> (tempfile::TempDir, Store, String, String) {
+    fn initialized() -> (tempfile::TempDir, Store, String) {
         let directory = tempfile::tempdir().unwrap();
         let config = Config::local(&directory.path().join("core"));
         Store::init(&config).unwrap();
         let token = std::fs::read_to_string(config.witness_dir.join("owner.token")).unwrap();
-        let mut store = Store::open(config).unwrap();
+        let store = Store::open(config).unwrap();
+        (directory, store, token)
+    }
+
+    fn successful_task() -> (tempfile::TempDir, Store, String, String) {
+        let (directory, mut store, token) = initialized();
         let prepared = call(
             &mut store,
             &token,
@@ -505,6 +524,11 @@ mod tests {
         );
         let submitted = call(&mut store, &token, "Task.Submit", prepared);
         let task_id = submitted["task_id"].as_str().unwrap();
+        settle_task(&mut store, task_id);
+        (directory, store, token, task_id.into())
+    }
+
+    fn settle_task(store: &mut Store, task_id: &str) {
         assert_eq!(
             store
                 .transaction("claim-evidence-source", broker::claim)
@@ -526,7 +550,85 @@ mod tests {
                 broker::finish(db, &work, result)
             })
             .unwrap();
-        (directory, store, token, task_id.into())
+    }
+
+    #[test]
+    fn workflow_evidence_rejects_a_later_witness_even_after_the_pin_is_released() {
+        let (_directory, mut store, token) = initialized();
+        let grant = call(
+            &mut store,
+            &token,
+            "Grant.Issue",
+            json!({
+                "principal_id":policy::OWNER,"actions":["workflow.manage","task.submit","task.read","system.status"],
+                "tool_targets":[policy::PROFILE],"units":1,"ttl_seconds":120,
+            }),
+        );
+        let definition = call(
+            &mut store,
+            &token,
+            "Workflow.Define",
+            json!({
+                "key":"evidence-workflow-definition",
+                "steps":[{"id":"observe","tool":"system.status","input":{},"after":[]}],
+            }),
+        );
+        let run = call(
+            &mut store,
+            &token,
+            "Workflow.Start",
+            json!({
+                "key":"evidence-workflow-run","definition_ref":definition["reference"],
+                "delegation_id":grant["delegation_ref"]["resource_id"],"deadline_at":crate::after(60),
+            }),
+        );
+        let run_id = run["reference"]["resource_id"].as_str().unwrap();
+        crate::workflow::tick(&mut store).unwrap();
+        let active = call(&mut store, &token, "Workflow.Get", json!({"id":run_id}));
+        let task_id = active["state"]["steps"][0]["task_receipt"]["task_id"]
+            .as_str()
+            .unwrap();
+        settle_task(&mut store, task_id);
+        crate::workflow::tick(&mut store).unwrap();
+
+        store.transaction("check-historical-workflow-evidence", |db| {
+            let settled = db.of(task_id, "Task")?;
+            let workflow = db.of(run_id, "WorkflowRun")?;
+            let output = db.resolve(&settled.body["result"]["artifact_refs"][0])?;
+            let mut amended = settled.body.clone();
+            amended["conditions"] = json!([broker::condition("MetadataChecked", "result unchanged")]);
+            let task = db.status(&settled, amended)?;
+            let ready = db.create(
+                "WorkItem", "workflow-evidence-fixture", policy::OWNER,
+                json!({"project_id":"project-fixture","assignee_principal_id":policy::OWNER,"criterion":{
+                    "kind":"WorkflowTaskResult","definition_ref":definition["reference"],
+                    "step_id":"observe","tool":"system.status","target_ref":db.get(policy::PROFILE)?.reference(),
+                }}),
+                json!({"lifecycle":"Ready"}),
+            )?;
+            let evidence = attach(db, &ready, policy::OWNER, &task.reference(), &output.reference())?;
+            assert_eq!(evidence.body["task_ref"], task.reference());
+            assert_eq!(evidence.body["workflow_witness"]["task_ref"], settled.reference());
+            assert_eq!(evidence.body["workflow_witness"]["workflow_run_ref"], workflow.reference());
+            let mut historical = db.status(&ready, json!({"lifecycle":"InReview","evidence_ref":evidence.reference()}))?;
+            // Only historical evidence remains after rejection.
+            db.status(&historical, json!({"lifecycle":"Ready"}))?;
+            verify(db.c)?;
+
+            let later = db.status(&workflow, workflow.body.clone())?;
+            let mut forged = evidence;
+            forged.body["workflow_witness"]["workflow_run_ref"] = later.reference();
+            // Keep the outer evidence reference valid so verification has to check the witness itself.
+            historical.body["evidence_ref"] = forged.reference();
+            for doc in [&forged, &historical] {
+                db.c.execute("UPDATE versions SET body=?1 WHERE id=?2 AND rev=?3",
+                    params![doc.body, doc.id, doc.rev])?;
+            }
+            let failure = verify(db.c).unwrap_err();
+            assert_eq!(failure.0.code, "RecoveryRequired");
+            assert!(failure.0.message.contains("lost or changed its exact workflow step witness"));
+            Ok(())
+        }).unwrap();
     }
 
     #[test]

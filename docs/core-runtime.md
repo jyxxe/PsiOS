@@ -509,7 +509,9 @@ Core 在真正派发时重查项目成员、授权和工作项修订。在同一
 
 `psiosctl milestone close ID --revision REV` 需要每个工作项已经通过独立评审并由管理者关闭。Core 记录实际已关闭的工作项版本。`milestone abandon ID --revision REV --reason REASON` 保留结束原因和原工作项关联。Milestone 与工作项各自结算，证据制品的保留继续沿用原 WorkItem 规则。[里程碑生命周期验收](../tests/test_project_milestones.py)
 
-当前支持单节点和单个 TaskResult 验收条件。多条件验收、外部 Issue 与 CI 同步仍待实现。[多主体与重启验收](../tests/test_project_work_items.py) · [Project 规范](v1/docs/11-workflows-projects.md#118-project-与-workitem)
+工作项也可采用 `WorkflowTaskResult` 条件，固定 `definition_ref`、`step_id`、`tool` 和 `target_ref`。创建者需有该工作流定义的读取权限，指派者需能按现有 Workflow 权限使用同一份定义。提交证据仍使用原 Task 和 Artifact 引用。Core 核对原 WorkflowRun 中已知成功的确切步骤和生产回执。Project 成员可查看授权范围内的工作项，工作流身份和步骤详情仍按原 Workflow 读取权限裁决。[工作流证据验收](../tests/test_work_item_workflow_evidence.py)
+
+当前支持单节点和单个 Task 或 Workflow 步骤验收条件。多条件验收、外部 Issue 与 CI 同步仍待实现。[多主体与重启验收](../tests/test_project_work_items.py) · [Project 规范](v1/docs/11-workflows-projects.md#118-project-与-workitem)
 
 ## 本机会话
 

@@ -93,6 +93,7 @@ pub(crate) fn reassign(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value
     policy::active(db, replacement)?;
     policy::can_target(db, replacement, READ, &project.id)?;
     policy::can_target(db, replacement, CONTRIBUTE, &project.id)?;
+    check_criterion_assignee(db.c, &item, replacement)?;
     let previous = assigned(&item)?;
     if previous == replacement {
         return item_view(db, &item, actor, false);
@@ -214,6 +215,7 @@ fn verify_assignment(conn: &Connection, previous: &Doc, next: &Doc) -> Result<()
     )?;
     let mut expected_spec = previous.spec.clone();
     expected_spec["assignee_principal_id"] = json!(assignee);
+    check_criterion_assignee(conn, next, assignee).map_err(|_| invalid_state())?;
     require(
         awaiting_assignment(previous)
             && awaiting_assignment(next)

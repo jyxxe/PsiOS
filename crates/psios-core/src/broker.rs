@@ -5,6 +5,7 @@ pub(crate) mod dependencies;
 mod execution;
 mod history;
 mod network_trial;
+pub(crate) mod preparation;
 pub(crate) use history::{archive, history};
 mod recovery;
 pub(crate) mod result_access;
@@ -33,9 +34,9 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use submission::authority;
 pub(crate) use submission::{
-    bind_workflow_input, cancel_origin, lookup, prepare, prepare_scheduled, prepare_workflow,
-    retime_scheduled, retry, retry_in_session, submit, submit_claimed_model_tool, submit_scheduled,
-    submit_workflow,
+    bind_workflow_input, cancel_origin, discard_preparation, lookup, prepare,
+    prepare_claimed_model, prepare_scheduled, prepare_workflow, retime_scheduled, retry,
+    retry_in_session, submit, submit_claimed_model_tool, submit_scheduled, submit_workflow,
 };
 
 fn field<'v>(v: &'v Value, k: &str) -> &'v str {

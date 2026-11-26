@@ -733,10 +733,11 @@ pub fn respond(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
                 "PermissionDenied",
                 "tool not declared by pinned skill",
             )?;
-            let request = broker::prepare(
+            let request = broker::prepare_claimed_model(
                 db,
                 &s.owner,
                 &json!({"tool":tool,"input":input,"key":p.lease_id,"delegation_id":s.spec["delegation_id"]}),
+                &p.lease_id,
             )?;
             let receipt = broker::submit_claimed_model_tool(db, &s, &p.lease_id, &request)?;
             task = receipt["task_id"].as_str().map(str::to_owned);

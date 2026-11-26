@@ -567,7 +567,7 @@ jobs:
           python3 -B tests/agent_context_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
   work-item-migration:
     runs-on: ubuntu-24.04
-    timeout-minutes: 12
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -607,6 +607,13 @@ jobs:
           python3 -B tests/model_late_decision_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
           PSIOS_TEST_COMPACTION_PREVIOUS="$RUNNER_TEMP/psios-compatibility-target/debug" \
             python3 -B -m unittest discover -s tests -p test_state_compaction.py -k test_offline_compaction -v
+      - name: Preserve format 95 submitted and legacy prepared work when bounding new preparations
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format95"
+          git archive c402b948c6a3cf7c2be678207fce2d2c383218a9 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format95"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format95" "$RUNNER_TEMP/psios-compatibility-target"
+          PSIOS_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
+            python3 -B -m unittest discover -s tests -p test_task_preparation.py -k test_format95 -v
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

@@ -69,7 +69,14 @@ class SystemTests(unittest.TestCase):
         self.assertEqual(len({r["task_id"] for r in receipts}), 1)
         self.assertEqual(sum(not r["deduplicated"] for r in receipts), 1)
         self.assertEqual(n.call("Task.LookupSubmission", s)["accepted"]["task_id"], receipts[0]["task_id"])
-        changed = n.prepare("volume.create", {"name": "other"}, "stable")
+        self.denied("IdempotencyConflict", "Task.Prepare", {
+            "tool": "volume.create", "input": {"name": "other"},
+            "key": "stable", "delegation_id": "owner-delegation",
+        })
+        changed = {k: v for k, v in s.items() if k != "request_digest"}
+        changed["task_type"] = "volume.create"
+        body = json.dumps(changed, sort_keys=True, separators=(",", ":")).encode()
+        changed["request_digest"] = "sha256:" + hashlib.sha256(b"psios/task-submit/1\n" + body).hexdigest()
         self.denied("IdempotencyConflict", "Task.Submit", changed)
         self.assertEqual(n.wait(receipts[0]["task_id"])["lifecycle"], "Succeeded")
         n.stop(signal.SIGKILL)

@@ -284,6 +284,7 @@ fn worker(s: Shared, changes: Arc<Changes>, stop: Arc<AtomicBool>, tick: Duratio
 fn timer(s: Shared, stop: Arc<AtomicBool>) -> Result<()> {
     let mut next_model_expiry = Instant::now();
     let mut next_cursor_expiry = Instant::now() + Duration::from_secs(30);
+    let mut next_preparation_expiry = Instant::now();
     while !stop.load(Ordering::Acquire) {
         {
             let mut store = state(&s)?;
@@ -312,6 +313,19 @@ fn timer(s: Shared, stop: Arc<AtomicBool>) -> Result<()> {
                     eprintln!("psiosd watch scope expiry: {}", error.0.code);
                 }
                 next_cursor_expiry = Instant::now() + Duration::from_secs(30);
+            }
+            if Instant::now() >= next_preparation_expiry {
+                let delay = match store
+                    .transaction("task-preparation-expiry", broker::preparation::collect)
+                {
+                    Ok(removed) if removed > 0 => Duration::from_secs(1),
+                    Ok(_) => Duration::from_secs(30),
+                    Err(error) => {
+                        eprintln!("psiosd task preparation expiry: {}", error.0.code);
+                        Duration::from_secs(30)
+                    }
+                };
+                next_preparation_expiry = Instant::now() + delay;
             }
         }
         thread::park_timeout(Duration::from_millis(250));

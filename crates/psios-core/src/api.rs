@@ -111,10 +111,30 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
                 _ => {
                     let mut d = if method == "Resource.Get" {
                         let p: ById = decode(p)?;
-                        db.get(&p.id)?
+                        match db.find(&p.id)? {
+                            Some(doc) => doc,
+                            None => broker::preparation::preview(db, actor, &p.id)?
+                                .ok_or_else(|| err("NotFound", "resource unavailable"))?,
+                        }
                     } else {
                         let p: Reference = decode(p)?;
-                        db.resolve(&p.reference)?
+                        match db.resolve(&p.reference) {
+                            Ok(doc) => doc,
+                            Err(error)
+                                if error.0.code == "PreconditionFailed"
+                                    && broker::preparation::is_prepared(&p.reference) =>
+                            {
+                                let input = broker::preparation::preview(
+                                    db,
+                                    actor,
+                                    p.reference["resource_id"].as_str().unwrap_or(""),
+                                )?;
+                                input
+                                    .filter(|doc| doc.reference() == p.reference)
+                                    .ok_or(error)?
+                            }
+                            Err(error) => return Err(error),
+                        }
                     };
                     require(
                         policy::visible(actor, &d),
@@ -236,6 +256,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Message.Get" => chat::get_message(db, actor, p),
         "Message.AckRead" => chat::ack(db, actor, p),
         "Task.Prepare" => broker::prepare(db, actor, p),
+        "Task.DiscardPreparation" => broker::discard_preparation(db, actor, p),
         "Task.EvictResults" => artifact::retention::evict(db, actor, p),
         "Task.ResultEvictionCandidates" => artifact::retention::selection::list(db, actor, p),
         "Task.PrepareResultEvictionBatch" => artifact::retention::batch::prepare(db, actor, p),

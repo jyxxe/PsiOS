@@ -290,6 +290,10 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 
 `Task.Prepare` 可填 `requires`，每项指定已有上游 `task_id` 和结果制品的 `digest`。依赖属于固定输入清单，参与请求摘要和审批计划。最多指定四个不同上游，所有内容校验共用 8 MiB 上限。主体须有权读取各上游。Rust SDK 使用 `Client::submit_with_requirements`，CLI 使用 `psiosctl submit --requires FILE` 读取依赖 JSON 数组。
 
+直接 `Task.Prepare` 将输入按主体暂存在本机，返回现有 v1 提交请求。暂存跟随进程重启，期限最多十分钟，并受请求和授权原期限限制。每主体最多 128 个、单节点最多 1024 个暂存请求，各自的暂存输入上限为 8 MiB 和 64 MiB。主体可用获准的 `Resource.Get` 或 `Resource.Resolve` 预览自己的输入。Task 受理事务才发布持久输入、Task、Operation、预算使用及依赖保留关系。重复使用相同的输入在持久存储中共用内容，提交仍按各自的精确预备请求检查。
+
+`Task.LookupSubmission` 可查询原受理回执、当前可用窗口或过期结果。同键同请求在有效期内复用原窗口，更改已暂存键的请求会返回 `IdempotencyConflict`。未受理请求过期后，主体可显式重新执行 `Task.Prepare` 以获得新窗口。已受理记录和取消墓碑继续约束原键。用 `Task.DiscardPreparation` 或 `psiosctl task-discard-preparation REQUEST.json` 丢弃尚未受理的精确请求，并永久关闭该键。已经受理时返回当前受理状态。调度、Workflow 及格式 95 的已持久化输入仍可按原引用使用。
+
 上游尚未成功，或结果经权威标为 `Unavailable` 时，下游保持 `WaitingResource` 并保留原执行预算。依赖全部可用后，Core 校验固定摘要及实际字节，再开启审批或排队。领取和派发时复核权限与制品。实际执行快照保存通过核验的制品引用。工具仍接收清单中的 `tool_input`。需要读取制品内容时，调用者沿用固定引用和 `Artifact.Read`。
 
 上游失败、摘要不匹配、已生效的结果回收、授权变化或截止均可让下游在派发前结束。未结算的下游保留上游制品，直到取消、失败或完成结算。修复标为不可用的上游制品后，先用 `Task.VerifyResults` 重新确认结果，再继续派发。[重启、审批与制品恢复验收](../tests/test_task_dependencies.py) · [格式 40 升级](../tests/task_dependencies_upgrade.py)

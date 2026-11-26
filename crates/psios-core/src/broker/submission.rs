@@ -51,6 +51,15 @@ impl<'a> LocalOrigin<'a> {
 pub fn prepare(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     prepare_with_origin(db, actor, decode(p)?, LocalOrigin::Direct)
 }
+pub fn prepare_claimed_model(db: &Db<'_>, actor: &str, p: &Value, lease: &str) -> Result<Value> {
+    let p: Prepare = decode(p)?;
+    require(
+        p.key == lease,
+        "Fenced",
+        "tool preparation does not belong to the model lease",
+    )?;
+    prepare_with_origin(db, actor, p, LocalOrigin::ClaimedModel(lease))
+}
 pub fn prepare_scheduled(db: &Db<'_>, actor: &str, p: &Value, schedule: &str) -> Result<Value> {
     prepare_with_origin(db, actor, decode(p)?, LocalOrigin::Schedule(schedule))
 }
@@ -78,18 +87,16 @@ fn prepare_with_origin(
     Action::parse(&p.tool, &p.input)?;
     let d = policy::delegation(db, actor, &p.delegation_id, "task.submit")?;
     policy::delegation(db, actor, &d.id, &p.tool)?;
-    let input = if p.requires.is_empty() {
-        policy::intern_input(db, actor, &p.input)?
+    let (kind, body) = if p.requires.is_empty() {
+        ("Input", p.input)
     } else {
         let mut requires = p.requires;
         dependencies::authorize(db, actor, &requires)?;
         requires.sort_unstable_by(|a, b| a.task_id.cmp(&b.task_id));
-        policy::intern_input_kind(
-            db,
-            actor,
+        (
             dependencies::INPUT_KIND,
-            &json!({"tool_input":p.input,"requires":requires}),
-        )?
+            json!({"tool_input":p.input,"requires":requires}),
+        )
     };
     let origin_id = origin.id().unwrap_or(&p.key);
     let authority = origin.authority(db, actor)?;
@@ -104,14 +111,49 @@ fn prepare_with_origin(
         "origin_ref": reference,
         "idempotency_key": p.key,
         "cancel_scope_id": origin_id,
-        "input_ref": input.reference(),
         "delegation_ref": d.reference(),
         "budget_ref": d.body["budget_ref"]
     });
     if let Some(t) = p.deadline_at {
         s["deadline_at"] = json!(t)
     }
-    seal_request(s)
+    if !matches!(origin, LocalOrigin::Direct) {
+        s["input_ref"] = policy::intern_input_kind(db, actor, kind, &body)?.reference();
+        return seal_request(s);
+    }
+    prepare_direct(db, actor, s, kind, &body, &d)
+}
+
+fn prepare_direct(
+    db: &Db<'_>,
+    actor: &str,
+    mut request: Value,
+    kind: &str,
+    body: &Value,
+    delegation: &Doc,
+) -> Result<Value> {
+    let origin = origin(actor, LocalOrigin::Direct.kind(actor), &request, None)?;
+    if let Some(previous) = prior(db, actor, &origin, field(&request, "idempotency_key"))? {
+        let accepted = previous
+            .receipt
+            .as_ref()
+            .ok_or_else(|| err("Cancelled", "submission was blocked by origin cancellation"))?;
+        let task = db.of(field(accepted, "task_id"), "Task")?;
+        let input = db.resolve(&task.spec["input_ref"])?;
+        require(
+            input.owner == actor && input.kind == kind && input.body == *body,
+            "IdempotencyConflict",
+            "submission key bound to another request",
+        )?;
+        request["input_ref"] = input.reference();
+        let request = seal_request(request)?;
+        check_key(&request, &previous)?;
+        return Ok(request);
+    }
+    request["input_ref"] = preparation::reference(actor, kind, body);
+    let request = seal_request(request)?;
+    preparation::stage(db, actor, &origin, &request, kind, body, delegation)?;
+    Ok(request)
 }
 pub fn retime_scheduled(template: &Value, trigger_id: &str, deadline_at: &str) -> Result<Value> {
     let mut s = template.clone();
@@ -161,6 +203,13 @@ fn origin(authority: &str, kind: &str, s: &Value, expected_id: Option<&str>) -> 
     Ok(String::from_utf8(canonical(o)).unwrap())
 }
 pub(super) fn authority(db: &Db<'_>, actor: &str, s: &Value) -> Result<(Doc, Doc)> {
+    let d = delegation(db, actor, s)?;
+    let input = db.resolve(&s["input_ref"])?;
+    input_owner(actor, &input)?;
+    Ok((d, input))
+}
+
+fn delegation(db: &Db<'_>, actor: &str, s: &Value) -> Result<Doc> {
     policy::active(db, actor)?;
     let d = db.resolve(&s["delegation_ref"])?;
     policy::delegation(db, actor, &d.id, "task.submit")?;
@@ -170,13 +219,15 @@ pub(super) fn authority(db: &Db<'_>, actor: &str, s: &Value) -> Result<(Doc, Doc
         "PermissionDenied",
         "budget outside delegation",
     )?;
-    let input = db.resolve(&s["input_ref"])?;
+    Ok(d)
+}
+
+fn input_owner(actor: &str, input: &Doc) -> Result<()> {
     require(
         matches!(input.kind.as_str(), "Input" | dependencies::INPUT_KIND) && input.owner == actor,
         "PermissionDenied",
         "input outside delegation",
-    )?;
-    Ok((d, input))
+    )
 }
 fn deadline(s: &Value) -> Result<()> {
     if let Some(t) = s["deadline_at"].as_str() {
@@ -317,7 +368,7 @@ fn submit_with_origin(
     source: LocalOrigin<'_>,
 ) -> Result<Value> {
     let origin = validate_submit(db, actor, s, source)?;
-    let (d, input) = authority(db, actor, s)?;
+    let d = delegation(db, actor, s)?;
     let tool = field(s, "task_type");
     let key = field(s, "idempotency_key");
     let digest = field(s, "request_digest");
@@ -334,6 +385,20 @@ fn submit_with_origin(
         ));
     }
     deadline(s)?;
+    let staged = matches!(source, LocalOrigin::Direct)
+        && retry.is_none()
+        && preparation::is_prepared(&s["input_ref"]);
+    let input = if staged {
+        preparation::load(db, actor, &origin, s)?.ok_or_else(|| {
+            err(
+                "DeadlineExceeded",
+                "task preparation is unavailable or expired",
+            )
+        })?
+    } else {
+        db.resolve(&s["input_ref"])?
+    };
+    input_owner(actor, &input)?;
     let a = Action::parse(tool, dependencies::tool_input(&input)?)?;
     let target = a.target(db, actor)?;
     let audience = a.audience(db, actor, &s["delegation_ref"], &target)?;
@@ -377,6 +442,9 @@ fn submit_with_origin(
         "delegation has no available execution units",
     )?;
     let ready = dependencies::ready(db, actor, &requirements, None)?.is_some();
+    if staged {
+        preparation::promote(db, &input)?;
+    }
     let plan = plan(db, actor, s, &audience)?;
     let task = id("task");
     let deadline_source = match source {
@@ -475,6 +543,9 @@ fn submit_with_origin(
     artifact::capacity::reserve(db, &t, tool)?;
     apps::artifact_install::acquire(db, &t, &a, &audience)?;
     dependencies::pin(db, &t, &requirements)?;
+    if staged {
+        preparation::consume(db, actor, &origin, s)?;
+    }
     db.audit(actor, "Task.Accept", Some(&task), "Allowed")?;
     Ok(receipt)
 }
@@ -515,6 +586,15 @@ pub fn lookup(db: &Db<'_>, actor: &str, s: &Value) -> Result<Value> {
             out["status"] = json!("Expired");
             out["reason"] = json!("Cancellation tombstone")
         }
+    } else if preparation::is_prepared(&s["input_ref"]) {
+        if let Some(window) = preparation::window(db, actor, &origin, s)? {
+            out["status"] = json!("AbsentWithinWindow");
+            out["window_not_after"] = json!(window);
+            out["consistency_evidence_ref"] = grant.reference()
+        } else {
+            out["status"] = json!("Expired");
+            out["reason"] = json!("Task preparation is unavailable or expired")
+        }
     } else {
         out["status"] = json!("AbsentWithinWindow");
         out["window_not_after"] = d.body["valid_until"].clone();
@@ -523,6 +603,48 @@ pub fn lookup(db: &Db<'_>, actor: &str, s: &Value) -> Result<Value> {
     contract("task-lookup", &out)?;
     Ok(out)
 }
+
+pub fn discard_preparation(db: &Db<'_>, actor: &str, s: &Value) -> Result<Value> {
+    let origin = validate_submit(db, actor, s, LocalOrigin::Direct)?;
+    delegation(db, actor, s)?;
+    require(
+        preparation::is_prepared(&s["input_ref"]),
+        "InvalidArgument",
+        "request does not refer to a task preparation",
+    )?;
+    if let Some(previous) = prior(db, actor, &origin, field(s, "idempotency_key"))? {
+        check_key(s, &previous)?;
+        return Ok(json!({"status":if previous.receipt.is_some() {
+            "AlreadyAccepted"
+        } else {
+            "AlreadyDiscarded"
+        }}));
+    }
+    require(
+        preparation::window(db, actor, &origin, s)?.is_some(),
+        "DeadlineExceeded",
+        "task preparation is unavailable or expired",
+    )?;
+    preparation::consume(db, actor, &origin, s)?;
+    record_cancellation(db, actor, &origin, s)?;
+    db.audit(actor, "Task.DiscardPreparation", None, "Allowed")?;
+    Ok(json!({"status":"Discarded"}))
+}
+
+fn record_cancellation(db: &Db<'_>, actor: &str, origin: &str, s: &Value) -> Result<()> {
+    db.c.execute(
+        "INSERT INTO submissions(owner,origin,key,digest,scope,cancelled) VALUES(?1,?2,?3,?4,?5,1)",
+        params![
+            actor,
+            origin,
+            field(s, "idempotency_key"),
+            field(s, "request_digest"),
+            field(s, "cancel_scope_id")
+        ],
+    )?;
+    Ok(())
+}
+
 pub fn cancel_origin(db: &Db<'_>, actor: &str, s: &Value) -> Result<Value> {
     contract("cancel-origin", s)?;
     policy::can(db, actor, "task.submit")?;
@@ -549,8 +671,8 @@ pub fn cancel_origin(db: &Db<'_>, actor: &str, s: &Value) -> Result<Value> {
         }
         require(old.cancelled, "InternalError", "invalid submission record")?;
     } else {
-        db.c.execute("INSERT INTO submissions(owner,origin,key,digest,scope,cancelled) VALUES(?1,?2,?3,?4,?5,1)",
-            params![actor,o,key,field(s,"request_digest"),field(s,"cancel_scope_id")])?;
+        preparation::cancel(db, actor, &o, key, field(s, "request_digest"))?;
+        record_cancellation(db, actor, &o, s)?;
     }
     Ok(json!({"status": "Blocked", "cancel_request_id": s["cancel_request_id"]}))
 }

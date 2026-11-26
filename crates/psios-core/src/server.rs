@@ -365,7 +365,8 @@ fn reclaim_storage(s: Shared, stop: Arc<AtomicBool>, config: Config) -> Result<(
     let mut archive_cursor = String::new();
     let mut restore_cursor = String::new();
     let mut directory_cursor = String::new();
-    let mut retirement_cursor = retirement::Cursor::default();
+    let mut entry_cursor = crate::storage::reclamation::Cursor::default();
+    let mut retirement_cursor = crate::storage::reclamation::Cursor::default();
     let mut eviction_cursor = crate::artifact::retention::delayed::Cursor::default();
     while !stop.load(Ordering::Acquire) {
         let correlation = id("storage-reclaim");
@@ -388,7 +389,8 @@ fn reclaim_storage(s: Shared, stop: Arc<AtomicBool>, config: Config) -> Result<(
             );
         }
         if !stop.load(Ordering::Acquire)
-            && let Err(error) = reclaim_one_volume_entry(&s, &config, &correlation)
+            && let Err(error) =
+                reclaim_one_volume_entry(&s, &config, &correlation, &mut entry_cursor)
         {
             eprintln!("psiosd volume entry reclamation: {}", error.0.code);
         }
@@ -443,9 +445,16 @@ fn reclaim_storage(s: Shared, stop: Arc<AtomicBool>, config: Config) -> Result<(
     Ok(())
 }
 
-fn reclaim_one_volume_entry(s: &Shared, config: &Config, correlation: &str) -> Result<()> {
+fn reclaim_one_volume_entry(
+    s: &Shared,
+    config: &Config,
+    correlation: &str,
+    cursor: &mut crate::storage::reclamation::Cursor,
+) -> Result<()> {
     use crate::storage::entry_retirement;
-    let selected = state(s)?.transaction(correlation, entry_retirement::next_disposal)?;
+    let selected = state(s)?.transaction(correlation, |db| {
+        entry_retirement::next_disposal(db, cursor)
+    })?;
     if let Some(disposal) = selected {
         let result = disposal.run(config);
         state(s)?.transaction(correlation, |db| disposal.finish(db, result))?;

@@ -1408,7 +1408,7 @@ fn storage_deletion_interrupted_before_rename_can_settle_without_replaying() {
         let retirement_id = format!("storage-retirement-{}", work.op.id);
         let record = call(&mut reopened, "Resource.Get", json!({"id":retirement_id})).unwrap();
         assert_eq!(record["value"]["lifecycle"], "NotApplied");
-        let mut cleanup = storage::retirement::Cursor::default();
+        let mut cleanup = storage::reclamation::Cursor::default();
         assert!(
             reopened
                 .transaction("no-cleanup", |db| storage::retirement::next(

@@ -6,14 +6,83 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 bb=/bin/busybox
 stage=bootstrap
 payload_verified=no
+trial_boot=no
+# This path is in the EFI application's initramfs and is checked before
+# mounting any persistent filesystem. The kernel command line selects no mode.
+if [ -e /psios-trial-config.sha256 ] || [ -L /psios-trial-config.sha256 ]; then
+    trial_boot=yes
+fi
 abort_boot() {
     trap - EXIT
+    if [ "$trial_boot" = yes ]; then
+        printf '\nPSIOS-TRIAL/1 {"status":"Failed","stage":"%s"}\n' "$stage" >/dev/console || :
+    fi
     echo "PsiOS boot stopped at $stage; use external rescue media" >/dev/console || :
     if [ "$payload_verified" = yes ]; then
         "$bb" sh /psios-shutdown --mounts-only || :
     fi
     "$bb" poweroff -f
 }
+
+check_home_directories() {
+    local dir name
+    [ "$(stat -c '%u:%g:%a' /mnt/psios-homes)" = 0:0:755 ]
+    for name in psios root; do
+        dir=/mnt/psios-homes/$name
+        [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+    done
+    [ "$(stat -c '%u:%g' /mnt/psios-homes/psios)" = 1000:1000 ]
+    [ "$(stat -c '%u:%g' /mnt/psios-homes/root)" = 0:0 ]
+}
+
+run_trial() {
+    local config=/var/lib/etc/psios/core.json dir path manifest_digest
+    stage=trial-configuration
+    for dir in /var/lib/etc /var/lib/etc/psios; do
+        [ -d "$dir" ] && [ ! -L "$dir" ] && [ "$(stat -c '%u:%g:%a' "$dir")" = 0:0:755 ] || return 1
+    done
+    [ -f "$config" ] && [ ! -L "$config" ] || return 1
+    case "$(stat -c '%u:%g:%a:%h' "$config")" in
+        0:0:444:1|0:0:644:1) ;;
+        *) return 1 ;;
+    esac
+    # Compare and use one bounded copy. Persisted /etc is never bound, so it
+    # cannot change the service credentials, shell environment or init actions.
+    head -c 65537 "$config" > /psios-trial-core.json
+    chmod 0444 /psios-trial-core.json
+    sha256sum -c /psios-trial-config.sha256 >/dev/null
+
+    stage=home-mount
+    mount -t ext4 -o ro,noload,nodev,nosuid,noexec "$home_device" /mnt/psios-homes
+    check_home_directories
+
+    stage=trial-authority
+    . /psios-enroll
+    enrollment_marker /var/lib/initialization-issued
+    for path in /var/lib/initialize-once /var/lib/enrollment-preparing /var/lib/enrollment-ready; do
+        absent "$path"
+    done
+    enrollment_dir /var/lib/psios 1000:1000:700
+    enrollment_dir /var/lib/psios.witness 1000:1000:700
+    printf 'psios-trial:x:1000:1000::/:/bin/sh\n' >> /etc/passwd
+    printf 'psios-trial:x:1000:\n' >> /etc/group
+    su -s /bin/sh psios-trial -c \
+        'SQLITE_TMPDIR=/tmp exec /bin/busybox timeout -k 5 120 /bin/psiosd --config /psios-trial-core.json check' >/dev/null
+
+    stage=trial-unmount
+    sync -f /var/lib
+    umount /mnt/psios-homes
+    umount /var/lib
+    umount /tmp
+
+    stage=trial-report
+    manifest_digest=$(sha256sum /psios-deployment.json)
+    printf '\nPSIOS-TRIAL/1 {"status":"Ready","deployment_manifest_sha256":"%s"}\n' \
+        "${manifest_digest%% *}" >/dev/console
+    trap - EXIT
+    exec "$bb" poweroff -f
+}
+
 trap abort_boot EXIT
 "$bb" mount -t devtmpfs devtmpfs /dev
 "$bb" mount -t proc proc /proc
@@ -22,6 +91,11 @@ trap abort_boot EXIT
 "$bb" --install -s
 stage=deployment-payload
 "$bb" sha256sum -c /psios-payload.sha256 >/dev/null
+if [ "$trial_boot" = yes ]; then
+    for path in /psios-trial-config.sha256 /psios-trial-disk-id; do
+        [ -f "$path" ] && [ ! -L "$path" ] || exit 1
+    done
+fi
 payload_verified=yes
 "$bb" hostname psios
 if [ -f /psios-core-limits ]; then
@@ -32,8 +106,10 @@ stage=temporary-storage
 mkdir -p /tmp
 [ -d /tmp ] && [ ! -L /tmp ] || exit 1
 mount -t tmpfs -o nodev,nosuid,size=32m,nr_inodes=4096,mode=1777 tmpfs /tmp
-stage=loopback
-"$bb" ip link set lo up
+if [ "$trial_boot" = no ]; then
+    stage=loopback
+    "$bb" ip link set lo up
+fi
 stage=state-device
 /usr/sbin/modprobe virtio_blk
 /usr/sbin/modprobe ext4
@@ -41,12 +117,23 @@ id=$(cat /psios-disk-uuid)
 home_id=$(cat /psios-home-uuid)
 . /psios-storage
 select_boot_storage
+if [ "$trial_boot" = yes ]; then
+    stage=trial-disk
+    # The primary GPT header starts in sector 1 and stores the disk GUID at
+    # byte 56. Compare the on-disk byte order against the EFI payload.
+    disk_id=$(od -An -v -tx1 -j 568 -N 16 "${state_device%2}" | tr -d '[:space:]')
+    [ "$disk_id" = "$(cat /psios-trial-disk-id)" ]
+fi
 mkdir -p /var/lib /run/psios /home /root /mnt/psios-homes
 stage=state-device
 mount -t ext4 -o nodev,nosuid,noexec "$state_device" /var/lib
 [ "$(stat -c '%u:%g:%a' /var/lib)" = 0:0:755 ]
 [ "$(stat -c '%u:%g:%a' /var/lib/deployment-uuid)" = 0:0:444 ]
 [ "$(cat /var/lib/deployment-uuid)" = "$id" ]
+if [ "$trial_boot" = yes ]; then
+    run_trial
+    exit 1
+fi
 stage=host-config
 [ "$(stat -c '%u:%g:%a' /var/lib/etc)" = 0:0:755 ]
 [ "$(stat -c '%u:%g:%a' /var/lib/etc/shadow)" = 0:0:600 ]
@@ -64,13 +151,7 @@ chmod 0700 /run/psios
 chown 1000:1000 /run/psios
 stage=home-mount
 mount -t ext4 -o nodev,nosuid "$home_device" /mnt/psios-homes
-[ "$(stat -c '%u:%g:%a' /mnt/psios-homes)" = 0:0:755 ]
-for name in psios root; do
-    dir=/mnt/psios-homes/$name
-    [ -d "$dir" ] && [ ! -L "$dir" ] || exit 1
-done
-[ "$(stat -c '%u:%g' /mnt/psios-homes/psios)" = 1000:1000 ]
-[ "$(stat -c '%u:%g' /mnt/psios-homes/root)" = 0:0 ]
+check_home_directories
 mkdir -p /home/psios
 mount -o bind /mnt/psios-homes/psios /home/psios
 mount -o bind /mnt/psios-homes/root /root

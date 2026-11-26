@@ -143,7 +143,7 @@ jobs:
           python3 -B tests/native_grant_deadline.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
             --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
 
-      - name: Upgrade a running release through a stopped UEFI disk and boot both generations
+      - name: Trial-boot an isolated UEFI upgrade and boot both production generations
         run: |
           mkdir "$RUNNER_TEMP/native-format5"
           prior="$RUNNER_TEMP/native-format5/core.tar.gz"
@@ -182,7 +182,7 @@ jobs:
             --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
             --installer "$RUNNER_TEMP/rescue-core/native/create.py"
 
-      - name: Verify native Secure Boot, firmware rejection and a signed offline upgrade
+      - name: Verify native Secure Boot, signed trial, firmware rejection and offline upgrade
         run: |
           secure_tools="$RUNNER_TEMP/psios-secure-boot-tools"
           mkdir "$secure_tools"

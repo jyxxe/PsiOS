@@ -234,7 +234,7 @@ pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
     }
     Ok(())
 }
-fn create_volume(
+pub(crate) fn create_volume(
     w: &Work,
     initialize: Option<impl FnOnce(&File) -> Result<Value>>,
     checkpoint: impl FnOnce(&Value, &restore_publication::Placement) -> Result<()>,
@@ -260,7 +260,6 @@ fn create_volume(
         OFlags::RDONLY | OFlags::DIRECTORY,
     )?;
     new_file(&stage.path().join("identity"), &identity)?;
-    let materialized = initialize.is_some();
     let proof = initialize
         .map(|fill| fill(&data))
         .transpose()?
@@ -277,31 +276,30 @@ fn create_volume(
         "capacity": capacity.to_string(),
         "restore_proof": proof
     });
-    if materialized {
-        // The restored data root must still be accessible to the authority
-        // for verification, with the same identity and applied permissions.
-        let current = child(
-            stage.directory(),
-            "data",
-            OFlags::RDONLY | OFlags::DIRECTORY,
-        )?;
-        require(
-            same_source(&m, &current.metadata()?),
-            "PreconditionFailed",
-            "restored data root changed before publication",
-        )?;
-        let placement = restore_publication::Placement::staged(&stage)?;
-        stage.preserve_for_checkpoint()?;
-        if let Err(error) = checkpoint(&receipt, &placement) {
-            if error.0.code != "OutcomeUnknown" {
-                stage.discard_on_failure();
-            }
-            return Err(error);
-        }
-        stage.publish(&vid).map_err(unknown)?;
-    } else {
-        stage.publish(&vid)?;
+    // The data root must still be accessible with the pinned identity and
+    // applied permissions before authority commits the publication checkpoint.
+    let current = child(
+        stage.directory(),
+        "data",
+        OFlags::RDONLY | OFlags::DIRECTORY,
+    )?;
+    require(
+        same_source(&m, &current.metadata()?),
+        "PreconditionFailed",
+        "volume data root changed before publication",
+    )?;
+    if matches!(w.action, Action::Create { .. }) {
+        restore_publication::check_empty_create(&current)?;
     }
+    let placement = restore_publication::Placement::staged(&stage)?;
+    stage.preserve_for_checkpoint()?;
+    if let Err(error) = checkpoint(&receipt, &placement) {
+        if error.0.code != "OutcomeUnknown" {
+            stage.discard_on_failure();
+        }
+        return Err(error);
+    }
+    stage.publish(&vid).map_err(unknown)?;
     Ok(receipt)
 }
 
@@ -1114,9 +1112,6 @@ pub fn perform(w: &Work) -> Result<Value> {
         }
         Action::VolumeUsage(query) => usage::measure(w, query),
         Action::Activate(_) => restore_proof::verify(w),
-        Action::Create { .. } => {
-            create_volume(w, None::<fn(&File) -> Result<Value>>, |_, _| Ok(()))
-        }
         Action::InspectBackupPublication(_) => publication::observe(w),
         Action::InspectRestoredVolume(_) => restore_publication::observe(w),
         Action::VerifyBackup(_) => inspect_backup(&w.cfg, &w.target, None),
@@ -1183,8 +1178,9 @@ fn catalog_volume(db: &Db<'_>, owner: &str, receipt: &Value, mut spec: Value) ->
 pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
     let actor = &w.task.owner;
     match &w.action {
-        Action::Create { name } => catalog_volume(db, actor, r, json!({"name":name})),
-        Action::Restore(_) | Action::CloneVolume(_) => restore_publication::settle(db, w, r),
+        Action::Create { .. } | Action::Restore(_) | Action::CloneVolume(_) => {
+            restore_publication::settle(db, w, r)
+        }
         Action::Backup(_) => publication::settle(db, &w.op, &w.target, r),
         Action::Activate(_) => {
             let mut spec = w.target.spec.clone();

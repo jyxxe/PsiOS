@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 pub(super) enum Source {
     Backup,
     Clone(Value),
+    Create(Value),
 }
 
 impl Source {
@@ -26,6 +27,10 @@ impl Source {
         )?;
         match effect["action"].as_str() {
             Some("backup.restore") if target.kind == "Backup" => Ok((Self::Backup, target)),
+            Some(super::CREATE) => {
+                let binding = super::creation::binding(conn, op, &target)?;
+                Ok((Self::Create(binding), target))
+            }
             Some(cloning::TOOL) if target.kind == "Volume" => {
                 let task_id = op.spec["task_id"]
                     .as_str()
@@ -75,6 +80,7 @@ impl Source {
         match self {
             Self::Backup => "backup.restore",
             Self::Clone(_) => cloning::TOOL,
+            Self::Create(_) => super::CREATE,
         }
     }
 
@@ -87,6 +93,7 @@ impl Source {
                 }
             }
             Self::Clone(binding) => body["clone_source"] = binding.clone(),
+            Self::Create(binding) => body["create_source"] = binding.clone(),
         }
     }
 
@@ -94,6 +101,7 @@ impl Source {
         match self {
             Self::Backup => {
                 record.body.get("clone_source").is_none()
+                    && record.body.get("create_source").is_none()
                     && record.body["backup_ref"] == target.reference()
                     && (!checkpoint
                         || record.body["manifest_digest"] == target.body["manifest_digest"])
@@ -101,7 +109,14 @@ impl Source {
             Self::Clone(binding) => {
                 record.body.get("backup_ref").is_none()
                     && record.body.get("manifest_digest").is_none()
+                    && record.body.get("create_source").is_none()
                     && record.body["clone_source"] == *binding
+            }
+            Self::Create(binding) => {
+                record.body.get("backup_ref").is_none()
+                    && record.body.get("manifest_digest").is_none()
+                    && record.body.get("clone_source").is_none()
+                    && record.body["create_source"] == *binding
             }
         }
     }
@@ -114,12 +129,13 @@ impl Source {
                 spec["name"] = binding["name"].clone();
                 spec["cloned_from"] = target.reference();
             }
+            Self::Create(binding) => return json!({"name":binding["name"]}),
         }
         spec
     }
 
     pub(super) fn check_receipt(&self, operation: &Doc, receipt: &Value) -> Result<()> {
-        if matches!(self, Self::Clone(_)) {
+        if matches!(self, Self::Clone(_) | Self::Create(_)) {
             let number = |name: &str| {
                 receipt[name]
                     .as_str()
@@ -132,9 +148,18 @@ impl Source {
                     && number("inode").is_some_and(|value| value != 0)
                     && number("capacity").is_some_and(|value| value != 0),
                 "RecoveryRequired",
-                "volume clone receipt does not bind a distinct local target",
+                "volume publication receipt does not bind a distinct local target",
             )?;
-            super::restore_proof::check_clone_proof(&receipt["restore_proof"])?;
+            if matches!(self, Self::Clone(_)) {
+                super::restore_proof::check_clone_proof(&receipt["restore_proof"])?;
+            } else {
+                require(
+                    receipt.as_object().is_some_and(|body| body.len() == 6)
+                        && receipt.get("restore_proof").is_some_and(Value::is_null),
+                    "RecoveryRequired",
+                    "created volume receipt must describe an empty tree",
+                )?;
+            }
         }
         Ok(())
     }
@@ -143,4 +168,5 @@ impl Source {
 pub(super) fn same_binding(first: &Doc, second: &Doc) -> bool {
     first.body.get("clone_source") == second.body.get("clone_source")
         && first.body.get("backup_ref") == second.body.get("backup_ref")
+        && first.body.get("create_source") == second.body.get("create_source")
 }

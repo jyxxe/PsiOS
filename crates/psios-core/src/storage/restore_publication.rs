@@ -1,4 +1,4 @@
-//! Authenticate a restored volume when the original atomic rename lost its receipt.
+//! Authenticate a volume publication when the original atomic rename lost its receipt.
 use super::{catalog_volume, child, filename, regular, restore_proof, staging, usage};
 use crate::{
     Config, Result,
@@ -16,6 +16,8 @@ use serde_json::{Value, json};
 use std::{collections::HashSet, fs::File, io::Read, os::unix::fs::MetadataExt};
 
 pub(crate) const INSPECT: &str = "volume.inspect_publication";
+pub(crate) const CREATE: &str = "volume.create";
+pub(crate) const CREATE_FORMAT: u32 = crate::schedule::workflow_overlap::FORMAT + 1;
 pub(crate) const FORMAT: u32 = 42;
 pub(crate) const DISPOSAL_FORMAT: u32 = crate::events::offsets::FORMAT + 1;
 pub(crate) const DISPOSAL_SCHEMA: &str = include_str!("restore_publication/custody.sql");
@@ -27,15 +29,18 @@ const NOT_APPLIED: &str = "RestorePublicationNotApplied";
 const MAX_RESTORE_STAGES: i64 = 128;
 
 pub(crate) fn is_tool(tool: &str) -> bool {
-    matches!(tool, "backup.restore" | super::cloning::TOOL)
+    matches!(tool, "backup.restore" | super::cloning::TOOL | CREATE)
 }
 
+mod creation;
+pub(super) use creation::check_empty as check_empty_create;
+pub(crate) use creation::migrate as migrate_create;
 mod disposal;
 mod source;
 pub(crate) use disposal::{Disposal, next_disposal, queue_disposal};
 use source::Source;
 mod verification;
-pub(crate) use verification::{clone_origin, verify_clones};
+pub(crate) use verification::{clone_origin, verify_clones, verify_creates};
 pub(crate) use verification::{protected_stages, verify};
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,7 +91,12 @@ fn checkpoint_id(operation: &str) -> String {
     format!("restore-publication-{operation}")
 }
 
-fn held(db: &Db<'_>, op: &Doc, source: &Doc) -> Result<()> {
+fn held(db: &Db<'_>, op: &Doc, binding: &Source, source: &Doc) -> Result<()> {
+    if matches!(binding, Source::Create(_)) {
+        // The output is private to this Operation. The original allocation
+        // Plan owns its publication, and multiple creates may use one pool.
+        return Ok(());
+    }
     let held: bool = db.c.query_row(
         "SELECT EXISTS(SELECT 1 FROM holds WHERE volume=?1 AND holder=?2)",
         params![source.id, op.id],
@@ -108,11 +118,17 @@ fn belongs(record: &Doc, op: &Doc, kind: &str) -> bool {
 }
 
 pub(crate) fn begin(db: &Db<'_>, work: &Work) -> Result<()> {
-    held(db, &work.op, &work.target)?;
+    let (source, target) = Source::load(db.c, &work.op)?;
+    held(db, &work.op, &source, &work.target)?;
     let outstanding: i64 = db.c.query_row(
         "SELECT count(*) FROM (
             SELECT 1 FROM queue q JOIN current t ON q.task=t.id
-              WHERE q.phase IN ('Dispatched','Unknown') AND t.spec->>'task_type' IN ('backup.restore','volume.clone')
+              WHERE q.phase IN ('Dispatched','Unknown') AND (
+                   t.spec->>'task_type' IN ('backup.restore','volume.clone') OR (
+                   t.spec->>'task_type'='volume.create' AND EXISTS (
+                      SELECT 1 FROM current i WHERE i.id='restore-intent-' || q.operation
+                   )
+              ))
             UNION ALL SELECT 1 FROM restore_stage_disposals LIMIT ?1
          )",
         [MAX_RESTORE_STAGES],
@@ -123,7 +139,6 @@ pub(crate) fn begin(db: &Db<'_>, work: &Work) -> Result<()> {
         "QuotaExceeded",
         "restore staging custody limit reached",
     )?;
-    let (source, target) = Source::load(db.c, &work.op)?;
     require(
         target.reference() == work.target.reference(),
         "RecoveryRequired",
@@ -146,7 +161,13 @@ pub(crate) fn not_published(db: &Db<'_>, op: &Doc) -> Result<bool> {
         return Ok(false);
     };
     let (source, target) = Source::load(db.c, op)?;
-    Ok(belongs(&intent, op, INTENT)
+    let pre_effect = if matches!(source, Source::Create(_)) {
+        db.resolve(&op.body["effect_refs"][0])?.body["phase"] == "PermitBound"
+    } else {
+        true
+    };
+    Ok(pre_effect
+        && belongs(&intent, op, INTENT)
         && source.matches(&intent, &target, false)
         && intent.body.get("checkpoint_ref").is_none()
         && db.find(&checkpoint_id(&op.id))?.is_none())
@@ -158,14 +179,15 @@ pub(crate) fn record(
     receipt: &Value,
     placement: &Placement,
 ) -> Result<()> {
-    held(db, &work.op, &work.target)?;
+    let (source, target) = Source::load(db.c, &work.op)?;
+    held(db, &work.op, &source, &work.target)?;
+    let op = db.of(&work.op.id, "Operation")?;
     require(
-        not_published(db, &work.op)?,
+        not_published(db, &op)?,
         "Fenced",
         "restore publication intent is unavailable or used",
     )?;
     let intent = db.of(&intent_id(&work.op.id), INTENT)?;
-    let (source, target) = Source::load(db.c, &work.op)?;
     require(
         target.reference() == work.target.reference(),
         "RecoveryRequired",
@@ -175,6 +197,9 @@ pub(crate) fn record(
     let mut checkpoint = json!({"plan_ref":work.op.body["plan_ref"],"effect_id":work.effect.id,
                                 "receipt":receipt,"placement":placement});
     source.evidence(&mut checkpoint, &target, true);
+    if matches!(source, Source::Create(_)) {
+        checkpoint["started_effect_ref"] = creation::start_effect(db, work)?;
+    }
     let checkpoint = db.create(
         CHECKPOINT,
         &checkpoint_id(&work.op.id),
@@ -189,8 +214,8 @@ pub(crate) fn record(
 }
 
 fn recorded(db: &Db<'_>, op: &Doc, source: &Doc) -> Result<Doc> {
-    held(db, op, source)?;
     let (binding, target) = Source::load(db.c, op)?;
+    held(db, op, &binding, source)?;
     let checkpoint = db.find(&checkpoint_id(&op.id))?.ok_or_else(|| {
         err(
             "RecoveryRequired",
@@ -205,12 +230,18 @@ fn recorded(db: &Db<'_>, op: &Doc, source: &Doc) -> Result<Doc> {
         "restore publication checkpoint does not bind the original operation and backup",
     )?;
     let intent = db.find(&intent_id(&op.id))?;
-    verify_custody(op, &checkpoint, intent.as_ref())?;
+    let current_operation = db.of(&op.id, "Operation")?;
+    verify_custody(db.c, &current_operation, &checkpoint, intent.as_ref())?;
     binding.check_receipt(op, &checkpoint.body["receipt"])?;
     Ok(checkpoint)
 }
 
-fn verify_custody(op: &Doc, checkpoint: &Doc, intent: Option<&Doc>) -> Result<Placement> {
+fn verify_custody(
+    conn: &rusqlite::Connection,
+    op: &Doc,
+    checkpoint: &Doc,
+    intent: Option<&Doc>,
+) -> Result<Placement> {
     let placement: Placement = decode(&checkpoint.body["placement"])?;
     let named = placement.stage_name()?.is_some();
     let linked = intent.and_then(|document| document.body.get("checkpoint_ref"));
@@ -221,11 +252,16 @@ fn verify_custody(op: &Doc, checkpoint: &Doc, intent: Option<&Doc>) -> Result<Pl
                     belongs(doc, op, INTENT) && source::same_binding(doc, checkpoint)
                 }) && linked == Some(&checkpoint.reference())
             } else {
-                linked.is_none() && checkpoint.body.get("clone_source").is_none()
+                linked.is_none()
+                    && checkpoint.body.get("clone_source").is_none()
+                    && checkpoint.body.get("create_source").is_none()
             },
         "RecoveryRequired",
         "restore staging custody disagrees with its witnessed intent",
     )?;
+    if checkpoint.body.get("create_source").is_some() {
+        creation::verify_started(conn, op, checkpoint)?;
+    }
     Ok(placement)
 }
 
@@ -240,7 +276,10 @@ pub(crate) fn pending(db: &Db<'_>, op: &Doc) -> Result<Doc> {
         "PreconditionFailed",
         "operation is not an unresolved volume restore",
     )?;
-    let (_, original) = Source::load(db.c, op)?;
+    let (binding, original) = Source::load(db.c, op)?;
+    if matches!(binding, Source::Create(_)) {
+        return recorded(db, op, &original);
+    }
     let source = db.of(&original.id, &original.kind)?;
     require(
         source.reference() == original.reference(),
@@ -248,6 +287,17 @@ pub(crate) fn pending(db: &Db<'_>, op: &Doc) -> Result<Doc> {
         "publication source differs from the original plan",
     )?;
     recorded(db, op, &source)
+}
+
+pub(crate) fn original_create_pool(db: &Db<'_>, op: &Doc) -> Result<Doc> {
+    let (binding, pool) = Source::load(db.c, op)?;
+    require(
+        matches!(binding, Source::Create(_)),
+        "RecoveryRequired",
+        "operation has no new volume publication source",
+    )?;
+    recorded(db, op, &pool)?;
+    Ok(pool)
 }
 
 struct Candidate {
@@ -336,7 +386,9 @@ fn open_candidate(config: &Config, checkpoint: &Doc) -> Result<(Publication, Can
         }
     };
     let (root, data) = open_exact(&parent, name, &placement, receipt)?;
-    if checkpoint.body.get("clone_source").is_some() {
+    if checkpoint.body.get("create_source").is_some() {
+        creation::check_empty(&data)?;
+    } else if checkpoint.body.get("clone_source").is_some() {
         super::cloning::root_metadata(&data, "PreconditionFailed")?;
     }
     // Check the alternate name after the anchored opens as well. A competing
@@ -368,7 +420,14 @@ fn open_exact(
         "PreconditionFailed",
         "restored volume directory differs from the checkpoint",
     )?;
-    for entry in Dir::read_from(&root).map_err(std::io::Error::from)? {
+    check_wrapper(&root)?;
+    check_marker(&root, receipt)?;
+    let data = open_data(&root, receipt)?;
+    Ok((root, data))
+}
+
+fn check_wrapper(root: &File) -> Result<()> {
+    for entry in Dir::read_from(root).map_err(std::io::Error::from)? {
         let entry = entry.map_err(std::io::Error::from)?;
         require(
             matches!(
@@ -379,7 +438,11 @@ fn open_exact(
             "restored volume wrapper contains an unexpected entry",
         )?;
     }
-    let marker = child(&root, "identity", OFlags::RDONLY)?;
+    Ok(())
+}
+
+fn check_marker(root: &File, receipt: &Value) -> Result<()> {
+    let marker = child(root, "identity", OFlags::RDONLY)?;
     regular(&marker.metadata()?)?;
     let mut marker_bytes = Vec::new();
     marker.take(4097).read_to_end(&mut marker_bytes)?;
@@ -387,15 +450,18 @@ fn open_exact(
         marker_bytes == canonical(&json!([volume_id(receipt)?, receipt["incarnation"]])),
         "PreconditionFailed",
         "restored volume marker differs from the checkpoint",
-    )?;
-    let data = child(&root, "data", OFlags::RDONLY | OFlags::DIRECTORY)?;
+    )
+}
+
+fn open_data(root: &File, receipt: &Value) -> Result<File> {
+    let data = child(root, "data", OFlags::RDONLY | OFlags::DIRECTORY)?;
     let [device, inode] = identity(&data)?;
     require(
         receipt["device"] == device && receipt["inode"] == inode,
         "PreconditionFailed",
         "restored data directory differs from the checkpoint",
     )?;
-    Ok((root, data))
+    Ok(data)
 }
 
 pub(super) fn observe(work: &Work) -> Result<Value> {
@@ -408,7 +474,7 @@ pub(super) fn observe(work: &Work) -> Result<Value> {
     let (publication, opened) = open_candidate(&work.cfg, checkpoint)?;
     let before = usage::fingerprint(&opened.data)?;
     let proof = &checkpoint.body["receipt"]["restore_proof"];
-    restore_proof::verify_tree(&opened.data, proof, || {
+    let reopen = || {
         let (current, opened) = open_candidate(&work.cfg, checkpoint)?;
         require(
             current == publication,
@@ -416,7 +482,11 @@ pub(super) fn observe(work: &Work) -> Result<Value> {
             "restore placement changed during inspection",
         )?;
         Ok(opened.data)
-    })?;
+    };
+    let creating = checkpoint.body.get("create_source").is_some();
+    if !creating {
+        restore_proof::verify_tree(&opened.data, proof, reopen)?;
+    }
     require(
         before == usage::fingerprint(&opened.data)?,
         "Conflict",
@@ -425,6 +495,13 @@ pub(super) fn observe(work: &Work) -> Result<Value> {
     opened.data.sync_all()?;
     opened.root.sync_all()?;
     opened.parent.sync_all()?;
+    if creating {
+        require(
+            before == usage::fingerprint(&reopen()?)?,
+            "Conflict",
+            "new volume changed before publication of the observation",
+        )?;
+    }
     Ok(
         json!({"operation_ref":work.target.reference(),"checkpoint_ref":checkpoint.reference(),"publication":publication.label(),
         "restore_proof":proof,"metadata_digest":before,"observed_at":now()}),
@@ -478,7 +555,21 @@ pub(crate) fn reconcile(
         "OutcomeUnknown",
         "inspection does not verify this restore publication",
     )?;
-    let (publication, candidate) = open_candidate(db.cfg, &checkpoint)?;
+    let reopen = || {
+        open_candidate(db.cfg, &checkpoint).map_err(|error| {
+            if source.kind == "StoragePool"
+                && matches!(error.0.code.as_str(), "PreconditionFailed" | "Conflict")
+            {
+                err(
+                    "OutcomeUnknown",
+                    "new volume no longer matches its inspection",
+                )
+            } else {
+                error
+            }
+        })
+    };
+    let (publication, candidate) = reopen()?;
     require(
         proof["metadata_digest"] == usage::fingerprint(&candidate.data)?
             && (proof["publication"] == publication.label()
@@ -489,13 +580,15 @@ pub(crate) fn reconcile(
         "restored volume changed after inspection",
     )?;
     require(
-        open_candidate(db.cfg, &checkpoint)?.0 == publication,
+        reopen()?.0 == publication,
         "OutcomeUnknown",
         "restore placement changed after reinspection",
     )?;
     let applied = publication == Publication::Published;
     let result = if applied {
         catalog(db, op, source, receipt)?
+    } else if source.kind == "StoragePool" {
+        json!({"pool_ref":source.reference(),"volume_id":receipt["id"],"publication":"NotApplied"})
     } else if source.kind == "Backup" {
         json!({"backup_ref":source.reference(),"volume_id":receipt["id"],"publication":"NotApplied"})
     } else {

@@ -58,7 +58,7 @@ impl Disposal {
         let effect = resolve(conn, &op.body["effect_refs"][0])?;
         let intent = find(conn, &intent_id(operation))?;
         let (binding, source) = Source::load(conn, &op)?;
-        let placement = verify_custody(&op, &checkpoint, intent.as_ref())?;
+        let placement = verify_custody(conn, &op, &checkpoint, intent.as_ref())?;
         binding.check_receipt(&op, &checkpoint.body["receipt"])?;
         require(
             placement.stage_name()?.is_some()
@@ -119,7 +119,10 @@ impl Disposal {
         if present(&parent, source)? {
             // No filesystem deletion before this no-replace rename. A retry
             // can continue on the quarantined original inode after partial removal.
-            let (_dir, _data) = open_exact(&parent, source, &placement, receipt)?;
+            let (_dir, data) = open_exact(&parent, source, &placement, receipt)?;
+            if self.checkpoint.body.get("create_source").is_some() {
+                creation::check_empty(&data)?;
+            }
             renameat_with(&parent, source, &parent, &retired, RenameFlags::NOREPLACE)
                 .map_err(std::io::Error::from)?;
             parent.sync_all()?;
@@ -132,7 +135,11 @@ impl Disposal {
                 "PreconditionFailed",
                 "restore quarantine directory differs from the verified stage",
             )?;
-            staging::discard(&parent, retired.as_str(), &dir)?;
+            if self.checkpoint.body.get("create_source").is_some() {
+                creation::dispose(&parent, &retired, &dir, receipt)?;
+            } else {
+                staging::discard(&parent, retired.as_str(), &dir)?;
+            }
         }
         parent.sync_all()?;
         Ok(removed)

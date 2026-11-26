@@ -192,7 +192,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = schedule::workflow_overlap::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = storage::restore_publication::CREATE_FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -560,6 +560,9 @@ impl Store {
                 }
                 if ver < workflow::session_join::FORMAT {
                     db.c.execute_batch(workflow::session_join::SCHEMA)?;
+                }
+                if ver < storage::restore_publication::CREATE_FORMAT {
+                    storage::restore_publication::migrate_create(db)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

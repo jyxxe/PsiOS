@@ -52,6 +52,10 @@ jobs:
         run: |
           PSIOS_TEST_CLONE_RENAME_FAULT=1 python3 -B -m unittest discover -s tests \
             -p test_volume_clone_recovery.py -k kill_before_atomic_publication -v
+      - name: Recover a new volume after interruption at the publication rename
+        run: |
+          PSIOS_TEST_VOLUME_CREATE_RENAME_FAULT=1 python3 -B -m unittest discover -s tests \
+            -p test_volume_create_recovery.py -k pre_rename_crash -v
       - name: Interrupt detached backup publication and verify durable catalog recovery
         run: |
           PSIOS_TEST_BACKUP_INTAKE_CUT=1 python3 -B -m unittest discover -s tests \
@@ -769,6 +773,13 @@ jobs:
           git archive ec878f6db929a1d2ec08dd3e7b6c704baa5d72e0 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format116"
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format116" "$RUNNER_TEMP/psios-compatibility-target"
           python3 -B tests/workflow_schedule_overlap_upgrade.py --previous-bin-dir "$RUNNER_TEMP/psios-compatibility-target/debug"
+      - name: Preserve unwitnessed legacy volume creation without inferring its result
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format117"
+          git archive b47823fe6ef336f141795703cebf7a87308ecd68 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format117"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format117" "$RUNNER_TEMP/psios-compatibility-target"
+          PSIOS_VOLUME_CREATE_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
+            python3 -B -m unittest discover -s tests -p test_volume_create_recovery.py -k legacy_unknown -v
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

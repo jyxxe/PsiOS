@@ -8,7 +8,7 @@ use crate::{
 use psios_api::VERSION;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::{fs::File, path::PathBuf};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -838,7 +838,7 @@ impl Work {
                 },
             ) => storage::publication::record(db, self, receipt, device, inode),
             (
-                Action::Restore(_) | Action::CloneVolume(_),
+                Action::Create { .. } | Action::Restore(_) | Action::CloneVolume(_),
                 Checkpoint::RestoredVolume { receipt, placement },
             ) => storage::restore_publication::record(db, self, receipt, placement),
             (Action::RemoveEntry(request), Checkpoint::EntryRetirement(location)) => {
@@ -966,6 +966,11 @@ impl Work {
                 &mut check_streaming,
             ),
             Action::InspectFileRename(_) => storage::file_move::inspect(self, &mut check_streaming),
+            Action::Create { .. } => storage::create_volume(
+                self,
+                None::<fn(&File) -> Result<Value>>,
+                |receipt, placement| checkpoint(Checkpoint::RestoredVolume { receipt, placement }),
+            ),
             Action::CloneVolume(_) => storage::cloning::run(
                 self,
                 |receipt, placement| checkpoint(Checkpoint::RestoredVolume { receipt, placement }),
@@ -1263,7 +1268,10 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     if matches!(w.action, Action::NetworkTrial(_)) {
         node::network::trial::begin(db, &w)?;
     }
-    if matches!(w.action, Action::Restore(_) | Action::CloneVolume(_)) {
+    if matches!(
+        w.action,
+        Action::Create { .. } | Action::Restore(_) | Action::CloneVolume(_)
+    ) {
         storage::restore_publication::begin(db, &w)?;
     }
     if matches!(w.action, Action::Start(_)) {

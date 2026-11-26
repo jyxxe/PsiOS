@@ -303,6 +303,12 @@ Rust SDK 的 `Client::prepare_oci_stop_continuation` 与 `psiosctl application-p
 
 管理员提交 `NotApplied` 证据后，Core 复核当前路径及元数据，在同一事务内将原 Task 结算为已知失败，释放备份占用并登记暂存清理。后台按原目录身份隔离并删除暂存卷，清理中断后可继续。待录证和待清理的恢复占用共同受节点级 128 项限额约束。任何再次恢复都要重新获得执行许可，原请求仍返回原结算。[文件系统提交边界强杀验收](../tests/test_storage_recovery.py)
 
+### 核实新建空卷的发布回执
+
+从数据库格式 118 起，`volume.create` 在发布空卷前将原 Task、获准使用的 `local` StoragePool 修订、卷身份、父目录和暂存目录身份写入带见证的权威。数据目录和父目录先同步，再提交检查点并执行不覆盖原路径的原子重命名。随后 Core 在同一事务登记卷及原 Task 回执。正常创建返回原有的 Volume 引用，卷可直接使用。
+
+若发布回执丢失，使用限于原 Operation 的 `volume.inspect_publication` 核验目录和空数据根，再由管理员用 `Operation.Reconcile` 提交观测制品。Core 重新核验路径和元数据，只登记仍在最终位置的原卷。原目录仍在暂存位置时可结算 `NotApplied`，后台仅删除经核实的空目录和身份标记。两处都存在、均不可达、已有其他文件或身份被替换时保留未知结果。发布检查点之前中断可结算为 `NotStarted`。旧版未记录检查点的未知创建仍需保留，格式 118 的权威拒绝旧版 Core 写入。[发布边界、篡改和升级验收](../tests/test_volume_create_recovery.py)
+
 ### 本地单次复制卷克隆
 
 格式 114 支持 `volume.clone`。本机所有者须持有显式限定到源 Volume ID 和本机 StoragePool `local` 的委托，并独立批准操作。输入包含源卷的 `target` 和新卷 `name`。SDK `Client::prepare_volume_clone` 和 `psiosctl volume-prepare-clone --name NAME --key KEY --delegation ID source-ref.json` 返回可提交的 Task 请求。

@@ -1,5 +1,6 @@
 //! Linux observation and the operator's explicit systemd allowlist.
 pub mod block;
+pub(crate) mod block_device;
 pub mod journal;
 pub(crate) mod mounts;
 pub mod network;
@@ -349,6 +350,8 @@ pub fn perform(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Resul
         Action::InspectProcess(expected) => process::inspect(&w.target.id, expected),
         Action::Devices {} => devices(),
         Action::BlockLayout(query) => block::observe(w, query),
+        Action::TrackBlockDevice(query) => block_device::enroll(query),
+        Action::ObserveBlockDevice(_) => block_device::observe(w),
         Action::Mounts {} => mounts::observe(),
         Action::ServiceLogs(query) => journal::read(w, query),
         Action::ServiceLogsSince(query) => journal::read_since(w, query),

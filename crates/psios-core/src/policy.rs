@@ -35,6 +35,8 @@ pub const TOOLS: &[&str] = &[
     node::process::TOOL,
     "node.devices",
     node::block::TOOL,
+    node::block_device::TRACK,
+    node::block_device::OBSERVE,
     "node.mounts",
     "service.inspect",
     node::service_state::TOOL,
@@ -136,6 +138,8 @@ pub fn readonly(tool: &str) -> bool {
             | node::process::TOOL
             | "node.devices"
             | node::block::TOOL
+            | node::block_device::TRACK
+            | node::block_device::OBSERVE
             | "node.mounts"
             | "service.inspect"
             | node::service_state::TOOL
@@ -226,6 +230,8 @@ fn bootstrap_actions() -> Vec<String> {
                     | apps::release_retirement::TOOL
                     | apps::volume_rebind::TOOL
                     | node::block::TOOL
+                    | node::block_device::TRACK
+                    | node::block_device::OBSERVE
                     | "backup.verify"
                     | storage::file_integrity::TOOL
                     | storage::file_move::TOOL
@@ -621,6 +627,29 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         .actions
         .iter()
         .any(|action| action == project::assigned::TOOL);
+    let tracks_block = p
+        .actions
+        .iter()
+        .any(|action| action == node::block_device::TRACK);
+    let observes_block = p
+        .actions
+        .iter()
+        .any(|action| action == node::block_device::OBSERVE);
+    require(
+        !tracks_block || principal.id == OWNER,
+        "PermissionDenied",
+        "tracking a block device requires the local owner",
+    )?;
+    if tracks_block {
+        let node_id = db.meta("authority")?;
+        require(
+            p.tool_targets
+                .as_ref()
+                .is_some_and(|targets| targets.contains(&node_id)),
+            "InvalidArgument",
+            "tracking a block device requires an explicit local Node target",
+        )?;
+    }
     require(
         !has_project_action || (!reads_results && p.tool_targets.is_some()),
         "InvalidArgument",
@@ -630,6 +659,7 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         !(reads_results
             || submits_evidence
             || discovers_work
+            || observes_block
             || p.actions.iter().any(|action| {
                 action == storage::export::ACTION
                     || action == artifact::ingress::UPLOAD
@@ -672,6 +702,7 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         )?;
         let mut includes_work_item = false;
         let mut includes_project = false;
+        let mut includes_block = false;
         for id in ids {
             if reads_results {
                 db.of(id, "Task")?;
@@ -682,6 +713,7 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
                 let target = db.get(id)?;
                 includes_work_item |= target.kind == "WorkItem";
                 includes_project |= target.kind == "Project";
+                includes_block |= target.kind == node::block_device::KIND;
             }
         }
         require(
@@ -693,6 +725,11 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
             !discovers_work || includes_project,
             "InvalidArgument",
             "assigned work discovery requires an exact Project in the grant target scope",
+        )?;
+        require(
+            !observes_block || includes_block,
+            "InvalidArgument",
+            "block layout observation requires an exact enrolled BlockDevice target",
         )?;
     }
     require(

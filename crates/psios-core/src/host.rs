@@ -105,6 +105,10 @@ pub enum Action {
     Devices {},
     #[serde(rename = "node.block_layout")]
     BlockLayout(node::block::Query),
+    #[serde(rename = "node.track_block_device")]
+    TrackBlockDevice(node::block_device::Enrollment),
+    #[serde(rename = "device.block_layout")]
+    ObserveBlockDevice(Target),
     #[serde(rename = "node.mounts")]
     Mounts {},
     #[serde(rename = "node.processes")]
@@ -232,6 +236,7 @@ impl Action {
             Self::RouteLookup(q) => q.validate()?,
             Self::RoutingRules(q) => q.validate()?,
             Self::BlockLayout(q) => q.validate()?,
+            Self::TrackBlockDevice(q) => q.validate()?,
             Self::ServiceLogs(q) => q.validate()?,
             Self::ServiceLogsSince(q) => q.validate()?,
             Self::ServiceObserve(q) => q.validate()?,
@@ -383,6 +388,11 @@ impl Action {
                 )
             }
             Self::PublishSessionSummary(_) => return db.of(&db.meta("authority")?, "Node"),
+            Self::TrackBlockDevice(_) => {
+                policy::admin(actor)?;
+                return db.of(&db.meta("authority")?, "Node");
+            }
+            Self::ObserveBlockDevice(query) => return node::block_device::target(db, actor, query),
             Self::CaptureOciImage(request) => {
                 apps::capture::authorize(db, actor)?;
                 request.check_ceiling(db.cfg)?;
@@ -669,6 +679,8 @@ impl Work {
                 | Action::InspectFileRename(_)
                 | Action::InspectRestoredVolume(_)
                 | Action::InspectProcess(_)
+                | Action::TrackBlockDevice(_)
+                | Action::ObserveBlockDevice(_)
                 | Action::ServiceLogs(_)
                 | Action::ServiceLogsSince(_)
                 | Action::ObserveNetworkProbe(_)
@@ -811,6 +823,8 @@ impl Work {
             | Action::NetworkProbe(_)
             | Action::Mounts {}
             | Action::BlockLayout(_)
+            | Action::TrackBlockDevice(_)
+            | Action::ObserveBlockDevice(_)
             | Action::Devices {} => node::perform(self, |before| {
                 checkpoint(Checkpoint::ServiceControl(before))
             }),
@@ -1143,6 +1157,9 @@ pub fn apply(db: &Db<'_>, w: &Work, receipt: &Value) -> Result<Value> {
         Action::SubmitWorkItemEvidence(_) | Action::ListAssignedWork(_) => Ok(receipt.clone()),
         Action::ObserveNetworkProbe(_) => node::network::probe::state::publish(db, w, receipt),
         Action::ServiceObserve(_) => node::service_state::publish(db, w, receipt),
+        Action::TrackBlockDevice(_) | Action::ObserveBlockDevice(_) => {
+            node::block_device::publish(db, w, receipt)
+        }
         Action::ServiceStart(_) | Action::ServiceStop(_) | Action::ServiceRestart(_) => {
             node::apply(db, w, receipt)
         }

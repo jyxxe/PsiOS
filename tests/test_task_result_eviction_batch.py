@@ -142,15 +142,20 @@ class TaskResultEvictionBatchTests(unittest.TestCase):
         request = {"task_refs": [second.task, first.task], "reason": reason}
         self.denied("PermissionDenied", PREPARE, request, self.token)
         self.denied("InvalidArgument", PREPARE, {**request, "task_refs": [first.task, first.task]})
-        self.denied("PreconditionFailed", PREPARE, {
+        self.denied("Conflict", PREPARE, {
             **request, "task_refs": [first.task, {**second.task, "digest": "sha256:" + "0" * 64}],
         })
+        for invalid_count in ([], [first.task] * 17):
+            self.denied("InvalidArgument", PREPARE, {**request, "task_refs": invalid_count})
         size = first.content_bytes + second.content_bytes
         self.denied("QuotaExceeded", PREPARE, {**request, "max_content_bytes": size - 1})
 
         stale_plan = self.prepare([first, stale], "the second task revision will change")
         n.call("Task.EvictResults", {**target(stale.task), "reason": "explicitly evict one result first"})
         self.denied("Conflict", APPLY, {"plan_token": stale_plan["plan_token"]})
+        superseded = self.prepare([first, second], "authorization will change before this plan applies")
+        self.grant(self.contributor["principal_id"], ["task.read"], [self.profile["resource_id"]])
+        self.denied("Conflict", APPLY, {"plan_token": superseded["plan_token"]})
         self.assert_available(first, second)
         plan = n.call(PREPARE, {**request, "max_content_bytes": size})
         self.assertEqual(plan["content_bytes"], size, plan)

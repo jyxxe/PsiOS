@@ -638,6 +638,13 @@ jobs:
           git archive 89cf272b3791cc13d7fe5c4899a50fb47a08bbfd Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format98"
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format98" "$RUNNER_TEMP/psios-compatibility-target"
           python3 -B tests/oci_rebind_upgrade.py --previous-bin-dir "$RUNNER_TEMP/psios-compatibility-target/debug"
+      - name: Preserve strict model claims across the privacy-aware session format upgrade
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format99"
+          git archive 0b7ec484dcd245d75d5a57d8cde384943856454d Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format99"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format99" "$RUNNER_TEMP/psios-compatibility-target"
+          PSIOS_SESSION_INPUT_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
+            python3 -B -m unittest discover -s tests -p test_agent_session_inputs.py -k test_old_inflight -v
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

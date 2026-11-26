@@ -284,6 +284,7 @@ fn projected(
     let maximum = context_limit(model)?;
     let mut context = base(session, skill);
     context["previous_tools"] = json!([]);
+    session_inputs::project(conn, db, session, &mut context, maximum)?;
     require(
         session.body["last_task"].as_str()
             == entries

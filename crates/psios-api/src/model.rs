@@ -54,6 +54,11 @@ pub struct ModelFailureReport {
 pub trait SessionModel {
     fn decide(&self, context: &Value) -> ApiResult<ModelDecision>;
 
+    /// Opt into receiving authorized artifact data in a directly claimed session.
+    fn accepts_session_inputs(&self) -> bool {
+        false
+    }
+
     fn decide_with_usage(&self, context: &Value) -> ApiResult<ModelOutput> {
         Ok(ModelOutput {
             decision: self.decide(context)?,
@@ -131,6 +136,18 @@ enum Turn {
     },
 }
 
+fn direct_claim_parameters(
+    session: &str,
+    key: &str,
+    provider: &(impl SessionModel + ?Sized),
+) -> Value {
+    let mut params = json!({"session_id":session,"key":key});
+    if provider.accepts_session_inputs() {
+        params["accepts_session_inputs"] = json!(true);
+    }
+    params
+}
+
 impl Client {
     fn decide_turn(
         &self,
@@ -138,7 +155,10 @@ impl Client {
         key: &str,
         provider: &(impl SessionModel + ?Sized),
     ) -> ApiResult<Turn> {
-        let claim = self.call("Model.Claim", json!({"session_id":session,"key":key}))?;
+        let claim = self.call(
+            "Model.Claim",
+            direct_claim_parameters(session, key, provider),
+        )?;
         Self::decide_claim(session, claim, provider, None)
     }
 
@@ -175,6 +195,15 @@ impl Client {
             return Err(crate::invalid("model lease context digest differs"));
         }
         let context = &claim["context"];
+        if context.get("inputs").is_some()
+            && (expected_model.is_some() || !provider.accepts_session_inputs())
+        {
+            return Err(ApiError::new(
+                "UnsupportedCapability",
+                "model provider has not opted into session artifact inputs",
+            )
+            .into());
+        }
         let observe_late = match claim.get("late_decision_observation") {
             None | Some(Value::Bool(false)) => false,
             Some(Value::Bool(true)) if claim["inference_outcome_policy"] == "Strict" => true,
@@ -318,6 +347,66 @@ impl SessionModel for NodeSurvey {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn direct_model_input_receipt_requires_explicit_provider_support() {
+        struct InputProvider(Cell<bool>);
+        impl SessionModel for InputProvider {
+            fn decide(&self, context: &Value) -> ApiResult<ModelDecision> {
+                assert_eq!(context["inputs"][0]["value"], json!({"inventory": true}));
+                self.0.set(true);
+                Ok(ModelDecision::Finish {
+                    summary: "Recorded.".into(),
+                })
+            }
+
+            fn accepts_session_inputs(&self) -> bool {
+                true
+            }
+        }
+
+        let provider = InputProvider(Cell::new(false));
+        assert_eq!(
+            direct_claim_parameters("session-fixture", "first", &NodeSurvey),
+            json!({"session_id":"session-fixture","key":"first"})
+        );
+        assert_eq!(
+            direct_claim_parameters("session-fixture", "first", &provider),
+            json!({"session_id":"session-fixture","key":"first","accepts_session_inputs":true})
+        );
+        let mut claim = json!({"lease_id":"lease-fixture","context":{
+            "session_id":"session-fixture","inputs":[{"value":{"inventory":true}}],
+        }});
+        assert!(
+            matches!(Client::decide_claim("session-fixture", claim.clone(), &NodeSurvey, None),
+                         Err(error) if error.code == "UnsupportedCapability")
+        );
+        let queued = ResourceRef {
+            resource_id: "model-fixture".into(),
+            version: "r1".into(),
+            digest: "sha256:fixture".into(),
+        };
+        assert!(
+            matches!(Client::decide_claim("session-fixture", claim.clone(), &provider, Some(&queued)),
+                         Err(error) if error.code == "UnsupportedCapability")
+        );
+        assert!(!provider.0.get());
+        assert!(matches!(
+            Client::decide_claim("session-fixture", claim.clone(), &provider, None),
+            Ok(Turn::Deliver {
+                request: Delivery::Decision(_),
+                ..
+            })
+        ));
+        assert!(provider.0.get());
+
+        let receipt = json!({"task_id":"existing-task"});
+        claim["completed"] = receipt.clone();
+        assert!(
+            matches!(Client::decide_claim("session-fixture", claim, &NodeSurvey, None),
+                         Ok(Turn::Completed(previous)) if previous == receipt)
+        );
+    }
 
     #[test]
     fn only_a_fresh_strict_claim_invokes_the_provider_and_reports_its_failure() {

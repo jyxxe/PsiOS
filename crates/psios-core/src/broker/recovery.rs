@@ -7,6 +7,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
     apps::create_recovery::verify_active(db.c)?;
     node::network::trial::verify_active(db.c, crate::db::CURRENT_FORMAT)?;
     artifact::retention::delayed::verify_pending(db.c)?;
+    storage::entry_retirement::verify_active(db.c)?;
     network_trial::recover_parked(db)?;
     let active = db
         .c
@@ -71,6 +72,9 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
         let rename_unprepared = phase == "Dispatched"
             && tool == storage::file_move::TOOL
             && storage::file_move::not_prepared(db, &operation(db, &t)?)?;
+        let entry_unprepared = phase == "Dispatched"
+            && tool == storage::entry_retirement::TOOL
+            && storage::entry_retirement::not_prepared(db, &operation(db, &t)?)?;
         let deletion_unprepared = phase == "Dispatched"
             && matches!(tool, "volume.delete" | "backup.delete")
             && storage::retirement::not_prepared(db, &operation(db, &t)?)?;
@@ -89,6 +93,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             && !image_undispatched
             && !deletion_unprepared
             && !rename_unprepared
+            && !entry_unprepared
         {
             close(
                 db,
@@ -122,6 +127,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             || image_undispatched
             || deletion_unprepared
             || rename_unprepared
+            || entry_unprepared
         {
             close(
                 db,
@@ -136,6 +142,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                     || restart_undispatched
                     || create_undispatched
                     || trial_unstarted
+                    || entry_unprepared
                 {
                     "NotStarted"
                 } else {
@@ -350,12 +357,14 @@ pub(crate) enum ReconcileProbe {
     Service(node::service_control::ReconcileProbe),
     Network(Box<node::network::trial::Inspection>),
     VolumeFile(Box<storage::reconcile_file::Probe>),
+    EntryRetirement(Box<storage::entry_retirement::Probe>),
 }
 
 pub(crate) enum ReconcileSample {
     Service(node::service_control::ReconcileSample),
     Network(node::network::trial::ReconcileSample),
     VolumeFile(Box<storage::reconcile_file::Sample>),
+    EntryRetirement(Box<storage::entry_retirement::Sample>),
 }
 
 impl ReconcileProbe {
@@ -363,6 +372,9 @@ impl ReconcileProbe {
         match self {
             Self::Service(probe) => probe.read().map(ReconcileSample::Service),
             Self::Network(probe) => probe.live().map(ReconcileSample::Network),
+            Self::EntryRetirement(probe) => probe
+                .read()
+                .map(|sample| ReconcileSample::EntryRetirement(Box::new(sample))),
             Self::VolumeFile(probe) => probe
                 .read()
                 .map(|file| ReconcileSample::VolumeFile(Box::new(file))),
@@ -392,6 +404,23 @@ pub(crate) fn prepare_reconcile(
         )?;
         Ok(Some(ReconcileProbe::Network(Box::new(
             node::network::trial::inspect(db, &op)?,
+        ))))
+    } else if task.spec["task_type"] == storage::entry_retirement::TOOL {
+        require(
+            req.evidence_ref.is_none(),
+            "InvalidArgument",
+            "entry reconciliation reads the original volume custody directly",
+        )?;
+        let action = reconcile_action(db, &task)?;
+        let target = reconcile_target(db, &op, &action)?;
+        let Action::RemoveEntry(input) = action else {
+            return Err(err(
+                "RecoveryRequired",
+                "entry retirement input is unavailable",
+            ));
+        };
+        Ok(Some(ReconcileProbe::EntryRetirement(Box::new(
+            storage::entry_retirement::prepare_reconcile(db, &op, target, &input.path)?,
         ))))
     } else if matches!(
         field(&task.spec, "task_type"),
@@ -424,6 +453,7 @@ fn reconcile_target(db: &Db<'_>, op: &Doc, action: &Action) -> Result<Doc> {
     let (target_id, expected) = match action {
         Action::Write(p) => (&p.id, &p.expected_resource_version),
         Action::Append(p) => (&p.target.id, &p.target.expected_resource_version),
+        Action::RemoveEntry(p) => (&p.target.id, &p.target.expected_resource_version),
         Action::RenameFile(p) => (&p.target.id, &p.target.expected_resource_version),
         Action::Start(p)
         | Action::Stop(p)
@@ -535,6 +565,23 @@ pub(crate) fn reconcile(
                 storage::restore_publication::reconcile(db, &op, &target, &proof, &observation)?;
             if !applied {
                 reason = Some(err("LeaseLost", "restored volume was not published"));
+            }
+            (result, evidence)
+        }
+        Action::RemoveEntry(input) => {
+            let Some(ReconcileSample::EntryRetirement(observation)) = sample? else {
+                return Err(err(
+                    "OutcomeUnknown",
+                    "no synced entry retirement observation is available",
+                ));
+            };
+            let (applied, result, evidence) =
+                storage::entry_retirement::reconcile(db, &op, &target, &input.path, *observation)?;
+            if !applied {
+                reason = Some(err(
+                    "LeaseLost",
+                    "the approved entry retirement did not take effect",
+                ));
             }
             (result, evidence)
         }

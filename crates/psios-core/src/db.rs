@@ -192,7 +192,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = storage::ROOT_MODE_FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = storage::entry_retirement::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -554,6 +554,9 @@ impl Store {
                 }
                 if ver < node::block_device::retirement::FORMAT {
                     db.c.execute_batch(node::block_device::retirement::SCHEMA)?;
+                }
+                if ver < storage::entry_retirement::FORMAT {
+                    db.c.execute_batch(storage::entry_retirement::SCHEMA)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

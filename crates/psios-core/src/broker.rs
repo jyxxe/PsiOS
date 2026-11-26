@@ -156,6 +156,9 @@ fn close(
     {
         storage::retirement::abandon(db, &op)?;
     }
+    if !unknown && state != "Succeeded" && t.spec["task_type"] == storage::entry_retirement::TOOL {
+        storage::entry_retirement::abandon(db, &op)?;
+    }
     let mut effects = op.body["effect_refs"].clone();
     if let Some(r) = effects.as_array_mut().and_then(|a| a.last_mut()) {
         let e = db.get(field(r, "resource_id"))?;
@@ -180,6 +183,9 @@ fn close(
                 && let Some(confirmation) = apps::restart::record_settlement(db, &op, a)?
             {
                 refs.push(confirmation.reference());
+            }
+            if t.spec["task_type"] == storage::entry_retirement::TOOL {
+                refs.push(storage::entry_retirement::settlement_ref(db, &op)?);
             }
             b["evidence_refs"] = json!(refs);
         }

@@ -1,5 +1,6 @@
 //! Single-node directory volumes. A writer or an uncertain operation retains the volume hold.
 mod detached;
+pub(crate) mod entry_retirement;
 pub(crate) mod export;
 pub(crate) mod file_integrity;
 pub(crate) mod file_move;
@@ -185,6 +186,7 @@ pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
             db.c.execute("INSERT INTO holds VALUES(?1,?2)", params![v.id, w.op.id])?;
         }
         if matches!(w.action, Action::Delete(_)) {
+            entry_retirement::ensure_no_pending(db, v)?;
             let referenced:bool=db.c.query_row("SELECT EXISTS(SELECT 1 FROM current WHERE
               (kind='Backup' AND body->>'lifecycle'!='Deleted' AND json_extract(spec,'$.source_volume')=?1)
               OR (kind='Application' AND json_extract(spec,'$.volume_id')=?1 AND json_extract(body,'$.lifecycle')!='Uninstalled'))",[&v.id],|r|r.get(0))?;
@@ -1046,11 +1048,9 @@ fn remove_contents(dir: &File, depth: usize) -> Result<()> {
 }
 pub fn perform(w: &Work) -> Result<Value> {
     match &w.action {
-        Action::Files(_)
-        | Action::Chunk(_)
-        | Action::Append(_)
-        | Action::MakeDir(_)
-        | Action::RemoveEntry(_) => files::perform(w),
+        Action::Files(_) | Action::Chunk(_) | Action::Append(_) | Action::MakeDir(_) => {
+            files::perform(w)
+        }
         Action::VolumeUsage(query) => usage::measure(w, query),
         Action::Activate(_) => restore_proof::verify(w),
         Action::Create { .. } => create_volume(w, None, |_, _| Ok(())),
@@ -1145,11 +1145,8 @@ pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
                 .reference())
         }
         Action::DeleteBackup(_) | Action::Delete(_) => retirement::settle(db, &w.op, &w.target, r),
-        Action::Write(_)
-        | Action::Append(_)
-        | Action::MakeDir(_)
-        | Action::RemoveEntry(_)
-        | Action::RenameFile(_) => Ok(
+        Action::RemoveEntry(request) => entry_retirement::settle(db, w, &request.path, r),
+        Action::Write(_) | Action::Append(_) | Action::MakeDir(_) | Action::RenameFile(_) => Ok(
             json!({"volume_ref": db.status(&w.target,w.target.body.clone())?.reference(), "receipt": r}),
         ),
         _ => Ok(r.clone()),

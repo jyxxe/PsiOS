@@ -245,6 +245,14 @@ Core 通过已打开的目录和文件描述符流式校验私有普通文件。
 
 `volume.write` 或 `volume.append` 丢失回执时，本机所有者可对原 Operation 调用 `Operation.Reconcile`。Core 在卷仍由该操作独占时读取原计划指定的文件和字节，逐项同步该文件与父目录，再核对路径和 inode 后提交结算。同步期间数据库仍可处理其他请求。任一路同步失败或文件被替换时，原 Operation 保持 `Unknown` 并保留卷占用。成功后的恢复证据包含文件修订。[SIGKILL 与 fsync 故障注入验收](../tests/test_volume_write_reconciliation.py)
 
+### 卷内条目删除和对账
+
+从格式 113 起，`volume.remove_entry` 在当前卷修订和原批准下记录准确的源路径与 inode，再将条目原子移入同一文件系统上的私有保留目录。源目录与保留目录完成同步后，Core 提交卷修订和逻辑删除回执。支持单链接普通文件，以及服务账户可以检查为空的目录。卷挂载或其他写入占用期间继续拒绝删除。
+
+操作回执丢失时，本机所有者可对原 Operation 调用 `Operation.Reconcile`。Core 保留原卷占用并核验源路径和私有保留项。原条目仍位于源路径时记录未执行，原条目在保留目录且源路径为空时结算删除。两处都存在、两处都缺失、身份变化或待删除目录已包含内容时，均保留未知结果。旧格式已派发且缺少检查点的删除仍无法通过此协议确认。
+
+逻辑删除结算后，后台回收与回执绑定的原 inode，不会递归删除目录，也不会触碰复用原路径的新条目。未结算或未回收条目全节点合计最多 128 项，普通文件逻辑大小合计上限为 1 TiB。待回收项仍保留时，Core 拒绝删除整个卷。托管卷的外部写入须与 Core 协调并在操作前停止。[缺失、替换、重启和清理中断验收](../tests/test_volume_entry_retirement.py)
+
 ### 原子改名及对账
 
 `volume.rename_file` 在同一未挂载 Volume 内移动一个私有普通文件。请求包含卷的当前 `target`、相对 `source` 和 `destination`，以及先前 `volume.verify_file` 的 `expected_observation_digest`。需要对卷显式授予工具权限和批准本次计划。Core 重读原文件，提交包含内容摘要、inode 和目录身份的检查点，再使用 Linux 原子改名。已有目的项会使请求以 `Conflict` 结算。

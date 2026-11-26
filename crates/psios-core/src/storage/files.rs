@@ -2,7 +2,7 @@
 use super::*;
 use crate::host::Target;
 use base64::{Engine, engine::general_purpose::STANDARD};
-use rustix::fs::{mkdirat, unlinkat};
+use rustix::fs::mkdirat;
 use std::io::{Seek, SeekFrom};
 const CHUNK: usize = 96 * 1024;
 const FILE_MAX: u64 = 256 * 1024 * 1024;
@@ -220,26 +220,10 @@ pub fn perform(w: &Work) -> Result<Value> {
         Action::Files(p) => list(&root, p),
         Action::Chunk(p) => read(&root, p),
         Action::Append(p) => append(&w.cfg, &root, p),
-        Action::MakeDir(p) | Action::RemoveEntry(p) => {
+        Action::MakeDir(p) => {
             let (dir, name) = parent(&root, &p.path)?;
-            if matches!(w.action, Action::MakeDir(_)) {
-                w.cfg.check_managed_space(&dir, std::iter::empty(), 1)?;
-                mkdirat(&dir, name.as_str(), Mode::RWXU).map_err(std::io::Error::from)?;
-            } else {
-                let st = statat(&dir, name.as_str(), AtFlags::SYMLINK_NOFOLLOW)
-                    .map_err(std::io::Error::from)?;
-                let flags = match FileType::from_raw_mode(st.st_mode) {
-                    FileType::RegularFile if st.st_nlink == 1 => AtFlags::empty(),
-                    FileType::Directory => AtFlags::REMOVEDIR,
-                    _ => {
-                        return Err(err(
-                            "UnsupportedCapability",
-                            "only private files and empty directories can be removed",
-                        ));
-                    }
-                };
-                unlinkat(&dir, name.as_str(), flags).map_err(std::io::Error::from)?;
-            }
+            w.cfg.check_managed_space(&dir, std::iter::empty(), 1)?;
+            mkdirat(&dir, name.as_str(), Mode::RWXU).map_err(std::io::Error::from)?;
             dir.sync_all().map_err(unknown)?;
             Ok(json!({"path":p.path}))
         }

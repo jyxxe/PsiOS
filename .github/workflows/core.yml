@@ -56,6 +56,10 @@ jobs:
         run: |
           PSIOS_TEST_VOLUME_WRITE_CUT=1 python3 -B -m unittest discover -s tests \
             -p test_volume_write_reconciliation.py -v
+      - name: Reconcile a volume entry retirement that failed at the rename
+        run: |
+          PSIOS_TEST_ENTRY_RETIREMENT_FAULT=1 python3 -B -m unittest discover -s tests \
+            -p test_volume_entry_retirement.py -k rename_failure -v
       - name: Kill offline state compaction after the SQLite WAL commit
         run: |
           PSIOS_TEST_STATE_COMPACTION_CUT=1 python3 -B -m unittest discover -s tests \

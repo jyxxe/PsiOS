@@ -347,7 +347,7 @@ pub fn dispatch(db: &Db<'_>, task: &str) -> Result<Option<Work>> {
             "operation_id": op.id,
             "resource_ref": target,
             "action": tool,
-            "phase": if node::service_control::is_tool(tool) || apps::stop::is_tool(tool) || tool == apps::restart::TOOL || tool == node::network::trial::TOOL || tool == apps::volume_rebind::TOOL || matches!(tool, apps::create_recovery::CREATE | apps::create_recovery::CLEANUP) { "PermitBound" } else { "EffectStarted" },
+            "phase": if node::service_control::is_tool(tool) || apps::stop::is_tool(tool) || tool == apps::restart::TOOL || tool == node::network::trial::TOOL || tool == apps::volume_rebind::TOOL || matches!(tool, apps::create_recovery::CREATE | apps::create_recovery::CLEANUP | storage::entry_retirement::TOOL) { "PermitBound" } else { "EffectStarted" },
             "outcome_knowledge": "InFlight",
             "evidence_refs": []
         }),
@@ -445,6 +445,13 @@ pub fn settlement_failed(db: &Db<'_>, w: &Work) -> Result<()> {
             "StorageUnavailable",
             "application catalog transaction did not commit",
         )
+    } else if matches!(w.action, Action::RemoveEntry(_))
+        && storage::entry_retirement::not_prepared(db, &db.of(&w.op.id, "Operation")?)?
+    {
+        err(
+            "StorageUnavailable",
+            "entry retirement stopped before its rename checkpoint",
+        )
     } else if policy::readonly(field(&w.task.spec, "task_type")) {
         err("StorageUnavailable", "read result could not be committed")
     } else {
@@ -526,6 +533,8 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
     } else {
         None
     };
+    let entry_unprepared = matches!(w.action, Action::RemoveEntry(_))
+        && storage::entry_retirement::not_prepared(db, &db.of(&w.op.id, "Operation")?)?;
     let rebind = matches!(w.action, Action::RebindRestoredVolume(_));
     require(
         !atomic_authority || t.body["lifecycle"] == "Running",
@@ -548,7 +557,10 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
         None
     };
     if cancelled
-        && (stop_started == Some(false) || create_undispatched || cleanup_started == Some(false))
+        && (stop_started == Some(false)
+            || create_undispatched
+            || cleanup_started == Some(false)
+            || entry_unprepared)
     {
         close(db, &t, "Cancelled", "NotStarted", None, None)?;
         return Ok(());
@@ -636,6 +648,7 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                 || restart_started == Some(false)
                 || create_undispatched
                 || cleanup_started == Some(false)
+                || entry_unprepared
                 || rebind;
             let e = if (stop_started == Some(true) || cleanup_started == Some(true))
                 && e.0.code != "OutcomeUnknown"

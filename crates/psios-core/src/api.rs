@@ -278,7 +278,6 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Task.Get" => broker::get(db, actor, p, "Task"),
         "Task.Results" => broker::result_access::get(db, actor, p),
         "Run.Get" => broker::get(db, actor, p, "Run"),
-        "Operation.Reconcile" => broker::reconcile(db, actor, p, Ok(None)),
         "Operation.Get" => broker::get(db, actor, p, "Operation"),
         "Approval.Decide" => broker::decide(db, actor, p),
         "Audit.List" => {
@@ -304,6 +303,11 @@ impl Store {
         if r.method == storage::export::METHOD {
             let job = self.prepare_export(peer, &r)?;
             return self.finish_export(peer, &r, job.read());
+        }
+        if r.method == "Operation.Reconcile" {
+            let probe = self.prepare_reconcile(peer, &r)?;
+            let evidence = probe.map(|job| job.read()).transpose();
+            return self.finish_reconcile(peer, &r, evidence);
         }
         if r.method == "Model.Claim" {
             return self.authorized_request(peer, &r, |db, actor| {

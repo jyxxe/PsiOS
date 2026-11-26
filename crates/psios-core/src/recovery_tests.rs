@@ -1615,6 +1615,33 @@ fn kill_after_host_write_requires_observed_postcondition() {
         "OutcomeUnknown"
     );
     fs::write(&file, "verified").unwrap();
+    let request = Request {
+        schema_version: VERSION.into(),
+        request_id: id("file-proof-cas"),
+        token: fs::read_to_string(c.witness_dir.join("owner.token")).unwrap(),
+        method: "Operation.Reconcile".into(),
+        params: p.clone(),
+    };
+    let peer = rustix::process::geteuid().as_raw();
+    let sampled = s
+        .prepare_reconcile(peer, &request)
+        .unwrap()
+        .unwrap()
+        .read()
+        .unwrap();
+    let replacement = file.with_file_name("same-bytes-new-inode");
+    fs::write(&replacement, "verified").unwrap();
+    fs::rename(&replacement, &file).unwrap();
+    assert_eq!(
+        s.finish_reconcile(peer, &request, Ok(Some(sampled)))
+            .unwrap_err()
+            .0
+            .code,
+        "OutcomeUnknown"
+    );
+    let still_held = call(&mut s, "Task.Get", json!({"id": task})).unwrap();
+    assert_eq!(still_held["operation_refs"], t["operation_refs"]);
+    assert_eq!(still_held["outcome_knowledge"], "Unknown");
     assert_eq!(
         call(&mut s, "Operation.Reconcile", p).unwrap()["outcome_knowledge"],
         "Known"

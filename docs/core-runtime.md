@@ -229,6 +229,10 @@ Core 通过已打开的目录和文件描述符流式校验私有普通文件。
 
 同一未挂载卷可同时执行文件读取、分块读取、目录列表、空间统计和文件校验。Core 为每项在途读取保存独立的持有记录。写入、备份、激活、删除和应用挂载仍要求排他访问。冲突按现有 Task 语义结算，进程恢复会清除原读取持有并按剩余预算重试。读取成功时只释放本次持有。[读写隔离与恢复验收](../crates/psios-core/src/recovery_tests.rs) · [格式 48 在途读取升级](../tests/volume_read_holds_upgrade.py)
 
+### 卷写入的持久对账
+
+`volume.write` 或 `volume.append` 丢失回执时，本机所有者可对原 Operation 调用 `Operation.Reconcile`。Core 在卷仍由该操作独占时读取原计划指定的文件和字节，逐项同步该文件与父目录，再核对路径和 inode 后提交结算。同步期间数据库仍可处理其他请求。任一路同步失败或文件被替换时，原 Operation 保持 `Unknown` 并保留卷占用。成功后的恢复证据包含文件修订。[SIGKILL 与 fsync 故障注入验收](../tests/test_volume_write_reconciliation.py)
+
 ### 原子改名及对账
 
 `volume.rename_file` 在同一未挂载 Volume 内移动一个私有普通文件。请求包含卷的当前 `target`、相对 `source` 和 `destination`，以及先前 `volume.verify_file` 的 `expected_observation_digest`。需要对卷显式授予工具权限和批准本次计划。Core 重读原文件，提交包含内容摘要、inode 和目录身份的检查点，再使用 Linux 原子改名。已有目的项会使请求以 `Conflict` 结算。

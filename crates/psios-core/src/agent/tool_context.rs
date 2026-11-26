@@ -155,7 +155,7 @@ fn source(
     Ok((task, artifact, plan))
 }
 
-fn live_access(db: &Db<'_>, owner: &str, task: &Doc, plan: &Doc) -> Result<()> {
+pub(super) fn live_access(db: &Db<'_>, owner: &str, task: &Doc, plan: &Doc) -> Result<()> {
     let delegation = db.resolve(&task.spec["delegation_ref"])?;
     let tool = task.spec["task_type"].as_str().ok_or_else(|| {
         err(
@@ -197,7 +197,7 @@ fn context_limit(model: &Doc) -> Result<usize> {
     decode(&model.spec["max_context_bytes"])
 }
 
-fn current_result(conn: &Connection, pinned: &Doc) -> Result<()> {
+pub(super) fn current_result(conn: &Connection, pinned: &Doc) -> Result<()> {
     let current = find(conn, &pinned.id)?.ok_or_else(|| {
         err(
             "ResultUnavailable",
@@ -343,6 +343,13 @@ struct Snapshot {
     digest: String,
 }
 
+struct Checked {
+    session: Doc,
+    usage: Doc,
+    issued_seq: i64,
+    issued_incarnation: String,
+}
+
 fn snapshot(conn: &Connection, lease: &str) -> Result<Option<Snapshot>> {
     Ok(conn.query_row(
         "SELECT session_ref,usage_ref,context_digest FROM model_context_snapshots WHERE lease=?1",
@@ -370,14 +377,14 @@ fn checkpoint(
     lease: &str,
     turn: u32,
     recorded: &Snapshot,
-) -> Result<Doc> {
+) -> Result<Checked> {
     let pinned = resolve(conn, &recorded.session_ref)?;
     let usage = resolve(conn, &recorded.usage_ref)?;
-    let dispatched = conn
+    let (dispatched, issued_seq, issued_incarnation) = conn
         .query_row(
             "SELECT * FROM versions WHERE id=?1 AND rev=?2",
             params![pinned.id, pinned.rev.checked_add(1)],
-            row,
+            |r| Ok((row(r)?, r.get("seq")?, r.get("incarnation")?)),
         )
         .optional()?
         .ok_or_else(|| {
@@ -400,7 +407,7 @@ fn checkpoint(
             && pinned.id == session.id
             && pinned.owner == session.owner
             && pinned.spec == session.spec
-            && enabled(&pinned)
+            && (enabled(&pinned) || usage.body.get(default_context::TASK_REF).is_some())
             && pinned.body["turn"]
                 .as_u64()
                 .and_then(|old| old.checked_add(1))
@@ -424,7 +431,27 @@ fn checkpoint(
         "RecoveryRequired",
         "model lease context disagrees with its original session and usage",
     )?;
-    Ok(pinned)
+    Ok(Checked {
+        session: pinned,
+        usage,
+        issued_seq,
+        issued_incarnation,
+    })
+}
+
+fn reproduce(
+    conn: &Connection,
+    db: Option<&Db<'_>>,
+    checked: &Checked,
+    skill: &Doc,
+    model: &Doc,
+) -> Result<Value> {
+    let session = &checked.session;
+    if enabled(session) {
+        return projected(conn, db, session, skill, model);
+    }
+    let task = default_context::pinned_task(conn, session, &checked.usage, checked.issued_seq)?;
+    default_context::build(conn, db, session, skill, model, task.as_ref())
 }
 
 pub(super) fn replay(
@@ -434,30 +461,39 @@ pub(super) fn replay(
     model: &Doc,
     lease: &str,
     turn: u32,
-) -> Result<(Value, String)> {
-    let recorded = snapshot(db.c, lease)?.ok_or_else(|| {
-        err(
+) -> Result<Option<(Value, String)>> {
+    let Some(recorded) = snapshot(db.c, lease)? else {
+        require(
+            !enabled(session),
             "RecoveryRequired",
             "model lease has no durable context checkpoint",
-        )
-    })?;
-    let pinned = checkpoint(db.c, session, lease, turn, &recorded)?;
-    let context = build(db, &pinned, skill, model)?;
+        )?;
+        return Ok(None);
+    };
+    let checked = checkpoint(db.c, session, lease, turn, &recorded)?;
+    if !enabled(&checked.session) {
+        default_context::require_current_incarnation(db, &checked.issued_incarnation)?;
+    }
+    let context = reproduce(db.c, Some(db), &checked, skill, model)?;
     require(
         sha256(&canonical(&context)) == recorded.digest,
         "RecoveryRequired",
         "replayed model context differs from its original input",
     )?;
-    Ok((context, recorded.digest))
+    Ok(Some((context, recorded.digest)))
 }
 
-pub(crate) fn verify(conn: &Connection) -> Result<()> {
+pub(crate) fn verify(conn: &Connection, database_format: u32) -> Result<()> {
+    let cutover = (database_format >= default_context::FORMAT)
+        .then(|| default_context::cutover(conn))
+        .transpose()?;
     let mut leases = conn.prepare(
         "SELECT t.lease,t.session,t.turn FROM session_turns t JOIN current s ON s.id=t.session
-         WHERE s.spec->>'tool_context_window' IS NOT NULL",
+         WHERE ?1 OR s.spec->>'tool_context_window' IS NOT NULL",
     )?;
     let mut count = 0i64;
-    for row in leases.query_map([], |row| {
+    let mut defaults = 0i64;
+    for row in leases.query_map([cutover.is_some()], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
@@ -467,21 +503,45 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
         let (lease, id, turn) = row?;
         let session =
             find(conn, &id)?.ok_or_else(|| err("RecoveryRequired", "model session is missing"))?;
-        let recorded = snapshot(conn, &lease)?.ok_or_else(|| {
+        let recorded = snapshot(conn, &lease)?;
+        if !enabled(&session) {
+            let issue = default_context::issue(conn, &session, &lease)?;
+            let checkpoint_required = match (cutover, issue) {
+                (Some(cutover), Some(issue)) => issue.seq > cutover,
+                _ => false,
+            };
+            require(
+                recorded.is_some() == checkpoint_required,
+                "RecoveryRequired",
+                "default model lease checkpoint disagrees with its issuance format",
+            )?;
+            if !checkpoint_required {
+                continue;
+            }
+        }
+        let recorded = recorded.ok_or_else(|| {
             err(
                 "RecoveryRequired",
-                "opt-in model turn is missing its context checkpoint",
+                "model turn is missing its context checkpoint",
             )
         })?;
-        let pinned = checkpoint(conn, &session, &lease, turn, &recorded)?;
-        let origins = origins(conn, &pinned)?;
-        for observation in entries(&pinned)? {
-            source(conn, &pinned, &origins, &observation)?;
+        let checked = checkpoint(conn, &session, &lease, turn, &recorded)?;
+        let pinned = &checked.session;
+        if enabled(pinned) {
+            let origins = origins(conn, pinned)?;
+            for observation in entries(pinned)? {
+                source(conn, pinned, &origins, &observation)?;
+            }
+        } else {
+            default_context::pinned_task(conn, pinned, &checked.usage, checked.issued_seq)?;
+            defaults += 1;
         }
-        if state(&session) == "ModelInFlight" && session.body["current_lease"] == lease {
+        if (state(&session) == "ModelInFlight" && session.body["current_lease"] == lease)
+            || (!enabled(pinned) && pinned.spec["context_policy"] == "ReferencesOnly")
+        {
             let skill = resolve(conn, &session.spec["skill_ref"])?;
             let model = resolve(conn, &session.spec["model_ref"])?;
-            let context = projected(conn, None, &pinned, &skill, &model)?;
+            let context = reproduce(conn, None, &checked, &skill, &model)?;
             require(
                 sha256(&canonical(&context)) == recorded.digest,
                 "RecoveryRequired",
@@ -504,6 +564,19 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
                 artifact::retention::require_content(conn, &result)?;
             }
         }
+    }
+    if cutover.is_some() {
+        let issued = conn.query_row(
+            "SELECT count(*) FROM versions WHERE kind='ModelUsage' AND rev=1
+             AND json_type(body,'$.default_context_task_ref') IS NOT NULL",
+            [],
+            |r| r.get::<_, i64>(0),
+        )?;
+        require(
+            issued == defaults,
+            "RecoveryRequired",
+            "default model usage includes an unbound context checkpoint",
+        )?;
     }
     require(
         count

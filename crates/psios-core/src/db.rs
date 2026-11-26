@@ -192,7 +192,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = agent::session_inputs::BROKERED_FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = agent::default_context::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -545,6 +545,9 @@ impl Store {
                 }
                 if ver < agent::session_inputs::BROKERED_FORMAT {
                     db.c.execute_batch(agent::session_inputs::BROKERED_SCHEMA)?;
+                }
+                if ver < agent::default_context::FORMAT {
+                    agent::default_context::migrate(db)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

@@ -3,7 +3,7 @@ use super::*;
 pub fn recover(db: &Db<'_>) -> Result<()> {
     apps::stop::verify_active(db.c)?;
     apps::restart::verify_active(db.c)?;
-    node::network::trial::verify_active(db.c)?;
+    node::network::trial::verify_active(db.c, crate::db::CURRENT_FORMAT)?;
     network_trial::recover_parked(db)?;
     let active = db
         .c

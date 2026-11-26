@@ -752,13 +752,19 @@ fn approve(s: &mut Store, task: &str) {
 const HOST_WRITE_BARRIER: &str = "PSIOS_TEST_CRASH_STATE";
 
 #[test]
-fn approved_network_trial_parks_and_fences_cancel_revocation_and_lost_commit() {
+fn approved_network_trial_fences_interrupted_confirmation_and_rollback() {
     use crate::node::network::{managed, trial};
     use crate::policy::deadline::Clock;
     use host::{Checkpoint::NetworkTrial, Target};
     use trial::Boundary;
 
-    for interruption in ["cancel", "revoke", "lost-confirm", "restart"] {
+    for interruption in [
+        "cancel",
+        "revoke",
+        "lost-confirm",
+        "restart",
+        "mismatched-rollback",
+    ] {
         let directory = tempfile::tempdir().unwrap();
         let mut cfg = Config::local(&directory.path().join("core"));
         let initial = "1aad7685-9a7d-49ad-8132-0c9c56cfb34e";
@@ -862,7 +868,7 @@ fn approved_network_trial_parks_and_fences_cancel_revocation_and_lost_commit() {
                 broker::network_trial_confirmation(db, policy::OWNER, &query)
             })
             .unwrap();
-        let mut confirmation = query;
+        let mut confirmation = query.clone();
         confirmation["confirmation_token"] = challenge["confirmation_token"].clone();
         let first = store
             .transaction("network-trial-confirm-first", |db| {
@@ -882,7 +888,9 @@ fn approved_network_trial_parks_and_fences_cancel_revocation_and_lost_commit() {
             })
             .unwrap();
         store
-            .transaction("network-custody-check", |db| trial::verify_active(db.c))
+            .transaction("network-custody-check", |db| {
+                trial::verify_active(db.c, crate::db::CURRENT_FORMAT)
+            })
             .unwrap();
         match interruption {
             "cancel" => {
@@ -969,6 +977,63 @@ fn approved_network_trial_parks_and_fences_cancel_revocation_and_lost_commit() {
                     .transaction("network-trial-restart", broker::recover)
                     .unwrap();
             }
+            "mismatched-rollback" => {
+                let rollback = store
+                    .transaction("prepare-rollback", |db| {
+                        broker::prepare_network_trial_rollback(db, policy::OWNER, &query)
+                    })
+                    .unwrap();
+                store
+                    .transaction("dispatch-rollback", |db| {
+                        broker::authorize_network_trial_rollback(
+                            db,
+                            policy::OWNER,
+                            &query,
+                            &rollback,
+                        )
+                    })
+                    .unwrap();
+                store
+                    .transaction("fence-network-trial-decisions", |db| {
+                        assert!(
+                            broker::authorize_network_trial_confirm(
+                                db,
+                                policy::OWNER,
+                                &confirmation,
+                                &first
+                            )
+                            .is_err()
+                        );
+                        assert!(
+                            broker::authorize_network_trial_rollback(
+                                db,
+                                policy::OWNER,
+                                &query,
+                                &rollback
+                            )
+                            .is_err()
+                        );
+                        Ok(())
+                    })
+                    .unwrap();
+                let wrong_device: trial::RollbackReceipt = decode(&json!({
+                    "results":{"/org/freedesktop/NetworkManager/Devices/19":0},
+                    "observed":{"checkpoint_present":false,
+                        "active":{"path":"/org/freedesktop/NetworkManager/ActiveConnection/3",
+                            "profile_uuid":initial}}
+                }))
+                .unwrap();
+                store
+                    .transaction("persist-unverified-rollback-outcome", |db| {
+                        broker::finish_network_trial_rollback(
+                            db,
+                            policy::OWNER,
+                            &rollback,
+                            Ok(wrong_device),
+                        )
+                    })
+                    .unwrap();
+            }
             _ => unreachable!(),
         }
         let pending = call(&mut store, "Task.Get", json!({"id":task_id})).unwrap();
@@ -984,7 +1049,7 @@ fn approved_network_trial_parks_and_fences_cancel_revocation_and_lost_commit() {
         assert_eq!(pending["result"]["availability"], "Unavailable");
         store
             .transaction("network-trial-retains-held-link", |db| {
-                trial::verify_active(db.c)?;
+                trial::verify_active(db.c, crate::db::CURRENT_FORMAT)?;
                 let holder: String =
                     db.c.query_row("SELECT holder FROM holds WHERE volume=?1", [link], |r| {
                         r.get(0)
@@ -994,6 +1059,7 @@ fn approved_network_trial_parks_and_fences_cancel_revocation_and_lost_commit() {
                     broker::prepare_network_trial_confirm(db, policy::OWNER, &confirmation)
                         .is_err()
                 );
+                assert!(broker::prepare_network_trial_rollback(db, policy::OWNER, &query).is_err());
                 let late: trial::ConfirmationReceipt =
                     decode(&json!({"checkpoint_present":false,"active":active}))?;
                 assert!(

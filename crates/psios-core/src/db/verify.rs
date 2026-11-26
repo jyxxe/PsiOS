@@ -197,7 +197,10 @@ pub(super) fn check_artifacts(
         crate::apps::health::verify(conn)?;
     }
     if identity.database_format >= crate::node::network::trial::FORMAT {
-        crate::node::network::trial::verify_active(conn)?;
+        crate::node::network::trial::verify_active(conn, identity.database_format)?;
+    }
+    if identity.database_format >= crate::node::network::trial::ROLLBACK_FORMAT {
+        crate::node::network::trial::rollback_verify::check(conn)?;
     }
     if identity.database_format >= crate::storage::restore_publication::DISPOSAL_FORMAT {
         crate::storage::restore_publication::verify(conn)?;

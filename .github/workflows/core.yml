@@ -69,8 +69,10 @@ jobs:
               mount_targets+=("$directory")
             fi
           done
-          sudo -n unshare --net --mount --uts --propagation private /usr/bin/env "${network_env[@]}" \
-            /usr/bin/python3 -B tests/network_trial.py --bin-dir "$PWD/target/debug"
+          for scenario in network_trial.py network_trial_abort.py; do
+            sudo -n unshare --net --mount --uts --propagation private /usr/bin/env "${network_env[@]}" \
+              /usr/bin/python3 -B "tests/$scenario" --bin-dir "$PWD/target/debug"
+          done
       - name: Read live cgroup limits and verify pressure on a kernel without visible counters
         run: |
           sudo systemd-run --quiet --collect --wait --pipe --property=WorkingDirectory="$PWD" \

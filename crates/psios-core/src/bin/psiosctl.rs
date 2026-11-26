@@ -109,6 +109,12 @@ enum Cmd {
         #[arg(default_value = "-")]
         file: String,
     },
+    /// Request immediate rollback of an exact active trial.
+    NetworkTrialRollback {
+        operation: String,
+        #[arg(long)]
+        revision: String,
+    },
     /// Manage a local Project and its members.
     Project {
         #[command(subcommand)]
@@ -741,6 +747,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or("missing network confirmation token")?;
             c.confirm_network_trial(&operation, &revision, token)?
         }
+        Cmd::NetworkTrialRollback {
+            operation,
+            revision,
+        } => c.rollback_network_trial(&operation, &revision)?,
         Cmd::Project { command } => {
             let record = match command {
                 ProjectCommand::Create { file } => {

@@ -12,6 +12,7 @@ use std::{collections::BTreeMap, process::Command};
 pub(crate) mod artifact_install;
 pub(crate) mod capture;
 mod cgroup;
+pub(crate) mod health;
 pub(crate) mod inventory;
 pub(crate) mod log_tail;
 pub(crate) mod publisher;
@@ -69,6 +70,9 @@ pub fn validate(s: &Install) -> Result<()> {
         "InvalidArgument",
         "resource limits outside local profile",
     )?;
+    if let Some(probe) = &s.health_check {
+        probe.validate()?;
+    }
     environment(&s.environment)
 }
 pub fn profiles(db: &Db<'_>) -> Result<()> {
@@ -198,7 +202,8 @@ pub fn launch_spec(db: &Db<'_>, app: &Doc, authorizing_start: bool) -> Result<In
         "cpu_millicores": count("cpu_millicores")?,
         "memory_max_bytes": count("memory_max_bytes")?,
         "pids_max": count("pids_max")?,
-        "ephemeral_max_bytes": count("ephemeral_max_bytes")?
+        "ephemeral_max_bytes": count("ephemeral_max_bytes")?,
+        "health_check": health::release(db.c, &release, &spec, &image)?
     }))?;
     validate(&launch)?;
     Ok(launch)
@@ -312,6 +317,9 @@ impl Engine<'_> {
             .map_err(|_| err("DependencyUnavailable", "unreadable OCI metadata"))
     }
     fn image(&self, image: &str) -> Result<Value> {
+        self.inspect_image(image, None)
+    }
+    fn inspect_image(&self, image: &str, probe: Option<&health::Probe>) -> Result<Value> {
         let v = self.inspect("image", image)?;
         require(
             v["Id"] == image
@@ -322,14 +330,19 @@ impl Engine<'_> {
             "UnsupportedCapability",
             "expected local Linux image without implicit volumes",
         )?;
-        Ok(json!({
+        let mut inspection = json!({
             "config_digest": image,
             "os": v["Os"],
             "architecture": v["Architecture"],
             "created": v["Created"],
             "layers": v["RootFS"]["Layers"],
             "inspected_at": now()
-        }))
+        });
+        if let Some(probe) = probe {
+            probe.require_image(&v)?;
+            inspection["health_check"] = json!(probe);
+        }
+        Ok(inspection)
     }
     fn check_engine(&self) -> Result<EngineProfile> {
         let out = self.command(&["info", "--format", "{{json .}}"].map(String::from), false)?;
@@ -484,7 +497,7 @@ pub fn start(w: &Work, checkpoint: impl FnOnce(&str, &str) -> Result<()>) -> Res
         .launch
         .as_ref()
         .ok_or_else(|| err("PreconditionFailed", "missing validated release"))?;
-    e.image(&s.image_id)?;
+    e.inspect_image(&s.image_id, s.health_check.as_ref())?;
     let engine = e.check_engine()?;
     let uid = rustix::process::geteuid().as_raw();
     let gid = rustix::process::getegid().as_raw();
@@ -504,7 +517,6 @@ pub fn start(w: &Work, checkpoint: impl FnOnce(&str, &str) -> Result<()>) -> Res
         "--security-opt=no-new-privileges",
         "--restart=no",
         "--ipc=none",
-        "--no-healthcheck",
         "--log-driver=local",
         "--log-opt=max-size=1m",
         "--log-opt=max-file=1",
@@ -518,6 +530,9 @@ pub fn start(w: &Work, checkpoint: impl FnOnce(&str, &str) -> Result<()>) -> Res
     ]
     .map(String::from)
     .to_vec();
+    if s.health_check.is_none() {
+        args.push("--no-healthcheck".into());
+    }
     args.extend([
         format!("--label=io.psios.application={}", w.target.id),
         format!("--label=io.psios.operation={}", w.op.id),
@@ -560,7 +575,14 @@ pub fn start(w: &Work, checkpoint: impl FnOnce(&str, &str) -> Result<()>) -> Res
             "created instance identity requires reconciliation",
         )
     })?;
-    verify_isolation(w, &v, s, &user)?;
+    if let Err(error) = verify_isolation(w, &v, s, &user) {
+        if error.0.code == "PreconditionFailed"
+            && e.discard_unstarted(w, &cid, &engine.id).unwrap_or(false)
+        {
+            return Err(error);
+        }
+        return Err(err("OutcomeUnknown", error.0.message));
+    }
     require(
         e.identity().is_ok_and(|id| id == engine.id),
         "OutcomeUnknown",
@@ -584,7 +606,8 @@ pub fn start(w: &Work, checkpoint: impl FnOnce(&str, &str) -> Result<()>) -> Res
     let observed = e
         .managed(w, &cid, &w.op.id)
         .map_err(|_| err("OutcomeUnknown", "start receipt requires reconciliation"))?;
-    verify_isolation(w, &observed, s, &user)?;
+    verify_isolation(w, &observed, s, &user)
+        .map_err(|error| err("OutcomeUnknown", error.0.message))?;
     let state = &observed["State"];
     let running = state["Running"]
         .as_bool()
@@ -601,13 +624,15 @@ pub fn start(w: &Work, checkpoint: impl FnOnce(&str, &str) -> Result<()>) -> Res
         "OutcomeUnknown",
         "engine changed before the start receipt",
     )?;
-    Ok(json!({
+    let mut report = json!({
         "container_id": cid,
         "engine_id":engine.id,
         "process_running": running,
         "effective_limits": limits,
         "observed_at": now()
-    }))
+    });
+    health::status(&mut report, s.health_check.as_ref(), state);
+    Ok(report)
 }
 fn tmpfs_options(bytes: u64) -> String {
     format!("rw,noexec,nosuid,nodev,size={bytes}")
@@ -688,7 +713,8 @@ fn verify_isolation(w: &Work, v: &Value, s: &Install, user: &str) -> Result<()> 
             && h["LogConfig"]["Config"]["max-file"] == "1",
         "OutcomeUnknown",
         "OCI instance configuration differs from the approved isolation profile",
-    )
+    )?;
+    health::verify_runtime(s.health_check.as_ref(), v)
 }
 
 fn observe_start(w: &Work, e: &Engine<'_>, checkpoint: &Doc) -> Result<Value> {
@@ -735,20 +761,23 @@ fn observe_start(w: &Work, e: &Engine<'_>, checkpoint: &Doc) -> Result<Value> {
         "PreconditionFailed",
         "OCI engine changed during observation",
     )?;
-    Ok(
-        json!({"container_id":cid, "engine_id":engine.id, "start_operation_id":op,
+    let mut report = json!({"container_id":cid, "engine_id":engine.id, "start_operation_id":op,
         "checkpoint_ref":checkpoint.reference(), "process_running":running,
-        "runtime_state":state["Status"], "effective_limits":limits, "readiness":"Unknown","health":"Unknown","observed_at":now()}),
-    )
+        "runtime_state":state["Status"], "effective_limits":limits,"observed_at":now()});
+    health::status(&mut report, launch.health_check.as_ref(), state);
+    Ok(report)
 }
 
 pub fn perform(w: &Work) -> Result<Value> {
     let e = Engine(&w.cfg);
     match &w.action {
         Action::InspectOciInstance(_) => restart::observe(w),
-        Action::Install(s) | Action::Stage { release: s, .. } => e.image(&s.image_id),
+        Action::Install(s) | Action::Stage { release: s, .. } => {
+            e.inspect_image(&s.image_id, s.health_check.as_ref())
+        }
         Action::InstallArtifact(_) | Action::StageArtifactRelease(_) => {
-            e.image(&artifact_spec(w)?.image_id)
+            let s = artifact_spec(w)?;
+            e.inspect_image(&s.image_id, s.health_check.as_ref())
         }
         Action::Select { release_ref, .. } => Ok(json!({"release_ref":release_ref})),
         Action::RetireRelease(_) => Ok(json!({})),
@@ -790,7 +819,10 @@ pub fn perform(w: &Work) -> Result<Value> {
                 "PreconditionFailed",
                 "OCI engine changed during health observation",
             )?;
-            Ok(stop::health(&w.target.body, &v))
+            health::verify_runtime(w.oci_health_check.as_ref(), &v)?;
+            let mut observation = stop::health(&w.target.body, &v);
+            health::status(&mut observation, w.oci_health_check.as_ref(), &v["State"]);
+            Ok(observation)
         }
         _ => Err(err("UnsupportedCapability", "unknown OCI operation")),
     }
@@ -812,7 +844,8 @@ fn record_release(
     let specid = id("release-spec");
     let profile = db.get("oci-local")?.reference();
     let archive = artifact_install::work_archive(db, work)?;
-    let mut image = json!({"config_digest": s.image_id, "inspection": r, "source": "local-engine"});
+    let mut image = json!({"config_digest": s.image_id, "inspection": r, "source": "local-engine",
+        "health_admission":health::record(db,work,s)?});
     if let Some(archive) = &archive {
         archive.check_image(r)?;
         image["image_archive_ref"] = archive.artifact.reference();
@@ -918,6 +951,7 @@ fn record_release(
         "backup_scope_ref": db.get("local-backup")?.reference()
     });
     let spec = db.create("ApplicationReleaseSpec", &specid, owner, json!({}), spec)?;
+    let health_check_ref = health::pin(db, &spec, &image, s.health_check.as_ref())?;
     let volumes = if has_volume {
         json!([{"name":"data","minimum_bytes":"1","access_mode":"single_node_rw","schema_ref":db.get("local-files")?.reference()}])
     } else {
@@ -936,7 +970,7 @@ fn record_release(
         "required_capability_refs": [],
         "volume_requirements": volumes,
         "network_policy_ref": db.get("oci-network")?.reference(),
-        "health_check_ref": db.get("oci-health")?.reference(),
+        "health_check_ref": health_check_ref,
         "migration_plan_ref": db.get("local-migration")?.reference(),
         "rollback_policy_ref": db.get("local-rollback")?.reference(),
         "compatibility_claims": [{"capability":"Recognized","result":"Passed","profile_ref":profile,"evidence_refs":[image.reference()],"limitations":["Local image inspection only"]}]
@@ -1121,7 +1155,7 @@ pub fn apply(db: &Db<'_>, w: &Work, r: &Value) -> Result<Value> {
             }
             Ok(db.status(&w.target, b)?.reference())
         }
-        Action::Start(_) => started(db, &w.target, &w.op.id, w.volume.as_ref(), r),
+        Action::Start(_) => started(db, &w.target, &w.op.id, w.volume.as_ref(), r, false),
         Action::RestartApp(_) => restart::settle(db, &w.op, &w.target, r),
         Action::Stop(_) => stopped(
             db,
@@ -1151,6 +1185,7 @@ pub fn started(
     op_id: &str,
     volume: Option<&Doc>,
     r: &Value,
+    recovered: bool,
 ) -> Result<Value> {
     if let Some(v) = volume {
         attachment(db, app, op_id, v, true)?;
@@ -1176,8 +1211,9 @@ pub fn started(
     b["lifecycle"] = json!("Running");
     b["desired_state"] = json!("Running");
     b["runtime_state"] = json!(runtime);
-    b["health"] = json!("Unknown");
-    b["readiness"] = json!(if running { "Unknown" } else { "NotReady" });
+    let (health, readiness) = health::projection(r, recovered);
+    b["health"] = json!(health);
+    b["readiness"] = json!(readiness);
     b["observed_at"] = r["observed_at"].clone();
     b["start_operation_id"] = json!(op_id);
     b["engine_id"] = r["engine_id"].clone();

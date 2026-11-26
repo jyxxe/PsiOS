@@ -177,6 +177,9 @@ pub(super) fn check_artifacts(
     if identity.database_format >= crate::node::network::probe::state::FORMAT {
         crate::node::network::probe::state::verify(conn)?;
     }
+    if identity.database_format >= crate::apps::health::FORMAT {
+        crate::apps::health::verify(conn)?;
+    }
     Ok(())
 }
 

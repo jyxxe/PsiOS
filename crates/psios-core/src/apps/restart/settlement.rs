@@ -27,9 +27,11 @@ fn published_invocation(
     custody: &Custody,
     checkpoint: &Doc,
     published: &Doc,
+    recovered: bool,
 ) -> Result<Doc> {
     let instance = resolve(conn, &published.body["instance_ref"])?;
     let after = &published.body["last_observation"];
+    let (health, readiness) = crate::apps::health::projection(after, recovered);
     require(
         published.kind == "Application"
             && published.id == custody.app.id
@@ -40,9 +42,11 @@ fn published_invocation(
             && published.body["lifecycle"] == "Running"
             && custody.running(after)
             && changed(&checkpoint.body["before"], after)
-            && ["runtime_state", "readiness", "health", "observed_at"]
+            && ["runtime_state", "observed_at"]
                 .iter()
                 .all(|field| published.body[*field] == after[*field])
+            && published.body["health"] == health
+            && published.body["readiness"] == readiness
             && instance.kind == "RuntimeInstance"
             && instance.id == custody.instance.id
             && instance.rev == custody.instance.rev + 1
@@ -71,7 +75,14 @@ pub(crate) fn record_settlement(db: &Db<'_>, op: &Doc, receipt: &Doc) -> Result<
     })?;
     let reference = artifact::read(db, receipt, Some(32 * 1024))?;
     let app = db.resolve(&reference)?;
-    let instance = published_invocation(db.c, op, &record.custody, &checkpoint, &app)?;
+    let instance = published_invocation(
+        db.c,
+        op,
+        &record.custody,
+        &checkpoint,
+        &app,
+        op.body["outcome_knowledge"] == "Unknown",
+    )?;
     Ok(Some(db.create(CONFIRMATION,&confirmation_id(&op.id),&op.owner,json!({"operation_id":op.id}),json!({
         "checkpoint_ref":checkpoint.reference(),"operation_ref":op.reference(),"effect_ref":record.effect.reference(),
         "result_ref":receipt.reference(),"application_ref":app.reference(),"instance_ref":instance.reference(),
@@ -243,7 +254,14 @@ fn check_completed(conn: &Connection, op: &Doc, journal: &Journal) -> Result<boo
         let bytes = artifact::checkpoint_bytes(conn, &receipt, 32 * 1024)?;
         resolve(conn, &psios_api::parse(&bytes)?)?
     };
-    let instance = published_invocation(conn, op, &journal.custody, checkpoint, &application)?;
+    let instance = published_invocation(
+        conn,
+        op,
+        &journal.custody,
+        checkpoint,
+        &application,
+        effect.body["phase"] == "EffectReconciled",
+    )?;
     require(
         result_matches(&receipt, &application.reference())?,
         "RecoveryRequired",

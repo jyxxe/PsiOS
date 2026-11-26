@@ -304,6 +304,14 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 
 旧任务已接受的执行仍可结算。升级按现有块式制品清单和待执行 Task 回填用量。写操作的效果证据、资源状态投影和恢复核验继续由原来的权威存储保护。[配额、重启与真实回收验收](../tests/test_read_result_quota.py) · [格式 50 用量回填](../tests/read_result_quota_upgrade.py)
 
+### 批量回收任务结果字节
+
+本机所有者可用 `Task.PrepareResultEvictionBatch` 提交 1 至 16 个完整 Task 引用和非空 `reason`。可选 `max_content_bytes` 默认 16 MiB，上限 64 MiB。预检核对已结算的只读 Task、产物完整性和当前保留关系，返回每项字节数、总量以及两分钟内有效的 `plan_token`。CLI 用 `psiosctl task-result-eviction-plan` 从标准输入读取这份 JSON 请求。
+
+`Task.ApplyResultEvictionBatch` 接收计划令牌。Core 在同一事务重新核对当前任务修订、产物和工作流、会话、项目证据等保留关系。全部满足时才回收各项任务的制品字节，并记录原 Task 引用、每项原回执和整批回执。期间出现新的保留关系或部分写入错误时，整批回滚。授权代次、启动身份、时间命名空间或控制权变化会使未执行计划失效。已结算的原请求在当前权威下可按原令牌重放查询回执。
+
+`psiosctl task-result-eviction-apply` 可直接读取计划输出的 JSON。回执中的 `content_bytes_removed` 记录释放的逻辑载荷字节数。离线核验检查同一事务内各项回执、历史 Task 修订和分块确实已删除。[跨模块保留与回滚验收](../tests/test_task_result_eviction_batch.py)
+
 ## 本机制品暂存与发布
 
 `Artifact.UploadProfile` 公布 `OpaqueBytesV1` 的分块、大小、暂存期限及配额。上传主体需要以本机 Node 为目标的 `artifact.upload` Grant。`Artifact.Stage` 固定提交键、预计字节数、SHA-256、声明媒体类型和期限。`Artifact.Stage.PutChunk` 按已提交偏移接收 128 KiB 定长块及末块。中断后通过 `Artifact.Stage.Get` 取得继续位置，用同一键和输入恢复。

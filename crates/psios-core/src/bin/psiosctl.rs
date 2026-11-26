@@ -155,6 +155,16 @@ enum Cmd {
     TaskResults {
         id: String,
     },
+    /// Preview reclamation for exact Task references in a JSON file or stdin.
+    TaskResultEvictionPlan {
+        #[arg(default_value = "-")]
+        file: String,
+    },
+    /// Apply a result-eviction plan from a JSON file or stdin.
+    TaskResultEvictionApply {
+        #[arg(default_value = "-")]
+        file: String,
+    },
     /// Verify and write stored bytes for an Artifact reference from a file or stdin.
     Artifact {
         #[arg(default_value = "-")]
@@ -818,6 +828,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Cmd::SessionResume { id, revision } => c.resume_session(&id, &revision)?,
         Cmd::TaskResults { id } => c.task_results(&id)?,
+        Cmd::TaskResultEvictionPlan { file } => serde_json::to_value(
+            c.prepare_result_eviction_batch(&serde_json::from_value(input(&file)?)?)?,
+        )?,
+        Cmd::TaskResultEvictionApply { file } => {
+            let plan = input(&file)?;
+            let token = plan["plan_token"]
+                .as_str()
+                .ok_or("missing eviction plan token")?;
+            serde_json::to_value(c.apply_result_eviction_batch(token)?)?
+        }
         Cmd::Artifact { file, max_bytes } => {
             let reference = serde_json::from_value(input(&file)?)?;
             std::io::stdout().write_all(&c.artifact_bytes(&reference, max_bytes)?)?;

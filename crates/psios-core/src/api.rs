@@ -85,6 +85,10 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         }
         "Capability.LocalReadTools" => local_read_tools::discover(db, actor, p),
         "Capability.ResolveLocalReadTools" => local_read_tools::resolve(db, actor, p),
+        "McpTask.Start" => mcp_tasks::start(db, actor, p),
+        "McpTask.Get" | "McpTask.Update" | "McpTask.Cancel" => {
+            mcp_tasks::access(db, actor, method, p)
+        }
         "Tool.Call" => {
             let p: ToolCall = decode(p)?;
             let d = policy::delegation(db, actor, &p.delegation_id, &p.tool)?;

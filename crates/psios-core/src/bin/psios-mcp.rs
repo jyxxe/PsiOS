@@ -56,6 +56,12 @@ struct Options {
     /// Include observations for one exact registered HostService ID.
     #[arg(long, value_name = "HOST_SERVICE_ID", value_parser = parse_target)]
     service_inspect: Option<String>,
+    /// Enable modern durable Tasks for an exact local endpoint identity.
+    #[arg(long, value_name = "ENDPOINT_ID", value_parser = parse_endpoint)]
+    tasks_endpoint: Option<String>,
+    /// Lifetime of new task handles in seconds.
+    #[arg(long, requires = "tasks_endpoint", value_parser = clap::value_parser!(u32).range(1..=600))]
+    tasks_ttl_seconds: Option<u32>,
 }
 
 fn parse_tool(name: &str) -> Result<LocalReadTool, &'static str> {
@@ -67,6 +73,18 @@ fn parse_target(id: &str) -> Result<String, &'static str> {
         return Err("invalid resource ID");
     }
     Ok(id.to_owned())
+}
+
+fn parse_endpoint(id: &str) -> Result<String, &'static str> {
+    if (1..=96).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    {
+        Ok(id.to_owned())
+    } else {
+        Err("invalid MCP Tasks endpoint identity")
+    }
 }
 
 fn credential(path: &Path) -> io::Result<String> {
@@ -100,10 +118,16 @@ struct Adapter {
     client: Client,
     delegation_id: String,
     bindings: Vec<LocalReadBinding>,
+    tasks: Option<TaskProfile>,
     phase: Phase,
     requests: HashSet<String>,
     call_window: Instant,
     calls: u8,
+}
+
+struct TaskProfile {
+    endpoint: String,
+    ttl_seconds: u32,
 }
 
 struct AvailableTool<'a> {
@@ -178,17 +202,6 @@ impl Adapter {
 
     fn invoke(&mut self, name: &str, cancelled: Option<&AtomicBool>) -> Result<Value, Value> {
         let abandoned = || cancelled.is_some_and(|flag| flag.load(Ordering::Acquire));
-        if abandoned() {
-            return Err(tool_error("Cancelled", None));
-        }
-        if self.call_window.elapsed() >= Duration::from_secs(1) {
-            self.call_window = Instant::now();
-            self.calls = 0;
-        }
-        if self.calls == CALLS_PER_SECOND {
-            return Err(tool_error("RateLimited", None));
-        }
-        self.calls += 1;
         let selected = self
             .available()
             .map_err(|error| tool_error(&error.code, None))?
@@ -260,28 +273,24 @@ impl Adapter {
         if selected.binding.target().is_some() && live.target_ref != selected.target_ref {
             return Err(failed("PreconditionFailed"));
         }
-        let structured = json!({"task_id":task_id,"result":result});
-        let text = structured.to_string();
-        if text.len() > MAX_RESULT {
-            return Err(failed("QuotaExceeded"));
-        }
-        Ok(
-            json!({"isError":false,"structuredContent":structured,"content":[{"type":"text","text":text}]}),
-        )
+        tool_result(task_id, result)
     }
 
     fn tool_call(
         &mut self,
         params: &Map<String, Value>,
         cancelled: Option<&AtomicBool>,
+        invocation: Option<&str>,
     ) -> Result<Value, (i32, &'static str)> {
         let name = params
             .get("name")
             .and_then(Value::as_str)
             .ok_or((-32602, "Invalid tool name"))?;
-        if !self.bindings.iter().any(|tool| tool.name() == name) {
-            return Err((-32602, "Unknown tool"));
-        }
+        let binding = self
+            .bindings
+            .iter()
+            .find(|tool| tool.name() == name)
+            .ok_or((-32602, "Unknown tool"))?;
         if params
             .get("arguments")
             .is_some_and(|arguments| !arguments.is_object())
@@ -294,6 +303,42 @@ impl Adapter {
             .is_some_and(|arguments| !arguments.is_empty())
         {
             return Ok(tool_error("InvalidArgument", None));
+        }
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return Ok(tool_error("Cancelled", None));
+        }
+        if self.call_window.elapsed() >= Duration::from_secs(1) {
+            self.call_window = Instant::now();
+            self.calls = 0;
+        }
+        if self.calls == CALLS_PER_SECOND {
+            return Ok(tool_error("RateLimited", None));
+        }
+        self.calls += 1;
+        if let Some(key) = invocation {
+            let profile = self
+                .tasks
+                .as_ref()
+                .ok_or((-32601, "MCP Tasks is disabled"))?;
+            let result = self.client.call(
+                "McpTask.Start",
+                json!({"endpoint":profile.endpoint,
+                "delegation_id":self.delegation_id,"binding":binding,"invocation_key":key,
+                "ttl_seconds":profile.ttl_seconds}),
+            );
+            return Ok(result
+                .map(|mut task| {
+                    task["resultType"] = json!("task");
+                    task
+                })
+                .unwrap_or_else(|error| {
+                    let code = if error.code == "DependencyUnavailable" {
+                        "OutcomeUnknown"
+                    } else {
+                        &error.code
+                    };
+                    tool_error(code, None)
+                }));
         }
         Ok(self
             .invoke(name, cancelled)
@@ -359,7 +404,7 @@ impl Adapter {
                     .collect();
                 Ok(json!({"tools":tools}))
             }
-            "tools/call" if fields(&["name", "arguments"]) => self.tool_call(params, None),
+            "tools/call" if fields(&["name", "arguments"]) => self.tool_call(params, None, None),
             "tools/list" | "tools/call" | "ping" => {
                 Err((-32602, "Invalid or unsupported parameters"))
             }
@@ -427,6 +472,17 @@ fn descriptor(tool: &LocalReadBinding, protocol: Protocol) -> Value {
         descriptor["execution"] = json!({"taskSupport":"forbidden"});
     }
     descriptor
+}
+
+fn tool_result(task_id: &str, result: Value) -> Result<Value, Value> {
+    let structured = json!({"task_id":task_id,"result":result});
+    let text = structured.to_string();
+    if text.len() > MAX_RESULT {
+        return Err(tool_error("QuotaExceeded", Some(task_id)));
+    }
+    Ok(
+        json!({"isError":false,"structuredContent":structured,"content":[{"type":"text","text":text}]}),
+    )
 }
 
 fn tool_error(code: &str, task: Option<&str>) -> Value {
@@ -498,6 +554,9 @@ fn main() -> io::Result<()> {
     if bindings.is_empty() {
         bindings.push(LocalReadBinding::SystemStatus {});
     }
+    if options.tasks_endpoint.is_some() && matches!(options.protocol, Protocol::Legacy) {
+        return Err(io::Error::other("MCP Tasks requires --protocol 2026-07-28"));
+    }
     let client = Client::new(options.socket, credential(&options.token_file)?)
         .with_service_uid(options.service_uid.unwrap_or_else(|| geteuid().as_raw()))
         .with_fail_fast_connect();
@@ -505,6 +564,10 @@ fn main() -> io::Result<()> {
         client,
         delegation_id: options.delegation,
         bindings,
+        tasks: options.tasks_endpoint.map(|endpoint| TaskProfile {
+            endpoint,
+            ttl_seconds: options.tasks_ttl_seconds.unwrap_or(300),
+        }),
         phase: Phase::New,
         requests: HashSet::new(),
         call_window: Instant::now(),

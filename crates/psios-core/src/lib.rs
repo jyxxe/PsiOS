@@ -13,6 +13,7 @@ mod linux_cgroup;
 mod linux_clock;
 mod linux_proc;
 mod local_read_tools;
+mod mcp_tasks;
 mod node;
 mod policy;
 mod project;

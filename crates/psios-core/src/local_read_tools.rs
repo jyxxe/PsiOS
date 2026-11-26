@@ -12,7 +12,7 @@ use psios_api::{
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
-fn agent(db: &Db<'_>, actor: &str) -> Result<()> {
+pub(crate) fn agent(db: &Db<'_>, actor: &str) -> Result<()> {
     let principal = db.of(actor, "Principal")?;
     require(
         principal.spec["principal_type"] == "Agent" && principal.body["lifecycle"] == "Active",
@@ -21,7 +21,7 @@ fn agent(db: &Db<'_>, actor: &str) -> Result<()> {
     )
 }
 
-fn task_authority(db: &Db<'_>, actor: &str, delegation_id: &str) -> Result<bool> {
+pub(crate) fn task_authority(db: &Db<'_>, actor: &str, delegation_id: &str) -> Result<bool> {
     for action in ["task.submit", "task.read"] {
         match policy::delegation(db, actor, delegation_id, action) {
             Err(error) if error.0.code == "PermissionDenied" => return Ok(false),
@@ -79,7 +79,7 @@ pub(crate) fn discover(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value
     Ok(json!({"tools":visible}))
 }
 
-fn explicitly_scoped(db: &Db<'_>, delegation: &Doc, target: &str) -> Result<bool> {
+pub(crate) fn explicitly_scoped(db: &Db<'_>, delegation: &Doc, target: &str) -> Result<bool> {
     let grant_id = delegation.body["grant_id"]
         .as_str()
         .ok_or_else(|| err("RecoveryRequired", "delegation has no root grant"))?;
@@ -91,7 +91,7 @@ fn explicitly_scoped(db: &Db<'_>, delegation: &Doc, target: &str) -> Result<bool
     }))
 }
 
-fn resolve_binding(
+pub(crate) fn resolve_binding(
     db: &Db<'_>,
     actor: &str,
     delegation: &Doc,

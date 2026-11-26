@@ -198,6 +198,8 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Project.SetMember" => project::set_member(db, actor, p),
         "WorkItem.Create" => project::create_item(db, actor, p),
         "WorkItem.Get" => project::get_item(db, actor, p),
+        "WorkItem.History" => project::history::list(db, actor, p),
+        "WorkItem.RevisionGet" => project::history::revision::get(db, actor, p),
         "WorkItem.List" => project::list_items(db, actor, p),
         "WorkItem.SubmitEvidence" => project::submit_evidence(db, actor, p),
         "WorkItem.Review" => project::review(db, actor, p),

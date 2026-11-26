@@ -175,6 +175,25 @@ fn strict_model_lease_binding_is_witnessed_and_cannot_become_legacy() {
         verify(db.c)
     }).unwrap();
 
+    let unused = issue_provider(&mut store);
+    let revoked = call(
+        &mut store,
+        "Grant.Revoke",
+        json!({
+            "id":unused["grant_ref"]["resource_id"],"expected_resource_version":unused["grant_ref"]["version"],
+        }),
+    ).unwrap();
+    assert_eq!(revoked["status"], "Complete");
+    let replay = call_as(
+        &mut store,
+        "Model.Claim",
+        claim_request.clone(),
+        provider_token.into(),
+    )
+    .unwrap();
+    assert_eq!(replay["lease_id"], lease);
+    assert_eq!(replay["context"], issued["context"]);
+
     let grant = &issuer["grant_ref"];
     let revoked = call(
         &mut store,

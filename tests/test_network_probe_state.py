@@ -1,6 +1,7 @@
 """Publish real loopback measurements through the broker and event scheduler."""
 import json
 import os
+from pathlib import Path
 import signal
 import socket
 import struct
@@ -18,8 +19,8 @@ KIND = "NetworkProbeState"
 
 
 class NetworkProbeStateTests(unittest.TestCase):
-    def setUp(self):
-        self.node = Node(os.environ.get("PSIOS_TEST_BIN_DIR", "target/debug"))
+    def start_node(self, binaries=None):
+        self.node = Node(binaries or os.environ.get("PSIOS_TEST_BIN_DIR", "target/debug"))
         self.addCleanup(self.node.close)
         self.actor = self.node.call("Agent.Register", {"name": "probe-state-worker"})
 
@@ -94,11 +95,16 @@ class NetworkProbeStateTests(unittest.TestCase):
         connection.sendall(struct.pack("!H", len(reply)) + reply)
 
     def assert_no_connection(self, listener):
+        previous = listener.gettimeout()
         listener.settimeout(0.15)
-        with self.assertRaises(TimeoutError):
-            listener.accept()
+        try:
+            with self.assertRaises(TimeoutError):
+                listener.accept()
+        finally:
+            listener.settimeout(previous)
 
     def test_exact_grant_and_transition_drive_watch_and_schedule(self):
+        self.start_node()
         n = self.node
         stream = self.socket()
         address = self.endpoint(stream)
@@ -183,6 +189,7 @@ class NetworkProbeStateTests(unittest.TestCase):
         self.assertEqual(n.get(state_id)["value"]["lifecycle"], "Retired")
 
     def test_dns_name_absence_and_invalid_response_have_distinct_states(self):
+        self.start_node()
         service, resolver = self.socket(listening=True), self.socket(listening=True)
         endpoint, resolver_endpoint = self.endpoint(service), self.endpoint(resolver)
         self.configure(dict(name="checked", endpoint=endpoint, timeout_ms=5000,
@@ -209,6 +216,7 @@ class NetworkProbeStateTests(unittest.TestCase):
         self.assert_no_connection(service)
 
     def test_revoked_during_dns_does_not_publish_measurement(self):
+        self.start_node()
         n = self.node
         service, resolver = self.socket(listening=True), self.socket(listening=True)
         self.configure(dict(name="held", endpoint=self.endpoint(service), timeout_ms=5000,
@@ -240,6 +248,7 @@ class NetworkProbeStateTests(unittest.TestCase):
     @unittest.skipUnless(os.environ.get("PSIOS_TEST_PROBE_NETNS") == "1",
                          "requires an isolated Linux namespace with working loopback and nested unshare")
     def test_real_netns_change_requires_fresh_measurement(self):
+        self.start_node()
         n = self.node
         listener = self.socket(listening=True)
         self.configure(dict(name="isolated", endpoint=self.endpoint(listener)))
@@ -288,3 +297,63 @@ class NetworkProbeStateTests(unittest.TestCase):
         restored = measure("Healthy", "TcpOpen", "Connected")
         self.assertEqual(restored["network_namespace_inode"], outer_inode)
         self.assertEqual(restored["boot_id"], reachable["boot_id"])
+
+    @unittest.skipUnless(os.environ.get("PSIOS_TEST_PREVIOUS_PROBE_BIN_DIR"), "requires a format-70 daemon")
+    def test_format_70_probe_upgrade_preserves_identity_and_scoped_grant(self):
+        self.start_node(os.environ["PSIOS_TEST_PREVIOUS_PROBE_BIN_DIR"])
+        n = self.node
+        listener = self.socket(listening=True)
+        self.configure(dict(name="upgrade", endpoint=self.endpoint(listener)))
+        probe = self.probe("upgrade")
+        state_id = "state-" + probe["resource_id"]
+        legacy = self.grant(probe, STATELESS_TOOL)
+        token = self.actor["token"]
+        probe_view = n.call("NetworkProbe.Get", {"id": probe["resource_id"]}, token)
+
+        def assert_connected(measurement):
+            self.assertEqual(measurement["target_ref"], probe)
+            self.assertEqual(measurement["observation"]["tcp"]["status"], "Connected")
+            connection, _ = listener.accept()
+            with connection:
+                connection.settimeout(2)
+                self.assertEqual(connection.recv(1), b"")
+
+        def verify():
+            return json.loads(subprocess.check_output(n.daemon + ["verify"], timeout=15))
+
+        old_task = self.submit(probe, legacy, STATELESS_TOOL)
+        old_result = self.result(old_task)
+        assert_connected(old_result)
+        n.stop(signal.SIGKILL)
+        current = Path(os.environ.get("PSIOS_TEST_BIN_DIR", "target/debug")).resolve()
+        n.daemon[0] = str(current / "psiosd")
+        before = verify()
+        self.assertEqual(before["database_format"], 70, before)
+        self.assertTrue(before["migration_required"], before)
+
+        n.start()
+        self.assertEqual(self.probe("upgrade"), probe)
+        self.assertEqual(n.call("NetworkProbe.Get", {"id": probe["resource_id"]}, token), probe_view)
+        self.assertEqual(self.result(old_task), old_result)
+        self.assertEqual(n.get(legacy["grant_ref"]["resource_id"])["reference"], legacy["grant_ref"])
+        initial = n.get(state_id)
+        self.assertEqual(initial["resource"]["spec"]["probe_ref"], probe)
+        self.assertEqual(initial["value"], {"lifecycle": "Unknown", "reason": None, "observed_at": None})
+        self.assert_no_connection(listener)
+
+        self.rejects("PermissionDenied", self.submit, probe, legacy)
+        assert_connected(self.result(self.submit(probe, legacy, STATELESS_TOOL)))
+        self.assertEqual(n.get(state_id), initial)
+
+        grant = self.grant(probe)
+        result = self.result(self.submit(probe, grant))
+        assert_connected(result["measurement"])
+        state = n.get(state_id)
+        self.assertEqual(result["projection"], "Published", result)
+        self.assertEqual(result["network_probe_state_ref"], state["reference"])
+        self.assertEqual((state["value"]["lifecycle"], state["value"]["reason"]), ("Healthy", "TcpOpen"))
+        n.stop()
+        after = verify()
+        self.assertEqual(after["node_id"], before["node_id"], after)
+        self.assertGreaterEqual(after["database_format"], 72, after)
+        self.assertFalse(after["migration_required"], after)

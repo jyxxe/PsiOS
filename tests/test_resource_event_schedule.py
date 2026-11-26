@@ -2,6 +2,8 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 import json
+import os
+from pathlib import Path
 import signal
 import sqlite3
 import subprocess
@@ -11,10 +13,13 @@ import unittest
 from support import Failure, Node, key, target
 from test_schedule import timestamp
 
+BINARIES = os.getenv("PSIOS_TEST_BIN_DIR", "target/debug")
+PRIOR_BINARIES = os.getenv("PSIOS_SCHEDULE_PRIOR_BIN_DIR")
+
 
 class ResourceEventSchedules(unittest.TestCase):
     def setUp(self):
-        self.node = Node("target/debug")
+        self.node = Node(BINARIES)
         self.addCleanup(self.node.close)
 
     def mode(self, scheduling):
@@ -218,6 +223,16 @@ class ResourceEventSchedules(unittest.TestCase):
         self.assertEqual(n.call("Task.Get", {"id": blocked["task_id"]}), blocked)
 
     def test_pending_older_event_does_not_block_another_principal(self):
+        self.exercise_event_admission_fairness()
+
+    @unittest.skipUnless(PRIOR_BINARIES, "set PSIOS_SCHEDULE_PRIOR_BIN_DIR to actual format 100 binaries")
+    def test_format100_pending_event_keeps_cursor_during_fairness_upgrade(self):
+        self.node.close()
+        self.node = Node(PRIOR_BINARIES)
+        self.addCleanup(self.node.close)
+        self.exercise_event_admission_fairness(upgrade=True)
+
+    def exercise_event_admission_fairness(self, *, upgrade=False):
         n = self.node
         volume, held = self.fill_queue(queue_limit=4, principal_queue_limit=1)
         blocked_scope = self.grant("volume.write", volume["resource_id"])
@@ -236,6 +251,23 @@ class ResourceEventSchedules(unittest.TestCase):
         later = n.call("Schedule.Create", self.request(independent_scope, next_source), independent["token"])
         later_event = self.mode("Cordoned")
         self.mode("Enabled")
+        before = None
+        if upgrade:
+            self.assertEqual(n.call("Task.Admission", {}, independent["token"])["ordinary"],
+                             {"used": 0, "limit": 1})
+            stalled_until = time.monotonic() + 1.1
+            while time.monotonic() < stalled_until:
+                self.assertEqual(self.pending(blocked), (current, pending))
+                self.assertEqual(self.state(later), later)
+                time.sleep(0.05)
+            self.assertEqual(self.budget(independent_scope), (0, 0))
+            n.stop(signal.SIGKILL)
+            n.daemon[0] = str(Path(BINARIES, "psiosd").absolute())
+            before = json.loads(subprocess.check_output(n.daemon + ["verify"], timeout=20))
+            self.assertEqual(before["database_format"], 100, before)
+            self.assertTrue(before["migration_required"], before)
+            n.start()
+
         self.wait(later, lambda s: s["lifecycle"] == "Completed")
         later_trigger, = self.triggers(later)
         self.assertEqual(later_trigger["source_event"]["resource_ref"], later_event)
@@ -254,7 +286,11 @@ class ResourceEventSchedules(unittest.TestCase):
             self.assertEqual(record, ("ResourceEvent", pending["state"]["trigger_id"],
                                       int(pending["state"]["source_event"]["source_seq"]),
                                       int(original_source["version"][1:])))
-        subprocess.run(n.daemon + ["verify"], check=True, stdout=subprocess.DEVNULL, timeout=20)
+        verified = json.loads(subprocess.check_output(n.daemon + ["verify"], timeout=20))
+        self.assertGreaterEqual(verified["database_format"], 101, verified)
+        self.assertFalse(verified["migration_required"], verified)
+        if before is not None:
+            self.assertEqual(verified["node_id"], before["node_id"])
         n.start()
         self.assertEqual(self.pending(blocked), (current, pending))
         self.assertEqual(self.triggers(later), [later_trigger])

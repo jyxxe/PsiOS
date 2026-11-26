@@ -1,5 +1,5 @@
 //! Bounded retries that retain the original time window or source event.
-use super::{due_ms, instant, resource_event, trigger_id};
+use super::{deferred, due_ms, instant, resource_event, trigger_id};
 use crate::{
     Result, Store,
     db::{Db, Doc, find, resolve, row},
@@ -184,7 +184,13 @@ pub(super) fn after_refusal(
     correlation: &str,
     action: impl FnOnce(&Db<'_>) -> Result<()>,
 ) -> Result<()> {
-    match store.transaction(correlation, action) {
+    match store.transaction(correlation, |db| match db.cfg.check_admission_space() {
+        Ok(()) => action(db),
+        // Every owner shares this storage gate. Keep its remaining space
+        // available for settling elapsed or already accepted work.
+        Err(error) if deferred(&error) => Ok(()),
+        Err(error) => Err(error),
+    }) {
         Err(error) if error.0.code == "StorageUnavailable" && !store.transaction_is_uncertain() => {
             eprintln!("psiosd schedule admission deferral: {}", error.0.code);
             Ok(())

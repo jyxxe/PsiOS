@@ -470,15 +470,19 @@ class ScheduleTests(unittest.TestCase):
         view = n.call("Node.Get", {})["authority_storage"]["state"]
         reserve = int(view["capacity_bytes"]) + 4096
         admission = n.prepare("system.status", {})
-        once_request = self.request(grant, run=1.5, deadline=3)
+        once_request = self.request(grant, run=1.5, deadline=5)
         timer = n.call("Schedule.Create", once_request)
-        interval_request = self.interval(grant, count=2, every=1, run=1.5, deadline=2.8)
+        interval_request = self.interval(grant, count=2, every=1, run=1.5, deadline=4.8)
         series = n.call("Schedule.Create", interval_request)
         n.stop()
         n.config.write_text(json.dumps(dict(json.loads(n.config.read_text()), authority_reserve={"state_bytes": reserve})))
         n.start()
         self.assertTrue(n.call("Node.Get", {})["authority_storage"]["state"]["below_reserve"])
         self.rejected("QuotaExceeded", "Task.Submit", admission)
+        after(once_request["run_at"], 0.5)
+        self.assertEqual(self.state(timer), timer)
+        with closing(sqlite3.connect(n.state / "state.db")) as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM schedule_admission_deferrals").fetchone(), (0,))
         complete_once = self.wait(timer, "Expired")
         self.assertEqual(complete_once["state"]["reason"], "DeadlineExceeded")
         self.assertIsNone(complete_once["state"]["task_receipt"])

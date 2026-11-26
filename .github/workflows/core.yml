@@ -645,6 +645,13 @@ jobs:
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format99" "$RUNNER_TEMP/psios-compatibility-target"
           PSIOS_SESSION_INPUT_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
             python3 -B -m unittest discover -s tests -p test_agent_session_inputs.py -k test_old_inflight -v
+      - name: Preserve a pending format 100 event while restoring fair schedule admission
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format100"
+          git archive 10f1e6b90f6c5c0dff766d2dff852fa420d15e6a Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format100"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format100" "$RUNNER_TEMP/psios-compatibility-target"
+          PSIOS_SCHEDULE_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
+            python3 -B -m unittest discover -s tests -p test_resource_event_schedule.py -k test_format100 -v
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

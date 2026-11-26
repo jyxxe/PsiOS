@@ -525,7 +525,7 @@ Core 在真正派发时重查项目成员、授权和工作项修订。在同一
 
 创建工作项时可用 `parent_id` 指向同项目中处于 `Ready` 的已有工作项。父关系随新工作项固定。Core 检查父子关系和 `blocked_by` 共同形成的等待图，拒绝直接或间接循环。每个子项仍各自提交证据、审核并关闭。父项经过评审后，须等直接子项均关闭才能执行最后的关闭操作。`psiosctl work-item children ID` 在当前项目授权范围内分页查询直属子项。[父子关系与关闭验收](../tests/test_work_item_hierarchy.py)
 
-`WorkItem.Assigned` 按当前身份和项目授权分页列出自己负责的 `Ready` 工作项。请求提供 `project_id`，可选 `after_id`、`limit` 和 `include_blocked`。默认只返回可开始的项目，打开 `include_blocked` 可查看自己尚被依赖阻塞的工作项。CLI 使用 `psiosctl work-item assigned` 读取标准输入的 JSON。
+`WorkItem.Assigned` 按当前身份和项目授权分页列出自己负责的 `Ready` 工作项。请求提供 `project_id`，可选 `after_id`、`limit` 和 `include_blocked`，每页最多 16 项。默认只返回可开始的工作项，打开 `include_blocked` 可查看自己尚被依赖阻塞的工作项。CLI 使用 `psiosctl work-item assigned` 读取标准输入的 JSON。
 
 原生 Agent 的 Skill 可登记只读工具 `project.list_assigned_work`。工具请求还需提供 `expected_project_version`，委托须包含该工具和所选 Project，实际执行时重新检查项目成员、`project.read`、`project.contribute` 和精确项目修订。查询结果以普通 Task 回执持久保存，继续按 Task 结果权限读取。Agent 可用返回的工作项引用选择后续操作。执行普通 Task 和提交证据仍需要各自的授权。[原生 Agent 领取工作验收](../tests/test_agent_assigned_work.py)
 

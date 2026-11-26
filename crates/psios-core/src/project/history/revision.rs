@@ -25,7 +25,7 @@ pub(crate) fn get(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         "work item revision is outside its project authority",
     )?;
 
-    let mut value = projection(&item);
+    let mut value = projection(&item)?;
     value["title"] = item.spec["title"].clone();
     value["description"] = item.spec["description"].clone();
     value["blocked_by"] = item.spec["blocked_by"].clone();

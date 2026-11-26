@@ -7,6 +7,7 @@ pub(crate) mod hierarchy;
 pub(crate) mod history;
 mod maintenance;
 pub(crate) mod milestone;
+pub(crate) mod priority;
 pub(crate) mod workflow_proof;
 pub(crate) use maintenance::{abandon, reassign};
 
@@ -22,7 +23,7 @@ use crate::{
 };
 use psios_api::{
     CreateProject, CreateWorkItem, ProjectRole as Role, SetProjectMember, SubmitWorkItemEvidence,
-    WorkItemCriterion as Criterion, canonical, sha256,
+    WorkItemCriterion as Criterion, WorkItemPriority, canonical, sha256,
 };
 use rusqlite::{Connection, params};
 use serde::Deserialize;
@@ -224,6 +225,18 @@ fn criterion_view(db: &Db<'_>, item: &Doc, actor: &str) -> Result<Value> {
     Ok(criterion)
 }
 
+fn project_priority(item: &Doc, value: &mut Value) -> Result<()> {
+    let effective = priority::effective(item)?;
+    let change = priority::summary(item);
+    if effective != WorkItemPriority::Normal || !change.is_null() {
+        value["priority"] = json!(effective);
+    }
+    if !change.is_null() {
+        value["priority_change"] = change;
+    }
+    Ok(())
+}
+
 fn item_view(db: &Db<'_>, item: &Doc, actor: &str, include_evidence: bool) -> Result<Value> {
     let mut value = json!({
         "schema_version":psios_api::VERSION,"project_id":item.spec["project_id"],"title":item.spec["title"],
@@ -237,6 +250,7 @@ fn item_view(db: &Db<'_>, item: &Doc, actor: &str, include_evidence: bool) -> Re
     if let Some(parent) = parent_id(item) {
         value["parent_id"] = json!(parent);
     }
+    project_priority(item, &mut value)?;
     if include_evidence && let Some(evidence) = evidence::view(db, item, actor)? {
         value["evidence"] = evidence;
     }
@@ -489,6 +503,10 @@ pub(crate) fn create_item(db: &Db<'_>, actor: &str, params: &Value) -> Result<Va
         "created_by_principal_id":actor});
     if let Some(parent) = &request.parent_id {
         fields["parent_work_item_id"] = json!(parent);
+    }
+    let initial_priority = request.priority.unwrap_or_default();
+    if initial_priority != WorkItemPriority::Normal {
+        fields["initial_priority"] = json!(initial_priority);
     }
     let creation = digest(&fields);
     if let Some(existing) = db.find(&id)? {
@@ -788,6 +806,14 @@ pub(crate) fn verify(conn: &Connection, format: u32) -> Result<()> {
             "RecoveryRequired",
             "work item parent requires the hierarchy format",
         )?;
+        if let Some(initial) = original.spec.get("initial_priority") {
+            let initial: WorkItemPriority = decode(initial).map_err(|_| invalid_state())?;
+            require(
+                format >= priority::FORMAT && initial != WorkItemPriority::Normal,
+                "RecoveryRequired",
+                "work item initial priority is noncanonical or predates the priority format",
+            )?;
+        }
         let criterion: Criterion =
             decode(&original.spec["criterion"]).map_err(|_| invalid_state())?;
         criterion_target(conn, &criterion).map_err(|_| invalid_state())?;
@@ -810,8 +836,7 @@ pub(crate) fn verify(conn: &Connection, format: u32) -> Result<()> {
                 "work item criterion lacks its original workflow definition authority",
             )?;
         }
-        let abandoned =
-            maintenance::verify_history(conn, &original, &item, format >= MAINTENANCE_FORMAT)?;
+        let abandoned = maintenance::verify_history(conn, &original, &item, format)?;
         let outcome = abandoned.as_ref().unwrap_or(&item);
         let lifecycle = outcome.body["lifecycle"].as_str();
         let evidence = outcome.body.get("evidence_ref");

@@ -1,5 +1,7 @@
 //! Live discovery of a contributor's own ready work.
-use super::{CONTRIBUTE, ITEM, MAX_ITEMS, access, assigned, invalid_state, item_view, project_id};
+use super::{
+    CONTRIBUTE, ITEM, MAX_ITEMS, access, assigned, invalid_state, item_view, priority, project_id,
+};
 use crate::{
     Result,
     db::{Db, Doc},
@@ -116,6 +118,11 @@ impl Input {
             )?;
             position = id;
             if assigned(&item)? != actor || item.body["lifecycle"] != "Ready" {
+                continue;
+            }
+            if let Some(minimum) = self.0.min_priority
+                && priority::effective(&item)? < minimum
+            {
                 continue;
             }
             let record = item_view(db, &item, actor, false)?;

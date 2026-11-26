@@ -49,6 +49,7 @@
 ## 受管服务调用与恢复
 
 - `service.logs_since` 可从本次启动的准确日志游标按页续读。真实 systemd 验收覆盖 43 条日志跨页、守护进程强杀后继续、页尾追加、错误游标与撤权。格式 91→92 升级保留既有尾读制品，续读使用独立授权。尾读和续读在发布前复核权限，迟到回执只记录结算状态。[真实日志验收](../tests/service_journal_since.py)
+- 宿主适配器在同一截止时间内读取标准输出和错误流。真实 Linux 子进程验收覆盖子进程退出后继承管道仍然打开的情况，并验证采集可在截止时返回。真实 systemd 和 NetworkManager 回归保留原操作结果及对账行为。[进程采集验收](../crates/psios-core/src/command.rs) · [网络回退验收](../tests/network_trial_abort.py)
 
 - 格式 69 在调用 systemd 前将批准、一次性使用、原操作和服务修订绑定到持久检查点。检查点失败时未发出宿主命令，可经重新审批重试。已提交检查点但丢失回执时保留服务占用，允许以同次 Linux 启动及相同管理器范围和 UID 的新观测结算。已用真实用户 systemd 验证启停、重启、检查点写入失败、守护进程强杀，以及格式 34 和 68 的在途启动跨升级。其他宿主管理员可独立改变 unit，Core 的回执记录已核实的状态。[启动与停止](../tests/services.py) · [重启与核验](../tests/service_restart.py) · [在途升级](../tests/service_dispatch_upgrade.py)
 

@@ -1,38 +1,75 @@
 use crate::*;
 use rustix::{
     event::{PollFd, PollFlags, Timespec, poll},
+    fd::AsFd,
     fs::{OFlags, fcntl_getfl, fcntl_setfl},
     io::Errno,
 };
 use std::{
-    io::{ErrorKind, Read, Write},
+    io::{self, ErrorKind, Read, Write},
     process::{Child, ChildStdout, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
-fn drain(r: impl Read, limit: usize, keep_end: bool) -> std::io::Result<(Vec<u8>, bool)> {
-    let mut r = r;
-    let mut kept = Vec::new();
-    let mut buf = [0; 8192];
-    let mut truncated = false;
-    loop {
-        let n = r.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        truncated |= kept.len() + n > limit;
-        if keep_end {
-            let take = n.min(limit);
-            let discard = kept.len().saturating_sub(limit - take);
-            kept.drain(..discard);
-            kept.extend_from_slice(&buf[n - take..n]);
-        } else {
-            let take = n.min(limit.saturating_sub(kept.len()));
-            kept.extend_from_slice(&buf[..take]);
-        }
-    }
-    Ok((kept, truncated))
+
+fn nonblocking(fd: impl AsFd) -> io::Result<()> {
+    let fd = fd.as_fd();
+    let flags = fcntl_getfl(fd)?;
+    fcntl_setfl(fd, flags | OFlags::NONBLOCK).map_err(io::Error::from)
 }
+
+struct CapturePipe<R> {
+    reader: Option<R>,
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+impl<R: Read + AsFd> CapturePipe<R> {
+    fn new(reader: R) -> io::Result<Self> {
+        nonblocking(&reader)?;
+        Ok(Self {
+            reader: Some(reader),
+            bytes: Vec::new(),
+            truncated: false,
+        })
+    }
+
+    fn poll_fd(&self) -> Option<PollFd<'_>> {
+        self.reader
+            .as_ref()
+            .map(|reader| PollFd::new(reader, PollFlags::IN))
+    }
+
+    fn read(&mut self, buffer: &mut [u8], limit: usize, keep_end: bool) -> io::Result<bool> {
+        let Some(reader) = &mut self.reader else {
+            return Ok(false);
+        };
+        let count = match reader.read(buffer) {
+            Ok(0) => {
+                self.reader = None;
+                return Ok(true);
+            }
+            Ok(count) => count,
+            Err(e) if matches!(e.kind(), ErrorKind::Interrupted | ErrorKind::WouldBlock) => {
+                return Ok(false);
+            }
+            Err(e) => return Err(e),
+        };
+        let remaining = limit.saturating_sub(self.bytes.len());
+        self.truncated |= count > remaining;
+        if keep_end {
+            let take = count.min(limit);
+            let discard = self.bytes.len().saturating_sub(limit - take);
+            self.bytes.drain(..discard);
+            self.bytes.extend_from_slice(&buffer[count - take..count]);
+        } else {
+            self.bytes
+                .extend_from_slice(&buffer[..count.min(remaining)]);
+        }
+        Ok(true)
+    }
+}
+
 pub struct Output {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
@@ -40,7 +77,14 @@ pub struct Output {
 }
 
 pub fn capture(cmd: Command, effect: bool, adapter: &str, timeout_seconds: u64) -> Result<Output> {
-    capture_window(cmd, effect, adapter, timeout_seconds, 192 * 1024, false)
+    capture_window(
+        cmd,
+        effect,
+        adapter,
+        Duration::from_secs(timeout_seconds),
+        192 * 1024,
+        false,
+    )
 }
 
 pub(crate) fn capture_tail(
@@ -49,42 +93,24 @@ pub(crate) fn capture_tail(
     timeout_seconds: u64,
     limit: usize,
 ) -> Result<Output> {
-    capture_window(cmd, false, adapter, timeout_seconds, limit, true)
+    capture_window(
+        cmd,
+        false,
+        adapter,
+        Duration::from_secs(timeout_seconds),
+        limit,
+        true,
+    )
 }
 
 fn capture_window(
     mut cmd: Command,
     effect: bool,
     adapter: &str,
-    timeout_seconds: u64,
+    timeout: Duration,
     limit: usize,
     keep_end: bool,
 ) -> Result<Output> {
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = cmd.spawn().map_err(|_| {
-        err(
-            "DependencyUnavailable",
-            format!("{adapter} client unavailable"),
-        )
-    })?;
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
-    let out = thread::spawn(move || drain(stdout, limit, keep_end));
-    let errors = thread::spawn(move || drain(stderr, limit, keep_end));
-    let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
-    let code = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(15)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-        }
-    };
     let failure = || {
         err(
             if effect {
@@ -95,19 +121,66 @@ fn capture_window(
             format!("{adapter} did not confirm the request"),
         )
     };
-    let (stdout, a) = out.join().map_err(|_| failure())?.map_err(|_| failure())?;
-    let (stderr, b) = errors
-        .join()
-        .map_err(|_| failure())?
-        .map_err(|_| failure())?;
-    if !code.is_some_and(|s| s.success()) {
-        return Err(failure());
+    let deadline = Instant::now().checked_add(timeout).ok_or_else(failure)?;
+    let child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|_| {
+            err(
+                "DependencyUnavailable",
+                format!("{adapter} client unavailable"),
+            )
+        })?;
+    let mut child = CaptureChild(child);
+    read_window(&mut child.0, deadline, limit, keep_end).map_err(|_| failure())
+}
+
+fn read_window(
+    child: &mut Child,
+    deadline: Instant,
+    limit: usize,
+    keep_end: bool,
+) -> io::Result<Output> {
+    let mut stdout = CapturePipe::new(child.stdout.take().unwrap())?;
+    let mut stderr = CapturePipe::new(child.stderr.take().unwrap())?;
+    let mut buffer = [0; 8192];
+    loop {
+        if Instant::now() >= deadline {
+            return Err(ErrorKind::TimedOut.into());
+        }
+        if let Some(status) = child.try_wait()? {
+            if !status.success() {
+                return Err(io::Error::other("adapter child exited unsuccessfully"));
+            }
+            // Other processes may still hold a pipe writer after the child exits.
+            if stdout.reader.is_none() && stderr.reader.is_none() {
+                return Ok(Output {
+                    stdout: stdout.bytes,
+                    stderr: stderr.bytes,
+                    truncated: stdout.truncated || stderr.truncated,
+                });
+            }
+        }
+        let read_stdout = stdout.read(&mut buffer, limit, keep_end)?;
+        let read_stderr = stderr.read(&mut buffer, limit, keep_end)?;
+        if read_stdout || read_stderr {
+            continue;
+        }
+        let interval = deadline
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_millis(15));
+        let elapsed = Timespec::try_from(interval).expect("capture interval fits timespec");
+        let mut fds: Vec<_> = [stdout.poll_fd(), stderr.poll_fd()]
+            .into_iter()
+            .flatten()
+            .collect();
+        match poll(&mut fds, Some(&elapsed)) {
+            Ok(_) | Err(Errno::INTR) => (),
+            Err(e) => return Err(e.into()),
+        }
     }
-    Ok(Output {
-        stdout,
-        stderr,
-        truncated: a || b,
-    })
 }
 
 #[cfg(test)]
@@ -176,8 +249,7 @@ fn read_capture(
     timeout: Duration,
     check_authority: &mut impl FnMut() -> Result<()>,
 ) -> Result<usize> {
-    let flags = fcntl_getfl(&stdout).map_err(|_| capture_unavailable())?;
-    fcntl_setfl(&stdout, flags | OFlags::NONBLOCK).map_err(|_| capture_unavailable())?;
+    nonblocking(&stdout).map_err(|_| capture_unavailable())?;
     let started = Instant::now();
     let deadline = started
         .checked_add(timeout)
@@ -260,6 +332,125 @@ fn read_capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_capture_preserves_both_streams_and_byte_limits() {
+        let short = |limit, keep_end| {
+            let mut cmd = Command::new("/bin/sh");
+            cmd.args(["-c", "printf abcdef; printf 123456 >&2"]);
+            capture_window(
+                cmd,
+                false,
+                "pipe fixture",
+                Duration::from_secs(2),
+                limit,
+                keep_end,
+            )
+            .unwrap()
+        };
+        let exact = short(6, false);
+        assert_eq!(exact.stdout, b"abcdef");
+        assert_eq!(exact.stderr, b"123456");
+        assert!(!exact.truncated);
+        let prefix = short(3, false);
+        assert_eq!(prefix.stdout, b"abc");
+        assert_eq!(prefix.stderr, b"123");
+        assert!(prefix.truncated);
+
+        let mut large = Command::new("/bin/sh");
+        large.args([
+            "-c",
+            "head -c 131072 /dev/zero; printf out; head -c 131072 /dev/zero >&2; printf err >&2",
+        ]);
+        let tail = capture_window(
+            large,
+            false,
+            "pipe fixture",
+            Duration::from_secs(2),
+            3,
+            true,
+        )
+        .unwrap();
+        assert_eq!(tail.stdout, b"out");
+        assert_eq!(tail.stderr, b"err");
+        assert!(tail.truncated);
+    }
+
+    #[test]
+    fn window_capture_preserves_read_and_effect_failure_codes() {
+        for (effect, code) in [(false, "DependencyUnavailable"), (true, "OutcomeUnknown")] {
+            let mut cmd = Command::new("/bin/sh");
+            cmd.args(["-c", "printf rejected >&2; exit 7"]);
+            let error = capture(cmd, effect, "pipe fixture", 2)
+                .err()
+                .expect("an unsuccessful command must fail");
+            assert_eq!(error.0.code, code);
+        }
+    }
+
+    fn held_pipe_deadline(script: &str, effect: bool, expected: &str) {
+        use rustix::process::{Pid, WaitOptions, waitpid};
+
+        let temp = tempfile::tempdir().unwrap();
+        let child = temp.path().join("child");
+        let released = temp.path().join("released");
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", script, "fixture"])
+            .arg(&child)
+            .arg(&released);
+        let start = Instant::now();
+        let result = capture_window(
+            cmd,
+            effect,
+            "pipe fixture",
+            Duration::from_millis(300),
+            64,
+            false,
+        );
+        let elapsed = start.elapsed();
+        // The test's descendant releases its endpoint on its own. Wait for
+        // its completion signal even if the command returned the wrong result.
+        let cleanup_deadline = Instant::now() + Duration::from_secs(5);
+        while !released.is_file() && Instant::now() < cleanup_deadline {
+            thread::sleep(Duration::from_millis(15));
+        }
+        assert!(
+            released.is_file(),
+            "fixture did not finish releasing its pipe"
+        );
+        let pid = std::fs::read_to_string(child).unwrap().parse().unwrap();
+        assert_eq!(
+            waitpid(Some(Pid::from_raw(pid).unwrap()), WaitOptions::NOHANG).unwrap_err(),
+            Errno::CHILD,
+            "adapter child was not reaped",
+        );
+        assert_eq!(
+            result.err().expect("open pipe must time out").0.code,
+            expected
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "waited for the endpoint: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn window_capture_times_out_when_stdout_outlives_a_successful_child() {
+        held_pipe_deadline(
+            "( sleep 3; : > \"$2\" ) 2>/dev/null & printf '%s' $$ > \"$1\"; printf partial; exit 0",
+            false,
+            "DependencyUnavailable",
+        );
+    }
+
+    #[test]
+    fn window_capture_reaps_timed_out_child_while_stderr_is_inherited() {
+        held_pipe_deadline(
+            "( sleep 3; : > \"$2\" ) >/dev/null & printf '%s' $$ > \"$1\"; exec sleep 8",
+            true,
+            "OutcomeUnknown",
+        );
+    }
 
     #[test]
     fn binary_capture_handles_short_and_interrupted_sink_writes() {

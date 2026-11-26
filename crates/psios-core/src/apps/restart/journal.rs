@@ -395,7 +395,15 @@ pub(super) fn binding(db: &Db<'_>, work: &Work) -> Result<(Value, Value)> {
     let plan = db.resolve(&work.op.body["plan_ref"])?;
     let custody = Custody::load(db.c, &plan)?;
     custody.holds(db.c, &work.op, true)?;
-    let approved = authorized(db.c, &work.op, &work.task, &work.run, &plan, &work.effect)?;
+    let approved = crate::broker::verify_bound_approval(
+        db.c,
+        &work.op,
+        &work.task,
+        &work.run,
+        &plan,
+        &work.effect,
+        TOOL,
+    )?;
     Ok((custody.binding(), approved.reference()))
 }
 

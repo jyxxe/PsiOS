@@ -128,8 +128,9 @@ fn selected(conn: &Connection) -> Result<HashSet<String>> {
         "SELECT q.operation FROM queue q JOIN current t ON q.task=t.id
            WHERE q.phase IN ('Dispatched','Unknown') AND t.spec->>'task_type'='backup.restore'
          UNION
-         SELECT h.holder FROM holds h JOIN current o ON h.holder=o.id AND o.kind='Operation'
-           JOIN current t ON t.id=o.spec->>'task_id' AND t.spec->>'task_type'='backup.restore'",
+         SELECT h.holder FROM holds h CROSS JOIN current o CROSS JOIN current t
+           WHERE h.holder=o.id AND o.kind='Operation'
+             AND t.id=o.spec->>'task_id' AND t.spec->>'task_type'='backup.restore'",
     )?;
     for operation in work.query_map([], |r| r.get::<_, String>(0))? {
         if let Some(name) = active(conn, &operation?, epoch)? {

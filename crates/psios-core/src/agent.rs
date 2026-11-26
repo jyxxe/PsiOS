@@ -162,8 +162,7 @@ fn open_session(db: &Db<'_>, actor: &str, p: &Value, origin_task: Option<&Doc>) 
     session_inputs::validate(&o.input_artifacts)?;
     let with_inputs = !o.input_artifacts.is_empty();
     require(
-        !with_inputs
-            || (!o.provider_queue && o.fallback_model_refs.is_empty() && origin_task.is_none()),
+        !with_inputs || (o.fallback_model_refs.is_empty() && origin_task.is_none()),
         "UnsupportedCapability",
         "artifact inputs currently require a direct session without fallback",
     )?;

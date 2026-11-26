@@ -13,11 +13,14 @@ from test_artifact_ingress import chunk, upload_request
 
 
 PRIOR_BINARIES = os.getenv("PSIOS_SESSION_INPUT_PRIOR_BIN_DIR")
+QUEUE_PRIOR_BINARIES = os.getenv("PSIOS_QUEUED_SESSION_INPUT_PRIOR_BIN_DIR")
 
 
-class AgentSessionInputs(unittest.TestCase):
+class SessionInputFixture:
+    bin_dir = os.getenv("PSIOS_TEST_BIN_DIR", "target/debug")
+
     def setUp(self):
-        self.n = Node(os.getenv("PSIOS_TEST_BIN_DIR", "target/debug"))
+        self.n = Node(self.bin_dir)
         self.addCleanup(self.n.close)
         self.node_id = self.n.call("Node.Get", {})["reference"]["resource_id"]
         self.agent = self.n.call("Agent.Register", {"name": "private-input-owner"})
@@ -70,6 +73,15 @@ class AgentSessionInputs(unittest.TestCase):
         return self.n.call("Model.Claim", {"session_id": session["resource_id"], "key": claim_key, **support},
                            (provider or self.provider)["token"])
 
+    def queued(self, claim_key, *, accept=None, wait_ms=None, provider=None):
+        params = {"model_ref": self.model, "key": claim_key}
+        if accept is not None:
+            params["accepts_session_inputs"] = accept
+        if wait_ms is not None:
+            params["timeout_ms"] = wait_ms
+        return self.n.call("Model.ClaimNext" if wait_ms is None else "Model.WaitNext", params,
+                           (provider or self.provider)["token"])
+
     def respond(self, session, claim, decision):
         return self.n.call("Model.Respond", {"session_id": session["resource_id"], "lease_id": claim["lease_id"],
                           "decision": decision}, self.provider["token"])
@@ -82,6 +94,15 @@ class AgentSessionInputs(unittest.TestCase):
     def withdrawal(self):
         return {"reference": self.artifact, "reason": "session closed"}
 
+    def session(self, reference):
+        return self.n.call("Session.Get", {"id": reference["resource_id"]}, self.agent["token"])
+
+    def model_calls(self, grant):
+        return self.n.call("Budget.Get", {"id": grant["budget_ref"]["resource_id"]},
+                           self.agent["token"])["model_calls_used"]
+
+
+class AgentSessionInputs(SessionInputFixture, unittest.TestCase):
     def test_exact_context_survives_crash_and_runs_a_real_authorized_task(self):
         n = self.n
         grant = self.authorize()
@@ -245,10 +266,158 @@ class AgentSessionInputs(unittest.TestCase):
         repeated = self.opening(owned)
         repeated["input_artifacts"] *= 2
         self.refuse("InvalidArgument", "Session.Open", repeated, token)
-        self.refuse("UnsupportedCapability", "Session.Open", self.opening(owned, provider_queue=True), token)
+        self.refuse("UnsupportedCapability", "Session.Open",
+                    self.opening(owned, provider_queue=True, fallback_model_refs=[limited]), token)
         self.assertEqual(n.call("Budget.Get", {"id": owned["budget_ref"]["resource_id"]},
                                 token)["model_calls_used"], 0)
         n.call("Artifact.Withdraw", self.withdrawal(), token)
+
+    def test_queued_private_input_capability_orders_claims_and_preserves_exact_replay(self):
+        n = self.n
+        caller = self.agent["token"]
+        grant = self.authorize()
+        attached = self.opened(self.opening(grant, provider_queue=True))
+        self.assertEqual(self.queued("settle-ordinary"), {"available": False})
+        self.assertEqual(self.queued("wait-ordinary", accept=False, wait_ms=30), {"available": False})
+        self.assertEqual(self.session(attached)["reference"], attached)
+        self.assertEqual(self.model_calls(grant), 0)
+        self.refuse("Conflict", "Artifact.Withdraw", self.withdrawal(), caller)
+
+        ordinary_grant = self.authorize()
+        ordinary = self.opened(self.opening(ordinary_grant, provider_queue=True, input_artifacts=[]))
+        legacy = self.queued("settle-ordinary")
+        self.assertEqual(legacy["session_id"], ordinary["resource_id"])
+        self.assertNotIn("inputs", legacy["context"])
+        self.assertEqual(self.queued("settle-ordinary", accept=True), {**legacy, "recovered": True})
+        legacy_receipt = self.respond(ordinary, legacy, {"action": "finish", "summary": "Queue ready."})
+        self.assertEqual(legacy_receipt["lifecycle"], "Succeeded")
+        self.assertEqual(self.session(attached)["reference"], attached)
+        self.assertEqual(self.model_calls(grant), 0)
+        outsider, _ = n.agent(["model.serve"])
+        self.refuse("PermissionDenied", "Model.ClaimNext",
+                    {"model_ref": self.model, "key": "foreign", "accepts_session_inputs": True}, outsider["token"])
+
+        first = self.queued("use-exact-input", accept=True, wait_ms=1000)
+        self.assertEqual(first["session_id"], attached["resource_id"])
+        self.assertEqual(first["context"]["inputs"], [
+            {"name": "approved-input", "reference": self.artifact, "kind": "Json", "value": self.data},
+        ])
+        status = {"model_ref": self.model, "key": "use-exact-input", "lease_id": first["lease_id"]}
+        self.assertEqual(n.call("Model.ClaimStatus", status, self.provider["token"]), {"status": "Pending"})
+        self.assertEqual(self.model_calls(grant), 1)
+        next_ordinary = self.opened(self.opening(ordinary_grant, provider_queue=True, input_artifacts=[]))
+        n.stop(signal.SIGKILL)
+        subprocess.run(n.daemon + ["verify"], check=True, capture_output=True, timeout=20)
+        n.start()
+        self.refuse("UnsupportedCapability", "Model.WaitNext",
+                    {"model_ref": self.model, "key": "use-exact-input", "timeout_ms": 1000}, self.provider["token"])
+        self.assertEqual(self.session(next_ordinary)["reference"], next_ordinary)
+        recovered = self.queued("use-exact-input", accept=True)
+        self.assertEqual(recovered, {**first, "recovered": True})
+        self.assertEqual(self.model_calls(grant), 1)
+
+        work = {"action": "tool", "tool": recovered["context"]["inputs"][0]["value"]["tool"], "input": {}}
+        receipt = self.respond(attached, recovered, work)
+        self.assertEqual(self.respond(attached, first, work), receipt)
+        completed = n.wait(receipt["task_id"])
+        self.assertEqual(completed["lifecycle"], "Succeeded")
+        result = n.call("Artifact.Read", {"reference": completed["result"]["artifact_refs"][0]}, caller)
+        self.assertGreater(result["memory_bytes"]["MemTotal"], 0)
+        later = self.queued("next-ordinary")
+        self.assertEqual(later["session_id"], next_ordinary["resource_id"])
+        self.assertNotIn("inputs", later["context"])
+        self.respond(next_ordinary, later, {"action": "finish", "summary": "Queue still ready."})
+
+        second = self.queued("finish-input-work", accept=True, wait_ms=3000)
+        self.assertEqual(second["session_id"], attached["resource_id"])
+        self.assertEqual(second["context"]["inputs"], first["context"]["inputs"])
+        self.respond(attached, second, {"action": "finish", "summary": "Inventory recorded."})
+        n.call("Artifact.Withdraw", self.withdrawal(), caller)
+        completed_replay = self.queued("use-exact-input", accept=False)
+        self.assertEqual(completed_replay, {"available": True, "session_id": attached["resource_id"],
+                                           "turn": first["turn"], "completed": receipt})
+        self.assertEqual(n.call("Model.ClaimStatus", status, self.provider["token"]), {"status": "Settled"})
+        history = n.call("Session.History", {"id": attached["resource_id"]}, caller)
+        self.assertEqual(len(history["tasks"]), 1)
+        self.assertEqual([turn["context_digest"] for turn in history["turns"]],
+                         [first["context_digest"], second["context_digest"]])
+        self.assertNotIn(self.data["private_ticket"], json.dumps(history))
+        self.assertEqual(self.model_calls(grant), 2)
+        n.stop()
+        subprocess.run(n.daemon + ["verify"], check=True, capture_output=True, timeout=20)
+
+    def test_queued_provider_capability_never_replaces_original_disclosure_grant(self):
+        n = self.n
+        grant = self.authorize()
+        revoked = self.opened(self.opening(grant, provider_queue=True))
+        n.call("Grant.Revoke", target(grant["grant_ref"]))
+        next_grant = self.authorize()
+        ordinary = self.opened(self.opening(next_grant, provider_queue=True, input_artifacts=[]))
+        first = self.queued("legacy-worker")
+        self.assertEqual(first["session_id"], ordinary["resource_id"])
+        self.assertEqual(self.session(revoked)["reference"], revoked)
+        self.respond(ordinary, first, {"action": "finish", "summary": "No input requested."})
+
+        self.assertEqual(self.queued("authorized-worker", accept=True), {"available": False})
+        parked = self.session(revoked)
+        self.assertEqual(parked["session"]["lifecycle"], "Paused")
+        self.assertEqual(parked["session"]["pause_reason"], "ModelAuthorizationDenied")
+        self.assertEqual(parked["session"]["turn"], 0)
+        n.call("Session.Cancel", target(parked["reference"]), self.agent["token"])
+
+        active = self.opened(self.opening(next_grant, provider_queue=True))
+        lease = self.queued("authorized-worker", accept=True)
+        self.assertEqual(lease["session_id"], active["resource_id"])
+        n.call("Grant.Revoke", target(next_grant["grant_ref"]))
+        self.authorize()
+        request = {"model_ref": self.model, "key": "authorized-worker", "accepts_session_inputs": True}
+        self.refuse("PermissionDenied", "Model.ClaimNext", request, self.provider["token"])
+        response = {"session_id": active["resource_id"], "lease_id": lease["lease_id"],
+                    "decision": {"action": "tool", "tool": "node.inventory", "input": {}}}
+        self.refuse("PermissionDenied", "Model.Respond", response, self.provider["token"])
+        history = n.call("Session.History", {"id": active["resource_id"]}, self.agent["token"])
+        self.assertEqual(history["tasks"], [])
+        self.assertEqual(len(history["turns"]), 1)
+
+
+@unittest.skipUnless(QUEUE_PRIOR_BINARIES, "requires the verified prior Core without private queue support")
+class QueuedSessionInputUpgrade(SessionInputFixture, unittest.TestCase):
+    bin_dir = QUEUE_PRIOR_BINARIES
+
+    def test_old_writer_refuses_the_queue_disclosure_format(self):
+        n = self.n
+        grant = self.authorize()
+        request = self.opening(grant, provider_queue=True)
+        self.refuse("UnsupportedCapability", "Session.Open", request, self.agent["token"])
+        ordinary = self.opened(self.opening(grant, provider_queue=True, input_artifacts=[]))
+        old_claim = self.queued("pre-upgrade-ordinary")
+        self.assertEqual(old_claim["session_id"], ordinary["resource_id"])
+        self.assertNotIn("inputs", old_claim["context"])
+        old_daemon = n.daemon[:]
+        n.stop(signal.SIGKILL)
+        source = json.loads(subprocess.check_output(old_daemon + ["verify"], timeout=20))
+        self.assertIn(source["database_format"], (102, 103))
+
+        n.daemon[0] = os.path.abspath(os.path.join(SessionInputFixture.bin_dir, "psiosd"))
+        pending = json.loads(subprocess.check_output(n.daemon + ["verify"], timeout=20))
+        self.assertTrue(pending["migration_required"])
+        n.start()
+        self.assertEqual(self.queued("pre-upgrade-ordinary"), {**old_claim, "recovered": True})
+        self.respond(ordinary, old_claim, {"action": "finish", "summary": "Old queued turn settled."})
+        attached = self.opened(request)
+        self.assertEqual(self.queued("new-format-unnegotiated"), {"available": False})
+        n.stop(signal.SIGKILL)
+        old_writer = subprocess.run(old_daemon + ["serve"], capture_output=True, timeout=20, text=True)
+        self.assertNotEqual(old_writer.returncode, 0, old_writer)
+        self.assertIn("SchemaVersionUnsupported", old_writer.stdout + old_writer.stderr)
+        upgraded = json.loads(subprocess.check_output(n.daemon + ["verify"], timeout=20))
+        self.assertFalse(upgraded["migration_required"])
+        self.assertEqual(upgraded["database_format"], 104)
+        self.assertEqual(upgraded["node_id"], source["node_id"])
+        n.start()
+        first = self.queued("new-format-negotiated", accept=True)
+        self.assertEqual(first["session_id"], attached["resource_id"])
+        self.assertEqual(first["context"]["inputs"][0]["value"], self.data)
 
 
 @unittest.skipUnless(PRIOR_BINARIES, "requires the verified prior format-99 Core")

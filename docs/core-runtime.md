@@ -703,7 +703,7 @@ Core 记录 Provider 的迟到证据，原 `Unknown`、工具任务和记账继�
 
 直接调用 `Session.Open` 可提交 `input_artifacts`，每项由唯一 `name`、完整资源引用 `reference` 和 `kind: "Json"` 组成。支持至多四个会话所有者发布的 `application/json` 制品，每份原始数据至多 16 KiB。Core 在会话建立和 Provider 领取时校验 JSON、原摘要及合并后上下文预算。会话表和历史查询保存引用及上下文摘要。
 
-原始会话委托需具备 `session.context.read`、`artifact.read`、正常的会话与工具操作权限。它的 `tool_targets` 必须明确包含所选模型、每个制品和节点，以及工具所需的作用域。该模型的注册 Provider 必须在 `Model.Claim` 显式提交 `accepts_session_inputs: true`，随后通过 `context.inputs` 接收 `name`、`reference`、`kind` 和 `value`。SDK 的 `SessionModel::accepts_session_inputs` 可启用此协商。Core 会在重放和提交新决策前复核原委托。活动会话固定这些精确制品，终态释放。重试会话中的失败 Task 时，会在同一受理事务内重新验证并固定原制品。格式 100 提供此能力，适用于直接模型领取。Provider 队列、备选模型和通用本机盘点适配器会拒绝带此类输入的会话或推理。 [Unix API 验收](../tests/test_agent_session_inputs.py)
+原始会话委托需具备 `session.context.read`、`artifact.read`、正常的会话与工具操作权限。它的 `tool_targets` 必须明确包含所选模型、每个制品和节点，以及工具所需的作用域。该模型的注册 Provider 必须在领取请求中显式提交 `accepts_session_inputs: true`，随后通过 `context.inputs` 接收 `name`、`reference`、`kind` 和 `value`。SDK 的 `SessionModel::accepts_session_inputs` 可启用此协商。Core 会在重放和提交新决策前复核原委托。活动会话固定这些精确制品，终态释放。重试会话中的失败 Task 时，会在同一受理事务内重新验证并固定原制品。格式 100 支持直接领取，格式 104 扩展至 Provider 队列并阻止旧 Core 打开升级后的状态。私有输入限定于直接建立、使用固定模型的会话。通用本机盘点适配器继续使用默认能力声明。 [Unix API 验收](../tests/test_agent_session_inputs.py)
 
 ### 预授权本机模型交接
 
@@ -721,6 +721,8 @@ providerctl model-worker "$workdir/model.json" --decision-dir "$workdir/worker-d
 ```
 
 API 的 `Model.ClaimNext` 接受 `model_ref` 和 `key`。`Model.WaitNext` 另接受 1 至 10000 毫秒的 `timeout_ms`。返回 `available:false` 表示暂无可领取轮次。领取按进入就绪状态的顺序执行，等待工具或人工审批期间跳过该会话。每个 Model 最多接纳 128 个自动领取会话，沿用单次租约并发限制、会话轮数和共同根预算。撤权、依赖变更或额度耗尽的会话进入带原因的暂停状态，其他会话仍可领取。
+
+这两个队列接口都接受可选的 `accepts_session_inputs`。未声明支持的 Provider 会跳过附有私有输入的会话，并可继续领取随后就绪的普通会话。重复领取键始终绑定原轮次。未声明支持时，重放仍在途的私有轮次会得到 `UnsupportedCapability`，已结算轮次仍可返回原回执。
 
 使用 `LocalToolResults` 的会话在固定工具制品不可读取时暂停，记录 `ResultUnavailable` 或 `ResultEvicted`。自动领取继续服务其他会话。恢复原制品后，会话所有者用 `id` 和当前 `expected_resource_version` 调用 `Session.Resume`。服务重新检查原工具输出、Skill、Model 和委托，随后将会话放回就绪队列。模型调用额度在新轮次实际获发租约时扣除，原工具执行和回执仍可查。[缺失上下文验收](../tests/test_model_queue.py)
 

@@ -68,7 +68,7 @@ jobs:
   rescue-disk:
     needs: portable-core
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -174,6 +174,15 @@ jobs:
             --previous-archive "$prior" --previous-installer "$RUNNER_TEMP/native-format5/native/create.py" \
             --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
             --installer "$RUNNER_TEMP/rescue-core/native/create.py"
+
+      - name: Freeze one native source and publish a candidate after an isolated health proof
+        run: |
+          python3 -B tests/native_staged_update.py \
+            --controller "$RUNNER_TEMP/rescue-core/native/stage_update.py" \
+            --previous-installer "$RUNNER_TEMP/native-format5/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" \
+            --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
+            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
 
       - name: Keep larger native state and home partitions through a crash and upgrade
         run: |

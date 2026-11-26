@@ -20,6 +20,7 @@ const IP6_CONFIG: &str = "org.freedesktop.NetworkManager.IP6Config";
 const IP6_PATH: &str = "/org/freedesktop/NetworkManager/IP6Config/";
 const CHECKPOINT: &str = "org.freedesktop.NetworkManager.Checkpoint";
 const CHECKPOINT_PATH: &str = "/org/freedesktop/NetworkManager/Checkpoint/";
+const MAX_CHECKPOINTS_TO_INSPECT: usize = 16;
 const EFFECT_MARGIN_MS: i64 = 3_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -346,6 +347,50 @@ fn checkpoint_present(bus: &Bus, checkpoint: &Checkpoint) -> Result<bool> {
     Ok(manager_paths(bus, "Checkpoints", CHECKPOINT_PATH, 128)?.contains(&checkpoint.path))
 }
 
+fn require_checkpoint_available(bus: &Bus, device: &str) -> Result<()> {
+    let paths = manager_paths(
+        bus,
+        "Checkpoints",
+        CHECKPOINT_PATH,
+        MAX_CHECKPOINTS_TO_INSPECT,
+    )?;
+    for path in &paths {
+        let checkpoint = bus.get_all(path, CHECKPOINT)?;
+        let devices = bus::field(&checkpoint, "Devices", "ao")?
+            .as_array()
+            .filter(|list| (1..=128).contains(&list.len()))
+            .ok_or_else(|| {
+                err(
+                    "DependencyUnavailable",
+                    "invalid NetworkManager checkpoint device list",
+                )
+            })?;
+        let mut unique = BTreeSet::new();
+        for entry in devices {
+            require(
+                unique.insert(bus::numbered_path(entry, DEVICE_PATH)?),
+                "DependencyUnavailable",
+                "duplicate NetworkManager checkpoint device",
+            )?;
+        }
+        require(
+            !unique.contains(device),
+            "Conflict",
+            "the NetworkManager device already has a live checkpoint",
+        )?;
+    }
+    require(
+        manager_paths(
+            bus,
+            "Checkpoints",
+            CHECKPOINT_PATH,
+            MAX_CHECKPOINTS_TO_INSPECT,
+        )? == paths,
+        "Conflict",
+        "NetworkManager checkpoints changed during admission",
+    )
+}
+
 fn deadline(bus: &Bus, checkpoint: &Checkpoint) -> Result<()> {
     let current = boottime(bus)?;
     require(
@@ -389,6 +434,8 @@ pub(crate) fn checkpoint(
         "PreconditionFailed",
         "NetworkManager baseline changed before checkpoint creation",
     )?;
+    require_checkpoint_available(&bus, &scope.device_path)?;
+    bus.verify_owner()?;
     let started = boottime(&bus)?;
     before_effect(started)?;
     bus.verify_owner().map_err(uncertain)?;
@@ -688,6 +735,11 @@ mod tests {
         assert!(manager_paths(&Bus::open()?, "Checkpoints", CHECKPOINT_PATH, 128)?.is_empty());
 
         let trial = checkpoint(&scope, 12, |_| Ok(()))?;
+        let overlap = checkpoint(&scope, 12, |_| {
+            panic!("overlapping checkpoint reached dispatch")
+        });
+        assert_eq!(overlap.unwrap_err().0.code, "Conflict");
+        assert!(checkpoint_present(&Bus::open()?, &trial)?);
         let activation = activate(&scope, &trial, candidate, || Ok(()))?;
         let observed = await_candidate(&scope, &trial, &activation)?;
         assert_eq!(observed.active, activation.active);

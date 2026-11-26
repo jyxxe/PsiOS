@@ -301,8 +301,7 @@ pub(crate) fn inspected(
     let observation = artifact::read(db, &proof, None)?;
     Ok((proof, observation))
 }
-/// Reconcile only an independently verifiable local postcondition. Never dispatch the write again.
-pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
+fn reconcile_request(db: &Db<'_>, actor: &str, params: &Value) -> Result<(Reconcile, Doc)> {
     policy::admin(actor)?;
     let req: Reconcile = decode(params)?;
     let op = db.of(&req.id, "Operation")?;
@@ -312,6 +311,31 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
         "PreconditionFailed",
         "operation has no unknown outcome",
     )?;
+    Ok((req, op))
+}
+
+pub(crate) fn prepare_reconcile(
+    db: &Db<'_>,
+    actor: &str,
+    params: &Value,
+) -> Result<Option<node::service_control::ReconcileProbe>> {
+    let (req, op) = reconcile_request(db, actor, params)?;
+    let task = db.of(field(&op.spec, "task_id"), "Task")?;
+    if node::service_control::is_tool(field(&task.spec, "task_type")) {
+        node::service_control::prepare_reconcile_probe(db, &op, req.evidence_ref.as_ref())
+    } else {
+        Ok(None)
+    }
+}
+
+/// Reconcile only an independently verifiable local postcondition. Never dispatch the write again.
+pub(crate) fn reconcile(
+    db: &Db<'_>,
+    actor: &str,
+    params: &Value,
+    manager: Result<Option<node::service_control::ReconcileSample>>,
+) -> Result<Value> {
+    let (req, op) = reconcile_request(db, actor, params)?;
     let t = db.of(field(&op.spec, "task_id"), "Task")?;
     let input = db.resolve(&t.spec["input_ref"])?;
     let action = Action::parse(
@@ -448,6 +472,18 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
             )?;
             let checkpoint =
                 node::service_control::confirmed(db, &op, &target, &action, &observation)?;
+            let live_manager = if let Some(checkpoint) = &checkpoint {
+                let manager = manager?;
+                node::service_control::require_live_manager(
+                    &op,
+                    checkpoint,
+                    &proof,
+                    &observation,
+                    manager.as_ref(),
+                )?
+            } else {
+                None
+            };
             let wanted = if matches!(action, Action::ServiceStop(_)) {
                 "inactive"
             } else {
@@ -476,6 +512,9 @@ pub fn reconcile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
             if let Some(checkpoint) = checkpoint {
                 evidence["checkpoint_ref"] = checkpoint.reference();
                 result["checkpoint_ref"] = checkpoint.reference();
+            }
+            if let Some(live_manager) = live_manager {
+                evidence["live_manager"] = live_manager;
             }
             (result, evidence)
         }

@@ -9,14 +9,13 @@ pub(crate) mod service_control;
 pub(crate) mod service_manager;
 pub mod service_state;
 use crate::{
-    config::Manager,
     db::{Db, Doc},
     host::{Action, ServiceRestart, Work},
     policy, *,
 };
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, fs, path::Path, process::Command};
+use std::{collections::BTreeMap, fs, path::Path};
 
 pub(crate) const RESTART_TOOL: &str = "service.restart";
 
@@ -214,33 +213,10 @@ pub(crate) fn restarted(observation: &Value, request: &ServiceRestart) -> bool {
 
 fn service(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Result<Value> {
     let cfg = configured_service(w)?;
-    let manager = if cfg.manager == Manager::User {
-        "--user"
-    } else {
-        "--system"
-    };
-    let command = |verb: &str,
-                   args: &[&str],
-                   unit: Option<&str>,
-                   effect: bool|
-     -> Result<Vec<u8>> {
-        let mut cmd = Command::new("/usr/bin/systemctl");
-        cmd.env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("LC_ALL", "C");
-        if cfg.manager == Manager::User {
-            cmd.env(
-                "XDG_RUNTIME_DIR",
-                format!("/run/user/{}", rustix::process::geteuid().as_raw()),
-            );
-        }
-        cmd.args([manager, "--no-pager", "--no-ask-password", verb])
-            .args(args);
-        if let Some(unit) = unit {
-            cmd.arg("--").arg(unit);
-        }
-        let out =
-            crate::command::capture(cmd, effect, "systemd", if unit.is_some() { 30 } else { 5 })?;
+    let command = |verb: &str, args: &[&str], effect: bool| -> Result<Vec<u8>> {
+        let mut cmd = service_manager::command(&cfg.manager, verb);
+        cmd.args(args).arg("--").arg(&cfg.unit);
+        let out = crate::command::capture(cmd, effect, "systemd", 30)?;
         require(
             !out.truncated,
             if effect {
@@ -252,21 +228,12 @@ fn service(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Result<Va
         )?;
         Ok(out.stdout)
     };
-    let unit = Some(cfg.unit.as_str());
-    let manager_sample = || -> Result<Option<String>> {
-        service_manager::parse_sample(&command(
-            "show",
-            &[service_manager::START_PROPERTY],
-            None,
-            false,
-        )?)
-    };
+    let manager_sample = || service_manager::sample(&cfg.manager);
     let inspect = || -> Result<Value> {
         let started = manager_sample()?;
         let bytes = command(
             "show",
             &["--property=Id,LoadState,ActiveState,SubState,MainPID,InvocationID,NeedDaemonReload"],
-            unit,
             false,
         )?;
         let mut props = BTreeMap::new();
@@ -285,7 +252,7 @@ fn service(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Result<Va
         )?;
         let load_state = props.get("LoadState").copied().unwrap_or_default();
         let definition = if load_state == "loaded" {
-            Some(psios_api::sha256(&command("cat", &[], unit, false)?))
+            Some(psios_api::sha256(&command("cat", &[], false)?))
         } else {
             require(
                 matches!(w.action, Action::ServiceObserve(_))
@@ -357,7 +324,7 @@ fn service(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Result<Va
             "checkpointed systemd manager could not be confirmed before unit control",
         )
     })?;
-    command(control.verb(), &[], unit, true)?;
+    command(control.verb(), &[], true)?;
     let observed =
         inspect().map_err(|_| err("OutcomeUnknown", "unit change requires reconciliation"))?;
     require(

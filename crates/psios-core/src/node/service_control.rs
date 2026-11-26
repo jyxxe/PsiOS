@@ -1,5 +1,6 @@
 //! Durable evidence of the exact authorized call into a systemd manager.
 use super::*;
+use crate::config::Manager;
 use crate::db::{find, resolve, row};
 use rusqlite::{Connection, params};
 mod settlement;
@@ -647,6 +648,119 @@ pub(crate) fn confirmed(
         "observation does not confirm the checkpointed systemd manager, boot and postcondition",
     )?;
     Ok(Some(checkpoint))
+}
+
+pub(crate) struct ReconcileProbe {
+    operation_ref: Value,
+    checkpoint_ref: Value,
+    evidence_ref: Value,
+    manager: Manager,
+}
+
+pub(crate) struct ReconcileSample {
+    probe: ReconcileProbe,
+    boot_id: String,
+    started: String,
+}
+
+impl ReconcileProbe {
+    pub(crate) fn read(self) -> Result<ReconcileSample> {
+        let unavailable = || {
+            err(
+                "OutcomeUnknown",
+                "live systemd manager startup time is unavailable",
+            )
+        };
+        let boot_id = boot_id().map_err(|_| unavailable())?;
+        let started = service_manager::sample(&self.manager)
+            .map_err(|_| unavailable())?
+            .ok_or_else(unavailable)?;
+        Ok(ReconcileSample {
+            probe: self,
+            boot_id,
+            started,
+        })
+    }
+}
+
+pub(crate) fn prepare_reconcile_probe(
+    db: &Db<'_>,
+    op: &Doc,
+    evidence: Option<&Value>,
+) -> Result<Option<ReconcileProbe>> {
+    let Some(intent) = intent(db.c, op)? else {
+        return Ok(None);
+    };
+    let target = db.resolve(&intent.body["service_ref"])?;
+    let control = Control::from_tool(&intent.body["tool"])
+        .ok_or_else(|| err("RecoveryRequired", "not a managed systemd control"))?;
+    let checkpoint = checkpoint(db.c, op, &intent, &target, control)?.ok_or_else(|| {
+        err(
+            "RecoveryRequired",
+            "systemd operation has no committed checkpoint",
+        )
+    })?;
+    if service_manager::timestamp(&checkpoint.body["before"]).is_none() {
+        return Ok(None);
+    }
+    held(db, &target, op)?;
+    require(
+        db.of(&target.id, "HostService")?.reference() == target.reference(),
+        "RecoveryRequired",
+        "original systemd service revision is unavailable",
+    )?;
+    let evidence = db.resolve(evidence.ok_or_else(|| {
+        err(
+            "PreconditionFailed",
+            "a fresh inspection artifact is required",
+        )
+    })?)?;
+    require(
+        evidence.kind == "Artifact",
+        "PreconditionFailed",
+        "expected a retained inspection artifact",
+    )?;
+    Ok(Some(ReconcileProbe {
+        operation_ref: op.reference(),
+        checkpoint_ref: checkpoint.reference(),
+        evidence_ref: evidence.reference(),
+        manager: decode(&target.spec["manager"])?,
+    }))
+}
+
+pub(crate) fn require_live_manager(
+    op: &Doc,
+    checkpoint: &Doc,
+    proof: &Doc,
+    observation: &Value,
+    sample: Option<&ReconcileSample>,
+) -> Result<Option<Value>> {
+    let before = &checkpoint.body["before"];
+    let Some(expected) = service_manager::timestamp(before) else {
+        return Ok(None);
+    };
+    let manager: Manager = decode(&before["manager"])?;
+    require(
+        sample.is_some_and(|live| {
+            live.probe.operation_ref == op.reference()
+                && live.probe.checkpoint_ref == checkpoint.reference()
+                && live.probe.evidence_ref == proof.reference()
+                && live.probe.manager == manager
+                && live.boot_id == before["boot_id"]
+                && live.boot_id == observation["boot_id"]
+                && live.started == expected
+        }),
+        "OutcomeUnknown",
+        "live systemd manager does not match the checkpointed invocation",
+    )?;
+    Ok(manager_evidence(before))
+}
+
+fn manager_evidence(observation: &Value) -> Option<Value> {
+    service_manager::timestamp(observation).map(|started| {
+        json!({"manager":observation["manager"],"manager_uid":observation["manager_uid"],
+            "boot_id":observation["boot_id"],(service_manager::STARTED):started})
+    })
 }
 
 pub(crate) fn verify(conn: &Connection) -> Result<()> {

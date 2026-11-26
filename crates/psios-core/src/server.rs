@@ -116,6 +116,11 @@ fn connection(s: &Shared, stream: &mut UnixStream, stop: &AtomicBool) -> Result<
             let read = job.read();
             return accepting(s, stop)?.finish_export(peer, &r, read);
         }
+        if r.method == "Operation.Reconcile" {
+            let probe = accepting(s, stop)?.prepare_reconcile(peer, &r)?;
+            let sample = probe.map(|job| job.read()).transpose();
+            return accepting(s, stop)?.finish_reconcile(peer, &r, sample);
+        }
         let wait: Option<(&str, WaitCondition)> = match r.method.as_str() {
             "Event.Wait" => Some(("Event.Poll", WaitCondition::Items("events"))),
             "Resource.Watch" if r.params.get("timeout_ms").is_some() => {

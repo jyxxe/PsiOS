@@ -221,7 +221,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Task.Get" => broker::get(db, actor, p, "Task"),
         "Task.Results" => broker::result_access::get(db, actor, p),
         "Run.Get" => broker::get(db, actor, p, "Run"),
-        "Operation.Reconcile" => broker::reconcile(db, actor, p),
+        "Operation.Reconcile" => broker::reconcile(db, actor, p, Ok(None)),
         "Operation.Get" => broker::get(db, actor, p, "Operation"),
         "Approval.Decide" => broker::decide(db, actor, p),
         "Audit.List" => {
@@ -339,6 +339,27 @@ impl Store {
     ) -> Result<Value> {
         self.authorized_request(peer, r, |db, actor| {
             storage::export::finish(db, actor, &r.params, read)
+        })
+    }
+
+    pub(crate) fn prepare_reconcile(
+        &mut self,
+        peer: u32,
+        r: &Request,
+    ) -> Result<Option<node::service_control::ReconcileProbe>> {
+        self.authorized_request(peer, r, |db, actor| {
+            broker::prepare_reconcile(db, actor, &r.params)
+        })
+    }
+
+    pub(crate) fn finish_reconcile(
+        &mut self,
+        peer: u32,
+        r: &Request,
+        sample: Result<Option<node::service_control::ReconcileSample>>,
+    ) -> Result<Value> {
+        self.authorized_request(peer, r, |db, actor| {
+            broker::reconcile(db, actor, &r.params, sample)
         })
     }
 

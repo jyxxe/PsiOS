@@ -230,6 +230,8 @@ fn check_inspection(
             && evidence.body["operation_ref"] == original.reference()
             && evidence.body["target_ref"] == target.reference()
             && evidence.body["evidence"]["checkpoint_ref"] == checkpoint.reference()
+            && evidence.body["evidence"].get("live_manager")
+                == manager_evidence(&checkpoint.body["before"]).as_ref()
             && task.kind == "Task"
             && task.spec["task_type"] == "service.inspect"
             && task.body["lifecycle"] == "Succeeded"

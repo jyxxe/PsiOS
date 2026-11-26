@@ -763,6 +763,12 @@ jobs:
           git archive ac52769cebdc4f8225dd5486ca4ab7b5a0d11ca3 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format114"
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format114" "$RUNNER_TEMP/psios-compatibility-target"
           python3 -B tests/workflow_session_join_upgrade.py --previous-bin-dir "$RUNNER_TEMP/psios-compatibility-target/debug"
+      - name: Preserve legacy timed Workflow overlap through the workflow-aware upgrade
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format116"
+          git archive ec878f6db929a1d2ec08dd3e7b6c704baa5d72e0 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format116"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format116" "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/workflow_schedule_overlap_upgrade.py --previous-bin-dir "$RUNNER_TEMP/psios-compatibility-target/debug"
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

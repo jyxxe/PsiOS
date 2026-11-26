@@ -1,6 +1,10 @@
 //! Reclaim verified-unpublished restore stages only after logical settlement.
 use super::*;
+use crate::db::{find, resolve};
+use rusqlite::Connection;
 use rustix::fs::{RenameFlags, renameat_with};
+
+const AUDIT: &str = "Storage.RestoreStageReclaim";
 
 pub(crate) fn queue_disposal(db: &Db<'_>, op: &Doc, evidence: &Doc) -> Result<()> {
     if evidence.body["evidence"]["conclusion"] != NOT_APPLIED {
@@ -28,25 +32,41 @@ pub(crate) fn next_disposal(db: &Db<'_>, cursor: &str) -> Result<Option<String>>
 
 impl Disposal {
     pub(crate) fn open(db: &Db<'_>, operation: &str) -> Result<Self> {
-        let (checkpoint_ref, evidence_ref): (Value, Value) = db.c.query_row(
+        Self::indexed(db.c, operation)
+    }
+
+    pub(super) fn indexed(conn: &Connection, operation: &str) -> Result<Self> {
+        let (checkpoint_ref, evidence_ref): (Value, Value) = conn.query_row(
             "SELECT checkpoint_ref,evidence_ref FROM restore_stage_disposals WHERE operation=?1",
             [operation],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        let op = db.of(operation, "Operation")?;
-        let checkpoint = db.resolve(&checkpoint_ref)?;
-        let evidence = db.resolve(&evidence_ref)?;
-        let prior = db.resolve(&evidence.body["operation_ref"])?;
-        let effect = db.resolve(&op.body["effect_refs"][0])?;
-        let intent = db.get(&intent_id(operation))?;
-        verify_custody(&op, &checkpoint, Some(&intent))?;
+        let evidence = resolve(conn, &evidence_ref)?;
         require(
-            checkpoint.id == checkpoint_id(operation)
+            evidence.body["evidence"]["checkpoint_ref"] == checkpoint_ref
+                && !finished(conn, operation)?,
+            "RecoveryRequired",
+            "pending restore disposal disagrees with its evidence or completion",
+        )?;
+        Self::authenticate(conn, operation, evidence)
+    }
+
+    pub(super) fn authenticate(conn: &Connection, operation: &str, evidence: Doc) -> Result<Self> {
+        let op = verification::needed(conn, operation)?;
+        let checkpoint = resolve(conn, &evidence.body["evidence"]["checkpoint_ref"])?;
+        let prior = resolve(conn, &evidence.body["operation_ref"])?;
+        let effect = resolve(conn, &op.body["effect_refs"][0])?;
+        let intent = find(conn, &intent_id(operation))?;
+        let placement = verify_custody(&op, &checkpoint, intent.as_ref())?;
+        require(
+            placement.stage_name()?.is_some()
+                && op.kind == "Operation"
+                && checkpoint.id == checkpoint_id(operation)
                 && op.body["outcome_knowledge"] == "Known"
                 && matches!(op.body["lifecycle"].as_str(), Some("Failed" | "Cancelled"))
                 && evidence.kind == "RecoveryEvidence"
+                && evidence.rev == 1
                 && evidence.owner == op.owner
-                && evidence.body["evidence"]["checkpoint_ref"] == checkpoint_ref
                 && evidence.body["evidence"]["conclusion"] == NOT_APPLIED
                 && evidence.body["target_ref"] == checkpoint.body["backup_ref"]
                 && prior.kind == "Operation"
@@ -58,10 +78,12 @@ impl Disposal {
                 && effect.kind == "Effect"
                 && effect.owner == op.owner
                 && effect.body["operation_id"] == operation
+                && effect.body["action"] == "backup.restore"
+                && effect.body["resource_ref"] == checkpoint.body["backup_ref"]
                 && effect.body["phase"] == "EffectReconciled"
                 && effect.body["evidence_refs"]
                     .as_array()
-                    .is_some_and(|refs| refs.contains(&evidence_ref)),
+                    .is_some_and(|refs| refs.contains(&evidence.reference())),
             "RecoveryRequired",
             "restore stage disposal has no settled not-applied evidence",
         )?;
@@ -72,11 +94,15 @@ impl Disposal {
         })
     }
 
+    pub(super) fn stage_name(&self) -> Result<&str> {
+        self.checkpoint.body["placement"]["stage_name"]
+            .as_str()
+            .ok_or_else(|| err("RecoveryRequired", "restore discard has no original stage"))
+    }
+
     pub(crate) fn run(&self, cfg: &Config) -> Result<bool> {
         let placement: Placement = decode(&self.checkpoint.body["placement"])?;
-        let source = placement
-            .stage_name()?
-            .ok_or_else(|| err("RecoveryRequired", "restore discard has no original stage"))?;
+        let source = self.stage_name()?;
         let receipt = &self.checkpoint.body["receipt"];
         let final_name = volume_id(receipt)?;
         let parent = open_parent(cfg, &placement)?;
@@ -116,7 +142,7 @@ impl Disposal {
         )? == 1, "RecoveryRequired", "restore disposal authorization changed")?;
         db.audit(
             crate::policy::SYSTEM,
-            "Storage.RestoreStageReclaim",
+            AUDIT,
             Some(&self.operation),
             if removed {
                 "Removed"
@@ -126,4 +152,22 @@ impl Disposal {
         )?;
         Ok(())
     }
+}
+
+pub(super) fn finished(conn: &Connection, operation: &str) -> Result<bool> {
+    let audited = conn.query_row(
+        "SELECT actor,decision FROM audit WHERE method='Storage.RestoreStageReclaim' AND resource=?1",
+        [operation],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    ).optional()?;
+    if let Some((actor, outcome)) = audited {
+        require(
+            actor == crate::policy::SYSTEM
+                && matches!(outcome.as_str(), "Removed" | "ConfirmedAbsent"),
+            "RecoveryRequired",
+            "restore disposal completion record is invalid",
+        )?;
+        return Ok(true);
+    }
+    Ok(false)
 }

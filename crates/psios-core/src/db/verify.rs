@@ -180,6 +180,9 @@ pub(super) fn check_artifacts(
     if identity.database_format >= crate::apps::health::FORMAT {
         crate::apps::health::verify(conn)?;
     }
+    if identity.database_format >= crate::storage::restore_publication::DISPOSAL_FORMAT {
+        crate::storage::restore_publication::verify(conn)?;
+    }
     Ok(())
 }
 

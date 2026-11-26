@@ -5,7 +5,7 @@ use rusqlite::params;
 pub(crate) const FORMAT: u32 = super::file_integrity::FORMAT + 1;
 pub(crate) const SCHEMA: &str = include_str!("read_holds.sql");
 
-pub(super) fn reader(action: &Action) -> bool {
+pub(crate) fn reader(action: &Action) -> bool {
     matches!(
         action,
         Action::Read(_)

@@ -486,26 +486,27 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
         )?;
         let receipt = match result {
             Ok(_)
-                if matches!(
-                    w.action,
-                    Action::InspectProcess(_)
-                        | Action::Pressure {}
-                        | Action::TrackBlockDevice(_)
-                        | Action::ObserveBlockDevice(_)
-                        | Action::ServiceObserve(_)
-                        | Action::ServiceLogs(_)
-                        | Action::ServiceLogsSince(_)
-                        | Action::ServiceResources(_)
-                        | Action::ListAppReleases(_)
-                        | Action::InstallArtifact(_)
-                        | Action::StageArtifactRelease(_)
-                        | Action::Logs(_)
-                        | Action::Stop(_)
-                        | Action::ObserveNetworkProbe(_)
-                        | Action::InspectNetworkTrial(_)
-                        | Action::InspectOciCreate(_)
-                        | Action::DiscardOciCreate(_)
-                ) =>
+                if storage::read_holds::reader(&w.action)
+                    || matches!(
+                        w.action,
+                        Action::InspectProcess(_)
+                            | Action::Pressure {}
+                            | Action::TrackBlockDevice(_)
+                            | Action::ObserveBlockDevice(_)
+                            | Action::ServiceObserve(_)
+                            | Action::ServiceLogs(_)
+                            | Action::ServiceLogsSince(_)
+                            | Action::ServiceResources(_)
+                            | Action::ListAppReleases(_)
+                            | Action::InstallArtifact(_)
+                            | Action::StageArtifactRelease(_)
+                            | Action::Logs(_)
+                            | Action::Stop(_)
+                            | Action::ObserveNetworkProbe(_)
+                            | Action::InspectNetworkTrial(_)
+                            | Action::InspectOciCreate(_)
+                            | Action::DiscardOciCreate(_)
+                    ) =>
             {
                 json!({"code":"Fenced"})
             }

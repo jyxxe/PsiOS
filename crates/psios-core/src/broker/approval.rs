@@ -134,12 +134,19 @@ pub(crate) fn verify_bound_approval(
     effect: &Doc,
     tool: &str,
 ) -> Result<Doc> {
-    let historical = |id: &str, revision: i64| {
+    let historical = |id: &str, revision: i64| -> Result<Doc> {
         conn.query_row(
             "SELECT * FROM versions WHERE id=?1 AND rev=?2",
             params![id, revision],
             crate::db::row,
         )
+        .optional()?
+        .ok_or_else(|| {
+            err(
+                "RecoveryRequired",
+                "original approval history revision is unavailable",
+            )
+        })
     };
     let permit = resolve(conn, &effect.spec["permit_ref"])?;
     let proof = resolve(conn, &permit.body["auth_proof"]["record_ref"])?;

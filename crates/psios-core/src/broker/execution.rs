@@ -507,6 +507,7 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                             | Action::InspectNetworkTrial(_)
                             | Action::InspectOciCreate(_)
                             | Action::DiscardOciCreate(_)
+                            | Action::InspectBackupPublication(_)
                     ) =>
             {
                 json!({"code":"Fenced"})
@@ -548,6 +549,8 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
     };
     let mkdir_unprepared = matches!(w.action, Action::MakeDir(_))
         && storage::directory_create::not_prepared(db, &db.of(&w.op.id, "Operation")?)?;
+    let backup_checkpointed =
+        matches!(w.action, Action::Backup(_)) && storage::publication::checkpointed(db, &w.op)?;
     let rebind = matches!(w.action, Action::RebindRestoredVolume(_));
     require(
         !atomic_authority || t.body["lifecycle"] == "Running",
@@ -694,6 +697,11 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                 err(
                     "OutcomeUnknown",
                     "unable to settle the checkpointed volume publication",
+                )
+            } else if backup_checkpointed && e.0.code != "OutcomeUnknown" {
+                err(
+                    "OutcomeUnknown",
+                    "unable to settle the checkpointed backup publication",
                 )
             } else if volume_create_started == Some(false) && e.0.code == "OutcomeUnknown" {
                 err(

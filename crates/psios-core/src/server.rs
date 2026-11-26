@@ -236,6 +236,7 @@ fn worker(s: Shared, changes: Arc<Changes>, stop: Arc<AtomicBool>, tick: Duratio
                     crate::host::Checkpoint::RestoredVolume { .. }
                         | crate::host::Checkpoint::DirectoryAllocation(_)
                         | crate::host::Checkpoint::DirectoryCreation(_)
+                        | crate::host::Checkpoint::BackupPublication { .. }
                 );
                 let mut store = state(&s)?;
                 let result = store.transaction(&correlation, |db| work.checkpoint(db, checkpoint));
@@ -376,6 +377,7 @@ fn timer(s: Shared, stop: Arc<AtomicBool>) -> Result<()> {
 fn reclaim_storage(s: Shared, stop: Arc<AtomicBool>, config: Config) -> Result<()> {
     let mut archive_cursor = String::new();
     let mut restore_cursor = String::new();
+    let mut backup_cursor = String::new();
     let mut directory_cursor = String::new();
     let mut entry_cursor = crate::storage::reclamation::Cursor::default();
     let mut retirement_cursor = crate::storage::reclamation::Cursor::default();
@@ -390,6 +392,12 @@ fn reclaim_storage(s: Shared, stop: Arc<AtomicBool>, config: Config) -> Result<(
             reclaim_one_restore_stage(&s, &config, &correlation, &mut restore_cursor)
         {
             eprintln!("psiosd restore stage reclamation: {}", error.0.code);
+        }
+        if !stop.load(Ordering::Acquire)
+            && let Err(error) =
+                reclaim_one_backup_stage(&s, &config, &correlation, &mut backup_cursor)
+        {
+            eprintln!("psiosd backup stage reclamation: {}", error.0.code);
         }
         if !stop.load(Ordering::Acquire)
             && let Err(error) =
@@ -556,6 +564,24 @@ fn reclaim_one_restore_stage(
     state(s)?.transaction(correlation, |db| job.finish(db, removed))
 }
 
+fn reclaim_one_backup_stage(
+    s: &Shared,
+    config: &Config,
+    correlation: &str,
+    cursor: &mut String,
+) -> Result<()> {
+    use crate::storage::publication::{Disposal, next_disposal};
+    let selected = state(s)?.transaction(correlation, |db| next_disposal(db, cursor))?;
+    let Some(operation) = selected else {
+        cursor.clear();
+        return Ok(());
+    };
+    cursor.clone_from(&operation);
+    let job = state(s)?.transaction(correlation, |db| Disposal::open(db, &operation))?;
+    let removed = job.run(config)?;
+    state(s)?.transaction(correlation, |db| job.finish(db, removed))
+}
+
 struct Endpoint<'a> {
     path: &'a Path,
     _lock: File,
@@ -620,6 +646,10 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     let mut db = Store::open(cfg.clone())?;
     db.transaction("storage-reclamation-custody", |db| retirement::verify(db.c))?;
     db.reclaim_oci_archives()?;
+    let backup_stages = db.transaction(
+        "backup-stage-custody",
+        crate::storage::publication::protected_stages,
+    )?;
     let (listener, _endpoint) = bind(&cfg.socket)?;
     let restore_stages = db.transaction(
         "restore-stage-custody",
@@ -628,7 +658,7 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     if let Err(error) = &restore_stages {
         eprintln!("psiosd volume staging retained: {}", error.0.code);
     }
-    crate::storage::reclaim_on_startup(&cfg, restore_stages.as_ref().ok());
+    crate::storage::reclaim_on_startup(&cfg, restore_stages.as_ref().ok(), &backup_stages);
     db.transaction("restart-recovery", |db| {
         crate::events::scopes::reclaim(db)?;
         crate::node::service_control::verify_active_holds(db)?;

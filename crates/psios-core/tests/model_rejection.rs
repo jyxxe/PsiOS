@@ -10,7 +10,7 @@ use std::{
     fs::OpenOptions,
     io::{ErrorKind, Write},
     os::unix::{
-        fs::OpenOptionsExt,
+        fs::{OpenOptionsExt, PermissionsExt},
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
@@ -157,7 +157,8 @@ fn intercept(listener: &UnixListener, unix: &Path) -> (UnixStream, Value, Value)
 #[test]
 fn rejected_decision_replays_without_tool_effect_or_second_inference() {
     let dir = tempfile::tempdir().unwrap();
-    let base = dir.path();
+    let base = dir.path().canonicalize().unwrap();
+    fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
     let config = base.join("core.json");
     let state = base.join("state");
     let witness = base.join("witness");
@@ -230,7 +231,6 @@ fn rejected_decision_replays_without_tool_effect_or_second_inference() {
     let calls = base.join("inference-calls");
     let journal = base.join("provider");
     fs::create_dir(&journal).unwrap();
-    use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&journal, fs::Permissions::from_mode(0o700)).unwrap();
     let token_path = base.join("provider.token");
     OpenOptions::new()

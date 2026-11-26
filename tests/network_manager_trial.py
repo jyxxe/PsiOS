@@ -25,6 +25,8 @@ DBUS_PATH = "/org/freedesktop/DBus"
 DEVICE = "psios-nm0"
 PEER = "psios-nmpeer0"
 DEVICE_MAC = "02:50:53:00:00:01"
+PEER_ADDRESS = "192.0.2.20"
+ON_LINK_PREFIX = "192.0.2.0/24"
 BUS_SOCKET = Path("/run/dbus/system_bus_socket")
 BUS_ADDRESS = f"unix:path={BUS_SOCKET}"
 
@@ -34,8 +36,6 @@ class Profile:
     name: str
     uuid: str
     local: str
-    peer: str
-    subnet: str
 
     def keyfile(self):
         return f"""[connection]
@@ -44,6 +44,8 @@ uuid={self.uuid}
 type=ethernet
 interface-name={DEVICE}
 autoconnect=false
+mdns=0
+llmnr=0
 
 [ethernet]
 
@@ -52,16 +54,15 @@ method=manual
 address1={self.local}/24
 never-default=true
 ignore-auto-dns=true
+route-table=254
 
 [ipv6]
 method=disabled
 """
 
 
-ORIGINAL = Profile("psios-original", "1aad7685-9a7d-49ad-8132-0c9c56cfb34e",
-                   "192.0.2.10", "192.0.2.20", "192.0.2.0/24")
-CANDIDATE = Profile("psios-candidate", "597da7b3-c8ba-4134-bfa7-57377f1ab670",
-                    "198.51.100.10", "198.51.100.20", "198.51.100.0/24")
+ORIGINAL = Profile("psios-original", "1aad7685-9a7d-49ad-8132-0c9c56cfb34e", "192.0.2.10")
+CANDIDATE = Profile("psios-candidate", "597da7b3-c8ba-4134-bfa7-57377f1ab670", "192.0.2.11")
 
 
 @dataclass(frozen=True)
@@ -126,8 +127,7 @@ def peer():
         raise RuntimeError("veth peer setup was not requested")
     command("ip", "link", "set", "lo", "up")
     command("ip", "link", "set", PEER, "up")
-    for profile in (ORIGINAL, CANDIDATE):
-        command("ip", "address", "add", f"{profile.peer}/24", "dev", PEER)
+    command("ip", "address", "add", f"{PEER_ADDRESS}/24", "dev", PEER)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("0.0.0.0", 0))
         listener.listen()
@@ -243,11 +243,20 @@ auth-polkit=false
 [connectivity]
 enabled=false
 
+[logging]
+audit=false
+
 [keyfile]
 unmanaged-devices=*;except:interface-name:{DEVICE}
+
+[device-psios-fixture]
+match-device=interface-name:{DEVICE}
+managed=1
 """)
         state = self.root / "state"
         state.mkdir(mode=0o700)
+        # sysfs network links are resolved in the network namespace of their mount.
+        mount_private(stack, "-t", "sysfs", "-o", "ro,nodev,nosuid,noexec", "sysfs", "/sys")
         mount_private(stack, "-t", "tmpfs", "-o", "size=8m,nodev,nosuid,noexec", "tmpfs", "/run")
         mount_private(stack, "--bind", etc, "/etc/NetworkManager")
         mount_private(stack, "--bind", state, "/var/lib/NetworkManager")
@@ -274,7 +283,8 @@ unmanaged-devices=*;except:interface-name:{DEVICE}
         until("private D-Bus is listening", BUS_SOCKET.is_socket, True)
         self.bus_id = scalar(self.busctl("call", DBUS, DBUS_PATH, DBUS, "GetId"), "s")
         manager = self.start_logged(stack, "manager", [
-            "NetworkManager", "--no-daemon", "--log-level=INFO", f"--config={config}",
+            "NetworkManager", "--debug", "--log-level=INFO",
+            f"--config={config}",
             f"--config-dir={local_conf}", f"--system-config-dir={vendor_conf}",
             f"--state-file={state / 'NetworkManager.state'}",
             f"--intern-config={state / 'NetworkManager-intern.conf'}",
@@ -349,14 +359,14 @@ unmanaged-devices=*;except:interface-name:{DEVICE}
         addresses = [(address["local"], address["prefixlen"]) for address in link["addr_info"]]
         assert addresses == [(profile.local, 24)], link
         routes = ip_json("-4", "route", "show", "table", "main")
-        assert [route["dst"] for route in routes if route.get("dev") == self.interface] == [profile.subnet], routes
+        assert [route["dst"] for route in routes if route.get("dev") == self.interface] == [ON_LINK_PREFIX], routes
         assert all(route.get("dst") != "default" for route in routes), routes
         assert not ip_json("-6", "route", "show", "default")
-        with socket.create_connection((profile.peer, self.peer_port), timeout=3) as connection:
+        with socket.create_connection((PEER_ADDRESS, self.peer_port), timeout=3) as connection:
             with connection.makefile("rb") as stream:
                 assert connection.getsockname()[0] == profile.local
                 connection.sendall(b"probe\n")
-                assert stream.readline(128) == f"{profile.local} {profile.peer} probe\n".encode()
+                assert stream.readline(128) == f"{profile.local} {PEER_ADDRESS} probe\n".encode()
 
 
 @contextmanager
@@ -410,10 +420,29 @@ def exercise():
 
 def print_settings():
     with isolated_manager() as manager:
+        def properties(path, interface, *keys):
+            response = json.loads(manager.bus_command("--json=short", "call", manager.manager_owner, path,
+                                                      f"{DBUS}.Properties", "GetAll", "s", interface))
+            values, = response["data"]
+            return {key: values[key] for key in keys if key in values}
+
+        device = f"{NM}.Device"
+        active = scalar(manager.bus_property(manager.device, device, "ActiveConnection"), "o")
+        ip6 = scalar(manager.bus_property(manager.device, device, "Ip6Config"), "o")
+        applied = json.loads(manager.bus_command("--json=short", "call", manager.manager_owner, manager.device,
+                                                device, "GetAppliedConnection", "u", "0"))
         print(json.dumps({
-            "device_type": int(scalar(manager.bus_property(manager.device, f"{NM}.Device", "DeviceType"), "u")),
+            "device": properties(manager.device, device, "DeviceType", "HwAddress", "Ports", "Ip6Config"),
+            "active": properties(active, f"{NM}.Connection.Active", "Default6", "Ip6Config", "Master", "Controller"),
+            "ip6": properties(ip6, f"{NM}.IP6Config", "AddressData", "RouteData", "NameserverData", "Gateway")
+            if ip6 != "/" else {},
+            "saved": properties(manager.profile_path(ORIGINAL), f"{NM}.Settings.Connection",
+                                "Flags", "Unsaved", "Filename"),
             "original": manager.settings(ORIGINAL),
             "candidate": manager.settings(CANDIDATE),
+            "applied": applied,
+            "routes": ip_json("-4", "route", "show", "table", "all", "dev", DEVICE),
+            "ipv6_routes": ip_json("-6", "route", "show", "table", "all", "dev", DEVICE),
         }, indent=2))
 
 

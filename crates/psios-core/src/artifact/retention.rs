@@ -444,3 +444,75 @@ pub(super) fn apply_candidate(
     db.audit(actor, "Task.EvictResults", Some(&task.id), "Evicted")?;
     Ok(view(&record))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Config, Store, broker};
+
+    #[test]
+    fn metadata_discovery_keeps_payload_checks_separate_from_durable_reference_faults() {
+        let directory = tempfile::tempdir().unwrap();
+        let cfg = Config::local(&directory.path().join("state"));
+        Store::init(&cfg).unwrap();
+        let mut store = Store::open(cfg).unwrap();
+        let task = store.transaction("enqueue-candidate-fixture", |db| {
+            let prepared = broker::prepare(db, policy::OWNER, &json!({
+                "tool":"system.status","input":{},"key":"candidate-fixture","delegation_id":"owner-delegation",
+            }))?;
+            let accepted = broker::submit(db, policy::OWNER, &prepared, None)?;
+            Ok(accepted["task_id"].as_str().unwrap().to_owned())
+        }).unwrap();
+        let claimed = store
+            .transaction("claim-candidate-fixture", broker::claim)
+            .unwrap();
+        assert_eq!(claimed.as_deref(), Some(task.as_str()));
+        let work = store
+            .transaction("dispatch-candidate-fixture", |db| {
+                broker::dispatch(db, &task)
+            })
+            .unwrap()
+            .unwrap();
+        let outcome = work.perform(|checkpoint| {
+            store.transaction("checkpoint-candidate-fixture", |db| {
+                work.checkpoint(db, checkpoint)
+            })
+        });
+        store
+            .transaction("check-candidate-fixture", |db| {
+                broker::finish(db, &work, outcome)?;
+                let ready = db.of(&task, "Task")?;
+                let artifact = db.resolve(&ready.body["result"]["artifact_refs"][0])?;
+                let content_bytes = prepare_candidate(db, ready.clone())?.bytes();
+                assert!(matches!(
+                    candidate_metadata(db, &ready)?,
+                    CandidateMetadata::Ready(bytes) if bytes == content_bytes
+                ));
+
+                assert!(
+                    db.c.execute(
+                        "DELETE FROM artifact_chunks WHERE artifact_id=?1 AND artifact_rev=?2",
+                        params![artifact.id, artifact.rev],
+                    )? > 0
+                );
+                assert!(matches!(
+                    candidate_metadata(db, &ready)?,
+                    CandidateMetadata::Ready(bytes) if bytes == content_bytes
+                ));
+                let removal = prepare_candidate(db, ready.clone()).err().unwrap();
+                assert_eq!(removal.0.code, "RecoveryRequired");
+
+                let mut body = ready.body.clone();
+                body["result"]["artifact_refs"][0]["digest"] =
+                    json!(format!("sha256:{}", "0".repeat(64)));
+                let damaged = db.status(&ready, body)?;
+                let removal = prepare_candidate(db, damaged.clone()).err().unwrap();
+                assert_eq!(removal.0.code, "PreconditionFailed");
+                let discovery = candidate_metadata(db, &damaged).err().unwrap();
+                assert_eq!(discovery.0.code, "RecoveryRequired");
+                assert!(discovery.0.message.contains("reference digest mismatch"));
+                Ok(())
+            })
+            .unwrap();
+    }
+}

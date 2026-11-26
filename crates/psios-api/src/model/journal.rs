@@ -1,6 +1,6 @@
 //! A private, single-worker outbox for a completed local provider attempt.
-use super::{Delivery, SessionModel, Turn};
-use crate::{ApiError, ApiResult, Client, ResourceRef, parse};
+use super::{DecisionRequest, Delivery, SessionModel, Turn};
+use crate::{ApiError, ApiResult, Client, ResourceRef, canonical, parse, sha256};
 use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags, open, openat, renameat_with, unlinkat};
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
@@ -16,6 +16,7 @@ use std::{
 const PENDING: &str = "psios-model-pending.json";
 const STAGING: &str = ".psios-model-pending.tmp";
 const LIMIT: u64 = 72 * 1024;
+const LATE_DECISION_FORMAT: u32 = 4;
 
 fn storage_error(_: impl std::fmt::Display) -> Box<ApiError> {
     ApiError::new("StorageUnavailable", "provider decision journal I/O failed").into()
@@ -30,6 +31,8 @@ struct Pending {
     claim_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     queue_model: Option<ResourceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    late_decision_model_ref: Option<ResourceRef>,
     request: Delivery,
 }
 
@@ -39,14 +42,34 @@ impl Pending {
         claim_key: &str,
         queue_model: Option<&ResourceRef>,
         request: Delivery,
+        late_decision_model_ref: Option<ResourceRef>,
     ) -> Self {
+        let format = if late_decision_model_ref.is_some() {
+            LATE_DECISION_FORMAT
+        } else {
+            request.format()
+        };
         Self {
-            format: request.format(),
+            format,
             authority: identity.0,
             provider: identity.1,
             claim_key: claim_key.to_owned(),
             queue_model: queue_model.cloned(),
+            late_decision_model_ref,
             request,
+        }
+    }
+
+    fn valid_format(&self) -> bool {
+        if let Some(model) = &self.late_decision_model_ref {
+            self.format == LATE_DECISION_FORMAT
+                && matches!(self.request, Delivery::Decision(_))
+                && self
+                    .queue_model
+                    .as_ref()
+                    .is_none_or(|queued| queued == model)
+        } else {
+            self.format == self.request.format()
         }
     }
 
@@ -144,7 +167,7 @@ impl Journal {
         }
         let record: Pending =
             serde_json::from_value(parse(&bytes).map_err(|_| invalid())?).map_err(|_| invalid())?;
-        if record.format != record.request.format() {
+        if !record.valid_format() {
             return Err(invalid().into());
         }
         // A previous fsync of the renamed directory entry may have returned an
@@ -183,6 +206,89 @@ impl Journal {
     }
 }
 
+fn should_check_lease(error: &ApiError) -> bool {
+    !error.retryable
+        && matches!(
+            error.code.as_str(),
+            "PermissionDenied"
+                | "PreconditionFailed"
+                | "QuotaExceeded"
+                | "InvalidArgument"
+                | "Conflict"
+                | "ApprovalInvalidated"
+                | "SchemaVersionUnsupported"
+        )
+}
+
+fn pending_delivery(error: &ApiError) -> Box<ApiError> {
+    ApiError::new(
+        "OutcomeUnknown",
+        format!("retained model delivery is pending after {}", error.code),
+    )
+    .into()
+}
+
+fn decision_bytes(request: &DecisionRequest) -> Vec<u8> {
+    canonical(&json!(request.decision))
+}
+
+fn digest_valid(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|value| {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+fn session_revision(reference: &Value, session_id: &str) -> Option<u64> {
+    let exact: ResourceRef = serde_json::from_value(reference.clone()).ok()?;
+    let revision = exact.version.strip_prefix('r')?.parse().ok()?;
+    (exact.resource_id == session_id && revision > 0 && digest_valid(&exact.digest))
+        .then_some(revision)
+}
+
+fn matches_decision(receipt: &Value, request: &DecisionRequest) -> bool {
+    let bytes = decision_bytes(request);
+    receipt["decision_digest"] == sha256(&bytes) && receipt["output_bytes"] == bytes.len()
+}
+
+fn matches_observation(
+    receipt: &Value,
+    record: &Pending,
+    request: &DecisionRequest,
+    model: &ResourceRef,
+) -> bool {
+    let observation = &receipt["observation"];
+    let issued = session_revision(&observation["issued_session_ref"], &request.session_id);
+    let unknown = session_revision(&observation["unknown_session_ref"], &request.session_id);
+    let usage_digest = request.usage.map(|usage| sha256(&canonical(&json!(usage))));
+    receipt["status"] == "Recorded"
+        && observation["lease_id"] == request.lease_id
+        && observation["model_ref"] == json!(model)
+        && observation["provider_principal_id"] == record.provider
+        && observation["provider_authority_digest"]
+            .as_str()
+            .is_some_and(digest_valid)
+        && issued
+            .zip(unknown)
+            .is_some_and(|(before, after)| before < after)
+        && observation["observed_at"]
+            .as_str()
+            .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok())
+        && observation["usage_digest"] == json!(usage_digest)
+        && matches_decision(observation, request)
+}
+
+fn observation_terminal(error: &ApiError) -> bool {
+    !error.retryable
+        && (error.code == "Fenced"
+            || (error.code == "PermissionDenied"
+                && error.details.as_ref().is_some_and(|details| {
+                    details["reason"] == "OriginalProviderAuthorityUnavailable"
+                })))
+}
+
 impl Client {
     fn provider_identity(&self) -> ApiResult<(String, String)> {
         let who = self.call("Principal.WhoAmI", json!({}))?;
@@ -196,6 +302,12 @@ impl Client {
     }
 
     fn deliver_record(&self, journal: &Journal, record: &Pending) -> ApiResult<Value> {
+        if let Some(model) = &record.late_decision_model_ref {
+            return self.deliver_observable_decision(journal, record, model);
+        }
+        if let Some(model) = &record.queue_model {
+            return self.deliver_legacy_queued(journal, record, model);
+        }
         let answer = self.send_delivery(&record.request);
         // The authority checks previously settled receipts before checking the
         // lease fence. Fenced therefore also resolves this exact pending request.
@@ -205,7 +317,16 @@ impl Client {
         answer
     }
 
-    fn deliver_queued_record(
+    fn claim_disposition(&self, record: &Pending, model: &ResourceRef) -> ApiResult<Value> {
+        self.call(
+            "Model.ClaimStatus",
+            json!({
+                "model_ref":model, "key":record.claim_key, "lease_id":record.request.lease_id()
+            }),
+        )
+    }
+
+    fn deliver_legacy_queued(
         &self,
         journal: &Journal,
         record: &Pending,
@@ -220,36 +341,83 @@ impl Client {
                 journal.remove()?;
                 Ok(json!({"status":"Fenced"}))
             }
-            Err(e)
-                if !e.retryable
-                    && matches!(
-                        e.code.as_str(),
-                        "PermissionDenied"
-                            | "PreconditionFailed"
-                            | "QuotaExceeded"
-                            | "InvalidArgument"
-                            | "Conflict"
-                            | "ApprovalInvalidated"
-                            | "SchemaVersionUnsupported"
-                    ) =>
-            {
-                let disposition = self.call("Model.ClaimStatus", json!({
-                    "model_ref":model, "key":record.claim_key, "lease_id":record.request.lease_id()
-                }))?;
+            Err(e) if should_check_lease(&e) => {
+                let disposition = self.claim_disposition(record, model)?;
                 match disposition["status"].as_str() {
                     Some("Settled" | "Fenced") => {
                         journal.remove()?;
                         Ok(disposition)
                     }
-                    Some("Pending") => Err(ApiError::new(
-                        "OutcomeUnknown",
-                        format!("retained model delivery is pending after {}", e.code),
-                    )
-                    .into()),
+                    Some("Pending") => Err(pending_delivery(&e)),
                     _ => Err(crate::invalid("invalid queued lease disposition")),
                 }
             }
             Err(e) => Err(e),
+        }
+    }
+
+    fn deliver_observable_decision(
+        &self,
+        journal: &Journal,
+        record: &Pending,
+        model: &ResourceRef,
+    ) -> ApiResult<Value> {
+        let Delivery::Decision(request) = &record.request else {
+            return Err(
+                ApiError::new("RecoveryRequired", "retained observation lacks a decision").into(),
+            );
+        };
+        match self.send_delivery(&record.request) {
+            Ok(receipt) => {
+                if !matches_decision(&receipt, request)
+                    || session_revision(&receipt["session_ref"], &request.session_id).is_none()
+                {
+                    return Err(ApiError::new(
+                        "RecoveryRequired",
+                        "model response does not confirm the retained decision",
+                    )
+                    .into());
+                }
+                journal.remove()?;
+                return Ok(receipt);
+            }
+            Err(error)
+                if !error.retryable
+                    && matches!(error.code.as_str(), "Fenced" | "PermissionDenied") => {}
+            Err(error) if should_check_lease(&error) => {
+                if let Some(queued) = &record.queue_model {
+                    // Settled can also be a strict Unknown. It does not
+                    // acknowledge this decision or authorize its deletion.
+                    match self.claim_disposition(record, queued)?["status"].as_str() {
+                        Some("Settled" | "Fenced") => {}
+                        Some("Pending") => return Err(pending_delivery(&error)),
+                        _ => return Err(crate::invalid("invalid queued lease disposition")),
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        match self.call("Model.ObserveLateDecision", json!(request)) {
+            Ok(receipt) => {
+                if !matches_observation(&receipt, record, request, model) {
+                    return Err(ApiError::new(
+                        "RecoveryRequired",
+                        "late decision receipt does not match the retained decision",
+                    )
+                    .into());
+                }
+                journal.remove()?;
+                Ok(receipt)
+            }
+            Err(error) if observation_terminal(&error) => {
+                journal.remove()?;
+                if error.code == "Fenced" && record.queue_model.is_some() {
+                    Ok(json!({"status":"Fenced"}))
+                } else {
+                    Err(error)
+                }
+            }
+            Err(error) => Err(error),
         }
     }
 
@@ -277,8 +445,12 @@ impl Client {
         } else {
             match self.decide_turn(session, key, provider)? {
                 Turn::Completed(receipt) => return Ok(receipt),
-                Turn::Deliver(request) => {
-                    let record = Pending::new(identity, key, None, request);
+                Turn::Deliver {
+                    request,
+                    late_decision_model_ref,
+                } => {
+                    let record =
+                        Pending::new(identity, key, None, request, late_decision_model_ref);
                     journal.retain(&record)?;
                     record
                 }
@@ -301,9 +473,7 @@ impl Client {
         let identity = self.provider_identity()?;
         if let Some(pending) = journal.pending()? {
             pending.verify_origin(&identity, Some(model))?;
-            return self
-                .deliver_queued_record(&journal, &pending, model)
-                .map(Some);
+            return self.deliver_record(&journal, &pending).map(Some);
         }
         let mut params = json!({"model_ref": model, "key": key});
         let method = if wait.is_zero() {
@@ -329,11 +499,14 @@ impl Client {
             .to_owned();
         match Self::decide_claim(&session, claim, provider, Some(model))? {
             Turn::Completed(receipt) => Ok(Some(receipt)),
-            Turn::Deliver(request) => {
-                let record = Pending::new(identity, key, Some(model), request);
+            Turn::Deliver {
+                request,
+                late_decision_model_ref,
+            } => {
+                let record =
+                    Pending::new(identity, key, Some(model), request, late_decision_model_ref);
                 journal.retain(&record)?;
-                self.deliver_queued_record(&journal, &record, model)
-                    .map(Some)
+                self.deliver_record(&journal, &record).map(Some)
             }
         }
     }
@@ -360,9 +533,94 @@ mod tests {
             let original = json!({"format":format,"request":request,"authority":"local-fixture",
                 "provider":"provider-fixture","claim_key":"fixture"});
             let restored: Pending = serde_json::from_value(original.clone()).unwrap();
+            assert!(restored.valid_format());
             assert_eq!(restored.request.format(), format);
             assert_eq!(restored.request.method(), method);
             assert_eq!(json!(restored), original);
         }
+    }
+
+    #[test]
+    fn negotiated_journal_matches_exact_late_observation_and_keeps_ambiguous_errors() {
+        let reference = |resource_id: &str, version: &str| {
+            json!({
+                "resource_id":resource_id,"version":version,
+                "digest":sha256(version.as_bytes()),
+            })
+        };
+        let model = reference("model-fixture", "r1");
+        let request = json!({
+            "session_id":"session-fixture","lease_id":"lease-fixture",
+            "decision":{"action":"tool","tool":"system.status","input":{}},
+            "usage":{"input_tokens":12,"output_tokens":4},
+        });
+        let pending = json!({
+            "format":LATE_DECISION_FORMAT,"authority":"authority-fixture","provider":"provider-fixture",
+            "queue_model":model,"late_decision_model_ref":model,"claim_key":"claim-fixture","request":request,
+        });
+        let saved: Pending = serde_json::from_value(pending.clone()).unwrap();
+        assert!(saved.valid_format());
+        assert_eq!(json!(saved), pending);
+        for (field, wrong) in [
+            ("format", json!(2)),
+            ("late_decision_model_ref", Value::Null),
+            ("queue_model", reference("model-fixture", "r2")),
+        ] {
+            let mut foreign = pending.clone();
+            foreign[field] = wrong;
+            let foreign: Pending = serde_json::from_value(foreign).unwrap();
+            assert!(!foreign.valid_format());
+        }
+
+        let Delivery::Decision(delivery) = &saved.request else {
+            unreachable!()
+        };
+        let decision = canonical(&request["decision"]);
+        let exact = json!({"status":"Recorded","observation":{
+            "lease_id":request["lease_id"],"model_ref":model,
+            "issued_session_ref":reference("session-fixture","r2"),
+            "unknown_session_ref":reference("session-fixture","r3"),
+            "provider_principal_id":saved.provider,"provider_authority_digest":sha256(b"binding"),
+            "decision_digest":sha256(&decision),"output_bytes":decision.len(),
+            "observed_at":"2026-11-26T00:00:00.000Z",
+            "usage_digest":sha256(&canonical(&request["usage"])),
+        }});
+        let model = saved.late_decision_model_ref.as_ref().unwrap();
+        assert!(matches_observation(&exact, &saved, delivery, model));
+        for field in [
+            "lease_id",
+            "model_ref",
+            "issued_session_ref",
+            "unknown_session_ref",
+            "provider_principal_id",
+            "provider_authority_digest",
+            "decision_digest",
+            "output_bytes",
+            "usage_digest",
+        ] {
+            let mut wrong = exact.clone();
+            wrong["observation"][field] = Value::Null;
+            assert!(
+                !matches_observation(&wrong, &saved, delivery, model),
+                "{field}"
+            );
+        }
+        let mut pending = ApiError::new("PreconditionFailed", "lease settlement pending");
+        pending.retryable = true;
+        pending.retry_condition = "SameRequestAfterBackoff".into();
+        assert!(!should_check_lease(&pending));
+        assert!(!observation_terminal(&pending));
+        assert!(!observation_terminal(&ApiError::new(
+            "DependencyUnavailable",
+            "receipt lost"
+        )));
+        let mut denied = ApiError::new("PermissionDenied", "unauthorized");
+        assert!(!observation_terminal(&denied));
+        denied.details = Some(json!({"reason":"OriginalProviderAuthorityUnavailable"}));
+        assert!(observation_terminal(&denied));
+        assert!(observation_terminal(&ApiError::new(
+            "Fenced",
+            "ineligible for observation"
+        )));
     }
 }

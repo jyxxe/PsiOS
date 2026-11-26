@@ -644,7 +644,11 @@ Provider 可用 `Model.ReportFailure` 提交 `session_id`、`model_ref`、`lease
 
 `ReferencesOnly` 给模型上一步的结果引用，`LocalToolResults` 允许将授权结果正文交给指定本机 Provider。两种模式都核对当前权限与大小。Session 固定 Skill、工具和 Model 修订。退役依赖会阻止后续派发。重复决策返回原回执，租约被取代后旧决策被拒绝。SDK 遇到已领取但结论不明的模型调用时要求保留决策或等待新租约。工具提交、会话检查点和预算更新使用同一事务。
 
-Provider 可用 Rust SDK 的 `model_turn_durable`，或运行 `psiosctl model-step SESSION --key KEY --decision-dir DIR`。为每个并发工作进程预建独占的服务账户目录（模式 0700），使用支持目录锁、原子重命名和 fsync 的本机文件系统。SDK 在发出决策前将原节点、主体、会话、键、租约和结构化决策写入私有文件并落盘。文件至多 72 KiB，可能包含私有工具输入。重启后用原目录和参数重发已保存的决策，Core 可返回原 Task 回执。确认结算或收到该租约的 `Fenced` 后释放目录。同一目录有未决记录时，其他请求会得到 `Conflict`。
+Provider 可用 Rust SDK 的 `model_turn_durable`，或运行 `psiosctl model-step SESSION --key KEY --decision-dir DIR`。为每个并发工作进程预建独占的服务账户目录（模式 0700），使用支持目录锁、原子重命名和 fsync 的本机文件系统。SDK 在发出决策前将原节点、主体、会话、键、租约和结构化决策写入私有文件并落盘。文件至多 72 KiB，可能包含私有工具输入。重启后用原目录和参数重发已保存的决策，Core 可返回原 Task 回执。同一目录有未决记录时，其他请求会得到 `Conflict`。
+
+格式 95 的严格租约公布迟到证据能力及原 Model 引用。已有决策无法再按原租约结算时，SDK 可调用 `Model.ObserveLateDecision` 递交原会话、租约和精确决策。Core 只接受已经持久结算为 `Unknown` 的严格租约与仍获原授权的 Provider，保存一条决策摘要、字节数及可选用量摘要。会话所有者可经 `Session.History` 核对。相同报告可重放，摘要不同会返回冲突。
+
+Core 记录 Provider 的迟到证据，原 `Unknown`、工具任务和记账继续沿用各自权威记录。传输或写入中断时，SDK 保留原本地决策。收到对应的持久回执或明确终止答复后释放暂存。旧日志沿用原投递格式。[迟到证据验收](../tests/test_model_late_decision.py)
 
 如果推理已经开始、决策尚未持久化，重启返回 `OutcomeUnknown`。损坏记录、授权被撤销及冲突决策会留待核实。需保留这类记录时，停用该工作进程并隔离其私有目录；新键仍受原租约、预算和权限约束。[进程故障验收](../tests/test_runtime.py)
 

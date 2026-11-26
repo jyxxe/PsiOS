@@ -125,7 +125,10 @@ impl Delivery {
 
 enum Turn {
     Completed(Value),
-    Deliver(Delivery),
+    Deliver {
+        request: Delivery,
+        late_decision_model_ref: Option<ResourceRef>,
+    },
 }
 
 impl Client {
@@ -172,7 +175,16 @@ impl Client {
             return Err(crate::invalid("model lease context digest differs"));
         }
         let context = &claim["context"];
-        let output = match claim.get("inference_outcome_policy") {
+        let observe_late = match claim.get("late_decision_observation") {
+            None | Some(Value::Bool(false)) => false,
+            Some(Value::Bool(true)) if claim["inference_outcome_policy"] == "Strict" => true,
+            Some(_) => {
+                return Err(crate::invalid(
+                    "invalid late decision observation capability",
+                ));
+            }
+        };
+        let (output, late_decision_model_ref) = match claim.get("inference_outcome_policy") {
             Some(policy) if policy == "Strict" => {
                 let model_ref: ResourceRef =
                     serde_json::from_value(context["model_ref"].clone())
@@ -182,19 +194,27 @@ impl Client {
                         "strict model lease belongs to another model",
                     ));
                 }
+                if observe_late && claim["model_ref"] != json!(model_ref) {
+                    return Err(crate::invalid(
+                        "late decision capability model reference differs",
+                    ));
+                }
                 match provider.decide_with_outcome(context) {
-                    Ok(output) => output,
+                    Ok(output) => (output, observe_late.then_some(model_ref)),
                     Err(failure) => {
-                        return Ok(Turn::Deliver(Delivery::Failure(ModelFailureReport {
-                            session_id: session.to_owned(),
-                            model_ref,
-                            lease_id,
-                            outcome: failure.outcome,
-                        })));
+                        return Ok(Turn::Deliver {
+                            request: Delivery::Failure(ModelFailureReport {
+                                session_id: session.to_owned(),
+                                model_ref,
+                                lease_id,
+                                outcome: failure.outcome,
+                            }),
+                            late_decision_model_ref: None,
+                        });
                     }
                 }
             }
-            None => provider.decide_with_usage(context)?,
+            None => (provider.decide_with_usage(context)?, None),
             Some(_) => {
                 return Err(ApiError::new(
                     "UnsupportedCapability",
@@ -203,14 +223,17 @@ impl Client {
                 .into());
             }
         };
-        Ok(Turn::Deliver(Delivery::Decision(DecisionRequest {
-            session_id: session.to_owned(),
-            lease_id,
-            decision: output.decision,
-            usage: output
-                .usage
-                .filter(|_| claim["usage_format"] == "tokens.v1"),
-        })))
+        Ok(Turn::Deliver {
+            request: Delivery::Decision(DecisionRequest {
+                session_id: session.to_owned(),
+                lease_id,
+                decision: output.decision,
+                usage: output
+                    .usage
+                    .filter(|_| claim["usage_format"] == "tokens.v1"),
+            }),
+            late_decision_model_ref,
+        })
     }
 
     fn send_delivery(&self, delivery: &Delivery) -> ApiResult<Value> {
@@ -242,7 +265,7 @@ impl Client {
     ) -> ApiResult<Value> {
         match self.decide_turn(session, key, provider)? {
             Turn::Completed(receipt) => Ok(receipt),
-            Turn::Deliver(delivery) => self.send_delivery(&delivery),
+            Turn::Deliver { request, .. } => self.send_delivery(&request),
         }
     }
 }
@@ -323,7 +346,7 @@ mod tests {
         let pending =
             Client::decide_claim("session-fixture", claim.clone(), &provider, Some(&model));
         assert!(
-            matches!(pending, Ok(Turn::Deliver(Delivery::Failure(report)))
+            matches!(pending, Ok(Turn::Deliver { request: Delivery::Failure(report), late_decision_model_ref: None })
             if report.model_ref == model && report.outcome == ModelInferenceOutcome::Unknown)
         );
         claim

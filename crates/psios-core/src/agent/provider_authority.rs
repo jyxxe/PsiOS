@@ -231,6 +231,39 @@ pub(super) fn current(db: &Db<'_>, session: &Doc, model: &Doc, lease: &str) -> R
         // Its contexts/outcomes stay fenced and its reserved slot expires normally.
         return Ok(false);
     };
+    binding_current(db, model, &binding, &chain)
+}
+
+pub(super) fn issued_binding(
+    conn: &Connection,
+    issued: &Doc,
+    model: &Doc,
+    lease: &str,
+) -> Result<Option<(Binding, Vec<Doc>)>> {
+    let (sequence, root, binding) = conn.query_row(
+        "SELECT v.seq,p.root_grant,p.binding FROM versions v
+         LEFT JOIN model_provider_authorities p ON p.lease=?3
+         WHERE v.id=?1 AND v.rev=?2",
+        params![issued.id, issued.rev, lease],
+        |row| Ok((row.get::<_, i64>(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    witnessed(
+        conn,
+        issued,
+        model,
+        lease,
+        sequence > epoch(conn)?,
+        root,
+        binding,
+    )
+}
+
+pub(super) fn binding_current(
+    db: &Db<'_>,
+    model: &Doc,
+    binding: &Binding,
+    chain: &[Doc],
+) -> Result<bool> {
     let leaf = &chain[0];
     if !find(db.c, &model.id)?
         .is_some_and(|d| d.reference() == model.reference() && d.body["lifecycle"] == "Active")

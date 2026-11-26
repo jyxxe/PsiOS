@@ -595,6 +595,12 @@ jobs:
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format93" "$RUNNER_TEMP/psios-compatibility-target"
           PSIOS_TEST_MODEL_BLOCKERS_PREVIOUS="$RUNNER_TEMP/psios-compatibility-target/debug" \
             python3 -B -m unittest discover -s tests -p test_maintenance_model_blockers.py -v
+      - name: Record digest evidence for an original witnessed format 94 Unknown
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format94"
+          git archive 4b07bebca8563de38e885a09051dbac7f9b8b55a Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format94"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format94" "$RUNNER_TEMP/psios-compatibility-target"
+          python3 -B tests/model_late_decision_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

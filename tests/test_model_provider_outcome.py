@@ -26,10 +26,13 @@ class LocalInferenceHandler(BaseHTTPRequestHandler):
         if self.server.drop_reply:
             self.close_connection = True
             return
-        decision = json.dumps({"action": "finish", "summary": "Recovered with a fresh authorized call"})
-        data = json.dumps({"model": "strict-fixture", "choices": [
+        decision = json.dumps(self.server.decision)
+        response = {"model": "strict-fixture", "choices": [
             {"finish_reason": "stop", "message": {"role": "assistant", "content": decision}},
-        ]}).encode()
+        ]}
+        if self.server.usage is not None:
+            response["usage"] = self.server.usage
+        data = json.dumps(response).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
@@ -41,11 +44,15 @@ class LocalInferenceHandler(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def serve_inference(endpoint, *, drop_reply=False, gate=None):
+def serve_inference(endpoint, *, drop_reply=False, gate=None, decision=None, usage=None):
     with socketserver.UnixStreamServer(str(endpoint), LocalInferenceHandler) as service:
         service.requests = []
         service.drop_reply = drop_reply
         service.gate = gate
+        service.decision = decision if decision is not None else {
+            "action": "finish", "summary": "Recovered with a fresh authorized call",
+        }
+        service.usage = usage
         thread = threading.Thread(target=service.serve_forever, kwargs={"poll_interval": 0.05})
         thread.start()
         try:

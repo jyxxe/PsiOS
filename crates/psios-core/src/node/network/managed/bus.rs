@@ -1,4 +1,5 @@
 //! Fixed local system D-Bus transport, pinned to a single bus and NM owner.
+mod auth;
 use crate::{Result, err, require};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -24,6 +25,7 @@ pub(crate) struct Identity {
     pub time_namespace_device: u64,
     pub time_namespace_inode: u64,
     pub bus_id: String,
+    pub transport_guid: String,
     pub manager_owner: String,
     pub manager_pid: u32,
 }
@@ -149,6 +151,14 @@ fn canonical_uint(value: &str) -> Option<u32> {
         .filter(|number| number.to_string() == value)
 }
 
+fn valid_guid(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && value.bytes().any(|byte| byte != b'0')
+}
+
 fn local_socket() -> Result<()> {
     for directory in ["/run", "/run/dbus"] {
         let metadata = fs::symlink_metadata(directory).map_err(|_| {
@@ -207,18 +217,15 @@ impl Bus {
         )?;
         local_socket()?;
         let boot_id = crate::node::service_control::boot_id()?;
-        let bus_id = dbus(ADDRESS, "GetId", &[], "s")?;
+        let transport_guid = auth::server_guid()?;
+        let address = format!("{ADDRESS},guid={transport_guid}");
+        let bus_id = dbus(&address, "GetId", &[], "s")?;
         let bus_id = text(&bus_id)?;
         require(
-            bus_id.len() == 32
-                && bus_id
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-                && bus_id.as_bytes().iter().any(|byte| *byte != b'0'),
+            valid_guid(bus_id),
             "DependencyUnavailable",
             "invalid system D-Bus ID",
         )?;
-        let address = format!("{ADDRESS},guid={bus_id}");
         let owner = dbus(&address, "GetNameOwner", &["s", NM], "s")?;
         let owner = text(&owner)?;
         require(
@@ -251,12 +258,7 @@ impl Bus {
         )?;
         let (network_namespace_device, network_namespace_inode) = same_namespace(pid, "net")?;
         let (time_namespace_device, time_namespace_inode) = same_namespace(pid, "time")?;
-        require(
-            dbus(&address, "GetNameOwner", &["s", NM], "s")? == owner,
-            "PreconditionFailed",
-            "NetworkManager D-Bus owner changed",
-        )?;
-        Ok(Self {
+        let bus = Self {
             identity: Identity {
                 boot_id,
                 network_namespace_device,
@@ -264,18 +266,23 @@ impl Bus {
                 time_namespace_device,
                 time_namespace_inode,
                 bus_id: bus_id.to_owned(),
+                transport_guid,
                 manager_owner: owner.to_owned(),
                 manager_pid: pid,
             },
             address,
-        })
+        };
+        bus.verify_owner()?;
+        Ok(bus)
     }
 
     pub(super) fn verify_owner(&self) -> Result<()> {
         require(
-            dbus(&self.address, "GetNameOwner", &["s", NM], "s")? == self.identity.manager_owner,
+            dbus(&self.address, "GetId", &[], "s")? == self.identity.bus_id
+                && dbus(&self.address, "GetNameOwner", &["s", NM], "s")?
+                    == self.identity.manager_owner,
             "PreconditionFailed",
-            "NetworkManager D-Bus owner changed",
+            "local system bus or NetworkManager owner changed",
         )
     }
 

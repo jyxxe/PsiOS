@@ -2,6 +2,8 @@
 pub(crate) mod admission_delay;
 mod calendar;
 pub(crate) mod coalescence;
+mod elapsed;
+pub(crate) mod event_workflow_overlap;
 mod repeat;
 mod resource_event;
 pub(crate) mod workflow_overlap;
@@ -334,6 +336,7 @@ fn settle(
 
 fn remove_pending(db: &Db<'_>, schedule: &Doc) -> Result<()> {
     let sql = if schedule.spec["event"].is_object() {
+        event_workflow_overlap::remove_cursor(db, schedule)?;
         "DELETE FROM pending_event_schedules WHERE schedule=?1"
     } else {
         "DELETE FROM pending_schedules WHERE schedule=?1"

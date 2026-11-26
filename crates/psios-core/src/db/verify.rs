@@ -188,6 +188,7 @@ pub(super) fn check_artifacts(
     }
     if identity.database_format >= crate::agent::provider_authority::FORMAT {
         crate::agent::provider_authority::verify(conn)?;
+        crate::agent::fallback::verify_not_started(conn)?;
     }
     if identity.database_format >= crate::agent::late_decision::FORMAT {
         crate::agent::late_decision::verify(conn)?;
@@ -211,7 +212,13 @@ pub(super) fn check_artifacts(
         crate::schedule::admission_delay::verify(conn)?;
     }
     if identity.database_format >= crate::schedule::workflow_overlap::FORMAT {
-        crate::schedule::workflow_overlap::verify(conn)?;
+        crate::schedule::workflow_overlap::verify(
+            conn,
+            identity.database_format >= crate::schedule::event_workflow_overlap::FORMAT,
+        )?;
+    }
+    if identity.database_format >= crate::schedule::event_workflow_overlap::FORMAT {
+        crate::schedule::event_workflow_overlap::verify(conn)?;
     }
     if identity.database_format >= crate::schedule::coalescence::FORMAT {
         crate::schedule::coalescence::verify(conn)?;

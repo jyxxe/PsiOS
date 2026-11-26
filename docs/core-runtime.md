@@ -580,6 +580,10 @@ Core 在创建时固定 IANA 数据版本、UTC 窗口和因 `gap` 跳过的当�
 
 跳过记录在 `Schedule.TriggerGet` 中提供 `overlap_evidence`，包含原触发、启动 Task 及已核实的回执和 WorkflowRun 修订。旧 `Skip` 仍按启动 Task 判断。使用 `Schedule.Cancel` 取消待触发的轮次，使用 `Workflow.Cancel` 管理已启动的子工作流。重叠保护作用于各自的调度。需要等待子工作流内的 Agent 时，在该步骤启用 `SessionTerminal`。新格式由当前写入器执行，旧写入器拒绝打开。[重启、取消和实际写入验收](../tests/test_workflow_schedule_overlap.py)
 
+格式 121 的资源事件 `workflow.start` 可设置 `event.overlap: "SkipWhileWorkflowActive"`。跳过记录保留本轮的原始来源事件及上一组确切的启动凭据，推进源游标并消耗一个已记录触发名额，但不会准入 Task 或占用预算。队列压力后结算的触发修订保留原事件 ID、源序列和资源修订。省略此设置时，事件仍按上一启动 Task 判断重叠。`Schedule.Cancel` 和到期仅结算该事件订阅；已启动的子 Workflow 保留独立生命周期。[真实资源事件和写入验收](../tests/test_resource_event_workflow_overlap.py)
+
+受保护的规则独立保存原始单调时钟截止时间及当前事件游标。每次推进都在同一事务核对并更新游标索引。启动和离线校验会拒绝丢失或被替换的记录。后续引导沿用既有跨引导截止规则。
+
 ### 通过调度创建 Agent 会话
 
 将 `agent.session.start` 作为 `Schedule.Create` 的 `tool`。输入包括 `goal`、完整的 `skill_ref` 和 `model_ref`、`context_policy` 及 `max_turns`。所选委托需要包含 `schedule.manage`、`agent.session.start`、`session.run`、`task.submit`、`task.read` 及 Skill 所需工具。启用资源范围时，计划同时核对指定的 Model 和 Skill，后续工具依然各自核对资源。也可通过普通 Task.Submit 接受同一个工具。
@@ -796,6 +800,8 @@ Schedule 和 Workflow 可以固定同样的制品引用，并通过各自已有�
 `Session.Open` 和 `agent.session.start` 可用 `fallback_model_refs` 固定至多三个备选 Model 修订。会话选用 `ReferencesOnly`，使用的委托须包含 `session.failover` 并在目标范围纳入主模型及每个备选模型。登记的模型须共享本机认证接口和模态。交接时再次检查所选模型修订、Provider 授权和当前上下文大小。
 
 调用 `Session.UseFallback` 时提交原会话 ID、当前修订和备选 Model 引用。Rust SDK 使用 `Client::use_session_fallback`，CLI 使用 `psiosctl session-use-fallback ID --revision VERSION MODEL_REF_FILE`。Core 在一个事务中关闭原会话并创建后继，保留已确认的 Task 引用和结果保留关系。交接沿用原共享预算，已使用的轮次也计入上限。原 Provider 的未结算租约立即失去提交权限。该次调用的预扣仍计入共享预算，原 Provider 的并发名额占用至租期结束。等待 Task 或含未知效果的会话先走原 Task 结算流程。此接口使用显式交接，备选 Provider 按原会话的队列设置接手。[双 Provider、任务和重启验收](../tests/test_model_fallback.py) · [格式 46 升级](../tests/model_fallback_upgrade.py)
+
+严格租约已收到原 Provider 有授权且可核验的 `NotStarted` 回执时，所有者可直接交接至预授权备选模型。原 Model 之后退役仍可核验该历史回执。Core 验证当前会话委托、备选模型的 Provider 权限、剩余预算与原无效果回执，保留原轮次和已确认工具结果。后继会话在实际领取新租约时计费。原租约尚在途或结果为 `Unknown` 时仍拒绝交接。[严格失败回执及备选模型验收](../tests/test_model_fallback.py)
 
 ### 持久的 Provider 队列
 

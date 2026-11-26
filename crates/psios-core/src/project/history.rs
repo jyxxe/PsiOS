@@ -1,7 +1,10 @@
 //! Scoped, immutable work-item history pages.
 pub(crate) mod revision;
 
-use super::{ITEM, READ, access_item, digest, invalid_state, maintenance, parent_id, project_id};
+use super::{
+    ITEM, READ, access_item, digest, invalid_state, maintenance, parent_id, project_id,
+    project_priority,
+};
 use crate::{
     Result,
     db::{Db, Doc, row},
@@ -70,13 +73,13 @@ pub(crate) fn list(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
             {
                 return Err(invalid_state());
             }
-            Ok(json!({"reference":revision.reference(),"value":projection(revision)}))
+            Ok(json!({"reference":revision.reference(),"value":projection(revision)?}))
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(json!({"items":items,"next_cursor":next_cursor}))
 }
 
-fn projection(item: &Doc) -> Value {
+fn projection(item: &Doc) -> Result<Value> {
     let review = &item.body["review"];
     let review = if review.is_null() {
         Value::Null
@@ -94,7 +97,8 @@ fn projection(item: &Doc) -> Value {
     if let Some(parent) = parent_id(item) {
         value["parent_id"] = json!(parent);
     }
-    value
+    project_priority(item, &mut value)?;
+    Ok(value)
 }
 
 #[cfg(test)]

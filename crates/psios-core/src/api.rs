@@ -212,6 +212,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "WorkItem.Review" => project::review(db, actor, p),
         "WorkItem.Close" => project::close(db, actor, p),
         "WorkItem.Reassign" => project::reassign(db, actor, p),
+        "WorkItem.Reprioritize" => project::priority::reprioritize(db, actor, p),
         "WorkItem.Abandon" => project::abandon(db, actor, p),
         "Conversation.OpenDirect" => chat::open(db, actor, p),
         "Conversation.OpenRoom" => chat::open_room(db, actor, p),
@@ -330,6 +331,7 @@ impl Store {
                     | "WorkItem.Review"
                     | "WorkItem.Close"
                     | "WorkItem.Reassign"
+                    | "WorkItem.Reprioritize"
                     | "WorkItem.Abandon"
                     | "Conversation.OpenDirect"
                     | "Conversation.OpenRoom"

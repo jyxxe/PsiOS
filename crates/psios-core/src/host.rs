@@ -5,7 +5,7 @@ use crate::{
     db::{Db, Doc},
     policy, storage, *,
 };
-use psios_api::VERSION;
+use psios_api::{BlockInventoryQuery, VERSION};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{fs::File, path::PathBuf};
@@ -104,7 +104,7 @@ pub enum Action {
     #[serde(rename = "network.inspect_trial")]
     InspectNetworkTrial(Target),
     #[serde(rename = "node.devices")]
-    Devices {},
+    Devices(BlockInventoryQuery),
     #[serde(rename = "node.block_layout")]
     BlockLayout(node::block::Query),
     #[serde(rename = "node.track_block_device")]
@@ -251,6 +251,7 @@ impl Action {
             Self::Routes(q) => q.validate()?,
             Self::RouteLookup(q) => q.validate()?,
             Self::RoutingRules(q) => q.validate()?,
+            Self::Devices(q) => node::block::validate_inventory(q)?,
             Self::BlockLayout(q) => q.validate()?,
             Self::TrackBlockDevice(q) => q.validate()?,
             Self::ServiceLogs(q) => q.validate()?,
@@ -457,7 +458,7 @@ impl Action {
             | Self::Pressure {}
             | Self::Mounts {}
             | Self::BlockLayout(_)
-            | Self::Devices {} => {
+            | Self::Devices(_) => {
                 return db.of(&db.meta("authority")?, "Node");
             }
             Self::ServiceInspect(t) | Self::ServiceStart(t) | Self::ServiceStop(t) => {
@@ -965,7 +966,7 @@ impl Work {
             | Action::BlockLayout(_)
             | Action::TrackBlockDevice(_)
             | Action::ObserveBlockDevice(_)
-            | Action::Devices {} => node::perform(self, |before| {
+            | Action::Devices(_) => node::perform(self, |before| {
                 checkpoint(Checkpoint::ServiceControl(before))
             }),
             Action::Start(_) => apps::start(self, checkpoint),

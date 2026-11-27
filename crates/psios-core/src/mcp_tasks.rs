@@ -272,7 +272,7 @@ pub(crate) fn start(db: &Db<'_>, actor: &str, value: &Value) -> Result<Value> {
         require(
             saved.spec.tool == request.binding,
             "IdempotencyConflict",
-            "MCP invocation key is bound to another tool or target",
+            "MCP invocation key is bound to another tool, target or input",
         )?;
         return snapshot(db, &saved, &current_task(db, &saved)?, false);
     }

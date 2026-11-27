@@ -304,7 +304,7 @@ pub fn perform(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Resul
         Action::RoutingRules(q) => network::observe_rules(q, w),
         Action::Processes(p) => process::page(&w.target.id, p),
         Action::InspectProcess(expected) => process::inspect(&w.target.id, expected),
-        Action::Devices {} => block::inventory(),
+        Action::Devices(query) => block::inventory(w, query),
         Action::BlockLayout(query) => block::observe(w, query),
         Action::TrackBlockDevice(query) => block_device::enroll(query),
         Action::ObserveBlockDevice(_) => block_device::observe(w),

@@ -1,8 +1,10 @@
-//! Observe a whole disk and seal its Linux identity and geometry for later comparison.
+//! Observe Linux block devices and seal their kernel identity for later comparison.
 mod attachment;
 
 use crate::{Result, err, host::Work, now, require};
-use psios_api::{canonical, sha256};
+use psios_api::{
+    BlockInventoryCursor, BlockInventoryQuery, MAX_BLOCK_INVENTORY_PAGE, canonical, sha256,
+};
 use rustix::{
     fd::OwnedFd,
     fs::{
@@ -22,11 +24,13 @@ use std::{
 };
 
 pub const TOOL: &str = "node.block_layout";
+pub(crate) const PAGED_INVENTORY_FORMAT: u32 = crate::local_read_tools::NODE_INVENTORY_FORMAT + 1;
 const SYSFS: &str = "/sys";
 const SYSFS_MAGIC: u32 = 0x6265_6572;
 const ATTRIBUTE_BYTES: u64 = 4096;
 const LAYOUT_ROWS: usize = 512;
 const INVENTORY_ROWS: usize = 1024;
+const INVENTORY_PAGE_BYTES: usize = 12 * 1024;
 const DIRECTORY: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::CLOEXEC);
@@ -249,7 +253,26 @@ fn inventory_row(expected_number: &str, path: &Path, dir: &OwnedFd) -> Result<In
     })
 }
 
-pub(super) fn inventory() -> Result<Value> {
+pub(crate) fn validate_inventory(query: &BlockInventoryQuery) -> Result<()> {
+    require(
+        query
+            .limit
+            .is_none_or(|limit| (1..=MAX_BLOCK_INVENTORY_PAGE).contains(&limit)),
+        "InvalidArgument",
+        "block inventory page limit must be 1 to 32",
+    )?;
+    if let Some(cursor) = &query.cursor {
+        require(
+            (1..INVENTORY_ROWS).contains(&usize::from(cursor.offset))
+                && valid_digest(&cursor.snapshot_digest),
+            "InvalidArgument",
+            "invalid block inventory cursor",
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn inventory(w: &Work, query: &BlockInventoryQuery) -> Result<Value> {
     let boot_id = crate::linux_clock::boot_id()?;
     let tree = BlockTree::open()?;
     let devices = tree.inventory()?;
@@ -259,7 +282,67 @@ pub(super) fn inventory() -> Result<Value> {
         "Conflict",
         "kernel block devices changed during inventory",
     )?;
-    Ok(json!({"devices":devices,"boot_id":boot_id,"observed_at":now()}))
+    if query.limit.is_none() && query.cursor.is_none() {
+        return Ok(json!({"devices":devices,"boot_id":boot_id,"observed_at":now()}));
+    }
+
+    let index = fstat(&tree.entries).map_err(io::Error::from)?;
+    let identities: Vec<_> = devices.iter().map(|row| row.sysfs_identity).collect();
+    let digest = sha256(&serde_json::to_vec(&(
+        "psios/node.devices/1",
+        w.target.reference(),
+        &w.task.owner,
+        &w.task.spec["delegation_ref"],
+        &boot_id,
+        (index.st_dev, index.st_ino),
+        identities,
+        &devices,
+    ))?);
+    let offset = if let Some(cursor) = &query.cursor {
+        require(
+            cursor.snapshot_digest == digest,
+            "ResyncRequired",
+            "block inventory changed or cursor scope differs",
+        )?;
+        let offset = usize::from(cursor.offset);
+        require(
+            offset < devices.len(),
+            "InvalidArgument",
+            "block inventory cursor is past the end",
+        )?;
+        offset
+    } else {
+        0
+    };
+    let mut end = offset;
+    let mut bytes = 0;
+    let limit = usize::from(query.limit.unwrap_or(MAX_BLOCK_INVENTORY_PAGE));
+    for row in devices[offset..].iter().take(limit) {
+        bytes += serde_json::to_vec(row)?.len() + 1;
+        if bytes > INVENTORY_PAGE_BYTES {
+            require(
+                end > offset,
+                "QuotaExceeded",
+                "one device exceeds the inventory page byte limit",
+            )?;
+            break;
+        }
+        end += 1;
+    }
+    let next = if end < devices.len() {
+        let offset =
+            u16::try_from(end).map_err(|_| err("HostFailure", "invalid block inventory size"))?;
+        Some(BlockInventoryCursor {
+            snapshot_digest: digest.clone(),
+            offset,
+        })
+    } else {
+        None
+    };
+    Ok(
+        json!({"devices":&devices[offset..end],"boot_id":boot_id,"observed_at":now(),
+        "snapshot_digest":digest,"next_cursor":next}),
+    )
 }
 
 fn lookup(device: &str) -> Result<(PathBuf, OwnedFd)> {

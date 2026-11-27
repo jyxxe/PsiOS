@@ -6,7 +6,7 @@ The repository contains the **PsiOS v1.0.0 documentation baseline (2026-11-22)**
 
 Build with `cargo build --locked --workspace`, or use the [portable amd64 Core build](docs/core-local.md#portable-amd64-core) for standalone Linux binaries. The [Core package guide](docs/host-package.md) covers the optional .deb integration tested on Ubuntu 24.04. The [QEMU guide](docs/host-vm.md) runs a development node on an Ubuntu Minimal guest. The [local Core guide](docs/core-local.md) covers initialization, running a task, enrolling an agent, approvals, recovery and verification. The [host and Agent Runtime guide](docs/core-runtime.md) covers systemd control, concurrent scheduling, release switching, binary files, versioned Skills and restartable multi-step sessions. The sealed v1 documentation retains its original release and acceptance status.
 
-PsiOS Shell is designed as a **macOS-like browser desktop workspace**, with a menu bar, Dock, application windows and workspaces. System management lives in desktop apps. The current local Shell is an initial status/task viewer; the full desktop remains planned. See the [Shell design](docs/v1/docs/07-applications-packages-gui.md#5-psios-shell浏览器桌面工作环境).
+PsiOS Shell is designed as a **macOS-like browser desktop workspace**, with a menu bar, Dock, application windows and workspaces. System management lives in desktop apps. The paired local Shell opens a desktop with a Dock for node management and Tasks. Its two app windows can sit side by side, maximize, minimize and close. Named workspaces, free positioning and persistent layouts remain planned. See the [Shell design](docs/v1/docs/07-applications-packages-gui.md#5-psios-shell浏览器桌面工作环境).
 
 ## Documentation
 

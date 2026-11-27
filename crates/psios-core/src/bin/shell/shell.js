@@ -5,9 +5,7 @@ const pairing = byId("pairing");
 const workspace = byId("workspace");
 const code = byId("code");
 const status = byId("status");
-const heading = byId("view-title");
 const nodeView = byId("node-view");
-const taskView = byId("task-view");
 const taskRows = byId("task-rows");
 const taskDetail = byId("task-detail");
 const taskContent = byId("task-content");
@@ -16,8 +14,14 @@ const next = byId("next");
 
 let bearer = null;
 let canCancelPending = false;
-let view = "node";
-let update = 0;
+const apps = new Map(["node", "tasks"].map(id => [id, {
+  window: byId("window-" + id), title: byId("title-" + id),
+  dock: byId("nav-" + id), status: byId("status-" + id), state: "closed",
+}]));
+let active = null;
+let maximized = null;
+let nodeUpdate = 0;
+let taskUpdate = 0;
 let detailUpdate = 0;
 let cursors = [null];
 let nextCursor = null;
@@ -31,12 +35,12 @@ function message(element, text, error = false) {
 function leave(text, error = false) {
   bearer = null;
   canCancelPending = false;
-  update += 1;
-  detailUpdate += 1;
   workspace.hidden = true;
-  nodeView.replaceChildren();
-  taskRows.replaceChildren();
-  taskContent.replaceChildren();
+  for (const app of apps.values()) app.state = "closed";
+  active = maximized = null;
+  cursors = [null];
+  nextCursor = selectedTask = null;
+  updateDesktop();
   byId("principal").textContent = "";
   message(status, "");
   code.value = "";
@@ -241,7 +245,7 @@ function artifactView(taskId, references) {
         content.textContent = result.content_json;
         content.hidden = false;
         message(notice, "已核对固定版本的 SHA-256 摘要。");
-        content.focus();
+        if (active === "tasks") content.focus();
       }
     } catch (error) {
       if (!section.isConnected) return;
@@ -315,7 +319,7 @@ function historyView(task) {
       back.disabled = pages.length === 1;
       forward.disabled = !nextAfter;
       controls.hidden = back.disabled && forward.disabled;
-      if (focus) list.focus();
+      if (focus && active === "tasks") list.focus();
     } catch (error) {
       if (!panel.isConnected || generationAtRequest !== generation) return;
       message(notice, error.message, true);
@@ -354,7 +358,7 @@ function pendingCancellation(task) {
       });
       if (!controls.isConnected) return;
       renderTask(result);
-      taskDetail.focus();
+      if (active === "tasks") taskDetail.focus();
     } catch (error) {
       if (!controls.isConnected) return;
       if (error.code === "Conflict" || error.code === "PreconditionFailed") {
@@ -428,59 +432,146 @@ function renderTasks(items) {
   byId("tasks-empty").hidden = items.length > 0;
 }
 
-async function load(target = cursors, task = selectedTask) {
-  const thisUpdate = ++update;
+async function loadNode() {
+  const revision = ++nodeUpdate;
+  const notice = apps.get("node").status;
+  nodeView.replaceChildren();
+  message(notice, "正在读取…");
+  try {
+    const result = await request("/api/node", {});
+    if (revision !== nodeUpdate) return;
+    renderNode(result);
+    message(notice, "");
+  } catch (error) {
+    if (revision === nodeUpdate) message(notice, error.message, true);
+  }
+}
+
+function clearTaskView() {
   detailUpdate += 1;
-  selectedTask = null;
   taskDetail.hidden = true;
   taskContent.replaceChildren();
-  previous.disabled = next.disabled = true;
   taskRows.replaceChildren();
   byId("tasks-empty").hidden = true;
-  nodeView.replaceChildren();
-  message(status, "正在读取…");
+  previous.disabled = next.disabled = true;
+}
+
+async function loadTasks(target = cursors, task = selectedTask) {
+  const revision = ++taskUpdate;
+  const notice = apps.get("tasks").status;
+  clearTaskView();
+  message(notice, "正在读取…");
   try {
-    if (view === "node") {
-      const result = await request("/api/node", {});
-      if (thisUpdate !== update) return;
-      renderNode(result);
-    } else {
-      const result = await request("/api/tasks", { cursor: target.at(-1) });
-      if (thisUpdate !== update) return;
-      cursors = target;
-      nextCursor = result.next_cursor;
-      renderTasks(result.items);
-      previous.textContent = cursors.length === 2 ? "返回首页" : "上一页";
-      previous.disabled = cursors.length === 1;
-      next.disabled = !nextCursor;
-      if (task && result.items.some((item) => item.resource_id === task)) inspectTask(task);
-    }
-    message(status, "");
+    const result = await request("/api/tasks", { cursor: target.at(-1) });
+    if (revision !== taskUpdate) return;
+    cursors = target;
+    nextCursor = result.next_cursor;
+    renderTasks(result.items);
+    previous.textContent = cursors.length === 2 ? "返回首页" : "上一页";
+    previous.disabled = cursors.length === 1;
+    next.disabled = !nextCursor;
+    selectedTask = null;
+    if (task && result.items.some((item) => item.resource_id === task)) inspectTask(task);
+    message(notice, "");
   } catch (error) {
-    if (thisUpdate !== update) return;
+    if (revision !== taskUpdate) return;
     if (error.code === "CursorExpired") {
       cursors = [null];
-      nextCursor = null;
-      message(status, "任务列表快照已过期。刷新后将从第一页读取。", true);
+      nextCursor = selectedTask = null;
+      message(notice, "任务列表快照已过期。刷新后将从第一页读取。", true);
     } else {
-      message(status, error.message, true);
+      message(notice, error.message, true);
     }
   }
 }
 
-function navigate(page) {
-  view = page;
-  const isNode = view === "node";
-  nodeView.hidden = !isNode;
-  taskView.hidden = isNode;
-  heading.textContent = isNode ? "节点概览" : "任务";
-  for (const name of ["node", "tasks"]) {
-    const button = byId("nav-" + name);
-    if (view === name) button.setAttribute("aria-current", "page");
-    else button.removeAttribute("aria-current");
+function showWindow(id, app, shown) {
+  if (app.window.hidden === !shown) return;
+  app.window.hidden = !shown;
+  if (shown) {
+    if (id === "node") loadNode();
+    else loadTasks();
+    return;
   }
-  heading.focus();
-  load([null], null);
+  if (id === "node") {
+    nodeUpdate += 1;
+    nodeView.replaceChildren();
+  } else {
+    taskUpdate += 1;
+    clearTaskView();
+  }
+  message(app.status, "");
+}
+
+function updateDesktop() {
+  let visible = 0;
+  for (const [id, app] of apps) {
+    const shown = app.state === "open" && (!maximized || maximized === id);
+    showWindow(id, app, shown);
+    if (shown) visible += 1;
+    app.window.classList.toggle("focused", id === active);
+    app.window.classList.toggle("maximized", id === maximized);
+    app.dock.dataset.state = app.state;
+    app.dock.setAttribute("aria-expanded", String(shown));
+    const stateLabel = { open: "已打开", minimized: "已最小化", closed: "已关闭" };
+    app.dock.setAttribute("aria-label", app.title.textContent + "，" + stateLabel[app.state]);
+    const maximize = app.window.querySelector('[data-action="maximize"]');
+    maximize.textContent = maximized === id ? "还原" : "最大化";
+    maximize.setAttribute("aria-pressed", String(maximized === id));
+  }
+  byId("desktop").classList.toggle("has-maximized", maximized !== null);
+  byId("empty-desktop").hidden = visible !== 0;
+  byId("active-app").textContent = active ? apps.get(active).title.textContent : "桌面";
+}
+
+function focusApp(id) {
+  if (active === id) return;
+  active = id;
+  updateDesktop();
+}
+
+function openWindow(id) {
+  const app = apps.get(id);
+  if (maximized !== id) maximized = null;
+  app.state = "open";
+  active = id;
+  updateDesktop();
+  app.title.focus();
+}
+
+function hideWindow(id, state) {
+  const app = apps.get(id);
+  app.state = state;
+  if (maximized === id) maximized = null;
+  if (id === "tasks" && state === "closed") {
+    cursors = [null];
+    nextCursor = selectedTask = null;
+  }
+  if (active === id) active = Array.from(apps.keys()).find(key => apps.get(key).state === "open") ?? null;
+  updateDesktop();
+  if (!workspace.hidden) {
+    if (active) apps.get(active).title.focus();
+    else app.dock.focus();
+  }
+}
+
+for (const [id, app] of apps) {
+  const controls = byId("window-tools").content.cloneNode(true);
+  controls.querySelector('[data-action="refresh"]').addEventListener("click", () => {
+    if (id === "node") loadNode();
+    else loadTasks();
+  });
+  controls.querySelector('[data-action="close"]').addEventListener("click", () => hideWindow(id, "closed"));
+  controls.querySelector('[data-action="minimize"]').addEventListener("click", () => hideWindow(id, "minimized"));
+  controls.querySelector('[data-action="maximize"]').addEventListener("click", () => {
+    active = id;
+    maximized = maximized === id ? null : id;
+    updateDesktop();
+  });
+  app.window.querySelector("header").append(controls);
+  app.window.addEventListener("focusin", () => focusApp(id));
+  app.window.addEventListener("pointerdown", () => focusApp(id));
+  app.dock.addEventListener("click", () => openWindow(id));
 }
 
 byId("pair-form").addEventListener("submit", async (event) => {
@@ -498,7 +589,8 @@ byId("pair-form").addEventListener("submit", async (event) => {
     byId("principal").textContent = session.principal_id;
     pairing.hidden = true;
     workspace.hidden = false;
-    navigate("node");
+    updateDesktop();
+    apps.get("node").dock.focus();
   } catch (error) {
     message(byId("pair-message"), error.message, true);
     code.focus();
@@ -507,9 +599,6 @@ byId("pair-form").addEventListener("submit", async (event) => {
   }
 });
 
-byId("nav-node").addEventListener("click", () => navigate("node"));
-byId("nav-tasks").addEventListener("click", () => navigate("tasks"));
-byId("refresh").addEventListener("click", () => load());
 byId("close-task").addEventListener("click", () => {
   const current = taskRows.querySelector('button[aria-pressed="true"]');
   detailUpdate += 1;
@@ -519,8 +608,8 @@ byId("close-task").addEventListener("click", () => {
   current?.setAttribute("aria-pressed", "false");
   current?.focus();
 });
-previous.addEventListener("click", () => load(cursors.slice(0, -1), null));
-next.addEventListener("click", () => load([...cursors, nextCursor], null));
+previous.addEventListener("click", () => loadTasks(cursors.slice(0, -1), null));
+next.addEventListener("click", () => loadTasks([...cursors, nextCursor], null));
 byId("logout").addEventListener("click", async () => {
   if (!bearer) return;
   const button = byId("logout");

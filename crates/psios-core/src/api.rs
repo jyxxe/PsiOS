@@ -72,6 +72,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Session.Resume" => agent::resume(db, actor, p),
         "Session.UseFallback" => agent::fallback::handoff(db, actor, p),
         "Session.History" => agent::history(db, actor, p),
+        "Session.ModelUsage" => agent::usage::get(db, actor, p),
         "Session.Cancel" => agent::cancel(db, actor, p),
         "Agent.Register" => policy::register(db, actor, p),
         "Principal.Revoke" => policy::disable(db, actor, p),

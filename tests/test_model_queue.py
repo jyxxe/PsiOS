@@ -111,6 +111,10 @@ class ModelQueueTests(unittest.TestCase):
         self.finish(next_claim)
         self.assertEqual(self.next_turn(timeout_ms=125), {"available": False})
         self.assertEqual(self.status(manual)["session"]["turn"], 0)
+        model_usage = self.n.call("Session.ModelUsage", {"id": first["resource_id"]}, self.agent["token"])
+        self.assertEqual(model_usage["lease_time"]["unmetered_calls"], 1)
+        self.assertEqual(model_usage["calls"], [{"turn": 1, "lease_id": claims[0]["lease_id"], "outcome": "Responded",
+            "charged_lease_ms": None, "provider_reported_tokens": None}])
         self.assertEqual(self.n.call("Budget.Get", {"id": self.grant["budget_ref"]["resource_id"]},
             self.agent["token"])["model_calls_used"], 2)
 

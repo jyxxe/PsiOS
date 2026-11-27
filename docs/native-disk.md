@@ -203,6 +203,8 @@ python3 native/activate_update.py inspect --state-dir "$ACTIVATION_STATE"
 
 计划固定分阶段回执、原盘、候选盘和固件，在状态目录准备私有引导材料。执行复核原盘身份与摘要，持久记录 `BootIssued`，再启动只连接候选盘副本的无网络来宾。通过控制台登录后，核对本次启动 ID、部署摘要及 Core 节点身份。来宾正常退出并刷盘后，控制器从加锁的停机磁盘再次核对 GPT 布局和分区标识，以及状态和主目录分区的 ext4 UUID、清洁标志和启用时的超级块校验和。确认无需日志重放且无待清理的孤立 inode 后，才写入列有受管磁盘和 EFI 变量的 `BootVerified` 回执。完整文件系统检查仍由离线救援执行。
 
+准备材料期间中断后，可在同一目录重跑原来的 `plan`。若尚无准备记录，目录应为空。已有记录时，`inspect` 显示 `Preparing`，重试会重新核对原盘、分阶段回执、固件和已发布的副本，补齐缺失的材料。所有文件持久化后才发布 `BootPending`。计划摘要和批准对象在重试中保持一致。已进入 `BootIssued` 的启动继续遵循下述恢复流程。
+
 签名候选须使用包含挂载前强制检查的分阶段构建。计划核对候选和试启动的证书、EFI stub 摘要与固件强制执行记录。正式候选在可写挂载前要求 Secure Boot。控制器通过来宾核对正式启动的固件状态，并把此次证据收入 `BootVerified` 回执。[签名首次引导验收](../tests/native_signed_activation.py)
 
 有启动记录而缺少最终证明时，`inspect` 报告 `RecoveryRequired`，原计划停止派发。执行期间，控制器在操作者拥有的本地源映像上持有 Linux OFD 排他锁。支持遵循文件锁的 QEMU 进程，原盘在整个操作内保持停机。首次引导回执及其副本可供下一节使用。[首次引导验收](../tests/native_activation.py)

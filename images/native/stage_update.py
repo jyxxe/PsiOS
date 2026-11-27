@@ -79,6 +79,15 @@ def write_receipt(directory, name, fields):
     return sha256(path)
 
 
+def rename_noreplace(source_fd, source, target_fd, target):
+    rename = ctypes.CDLL(None, use_errno=True).renameat2
+    rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+    rename.restype = ctypes.c_int
+    if rename(source_fd, os.fsencode(source), target_fd, os.fsencode(target), RENAME_NOREPLACE):
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), target)
+
+
 def publish_bundle(bundle, parent_fd, basename):
     # Both directory descriptors refer to the same filesystem. The final name
     # appears atomically and an existing destination remains operator-owned.
@@ -86,12 +95,7 @@ def publish_bundle(bundle, parent_fd, basename):
     payload = os.open(bundle, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
         os.fsync(payload)
-        rename = ctypes.CDLL(None, use_errno=True).renameat2
-        rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
-        rename.restype = ctypes.c_int
-        if rename(directory, os.fsencode(bundle.name), parent_fd, os.fsencode(basename), RENAME_NOREPLACE):
-            code = ctypes.get_errno()
-            raise OSError(code, os.strerror(code), basename)
+        rename_noreplace(directory, bundle.name, parent_fd, basename)
         try:
             os.fsync(parent_fd)
             os.fsync(directory)

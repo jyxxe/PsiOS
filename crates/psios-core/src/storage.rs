@@ -1055,8 +1055,16 @@ fn read_manifest(manifest: &File, digest: &Value) -> Result<Vec<u8>> {
 
 // The workload may have created a valid hierarchy whose full name exceeds PATH_MAX.
 fn entry_parent<'a>(root: &File, relative: &'a str) -> Result<(File, &'a str)> {
-    let mut parts = relative.split('/');
-    let name = parts.next_back().unwrap();
+    parent_from_components(root, relative.split('/'))
+}
+
+fn parent_from_components<T: rustix::path::Arg>(
+    root: &File,
+    mut parts: impl DoubleEndedIterator<Item = T>,
+) -> Result<(File, T)> {
+    let name = parts
+        .next_back()
+        .ok_or_else(|| err("InvalidArgument", "volume entry path has no filename"))?;
     let mut dir = root.try_clone()?;
     for part in parts {
         dir = child(&dir, part, OFlags::RDONLY | OFlags::DIRECTORY)?;

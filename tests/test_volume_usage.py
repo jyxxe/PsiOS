@@ -67,6 +67,35 @@ class VolumeUsageTests(unittest.TestCase):
         self.assertEqual((subtree["path"], subtree["files"], subtree["directories"]), ("nested", 2, 1))
         self.assertEqual(subtree["allocated_directory_bytes"], str(directory.stat().st_blocks * 512))
 
+    def test_counts_distinct_raw_names_and_keeps_the_result_after_restart(self):
+        n = self.node
+        directory = self.root / "measured"
+        directory.mkdir()
+        raw_dir = os.fsencode(directory) + b"/nested-\xff"
+        os.mkdir(raw_dir)
+        files = [raw_dir + b"/record-\xfe", raw_dir + b"/record-\xff",
+                 raw_dir + "/record-�".encode()]
+        for size, path in enumerate(files, 1):
+            with open(path, "wb") as stream:
+                stream.truncate(size * 65536)
+                stream.write(bytes([size]))
+        result = n.wait(n.submit("volume.usage", self.input(path="measured")))
+        self.assertEqual(result["lifecycle"], "Succeeded", result)
+        ref, = result["result"]["artifact_refs"]
+        report = n.call("Artifact.Read", {"reference": ref})
+        self.assertEqual((report["files"], report["directories"]), (3, 2))
+        self.assertEqual(report["logical_file_bytes"], str(sum(os.stat(p).st_size for p in files)))
+        blocks = sum(os.stat(p).st_blocks for p in files) * 512
+        dirs = (os.stat(raw_dir).st_blocks + directory.stat().st_blocks) * 512
+        self.assertEqual(report["allocated_total_bytes"], str(blocks + dirs))
+        n.stop(signal.SIGKILL)
+        n.start()
+        self.assertEqual(n.call("Artifact.Read", {"reference": ref}), report)
+        os.link(files[0], raw_dir + b"/link-\x80")
+        rejected = n.wait(n.submit("volume.usage", self.input(path="measured")))
+        self.assertEqual(rejected["conditions"][0]["type"], "UnsupportedCapability", rejected)
+        self.assertEqual(rejected["result"]["artifact_refs"], [])
+
     def test_rejects_links_and_special_files_without_holding_the_volume(self):
         n = self.node
         outside = n.base / "other-directory"

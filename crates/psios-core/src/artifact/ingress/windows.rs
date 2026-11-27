@@ -1,16 +1,24 @@
 //! Prepared upload keys fence creation to one bounded authority clock window.
 use super::{MAX_BYTES, Stage, Start, UPLOAD, authority, authorize, stage_row, validate_stage};
-use crate::{Result, after, db::Db, decode, err, policy::deadline::Clock, require};
+use crate::{
+    Result, after,
+    db::{self, Db, Doc},
+    decode, err,
+    policy::deadline::Clock,
+    require,
+};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use psios_api::{ArtifactStagePreparation, PreparedArtifactStage, canonical};
 use ring::hmac;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 pub(crate) const FORMAT: u32 = crate::storage::ENTRY_CAPACITY_FORMAT + 1;
 pub(crate) const SCHEMA: &str = include_str!("windows.sql");
+pub(crate) const RELEASE_FORMAT: u32 = crate::local_read_tools::VOLUME_FILE_CHUNK_FORMAT + 1;
+pub(crate) const RELEASE_SCHEMA: &str = include_str!("window_reclaims.sql");
 const PREFIX: &str = "psios-upload-v1-";
 const DOMAIN_BYTES: usize = 16;
 const TIME_END: usize = DOMAIN_BYTES + 8;
@@ -143,7 +151,11 @@ pub(super) fn authorize_new(
     Ok(Some(window))
 }
 
-fn verified(conn: &Connection, stage: &str) -> Result<(Window, Start, String)> {
+fn verified(
+    conn: &Connection,
+    stage: &str,
+    release_format: bool,
+) -> Result<(Window, Start, String, Option<String>)> {
     let binding = authority::lookup(conn, stage)?;
     let (domain, deadline, actor, key, source, receipt): (Vec<u8>, i64, String, String, String, Stage) = conn.query_row(
         "SELECT w.clock_domain,w.deadline_boot_ms,u.*
@@ -165,17 +177,106 @@ fn verified(conn: &Connection, stage: &str) -> Result<(Window, Start, String)> {
         domain == window.domain
             && deadline == window.deadline
             && source == "LocalSubmission"
-            && matches!(receipt.state.as_str(), "Open" | "Discarded" | "Expired")
+            && (matches!(receipt.state.as_str(), "Open" | "Discarded" | "Expired")
+                || release_format && matches!(receipt.state.as_str(), "Published" | "Withdrawn"))
             && start.request_digest()? == receipt.request_digest,
         "RecoveryRequired",
         "prepared upload window disagrees with its stage receipt",
     )?;
-    Ok((window, start, actor))
+    let withdrawn = if receipt.state == "Withdrawn" {
+        receipt.artifact
+    } else {
+        None
+    };
+    Ok((window, start, actor, withdrawn))
+}
+
+pub(super) fn mark_reclaimable(db: &Db<'_>, stage: &str) -> Result<()> {
+    db.c.execute(
+        "UPDATE artifact_stage_windows SET reclaimable=1 WHERE stage_id=?1",
+        [stage],
+    )?;
+    Ok(())
+}
+
+fn record_reclamation(
+    db: &Db<'_>,
+    stage: &str,
+    artifact_id: &str,
+    actor: &str,
+    start: &Start,
+) -> Result<()> {
+    let artifact = db.of(artifact_id, "Artifact")?;
+    let release = super::retention(db.c, &artifact)?.ok_or_else(|| {
+        err(
+            "RecoveryRequired",
+            "released upload has no withdrawal receipt",
+        )
+    })?;
+    let remaining: bool = db.c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM artifact_chunks WHERE artifact_id=?1)",
+        [artifact_id],
+        |row| row.get(0),
+    )?;
+    require(
+        artifact.owner == actor
+            && artifact.spec["content_layout"] == super::RAW_LAYOUT
+            && artifact.spec["source"]["kind"] == "LocalSubmission"
+            && artifact.spec["source"]["stage_id"] == stage
+            && artifact.spec["digest"] == start.digest
+            && artifact.spec["size_bytes"]
+                .as_str()
+                .and_then(|size| size.parse::<u32>().ok())
+                == Some(start.size_bytes)
+            && artifact.spec["declared_media_type"] == start.declared_media_type
+            && !remaining,
+        "RecoveryRequired",
+        "released upload provenance or byte accounting changed",
+    )?;
+    let reference = release.reference();
+    db.c.execute(
+        "INSERT INTO reclaimed_artifact_uploads VALUES(?1,?2,?3)",
+        params![artifact_id, stage, reference["digest"].as_str()],
+    )?;
+    Ok(())
+}
+
+pub(super) fn reclaimed(conn: &Connection, artifact: &Doc, release: Option<&Doc>) -> Result<bool> {
+    let format: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if format < RELEASE_FORMAT {
+        return Ok(false);
+    }
+    let record = conn
+        .query_row(
+            "SELECT stage_id,release_digest,
+                    NOT EXISTS(SELECT 1 FROM artifact_uploads u WHERE u.id=r.stage_id OR u.artifact_id=r.artifact_id)
+             FROM reclaimed_artifact_uploads r WHERE r.artifact_id=?1",
+            [&artifact.id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?)),
+        )
+        .optional()?;
+    let Some((stage, release_digest, absent_stage)) = record else {
+        return Ok(false);
+    };
+    require(
+        absent_stage
+            && artifact.kind == "Artifact"
+            && artifact.spec["content_layout"] == super::RAW_LAYOUT
+            && artifact.spec["source"]["kind"] == "LocalSubmission"
+            && artifact.spec["source"]["stage_id"] == stage
+            && release.is_some_and(|release| {
+                super::valid_release(release, artifact)
+                    && release.reference()["digest"] == release_digest
+            }),
+        "RecoveryRequired",
+        "reclaimed upload disagrees with its immutable release receipt",
+    )?;
+    Ok(true)
 }
 
 pub(crate) fn reclaim(db: &Db<'_>) -> Result<()> {
     let pending: bool = db.c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM artifact_stage_windows)",
+        "SELECT EXISTS(SELECT 1 FROM artifact_stage_windows WHERE reclaimable=1)",
         [],
         |row| row.get(0),
     )?;
@@ -184,19 +285,26 @@ pub(crate) fn reclaim(db: &Db<'_>) -> Result<()> {
     }
     let clock = Clock::sample()?;
     let domain = clock_domain(db, &clock);
-    let candidates = db.c.prepare_cached(
-        "SELECT w.stage_id FROM artifact_stage_windows w JOIN artifact_uploads u ON u.id=w.stage_id
-         WHERE u.state IN ('Discarded','Expired') AND (w.clock_domain<>?1 OR w.deadline_boot_ms<=?2)
+    let candidates =
+        db.c.prepare_cached(
+            "SELECT w.stage_id FROM artifact_stage_windows w WHERE w.reclaimable=1
+         AND (w.clock_domain<>?1 OR w.deadline_boot_ms<=?2)
          ORDER BY w.deadline_boot_ms,w.stage_id LIMIT 8",
-    )?.query_map(params![domain.as_slice(), clock.boot.millis], |row| row.get::<_, String>(0))?
+        )?
+        .query_map(params![domain.as_slice(), clock.boot.millis], |row| {
+            row.get::<_, String>(0)
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for stage in candidates {
-        let (window, start, actor) = verified(db.c, &stage)?;
+        let (window, start, actor, withdrawn) = verified(db.c, &stage, true)?;
         require(
             window.authenticated(db, &actor, &start) && window.elapsed(&domain, clock.boot.millis),
             "RecoveryRequired",
             "prepared upload reclamation has no valid expired key",
         )?;
+        if let Some(artifact) = &withdrawn {
+            record_reclamation(db, &stage, artifact, &actor, &start)?;
+        }
         db.c.execute(
             "DELETE FROM artifact_upload_authority WHERE stage_id=?1",
             [&stage],
@@ -206,8 +314,9 @@ pub(crate) fn reclaim(db: &Db<'_>) -> Result<()> {
             [&stage],
         )?;
         let removed = db.c.execute(
-            "DELETE FROM artifact_uploads WHERE id=?1 AND state IN ('Discarded','Expired')",
-            [&stage],
+            "DELETE FROM artifact_uploads WHERE id=?1
+             AND (state IN ('Discarded','Expired') OR state='Withdrawn' AND artifact_id=?2)",
+            params![stage, withdrawn],
         )?;
         require(
             removed == 1,
@@ -218,16 +327,46 @@ pub(crate) fn reclaim(db: &Db<'_>) -> Result<()> {
             crate::policy::SYSTEM,
             "Artifact.Stage.Reclaim",
             Some(&stage),
-            "ExpiredPreparation",
+            if withdrawn.is_some() {
+                "ReleasedPreparation"
+            } else {
+                "ExpiredPreparation"
+            },
         )?;
     }
     Ok(())
 }
 
-pub(crate) fn verify(conn: &Connection) -> Result<()> {
+pub(crate) fn verify(conn: &Connection, format: u32) -> Result<()> {
+    let release_format = format >= RELEASE_FORMAT;
     let mut windows = conn.prepare("SELECT stage_id FROM artifact_stage_windows")?;
     for stage in windows.query_map([], |row| row.get::<_, String>(0))? {
-        verified(conn, &stage?)?;
+        verified(conn, &stage?, release_format)?;
+    }
+    if release_format {
+        let mismatch: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM artifact_stage_windows w JOIN artifact_uploads u
+             ON u.id=w.stage_id WHERE w.reclaimable<>(u.state IN ('Discarded','Expired','Withdrawn')))",
+            [],
+            |row| row.get(0),
+        )?;
+        require(
+            !mismatch,
+            "RecoveryRequired",
+            "prepared upload reclamation state disagrees with receipt",
+        )?;
+        let mut records = conn.prepare("SELECT artifact_id FROM reclaimed_artifact_uploads")?;
+        for id in records.query_map([], |row| row.get::<_, String>(0))? {
+            let id = id?;
+            let artifact = db::find(conn, &id)?
+                .ok_or_else(|| err("RecoveryRequired", "reclaimed upload artifact is missing"))?;
+            let release = db::find(conn, &super::withdrawal_id(&artifact))?;
+            require(
+                reclaimed(conn, &artifact, release.as_ref())?,
+                "RecoveryRequired",
+                "reclaimed upload lost its record",
+            )?;
+        }
     }
     Ok(())
 }

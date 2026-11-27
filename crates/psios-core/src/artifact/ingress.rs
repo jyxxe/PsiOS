@@ -186,7 +186,7 @@ pub(crate) fn profile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value>
         "total_bytes":TOTAL_BYTES,"owner_open_stages":OWNER_STAGES,"total_open_stages":TOTAL_STAGES,
         "owner_receipts":owner_receipts,"total_receipts":total_receipts,
         "min_ttl_seconds":5,"max_ttl_seconds":3600,
-        "exact_delegation":true,"prepared_stage_keys":true,
+        "exact_delegation":true,"prepared_stage_keys":true,"reclaims_released_prepared_uploads":true,
     }))
 }
 
@@ -757,10 +757,6 @@ fn finish_published(db: &Db<'_>, actor: &str, mut stage: Stage, artifact: &Doc) 
         "DELETE FROM authorization_deadlines WHERE resource=?1",
         [&stage.id],
     )?;
-    db.c.execute(
-        "DELETE FROM artifact_stage_windows WHERE stage_id=?1",
-        [&stage.id],
-    )?;
     db.audit(
         actor,
         "Artifact.Publish",
@@ -785,6 +781,7 @@ fn close(db: &Db<'_>, id: &str, owner: &str, state: &str) -> Result<()> {
         "DELETE FROM authorization_deadlines WHERE resource=?1",
         [id],
     )?;
+    windows::mark_reclaimable(db, id)?;
     db.audit(owner, "Artifact.CloseStage", Some(id), state)
 }
 
@@ -891,6 +888,16 @@ fn withdrawal_id(artifact: &Doc) -> String {
     format!("withdrawal-{}", artifact.id)
 }
 
+fn valid_release(receipt: &Doc, artifact: &Doc) -> bool {
+    matches!(receipt.kind.as_str(), WITHDRAWAL | ABANDONMENT)
+        && receipt.rev == 1
+        && receipt.owner == artifact.owner
+        && receipt.spec["artifact_id"] == artifact.id
+        && receipt.body["artifact_ref"] == artifact.reference()
+        && (receipt.kind != ABANDONMENT
+            || receipt.body["damage"]["artifact_ref"] == artifact.reference())
+}
+
 pub(super) fn retention(conn: &Connection, artifact: &Doc) -> Result<Option<Doc>> {
     let recorded: Option<(String, String)> = conn
         .query_row(
@@ -899,30 +906,25 @@ pub(super) fn retention(conn: &Connection, artifact: &Doc) -> Result<Option<Doc>
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    let (owner, state) =
-        recorded.ok_or_else(|| err("RecoveryRequired", "uploaded artifact provenance missing"))?;
-    require(
-        artifact.owner == owner,
-        "RecoveryRequired",
-        "artifact owner disagrees with its publication",
-    )?;
     let receipt = find(conn, &withdrawal_id(artifact))?;
-    require(
-        match (state.as_str(), &receipt) {
-            ("Published", None) => true,
-            ("Withdrawn", Some(doc)) => {
-                matches!(doc.kind.as_str(), WITHDRAWAL | ABANDONMENT)
-                    && doc.rev == 1
-                    && doc.owner == owner
-                    && doc.body["artifact_ref"] == artifact.reference()
-                    && (doc.kind != ABANDONMENT
-                        || doc.body["damage"]["artifact_ref"] == artifact.reference())
-            }
-            _ => false,
-        },
-        "RecoveryRequired",
-        "artifact retention disagrees with its publication",
-    )?;
+    if let Some((owner, state)) = recorded {
+        require(
+            artifact.owner == owner
+                && match (state.as_str(), &receipt) {
+                    ("Published", None) => true,
+                    ("Withdrawn", Some(doc)) => valid_release(doc, artifact),
+                    _ => false,
+                },
+            "RecoveryRequired",
+            "artifact retention disagrees with its publication",
+        )?;
+    } else {
+        require(
+            windows::reclaimed(conn, artifact, receipt.as_ref())?,
+            "RecoveryRequired",
+            "uploaded artifact provenance missing",
+        )?;
+    }
     Ok(receipt)
 }
 
@@ -1023,9 +1025,14 @@ fn release_upload(db: &Db<'_>, actor: &str, params: &Value, kind: &str) -> Resul
         "RecoveryRequired",
         "uploaded artifact chunks are incomplete",
     )?;
-    db.c.execute(
+    let retired = db.c.execute(
         "UPDATE artifact_uploads SET state='Withdrawn' WHERE artifact_id=?1",
         [&artifact.id],
+    )?;
+    require(
+        retired == 1,
+        "RecoveryRequired",
+        "original upload receipt is missing",
     )?;
     let (body, method, decision) = if let Some((_, bytes, evidence)) = damage {
         (
@@ -1048,6 +1055,10 @@ fn release_upload(db: &Db<'_>, actor: &str, params: &Value, kind: &str) -> Resul
         json!({"artifact_id":artifact.id}),
         body,
     )?;
+    let stage = artifact.spec["source"]["stage_id"]
+        .as_str()
+        .ok_or_else(|| err("RecoveryRequired", "released artifact has no upload stage"))?;
+    windows::mark_reclaimable(db, stage)?;
     db.audit(actor, method, Some(&artifact.id), decision)?;
     Ok(release_view(&receipt, &p.reference))
 }

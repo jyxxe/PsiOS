@@ -39,8 +39,8 @@ class Node:
         self.process = None
         self.start()
 
-    def start(self):
-        self.process = subprocess.Popen(self.daemon + ["serve"])
+    def start(self, *, stderr=None):
+        self.process = subprocess.Popen(self.daemon + ["serve"], stderr=stderr)
         for _ in range(300):
             if self.process.poll() is not None:
                 raise AssertionError("daemon failed to start")

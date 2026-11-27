@@ -15,7 +15,7 @@ from support import Failure, Node, key, target
 
 class PlatformTests(unittest.TestCase):
     def setUp(self):
-        self.n = Node("target/debug")
+        self.n = Node()
         self.addCleanup(self.n.close)
 
     def denied(self, code, method, params, token=None):

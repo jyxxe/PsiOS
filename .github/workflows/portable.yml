@@ -87,13 +87,12 @@ jobs:
             if [[ $(dpkg-query -W -f='${db:Status-Status}' "$pkg" 2>/dev/null) != installed ]]; then missing+=("$pkg"); fi
           done
           if (( ${#missing[@]} )); then
-            apt_opts=(-o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=1 -o Acquire::Languages=none)
             install=(install -y --no-install-recommends "${missing[@]}")
-            if ! sudo timeout 240 apt-get "${apt_opts[@]}" --download-only "${install[@]}"; then
-              sudo timeout 180 apt-get "${apt_opts[@]}" update -q
-              sudo timeout 300 apt-get "${apt_opts[@]}" --download-only "${install[@]}"
+            if ! sudo timeout 240 tools/ci-ubuntu-apt --download-only "${install[@]}"; then
+              sudo timeout 180 tools/ci-ubuntu-apt update -q
+              sudo timeout 300 tools/ci-ubuntu-apt --download-only "${install[@]}"
             fi
-            sudo timeout 180 env DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" --no-download "${install[@]}"
+            sudo timeout 180 tools/ci-ubuntu-apt --no-download "${install[@]}"
           fi
           if [ -c /dev/kvm ]; then sudo setfacl -m "u:$(id -un):rw" /dev/kvm; fi
 
@@ -234,11 +233,11 @@ jobs:
           mkdir "$secure_tools"
           (
             cd "$secure_tools"
-            apt_opts=(-o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=1)
             packages=(systemd-boot-efi systemd-ukify python3-pefile python3-virt-firmware python3-cryptography python3-pkg-resources sbsigntool)
-            if ! timeout 180 apt-get "${apt_opts[@]}" download "${packages[@]}"; then
-              sudo timeout 180 apt-get "${apt_opts[@]}" update -q
-              timeout 180 apt-get "${apt_opts[@]}" download "${packages[@]}"
+            archive_apt="$GITHUB_WORKSPACE/tools/ci-ubuntu-apt"
+            if ! timeout 180 "$archive_apt" download "${packages[@]}"; then
+              sudo timeout 180 "$archive_apt" update -q
+              timeout 180 "$archive_apt" download "${packages[@]}"
             fi
             for package in ./*.deb; do dpkg-deb -x "$package" "$secure_tools/root"; done
           )

@@ -259,7 +259,8 @@ def verify_direct_clone_rebind(node, docker, spec, app_ids):
         assert (refusal["lifecycle"], refusal["outcome_knowledge"], refusal["conditions"][0]["type"]) == (
             "Failed", "NotStarted", "PreconditionFailed",
         ), refusal
-        assert "clone root" in refusal["conditions"][0]["message"], refusal
+        message = refusal["conditions"][0]["message"]
+        assert "volume root" in message and "no extended attributes" in message, refusal
         assert not refusal["result"]["artifact_refs"], refusal
         assert os.getxattr(clone_root, attribute) == b"root metadata added after activation"
         assert_unbound()

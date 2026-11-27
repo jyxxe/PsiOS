@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import tempfile
 
-from native_disk import REPO, boot, call, check_clean_shutdown, password
+from native_disk import REPO, boot, call, check_clean_shutdown, extract_partition, password, replace_partition, sha
 from native_static_ipv4 import installer, poweroff
 
 
@@ -83,6 +83,28 @@ def recover_backup(console):
     assert console.run("stat -c '%a' recovery/data/record") == "600"
 
 
+def stage_terminal_check(work, disk):
+    # Install the test executable into the disposable guest's private root home.
+    # The EFI image and all deployed programs remain the ones produced by the installer.
+    probe = work / "pty-check"
+    subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-static", "-s",
+                    REPO / "tests/native_pty.c", "-o", probe], check=True, timeout=60)
+    table = json.loads(subprocess.check_output(["sfdisk", "--json", disk]))["partitiontable"]
+    home = table["partitions"][2]
+    start, size = [home[key] * table["sectorsize"] for key in ("start", "size")]
+    mib = 1024 * 1024
+    assert start % mib == 0 and size % mib == 0
+    partition = work / "test-home.ext4"
+    extract_partition(disk, partition, start // mib, size // mib)
+    commands = ("write pty-check /root/pty-check\nset_inode_field /root/pty-check uid 0\n"
+                "set_inode_field /root/pty-check gid 0\nset_inode_field /root/pty-check mode 0100700\n")
+    subprocess.run(["debugfs", "-w", "-f", "-", partition], input=commands, text=True,
+                   cwd=work, check=True, stdout=subprocess.DEVNULL)
+    replace_partition(disk, partition, start // mib)
+    partition.unlink()
+    return sha(probe)
+
+
 def exercise(args, work):
     user, operator_hash = password(work, "operator.hash")
     root, root_hash = password(work, "root.hash")
@@ -91,16 +113,24 @@ def exercise(args, work):
     disk = work / "combined.raw"
     subprocess.run([*installer(args, disk, args.archive), "--console-hash", operator_hash,
                     "--root-console-hash", root_hash], check=True, stdout=subprocess.DEVNULL, timeout=140)
+    probe_digest = stage_terminal_check(work, disk)
     with boot(work, disk, pace_commands=True) as console:
         console.login("psios", user)
+        assert console.run("stat -c '%a' /dev/pts/ptmx") == "666"
+        mount = console.run("awk '$5==\"/dev/pts\" {print $6}' /proc/self/mountinfo")
+        assert {"nosuid", "noexec"} <= set(mount.split(",")), mount
+        console.run("exec 3<>/dev/ptmx && test -c /dev/pts/0 && exec 3>&-")
         observations(console)
         wait_through_cordon(console)
         recover_backup(console)
         console.send("exit")
         console.login("root", root)
+        assert console.run("stat -c '%u:%g:%a' /root/pty-check") == "0:0:700"
+        assert console.run("sha256sum /root/pty-check").split()[0] == probe_digest
+        assert console.run("/root/pty-check") == "private PTY I/O, resize, 64-pair limit and reuse passed"
         poweroff(console)
     check_clean_shutdown(disk)
-    print("PASS block layout, pressure, durable Task.Wait, backup export, detached recovery and clean shutdown in one native boot")
+    print("PASS block layout, pressure, durable Task.Wait, backup export, detached recovery, user PTYs and clean shutdown")
 
 
 if __name__ == "__main__":

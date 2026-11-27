@@ -71,6 +71,8 @@ pub struct Config {
     pub backup_max_bytes: u64,
     #[serde(default = "default_backup_max_entries")]
     pub backup_max_entries: usize,
+    #[serde(default)]
+    pub backup_user_xattrs: bool,
     #[serde(default = "default_backup_capture_timeout_seconds")]
     pub backup_capture_timeout_seconds: u32,
 }
@@ -268,6 +270,7 @@ impl Config {
             authority_reserve: AuthorityReserve::default(),
             backup_max_bytes: DEFAULT_BACKUP_MAX_BYTES,
             backup_max_entries: DEFAULT_BACKUP_MAX_ENTRIES,
+            backup_user_xattrs: false,
             backup_capture_timeout_seconds: DEFAULT_BACKUP_CAPTURE_TIMEOUT_SECONDS,
         }
     }

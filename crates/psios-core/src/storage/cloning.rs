@@ -54,16 +54,15 @@ pub(crate) fn run(
         work,
         Some(|destination: &File| {
             checked_root_metadata(destination, "UnsupportedCapability")?;
-            let mut capture = Capture {
-                mode: CaptureMode::Copy(CaptureOutput::Tree(RestoreDestination {
+            let mut capture = Capture::new(
+                CaptureMode::Copy(CaptureOutput::Tree(RestoreDestination {
                     directory: destination,
                     authority: Some(&work.cfg),
                 })),
-                entries: Vec::new(),
-                total: 0,
-                max_bytes: work.cfg.backup_max_bytes,
+                work.cfg.backup_max_bytes,
+                work.cfg.backup_max_entries,
                 check,
-            };
+            );
             let source = capture_root(work)?;
             let before = checked_root_metadata(&source, "UnsupportedCapability")?;
             let root_mode = before.mode() & 0o777;

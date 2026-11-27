@@ -128,13 +128,12 @@ pub(super) fn verify_tree_checked(
         "PreconditionFailed",
         "restored data root mode differs from its verified backup",
     )?;
-    let mut capture = Capture {
-        mode: CaptureMode::DigestOnly,
-        entries: vec![],
-        total: 0,
-        max_bytes: MAX_BACKUP_BYTES,
+    let mut capture = Capture::new(
+        CaptureMode::DigestOnly,
+        MAX_BACKUP_BYTES,
+        super::MAX_ENTRIES,
         check,
-    };
+    );
     capture.walk(root, Path::new(""), 0)?;
     let entries = capture.entries.iter().map(|(entry, meta)| {
         (

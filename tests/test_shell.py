@@ -112,6 +112,18 @@ class ShellTests(unittest.TestCase):
         node = self.node.call("Node.Get", {})
         self.node.call("Node.Configure", {"expected_resource_version": node["reference"]["version"], "scheduling": "Cordoned"})
         pending = self.node.submit("system.status", {})
+        # Exercise independent admission floors on the same live filesystem. Reads
+        # and cancellation of the already queued Task remain available under pressure.
+        self.node.stop()
+        cfg = json.loads(self.node.config.read_text())
+        floor = 2**53 - 1
+        cfg["authority_reserve"] = {"state_inodes": floor, "witness_bytes": floor}
+        self.node.config.write_text(json.dumps(cfg))
+        self.node.start()
+        storage = self.node.call("Node.Get", {})["authority_storage"]
+        self.assertTrue(storage["witness"]["below_reserve"])
+        inode_observed = storage["state"]["inode_accounting"] == "Observed"
+        self.assertEqual(storage["state"]["below_reserve"], inode_observed)
         shell = self.shell(cancel_pending=True)
         browser = os.environ.get("PSIOS_TEST_CHROME", "google-chrome")
         subprocess.run(
@@ -120,7 +132,7 @@ class ShellTests(unittest.TestCase):
                                   history=self.node.call("Task.History", {"id": task})["items"], pending=pending,
                                   large_task=large_task, large_digest=large_ref["digest"], downloads=str(downloads),
                                   node=self.node.call("Node.Get", {})["reference"]["resource_id"],
-                                  profile=str(self.node.base / "browser"))),
+                                  inode_observed=inode_observed, profile=str(self.node.base / "browser"))),
             text=True, timeout=110, check=True,
         )
         self.assertEqual(shell.process.wait(timeout=5), 0)

@@ -128,6 +128,20 @@ async function test() {
     'document.getElementById("code").value === "" && document.cookie === "" && ' +
     'localStorage.length === 0 && sessionStorage.length === 0'));
 
+  const reserves = await evaluate(`Array.from(document.querySelectorAll("#node-view .card"))
+    .filter(card => ["状态存储", "见证存储"].includes(card.querySelector("h2").textContent))
+    .map(card => ({ fields: Object.fromEntries(Array.from(card.querySelectorAll("dt"),
+      label => [label.textContent, label.nextElementSibling.textContent])),
+      warnings: Array.from(card.querySelectorAll(".reserve-low"), item => item.textContent) }))`);
+  const [state, witness] = reserves;
+  assert.deepEqual(state.warnings, [input.inode_observed ?
+    "可用 inode 已低于预留数量。" : "无法核对本文件系统配置的 inode 预留数量。"]);
+  assert.deepEqual(witness.warnings, ["可用字节已低于预留空间。"]);
+  assert.equal(state.fields["预留 inode"], 9007199254740991n.toLocaleString("zh-CN"));
+  assert.equal(witness.fields["预留 inode"], "0");
+  assert.ok(input.inode_observed ? /^[0-9,]+$/.test(state.fields["可用 inode"]) :
+    state.fields["可用 inode"] === "文件系统未提供");
+
   await click("#nav-tasks");
   await waitFor("first page", 'document.querySelectorAll("#task-rows button").length === 20');
   await click("#next");

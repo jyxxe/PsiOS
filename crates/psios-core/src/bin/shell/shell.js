@@ -110,10 +110,15 @@ function capacity(bytes) {
 }
 
 function storageCard(title, storage) {
+  const inodeFloor = storage.reserve_inodes == null ? null : BigInt(storage.reserve_inodes);
+  const freeInodes = storage.inode_accounting === "Observed" ? BigInt(storage.available_inodes) : null;
+  const inodeStatus = storage.inode_accounting === "Unavailable" ? "文件系统未提供" : "未报告";
   const section = card(title, [
     ["可用空间", capacity(storage.available_bytes)],
     ["总容量", capacity(storage.capacity_bytes)],
     ["预留空间", capacity(storage.reserve_bytes)],
+    ["可用 inode", freeInodes?.toLocaleString("zh-CN") ?? inodeStatus],
+    ["预留 inode", inodeFloor?.toLocaleString("zh-CN") ?? "未报告"],
   ]);
   const size = Number(storage.capacity_bytes);
   if (size > 0) {
@@ -125,9 +130,16 @@ function storageCard(title, storage) {
     meter.setAttribute("aria-label", title + "可用空间");
     section.append(meter);
   }
-  if (storage.below_reserve) {
-    section.append(element("p", "可用空间低于预留阈值。", "reserve-low"));
+  const warnings = [];
+  if (BigInt(storage.available_bytes) < BigInt(storage.reserve_bytes)) {
+    warnings.push("可用字节已低于预留空间。");
   }
+  if (inodeFloor !== null && inodeFloor > 0n) {
+    if (freeInodes === null) warnings.push("无法核对本文件系统配置的 inode 预留数量。");
+    else if (freeInodes < inodeFloor) warnings.push("可用 inode 已低于预留数量。");
+  }
+  if (storage.read_only) warnings.push("此文件系统以只读方式挂载。");
+  for (const warning of warnings) section.append(element("p", warning, "reserve-low"));
   return section;
 }
 

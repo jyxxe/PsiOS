@@ -119,6 +119,7 @@ class McpTaskTests(McpTaskFixture, unittest.TestCase):
         handle = node.call("McpTask.Start", start, token)["taskId"]
         [reference] = node.call("Resource.List", {"kind": "Task"})["items"]
         self.assertEqual(node.wait(reference["resource_id"])["lifecycle"], "Succeeded")
+        reference = node.get(reference["resource_id"])["reference"]
         access = {**scope, "handle": handle, "bindings": [binding]}
         original = node.call("McpTask.Get", access, token)
         self.assertEqual(original["tool_result"]["task_id"], reference["resource_id"])

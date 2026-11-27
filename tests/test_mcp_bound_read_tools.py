@@ -90,7 +90,12 @@ class McpBoundReadToolsTests(McpFixture, unittest.TestCase):
             self.assertEqual([tool["name"] for tool in listed], tools)
             for tool in listed:
                 self.assertTrue(tool["annotations"]["readOnlyHint"])
-                self.assertEqual(tool["inputSchema"], {"type": "object", "additionalProperties": False})
+                schema = tool["inputSchema"]
+                self.assertEqual((schema["type"], schema["additionalProperties"]), ("object", False))
+                if tool["name"] == "node.devices":
+                    self.assertEqual(set(schema["properties"]), {"limit", "cursor"})
+                else:
+                    self.assertNotIn("properties", schema)
             inventory = self.check_receipt(client("tools/call", {"name": tools[0]})["result"],
                                            tools[0], exact)["result"]
             self.assertEqual(inventory["boot_id"], n.call("Node.Get", {})["state"]["boot_id"])
@@ -100,12 +105,17 @@ class McpBoundReadToolsTests(McpFixture, unittest.TestCase):
             self.assertEqual(devices["boot_id"], inventory["boot_id"])
             self.assertEqual({row["name"] for row in devices["devices"]},
                              {device.name for device in Path("/sys/class/block").iterdir()})
-        self.assertEqual(len(self.tasks()), 4)
+            page = self.check_receipt(client("tools/call", {"name": tools[1], "arguments": {"limit": 1}})["result"],
+                                      tools[1], exact)["result"]
+            self.assertEqual(page["boot_id"], devices["boot_id"])
+            self.assertEqual(page["devices"], devices["devices"][:1])
+            self.assertTrue(page["snapshot_digest"].startswith("sha256:"))
+        self.assertEqual(len(self.tasks()), 6)
         n.call("Grant.Revoke", target(exact["grant_ref"]))
         self.assertEqual(client("tools/list")["result"]["tools"], [])
         self.assertEqual(client("tools/call", {"name": tools[1]})["result"]["structuredContent"],
                          {"code": "PermissionDenied"})
-        self.assertEqual(len(self.tasks()), 4)
+        self.assertEqual(len(self.tasks()), 6)
 
     def test_measure_only_the_fixed_owned_volume_and_resolve_its_current_revision(self):
         n = self.node

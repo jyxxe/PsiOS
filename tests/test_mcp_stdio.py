@@ -90,9 +90,9 @@ class McpFixture:
         self.profile = "profile-local"
         self.node_id = self.node.call("Node.Get", {})["reference"]["resource_id"]
 
-    def grant(self, targets, units=2):
+    def grant(self, targets, units=2, *, tools=TOOLS):
         return self.node.call("Grant.Issue", {
-            "principal_id": self.agent["principal_id"], "actions": ["task.submit", "task.read", *TOOLS],
+            "principal_id": self.agent["principal_id"], "actions": ["task.submit", "task.read", *tools],
             "tool_targets": targets, "units": units, "ttl_seconds": 120,
         })
 
@@ -250,16 +250,20 @@ class McpStdioTests(McpFixture, unittest.TestCase):
         from mcp.client.stdio import stdio_client
 
         self.assertEqual(importlib.metadata.version("mcp"), "1.28.1")
-        grant = self.grant([self.profile])
-        command, *args = self.command(grant)
+        tools = ["system.status", "node.inventory"]
+        grant = self.grant([self.profile, self.node_id], tools=tools)
+        command, *args = [*self.adapter_command(grant), "--tool", tools[0], "--tool", tools[1]]
 
         async def invoke():
             async with stdio_client(StdioServerParameters(command=command, args=args, cwd=Path(self.node.base))) as pipes:
                 async with ClientSession(*pipes) as session:
                     initialized = await session.initialize()
                     self.assertEqual(initialized.protocolVersion, PROFILE)
-                    self.assertEqual([tool.name for tool in (await session.list_tools()).tools], ["system.status"])
-                    return (await session.call_tool("system.status", {})).model_dump(exclude_none=True)
+                    self.assertEqual({tool.name for tool in (await session.list_tools()).tools}, set(tools))
+                    return [(await session.call_tool(tool, {})).model_dump(exclude_none=True) for tool in tools]
 
-        response = asyncio.run(asyncio.wait_for(invoke(), timeout=40))
-        self.check_receipt(response, "system.status", grant)
+        reports = asyncio.run(asyncio.wait_for(invoke(), timeout=40))
+        for tool, report in zip(tools, reports, strict=True):
+            settled = self.check_receipt(report, tool, grant)
+            self.assertEqual(settled["result"]["kernel_release"], os.uname().release)
+        self.assertEqual(len(self.tasks()), len(tools))

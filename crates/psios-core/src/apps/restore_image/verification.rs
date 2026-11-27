@@ -275,7 +275,7 @@ fn normalized_digest<'a>(
                         std::io::sink(),
                         &binding.image_id,
                         &binding.diff_ids,
-                        binding.manifest_config_digest.is_some(),
+                        binding.manifest_config_digest.as_deref(),
                     )?),
                 };
             entry.insert(digest)

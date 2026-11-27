@@ -368,7 +368,7 @@ pub(crate) fn run(work: &Work, checkpoint: impl FnOnce(&Dispatch) -> Result<()>)
             output,
             &binding.image_id,
             &binding.diff_ids,
-            binding.manifest_config_digest.is_some(),
+            binding.manifest_config_digest.as_deref(),
         )
     })?;
     let dispatch = Dispatch { normalized_digest };

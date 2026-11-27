@@ -8,20 +8,33 @@ from pathlib import Path
 import signal
 import subprocess
 import tarfile
+import time
 
 from oci_capacity import install_and_restore, read_archive, verify_authority
 from oci_capture import DOCKER, TOOL, checkpoint_archive, grant
 from oci_restore import current_image
-from support import Node, key
+from support import Node, key, target
 
 
-def import_fixture(tag):
+def import_fixture(directory, tag):
+    source = directory / "manifest-probe.c"
+    probe = directory / "manifest-probe"
+    source.write_text('''#include <stdio.h>
+#include <unistd.h>
+int main(void) {
+    puts("restored manifest probe ready");
+    fflush(stdout);
+    for (;;) pause();
+}
+''')
+    subprocess.run(["cc", "-static", "-O2", source, "-o", probe], check=True, timeout=30)
     contents = (tag + "\n").encode() * 4096
     archive = io.BytesIO()
     with tarfile.open(fileobj=archive, mode="w", format=tarfile.USTAR_FORMAT) as layer:
         member = tarfile.TarInfo("manifest-fixture")
         member.size = len(contents)
         layer.addfile(member, io.BytesIO(contents))
+        layer.add(probe, arcname="probe")
     return subprocess.check_output([*DOCKER, "image", "import", "-", tag], input=archive.getvalue(),
                                    timeout=20).decode().strip()
 
@@ -37,14 +50,39 @@ def capture(node, image, engine, delegation):
     return receipt, proof
 
 
+def owned_containers(app):
+    return subprocess.check_output([*DOCKER, "ps", "-aq", "--no-trunc", "--filter",
+        "label=io.psios.application=" + app["resource_id"]], text=True, timeout=15).split()
+
+
+def verify_start_and_stop(node, app):
+    node.start()
+    started = node.perform("application.start", target(app))
+    health = node.perform("application.health", target(started))
+    assert health["process_running"] and owned_containers(app) == [health["container_id"]], health
+    deadline = time.monotonic() + 10
+    while True:
+        logs = node.perform("application.logs", target(started))
+        if "restored manifest probe ready" in logs["stdout"]:
+            break
+        assert time.monotonic() < deadline, logs
+        time.sleep(0.1)
+    stopped = node.perform("application.stop", target(started))
+    health = node.perform("application.health", target(stopped))
+    assert not health["process_running"], health
+    node.stop()
+    verify_authority(node)
+
+
 def main(binaries, previous=None):
     info = json.loads(subprocess.check_output([*DOCKER, "info", "--format", "{{json .}}"], timeout=15))
     assert ["driver-type", "io.containerd.snapshotter.v1"] in info["DriverStatus"], info["DriverStatus"]
     node = Node(previous or binaries)
     tag = "psios-manifest-restore:" + key()
     image = None
+    app = None
     try:
-        image = import_fixture(tag)
+        image = import_fixture(node.base, tag)
         layers = current_image(image)["RootFS"]["Layers"]
         policy = grant(node, "local-owner", "task.submit", "task.read", TOOL,
                        "artifact.upload", "artifact.read", "artifact.withdraw")
@@ -79,16 +117,20 @@ def main(binaries, previous=None):
         assert proof["restore_compatibility"] == {"status": "Verified", "profile": "DockerOciTaglessSaveV1",
                                                     "config_digest": cfg}, proof
         checkpoint_archive(node, receipt["artifact_ref"], body)
-        install_and_restore(node, tag, image, info["ID"], receipt["artifact_ref"], layers)
+        app = install_and_restore(node, tag, image, info["ID"], receipt["artifact_ref"], layers, argv=["/probe"])
+        verify_start_and_stop(node, app)
         if previous is not None:
             upgraded = verify_authority(node)
             assert (upgraded["node_id"], upgraded["database_format"], upgraded["migration_required"]) == (
                 old["node_id"], 133, False), upgraded
             refused = subprocess.run([*original, "serve"], capture_output=True, text=True, timeout=15)
             assert refused.returncode != 0 and "SchemaVersionUnsupported" in refused.stderr, refused
-        print("PASS signed gzip-layer OCI archive, exact manifest and DiffID restore, detached checkpoint and writer fence")
+        print("PASS signed gzip-layer OCI restore, exact manifest and DiffID, application start and stop, detached checkpoint and writer fence")
     finally:
         node.close()
+        if app is not None:
+            for container in owned_containers(app):
+                subprocess.run([*DOCKER, "rm", "-f", container], check=True, capture_output=True, timeout=15)
         for reference in (tag, image):
             if reference:
                 subprocess.run([*DOCKER, "image", "rm", reference], capture_output=True, timeout=15)

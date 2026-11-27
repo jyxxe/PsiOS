@@ -39,8 +39,8 @@ def read_archive(node, reference):
         assert result["next_offset"] == len(data) <= LIMIT, result["next_offset"]
 
 
-def install_and_restore(node, tag, image, engine, archive, diff_ids):
-    install = {"image_id": image, "argv": ["/unused"], "name": "large-archive-fixture",
+def install_and_restore(node, tag, image, engine, archive, diff_ids, argv=None):
+    install = {"image_id": image, "argv": ["/unused"] if argv is None else argv, "name": "large-archive-fixture",
                "release_version": "1.0.0", "license_expression": "0BSD", "cpu_millicores": 100,
                "memory_max_bytes": 33554432, "pids_max": 8, "ephemeral_max_bytes": 1048576}
     body = archived_declaration(install, archive).encode()
@@ -76,6 +76,7 @@ def install_and_restore(node, tag, image, engine, archive, diff_ids):
     assert loaded["Id"] == image and not loaded["RepoTags"] and loaded["RootFS"]["Layers"] == diff_ids, loaded
     node.stop()
     subprocess.run(node.daemon + ["verify"], check=True, capture_output=True, timeout=30)
+    return app
 
 
 def verify_authority(node):

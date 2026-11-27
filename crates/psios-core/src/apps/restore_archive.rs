@@ -650,14 +650,13 @@ pub(super) fn validate_reader(
     validate_members(&members, image, diff_ids, manifest_identity)
 }
 
-// Produce a single classic Docker manifest from the validated members. Never pass
-// original outer tar headers or JSON alias fields to Docker's different parsers.
+// Supply canonical tar headers and only the manifest format selected at capture.
 pub(super) fn write_load(
     mut input: impl Read + Seek,
     output: impl Write,
     image: &str,
     diff_ids: &[String],
-    manifest_identity: bool,
+    expected_config: Option<&str>,
 ) -> Result<String> {
     let length = input_length(&mut input)?;
     require(
@@ -666,15 +665,24 @@ pub(super) fn write_load(
         "restore requires an uncompressed outer tar",
     )?;
     let members = Members::read(input, length)?;
-    let compatibility = validate_members(&members, image, diff_ids, manifest_identity)?;
-    require(
-        matches!(
-            (manifest_identity, compatibility),
-            (false, Compatibility::Verified) | (true, Compatibility::VerifiedManifest(_))
-        ),
-        "UnsupportedCapability",
-        "captured archive does not meet its recorded Docker restore profile",
-    )?;
+    let compatibility = validate_members(&members, image, diff_ids, expected_config.is_some())?;
+    let manifest_identity = match (expected_config, compatibility) {
+        (None, Compatibility::Verified) => false,
+        (Some(expected), Compatibility::VerifiedManifest(actual)) => {
+            require(
+                expected == actual,
+                "PreconditionFailed",
+                "OCI archive configuration disagrees with the captured config digest",
+            )?;
+            true
+        }
+        _ => {
+            return Err(err(
+                "UnsupportedCapability",
+                "captured archive does not meet its recorded Docker restore profile",
+            ));
+        }
+    };
     let manifests: Vec<DockerManifest> = decode(&members.metadata("manifest.json")?)?;
     let docker = &manifests[0];
     if manifest_identity {

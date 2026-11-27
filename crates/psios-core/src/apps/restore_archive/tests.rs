@@ -9,7 +9,7 @@ fn validate(bytes: &[u8], image: &str, diff_ids: &[String]) -> Result<Compatibil
 
 fn canonical_load(bytes: &[u8], image: &str, diff_ids: &[String]) -> Result<Vec<u8>> {
     let mut output = Vec::new();
-    let digest = write_load(Cursor::new(bytes), &mut output, image, diff_ids, false)?;
+    let digest = write_load(Cursor::new(bytes), &mut output, image, diff_ids, None)?;
     assert_eq!(digest, sha256(&output));
     Ok(output)
 }
@@ -70,12 +70,26 @@ fn manifest_identity_keeps_original_blobs_in_an_oci_only_load() {
         Compatibility::VerifiedManifest(fixture.image.clone()),
     );
     let mut load = Vec::new();
+    assert_eq!(
+        write_load(
+            Cursor::new(&original),
+            &mut load,
+            image,
+            &fixture.layers,
+            Some(&sha256(b"unrelated config")),
+        )
+        .unwrap_err()
+        .0
+        .code,
+        "PreconditionFailed"
+    );
+    assert!(load.is_empty());
     let normalized = write_load(
         Cursor::new(original),
         &mut load,
         image,
         &fixture.layers,
-        true,
+        Some(&fixture.image),
     )
     .unwrap();
     assert_eq!(normalized, sha256(&load));

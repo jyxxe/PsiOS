@@ -121,7 +121,7 @@ def refuse_unavailable_controller(args, work, disk, receipt):
     efi = installer.boot_media.efi_application(stage, installer.CMDLINE + " cgroup_disable=memory")
     subprocess.run(["mcopy", "-o", "-i", f"{disk}@@1048576", efi, "::/EFI/BOOT/BOOTX64.EFI"], check=True, timeout=20)
     before = sha(disk)
-    with boot(work, disk) as console:
+    with boot(work, disk, pace_commands=True) as console:
         console.until(b"PsiOS boot stopped at core-resource-limits")
         assert console.vm.wait(25) == 0
     assert sha(disk) == before
@@ -143,7 +143,7 @@ def exercise(args, work):
     prior.write_bytes(subprocess.check_output([*fresh, *FLAGS], timeout=150))
     receipt = json.loads(prior.read_text())
     assert receipt["format"] == 6 and receipt["core_limits"] == LIMITS
-    with boot(work, disk) as console:
+    with boot(work, disk, pace_commands=True) as console:
         console.login("psios", user)
         assert console.run("sha256sum /psios-deployment.json").split()[0] == receipt["deployment_manifest_sha256"]
         assert json.loads(console.run("cat /psios-deployment.json"))["core_limits"] == LIMITS
@@ -167,7 +167,7 @@ def exercise(args, work):
     rehearsal = verified["migration_rehearsal"]
     assert not verified["migration_required"] and rehearsal["status"] == "Verified", verified
     assert rehearsal["source_format"] == rehearsal["target_format"] == verified["database_format"], rehearsal
-    with boot(work, upgraded) as console:
+    with boot(work, upgraded, pace_commands=True) as console:
         console.login("psios", user)
         after = check_state(console)
         assert after[0] == initial[0] and after[1]["task_id"] == initial[1]["task_id"] and after[2] == initial[2]
@@ -181,7 +181,7 @@ def exercise(args, work):
     tiny = work / "incomplete-workers.raw"
     subprocess.run([*installer, tiny, *inputs, "--console-hash", operator_hash, "--root-console-hash", root_hash,
                     *FLAGS[:-1], "3"], check=True, stdout=subprocess.DEVNULL, timeout=150)
-    with boot(work, tiny) as console:
+    with boot(work, tiny, pace_commands=True) as console:
         console.login("root", root)
         preceding = console.until(b"could not start Core workers")
         assert b"psiosd ready" not in preceding, preceding

@@ -95,7 +95,7 @@ class Console:
         if password.encode() in before_shell:
             raise AssertionError("guest serial console echoed the fixture password")
         marker = "PSIOSLOGIN" + secrets.token_hex(6)
-        self.send(f"stty -echo; export PS1=''; printf '\\n{marker}\\n'")
+        self.send(f"stty -echo; export PS1=''; printf '\\n{marker}\\n'", paced=self.pace_commands)
         self.until(("\n" + marker + "\n").encode(), phase="shell login nonce")
         if user == "psios":
             self.run("for i in $(seq 1 100); do psiosctl whoami >/dev/null 2>&1 && exit 0; sleep 0.1; done; exit 1")
@@ -117,7 +117,7 @@ class Console:
 
 @contextmanager
 def boot(work, image, network_mac=None, extra_disk=None, tap=None, *, rtc_base=None,
-         disk_format="raw", vars_file="vars.fd", vcpus=2):
+         disk_format="raw", vars_file="vars.fd", vcpus=2, pace_commands=False):
     # The privileged TAP fixture has a reproducible serial stall on hosted KVM.
     # Use a portable CPU emulator for that fixture; keep its real virtio and TAP.
     accel = "kvm" if tap is None and os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
@@ -145,7 +145,7 @@ def boot(work, image, network_mac=None, extra_disk=None, tap=None, *, rtc_base=N
         cmd += ["-nic", "none"]
     with subprocess.Popen(cmd, cwd=work, stdin=subprocess.PIPE, stdout=subprocess.PIPE) as vm:
         try:
-            yield Console(vm)
+            yield Console(vm, pace_commands=pace_commands)
         finally:
             if vm.poll() is None:
                 vm.kill()

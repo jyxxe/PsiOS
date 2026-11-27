@@ -24,7 +24,7 @@ const MEMBERSHIP_LIMIT: usize = 128 * 1024;
 
 #[derive(Serialize, PartialEq, Eq)]
 #[serde(tag = "status", content = "value")]
-pub(super) enum Reading<T> {
+pub(crate) enum Reading<T> {
     Observed(T),
     Unsupported,
     Denied,
@@ -143,7 +143,7 @@ fn counters(value: &str, keys: &[&'static str], required: &str) -> Option<Counte
 
 #[derive(Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", content = "value")]
-pub(super) enum Limit {
+pub(crate) enum Limit {
     Bounded(u64),
     Unbounded,
 }
@@ -156,9 +156,9 @@ pub(super) fn limit(text: &str) -> Option<Limit> {
 }
 
 #[derive(Clone, Copy, Serialize, PartialEq, Eq)]
-pub(super) struct CpuLimit {
-    pub(super) quota_us: Limit,
-    pub(super) period_us: u64,
+pub(crate) struct CpuLimit {
+    pub(crate) quota_us: Limit,
+    pub(crate) period_us: u64,
 }
 
 pub(super) fn cpu_limit(text: &str) -> Option<CpuLimit> {
@@ -187,7 +187,7 @@ fn membership(source: &Source) -> io::Result<PathBuf> {
     Ok(path.to_owned())
 }
 
-pub(super) fn contains_process(group: &OwnedFd, pid: u32) -> io::Result<bool> {
+pub(crate) fn contains_process(group: &OwnedFd, pid: u32) -> io::Result<bool> {
     // A namespace path alone can match the wrong directory on a bind mount.
     let ids = linux_proc::bounded_text(
         linux_cgroup::control(group, "cgroup.procs")?,
@@ -211,7 +211,7 @@ fn group_snapshot(source: &Source) -> io::Result<Value> {
     Ok(result)
 }
 
-pub(super) fn cgroup_snapshot(group: &OwnedFd) -> io::Result<Value> {
+pub(crate) fn cgroup_snapshot(group: &OwnedFd) -> io::Result<Value> {
     let id = fstat(group).map_err(io::Error::from)?;
     let control = |name| linux_cgroup::control(group, name);
     let group_pressure = |name| read(control(name), CONTROL_LIMIT, |text| pressure(text, true));
@@ -263,7 +263,7 @@ pub(super) fn cgroup_snapshot(group: &OwnedFd) -> io::Result<Value> {
     }))
 }
 
-pub(super) fn boot_us() -> u128 {
+pub(crate) fn boot_us() -> u128 {
     let time = clock_gettime(ClockId::Boottime);
     time.tv_sec as u128 * 1_000_000 + time.tv_nsec as u128 / 1_000
 }

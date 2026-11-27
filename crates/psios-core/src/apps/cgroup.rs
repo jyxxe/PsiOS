@@ -1,5 +1,11 @@
 //! Observe live cgroup v2 controls for the trusted local Docker adapter.
-use crate::{Result, err, host::Install, linux_cgroup, require};
+use crate::{
+    Result, err,
+    host::Install,
+    linux_cgroup,
+    node::pressure::{self, CpuLimit, Limit, Reading},
+    require,
+};
 use rustix::{
     event::{PollFd, PollFlags, Timespec, poll},
     fd::OwnedFd,
@@ -128,7 +134,12 @@ impl Process {
     }
 }
 
-pub(super) fn observe(container: &str, state: &Value, approval: &Install) -> Result<Value> {
+pub(super) fn observe(
+    container: &str,
+    state: &Value,
+    approval: &Install,
+    include_usage: bool,
+) -> Result<(Value, Option<Value>)> {
     let process = Process::pin(container, state)?;
     let group = linux_cgroup::group(root()?, &process.path)?;
     let control = |name| read(linux_cgroup::control(&group, name)?);
@@ -154,11 +165,40 @@ pub(super) fn observe(container: &str, state: &Value, approval: &Install) -> Res
         "PreconditionFailed",
         "live kernel cgroup limits exceed the approved resource profile",
     )?;
+    let inode = fstat(&group).map_err(io::Error::from)?;
+    let usage = if include_usage {
+        let from = pressure::boot_us();
+        let snapshot = pressure::cgroup_snapshot(&group)?;
+        let current = linux_cgroup::group(root()?, &process.path)?;
+        let latest = fstat(&current).map_err(io::Error::from)?;
+        let bandwidth = Reading::Observed(CpuLimit {
+            quota_us: Limit::Bounded(quota),
+            period_us: period,
+        });
+        let bounded = |value| json!(Reading::Observed(Limit::Bounded(value)));
+        require(
+            latest.st_dev == inode.st_dev
+                && latest.st_ino == inode.st_ino
+                && pressure::contains_process(&current, process.pid as u32)?
+                && snapshot["cpu"]["configured_limit"] == json!(bandwidth)
+                && snapshot["cpu"]["configured_burst_us"] == json!(Reading::Observed(0_u64))
+                && snapshot["memory"]["configured_max_bytes"] == bounded(memory)
+                && snapshot["memory"]["configured_swap_max_bytes"] == bounded(swap)
+                && snapshot["pids"]["configured_max"] == bounded(pids),
+            "PreconditionFailed",
+            "OCI cgroup identity or limits changed while reading usage",
+        )?;
+        Some(json!({"from_boot_us":from.to_string(),
+            "through_boot_us":pressure::boot_us().to_string(),"cgroup":snapshot}))
+    } else {
+        None
+    };
     process.confirm(container)?;
-    Ok(json!({
+    let limits = json!({
         "source": "LinuxCgroupV2", "host_pid": process.pid,
-        "cgroup_inode": fstat(&group).map_err(io::Error::from)?.st_ino.to_string(),
+        "cgroup_inode": inode.st_ino.to_string(),
         "cpu_quota_us": quota, "cpu_period_us": period, "cpu_burst_us": 0,
         "memory_max_bytes": memory, "swap_max_bytes": swap, "pids_max": pids,
-    }))
+    });
+    Ok((limits, usage))
 }

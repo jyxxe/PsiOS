@@ -155,6 +155,27 @@ def verify_agent_read(node, volume, agent):
     print("PASS a scoped MCP Agent read the authorized volume while the OCI process remained active")
 
 
+def verify_cgroup_usage(report):
+    limits = report["effective_limits"]
+    assert limits["source"] == "LinuxCgroupV2", limits
+    assert report["process_id"] == limits["host_pid"], report
+    usage = report["resource_usage"]
+    assert int(usage["from_boot_us"]) <= int(usage["through_boot_us"]), usage
+    measured = usage["cgroup"]
+    assert measured["source"] == "LinuxCgroupV2" and measured["inode"] == limits["cgroup_inode"], measured
+    membership = Path(f'/proc/{report["process_id"]}/cgroup').read_text()
+    relative = membership.removeprefix("0::/").strip()
+    group = Path("/sys/fs/cgroup") / relative
+    assert str(group.stat().st_ino) == limits["cgroup_inode"], group
+    cpu = dict(line.split() for line in (group / "cpu.stat").read_text().splitlines())
+    stat = measured["cpu"]["stat"]
+    assert stat["status"] == "Observed" and 0 <= stat["value"]["usage_usec"] <= int(cpu["usage_usec"]), stat
+    memory = measured["memory"]["current_bytes"]
+    assert memory["status"] == "Observed" and 0 < memory["value"] <= limits["memory_max_bytes"], memory
+    pids = measured["pids"]["current"]
+    assert pids["status"] == "Observed" and pids["value"] == int((group / "pids.current").read_text()), pids
+
+
 def refuse_other_invocation(node, spec, volume, app_ids):
     app = node.perform("application.install", dict(spec, name="external-oci-restart",
                                                    volume=target(volume), volume_access="ReadOnly"))
@@ -306,13 +327,21 @@ def exercise(node, image, app_ids):
         return node.call("Artifact.Read", {"reference": result})
 
     observed = delegated("application.inspect_instance", target(app))
+    assert "resource_usage" not in observed, observed
     assert verify_kernel(DOCKER, observed, data, volume, access="ReadOnly")["mount_id"] == evidence["mount_id"]
+    measured = delegated("application.inspect_instance", {**target(app), "include_usage": True})
+    verify_cgroup_usage(measured)
+    assert (measured["container_id"], measured["started_at"]) == (observed["container_id"], observed["started_at"])
     app = delegated("application.restart", {**target(app), "expected_boot_id": observed["boot_id"],
                                              "expected_started_at": observed["started_at"]})
     after, same_attachment = verify_application(node, app, data, volume)
     assert after["container_id"] == evidence["container_id"] and after["started_at"] != evidence["started_at"]
     assert same_attachment == attachment
     verify_shared_reads(node, volume)
+    restarted = delegated("application.inspect_instance", {**target(app), "include_usage": True})
+    verify_cgroup_usage(restarted)
+    assert restarted["started_at"] == after["started_at"] and restarted["started_at"] != measured["started_at"]
+    print("PASS exact OCI cgroup v2 usage before and after an authorized restart")
     app = node.perform("application.stop", target(app))
     detached = node.get(attachment["resource_id"])["value"]
     assert (detached["effective_access"], detached["lifecycle"]) == ("Blocked", "Detached"), detached

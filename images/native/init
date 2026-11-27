@@ -129,6 +129,10 @@ mkdir -p /tmp
 [ -d /tmp ] && [ ! -L /tmp ] || exit 1
 mount -t tmpfs -o nodev,nosuid,size=32m,nr_inodes=4096,mode=1777 tmpfs /tmp
 if [ "$trial_boot" = no ]; then
+    stage=runtime-directory
+    mkdir -p /run
+    [ -d /run ] && [ ! -L /run ] || exit 1
+    mount -t tmpfs -o nodev,nosuid,noexec,size=8m,nr_inodes=1024,mode=0755 tmpfs /run
     stage=shared-memory
     mkdir -p /dev/shm
     mount -t tmpfs -o nodev,nosuid,noexec,size=16m,nr_inodes=1024,mode=1777 tmpfs /dev/shm

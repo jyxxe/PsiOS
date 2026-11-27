@@ -480,7 +480,7 @@ fn repeated_layers_share_one_cached_member_digest() {
     let member = members.file(&layer_path).unwrap();
     assert!(member.digest.get().is_none());
     assert_eq!(
-        validate_members(&members, &id, &diff_ids, false).unwrap(),
+        validate_members(&members, &id, &diff_ids, None).unwrap(),
         Compatibility::Verified
     );
     let cached = member.digest.get().unwrap();

@@ -949,14 +949,11 @@ impl TryFrom<BackupManifestWire> for BackupManifest {
     type Error = &'static str;
 
     fn try_from(wire: BackupManifestWire) -> std::result::Result<Self, Self::Error> {
-        let entries = match (
+        let entries = profile_entries(
             wire.entries,
             wire.entries_with_user_xattrs,
             wire.user_xattrs_unix_v1.is_some(),
-        ) {
-            (Some(entries), None, false) | (None, Some(entries), true) => entries,
-            _ => return Err("backup entries do not match the declared user attribute profile"),
-        };
+        )?;
         Ok(Self {
             backup_id: wire.backup_id,
             source: wire.source,
@@ -966,6 +963,17 @@ impl TryFrom<BackupManifestWire> for BackupManifest {
             user_xattrs_unix_v1: wire.user_xattrs_unix_v1,
             root_mode_unix_v1: wire.root_mode_unix_v1,
         })
+    }
+}
+
+fn profile_entries<T>(
+    entries: Option<Vec<T>>,
+    entries_with_user_xattrs: Option<Vec<T>>,
+    has_user_xattrs: bool,
+) -> std::result::Result<Vec<T>, &'static str> {
+    match (entries, entries_with_user_xattrs, has_user_xattrs) {
+        (Some(entries), None, false) | (None, Some(entries), true) => Ok(entries),
+        _ => Err("backup entries do not match the declared user attribute profile"),
     }
 }
 

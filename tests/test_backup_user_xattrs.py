@@ -20,9 +20,11 @@ class BackupUserAttributesTests(unittest.TestCase):
         self.volume = self.node.perform("volume.create", {"name": "attribute-capture-source"})
         self.source = self.data(self.volume)
         self.config = json.loads(self.node.config.read_text())
-        self.expected = {".": {"user.label": b"original root", "user.empty": b""},
-                         "nested": {"user.kind": b"directory"},
-                         "nested/payload": {"user.binary": b"\x00\xff\x00\n"}}
+        self.expected = {
+            ".": {"user.label": b"original root", "user.empty": b""},
+            "nested": {"user.kind": b"directory"},
+            "nested/payload": {"user.binary": b"\x00\xff\x00\n"},
+        }
         (self.source / "nested").mkdir()
         (self.source / "nested/payload").write_bytes(b"persistent application data")
         for suffix, attributes in self.expected.items():
@@ -56,6 +58,21 @@ class BackupUserAttributesTests(unittest.TestCase):
         directory = self.node.state / "backups" / backup["resource_id"]
         digest = self.node.get(backup["resource_id"])["value"]["manifest_digest"]
         return directory, digest
+
+    def export(self, reference, output):
+        n = self.node
+        agent = n.call("Agent.Register", {"name": "attribute-backup-exporter"})
+        grant(n, agent["principal_id"], ["backup.export"], [reference["resource_id"]])
+        token = n.base / "backup-export.token"
+        token.touch(mode=0o600)
+        token.write_text(agent["token"])
+        result = subprocess.run(
+            [n.binaries / "psiosctl", "--socket", n.socket, "--token-file", token,
+             "backup-export", "--output", output],
+            input=json.dumps(reference), capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
 
     def test_profile_preserves_root_directory_and_file_attributes_after_restart(self):
         n = self.node
@@ -107,10 +124,71 @@ class BackupUserAttributesTests(unittest.TestCase):
                                      capture_output=True, text=True, timeout=20)
             self.assertNotEqual(refused.returncode, 0, refused)
             self.assertFalse((n.base / "older-copy").exists())
-            self.assertIn("missing field `entries`", refused.stderr)
+            self.assertIn('code: "InvalidArgument"', refused.stderr)
         n.stop()
         result = json.loads(subprocess.check_output([*n.daemon, "verify"], timeout=20))
         self.assertEqual((result["database_format"], result["sqlite_integrity"]), (137, "Verified"))
+
+    def test_export_and_import_on_a_different_node(self):
+        self.configure(True)
+        saved = self.node.perform("backup.create", target(self.volume))
+        archive, digest = self.archive(saved)
+        exported = self.node.base / "exported"
+        self.assertEqual(self.export(saved, exported)["manifest_digest"], digest)
+        self.assertEqual({path.name: path.read_bytes() for path in exported.iterdir()},
+                         {path.name: path.read_bytes() for path in archive.iterdir()})
+        receiver = Node(self.node.binaries)
+        self.addCleanup(receiver.close)
+        self.assertNotEqual(self.node.call("Node.Get", {})["reference"]["resource_id"],
+                            receiver.call("Node.Get", {})["reference"]["resource_id"])
+        self.assertFalse(receiver.call("StoragePool.Get", {"id": "local"})["backup_user_xattrs"])
+        receiver.stop()
+        imported = subprocess.run(
+            [*receiver.daemon, "import-backup", "--directory", exported, "--manifest-digest", digest],
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(imported.returncode, 0, imported.stderr)
+        receiver.start()
+        restored = receiver.perform("backup.restore", target(json.loads(imported.stdout)["reference"]))
+        active = receiver.perform("volume.activate", target(restored))
+        recovered = receiver.state / "volumes" / active["resource_id"] / "data"
+        self.assertEqual(self.attributes(recovered), self.expected)
+        self.assertEqual((recovered / "nested/payload").read_bytes(), b"persistent application data")
+
+    @unittest.skipUnless(os.getenv("PSIOS_USER_XATTR_PREVIOUS_BIN_DIR"), "requires pinned format-136 binaries")
+    def test_old_authority_upgrades_without_changing_an_existing_plain_backup(self):
+        previous = Node(os.environ["PSIOS_USER_XATTR_PREVIOUS_BIN_DIR"])
+        self.addCleanup(previous.close)
+        original = previous.daemon[:]
+        source = previous.perform("volume.create", {"name": "plain-format-136"})
+        source = previous.perform("volume.write", {
+            **target(source), "name": "record", "content": "data created by format 136",
+        })["volume_ref"]
+        saved = previous.perform("backup.create", target(source))
+        document = previous.get(saved["resource_id"])
+        previous.stop(signal.SIGKILL)
+        before = json.loads(subprocess.check_output([*original, "verify"], timeout=20))
+        self.assertEqual((before["database_format"], before["migration_required"]), (136, False))
+
+        previous.binaries = self.node.binaries
+        previous.daemon[0] = str(previous.binaries / "psiosd")
+        planned = json.loads(subprocess.check_output([*previous.daemon, "verify"], timeout=20))
+        self.assertEqual((planned["node_id"], planned["database_format"], planned["migration_required"]),
+                         (before["node_id"], 136, True))
+        previous.start()
+        self.assertEqual(previous.get(saved["resource_id"]), document)
+        restored = previous.perform("backup.restore", target(saved))
+        active = previous.perform("volume.activate", target(restored))
+        record = previous.state / "volumes" / active["resource_id"] / "data" / "record"
+        self.assertEqual(record.read_text(), "data created by format 136")
+        self.assertEqual(os.listxattr(record), [])
+        previous.stop()
+        after = json.loads(subprocess.check_output([*previous.daemon, "verify"], timeout=20))
+        self.assertEqual((after["node_id"], after["database_format"], after["migration_required"]),
+                         (before["node_id"], 137, False))
+        refused = subprocess.run([*original, "serve"], capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(refused.returncode, 0, refused)
+        self.assertIn("SchemaVersionUnsupported", refused.stderr)
 
     def test_attribute_count_and_foreign_names_are_refused_before_publication(self):
         n = self.node
@@ -126,7 +204,9 @@ class BackupUserAttributesTests(unittest.TestCase):
         shutil.copytree(archive, external)
         manifest = external / "manifest.json"
         payload = json.loads(manifest.read_text())
-        payload["user_xattrs_unix_v1"]["root"] = [{"name":"security.capability","value_base64":"AA=="}]
+        payload["user_xattrs_unix_v1"]["root"] = [
+            {"name": "security.capability", "value_base64": "AA=="},
+        ]
         raw = json.dumps(payload).encode()
         manifest.write_bytes(raw)
         digest = "sha256:" + hashlib.sha256(raw).hexdigest()

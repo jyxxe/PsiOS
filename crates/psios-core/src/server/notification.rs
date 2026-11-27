@@ -60,7 +60,39 @@ impl Notifier {
         self.send(b"READY=1\nSTATUS=Core authority is serving")
     }
 
+    pub(super) fn watchdog_interval(&self) -> Result<Option<Duration>> {
+        let Some(usec) = environment_number("WATCHDOG_USEC")? else {
+            return Ok(None);
+        };
+        if environment_number("WATCHDOG_PID")?
+            .is_some_and(|pid| pid != u64::from(std::process::id()))
+        {
+            return Ok(None);
+        }
+        require(
+            self.0.is_some(),
+            "InvalidArgument",
+            "service watchdog requires a notification socket",
+        )?;
+        Ok(Some(Duration::from_micros((usec / 2).max(1))))
+    }
+
+    pub(super) fn heartbeat(&self) -> Result<()> {
+        self.send(b"WATCHDOG=1")
+    }
+
     pub(super) fn stopping(&self) -> Result<()> {
         self.send(b"STOPPING=1\nSTATUS=Core authority is shutting down")
     }
+}
+
+fn environment_number(key: &str) -> Result<Option<u64>> {
+    env::var_os(key)
+        .map(|raw| {
+            raw.to_str()
+                .and_then(|text| text.parse().ok())
+                .filter(|value| *value > 0)
+                .ok_or_else(|| err("InvalidArgument", format!("invalid service watchdog {key}")))
+        })
+        .transpose()
 }

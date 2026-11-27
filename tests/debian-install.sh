@@ -61,6 +61,8 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y "$package"
 [[ $(dpkg-query -W -f='${Version}' psios-core) == "$new_version" ]]
 [[ $(systemctl show -p Type --value psiosd) == notify ]]
 [[ $(systemctl show -p NotifyAccess --value psiosd) == main ]]
+[[ $(busctl get-property org.freedesktop.systemd1 /org/freedesktop/systemd1/unit/psiosd_2eservice \
+    org.freedesktop.systemd1.Service WatchdogUSec) == 't 120000000' ]]
 [[ $(systemctl show -p StatusText --value psiosd) == 'Core authority is serving' ]]
 ctl whoami >/dev/null
 [[ $(systemctl show -p MainPID --value psiosd) != "$pid" ]]

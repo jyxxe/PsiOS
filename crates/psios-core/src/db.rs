@@ -639,6 +639,10 @@ impl Store {
         File::open(&self.config.witness_dir)?.sync_all()?;
         Ok(())
     }
+    pub(crate) fn authority_available(&self) -> bool {
+        !self.sealed
+    }
+
     pub(crate) fn transaction<T>(
         &mut self,
         correlation: &str,

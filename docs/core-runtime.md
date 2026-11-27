@@ -171,6 +171,8 @@ Core 在请求 NetworkManager 回退前持久记录派发，核对原检查点�
 
 Debian 软件包以 `Type=notify` 启动 Core。主进程在核对权威状态、恢复未决工作、绑定本机接口并创建工作线程之后发送 `READY=1`。因此 `systemctl start psiosd` 成功返回后即可连接 System API。权威不可恢复时启动失败，保留现有状态供离线核查。主进程结束接入时会发送 `STOPPING=1`。[软件包验收](../tests/debian-install.sh) · [systemd 通知接口](https://www.freedesktop.org/software/systemd/man/latest/sd_notify.html)
 
+软件包启用两分钟的 systemd watchdog。主循环继续运行、所有工作线程仍在且权威可以及时取得并且未进入隔离状态时，Core 才发送心跳。权威持续阻塞时由 systemd 终止守护进程，随后按原配置尝试重启。未结算操作沿用既有恢复规则，已发生但无回执的效果继续保留为未知。[真实 SQLite 写锁与 systemd 恢复验收](../tests/test_systemd_notify.py) · [systemd watchdog 接口](https://www.freedesktop.org/software/systemd/man/latest/sd_watchdog_enabled.html)
+
 运维人员在本机配置中显式加入 `services`。先使用观察配置并重启守护进程。
 
 ```json

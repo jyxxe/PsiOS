@@ -690,6 +690,7 @@ fn resource_pressure(error: &std::io::Error) -> bool {
 
 pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     let notification = notification::Notifier::configured()?;
+    let watchdog_interval = notification.watchdog_interval()?;
     let mut db = Store::open(cfg.clone())?;
     db.transaction("storage-reclamation-custody", |db| retirement::verify(db.c))?;
     db.reclaim_oci_archives()?;
@@ -766,7 +767,19 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     drop(startup_guard);
     let mut clients: Vec<(UnixStream, thread::JoinHandle<()>)> = Vec::new();
     let mut accept_error = None;
+    let mut notify_error = None;
+    let mut last_heartbeat = Instant::now();
     while !stop.load(Ordering::Acquire) && !workers.iter().any(thread::JoinHandle::is_finished) {
+        // A responsive accept loop is insufficient if every request waits for the authority.
+        if watchdog_interval.is_some_and(|interval| last_heartbeat.elapsed() >= interval)
+            && db.try_lock().is_ok_and(|store| store.authority_available())
+        {
+            if let Err(error) = notification.heartbeat() {
+                notify_error = Some(error);
+                break;
+            }
+            last_heartbeat = Instant::now();
+        }
         let mut i = 0;
         while i < clients.len() {
             if clients[i].1.is_finished() {
@@ -846,6 +859,9 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     }
     result?;
     startup?;
+    if let Some(error) = notify_error {
+        return Err(error);
+    }
     if let Some(e) = accept_error {
         return Err(e.into());
     }

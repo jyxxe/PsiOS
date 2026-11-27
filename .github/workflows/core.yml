@@ -111,10 +111,20 @@ jobs:
           network_env=("PATH=/usr/sbin:/usr/bin:/sbin:/bin")
           if [[ ! -x /usr/sbin/NetworkManager ]]; then
             network_tools="$RUNNER_TEMP/psios-network-tools"
-            mkdir -p "$network_tools/archives/partial" "$network_tools/root"
-            sudo timeout 180 apt-get -o "Dir::Cache::archives=$network_tools/archives" \
-              --download-only --no-install-recommends install -y network-manager
-            for package in "$network_tools"/archives/*.deb; do
+            archives="$network_tools/archives"
+            apt_opts=(-o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15
+                      -o Acquire::Retries=1 -o Acquire::Languages=none)
+            download_network_manager() {
+              mkdir -p "$1/partial" "$network_tools/root" || return
+              sudo timeout 180 apt-get "${apt_opts[@]}" -o "Dir::Cache::archives=$1" \
+                --download-only --no-install-recommends install -y network-manager
+            }
+            if ! download_network_manager "$archives"; then
+              sudo timeout 180 apt-get "${apt_opts[@]}" -o APT::Update::Error-Mode=any update -q
+              archives="$network_tools/refreshed-archives"
+              download_network_manager "$archives"
+            fi
+            for package in "$archives"/*.deb; do
               dpkg-deb -x "$package" "$network_tools/root"
             done
             network_env=("PATH=$network_tools/root/usr/sbin:/usr/sbin:/usr/bin:/sbin:/bin"

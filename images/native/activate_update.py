@@ -105,13 +105,14 @@ def stage_contract(bundle, stage_sha256):
         receipt = digest_json(receipt_path, receipt_sha256)
         parsed, layout, _ = read_receipt(receipt_path)
         upgrade = receipt["upgrade"]
+        source_authority = upgrade["verified_authority"]
         require(receipt == parsed
                 and receipt["initial_image_sha256"] == candidate["image_sha256"]
                 and receipt["deployment_manifest_sha256"] == candidate["deployment_manifest_sha256"]
                 and receipt["source_commit"] == candidate["source_commit"]
                 and upgrade["previous_image_sha256"] == source["image_sha256"]
                 and upgrade["normalized_source_sha256"] == source["normalized_image_sha256"]
-                and upgrade["verified_authority"]["node_id"] == source["node_id"] == authority["node_id"]
+                and source_authority["node_id"] == source["node_id"] == authority["node_id"]
                 and trial["status"] == "Verified" and trial["boot_mode"] == "IsolatedTrial"
                 and trial["state_uuid"] == receipt["state_uuid"] and trial["home_uuid"] == receipt["home_uuid"]
                 and trial["normalized_source_sha256"] == source["normalized_image_sha256"]
@@ -120,8 +121,16 @@ def stage_contract(bundle, stage_sha256):
                 and authority["witness"] == "Confirmed"
                 and authority["sqlite_integrity"] == authority["foreign_keys"] == "Verified"
                 and authority["migration_required"] is False
-                and authority["database_format"] == upgrade["verified_authority"]["migration_rehearsal"]["target_format"],
+                and authority["database_format"] == source_authority["migration_rehearsal"]["target_format"],
                 "candidate and isolated trial do not reference the same verified deployment")
+        if any("max_copy_mib" in record for record in (inputs, source_authority, authority)):
+            budget = inputs.get("max_copy_mib")
+            require(type(budget) is int and 1 <= budget <= 256
+                    and all(type(report.get("max_copy_mib")) is int and report["max_copy_mib"] == budget
+                            and type(report.get("copied_bytes")) is int
+                            and 0 < report["copied_bytes"] <= budget * MIB
+                            for report in (source_authority, authority)),
+                    "staged source and trial authority reports disagree with their copy budget")
         signing = receipt.get("secure_boot")
         if signing is None:
             require("secure_boot" not in candidate and "secure_boot" not in trial

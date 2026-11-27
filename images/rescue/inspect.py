@@ -24,6 +24,14 @@ BOOT_TIMEOUT = 180
 REPORT_MARKER = b"\nPSIOS-RESCUE/1\n"
 
 
+def scratch_mib(args):
+    if type(args.max_copy_mib) is not int or not 1 <= args.max_copy_mib <= 256:
+        raise ValueError("authority copy limit must be 1–256 MiB")
+    # The copied source and migration's temporary pages can coexist. Reserve
+    # another copy plus 64 MiB for journal and SQLite temporary-file overhead.
+    return max(320, 2 * args.max_copy_mib + 64) if args.migration_config is not None else 320
+
+
 def guest_path(value):
     path = PurePosixPath(value)
     if (not value.startswith("/") or value.startswith("//") or value == "/"
@@ -53,6 +61,7 @@ def configuration(args):
 
 
 def prepare(work, args, require_secure_boot):
+    scratch = scratch_mib(args)
     boot_media.prepare_kernel(work, args.iso)
     pinned_copy(args.core, work / "psiosd", args.core_sha256, 64 * 1024 * 1024)
     shutil.copyfile(HERE / "init", work / "psios-rescue")
@@ -61,7 +70,8 @@ def prepare(work, args, require_secure_boot):
     # Keep input paths in JSON. The init script sources only these numeric settings.
     settings = (f"PARTITION={args.partition}\nSERVICE_UID={args.uid}\n"
                 f"SERVICE_GID={args.gid if args.gid is not None else args.uid}\nCOPY_MIB={args.max_copy_mib}\n"
-                f"OVERLAY={int(args.journal_overlay_mib is not None)}\nSECURE_BOOT={int(require_secure_boot)}\n"
+                f"SCRATCH_MIB={scratch}\nOVERLAY={int(args.journal_overlay_mib is not None)}\n"
+                f"SECURE_BOOT={int(require_secure_boot)}\n"
                 f"REHEARSE={int(args.migration_config is not None)}\n")
     (work / "rescue-settings").write_text(settings)
     (work / "rescue-settings").chmod(0o600)
@@ -137,8 +147,9 @@ def inspect(args):
             boot_media.build(work, signing)
             boot = boot_media.firmware_args(args.firmware, work, args.ovmf_dir, args.ovmf_vars)
             boot += ["-cdrom", "rescue.iso", "-boot", "order=d,strict=on"]
+        guest_mib = max(768, scratch_mib(args) + 384)
         command = ["qemu-system-x86_64", "-nodefaults", "-no-user-config", "-no-reboot",
-                   *boot, "-accel", accelerator, "-m", "768", "-smp", "2",
+                   *boot, "-accel", accelerator, "-m", str(guest_mib), "-smp", "2",
                    "-display", "none", "-monitor", "none", "-nic", "none", "-serial", "null", "-serial", "stdio",
                    "-add-fd", f"fd={fd},set=1", "-blockdev", "driver=file,node-name=disk,filename=/dev/fdset/1,read-only=on,locking=on",
                    "-blockdev", "driver=raw,node-name=source,file=disk,read-only=on"]

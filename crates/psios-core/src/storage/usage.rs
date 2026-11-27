@@ -1,5 +1,5 @@
 //! Bounded inode accounting for local volumes held exclusively by the Core.
-use super::{child, entry_parent, files, registered_root, same_source, volume_dir};
+use super::{child, files, parent_from_components, registered_root, same_source, volume_dir};
 use crate::{
     Result, err,
     host::{Target, Work},
@@ -10,8 +10,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
+    ffi::OsStr,
     fs::{File, Metadata},
-    os::unix::fs::MetadataExt,
+    os::unix::{ffi::OsStrExt, fs::MetadataExt},
+    path::{Path, PathBuf},
 };
 
 const ENTRY_LIMIT: usize = 4096;
@@ -34,7 +36,7 @@ impl Query {
 
 #[derive(Default)]
 struct Usage {
-    entries: Vec<(String, Metadata)>,
+    entries: Vec<(PathBuf, Metadata)>,
     files: usize,
     directories: usize,
     file_bytes: u128,
@@ -43,7 +45,7 @@ struct Usage {
 }
 
 impl Usage {
-    fn walk(&mut self, dir: &File, prefix: &str, depth: u32, entry_limit: usize) -> Result<()> {
+    fn walk(&mut self, dir: &File, prefix: &Path, depth: u32, entry_limit: usize) -> Result<()> {
         require(
             depth <= DEPTH_LIMIT,
             "QuotaExceeded",
@@ -51,13 +53,8 @@ impl Usage {
         )?;
         for entry in Dir::read_from(dir).map_err(std::io::Error::from)? {
             let entry = entry.map_err(std::io::Error::from)?;
-            let name = entry.file_name().to_str().map_err(|_| {
-                err(
-                    "UnsupportedCapability",
-                    "volume usage requires UTF-8 entry names",
-                )
-            })?;
-            if matches!(name, "." | "..") {
+            let name = entry.file_name();
+            if matches!(name.to_bytes(), b"." | b"..") {
                 continue;
             }
             require(
@@ -65,11 +62,7 @@ impl Usage {
                 "QuotaExceeded",
                 "volume usage entry limit",
             )?;
-            let relative = if prefix.is_empty() {
-                name.to_owned()
-            } else {
-                format!("{prefix}/{name}")
-            };
+            let relative = prefix.join(OsStr::from_bytes(name.to_bytes()));
             let entry = child(dir, name, OFlags::PATH)?;
             let meta = entry.metadata()?;
             if meta.is_dir() {
@@ -91,7 +84,7 @@ impl Usage {
 
     fn confirm(&self, dir: &File) -> Result<()> {
         for (path, expected) in &self.entries {
-            let (parent, leaf) = entry_parent(dir, path)?;
+            let (parent, leaf) = parent_from_components(dir, path.iter())?;
             let observed = child(&parent, leaf, OFlags::PATH)?.metadata()?;
             require(
                 same_observation(expected, &observed),
@@ -126,18 +119,27 @@ fn stamp(meta: &Metadata) -> Value {
 pub(super) fn fingerprint(root: &File) -> Result<String> {
     let before = root.metadata()?;
     let mut scan = Usage::default();
-    scan.walk(root, "", 0, super::MAX_ENTRIES)?;
+    scan.walk(root, Path::new(""), 0, super::MAX_ENTRIES)?;
     scan.confirm(root)?;
     require(
         same_observation(&before, &root.metadata()?),
         "Conflict",
         "restored tree changed during metadata inspection",
     )?;
-    scan.entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+    // The v1 receipt sorts complete UTF-8 path strings, including the slash.
+    // Path::cmp instead sorts components and would change existing receipts.
+    scan.entries
+        .sort_unstable_by(|(a, _), (b, _)| a.as_os_str().cmp(b.as_os_str()));
     let mut digest = Sha256::new();
     digest.update(b"psios-restore-metadata-v1\n");
     digest.update(serde_json::to_vec(&stamp(&before))?);
     for (path, meta) in scan.entries {
+        let path = path.to_str().ok_or_else(|| {
+            err(
+                "UnsupportedCapability",
+                "restore metadata requires UTF-8 entry names",
+            )
+        })?;
         digest.update(b"\n");
         digest.update(serde_json::to_vec(&json!([path, stamp(&meta)]))?);
     }
@@ -174,7 +176,7 @@ pub(super) fn measure(w: &Work, query: &Query) -> Result<Value> {
         ..Usage::default()
     };
     // Include the measured root in the limit.
-    usage.walk(&dir, "", 0, ENTRY_LIMIT - 1)?;
+    usage.walk(&dir, Path::new(""), 0, ENTRY_LIMIT - 1)?;
     usage.confirm(&dir)?;
     let current = subtree(&open_volume(w)?, &query.path)?;
     require(
@@ -198,15 +200,44 @@ mod tests {
     use std::{fs, io::Write};
 
     #[test]
+    fn restore_fingerprints_preserve_v1_path_order_and_name_encoding() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("a")).unwrap();
+        for path in ["a/file", "a-early"] {
+            fs::write(dir.path().join(path), b"data").unwrap();
+        }
+        let root = File::open(dir.path()).unwrap();
+        let mut original = Sha256::new();
+        original.update(b"psios-restore-metadata-v1\n");
+        original.update(serde_json::to_vec(&stamp(&root.metadata().unwrap())).unwrap());
+        for name in ["a", "a-early", "a/file"] {
+            let meta = fs::metadata(dir.path().join(name)).unwrap();
+            original.update(b"\n");
+            original.update(serde_json::to_vec(&json!([name, stamp(&meta)])).unwrap());
+        }
+        assert_eq!(
+            fingerprint(&root).unwrap(),
+            format!("sha256:{:x}", original.finalize())
+        );
+        fs::write(dir.path().join(OsStr::from_bytes(b"raw-\xff")), b"data").unwrap();
+        assert_eq!(
+            fingerprint(&root).unwrap_err().0.code,
+            "UnsupportedCapability"
+        );
+    }
+
+    #[test]
     fn a_file_changed_after_enumeration_invalidates_the_observation() {
         let dir = tempfile::tempdir().unwrap();
         let nested = dir.path().join("nested");
         fs::create_dir(&nested).unwrap();
-        let path = nested.join("file");
+        let path = nested.join(OsStr::from_bytes(b"file-\xff"));
         fs::write(&path, b"first").unwrap();
         let root = File::open(dir.path()).unwrap();
         let mut recorded = Usage::default();
-        recorded.walk(&root, "", 0, ENTRY_LIMIT - 1).unwrap();
+        recorded
+            .walk(&root, Path::new(""), 0, ENTRY_LIMIT - 1)
+            .unwrap();
         recorded.confirm(&root).unwrap();
         let mut file = File::options().append(true).open(path).unwrap();
         file.write_all(b"extra").unwrap();

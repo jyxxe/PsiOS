@@ -175,7 +175,7 @@ Core 启动和 `psiosd verify` 双向核对待回收记录与回收队列，并�
 
 用 `volume.usage` 提交只读 Task，并从 `Artifact.Read` 获取结果。授权需要 `task.submit`、`task.read` 和 `volume.usage`，`tool_targets` 可限制为指定卷。结果固定卷引用及数据世代，分别报告普通文件的逻辑字节、文件分配字节、目录分配字节和总分配字节。目录计数包含本次查询的根。分配字节采用 Linux inode 的 512 字节块计数，稀疏文件的空洞会体现在两个数值的差异中。池级剩余空间可通过 `StoragePool.Get` 查询。[Linux inode 字段](https://kernel.googlesource.com/pub/scm/docs/man-pages/man-pages/+/refs/tags/man-pages-6.13/man/man7/inode.7)
 
-测量持有本地卷的排他占用，且支持读取待激活的恢复卷。Core 通过目录文件描述符遍历并复查 inode 及分配量。每次最多遍历 4096 项和 32 层子目录。新扫描可选择更小的子树。符号链接、硬链接文件、设备等特殊文件、嵌套挂载和非 UTF-8 名称会拒绝整个扫描。直接从宿主写入卷的进程须在测量时暂停写入，以获得稳定观察结果。[文件、权限与扫描边界验收](../tests/test_volume_usage.py) · [格式 14 升级](../tests/volume_usage_upgrade.py)
+测量持有本地卷的排他占用，且支持读取待激活的恢复卷。Core 通过目录文件描述符遍历并复查 inode 及分配量。每次最多遍历 4096 项和 32 层子目录。新扫描可选择更小的子树。扫描按原始文件名字节区分目录项，可统计含非 UTF-8 名称的目录树。查询参数 `path` 仍使用 UTF-8。符号链接、硬链接文件、设备等特殊文件和嵌套挂载会拒绝整个扫描。直接从宿主写入卷的进程须在测量时暂停写入，以获得稳定观察结果。[文件、权限与扫描边界验收](../tests/test_volume_usage.py) · [格式 14 升级](../tests/volume_usage_upgrade.py)
 
 本机创建备份、恢复、克隆卷，以及从目录离线导入备份时，Core 对实际分配量小于逻辑长度的文件查询 Linux 文件系统报告的数据段和空洞。目标保留这些空洞的逻辑长度，SHA-256 包含空洞处的零字节。源文件已完整分配或文件系统不支持区间查询时，Core 逐字节复制。配额和目标空间预检仍使用逻辑长度。跨节点分块导出传递文件内容，接收方的分配布局可能不同。[稀疏文件验收](../tests/test_volume_clone.py)
 

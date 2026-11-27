@@ -179,7 +179,7 @@ pub(super) fn check_artifacts(
         crate::apps::release_archive::verify(conn)?;
     }
     if identity.database_format >= crate::apps::restore_archive::FORMAT {
-        crate::apps::capture::verify_restore_compatibility(conn, state)?;
+        crate::apps::capture::verify_restore_compatibility(conn, state, identity.database_format)?;
     }
     if identity.database_format >= crate::apps::restore_image::FORMAT {
         crate::apps::restore_image::verify(conn, state)?;

@@ -58,6 +58,8 @@ struct Binding {
     node_ref: ResourceRef,
     engine_id: String,
     image_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    manifest_config_digest: Option<String>,
     diff_ids: Vec<String>,
 }
 
@@ -125,6 +127,7 @@ fn source(
         node_ref: decode(&db.of(&db.meta("authority")?, "Node")?.reference())?,
         engine_id: request.expected_engine_id.clone(),
         image_id: decode(&archive.proof.body["image"]["config_digest"])?,
+        manifest_config_digest: manifest_config_digest(&archive.proof),
         diff_ids: decode(&archive.proof.body["image"]["diff_ids"])?,
     };
     require(
@@ -135,6 +138,14 @@ fn source(
         "requested archive, image or publisher differs from the signed release",
     )?;
     Ok((binding, archive))
+}
+
+fn manifest_config_digest(proof: &Doc) -> Option<String> {
+    let compatibility = &proof.body["restore_compatibility"];
+    if restore_archive::manifest_profile(compatibility) {
+        return compatibility["config_digest"].as_str().map(str::to_owned);
+    }
+    None
 }
 
 pub(crate) fn audience(
@@ -254,6 +265,10 @@ fn intent(conn: &Connection, op: &Doc, doc: &Doc) -> Result<Binding> {
             && binding.matches_request(&request)
             && capture::valid_engine_id(&binding.engine_id)
             && super::valid_image_id(&binding.image_id)
+            && binding
+                .manifest_config_digest
+                .as_deref()
+                .is_none_or(super::valid_image_id)
             && (1..=128).contains(&binding.diff_ids.len())
             && binding
                 .diff_ids
@@ -353,12 +368,13 @@ pub(crate) fn run(work: &Work, checkpoint: impl FnOnce(&Dispatch) -> Result<()>)
             output,
             &binding.image_id,
             &binding.diff_ids,
+            binding.manifest_config_digest.is_some(),
         )
     })?;
     let dispatch = Dispatch { normalized_digest };
     engine::runtime()?.block_on(async {
         let mut peer = engine::Connection::open(&work.cfg.docker_socket).await?;
-        peer.identity(&binding.engine_id).await?;
+        peer.identity(binding).await?;
         require(
             peer.observe(binding).await? == Presence::Absent,
             "PreconditionFailed",
@@ -460,7 +476,7 @@ pub(crate) fn inspect(work: &Work) -> Result<Value> {
     let binding = &recorded.binding;
     engine::runtime()?.block_on(async {
         let mut peer = engine::Connection::open(&work.cfg.docker_socket).await?;
-        peer.identity(&binding.engine_id).await?;
+        peer.identity(binding).await?;
         let presence = peer.observe(binding).await?;
         let mut receipt = observation(binding, presence);
         receipt["checkpoint_ref"] = recorded.checkpoint.reference();

@@ -174,8 +174,12 @@ pub(crate) fn export(
         "PreconditionFailed",
         "local OCI image or Docker engine changed during capture",
     )?;
-    let compatibility =
-        restore_archive::validate_reader(staged.file(), &image.config_digest, &image.diff_ids)?;
+    let compatibility = restore_archive::validate_reader(
+        staged.file(),
+        &image.config_digest,
+        &image.diff_ids,
+        true,
+    )?;
     let archive = staged.seal(u64::from(size), &digest)?;
     check_authority()?;
     Ok(Captured {
@@ -412,7 +416,11 @@ pub(crate) fn verify(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn verify_restore_compatibility(conn: &Connection, state: &Path) -> Result<()> {
+pub(crate) fn verify_restore_compatibility(
+    conn: &Connection,
+    state: &Path,
+    format: u32,
+) -> Result<()> {
     let mut captures =
         conn.prepare("SELECT artifact,proof,restore_status FROM oci_image_captures")?;
     for capture in captures.query_map([], |r| {
@@ -425,8 +433,10 @@ pub(crate) fn verify_restore_compatibility(conn: &Connection, state: &Path) -> R
         let (artifact, proof, status) = capture?;
         let proof = existing(conn, &proof)?;
         let evidence = &proof.body["restore_compatibility"];
+        let manifest = restore_archive::manifest_profile(evidence);
         require(
-            restore_archive::Compatibility::valid_evidence(&status, evidence),
+            restore_archive::Compatibility::valid_evidence(&status, evidence)
+                && (!manifest || format >= restore_archive::MANIFEST_IDENTITY_FORMAT),
             "RecoveryRequired",
             "OCI capture compatibility evidence disagrees with publication",
         )?;
@@ -441,13 +451,18 @@ pub(crate) fn verify_restore_compatibility(conn: &Connection, state: &Path) -> R
                 other => other?,
             };
         let image: ImageIdentity = decode(&proof.body["image"])?;
-        let actual = restore_archive::validate_reader(input, &image.config_digest, &image.diff_ids)
-            .map_err(|_| {
-                err(
-                    "RecoveryRequired",
-                    "OCI captured bytes no longer satisfy compatibility evidence",
-                )
-            })?;
+        let actual = restore_archive::validate_reader(
+            input,
+            &image.config_digest,
+            &image.diff_ids,
+            manifest,
+        )
+        .map_err(|_| {
+            err(
+                "RecoveryRequired",
+                "OCI captured bytes no longer satisfy compatibility evidence",
+            )
+        })?;
         require(
             evidence == &actual.evidence(),
             "RecoveryRequired",

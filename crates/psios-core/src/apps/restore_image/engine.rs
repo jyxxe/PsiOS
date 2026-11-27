@@ -24,6 +24,36 @@ pub(super) const API_TIMEOUT: Duration = Duration::from_secs(5);
 const LOAD_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_RESPONSE: usize = 128 * 1024;
 
+fn matching_store(info: &Value, manifest: bool) -> bool {
+    let classic = matches!(info["Driver"].as_str(), Some("overlay2" | "vfs"));
+    if info["DriverStatus"].is_null() {
+        return !manifest && info["Driver"] == "vfs";
+    }
+    let Some(rows) = info["DriverStatus"].as_array() else {
+        return false;
+    };
+    let mut driver_type = None;
+    for row in rows {
+        let Some([key, value]) = row.as_array().map(Vec::as_slice) else {
+            return false;
+        };
+        let (Some(key), Some(value)) = (key.as_str(), value.as_str()) else {
+            return false;
+        };
+        if key == "driver-type" && driver_type.replace(value).is_some() {
+            return false;
+        }
+    }
+    if manifest {
+        info["Driver"]
+            .as_str()
+            .is_some_and(|driver| !driver.is_empty())
+            && driver_type == Some("io.containerd.snapshotter.v1")
+    } else {
+        classic && driver_type.is_none()
+    }
+}
+
 pub(super) struct Input {
     file: File,
     remaining: u64,
@@ -193,23 +223,18 @@ impl Connection {
         Ok(())
     }
 
-    pub async fn identity(&mut self, expected: &str) -> Result<()> {
-        let info = self.bound_linux_info(expected).await?;
+    pub(super) async fn identity(&mut self, binding: &Binding) -> Result<()> {
+        let info = self.bound_linux_info(&binding.engine_id).await?;
+        let manifest = binding.manifest_config_digest.is_some();
         require(
             matches!(info["Architecture"].as_str(), Some("x86_64" | "amd64"))
-                && matches!(info["Driver"].as_str(), Some("overlay2" | "vfs"))
-                && (info["Driver"] == "vfs" && info["DriverStatus"].is_null()
-                    || info["DriverStatus"].as_array().is_some_and(|rows| {
-                        rows.iter().all(|row| {
-                            row.as_array().is_some_and(|fields| {
-                                fields.len() == 2
-                                    && fields[0].as_str().is_some_and(|key| key != "driver-type")
-                                    && fields[1].is_string()
-                            })
-                        })
-                    })),
+                && matching_store(&info, manifest),
             "UnsupportedCapability",
-            "OCI restore requires the classic Linux amd64 Docker overlay2 or vfs image store",
+            if manifest {
+                "OCI manifest restore requires a Linux amd64 Docker containerd image store"
+            } else {
+                "OCI restore requires the classic Linux amd64 Docker overlay2 or vfs image store"
+            },
         )
     }
 
@@ -405,8 +430,21 @@ mod tests {
             node_ref: rf,
             engine_id: "test-engine-000001".to_owned(),
             image_id: "sha256:".to_owned() + &"1".repeat(64),
+            manifest_config_digest: None,
             diff_ids: vec!["sha256:".to_owned() + &"2".repeat(64)],
         }
+    }
+
+    #[test]
+    fn classic_and_manifest_custody_require_their_matching_engine_store() {
+        let classic = serde_json::json!({"Driver":"overlay2","DriverStatus":[["Backing Filesystem","extfs"]]});
+        let modern = serde_json::json!({"Driver":"overlayfs","DriverStatus":[["driver-type","io.containerd.snapshotter.v1"]]});
+        assert!(matching_store(&classic, false));
+        assert!(!matching_store(&classic, true));
+        assert!(matching_store(&modern, true));
+        assert!(!matching_store(&modern, false));
+        let ambiguous = serde_json::json!({"Driver":"overlayfs","DriverStatus":[["driver-type","io.containerd.snapshotter.v1"], ["driver-type","unknown"]]});
+        assert!(!matching_store(&ambiguous, true));
     }
 
     #[test]
@@ -472,7 +510,7 @@ mod tests {
                 server_http1::Builder::new().serve_connection(TokioIo::new(peer), service).await.unwrap();
             });
             let mut client = Connection::open(&socket).await.unwrap();
-            client.identity(&binding.engine_id).await.unwrap();
+            client.identity(&binding).await.unwrap();
             assert_eq!(client.observe(&binding).await.unwrap(), Presence::Absent);
             client.ready().await.unwrap();
             client.load(sealed, &binding.image_id).await.unwrap();

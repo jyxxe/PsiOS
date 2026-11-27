@@ -209,8 +209,8 @@ def main(binaries, previous_binaries=None):
         install_and_restore(node, tag, image, engine, archive, diff_ids)
         if previous_binaries is not None:
             upgraded = verify_authority(node)
-            assert (upgraded["node_id"], upgraded["database_format"], upgraded["migration_required"]) == (
-                old["node_id"], 132, False), upgraded
+            assert upgraded["node_id"] == old["node_id"] and upgraded["database_format"] >= 132
+            assert not upgraded["migration_required"], upgraded
             refused = subprocess.run([*previous, "serve"], capture_output=True, text=True, timeout=15)
             assert refused.returncode != 0 and "SchemaVersionUnsupported" in refused.stderr, refused
         print(f"PASS real {size}-byte OCI archive, independent quotas, durable disposal charge, detached checkpoint and Docker restore")

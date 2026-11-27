@@ -82,6 +82,8 @@ enum Endpoint {
     Tasks,
     Applications,
     ApplicationReleases,
+    Conversations,
+    ConversationMessages,
     Task,
     TaskHistory,
     TaskArtifact,
@@ -107,6 +109,19 @@ struct Page {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ApplicationReleases {
+    id: String,
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Conversations {
+    after_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConversationMessages {
     id: String,
     cursor: Option<String>,
 }
@@ -159,6 +174,8 @@ enum CoreRequest {
     Call(&'static str, Value),
     Applications(Page),
     ApplicationReleases(ApplicationReleases),
+    Conversations(Conversations),
+    ConversationMessages(ConversationMessages),
     Artifact(TaskArtifact),
     CancelPending(CancelPendingTask),
 }
@@ -240,6 +257,65 @@ impl CoreRequest {
                         "items": items,
                         "next_cursor": page["next_cursor"],
                     }),
+                ))
+            }
+            Self::Conversations(request) => {
+                let page = client.call(
+                    "Conversation.List",
+                    json!({"after_id":request.after_id,"limit":12}),
+                )?;
+                let conversations = page["items"].as_array().ok_or_else(|| {
+                    ApiError::new("RecoveryRequired", "conversation directory is malformed")
+                })?;
+                let items = conversations
+                    .iter()
+                    .map(|conversation| {
+                        json!({
+                            "id":conversation["id"],
+                            "kind":conversation["kind"],
+                            "name":conversation["name"],
+                            "lifecycle":conversation["lifecycle"],
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                Ok(json_response(
+                    StatusCode::OK,
+                    json!({
+                        "items":items,
+                        "next_after_id":page["next_after_id"],
+                    }),
+                ))
+            }
+            Self::ConversationMessages(request) => {
+                let page = client.call(
+                    "Message.List",
+                    json!({"id":request.id,"cursor":request.cursor,"limit":16}),
+                )?;
+                let messages = page["items"].as_array().ok_or_else(|| {
+                    ApiError::new("RecoveryRequired", "conversation history is malformed")
+                })?;
+                let items = messages
+                    .iter()
+                    .map(|entry| {
+                        let message = &entry["message"];
+                        let text =
+                            entry["content"]["parts"].as_array().and_then(|parts| {
+                                match parts.as_slice() {
+                                    [part] if part["kind"] == "text" => part["text"].as_str(),
+                                    _ => None,
+                                }
+                            });
+                        json!({
+                            "from":message["sender_principal_id"],
+                            "accepted_at":message["accepted_at"],
+                            "text":text,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let next = (page["has_more"].as_bool() == Some(true)).then(|| &page["cursor"]);
+                Ok(json_response(
+                    StatusCode::OK,
+                    json!({"items":items,"next_cursor":next}),
                 ))
             }
             Self::CancelPending(request) => {
@@ -345,6 +421,10 @@ fn file(path: &str) -> Option<HttpResponse> {
             "text/css; charset=utf-8",
             include_bytes!("shell.css").as_slice(),
         ),
+        "/shell-chat.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("shell-chat.js").as_slice(),
+        ),
         "/shell.js" => (
             "text/javascript; charset=utf-8",
             include_bytes!("shell.js").as_slice(),
@@ -404,6 +484,12 @@ fn rpc(endpoint: Endpoint, data: Value) -> Result<CoreRequest, Fault> {
             serde_json::from_value(data).map_err(|_| INVALID)?,
         )),
         Endpoint::ApplicationReleases => Ok(CoreRequest::ApplicationReleases(
+            serde_json::from_value(data).map_err(|_| INVALID)?,
+        )),
+        Endpoint::Conversations => Ok(CoreRequest::Conversations(
+            serde_json::from_value(data).map_err(|_| INVALID)?,
+        )),
+        Endpoint::ConversationMessages => Ok(CoreRequest::ConversationMessages(
             serde_json::from_value(data).map_err(|_| INVALID)?,
         )),
         Endpoint::Task => {
@@ -499,6 +585,8 @@ impl Shell {
             "/api/tasks" => Endpoint::Tasks,
             "/api/applications" => Endpoint::Applications,
             "/api/application-releases" => Endpoint::ApplicationReleases,
+            "/api/conversations" => Endpoint::Conversations,
+            "/api/conversation-messages" => Endpoint::ConversationMessages,
             "/api/task" => Endpoint::Task,
             "/api/cancel-pending-task" if self.cancel_pending_tasks => Endpoint::CancelPendingTask,
             "/api/task-history" => Endpoint::TaskHistory,

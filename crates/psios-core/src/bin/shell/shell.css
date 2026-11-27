@@ -134,12 +134,16 @@ input {
 .window-body > .message { margin-bottom: .7rem; }
 .dock {
   grid-row: 4; position: sticky; bottom: .6rem; z-index: 1; justify-self: center; align-self: end;
-  display: flex; gap: .4rem; margin: .2rem auto .6rem; padding: .35rem;
+  display: flex; flex-wrap: wrap; justify-content: center; gap: .4rem; margin: .2rem auto .6rem; padding: .35rem;
   border: 1px solid var(--border); border-radius: .9rem; background: var(--rail);
 }
 .dock button { gap: .5rem; }
 .release-list { display: grid; gap: .75rem; padding-inline-start: 1.3rem; margin: .9rem 0; }
 .release-list li { overflow-wrap: anywhere; }
+.chat-thread { display: grid; gap: .75rem; list-style: none; padding: 0; margin: 0; }
+.chat-entry { padding: .75rem; border: 1px solid var(--border); border-radius: .5rem; overflow-wrap: anywhere; }
+.chat-entry time { display: block; color: var(--muted); font-size: .85rem; margin: .2rem 0 .5rem; }
+.chat-entry p { white-space: pre-wrap; }
 .dock button::before { content: ""; width: .55rem; height: .55rem; border-radius: 50%; border: 1px solid var(--muted); }
 .dock button[data-state="open"]::before { border-color: var(--accent); background: var(--accent); }
 .dock button[data-state="minimized"]::before { border-color: var(--accent); border-radius: 0; height: .15rem; }
@@ -193,7 +197,7 @@ dd { margin: 0; overflow-wrap: anywhere; }
 
 @container (max-width: 750px) {
   .columns { grid-template-columns: minmax(0, 1fr); }
-  #task-detail, #application-detail { grid-row: 1; }
+  #task-detail, #application-detail, #chat-detail { grid-row: 1; }
 }
 @container (max-width: 490px) {
   .node-grid { grid-template-columns: minmax(0, 1fr); }

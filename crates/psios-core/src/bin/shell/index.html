@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PsiOS Shell</title>
   <link rel="stylesheet" href="/shell.css">
-  <script defer src="/shell.js"></script>
+  <script type="module" src="/shell.js"></script>
 </head>
 <body>
   <main id="pairing" class="pairing">
@@ -102,11 +102,44 @@
           </div>
         </div>
       </section>
+      <section id="window-chat" class="app-window" aria-labelledby="title-chat" hidden>
+        <header class="window-bar">
+          <h1 id="title-chat" tabindex="-1">Agent Chat</h1>
+        </header>
+        <div class="window-body">
+          <p id="status-chat" class="message" role="status"></p>
+          <div class="columns">
+            <div class="table-panel">
+              <table>
+                <thead><tr><th scope="col">会话</th><th scope="col">类型</th></tr></thead>
+                <tbody id="chat-rows"></tbody>
+              </table>
+              <p id="chat-empty" class="empty" hidden>当前没有可见会话。</p>
+              <div class="pagination" aria-label="会话列表分页">
+                <button id="chat-previous" type="button" disabled>上一页</button>
+                <button id="chat-next" type="button" disabled>下一页</button>
+              </div>
+            </div>
+            <section id="chat-detail" class="card" aria-labelledby="chat-title" tabindex="-1" hidden>
+              <header class="detail-header">
+                <h2 id="chat-title">会话历史</h2>
+                <button id="close-chat" type="button">返回列表</button>
+              </header>
+              <div id="chat-content" aria-live="polite"></div>
+              <div class="pagination" aria-label="会话历史分页">
+                <button id="chat-history-previous" type="button">较早消息</button>
+                <button id="chat-history-next" type="button">较新消息</button>
+              </div>
+            </section>
+          </div>
+        </div>
+      </section>
     </main>
     <nav class="dock" aria-label="应用 Dock">
       <button id="nav-node" type="button" aria-controls="window-node" aria-expanded="false">节点管理</button>
       <button id="nav-tasks" type="button" aria-controls="window-tasks" aria-expanded="false">任务中心</button>
       <button id="nav-applications" type="button" aria-controls="window-applications" aria-expanded="false">应用管理</button>
+      <button id="nav-chat" type="button" aria-controls="window-chat" aria-expanded="false">Agent Chat</button>
     </nav>
   </div>
   <template id="window-tools">

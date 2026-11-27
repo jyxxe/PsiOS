@@ -156,6 +156,48 @@ async function test() {
   await waitFor("paired desktop", '!document.querySelector("#workspace").hidden && !document.querySelector("#empty-desktop").hidden');
   assert.ok(await evaluate('document.activeElement.id === "nav-node" && document.querySelectorAll(".app-window:not([hidden])").length === 0'));
   assert.ok(!requests.some(url => ["/api/node", "/api/tasks"].includes(new URL(url).pathname)));
+  if (input.chat) {
+    await click("#nav-chat");
+    await waitFor("first conversation directory page", 'document.querySelectorAll("#chat-rows button").length === 12');
+    assert.equal(await evaluate('document.querySelector("#chat-rows td:nth-child(2)").textContent'), "私聊");
+    await click("#chat-next");
+    await waitFor("room on second directory page", 'document.querySelector("#chat-rows button")?.textContent === "现场排查"');
+    await click("#chat-previous");
+    await waitFor("earlier conversations", 'document.querySelectorAll("#chat-rows button").length === 12');
+    await click("#chat-next");
+    await waitFor("room on second directory page again", 'document.querySelector("#chat-rows button")?.textContent === "现场排查"');
+    await click('#chat-rows button[data-conversation-id="' + input.conversation + '"]');
+    await waitFor("first permitted message page", 'document.querySelectorAll(".chat-entry").length === 16');
+    assert.ok(await evaluate('document.activeElement.id === "chat-detail" && ' +
+      'document.querySelector(".chat-entry p").textContent === "现场记录 1\\n<em>以文字显示</em>" && ' +
+      '!document.querySelector(".chat-entry em")'));
+    await click("#chat-history-next");
+    await waitFor("later messages", 'document.querySelectorAll(".chat-entry").length === 2 && ' +
+      'document.querySelector(".chat-entry p")?.textContent.startsWith("现场记录 17")');
+    await send("Emulation.setDeviceMetricsOverride", {
+      width: 360, height: 800, screenWidth: 360, screenHeight: 800, deviceScaleFactor: 1, mobile: true,
+    });
+    await waitFor("narrow Chat viewport", "window.innerWidth === 360");
+    assert.equal(await evaluate("document.documentElement.scrollWidth"), 360);
+    await keyboardActivate('#window-chat [data-action="minimize"]');
+    assert.ok(await evaluate('document.querySelector("#chat-content").textContent === "" && ' +
+      'document.querySelector("#chat-rows").textContent === "" && document.querySelector("#chat-title").textContent === "会话历史"'));
+    writeSync(input.control_fd, Buffer.from("R"));
+    const signal = Buffer.alloc(1);
+    assert.equal(readSync(input.control_fd, signal), 1);
+    assert.equal(signal.toString(), "K");
+    await keyboardActivate("#nav-chat");
+    await waitFor("removed room no longer visible", '!document.querySelector("#chat-empty").hidden');
+    assert.ok(await evaluate('document.querySelector("#chat-detail").hidden && ' +
+      'document.querySelector("#chat-content").textContent === ""'));
+    const readOnly = ["/api/session", "/api/session-end", "/api/conversations", "/api/conversation-messages"];
+    assert.ok(requests.map(url => new URL(url).pathname).filter(path => path.startsWith("/api/"))
+      .every(path => readOnly.includes(path)));
+    await click("#logout");
+    await waitFor("closed Chat", 'document.querySelector("#workspace").hidden');
+    assert.deepEqual(exceptions, []);
+    return;
+  }
   if (input.applicationCatalog) {
     await click("#nav-applications");
     await waitFor("first application page", 'document.querySelectorAll("#application-rows button").length === 8');

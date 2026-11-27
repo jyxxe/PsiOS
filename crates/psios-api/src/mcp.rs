@@ -3,9 +3,15 @@ use crate::{BlockInventoryQuery, ResourceRef};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-pub const MAX_LOCAL_READ_BINDINGS: usize = 5;
+pub const MAX_LOCAL_READ_BINDINGS: usize = 6;
 pub const MAX_VOLUME_FILES_PAGE: usize = 32;
 pub const VOLUME_FILES_RESULT_BYTES: usize = 12 * 1024;
+pub const MAX_VOLUME_FILE_CHUNK: usize = 6 * 1024;
+pub const MAX_VOLUME_FILE_OFFSET: u64 = (1_u64 << 53) - 1;
+
+fn valid_volume_version(version: &str) -> bool {
+    (1..=128).contains(&version.len()) && !version.chars().any(char::is_control)
+}
 
 /// A page of metadata from a volume selected by the adapter operator.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -33,8 +39,51 @@ impl VolumeFilesQuery {
                     && !matches!(after.as_str(), "." | "..")
                     && !after.contains(['/', '\0'])
             })
-            && self.volume_version.as_ref().is_none_or(|version| {
-                (1..=128).contains(&version.len()) && !version.chars().any(char::is_control)
+            && self
+                .volume_version
+                .as_deref()
+                .is_none_or(valid_volume_version)
+    }
+}
+
+/// A binary file chunk from a volume selected by the adapter operator.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct VolumeFileChunkQuery {
+    pub path: String,
+    #[serde(default)]
+    pub offset: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub volume_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_revision: Option<String>,
+}
+
+impl VolumeFileChunkQuery {
+    pub fn valid_file_revision(value: &str) -> bool {
+        value.strip_prefix("sha256:").is_some_and(|hex| {
+            hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    }
+
+    pub fn within_limits(&self) -> bool {
+        (1..=2048).contains(&self.path.len())
+            && self.offset <= MAX_VOLUME_FILE_OFFSET
+            && self
+                .limit
+                .is_none_or(|limit| (1..=MAX_VOLUME_FILE_CHUNK).contains(&limit))
+            && self
+                .volume_version
+                .as_deref()
+                .is_none_or(valid_volume_version)
+            && (self.offset == 0 || self.file_revision.is_some())
+            && self.file_revision.as_deref().is_none_or(|revision| {
+                self.volume_version.is_some() && Self::valid_file_revision(revision)
             })
     }
 }
@@ -93,6 +142,12 @@ pub enum LocalReadBinding {
         #[serde(default)]
         query: VolumeFilesQuery,
     },
+    #[serde(rename = "volume.read_chunk")]
+    VolumeReadChunk {
+        target_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        query: Option<VolumeFileChunkQuery>,
+    },
     #[serde(rename = "service.inspect")]
     ServiceInspect { target_id: String },
 }
@@ -117,6 +172,7 @@ impl LocalReadBinding {
             Self::NodeDevices(_) => LocalReadTool::NodeDevices.name(),
             Self::VolumeUsage { .. } => "volume.usage",
             Self::VolumeFiles { .. } => "volume.files",
+            Self::VolumeReadChunk { .. } => "volume.read_chunk",
             Self::ServiceInspect { .. } => "service.inspect",
         }
     }
@@ -127,18 +183,19 @@ impl LocalReadBinding {
             Self::NodePressure {} => Some(LocalReadTool::NodePressure),
             Self::NodeInventory {} => Some(LocalReadTool::NodeInventory),
             Self::NodeDevices(_) => Some(LocalReadTool::NodeDevices),
-            Self::VolumeUsage { .. } | Self::VolumeFiles { .. } | Self::ServiceInspect { .. } => {
-                None
-            }
+            Self::VolumeUsage { .. }
+            | Self::VolumeFiles { .. }
+            | Self::VolumeReadChunk { .. }
+            | Self::ServiceInspect { .. } => None,
         }
     }
 
     /// Resource ID and kind selected by deployment configuration.
     pub fn target(&self) -> Option<(&str, &'static str)> {
         match self {
-            Self::VolumeUsage { target_id } | Self::VolumeFiles { target_id, .. } => {
-                Some((target_id, "Volume"))
-            }
+            Self::VolumeUsage { target_id }
+            | Self::VolumeFiles { target_id, .. }
+            | Self::VolumeReadChunk { target_id, .. } => Some((target_id, "Volume")),
             Self::ServiceInspect { target_id } => Some((target_id, "HostService")),
             Self::SystemStatus {}
             | Self::NodePressure {}
@@ -157,12 +214,11 @@ impl LocalReadBinding {
         };
         let reference = reference.filter(|reference| reference.resource_id == id)?;
         let version = match self {
-            Self::VolumeFiles { query, .. } => query
-                .volume_version
-                .as_deref()
-                .unwrap_or(&reference.version),
-            _ => &reference.version,
-        };
+            Self::VolumeFiles { query, .. } => query.volume_version.as_deref(),
+            Self::VolumeReadChunk { query, .. } => query.as_ref()?.volume_version.as_deref(),
+            _ => None,
+        }
+        .unwrap_or(&reference.version);
         let target = json!({"id":id,"expected_resource_version":version});
         match self {
             Self::VolumeUsage { .. } => Some(json!({"target":target})),
@@ -171,6 +227,14 @@ impl LocalReadBinding {
                 "limit":query.limit.unwrap_or(MAX_VOLUME_FILES_PAGE),
                 "max_result_bytes":VOLUME_FILES_RESULT_BYTES
             })),
+            Self::VolumeReadChunk { query, .. } => {
+                let query = query.as_ref()?;
+                Some(json!({
+                    "target":target,"path":query.path,"offset":query.offset,
+                    "limit":query.limit.unwrap_or(MAX_VOLUME_FILE_CHUNK),
+                    "expected_file_revision":query.file_revision
+                }))
+            }
             Self::ServiceInspect { .. } => Some(target),
             Self::SystemStatus {}
             | Self::NodePressure {}

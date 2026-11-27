@@ -257,6 +257,14 @@ pub(crate) fn start(db: &Db<'_>, actor: &str, value: &Value) -> Result<Value> {
     if let Some((target, _)) = request.binding.target() {
         crate::label(target)?;
     }
+    require(
+        !matches!(
+            request.binding,
+            LocalReadBinding::VolumeReadChunk { query: None, .. }
+        ),
+        "InvalidArgument",
+        "volume file chunk query is required",
+    )?;
     crate::label(&request.delegation_id)?;
     let key = original_key(db, actor, &request.endpoint, &request.invocation_key)?;
     let previous =

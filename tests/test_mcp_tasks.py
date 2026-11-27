@@ -407,14 +407,7 @@ class McpTaskTests(McpTaskFixture, unittest.TestCase):
 
     def test_bound_directory_input_and_page_resume_after_restart(self):
         n = self.node
-        token = self.agent["token"]
-        create = self.grant(["local"], units=1, tools=["volume.create"])
-        prepared = n.prepare("volume.create", {"name": "mcp-directory-pages"}, token=token,
-                             delegation=create["delegation_ref"]["resource_id"])
-        created = n.wait(n.call("Task.Submit", prepared, token)["task_id"], autoapprove=True)
-        self.assertEqual(created["lifecycle"], "Succeeded", created)
-        artifact, = created["result"]["artifact_refs"]
-        volume = n.call("Artifact.Read", {"reference": artifact}, token)
+        volume = self.create_owned_volume("mcp-directory-pages")
         volume_id = volume["resource_id"]
         directory = n.state / "volumes" / volume_id / "data" / "reports"
         directory.mkdir()
@@ -454,6 +447,47 @@ class McpTaskTests(McpTaskFixture, unittest.TestCase):
                          {"entries": [{"name": "b", "kind": "file", "bytes": "2"}],
                           "next_after": None, "volume_version": volume["version"]})
         self.assertNotEqual(next_result["task_id"], first["task_id"])
+        n.call("Grant.Revoke", target(grant["grant_ref"]))
+        self.assertEqual(self.task_call(resumed, "tasks/get", {"taskId": handle})["error"]["code"], -32602)
+
+    def test_bound_file_chunk_reuses_the_original_queued_task_after_restart(self):
+        n = self.node
+        volume = self.create_owned_volume("mcp-file-chunk-recovery")
+        volume_id = volume["resource_id"]
+        root = n.state / "volumes" / volume_id / "data"
+        (root / "report").write_bytes(b"\x00\xff\x01")
+        tool = "volume.read_chunk"
+        grant = self.grant([volume_id], units=1, tools=[tool])
+        client = self.task_wire(grant, extra=("--volume-read-chunk", volume_id))
+        invocation = key()
+        query = {"path": "report", "limit": 2, "volume_version": volume["version"]}
+
+        def start(wire, arguments):
+            return self.task_call(wire, "tools/call", {"name": tool, "arguments": arguments},
+                                  invocation=invocation)["result"]
+
+        self.scheduling("Cordoned")
+        accepted = start(client, query)
+        self.assertEqual(accepted["status"], "working", accepted)
+        handle = accepted["taskId"]
+        client.close()
+        n.stop(signal.SIGKILL)
+        checked = json.loads(subprocess.check_output([*n.daemon, "verify"], timeout=20))
+        self.assertGreaterEqual(checked["database_format"], 142)
+        self.assertEqual(checked["sqlite_integrity"], "Verified")
+        n.start()
+        resumed = self.task_wire(grant, extra=("--volume-read-chunk", volume_id))
+        self.assertEqual(start(resumed, query)["taskId"], handle)
+        refused = start(resumed, {**query, "limit": 1})
+        self.assertEqual(refused["structuredContent"], {"code": "IdempotencyConflict"})
+        self.scheduling("Enabled")
+        settled = self.check_receipt(self.wait_status(resumed, handle)["result"], tool, grant)
+        chunk = settled["result"]
+        self.assertEqual((chunk["data_base64"], chunk["next_offset"], chunk["eof"]), ("AP8=", 2, False))
+        self.assertEqual(chunk["volume_version"], volume["version"])
+        self.assertEqual(start(resumed, query)["taskId"], handle)
+        budget = n.call("Budget.Get", {"id": grant["budget_ref"]["resource_id"]})
+        self.assertEqual((budget["reserved"], budget["spent"]), (0, 1))
         n.call("Grant.Revoke", target(grant["grant_ref"]))
         self.assertEqual(self.task_call(resumed, "tasks/get", {"taskId": handle})["error"]["code"], -32602)
 

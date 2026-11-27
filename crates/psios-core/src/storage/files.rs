@@ -30,6 +30,7 @@ pub struct ReadChunk {
     pub path: String,
     pub offset: u64,
     pub limit: usize,
+    pub expected_file_revision: Option<String>,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -104,6 +105,13 @@ pub fn validate(a: &Action) -> Result<()> {
                 (1..=CHUNK).contains(&p.limit),
                 "InvalidArgument",
                 "invalid read chunk size",
+            )?;
+            require(
+                p.expected_file_revision
+                    .as_deref()
+                    .is_none_or(psios_api::VolumeFileChunkQuery::valid_file_revision),
+                "InvalidArgument",
+                "invalid volume file revision",
             )
         }
         Action::Append(p) => {
@@ -205,14 +213,43 @@ fn read(root: &File, p: &ReadChunk) -> Result<Value> {
     let mut f = child(root, &p.path, OFlags::RDONLY)?;
     let m = f.metadata()?;
     regular(&m)?;
+    let revision = sha256(&canonical(&json!([
+        "psios/volume-file-revision/1",
+        p.path,
+        m.dev(),
+        m.ino(),
+        m.mode(),
+        m.uid(),
+        m.gid(),
+        m.nlink(),
+        m.len(),
+        m.mtime(),
+        m.mtime_nsec(),
+        m.ctime(),
+        m.ctime_nsec()
+    ])));
+    require(
+        p.expected_file_revision
+            .as_ref()
+            .is_none_or(|expected| *expected == revision),
+        "Conflict",
+        "volume file revision changed",
+    )?;
     require(p.offset <= m.len(), "PreconditionFailed", "read beyond end")?;
     f.seek(SeekFrom::Start(p.offset))?;
     let mut b = Vec::new();
-    f.take(p.limit as u64).read_to_end(&mut b)?;
+    (&mut f).take(p.limit as u64).read_to_end(&mut b)?;
+    let current = child(root, &p.path, OFlags::PATH)?;
+    require(
+        same_source(&m, &f.metadata()?) && same_source(&m, &current.metadata()?),
+        "Conflict",
+        "volume file changed during chunk read",
+    )?;
     let end = p.offset + b.len() as u64;
     Ok(
         json!({"path":p.path,"offset":p.offset,"next_offset":end,"total_bytes":m.len(),"eof":end==m.len(),
-              "data_base64":STANDARD.encode(&b),"digest":sha256(&b)}),
+              "data_base64":STANDARD.encode(&b),"digest":sha256(&b),
+              "volume_version":p.target.expected_resource_version,"file_revision":revision}),
     )
 }
 fn append(config: &Config, root: &File, p: &Append) -> Result<Value> {

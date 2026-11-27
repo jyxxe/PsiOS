@@ -111,6 +111,16 @@ class McpFixture:
     def tasks(self):
         return self.node.call("Resource.List", {"kind": "Task"})["items"]
 
+    def create_owned_volume(self, name="mcp-agent-owned"):
+        token = self.agent["token"]
+        grant = self.grant(["local"], units=1, tools=["volume.create"])
+        prepared = self.node.prepare("volume.create", {"name": name}, token=token,
+                                     delegation=grant["delegation_ref"]["resource_id"])
+        task = self.node.wait(self.node.call("Task.Submit", prepared, token)["task_id"], autoapprove=True)
+        self.assertEqual(task["lifecycle"], "Succeeded", task)
+        artifact, = task["result"]["artifact_refs"]
+        return self.node.call("Artifact.Read", {"reference": artifact}, token)
+
     def check_receipt(self, response, tool, grant):
         self.assertFalse(response["isError"], response)
         result = response["structuredContent"]

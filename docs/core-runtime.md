@@ -29,6 +29,8 @@
 
 ### 块设备代次与布局核对
 
+`node.devices` 从已核验的 sysfs 块设备索引读取列表。Core 用主次设备号核对同一内核目录，两次采样一致后才发布。列表带当前 Linux 启动 ID，设备提供 `diskseq` 时也报告该值。设备热插拔、同名替换或属性变化时，冲突会阻止发布不一致的快照。登记和写入继续使用独立的设备代次与授权规则。[真实块设备与挂载隔离验收](../tests/test_block_inventory.py)
+
 用 `node.devices` 取得当前设备号，向操作者显式授予目标 Node 上的 `node.block_layout`、`task.submit` 和 `task.read`。提交 `{"major_minor":"253:0"}` 观测指定整盘，设备号需替换为目标的当前值。结果随 Task 结算。该工具需要 Linux sysfs 的 `diskseq`。[Linux 块设备 ABI](https://docs.kernel.org/admin-guide/abi-stable.html)
 
 本机所有者可以通过 `node.block_layout` 的 `trackable: true` 获取可登记附件的 `fence`，再用目标 Node 上的显式授权提交 `node.track_block_device`。请求包含同一个 `major_minor` 和完整的 `expected` 围栏。Core 复核启动标识、内核设备代次、附件摘要和几何后保存 `BlockDevice`，并在 Task 结果中返回 `device_ref`。

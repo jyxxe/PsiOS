@@ -19,7 +19,7 @@ use crate::{
 };
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, fs, path::Path};
+use std::collections::BTreeMap;
 
 pub(crate) const RESTART_TOOL: &str = "service.restart";
 
@@ -134,31 +134,6 @@ pub fn get(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     )
 }
 
-fn scalar(path: impl AsRef<Path>) -> Result<String> {
-    Ok(fs::read_to_string(path)?.trim().to_owned())
-}
-fn devices() -> Result<Value> {
-    let mut items = Vec::new();
-    for entry in fs::read_dir("/sys/class/block")? {
-        let entry = entry?;
-        let path = entry.path();
-        let Ok(dev) = scalar(path.join("dev")) else {
-            continue;
-        };
-        items.push(
-            json!({"name":entry.file_name().to_string_lossy(),"major_minor":dev,
-            "read_only":scalar(path.join("ro"))?=="1","sectors_512":scalar(path.join("size"))?,
-            "logical_block_size":scalar(path.join("queue/logical_block_size")).ok()}),
-        );
-        require(
-            items.len() <= 1024,
-            "QuotaExceeded",
-            "block device inventory exceeds profile",
-        )?;
-    }
-    items.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-    Ok(json!({"devices":items,"observed_at":now()}))
-}
 pub(crate) fn service_target(db: &Db<'_>, id: &str, revision: &str) -> Result<Doc> {
     let service = db.of(id, "HostService")?;
     service.cas(revision)?;
@@ -329,7 +304,7 @@ pub fn perform(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Resul
         Action::RoutingRules(q) => network::observe_rules(q, w),
         Action::Processes(p) => process::page(&w.target.id, p),
         Action::InspectProcess(expected) => process::inspect(&w.target.id, expected),
-        Action::Devices {} => devices(),
+        Action::Devices {} => block::inventory(),
         Action::BlockLayout(query) => block::observe(w, query),
         Action::TrackBlockDevice(query) => block_device::enroll(query),
         Action::ObserveBlockDevice(_) => block_device::observe(w),

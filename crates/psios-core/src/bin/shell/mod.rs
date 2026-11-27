@@ -79,6 +79,7 @@ enum Endpoint {
     Node,
     Tasks,
     Task,
+    TaskHistory,
     TaskArtifact,
 }
 
@@ -102,6 +103,14 @@ struct Page {
 #[serde(deny_unknown_fields)]
 struct Task {
     id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskHistory {
+    id: String,
+    through_version: String,
+    after_version: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -283,6 +292,14 @@ fn rpc(endpoint: Endpoint, data: Value) -> Result<Read, Fault> {
             let task: Task = serde_json::from_value(data).map_err(|_| INVALID)?;
             Ok(Read::Call("Task.Get", json!({"id":task.id})))
         }
+        Endpoint::TaskHistory => {
+            let page: TaskHistory = serde_json::from_value(data).map_err(|_| INVALID)?;
+            Ok(Read::Call(
+                "Task.History",
+                json!({"id":page.id,"through_version":page.through_version,
+                    "after_version":page.after_version,"limit":3}),
+            ))
+        }
         Endpoint::TaskArtifact => Ok(Read::Artifact(
             serde_json::from_value(data).map_err(|_| INVALID)?,
         )),
@@ -295,7 +312,7 @@ fn core_error(error: &psios_api::ApiError) -> HttpResponse {
         "AuthenticationRequired" => StatusCode::UNAUTHORIZED,
         "PermissionDenied" => StatusCode::FORBIDDEN,
         "NotFound" => StatusCode::NOT_FOUND,
-        "CursorExpired" | "Conflict" => StatusCode::CONFLICT,
+        "PreconditionFailed" | "CursorExpired" | "Conflict" => StatusCode::CONFLICT,
         "InvalidArgument" => StatusCode::BAD_REQUEST,
         "QuotaExceeded" => StatusCode::PAYLOAD_TOO_LARGE,
         _ => StatusCode::SERVICE_UNAVAILABLE,
@@ -355,6 +372,7 @@ impl Shell {
             "/api/node" => Endpoint::Node,
             "/api/tasks" => Endpoint::Tasks,
             "/api/task" => Endpoint::Task,
+            "/api/task-history" => Endpoint::TaskHistory,
             "/api/task-artifact" => Endpoint::TaskArtifact,
             _ => return Err(Fault(StatusCode::NOT_FOUND, "NotFound", "操作不存在")),
         };

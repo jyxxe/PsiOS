@@ -146,6 +146,23 @@ async function test() {
     'document.getElementById("task-detail").getBoundingClientRect().bottom > 0 && ' +
     'document.getElementById("task-detail").getBoundingClientRect().top < window.innerHeight'));
   assert.equal(await evaluate("document.documentElement.scrollWidth"), 360);
+  assert.ok(input.history.length > 3);
+  await click(".task-history summary");
+  await waitFor("first history page", 'document.querySelectorAll(".task-history li").length === 3');
+  assert.deepEqual(await evaluate('Array.from(document.querySelectorAll(".task-history time"), t => t.dateTime)'),
+    input.history.slice(0, 3).map(item => item.at));
+  await click(".history-controls button:last-child");
+  const last = input.history.at(-1);
+  await waitFor("settled history revision", 'document.querySelector(".task-history li:last-child strong")' +
+    '?.textContent.includes(' + JSON.stringify(last.reference.version + " · 成功") + ')');
+  const historyText = await evaluate('document.querySelector(".task-history ol").textContent');
+  assert.ok(historyText.includes(last.run_id) && historyText.includes(last.operation_refs[0].resource_id));
+  assert.ok(await evaluate('document.activeElement === document.querySelector(".task-history ol")'));
+  assert.equal(await evaluate("document.documentElement.scrollWidth"), 360);
+  await click(".history-controls button:first-child");
+  await waitFor("previous history page", 'document.querySelector(".task-history strong")?.textContent.startsWith("r1 ·")');
+  await click(".task-history summary");
+  await waitFor("closed history", 'document.querySelectorAll(".task-history li").length === 0');
   await click("#preview-artifact");
   await waitFor("verified artifact preview", 'document.getElementById("artifact-json")?.textContent.includes(' +
     JSON.stringify(input.node) + ')');

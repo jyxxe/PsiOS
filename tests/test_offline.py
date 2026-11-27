@@ -1,17 +1,19 @@
 """Verify real crash state without checkpointing the source WAL or repairing its witness."""
+from contextlib import closing
 import hashlib
 import json
 import os
 import signal
+import sqlite3
 import subprocess
 import unittest
 
-from support import Node
+from support import Node, target
 
 
 class OfflineVerification(unittest.TestCase):
     def setUp(self):
-        self.n = Node("target/debug")
+        self.n = Node()
         self.addCleanup(self.n.close)
         self.scratch = self.n.base / "scratch"
         self.scratch.mkdir(mode=0o700)
@@ -103,3 +105,62 @@ class OfflineVerification(unittest.TestCase):
         before = self.contents()
         self.verify(error="StorageUnavailable")
         self.assertEqual(self.contents(), before)
+
+    def test_offline_vault_authenticates_active_secrets_before_checkpoint_publication(self):
+        n = self.n
+        first = "first synthetic vault fixture"
+        current = "rotated synthetic vault fixture"
+        secret = n.call("Secret.Put", {"name": "active-key", "value": first})
+        rotated = n.call("Secret.Rotate", {**target(secret), "value": current})
+        revoked = n.call("Secret.Put", {"name": "retired-key", "value": "retired fixture"})
+        n.call("Secret.Revoke", target(revoked))
+        n.stop(signal.SIGKILL)
+        before = self.contents()
+        self.assertEqual(self.verify()["secret_vault"], "Verified")
+        self.assertEqual(self.verify("--rehearse-migration")["secret_vault"], "Verified")
+        self.assertEqual(self.contents(), before)
+
+        clean = n.base / "clean-checkpoint"
+        captured = subprocess.run([*n.daemon, "checkpoint", "--output", clean],
+                                  capture_output=True, text=True, timeout=15)
+        self.assertEqual(captured.returncode, 0, captured.stderr)
+        self.assertNotIn(first, captured.stdout + captured.stderr)
+        self.assertNotIn(current, captured.stdout + captured.stderr)
+        self.assertFalse((clean / "keys").exists())
+        for file in clean.iterdir():
+            if file.is_file():
+                contents = file.read_bytes()
+                self.assertFalse(first.encode() in contents or current.encode() in contents)
+
+        identifier = rotated["resource_id"]
+        database = n.state / "state.db"
+        with closing(sqlite3.connect(database)) as db, db:
+            nonce, sealed = db.execute("SELECT nonce,ciphertext FROM secrets WHERE id=?",
+                                       (identifier,)).fetchone()
+            db.execute("UPDATE secrets SET ciphertext=zeroblob(length(ciphertext)) WHERE id=?",
+                       (identifier,))
+        present = self.contents()
+        self.verify(error="vault authentication failed")
+        self.assertEqual(self.contents(), present)
+        rejected = n.base / "damaged-checkpoint"
+        outcome = subprocess.run([*n.daemon, "checkpoint", "--output", rejected],
+                                 capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(outcome.returncode, 0)
+        self.assertIn("vault authentication failed", outcome.stderr)
+        self.assertNotIn(current, outcome.stderr + outcome.stdout)
+        self.assertFalse(rejected.exists())
+
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute("UPDATE secrets SET ciphertext=zeroblob(100000) WHERE id=?", (identifier,))
+        self.verify(error="active Secret has no valid sealed payload")
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute("UPDATE secrets SET ciphertext=? WHERE id=?", (sealed, identifier))
+            db.execute("INSERT INTO secrets VALUES(?,zeroblob(12),zeroblob(17))", (revoked["resource_id"],))
+        self.verify(error="Secret lifecycle disagrees with vault")
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute("DELETE FROM secrets WHERE id=?", (revoked["resource_id"],))
+            db.execute("DELETE FROM secrets WHERE id=?", (identifier,))
+        self.verify(error="active Secret has no valid sealed payload")
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute("INSERT INTO secrets VALUES(?,?,?)", (identifier, nonce, sealed))
+        self.assertEqual(self.verify()["secret_vault"], "Verified")

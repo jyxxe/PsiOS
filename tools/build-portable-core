@@ -29,6 +29,13 @@ git -C "$repo" show "$sha:Cargo.lock" > Cargo.lock
 printf '%s\n' "$sha" > source-commit
 members=(Cargo.lock SHA256SUMS psiosctl psiosd source-commit)
 checks=(psiosd psiosctl Cargo.lock source-commit)
+# Older build images export only the daemon and CLI. Preserve their exact archive layout.
+tar -tf "$work/binaries.tar" > "$work/exported-members"
+if grep -Fxq psios-mcp "$work/exported-members"; then
+    tar --same-permissions -xf "$work/binaries.tar" psios-mcp
+    checks+=(psios-mcp)
+    members+=(psios-mcp)
+fi
 # The selected revision determines its archive layout, including when rebuilding
 # an older release with this launcher. Fetch every rescue file from that tree.
 if git -C "$repo" cat-file -e "$sha:images/rescue/README.txt" 2>/dev/null; then

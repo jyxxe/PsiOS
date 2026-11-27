@@ -766,7 +766,7 @@ Core 在真正派发时重查项目成员、授权和工作项修订。在同一
 
 ## 通过 MCP STDIO 调用本机只读工具
 
-`psios-mcp` 提供 MCP `2025-11-25` 的本地 C1 工具接入，支持初始化握手、`ping`、`tools/list` 和 `tools/call`。从 Debian 软件包使用 `/usr/bin/psios-mcp`，或通过 `cargo build --locked -p psios-core --bin psios-mcp` 构建。将可执行文件的绝对路径和以下参数填入 MCP 客户端的 STDIO 配置。[MCP 生命周期](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle) · [STDIO 传输](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) · [工具协议](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)
+`psios-mcp` 提供 MCP `2025-11-25` 的本地 C1 工具接入，支持初始化握手、`ping`、`tools/list` 和 `tools/call`。独立 Core 归档提供静态可执行文件 `psios-mcp`，由该归档生成的原生盘将其安装在 `/bin/psios-mcp`，可选宿主包将其安装在 `/usr/bin/psios-mcp`。也可通过 `cargo build --locked -p psios-core --bin psios-mcp` 构建。将可执行文件的绝对路径和以下参数填入 MCP 客户端的 STDIO 配置。[MCP 生命周期](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle) · [STDIO 传输](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) · [工具协议](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)
 
 ```sh
 psios-mcp --socket /run/psios/api.sock --service-uid PSIOS_UID \

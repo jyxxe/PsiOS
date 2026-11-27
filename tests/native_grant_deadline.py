@@ -10,7 +10,7 @@ import tempfile
 import time
 
 from native_combined_core import artifact, submit
-from native_disk import REPO, boot, call, check_clean_shutdown, password, stage_guest_chat_token
+from native_disk import REPO, boot, call, check_clean_shutdown, password, stage_guest_token
 from native_static_ipv4 import installer, poweroff
 
 
@@ -134,7 +134,7 @@ def exercise(args, work):
         call(console, "Node.Configure", {"expected_resource_version": node["version"], "scheduling": "Cordoned"})
         boot_id = console.run("cat /proc/sys/kernel/random/boot_id")
         agent = call(console, "Agent.Register", {"name": "elapsed-grant"})
-        credential = stage_guest_chat_token(console, agent["token"])
+        credential = stage_guest_token(console, agent["token"])
         issue = {"principal_id": agent["principal_id"], "units": 2, "ttl_seconds": 22,
                  "actions": ["system.status", "task.submit", "task.read"], "tool_targets": ["profile-local"]}
         grant = call(console, "Grant.Issue", issue)

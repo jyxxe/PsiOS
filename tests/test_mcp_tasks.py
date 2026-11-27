@@ -466,11 +466,17 @@ class McpTaskTests(McpTaskFixture, unittest.TestCase):
 
     @unittest.skipUnless(os.environ.get("PSIOS_TEST_MCP_TASKS_SDK_DIR"), "requires pinned official TypeScript Tasks SDK")
     def test_official_typescript_tasks_client(self):
-        grant = self.grant([self.profile])
+        tools = ("system.status", "node.devices")
+        grant = self.grant([self.profile, self.node_id], tools=tools)
         node = os.environ.get("PSIOS_TEST_MCP_TASKS_NODE", "node")
         harness = Path(__file__).with_name("mcp_tasks_sdk.mjs")
-        adapter = [*self.adapter_command(grant), "--protocol", PROFILE, "--tasks-endpoint", "sdk-verification"]
-        result = json.loads(subprocess.check_output([node, harness, os.environ["PSIOS_TEST_MCP_TASKS_SDK_DIR"],
-                                                     *adapter], timeout=20))
-        self.check_receipt(result, "system.status", grant)
-        self.assertEqual(len(self.tasks()), 1)
+        adapter = [*self.adapter_command(grant), "--protocol", PROFILE, "--tasks-endpoint", "sdk-verification",
+                   "--tool", tools[0], "--tool", tools[1]]
+        for tool, query in zip(tools, ({}, {"limit": 1}), strict=True):
+            result = json.loads(subprocess.check_output([node, harness, os.environ["PSIOS_TEST_MCP_TASKS_SDK_DIR"],
+                                                         tool, json.dumps(query), *adapter], timeout=20))
+            reported = self.check_receipt(result, tool, grant)["result"]
+            if query:
+                self.assertLessEqual(len(reported["devices"]), 1)
+                self.assertTrue(reported["snapshot_digest"].startswith("sha256:"))
+        self.assertEqual(len(self.tasks()), len(tools))

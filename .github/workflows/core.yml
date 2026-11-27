@@ -37,6 +37,7 @@ jobs:
             sudo timeout 180 apt-get install -y --no-install-recommends strace
           fi
           python3 -B tests/oci.py
+          python3 -B tests/oci_xattr_rebind.py
       - name: Verify documentation contracts
         run: |
           python3 -m venv "$RUNNER_TEMP/psios-docs"

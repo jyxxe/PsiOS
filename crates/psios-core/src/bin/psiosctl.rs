@@ -45,8 +45,12 @@ struct Opts {
 enum Cmd {
     Whoami,
     Capabilities,
-    /// Serve a paired, read-only PsiOS Shell on this machine.
-    Shell,
+    /// Serve a paired PsiOS Shell on this machine.
+    Shell {
+        /// Allow the paired browser to cancel queued or approval-pending Tasks.
+        #[arg(long)]
+        cancel_pending_tasks: bool,
+    },
     Status {
         #[arg(long, default_value = "owner-delegation")]
         delegation: String,
@@ -895,7 +899,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_else(|| rustix::process::geteuid().as_raw()),
     );
     let v = match o.cmd {
-        Cmd::Shell => return shell::run(c),
+        Cmd::Shell {
+            cancel_pending_tasks,
+        } => return shell::run(c, cancel_pending_tasks),
         Cmd::ModelStep {
             session,
             key,

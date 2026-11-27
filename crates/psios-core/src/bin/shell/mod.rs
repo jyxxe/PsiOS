@@ -1,4 +1,4 @@
-//! A browser-facing local client. The Core remains the authority for every read.
+//! A browser-facing local client. The Core checks each operation under the paired identity.
 
 mod session;
 
@@ -67,6 +67,7 @@ struct Shell {
     host: String,
     origin: String,
     principal: String,
+    cancel_pending_tasks: bool,
     client: Client,
     session: Mutex<Session>,
     rpc_slots: Arc<Semaphore>,
@@ -81,6 +82,7 @@ enum Endpoint {
     Task,
     TaskHistory,
     TaskArtifact,
+    CancelPendingTask,
 }
 
 #[derive(Deserialize)]
@@ -136,12 +138,20 @@ impl TaskArtifact {
     }
 }
 
-enum Read {
-    Call(&'static str, Value),
-    Artifact(TaskArtifact),
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CancelPendingTask {
+    id: String,
+    expected_resource_version: String,
 }
 
-impl Read {
+enum CoreRequest {
+    Call(&'static str, Value),
+    Artifact(TaskArtifact),
+    CancelPending(CancelPendingTask),
+}
+
+impl CoreRequest {
     fn execute(
         self,
         client: &Client,
@@ -151,6 +161,28 @@ impl Read {
         match self {
             Self::Call(method, params) => {
                 Ok(json_response(StatusCode::OK, client.call(method, params)?))
+            }
+            Self::CancelPending(request) => {
+                let task = client.call("Task.Get", json!({"id":request.id}))?;
+                if task["task_revision"] != request.expected_resource_version {
+                    return Err(ApiError::new("Conflict", "task revision changed").into());
+                }
+                if !matches!(
+                    task["lifecycle"].as_str(),
+                    Some("Queued" | "WaitingApproval")
+                ) {
+                    return Err(
+                        ApiError::new("PreconditionFailed", "task is no longer pending").into(),
+                    );
+                }
+                check()?;
+                // Core compares the same revision inside its cancellation transaction.
+                let result = client.call(
+                    "Task.Cancel",
+                    json!({"id":request.id,
+                    "expected_resource_version":request.expected_resource_version}),
+                )?;
+                Ok(json_response(StatusCode::OK, result))
             }
             Self::Artifact(artifact) => {
                 artifact.check_membership(client)?;
@@ -275,32 +307,35 @@ async fn body(request: Request<Incoming>) -> Result<Value, Fault> {
     parse(&bytes).map_err(|_| INVALID)
 }
 
-fn rpc(endpoint: Endpoint, data: Value) -> Result<Read, Fault> {
+fn rpc(endpoint: Endpoint, data: Value) -> Result<CoreRequest, Fault> {
     match endpoint {
         Endpoint::Node => {
             let _: Empty = serde_json::from_value(data).map_err(|_| INVALID)?;
-            Ok(Read::Call("Node.Get", json!({})))
+            Ok(CoreRequest::Call("Node.Get", json!({})))
         }
         Endpoint::Tasks => {
             let page: Page = serde_json::from_value(data).map_err(|_| INVALID)?;
-            Ok(Read::Call(
+            Ok(CoreRequest::Call(
                 "Resource.List",
                 json!({"kind":"Task","limit":20,"cursor":page.cursor}),
             ))
         }
         Endpoint::Task => {
             let task: Task = serde_json::from_value(data).map_err(|_| INVALID)?;
-            Ok(Read::Call("Task.Get", json!({"id":task.id})))
+            Ok(CoreRequest::Call("Task.Get", json!({"id":task.id})))
         }
         Endpoint::TaskHistory => {
             let page: TaskHistory = serde_json::from_value(data).map_err(|_| INVALID)?;
-            Ok(Read::Call(
+            Ok(CoreRequest::Call(
                 "Task.History",
                 json!({"id":page.id,"through_version":page.through_version,
                     "after_version":page.after_version,"limit":3}),
             ))
         }
-        Endpoint::TaskArtifact => Ok(Read::Artifact(
+        Endpoint::CancelPendingTask => Ok(CoreRequest::CancelPending(
+            serde_json::from_value(data).map_err(|_| INVALID)?,
+        )),
+        Endpoint::TaskArtifact => Ok(CoreRequest::Artifact(
             serde_json::from_value(data).map_err(|_| INVALID)?,
         )),
         _ => Err(INVALID),
@@ -372,6 +407,7 @@ impl Shell {
             "/api/node" => Endpoint::Node,
             "/api/tasks" => Endpoint::Tasks,
             "/api/task" => Endpoint::Task,
+            "/api/cancel-pending-task" if self.cancel_pending_tasks => Endpoint::CancelPendingTask,
             "/api/task-history" => Endpoint::TaskHistory,
             "/api/task-artifact" => Endpoint::TaskArtifact,
             _ => return Err(Fault(StatusCode::NOT_FOUND, "NotFound", "操作不存在")),
@@ -385,7 +421,7 @@ impl Shell {
             }
             return Ok(json_response(
                 StatusCode::OK,
-                json!({"token":token,"principal_id":self.principal}),
+                json!({"token":token,"principal_id":self.principal,"cancel_pending_tasks":self.cancel_pending_tasks}),
             ));
         }
 
@@ -404,21 +440,21 @@ impl Shell {
             session.close();
             return Ok(json_response(StatusCode::OK, json!({})));
         }
-        let read = rpc(endpoint, data)?;
+        let operation = rpc(endpoint, data)?;
         let slot = self.rpc_slots.clone().try_acquire_owned().map_err(|_| {
             Fault(
                 StatusCode::TOO_MANY_REQUESTS,
                 "QueueFull",
-                "查询过多，请稍后重试",
+                "请求过多，请稍后重试",
             )
         })?;
         let context = self.clone();
         // Dropping the HTTP future (including on timeout) releases the receiver.
-        // An in-flight Core read can finish, but no further chunks are requested.
+        // An issued Core call may finish. Check before issuing each subsequent call.
         let (consumer, active_request) = oneshot::channel::<()>();
         let work = spawn_blocking(move || {
             let _slot = slot;
-            read.execute(&context.client, || {
+            operation.execute(&context.client, || {
                 if consumer.is_closed() {
                     return Err(ApiError::new("Cancelled", "Shell request ended").into());
                 }
@@ -452,7 +488,10 @@ impl Shell {
     }
 }
 
-pub(super) fn run(client: Client) -> Result<(), Box<dyn std::error::Error>> {
+pub(super) fn run(
+    client: Client,
+    cancel_pending_tasks: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let identity = client.call("Principal.WhoAmI", json!({}))?;
     let principal = identity["principal_id"]
         .as_str()
@@ -465,12 +504,17 @@ pub(super) fn run(client: Client) -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .max_blocking_threads(CORE_CALLS)
         .build()?;
-    let result = runtime.block_on(serve(client, principal, stop));
+    let result = runtime.block_on(serve(client, principal, cancel_pending_tasks, stop));
     runtime.shutdown_timeout(Duration::from_secs(1));
     result.map_err(Into::into)
 }
 
-async fn serve(client: Client, principal: String, stop: Arc<AtomicBool>) -> io::Result<()> {
+async fn serve(
+    client: Client,
+    principal: String,
+    cancel_pending_tasks: bool,
+    stop: Arc<AtomicBool>,
+) -> io::Result<()> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
     let host = listener.local_addr()?.to_string();
     let origin = format!("http://{host}");
@@ -479,6 +523,7 @@ async fn serve(client: Client, principal: String, stop: Arc<AtomicBool>) -> io::
         host,
         origin: origin.clone(),
         principal,
+        cancel_pending_tasks,
         client,
         session: Mutex::new(Session::new(&code, now())?),
         rpc_slots: Arc::new(Semaphore::new(CORE_CALLS)),

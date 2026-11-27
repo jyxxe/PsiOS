@@ -178,6 +178,11 @@ async function test() {
   await click("#preview-artifact");
   await waitFor("size limit", 'document.querySelector(".artifacts .message")?.textContent.includes("64 KiB")');
   assert.ok((await verifyDownload(input.large_digest)).length > 2 * 128 * 1024);
+  await selectTask(input.pending);
+  await waitFor("pending Task action", 'document.querySelector(".task-cancel button") !== null');
+  await click(".task-cancel button");
+  await waitFor("authoritative cancellation", 'document.getElementById("task-content").textContent.includes("已取消")');
+  assert.ok(await evaluate('!document.querySelector(".task-cancel button") && document.activeElement.id === "task-detail"'));
   await click("#logout");
   await waitFor("cleared session", 'document.getElementById("workspace").hidden && ' +
     'document.getElementById("task-content").textContent === ""');

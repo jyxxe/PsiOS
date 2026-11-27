@@ -1,12 +1,12 @@
 //! Timing for the provider transport belongs to the lease, outside the model context.
-use crate::{ApiResult, invalid, sha256};
+use crate::{ApiResult, Client, ResourceRef, invalid, sha256};
 use chrono::{DateTime, Utc};
 use rustix::{
     fs::{Mode, OFlags, open},
     time::{ClockId, clock_gettime},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     fs::{File, read_link},
     io::{ErrorKind, Read},
@@ -20,6 +20,43 @@ pub struct ModelLeaseTiming {
     pub clock_domain: String,
     pub deadline_boottime_ms: i64,
     pub window_ms: i64,
+}
+
+/// Exact identity needed to check an in-flight provider invocation.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelLeaseStatusRequest {
+    pub session_id: String,
+    pub model_ref: ResourceRef,
+    pub lease_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelLeaseStatus {
+    Active,
+    Ended,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LeaseStatusResponse {
+    status: ModelLeaseStatus,
+}
+
+impl Client {
+    /// Check only the liveness of a lease belonging to the authenticated provider.
+    pub fn model_lease_status(
+        &self,
+        request: &ModelLeaseStatusRequest,
+    ) -> ApiResult<ModelLeaseStatus> {
+        read_status(self.call("Model.LeaseStatus", json!(request))?)
+    }
+}
+
+fn read_status(response: Value) -> ApiResult<ModelLeaseStatus> {
+    serde_json::from_value::<LeaseStatusResponse>(response)
+        .map(|response| response.status)
+        .map_err(|_| invalid("invalid model lease status response"))
 }
 
 impl ModelLeaseTiming {
@@ -42,13 +79,19 @@ pub struct ModelInvocation<'a> {
     pub lease_id: &'a str,
     pub turn: u32,
     pub expires_at: DateTime<Utc>,
+    authority: &'a Client,
+    target: ModelLeaseStatusRequest,
     deadline_boottime_ms: Option<i64>,
     received: Instant,
     available: Duration,
 }
 
 impl<'a> ModelInvocation<'a> {
-    pub(super) fn from_claim(lease_id: &'a str, claim: &Value) -> ApiResult<Self> {
+    pub(super) fn from_claim(
+        authority: &'a Client,
+        lease_id: &'a str,
+        claim: &Value,
+    ) -> ApiResult<Self> {
         let received = Instant::now();
         let expires_at = claim["expires_at"]
             .as_str()
@@ -80,14 +123,67 @@ impl<'a> ModelInvocation<'a> {
                 deadline_boottime_ms = Some(timing.deadline_boottime_ms);
             }
         }
+        let target = ModelLeaseStatusRequest {
+            session_id: claim["context"]["session_id"]
+                .as_str()
+                .ok_or_else(|| invalid("model lease has no session reference"))?
+                .to_owned(),
+            model_ref: serde_json::from_value(claim["context"]["model_ref"].clone())
+                .map_err(|_| invalid("model lease has no model reference"))?,
+            lease_id: lease_id.to_owned(),
+        };
         Ok(Self {
             lease_id,
             turn,
             expires_at,
+            authority,
+            target,
             deadline_boottime_ms,
             received,
             available,
         })
+    }
+
+    /// Verify the lease against live session and provider authorization.
+    pub fn status(&self) -> ApiResult<ModelLeaseStatus> {
+        self.authority.model_lease_status(&self.target)
+    }
+
+    pub(super) fn model_ref(&self) -> &ResourceRef {
+        &self.target.model_ref
+    }
+
+    #[cfg(feature = "local-inference")]
+    pub(super) async fn wait_ended(&self) {
+        loop {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let status = self
+                .authority
+                .call_local(
+                    "Model.LeaseStatus",
+                    json!(self.target),
+                    Duration::from_millis(200),
+                )
+                .await
+                .and_then(read_status);
+            match status {
+                Ok(ModelLeaseStatus::Ended) => return,
+                Err(error)
+                    if matches!(
+                        error.code.as_str(),
+                        "PermissionDenied"
+                            | "NotFound"
+                            | "AuthenticationRequired"
+                            | "RecoveryRequired"
+                            | "Fenced"
+                            | "PreconditionFailed"
+                    ) =>
+                {
+                    return;
+                }
+                _ => {}
+            }
+        }
     }
 
     /// The current local execution allowance, accounting for time already spent before dispatch.
@@ -161,8 +257,11 @@ mod tests {
             window_ms: 1,
         };
         let claim = json!({"turn":1,"expires_at":(Utc::now()+chrono::TimeDelta::seconds(5)).to_rfc3339(),
-                           "lease_timing":timing});
-        let invocation = ModelInvocation::from_claim("model-call-test", &claim).unwrap();
+            "lease_timing":timing,"context":{"session_id":"session-test",
+            "model_ref":{"resource_id":"model-test","version":"r1","digest":sha256(b"test")}}});
+        let authority = Client::new("/unused", "");
+        let invocation =
+            ModelInvocation::from_claim(&authority, "model-call-test", &claim).unwrap();
         assert!(invocation.deadline_boottime_ms.is_some());
         assert!(invocation.remaining_time().is_zero());
     }

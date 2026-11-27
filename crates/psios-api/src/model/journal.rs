@@ -530,7 +530,7 @@ impl Client {
             .as_str()
             .ok_or_else(|| crate::invalid("missing queued model session"))?
             .to_owned();
-        match Self::decide_claim(&session, claim, provider, Some(model))? {
+        match self.decide_claim(&session, claim, provider, Some(model))? {
             Turn::Completed(receipt) => Ok(Some(receipt)),
             Turn::Deliver {
                 request,

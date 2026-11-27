@@ -374,13 +374,7 @@ impl Client {
         Ok(bytes)
     }
     pub fn call(&self, method: &str, params: Value) -> ApiResult<Value> {
-        let req = Request {
-            schema_version: VERSION.into(),
-            request_id: id("request"),
-            method: method.into(),
-            token: self.token.clone(),
-            params,
-        };
+        let req = self.request(method, params);
         let mut stream = self
             .connect()
             .map_err(|_| ApiError::new("DependencyUnavailable", "cannot connect to psiosd"))?;
@@ -406,8 +400,22 @@ impl Client {
                 "complete authority response unavailable",
             )
         })?;
-        let response = parse(&bytes)?;
-        if response["request_id"] != req.request_id {
+        Self::response(&req, &bytes)
+    }
+
+    fn request(&self, method: &str, params: Value) -> Request {
+        Request {
+            schema_version: VERSION.into(),
+            request_id: id("request"),
+            method: method.into(),
+            token: self.token.clone(),
+            params,
+        }
+    }
+
+    fn response(request: &Request, bytes: &[u8]) -> ApiResult<Value> {
+        let response = parse(bytes)?;
+        if response["request_id"] != request.request_id {
             return Err(invalid("response correlation mismatch"));
         }
         if let Some(e) = response.get("error") {
@@ -420,6 +428,62 @@ impl Client {
             .get("result")
             .cloned()
             .ok_or_else(|| invalid("missing result"))
+    }
+
+    #[cfg(feature = "local-inference")]
+    pub(crate) async fn call_local(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> ApiResult<Value> {
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::UnixStream,
+        };
+        let unavailable = || {
+            ApiError::new(
+                "DependencyUnavailable",
+                "complete authority response unavailable",
+            )
+        };
+        let request = self.request(method, params);
+        let bytes = serde_json::to_vec(&request).map_err(|_| invalid("request encoding"))?;
+        if bytes.is_empty() || bytes.len() > MAX_FRAME {
+            return Err(invalid("frame outside size limit"));
+        }
+        tokio::time::timeout(timeout, async {
+            let mut stream = UnixStream::connect(&self.socket)
+                .await
+                .map_err(|_| unavailable())?;
+            let peer = stream
+                .peer_cred()
+                .map_err(|_| invalid("socket peer unavailable"))?;
+            if peer.uid() != self.service_uid {
+                return Err(ApiError::new(
+                    "AuthenticationRequired",
+                    "system authority UID mismatch",
+                )
+                .into());
+            }
+            stream
+                .write_u32(bytes.len() as u32)
+                .await
+                .map_err(|_| unavailable())?;
+            stream.write_all(&bytes).await.map_err(|_| unavailable())?;
+            let len = stream.read_u32().await.map_err(|_| unavailable())? as usize;
+            if len == 0 || len > MAX_FRAME {
+                return Err(invalid("frame outside size limit"));
+            }
+            let mut response = vec![0; len];
+            stream
+                .read_exact(&mut response)
+                .await
+                .map_err(|_| unavailable())?;
+            Self::response(&request, &response)
+        })
+        .await
+        .map_err(|_| unavailable())?
     }
     /// Read a fixed application release history page. Reuse the next cursor for continuation.
     pub fn application_releases(

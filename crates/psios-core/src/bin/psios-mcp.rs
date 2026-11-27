@@ -5,8 +5,8 @@ mod modern;
 use clap::{Parser, ValueEnum};
 use psios_api::{
     ApiError, ApiResult, Client, LocalReadBinding, LocalReadTool, LocalReadToolsRequest,
-    MAX_BLOCK_INVENTORY_PAGE, ResolveLocalReadToolsRequest, ResolvedLocalReadTool, ResourceRef, id,
-    parse,
+    MAX_BLOCK_INVENTORY_PAGE, MAX_VOLUME_FILES_PAGE, ResolveLocalReadToolsRequest,
+    ResolvedLocalReadTool, ResourceRef, VolumeFilesQuery, id, parse,
 };
 use rustix::{fs::OFlags, process::geteuid};
 use serde_json::{Map, Value, json};
@@ -54,6 +54,9 @@ struct Options {
     /// Include root usage for one exact Volume ID.
     #[arg(long, value_name = "VOLUME_ID", value_parser = parse_target)]
     volume_usage: Option<String>,
+    /// Include paginated directory metadata for one exact Volume ID.
+    #[arg(long, value_name = "VOLUME_ID", value_parser = parse_target)]
+    volume_files: Option<String>,
     /// Include observations for one exact registered HostService ID.
     #[arg(long, value_name = "HOST_SERVICE_ID", value_parser = parse_target)]
     service_inspect: Option<String>,
@@ -301,15 +304,29 @@ impl Adapter {
             Some(args) if !args.is_object() => {
                 return Err((-32602, "Tool arguments must be an object"));
             }
-            Some(Value::Object(args)) if !args.is_empty() => {
-                if !matches!(configured, LocalReadBinding::NodeDevices(_)) {
-                    return Ok(tool_error("InvalidArgument", None));
+            Some(Value::Object(args)) if !args.is_empty() => match configured {
+                LocalReadBinding::NodeDevices(_) => {
+                    let Ok(query) = serde_json::from_value(Value::Object(args.clone())) else {
+                        return Ok(tool_error("InvalidArgument", None));
+                    };
+                    LocalReadBinding::NodeDevices(query)
                 }
-                let Ok(query) = serde_json::from_value(Value::Object(args.clone())) else {
-                    return Ok(tool_error("InvalidArgument", None));
-                };
-                LocalReadBinding::NodeDevices(query)
-            }
+                LocalReadBinding::VolumeFiles { target_id, .. } => {
+                    let Ok(query) =
+                        serde_json::from_value::<VolumeFilesQuery>(Value::Object(args.clone()))
+                    else {
+                        return Ok(tool_error("InvalidArgument", None));
+                    };
+                    if !query.within_limits() {
+                        return Ok(tool_error("InvalidArgument", None));
+                    }
+                    LocalReadBinding::VolumeFiles {
+                        target_id: target_id.clone(),
+                        query,
+                    }
+                }
+                _ => return Ok(tool_error("InvalidArgument", None)),
+            },
             _ => configured.clone(),
         };
         if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
@@ -477,6 +494,9 @@ fn descriptor(tool: &LocalReadBinding, protocol: Protocol) -> Value {
         LocalReadBinding::VolumeUsage { .. } => {
             "Measure file and allocation usage of the configured volume root."
         }
+        LocalReadBinding::VolumeFiles { .. } => {
+            "List a directory in the configured volume. Continue with next_after and volume_version from the previous page."
+        }
         LocalReadBinding::ServiceInspect { .. } => "Observe the configured systemd service state.",
     };
     let mut descriptor = json!({"name":tool.name(),"description":description,
@@ -491,6 +511,14 @@ fn descriptor(tool: &LocalReadBinding, protocol: Protocol) -> Value {
                     "offset":{"type":"integer","minimum":1,"maximum":1023}
                 }
             }
+        });
+    }
+    if matches!(tool, LocalReadBinding::VolumeFiles { .. }) {
+        descriptor["inputSchema"]["properties"] = json!({
+            "path":{"type":"string","default":"","maxLength":2048},
+            "limit":{"type":["integer","null"],"minimum":1,"maximum":MAX_VOLUME_FILES_PAGE},
+            "after":{"type":["string","null"],"minLength":1,"maxLength":255},
+            "volume_version":{"type":["string","null"],"minLength":1,"maxLength":128}
         });
     }
     if matches!(protocol, Protocol::Legacy) {
@@ -572,6 +600,12 @@ fn main() -> io::Result<()> {
         .collect();
     if let Some(target_id) = options.volume_usage {
         bindings.push(LocalReadBinding::VolumeUsage { target_id });
+    }
+    if let Some(target_id) = options.volume_files {
+        bindings.push(LocalReadBinding::VolumeFiles {
+            target_id,
+            query: VolumeFilesQuery::default(),
+        });
     }
     if let Some(target_id) = options.service_inspect {
         bindings.push(LocalReadBinding::ServiceInspect { target_id });

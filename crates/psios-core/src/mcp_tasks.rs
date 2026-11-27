@@ -6,7 +6,7 @@ use crate::{
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
-use psios_api::{LocalReadBinding, ResourceRef, canonical, id};
+use psios_api::{LocalReadBinding, MAX_LOCAL_READ_BINDINGS, ResourceRef, canonical, id};
 use ring::hmac;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
@@ -464,7 +464,7 @@ pub(crate) fn access(db: &Db<'_>, actor: &str, method: &str, value: &Value) -> R
     require(
         valid_label(&request.endpoint, 1)
             && valid_handle(&request.handle)
-            && (1..=4).contains(&request.bindings.len())
+            && (1..=MAX_LOCAL_READ_BINDINGS).contains(&request.bindings.len())
             && request
                 .bindings
                 .iter()

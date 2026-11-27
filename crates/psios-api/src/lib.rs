@@ -17,8 +17,9 @@ pub use artifact::{
 pub use backup::{BackupChunk, BackupMember, BackupMemberReceipt};
 pub use block_inventory::{BlockInventoryCursor, BlockInventoryQuery, MAX_BLOCK_INVENTORY_PAGE};
 pub use mcp::{
-    LocalReadBinding, LocalReadTool, LocalReadToolsRequest, ResolveLocalReadToolsRequest,
-    ResolvedLocalReadTool,
+    LocalReadBinding, LocalReadTool, LocalReadToolsRequest, MAX_LOCAL_READ_BINDINGS,
+    MAX_VOLUME_FILES_PAGE, ResolveLocalReadToolsRequest, ResolvedLocalReadTool,
+    VOLUME_FILES_RESULT_BYTES, VolumeFilesQuery,
 };
 pub use model::*;
 pub use project::*;

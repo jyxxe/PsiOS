@@ -268,6 +268,8 @@ jobs:
             python3 -B -m unittest discover -s tests -p test_volume_usage.py -k test_mount_boundary -v
           sudo unshare --mount --propagation private env PSIOS_TEST_VOLUME_BIND=1 \
             python3 -B -m unittest discover -s tests -p test_volume_file_integrity.py -k test_mount_boundary -v
+          sudo unshare --mount --propagation private env PSIOS_TEST_VOLUME_BIND=1 \
+            python3 -B -m unittest discover -s tests -p test_volume_file_page.py -k test_mount_boundary -v
       - name: Observe real tmpfs, bind, mount flags and path bytes in a private namespace
         run: |
           sudo unshare --mount --propagation private env PSIOS_TEST_MOUNT_TOPOLOGY=1 \

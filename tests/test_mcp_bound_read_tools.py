@@ -117,6 +117,69 @@ class McpBoundReadToolsTests(McpFixture, unittest.TestCase):
                          {"code": "PermissionDenied"})
         self.assertEqual(len(self.tasks()), 6)
 
+    def test_list_only_bound_volume_pages_with_a_bounded_native_receipt(self):
+        n = self.node
+        tool = "volume.files"
+        volume = self.create_owned_volume()
+        volume_id = volume["resource_id"]
+        root = n.state / "volumes" / volume_id / "data"
+        directory = root / "reports"
+        directory.mkdir()
+        names = [f"{index:02d}-" + "\x01" * 240 for index in range(20)]
+        for index, name in enumerate(names):
+            (directory / name).write_bytes(b"x" * index)
+        other = n.perform("volume.create", {"name": "not-in-the-mcp-binding"})
+        actions = ["task.submit", "task.read", tool]
+        binding = {"tool": tool, "target_id": volume_id}
+        self.assertEqual(self.resolve(self.issue(actions), binding), [])
+        self.assertEqual(self.resolve(self.issue(actions, [other["resource_id"]]), binding), [])
+        exact = self.issue(actions, [volume_id])
+        self.assertEqual(self.resolve(exact, binding), [{"tool": tool, "target_ref": volume}])
+
+        for profile in (LEGACY, MODERN):
+            with self.subTest(profile=profile):
+                client = self.bound_wire(exact, profile, "--volume-files", volume_id)
+                listed, = client("tools/list")["result"]["tools"]
+                self.assertEqual(listed["name"], tool)
+                self.assertEqual(set(listed["inputSchema"]["properties"]),
+                                 {"path", "limit", "after", "volume_version"})
+                for arguments in ({"target": target(other)}, {"path": "../reports"},
+                                  {"limit": 33}, {"after": names[0]}):
+                    denied = client("tools/call", {"name": tool, "arguments": arguments})["result"]
+                    self.assertEqual(denied["structuredContent"], {"code": "InvalidArgument"}, denied)
+
+                query = {"path": "reports"}
+                entries = []
+                continuation = None
+                for index in range(4):
+                    response = client("tools/call", {"name": tool, "arguments": query})["result"]
+                    receipt = self.check_receipt(response, tool, exact)
+                    self.assert_input(receipt["task_id"], {"target": target(volume), "path": "reports",
+                        "after": query.get("after"), "limit": 32, "max_result_bytes": 12 * 1024})
+                    page = receipt["result"]
+                    self.assertLessEqual(len(json.dumps(page, ensure_ascii=False,
+                        separators=(",", ":")).encode("utf-8")), 12 * 1024)
+                    self.assertEqual(page["volume_version"], volume["version"])
+                    entries.extend(page["entries"])
+                    if page["next_after"] is None:
+                        break
+                    self.assertEqual(page["next_after"], page["entries"][-1]["name"])
+                    query = {"path": "reports", "after": page["next_after"], "volume_version": page["volume_version"]}
+                    if index == 0:
+                        continuation = query
+                self.assertIsNotNone(continuation)
+                self.assertEqual(entries, [{"name": name, "kind": "file", "bytes": str(index)}
+                                           for index, name in enumerate(names)])
+
+        fresh = n.perform("volume.write", {**target(volume), "name": "advance", "content": "revision"})["volume_ref"]
+        self.assertNotEqual(fresh["version"], continuation["volume_version"])
+        denied = client("tools/call", {"name": tool, "arguments": continuation})["result"]
+        self.assertEqual(denied["structuredContent"], {"code": "Conflict"}, denied)
+        n.call("Grant.Revoke", target(exact["grant_ref"]))
+        self.assertEqual(client("tools/list")["result"]["tools"], [])
+        denied = client("tools/call", {"name": tool, "arguments": {"path": "reports"}})["result"]
+        self.assertEqual(denied["structuredContent"], {"code": "PermissionDenied"})
+
     def test_measure_only_the_fixed_owned_volume_and_resolve_its_current_revision(self):
         n = self.node
         volume = self.create_owned_volume()

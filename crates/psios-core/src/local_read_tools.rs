@@ -6,13 +6,14 @@ use crate::{
     label, policy, require,
 };
 use psios_api::{
-    LocalReadBinding, LocalReadTool, LocalReadToolsRequest, ResolveLocalReadToolsRequest,
-    ResolvedLocalReadTool, ResourceRef,
+    LocalReadBinding, LocalReadTool, LocalReadToolsRequest, MAX_LOCAL_READ_BINDINGS,
+    ResolveLocalReadToolsRequest, ResolvedLocalReadTool, ResourceRef,
 };
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
 pub(crate) const NODE_INVENTORY_FORMAT: u32 = crate::storage::xattrs::FORMAT + 1;
+pub(crate) const VOLUME_FILES_FORMAT: u32 = crate::apps::mount_observation::READ_ONLY_FORMAT + 1;
 
 pub(crate) fn agent(db: &Db<'_>, actor: &str) -> Result<()> {
     let principal = db.of(actor, "Principal")?;
@@ -126,6 +127,13 @@ pub(crate) fn resolve_binding(
     } else {
         None
     };
+    if let LocalReadBinding::VolumeFiles { query, .. } = binding {
+        require(
+            query.within_limits(),
+            "InvalidArgument",
+            "volume directory page parameters are outside the local profile",
+        )?;
+    }
     let input = binding
         .task_input(exact.as_ref())
         .ok_or_else(|| err("RecoveryRequired", "local read tool target is inconsistent"))?;
@@ -157,13 +165,13 @@ pub(crate) fn resolve(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value>
     label(&request.delegation_id)?;
     let mut tools = HashSet::new();
     require(
-        (1..=4).contains(&request.bindings.len())
+        (1..=MAX_LOCAL_READ_BINDINGS).contains(&request.bindings.len())
             && request
                 .bindings
                 .iter()
                 .all(|binding| tools.insert(binding.name())),
         "InvalidArgument",
-        "one to four distinct local read tools required",
+        "one to five distinct local read tools required",
     )?;
     for binding in &request.bindings {
         if let Some((id, _)) = binding.target() {

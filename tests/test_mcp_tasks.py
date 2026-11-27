@@ -405,6 +405,58 @@ class McpTaskTests(McpTaskFixture, unittest.TestCase):
         self.assertNotEqual(fresh["task_id"], result["task_id"])
         self.assertEqual((fresh["result"]["volume_ref"], fresh["result"]["logical_file_bytes"]), (second, "3"))
 
+    def test_bound_directory_input_and_page_resume_after_restart(self):
+        n = self.node
+        token = self.agent["token"]
+        create = self.grant(["local"], units=1, tools=["volume.create"])
+        prepared = n.prepare("volume.create", {"name": "mcp-directory-pages"}, token=token,
+                             delegation=create["delegation_ref"]["resource_id"])
+        created = n.wait(n.call("Task.Submit", prepared, token)["task_id"], autoapprove=True)
+        self.assertEqual(created["lifecycle"], "Succeeded", created)
+        artifact, = created["result"]["artifact_refs"]
+        volume = n.call("Artifact.Read", {"reference": artifact}, token)
+        volume_id = volume["resource_id"]
+        directory = n.state / "volumes" / volume_id / "data" / "reports"
+        directory.mkdir()
+        (directory / "a").write_bytes(b"a")
+        (directory / "b").write_bytes(b"bb")
+
+        tool = "volume.files"
+        grant = self.grant([volume_id], units=3, tools=[tool])
+        client = self.task_wire(grant, extra=("--volume-files", volume_id))
+        invocation = key()
+        query = {"path": "reports", "limit": 1}
+
+        def start(wire, arguments, invocation):
+            return self.task_call(wire, "tools/call", {"name": tool, "arguments": arguments},
+                                  invocation=invocation)["result"]
+
+        handle = start(client, query, invocation)["taskId"]
+        result = self.wait_status(client, handle)
+        first = self.check_receipt(result["result"], tool, grant)
+        self.assertEqual(first["result"], {"entries": [{"name": "a", "kind": "file", "bytes": "1"}],
+                                           "next_after": "a", "volume_version": volume["version"]})
+        client.close()
+        n.stop(signal.SIGKILL)
+        checked = json.loads(subprocess.check_output([*n.daemon, "verify"], timeout=20))
+        self.assertGreaterEqual(checked["database_format"], 141)
+        self.assertEqual(checked["sqlite_integrity"], "Verified")
+        n.start()
+        resumed = self.task_wire(grant, extra=("--volume-files", volume_id))
+        self.assertEqual(start(resumed, query, invocation)["taskId"], handle)
+        self.assertEqual(start(resumed, {**query, "path": ""}, invocation)["structuredContent"],
+                         {"code": "IdempotencyConflict"})
+        self.assertEqual(self.wait_status(resumed, handle), result)
+        next_page = {**query, "after": "a", "volume_version": volume["version"]}
+        next_handle = start(resumed, next_page, key())["taskId"]
+        next_result = self.check_receipt(self.wait_status(resumed, next_handle)["result"], tool, grant)
+        self.assertEqual(next_result["result"],
+                         {"entries": [{"name": "b", "kind": "file", "bytes": "2"}],
+                          "next_after": None, "volume_version": volume["version"]})
+        self.assertNotEqual(next_result["task_id"], first["task_id"])
+        n.call("Grant.Revoke", target(grant["grant_ref"]))
+        self.assertEqual(self.task_call(resumed, "tasks/get", {"taskId": handle})["error"]["code"], -32602)
+
     def test_retained_handle_limit_follows_the_agent_across_endpoints(self):
         n = self.node
         self.scheduling("Cordoned")

@@ -223,7 +223,7 @@ Debian 软件包以 `Type=notify` 启动 Core。主进程在核对权威状态�
 
 | Task 工具 | 参数与行为 |
 | --- | --- |
-| volume.files | `target` 为卷的 ID 和预期修订。`path` 默认为根，每页最多 128 项。同一目录续页时将 `next_after` 的值原样传入 `after`，值为 `null` 时已到最后一页。 |
+| volume.files | `target` 为卷的 ID 和预期修订。`path` 默认为根，每页最多 128 项。可用 `max_result_bytes` 将页面限制在 4 到 128 KiB。同一目录续页时将 `next_after` 的值原样传入 `after`，值为 `null` 时已到最后一页。遇到嵌套挂载时整页失败，链接和特殊文件显示为 `unsupported`，大小为 `0`。 |
 | volume.mkdir、volume.remove_entry | `target, path`。创建目录，或删除单个普通文件及空目录。 |
 | volume.append | `target, path, offset, data_base64`。偏移为零时排他新建，后续追加要求实际长度等于偏移。每块最多 96 KiB，单文件上限 256 MiB。沿用主体的 Task 输入保留额度。 |
 | volume.read_chunk | `target, path, offset, limit`。取回 Base64 数据、块摘要、下一偏移和 EOF。可以从待激活的恢复卷读取。 |
@@ -788,7 +788,9 @@ psios-mcp --socket /run/psios/api.sock --service-uid PSIOS_UID \
 
 两代协议都可用 `--volume-usage VOLUME_ID` 公开一个该 Agent 所有的已可用 Volume 的根目录容量，用 `--service-inspect HOST_SERVICE_ID` 公开一个 Core 已登记的 systemd 服务状态。指定资源须在该委托的有效范围内，并由根 Grant 或叶 Delegation 显式列出。授权需包含 `task.submit`、`task.read` 和对应的 `volume.usage` 或 `service.inspect`。可通过 `--tool` 同时选择原来的诊断工具。未指定任何工具时默认启用 `system.status`。
 
-两项资源工具的 MCP 参数均为空。适配器从 `Capability.ResolveLocalReadTools` 取得声明资源的当前精确引用，以该修订构造 Native Task，并在返回结果前复查授权和精确引用。列表只显示当前允许的工具名称，不消耗任务预算或创建任务草稿。Core 的卷持有、扫描限制和 systemd 登记校验照常执行。[实际 Volume 和 systemd 验收](../tests/test_mcp_bound_read_tools.py)
+`volume.usage` 和 `service.inspect` 接受空参数。适配器从 `Capability.ResolveLocalReadTools` 取得声明资源的当前精确引用，以该修订构造 Native Task，并在返回结果前复查授权和精确引用。工具列表可按当前权限刷新，查看列表不消耗任务预算。Core 的卷持有、扫描限制和 systemd 登记校验照常执行。[实际 Volume 和 systemd 验收](../tests/test_mcp_bound_read_tools.py)
+
+格式 141 可在两代协议上加 `--volume-files VOLUME_ID`。将该卷 ID 和 `volume.files` 纳入同一委托。工具可按相对 `path` 列出目录，空路径代表该卷根目录。每页最多 32 项，Core 将目录制品限制为 12 KiB，并在较长文件名需要更多空间时提早分页。继续读取时，将返回的 `next_after` 作为 `after`，连同原路径和返回的 `volume_version` 一并传回。Core 会拒绝已经变更的卷版本。同一查询可通过现代 Tasks 的原调用键恢复结果。[目录授权、分页与重启验收](../tests/test_mcp_bound_read_tools.py) · [持久句柄验收](../tests/test_mcp_tasks.py)
 
 ### 现代 MCP Tasks
 

@@ -5,6 +5,8 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use std::io::{Seek, SeekFrom};
 const CHUNK: usize = 96 * 1024;
 const FILE_MAX: u64 = 256 * 1024 * 1024;
+const MIN_PAGE_BYTES: usize = 4 * 1024;
+const MAX_PAGE_BYTES: usize = 128 * 1024;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PathInput {
@@ -19,6 +21,7 @@ pub struct Page {
     pub path: String,
     pub after: Option<String>,
     pub limit: Option<usize>,
+    pub max_result_bytes: Option<usize>,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -86,6 +89,12 @@ pub fn validate(a: &Action) -> Result<()> {
                 (1..=128).contains(&p.limit.unwrap_or(32)),
                 "InvalidArgument",
                 "invalid directory page size",
+            )?;
+            require(
+                p.max_result_bytes
+                    .is_none_or(|limit| (MIN_PAGE_BYTES..=MAX_PAGE_BYTES).contains(&limit)),
+                "InvalidArgument",
+                "invalid directory result byte limit",
             )
         }
         Action::MakeDir(p) | Action::RemoveEntry(p) => path(&p.path, false),
@@ -114,12 +123,17 @@ pub(super) fn parent(root: &File, path: &str) -> Result<(File, String)> {
     };
     Ok((dir, leaf.to_owned()))
 }
-fn list(root: &File, p: &Page) -> Result<Value> {
-    let dir = if p.path.is_empty() {
-        root.try_clone()?
+fn open_directory(root: &File, path: &str) -> Result<File> {
+    if path.is_empty() {
+        Ok(root.try_clone()?)
     } else {
-        child(root, &p.path, OFlags::RDONLY | OFlags::DIRECTORY)?
-    };
+        child(root, path, OFlags::RDONLY | OFlags::DIRECTORY)
+    }
+}
+
+fn list(root: &File, p: &Page) -> Result<Value> {
+    let dir = open_directory(root, &p.path)?;
+    let directory_before = dir.metadata()?;
     let limit = p.limit.unwrap_or(32);
     let mut selected = std::collections::BTreeSet::<String>::new();
     for (i, entry) in Dir::read_from(&dir)
@@ -140,22 +154,49 @@ fn list(root: &File, p: &Page) -> Result<Value> {
             selected.pop_last();
         }
     }
-    let more = selected.len() > limit;
-    if more {
-        selected.pop_last();
-    }
-    let cursor = more.then(|| selected.last().unwrap().clone());
+    let mut more = selected.len() > limit;
     let mut entries = Vec::new();
-    for name in selected {
-        let st =
-            statat(&dir, name.as_str(), AtFlags::SYMLINK_NOFOLLOW).map_err(std::io::Error::from)?;
-        let kind = match FileType::from_raw_mode(st.st_mode) {
-            FileType::RegularFile => "file",
-            FileType::Directory => "directory",
-            _ => "unsupported",
+    let mut last = None;
+    let mut encoded = p.max_result_bytes.map(|_| {
+        json!({"entries":[],"next_after":null,"volume_version":p.target.expected_resource_version})
+            .to_string()
+            .len()
+    });
+    for name in selected.into_iter().take(limit) {
+        // Do not collect metadata through a mount or follow a link out of the volume.
+        let meta = child(&dir, name.as_str(), OFlags::PATH)?.metadata()?;
+        let (kind, bytes) = if meta.is_file() && meta.nlink() == 1 {
+            ("file", meta.len())
+        } else if meta.is_dir() {
+            ("directory", meta.len())
+        } else {
+            ("unsupported", 0)
         };
-        entries.push(json!({"name":name,"kind":kind,"bytes":st.st_size.to_string()}));
+        let entry = json!({"name":name,"kind":kind,"bytes":bytes.to_string()});
+        if let (Some(encoded), Some(cap)) = (&mut encoded, p.max_result_bytes) {
+            let entry_bytes = entry.to_string().len() + 1;
+            // Reserve an escaped cursor for this entry in case the next row does not fit.
+            if *encoded + entry_bytes + entry["name"].to_string().len() > cap {
+                require(
+                    !entries.is_empty(),
+                    "QuotaExceeded",
+                    "directory entry exceeds page byte limit",
+                )?;
+                more = true;
+                break;
+            }
+            *encoded += entry_bytes;
+        }
+        last = Some(name);
+        entries.push(entry);
     }
+    let current = open_directory(root, &p.path)?;
+    require(
+        same_source(&directory_before, &current.metadata()?),
+        "Conflict",
+        "directory changed while the page was being read",
+    )?;
+    let cursor = if more { last } else { None };
     Ok(
         json!({"entries":entries,"next_after":cursor,"volume_version":p.target.expected_resource_version}),
     )

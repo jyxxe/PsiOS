@@ -142,7 +142,7 @@ pub fn volume_dir(cfg: &Config, d: &Doc) -> Result<PathBuf> {
     registered_root(d, &meta)?;
     Ok(data)
 }
-pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
+pub fn reserve(db: &Db<'_>, w: &mut Work) -> Result<()> {
     // These operations use original, exact custody instead of acquiring a competing hold.
     if matches!(
         w.action,
@@ -199,11 +199,19 @@ pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
             })
             .optional()?;
         if read_holds::reader(&w.action) {
-            require(
-                holder.is_none(),
-                "Conflict",
-                "volume held by workload or unresolved operation",
-            )?;
+            if let Some(holder) = holder {
+                let shared = if matches!(w.action, Action::Files(_) | Action::Chunk(_)) {
+                    crate::apps::attached_read::prepare(db, &holder, v)?
+                } else {
+                    None
+                };
+                require(
+                    shared.is_some(),
+                    "Conflict",
+                    "volume held by workload or unresolved operation",
+                )?;
+                w.attached_read = shared;
+            }
             return read_holds::acquire(db, &v.id, &w.task.id);
         }
         read_holds::ensure_no_readers(db, &v.id)?;
@@ -1346,6 +1354,12 @@ fn remove_contents(dir: &File, depth: usize) -> Result<()> {
     Ok(())
 }
 pub fn perform(w: &Work) -> Result<Value> {
+    if let Some(attached) = &w.attached_read {
+        attached.verify(w)?;
+        let result = files::perform(w)?;
+        attached.verify(w)?;
+        return Ok(result);
+    }
     match &w.action {
         Action::Files(_) | Action::Chunk(_) | Action::Append(_) => files::perform(w),
         Action::VolumeUsage(query) => usage::measure(w, query),

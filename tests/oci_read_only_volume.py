@@ -1,8 +1,11 @@
 """Exercise an approved read-only data volume in an actual local Docker container."""
 import argparse
+import base64
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from io import BytesIO
 import json
+import os
 from pathlib import Path
 import signal
 import sqlite3
@@ -13,6 +16,7 @@ import time
 from oci import stage_from_artifact
 from oci_mount_observation import verify_kernel
 from support import Failure, Node, key, target
+from test_mcp_stdio import Wire
 
 
 DOCKER = ["docker", "--host", "unix:///var/run/docker.sock"]
@@ -89,6 +93,96 @@ def seed_volume(node, name):
     return node.perform("volume.write", {**target(volume), "name": "seed", "content": "original"})["volume_ref"]
 
 
+def agent_volume(node):
+    agent = node.call("Agent.Register", {"name": "attached-volume-agent", "peer_uid": os.getuid()})
+    credential = node.call("Grant.Issue", {"principal_id": agent["principal_id"],
+        "actions": ["task.submit", "task.read", "volume.create"], "tool_targets": ["local"],
+        "units": 1, "ttl_seconds": 120})
+    request = node.prepare("volume.create", {"name": "protected-source"}, token=agent["token"],
+                           delegation=credential["delegation_ref"]["resource_id"])
+    task = node.wait(node.call("Task.Submit", request, agent["token"])["task_id"], autoapprove=True)
+    assert task["lifecycle"] == "Succeeded", task
+    reference, = task["result"]["artifact_refs"]
+    volume = node.call("Artifact.Read", {"reference": reference}, agent["token"])
+    seeded = node.perform("volume.write", {**target(volume), "name": "seed", "content": "original"})
+    return seeded["volume_ref"], agent
+
+
+def verify_shared_reads(node, volume):
+    current = node.get(volume["resource_id"])["reference"]
+    files = {"target": target(current)}
+    chunk = {**files, "path": "seed", "offset": 0, "limit": 8}
+    with ThreadPoolExecutor(max_workers=2) as readers:
+        page = readers.submit(node.perform, "volume.files", files)
+        read = readers.submit(node.perform, "volume.read_chunk", chunk)
+        page, read = page.result(), read.result()
+    assert {"name": "seed", "kind": "file", "bytes": "8"} in page["entries"], page
+    assert base64.b64decode(read["data_base64"], validate=True) == b"original", read
+    assert page["volume_version"] == read["volume_version"] == current["version"]
+    backup = node.wait(node.submit("backup.create", target(current)), autoapprove=True)
+    assert (backup["lifecycle"], backup["conditions"][0]["type"]) == ("Failed", "Conflict"), backup
+
+
+def verify_agent_read(node, volume, agent):
+    volume_id = volume["resource_id"]
+    tools = ["volume.files", "volume.read_chunk"]
+    grant = node.call("Grant.Issue", {"principal_id": agent["principal_id"],
+        "actions": ["task.submit", "task.read", *tools], "tool_targets": [volume_id],
+        "units": 2, "ttl_seconds": 120})
+    token = node.base / "read-only-agent.token"
+    token.touch(mode=0o600)
+    token.write_text(agent["token"])
+    wire = Wire([str(node.binaries / "psios-mcp"), "--socket", str(node.socket),
+                 "--token-file", str(token), "--delegation", grant["delegation_ref"]["resource_id"],
+                 "--volume-files", volume_id, "--volume-read-chunk", volume_id])
+    try:
+        wire.initialize()
+        listed = wire.request("tools/list")["result"]["tools"]
+        assert [tool["name"] for tool in listed] == tools, listed
+        listed_files = wire.invoke(tools[0])
+        assert not listed_files["isError"], listed_files
+        assert listed_files["structuredContent"]["result"]["entries"] == [
+            {"name": "seed", "kind": "file", "bytes": "8"}], listed_files
+        read = wire.request("tools/call", {"name": tools[1], "arguments": {"path": "seed"}})["result"]
+        assert not read["isError"], read
+        receipt = read["structuredContent"]
+        assert base64.b64decode(receipt["result"]["data_base64"], validate=True) == b"original", read
+        task = node.call("Task.Get", {"id": receipt["task_id"]}, agent["token"])
+        artifact, = task["result"]["artifact_refs"]
+        assert node.call("Artifact.Read", {"reference": artifact}, agent["token"]) == receipt["result"]
+    finally:
+        wire.close()
+    print("PASS a scoped MCP Agent read the authorized volume while the OCI process remained active")
+
+
+def refuse_other_invocation(node, spec, volume, app_ids):
+    app = node.perform("application.install", dict(spec, name="external-oci-restart",
+                                                   volume=target(volume), volume_access="ReadOnly"))
+    app_id = app["resource_id"]
+    app_ids.append(app_id)
+    app = node.perform("application.start", target(app))
+    current = node.get(app_id)["value"]
+    container = current["container_id"]
+    before = current["last_observation"]["mount_observation"]["started_at"]
+    subprocess.run([*DOCKER, "restart", "--timeout", "0", container], check=True, timeout=15,
+                   stdout=subprocess.DEVNULL)
+    state = json.loads(subprocess.check_output(
+        [*DOCKER, "inspect", "--format", "{{json .State}}", container], timeout=10))
+    assert state["Running"] and state["StartedAt"] != before, state
+    assert node.get(app_id)["reference"] == app
+    attached = node.get(volume["resource_id"])["reference"]
+    task_id = node.submit("volume.read_chunk", {"target": target(attached),
+                                               "path": "seed", "offset": 0, "limit": 8})
+    result = node.wait(task_id)
+    assert (result["lifecycle"], result["conditions"][0]["type"]) == ("Failed", "PreconditionFailed"), result
+    assert result["result"]["artifact_refs"] == [], result
+    with closing(sqlite3.connect(node.state / "state.db")) as conn:
+        assert conn.execute("SELECT count(*) FROM volume_read_holds WHERE task=?", (task_id,)).fetchone() == (0,)
+        assert conn.execute("SELECT holder FROM holds WHERE volume=?",
+                            (volume["resource_id"],)).fetchone() == (app_id,)
+    print("PASS an external Docker restart blocked the read and released its reader hold")
+
+
 def upgrade_running_read_write_volume(node, image, binaries, app_ids):
     config = json.loads(node.config.read_text())
     node.stop()
@@ -120,6 +214,8 @@ def upgrade_running_read_write_volume(node, image, binaries, app_ids):
     node.start()
     assert node.get(app_id) == old_app and node.get(volume["resource_id"]) == old_volume
     assert verify_kernel(DOCKER, observed, data, volume) == old_mount
+    read = node.wait(node.submit("volume.files", {"target": target(old_volume["reference"])}))
+    assert (read["lifecycle"], read["conditions"][0]["type"]) == ("Failed", "Conflict"), read
     stopped = node.perform("application.stop", target(app))
     node.perform("application.uninstall", target(stopped))
     assert (data / "old-writer").read_bytes() == b"legacy write\n"
@@ -179,7 +275,7 @@ def exercise(node, image, app_ids):
     else:
         raise AssertionError("read-only launch must name a managed volume")
 
-    volume = seed_volume(node, "protected-source")
+    volume, agent = agent_volume(node)
     data = node.state / "volumes" / volume["resource_id"] / "data"
     app = node.perform("application.install", dict(spec, volume=target(volume), volume_access="ReadOnly"))
     app_id = app["resource_id"]
@@ -190,11 +286,14 @@ def exercise(node, image, app_ids):
     volume = node.get(volume["resource_id"])["reference"]
     refused = node.wait(node.submit("volume.write", {**target(volume), "name": "new", "content": "denied"}), autoapprove=True)
     assert (refused["lifecycle"], refused["conditions"][0]["type"]) == ("Failed", "Conflict"), refused
+    verify_shared_reads(node, volume)
+    verify_agent_read(node, volume, agent)
 
     node.stop(signal.SIGKILL)
     offline = json.loads(subprocess.check_output([*node.daemon, "verify"], timeout=20))
     assert offline["database_format"] >= 140 and offline["sqlite_integrity"] == "Verified", offline
     node.start()
+    verify_shared_reads(node, volume)
     grant = node.call("Grant.Issue", {"principal_id": "local-owner", "actions": ["task.submit", "task.read",
         "application.inspect_instance", "application.restart"], "tool_targets": [app_id, volume["resource_id"]],
         "units": 4, "ttl_seconds": 120})
@@ -213,6 +312,7 @@ def exercise(node, image, app_ids):
     after, same_attachment = verify_application(node, app, data, volume)
     assert after["container_id"] == evidence["container_id"] and after["started_at"] != evidence["started_at"]
     assert same_attachment == attachment
+    verify_shared_reads(node, volume)
     app = node.perform("application.stop", target(app))
     detached = node.get(attachment["resource_id"])["value"]
     assert (detached["effective_access"], detached["lifecycle"]) == ("Blocked", "Detached"), detached
@@ -222,16 +322,18 @@ def exercise(node, image, app_ids):
     app = node.perform("application.select_release", {"target": target(app), "release_ref": staged})
     volume = node.get(volume["resource_id"])["reference"]
     app = recover_unsettled_start(node, app, data, volume)
+    verify_shared_reads(node, volume)
     app = node.perform("application.stop", target(app))
     node.perform("application.uninstall", target(app))
     assert (data / "seed").read_bytes() == b"original" and not (data / "new").exists()
     volume = node.get(volume["resource_id"])["reference"]
-    node.perform("volume.write", {**target(volume), "name": "new", "content": "after detach"})
+    volume = node.perform("volume.write", {**target(volume), "name": "new", "content": "after detach"})["volume_ref"]
     assert (data / "new").read_bytes() == b"after detach"
+    refuse_other_invocation(node, spec, volume, app_ids)
     node.stop()
     final = json.loads(subprocess.check_output([*node.daemon, "verify"], timeout=20))
     assert (final["witness"], final["sqlite_integrity"]) == ("Confirmed", "Verified"), final
-    print("PASS read-only Linux I/O, OCI restart, signed staged release, detach and offline authority verification")
+    print("PASS shared file reads across Core and approved OCI restarts, signed recovery, detach and offline verification")
 
 
 def main(binary_dir, previous_dir):

@@ -133,9 +133,10 @@ class McpBoundReadToolsTests(McpFixture, unittest.TestCase):
                 listed, = client("tools/list")["result"]["tools"]
                 self.assertEqual(listed["name"], tool)
                 self.assertEqual(set(listed["inputSchema"]["properties"]),
-                                 {"path", "limit", "after", "volume_version"})
+                                 {"path", "limit", "after", "volume_version", "directory_revision"})
                 for arguments in ({"target": target(other)}, {"path": "../reports"},
-                                  {"limit": 33}, {"after": names[0]}):
+                                  {"limit": 33}, {"after": names[0]}, {"directory_revision": "sha256:" + "1" * 64},
+                                  {"volume_version": volume["version"], "directory_revision": "bad"}):
                     denied = client("tools/call", {"name": tool, "arguments": arguments})["result"]
                     self.assertEqual(denied["structuredContent"], {"code": "InvalidArgument"}, denied)
 
@@ -145,8 +146,11 @@ class McpBoundReadToolsTests(McpFixture, unittest.TestCase):
                 for index in range(4):
                     response = client("tools/call", {"name": tool, "arguments": query})["result"]
                     receipt = self.check_receipt(response, tool, exact)
-                    self.assert_input(receipt["task_id"], {"target": target(volume), "path": "reports",
-                        "after": query.get("after"), "limit": 32, "max_result_bytes": 12 * 1024})
+                    native_input = {"target": target(volume), "path": "reports", "after": query.get("after"),
+                                    "limit": 32, "max_result_bytes": 12 * 1024}
+                    if "directory_revision" in query:
+                        native_input["expected_directory_revision"] = query["directory_revision"]
+                    self.assert_input(receipt["task_id"], native_input)
                     page = receipt["result"]
                     self.assertLessEqual(len(json.dumps(page, ensure_ascii=False,
                         separators=(",", ":")).encode("utf-8")), 12 * 1024)
@@ -155,12 +159,20 @@ class McpBoundReadToolsTests(McpFixture, unittest.TestCase):
                     if page["next_after"] is None:
                         break
                     self.assertEqual(page["next_after"], page["entries"][-1]["name"])
-                    query = {"path": "reports", "after": page["next_after"], "volume_version": page["volume_version"]}
+                    query = {"path": "reports", "after": page["next_after"], "volume_version": page["volume_version"],
+                             "directory_revision": page["directory_revision"]}
                     if index == 0:
                         continuation = query
                 self.assertIsNotNone(continuation)
                 self.assertEqual(entries, [{"name": name, "kind": "file", "bytes": str(index)}
                                            for index, name in enumerate(names)])
+
+                added = directory / "00-added"
+                added.touch()
+                stale = client("tools/call", {"name": tool, "arguments": continuation})["result"]["structuredContent"]
+                self.assertEqual(stale["code"], "Conflict", stale)
+                self.assertEqual(n.call("Task.Get", {"id": stale["task_id"]})["result"]["artifact_refs"], [])
+                added.unlink()
 
         fresh = n.perform("volume.write", {**target(volume), "name": "advance", "content": "revision"})["volume_ref"]
         self.assertNotEqual(fresh["version"], continuation["volume_version"])

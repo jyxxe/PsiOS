@@ -13,6 +13,15 @@ fn valid_volume_version(version: &str) -> bool {
     (1..=128).contains(&version.len()) && !version.chars().any(char::is_control)
 }
 
+pub fn valid_volume_entry_revision(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
 /// A page of metadata from a volume selected by the adapter operator.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -21,6 +30,8 @@ pub struct VolumeFilesQuery {
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub after: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directory_revision: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub volume_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -33,6 +44,9 @@ impl VolumeFilesQuery {
             && self
                 .limit
                 .is_none_or(|limit| (1..=MAX_VOLUME_FILES_PAGE).contains(&limit))
+            && self.directory_revision.as_deref().is_none_or(|revision| {
+                self.volume_version.is_some() && valid_volume_entry_revision(revision)
+            })
             && self.after.as_ref().is_none_or(|after| {
                 self.volume_version.is_some()
                     && (1..=255).contains(&after.len())
@@ -63,12 +77,7 @@ pub struct VolumeFileChunkQuery {
 
 impl VolumeFileChunkQuery {
     pub fn valid_file_revision(value: &str) -> bool {
-        value.strip_prefix("sha256:").is_some_and(|hex| {
-            hex.len() == 64
-                && hex
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
+        valid_volume_entry_revision(value)
     }
 
     pub fn within_limits(&self) -> bool {
@@ -231,11 +240,17 @@ impl LocalReadBinding {
         let target = json!({"id":id,"expected_resource_version":version});
         match self {
             Self::VolumeUsage { .. } => Some(json!({"target":target})),
-            Self::VolumeFiles { query, .. } => Some(json!({
-                "target":target,"path":query.path,"after":query.after,
-                "limit":query.limit.unwrap_or(MAX_VOLUME_FILES_PAGE),
-                "max_result_bytes":VOLUME_FILES_RESULT_BYTES
-            })),
+            Self::VolumeFiles { query, .. } => {
+                let mut input = json!({
+                    "target":target,"path":query.path,"after":query.after,
+                    "limit":query.limit.unwrap_or(MAX_VOLUME_FILES_PAGE),
+                    "max_result_bytes":VOLUME_FILES_RESULT_BYTES
+                });
+                if let Some(revision) = &query.directory_revision {
+                    input["expected_directory_revision"] = json!(revision);
+                }
+                Some(input)
+            }
             Self::VolumeReadChunk { query, .. } => {
                 let query = query.as_ref()?;
                 Some(json!({

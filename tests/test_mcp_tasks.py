@@ -427,8 +427,10 @@ class McpTaskTests(McpTaskFixture, unittest.TestCase):
         handle = start(client, query, invocation)["taskId"]
         result = self.wait_status(client, handle)
         first = self.check_receipt(result["result"], tool, grant)
+        revision = first["result"]["directory_revision"]
+        self.assertRegex(revision, r"^sha256:[0-9a-f]{64}$")
         self.assertEqual(first["result"], {"entries": [{"name": "a", "kind": "file", "bytes": "1"}],
-                                           "next_after": "a", "volume_version": volume["version"]})
+                                           "next_after": "a", "volume_version": volume["version"], "directory_revision": revision})
         client.close()
         n.stop(signal.SIGKILL)
         checked = json.loads(subprocess.check_output([*n.daemon, "verify"], timeout=20))
@@ -440,15 +442,79 @@ class McpTaskTests(McpTaskFixture, unittest.TestCase):
         self.assertEqual(start(resumed, {**query, "path": ""}, invocation)["structuredContent"],
                          {"code": "IdempotencyConflict"})
         self.assertEqual(self.wait_status(resumed, handle), result)
-        next_page = {**query, "after": "a", "volume_version": volume["version"]}
-        next_handle = start(resumed, next_page, key())["taskId"]
+        next_page = {**query, "after": "a", "volume_version": volume["version"], "directory_revision": revision}
+        next_key = key()
+        next_handle = start(resumed, next_page, next_key)["taskId"]
         next_result = self.check_receipt(self.wait_status(resumed, next_handle)["result"], tool, grant)
         self.assertEqual(next_result["result"],
                          {"entries": [{"name": "b", "kind": "file", "bytes": "2"}],
-                          "next_after": None, "volume_version": volume["version"]})
+                          "next_after": None, "volume_version": volume["version"], "directory_revision": revision})
         self.assertNotEqual(next_result["task_id"], first["task_id"])
+        (directory / "0").touch()
+        resumed.close()
+        n.stop(signal.SIGKILL)
+        n.start()
+        resumed = self.task_wire(grant, extra=("--volume-files", volume_id))
+        self.assertEqual(start(resumed, next_page, next_key)["taskId"], next_handle)
+        self.assertEqual(self.wait_status(resumed, next_handle)["result"]["structuredContent"], next_result)
+        stale_handle = start(resumed, next_page, key())["taskId"]
+        stale = self.wait_status(resumed, stale_handle)["result"]["structuredContent"]
+        self.assertEqual(stale["code"], "Conflict", stale)
         n.call("Grant.Revoke", target(grant["grant_ref"]))
         self.assertEqual(self.task_call(resumed, "tasks/get", {"taskId": handle})["error"]["code"], -32602)
+
+    @unittest.skipUnless(os.getenv("PSIOS_DIRECTORY_PREVIOUS_BIN_DIR"), "requires genuine format 147 binaries")
+    def test_format_147_directory_handle_preserves_original_input_and_result(self):
+        node = Node(os.environ["PSIOS_DIRECTORY_PREVIOUS_BIN_DIR"])
+        self.addCleanup(node.close)
+        agent = node.call("Agent.Register", {"name": "directory-upgrade"})
+        token = agent["token"]
+
+        def delegation(tool, scope):
+            grant = node.call("Grant.Issue", {"principal_id": agent["principal_id"], "tool_targets": [scope],
+                "actions": ["task.submit", "task.read", tool], "units": 4, "ttl_seconds": 300})
+            return grant["delegation_ref"]["resource_id"]
+
+        create = node.prepare("volume.create", {"name": "archive"}, token=token,
+                              delegation=delegation("volume.create", "local"))
+        created = node.call("Task.Submit", create, token)["task_id"]
+        task = node.wait(created, autoapprove=True)
+        volume = node.call("Artifact.Read", {"reference": task["result"]["artifact_refs"][0]}, token)
+        directory = node.state / "volumes" / volume["resource_id"] / "data"
+        for name in ("a", "b"):
+            (directory / name).touch()
+        binding = {"tool": "volume.files", "target_id": volume["resource_id"], "query": {"limit": 1}}
+        scope = {"endpoint": "directory", "delegation_id": delegation("volume.files", volume["resource_id"])}
+        start = {**scope, "binding": binding, "invocation_key": key(), "ttl_seconds": 300}
+        handle = node.call("McpTask.Start", start, token)["taskId"]
+        page_task, = [r["resource_id"] for r in node.call("Resource.List", {"kind": "Task"})["items"]
+                      if r["resource_id"] != created]
+        self.assertEqual(node.wait(page_task)["lifecycle"], "Succeeded")
+        access = {**scope, "bindings": [binding], "handle": handle}
+        original = node.call("McpTask.Get", access, token)
+        self.assertEqual(original["tool_result"]["result"]["next_after"], "a")
+        self.assertNotIn("directory_revision", original["tool_result"]["result"])
+
+        node.stop(signal.SIGKILL)
+        old = node.daemon.copy()
+        self.assertEqual(json.loads(subprocess.check_output([*old, "verify"]))["database_format"], 147)
+        node.daemon[0] = str(self.node.binaries / "psiosd")
+        node.start()
+        self.assertEqual(node.call("McpTask.Start", start, token)["taskId"], handle)
+        self.assertEqual(node.call("McpTask.Get", access, token), original)
+        fresh = node.call("McpTask.Start", {**start, "invocation_key": key()}, token)["taskId"]
+        new_task, = [r["resource_id"] for r in node.call("Resource.List", {"kind": "Task"})["items"]
+                     if r["resource_id"] not in (created, page_task)]
+        self.assertEqual(node.wait(new_task)["lifecycle"], "Succeeded")
+        page = node.call("McpTask.Get", {**access, "handle": fresh}, token)["tool_result"]["result"]
+        self.assertRegex(page["directory_revision"], r"^sha256:[0-9a-f]{64}$")
+        self.assertEqual(page["entries"], original["tool_result"]["result"]["entries"])
+        node.stop()
+        before = (node.witness / "head").read_bytes()
+        blocked = subprocess.run([*old, "serve"], capture_output=True, timeout=10)
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn(b"SchemaVersionUnsupported", blocked.stderr)
+        self.assertEqual((node.witness / "head").read_bytes(), before)
 
     def test_bound_file_chunk_reuses_the_original_queued_task_after_restart(self):
         n = self.node

@@ -112,7 +112,14 @@ class BackupEstimateTests(unittest.TestCase):
         source = node.state / "volumes" / volume["resource_id"] / "data"
         for index in range(4097):
             (source / str(index)).touch()
-        old = node.wait(node.submit(TOOL, target(volume)), autoapprove=True)
+        allowed = grant(node, "local-owner", ["task.submit", "task.read", TOOL], [volume["resource_id"]])
+        delegation = allowed["delegation_ref"]["resource_id"]
+
+        def estimate_task():
+            prepared = node.prepare(TOOL, target(volume), delegation=delegation)
+            return node.wait(node.call("Task.Submit", prepared)["task_id"], autoapprove=True)
+
+        old = estimate_task()
         self.assertEqual((old["lifecycle"], old["conditions"][0]["type"]), ("Failed", "QuotaExceeded"), old)
         node.stop(signal.SIGKILL)
         old_daemon = node.daemon[:]
@@ -125,7 +132,9 @@ class BackupEstimateTests(unittest.TestCase):
         self.assertEqual((before["node_id"], before["database_format"], before["migration_required"]),
                          (prior["node_id"], 133, True))
         node.start()
-        estimate = node.perform(TOOL, target(volume))
+        completed = estimate_task()
+        self.assertEqual(completed["lifecycle"], "Succeeded", completed)
+        estimate = node.call("Artifact.Read", {"reference": completed["result"]["artifact_refs"][0]})
         self.assertEqual((estimate["entries"], estimate["fits_entry_limit"]), (4097, False))
         self.assertEqual(node.call("Task.Get", {"id": old["task_id"]}), old)
         node.stop()

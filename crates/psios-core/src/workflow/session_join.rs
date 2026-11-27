@@ -306,7 +306,7 @@ pub(super) fn stopped_launch(db: &Db<'_>, run: &Doc, task: &Doc) -> Result<()> {
     Ok(())
 }
 
-fn launch_receipt(conn: &Connection, task: &Doc, opened: &Doc) -> Result<Doc> {
+pub(crate) fn launch_receipt(conn: &Connection, task: &Doc, opened: &Doc) -> Result<Doc> {
     let references = task.body["result"]["artifact_refs"]
         .as_array()
         .ok_or_else(invalid)?;

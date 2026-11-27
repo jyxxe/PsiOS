@@ -48,7 +48,12 @@ fn references(schedule: &Doc) -> Result<&[Value]> {
         .ok_or_else(invalid)
 }
 
-fn trigger(conn: &Connection, schedule: &Doc, reference: &Value, ordinal: usize) -> Result<Doc> {
+pub(super) fn trigger(
+    conn: &Connection,
+    schedule: &Doc,
+    reference: &Value,
+    ordinal: usize,
+) -> Result<Doc> {
     let trigger = db::resolve(conn, reference)?;
     let schedule_id = &schedule.id;
     let timing = &trigger.spec["timing"];
@@ -67,7 +72,7 @@ fn trigger(conn: &Connection, schedule: &Doc, reference: &Value, ordinal: usize)
             && trigger.id == timing["trigger_id"]
             && trigger.id == super::trigger_id(schedule_id, run_at),
         "RecoveryRequired",
-        "workflow overlap trigger differs from its schedule occurrence",
+        "recorded trigger differs from its schedule occurrence",
     )?;
     Ok(trigger)
 }
@@ -114,7 +119,7 @@ fn launch_deadline<'a>(schedule: &'a Doc, trigger: &'a Doc) -> &'a Value {
     }
 }
 
-fn prior_task(
+pub(super) fn prior_task(
     conn: &Connection,
     schedule: &Doc,
     trigger: &Doc,
@@ -137,13 +142,12 @@ fn prior_task(
             && task.spec["origin_ref"] == task.body["origin_ref"]
             && task.spec["origin_ref"]["origin_type"] == "Schedule"
             && task.spec["origin_ref"]["origin_id"] == schedule.id
-            && task.spec["task_type"] == START_TOOL
             && receipt["origin_ref"] == task.spec["origin_ref"]
             && receipt["idempotency_key"] == trigger.id
             && receipt["task_revision"] == "r1"
             && receipt["request_digest"] == task.spec["request_digest"],
         "RecoveryRequired",
-        "workflow overlap Task differs from the original schedule submission",
+        "Task differs from the original schedule submission",
     )?;
     Ok(task)
 }
@@ -160,7 +164,7 @@ fn workflow_id(conn: &Connection, task: &Doc) -> Result<String> {
     Ok(workflow::brokered_run_id(&authority, &task.owner, &task.id))
 }
 
-fn completed_launch(
+pub(super) fn completed_launch(
     conn: &Connection,
     limit: &Value,
     task: &Doc,
@@ -281,14 +285,18 @@ fn terminal(doc: &Doc) -> bool {
     )
 }
 
-fn settled(doc: &Doc) -> bool {
+pub(super) fn settled(doc: &Doc) -> bool {
     terminal(doc)
         && (doc.body["outcome_knowledge"] == "Known"
             || doc.body["lifecycle"] != "Succeeded"
                 && doc.body["outcome_knowledge"] == "NotStarted")
 }
 
-fn child_incomplete(conn: &Connection, child: &Doc, before: Option<i64>) -> Result<bool> {
+pub(super) fn child_incomplete(
+    conn: &Connection,
+    child: &Doc,
+    before: Option<i64>,
+) -> Result<bool> {
     let done = settled(child);
     if before.is_none() && child.body["outcome_knowledge"] != "Unknown" {
         let active: bool = conn.query_row(

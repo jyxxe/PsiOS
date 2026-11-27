@@ -574,6 +574,8 @@ jq -n --arg id "$schedule" '{id:$id}' | ctl call Schedule.Get
 
 进行中的调度通过 `Schedule.Get` 返回 `next` 和已结算的 `trigger_refs`。同一逻辑时刻的触发 ID 与调度定义绑定，重启后继续使用。对引用中的 ID 调用 `Schedule.TriggerGet` 可读取该轮的状态、原因及 Task 回执，读取权限限于调度所有者与本机管理员。序列用尽后返回 `Completed`。每轮分别记录已触发、已过期或已跳过。遇到永久的准入拒绝时记录该轮拒绝并结束序列。取消仍需当前修订，取消后的已提交任务可以继续用原入口管理。[格式 10 升级](../tests/schedule_repeat_upgrade.py)
 
+格式 131 允许用 `Schedule.Renew` 续期已完成的固定间隔序列。请求包含原 `id`、`expected_resource_version`、新 `key`、当前 `delegation_id`、首轮 `run_at` 和 `deadline_at`。Core 复核原触发记录、Task、关联 Workflow 或 Session 的结算状态，以及新委托对原工具和目标的权限。新序列沿用原输入和间隔规则，每个原序列只接受一次续期。回执固定新旧引用和已结算的 Task，可用相同请求重放。CLI 接受 `psiosctl schedule-renew REQUEST.json`，Rust SDK 提供 `renew_schedule`。 [真实调度、并发及恢复验收](../tests/test_schedule_renewal.py)
+
 `Schedule.Create` 也可用 `calendar` 提交有限期的当地日历规则。日历请求省略 `run_at`、`deadline_at` 和 `repeat`。以下规则从 2027 年 11 月 7 日起每天当地 01:30 触发，持续两天。
 
 ```json

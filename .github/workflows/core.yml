@@ -884,6 +884,13 @@ jobs:
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format126" "$RUNNER_TEMP/psios-compatibility-target"
           PSIOS_TEST_SESSION_SCOPE_PREVIOUS_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
             python3 -B -m unittest discover -s tests -p test_model_queue.py -k test_format_126_pauses -v
+      - name: Renew a settled format 130 interval schedule after migrating its in-flight occurrences
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format130"
+          git archive fe0055575b1e9d3b3cc1960bf23019b1035dd4c3 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format130"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format130" "$RUNNER_TEMP/psios-compatibility-target"
+          PSIOS_SCHEDULE_RENEWAL_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
+            python3 -B -m unittest discover -s tests -p test_schedule_renewal.py -k test_format_130 -v
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

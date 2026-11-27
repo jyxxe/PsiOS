@@ -4,6 +4,7 @@ mod calendar;
 pub(crate) mod coalescence;
 mod elapsed;
 pub(crate) mod event_workflow_overlap;
+pub(crate) mod renewal;
 mod repeat;
 mod resource_event;
 pub(crate) mod workflow_overlap;
@@ -90,14 +91,14 @@ fn reference(d: &Doc) -> Value {
     json!({"reference": d.reference(), "state": d.body})
 }
 
-fn schedule_id(db: &Db<'_>, actor: &str, key: &str) -> Result<String> {
+fn schedule_id(authority: &str, actor: &str, key: &str) -> String {
     let identity = sha256(&canonical(&json!([
         "psios/schedule/once/1",
-        db.meta("authority")?,
+        authority,
         actor,
         key
     ])));
-    Ok(format!("schedule-{}", &identity[7..]))
+    format!("schedule-{}", &identity[7..])
 }
 
 fn existing(db: &Db<'_>, actor: &str, id: &str, creation: &str) -> Result<Option<Value>> {
@@ -155,7 +156,15 @@ fn prepare_template(
 }
 
 pub fn create(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
-    let p: Create = decode(params)?;
+    create_schedule(db, actor, decode(params)?, None)
+}
+
+fn create_schedule(
+    db: &Db<'_>,
+    actor: &str,
+    p: Create,
+    predecessor: Option<&Doc>,
+) -> Result<Value> {
     label(&p.key)?;
     policy::active(db, actor)?;
     let workflow_overlap = p
@@ -222,14 +231,17 @@ pub fn create(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
             ));
         }
     };
-    let id = schedule_id(db, actor, &p.key)?;
+    if let Some(previous) = predecessor {
+        definition.push(json!({"predecessor_ref": previous.reference()}));
+    }
+    let id = schedule_id(&db.meta("authority")?, actor, &p.key);
     let creation = sha256(&canonical(&Value::Array(definition)));
     if let Some(record) = existing(db, actor, &id, &creation)? {
         return Ok(record);
     }
     let d = policy::delegation(db, actor, &p.delegation_id, ACTION)?;
     let scope_end = scope_end(db, &d)?;
-    let (first, last_deadline, mut spec, body) = match timing {
+    let (first, last_deadline, mut spec, mut body) = match timing {
         Timing::Fixed {
             first,
             last_deadline,
@@ -275,6 +287,10 @@ pub fn create(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     )?;
     spec["creation_digest"] = json!(creation);
     spec["request"] = request;
+    if let Some(previous) = predecessor {
+        spec["predecessor_ref"] = previous.reference();
+        body["predecessor_ref"] = spec["predecessor_ref"].clone();
+    }
     policy::deadline::Clock::sample()?.register_until(
         db,
         &id,

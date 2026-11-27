@@ -47,7 +47,7 @@ impl Overlap {
 #[serde(deny_unknown_fields)]
 pub(super) struct Repeat {
     interval_seconds: u32,
-    count: u32,
+    pub(super) count: u32,
     missed: Missed,
     pub(super) overlap: Overlap,
 }

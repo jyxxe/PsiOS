@@ -85,8 +85,9 @@ pub(super) fn copy_to_new_file(
     }
     // Data and hole positions came from separate queries on this descriptor.
     // A concurrent writer invalidates the extent map as well as the digest.
+    let after = source.metadata()?;
     require(
-        same_source(&before, &source.metadata()?),
+        same_source(&before, &after) && before.blocks() == after.blocks(),
         "Conflict",
         "source file changed during copy",
     )?;

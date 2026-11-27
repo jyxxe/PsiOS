@@ -126,7 +126,12 @@ class BackupEstimateTests(unittest.TestCase):
         self.addCleanup(node.close)
         volume = node.perform("volume.create", {"name": "old-fixed-entry-limit"})
         source = node.state / "volumes" / volume["resource_id"] / "data"
-        for index in range(4097):
+        original = source / "sparse"
+        with original.open("xb") as f:
+            f.seek(1024 * 1024 + 17)
+            f.write(b"format 133")
+        prior_backup = node.perform("backup.create", target(volume))
+        for index in range(4096):
             (source / str(index)).touch()
         allowed = grant(node, "local-owner", ["task.submit", "task.read", TOOL], [volume["resource_id"]])
         delegation = allowed["delegation_ref"]["resource_id"]
@@ -142,6 +147,9 @@ class BackupEstimateTests(unittest.TestCase):
         prior = json.loads(subprocess.check_output(old_daemon + ["verify"], timeout=20))
         self.assertEqual((prior["database_format"], prior["migration_required"]), (133, False))
 
+        self.n.stop()
+        current = json.loads(subprocess.check_output(self.n.daemon + ["verify"], timeout=20))
+        self.assertGreater(current["database_format"], prior["database_format"])
         node.binaries = self.n.binaries
         node.daemon[0] = str(node.binaries / "psiosd")
         before = json.loads(subprocess.check_output(node.daemon + ["verify"], timeout=20))
@@ -153,10 +161,13 @@ class BackupEstimateTests(unittest.TestCase):
         estimate = node.call("Artifact.Read", {"reference": completed["result"]["artifact_refs"][0]})
         self.assertEqual((estimate["entries"], estimate["fits_entry_limit"]), (4097, False))
         self.assertEqual(node.call("Task.Get", {"id": old["task_id"]}), old)
+        recovered = node.perform("backup.restore", target(prior_backup))
+        restored = node.state / "volumes" / recovered["resource_id"] / "data" / "sparse"
+        self.assertEqual(restored.read_bytes(), original.read_bytes())
         node.stop()
         after = json.loads(subprocess.check_output(node.daemon + ["verify"], timeout=20))
         self.assertEqual((after["node_id"], after["database_format"], after["migration_required"]),
-                         (prior["node_id"], 134, False))
+                         (prior["node_id"], current["database_format"], False))
         fenced = subprocess.run(old_daemon + ["serve"], capture_output=True, text=True, timeout=20)
         self.assertNotEqual(fenced.returncode, 0)
         self.assertIn("SchemaVersionUnsupported", fenced.stderr)

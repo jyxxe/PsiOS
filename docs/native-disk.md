@@ -85,6 +85,8 @@ mcopy -i node.raw@@1048576 ::/EFI/BOOT/BOOTX64.EFI boot.efi
 sha256sum boot.efi
 ```
 
+构建器保留固定内核的原始 initramfs，将 Core 程序、配置和启动脚本作为独立的 gzip 压缩 cpio 成员追加。文件名、权限和部署清单中的单文件摘要仍按解压后的内容核验。停机升级可从早期未压缩的开发盘生成压缩的候选盘，沿用原 EFI 分区布局。
+
 将结果与回执的 `efi_application_sha256` 比对。启动后普通账户可运行 `sha256sum /psios-deployment.json` 与回执的 `deployment_manifest_sha256` 比对。该清单列出 Core 源码修订及归档摘要、内核 ISO 及其内核与初始内存盘的输入摘要、两个文件系统 UUID 和 PsiOS 加入启动环境的文件摘要。回执另含组装后的完整 initramfs 摘要。PID 1 在挂载可写分区前核对清单和这些文件，发现不一致时给出 `deployment-payload` 停机阶段。外部回执供操作者比对。
 
 ## 安装到空白块设备

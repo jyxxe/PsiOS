@@ -64,6 +64,9 @@ struct Options {
     /// Include observations for one exact registered HostService ID.
     #[arg(long, value_name = "HOST_SERVICE_ID", value_parser = parse_target)]
     service_inspect: Option<String>,
+    /// Include live observations for one exact managed Application ID.
+    #[arg(long, value_name = "APPLICATION_ID", value_parser = parse_target)]
+    application_inspect: Option<String>,
     /// Enable modern durable Tasks for an exact local endpoint identity.
     #[arg(long, value_name = "ENDPOINT_ID", value_parser = parse_endpoint)]
     tasks_endpoint: Option<String>,
@@ -343,6 +346,19 @@ impl Adapter {
                         query: Some(query),
                     }
                 }
+                LocalReadBinding::ApplicationInspect { target_id, .. } => {
+                    let Some(include_usage) = args
+                        .get("include_usage")
+                        .and_then(Value::as_bool)
+                        .filter(|_| args.len() == 1)
+                    else {
+                        return Ok(tool_error("InvalidArgument", None));
+                    };
+                    LocalReadBinding::ApplicationInspect {
+                        target_id: target_id.clone(),
+                        include_usage,
+                    }
+                }
                 _ => return Ok(tool_error("InvalidArgument", None)),
             },
             _ if matches!(configured, LocalReadBinding::VolumeReadChunk { .. }) => {
@@ -522,6 +538,9 @@ fn descriptor(tool: &LocalReadBinding, protocol: Protocol) -> Value {
             "Read a bounded Base64 chunk in the configured volume. Continue with next_offset, volume_version and file_revision."
         }
         LocalReadBinding::ServiceInspect { .. } => "Observe the configured systemd service state.",
+        LocalReadBinding::ApplicationInspect { .. } => {
+            "Observe the configured OCI application. Request include_usage for live cgroup v2 accounting."
+        }
     };
     let mut descriptor = json!({"name":tool.name(),"description":description,
         "inputSchema":{"type":"object","additionalProperties":false},
@@ -553,6 +572,11 @@ fn descriptor(tool: &LocalReadBinding, protocol: Protocol) -> Value {
             "limit":{"type":["integer","null"],"minimum":1,"maximum":MAX_VOLUME_FILE_CHUNK},
             "volume_version":{"type":["string","null"],"minLength":1,"maxLength":128},
             "file_revision":{"type":["string","null"],"pattern":"^sha256:[0-9a-f]{64}$"}
+        });
+    }
+    if matches!(tool, LocalReadBinding::ApplicationInspect { .. }) {
+        descriptor["inputSchema"]["properties"] = json!({
+            "include_usage":{"type":"boolean","default":false}
         });
     }
     if matches!(protocol, Protocol::Legacy) {
@@ -649,6 +673,12 @@ fn main() -> io::Result<()> {
     }
     if let Some(target_id) = options.service_inspect {
         bindings.push(LocalReadBinding::ServiceInspect { target_id });
+    }
+    if let Some(target_id) = options.application_inspect {
+        bindings.push(LocalReadBinding::ApplicationInspect {
+            target_id,
+            include_usage: false,
+        });
     }
     if bindings.is_empty() {
         bindings.push(LocalReadBinding::SystemStatus {});

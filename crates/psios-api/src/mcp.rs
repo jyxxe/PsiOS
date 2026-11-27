@@ -3,7 +3,7 @@ use crate::{BlockInventoryQuery, ResourceRef};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-pub const MAX_LOCAL_READ_BINDINGS: usize = 6;
+pub const MAX_LOCAL_READ_BINDINGS: usize = 7;
 pub const MAX_VOLUME_FILES_PAGE: usize = 32;
 pub const VOLUME_FILES_RESULT_BYTES: usize = 12 * 1024;
 pub const MAX_VOLUME_FILE_CHUNK: usize = 6 * 1024;
@@ -150,6 +150,12 @@ pub enum LocalReadBinding {
     },
     #[serde(rename = "service.inspect")]
     ServiceInspect { target_id: String },
+    #[serde(rename = "application.inspect_instance")]
+    ApplicationInspect {
+        target_id: String,
+        #[serde(default)]
+        include_usage: bool,
+    },
 }
 
 impl From<LocalReadTool> for LocalReadBinding {
@@ -174,6 +180,7 @@ impl LocalReadBinding {
             Self::VolumeFiles { .. } => "volume.files",
             Self::VolumeReadChunk { .. } => "volume.read_chunk",
             Self::ServiceInspect { .. } => "service.inspect",
+            Self::ApplicationInspect { .. } => "application.inspect_instance",
         }
     }
 
@@ -186,7 +193,8 @@ impl LocalReadBinding {
             Self::VolumeUsage { .. }
             | Self::VolumeFiles { .. }
             | Self::VolumeReadChunk { .. }
-            | Self::ServiceInspect { .. } => None,
+            | Self::ServiceInspect { .. }
+            | Self::ApplicationInspect { .. } => None,
         }
     }
 
@@ -197,6 +205,7 @@ impl LocalReadBinding {
             | Self::VolumeFiles { target_id, .. }
             | Self::VolumeReadChunk { target_id, .. } => Some((target_id, "Volume")),
             Self::ServiceInspect { target_id } => Some((target_id, "HostService")),
+            Self::ApplicationInspect { target_id, .. } => Some((target_id, "Application")),
             Self::SystemStatus {}
             | Self::NodePressure {}
             | Self::NodeInventory {}
@@ -236,6 +245,9 @@ impl LocalReadBinding {
                 }))
             }
             Self::ServiceInspect { .. } => Some(target),
+            Self::ApplicationInspect { include_usage, .. } => Some(json!({
+                "id": id, "expected_resource_version": version, "include_usage": include_usage
+            })),
             Self::SystemStatus {}
             | Self::NodePressure {}
             | Self::NodeInventory {}

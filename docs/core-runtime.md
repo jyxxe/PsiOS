@@ -800,6 +800,8 @@ psios-mcp --socket /run/psios/api.sock --service-uid PSIOS_UID \
 
 格式 144 的 `volume.files` 和 `volume.read_chunk` 可与正在运行的只读 OCI 挂载并行。Core 持有该卷的读取锁，并在读取前后通过 Linux 核对原容器调用、挂载命名空间、卷 inode 和只读状态。外部重启或观测不一致时，读取失败且不发布制品。可写挂载的卷仍需先停止工作负载。写入、备份与其他卷工具沿用现有卷锁规则。[真实 Docker 和 MCP 路径](../tests/oci_read_only_volume.py)
 
+格式 146 可用 `--application-inspect APPLICATION_ID` 通过两代协议公开一个运行中应用的 `application.inspect_instance`。Agent 的委托须显式覆盖应用及其绑定卷。调用参数可设置 `include_usage`，目标由适配器部署配置决定。现代 Tasks 的原调用可跨守护进程重启恢复，撤权会阻止继续读取。[双协议、双目标授权与恢复验收](../tests/oci_read_only_volume.py)
+
 ### 现代 MCP Tasks
 
 在 `--protocol 2026-07-28` 上指定 `--tasks-endpoint ENDPOINT_ID` 可启用本机轮询式 Tasks。为每个部署选择稳定的端点标识。调用方在每个 Tasks 请求的 `io.modelcontextprotocol/clientCapabilities.extensions` 中声明 `io.modelcontextprotocol/tasks: {}`。PsiOS 对提供持久调用键的 `tools/call` 采用异步结果，调用键通过 PsiOS 定义的 `_meta.io.psios/mcpInvocationKey` 传递，使用 16 至 96 个 ASCII 字母、数字、短横线或下划线。省略调用键的工具请求仍同步返回。客户端丢失创建回执时，用同一端点、凭据、工具、资源绑定和调用键重连查询原句柄。JSON-RPC 请求 ID 仅用于当次回包关联。[MCP Tasks 2026-07-28](https://tasks.extensions.modelcontextprotocol.io/specification/2026-07-28/tasks)

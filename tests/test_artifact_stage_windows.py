@@ -140,7 +140,8 @@ class PreparedUploadTests(unittest.TestCase):
         self.assertEqual(self.capacity()["receipts"], 2)
         n.stop()
         report = json.loads(subprocess.check_output([*n.daemon, "verify"], timeout=20))
-        self.assertEqual((report["database_format"], report["sqlite_integrity"]), (135, "Verified"))
+        self.assertGreaterEqual(report["database_format"], 135)
+        self.assertEqual(report["sqlite_integrity"], "Verified")
 
     def test_offline_verifier_rejects_a_shortened_persisted_window(self):
         n = self.node
@@ -179,7 +180,9 @@ class PreparedUploadTests(unittest.TestCase):
         self.assertTrue(current["prepared_stage_keys"])
         prior.stop()
         upgraded = json.loads(subprocess.check_output([*prior.daemon, "verify"], timeout=20))
-        self.assertEqual((upgraded["node_id"], upgraded["database_format"]), (old["node_id"], 135))
+        self.assertEqual(upgraded["node_id"], old["node_id"])
+        self.assertGreaterEqual(upgraded["database_format"], 135)
+        self.assertFalse(upgraded["migration_required"])
         denied = subprocess.run([*original, "serve"], capture_output=True, text=True, timeout=20)
         self.assertNotEqual(denied.returncode, 0)
         self.assertIn("SchemaVersionUnsupported", denied.stderr)

@@ -327,6 +327,13 @@ def check_native_workflow(c):
     return observed
 
 
+def hold_terminal(console):
+    console.run("test ! -e /dev/pts/0 || exit 1; "
+                "(trap '' TERM HUP; exec 8<>/dev/ptmx && exec sleep 300) </dev/null >/dev/null 2>&1 & "
+                "for i in $(seq 1 50); do test ! -c /dev/pts/0 || exit 0; sleep 0.1; done; exit 1")
+    assert console.run("stat -c '%u:%a' /dev/pts/0") == console.run("id -u") + ":600"
+
+
 def check_temporary_storage(c):
     assert c.run("stat -c '%u:%g:%a' /tmp") == "0:0:1777"
     mount = c.run("awk '$5 == \"/tmp\" {for (i=7; i<NF; i++) "
@@ -582,11 +589,12 @@ def exercise(args, work):
         first = check_state(c)
         assert not first[1]["deduplicated"]
         pending_schedule = schedule_across_power_cut(c)
+        hold_terminal(c)
         # SIGKILL the VM with the OS and Core still running.
     with boot(work, image) as c:
         c.login("psios", operator)
         assert c.run("./observe") == "persisted"
-        c.run("test ! -e /tmp/psios-scratch-marker && test ! -e /tmp/psios-root-scratch && "
+        c.run("test ! -e /dev/pts/0 && test ! -e /tmp/psios-scratch-marker && test ! -e /tmp/psios-root-scratch && "
               "touch /tmp/psios-scratch-marker")
         # Only the executable was synced before the power cut. The fill file
         # has served its capacity test and may be absent after journal replay.
@@ -618,6 +626,7 @@ def exercise(args, work):
               "p=$!; sleep 0.1; test \"$(readlink /proc/$p/cwd)\" = /root")
         c.run("(cd /tmp && trap '' TERM HUP && exec tail -f ./psios-scratch-marker) "
               "</dev/null >/dev/null 2>&1 & p=$!; sleep 0.1; test \"$(readlink /proc/$p/cwd)\" = /tmp")
+        hold_terminal(c)
         c.send("poweroff")
         serial = c.until(b"Power down", timeout=30)
         assert b"PsiOS shutdown could not close" not in serial, serial[-2000:]
@@ -696,7 +705,7 @@ def exercise(args, work):
     print(f"Verified source {deployment['source_commit']}, node {first[0]}, task {first[1]['task_id']}, "
           "matched deployment receipt, authenticated UEFI console, private persistent homes, full-home isolation, "
           "bounded volatile /tmp, offline management, Task, schedule, workflow and chat recovery after power loss, "
-          "clean shutdown with active home and /tmp readers, external rescue, clean ext4 "
+          "clean shutdown with active home, /tmp and PTY handles, external rescue, clean ext4 "
           "after authority refusal, consumed enrollment and damaged payload and mismatched state/home refusal.")
 
 

@@ -168,8 +168,8 @@ jobs:
           sudo unshare --mount --propagation private env \
             PSIOS_TEST_BLOCK_INVENTORY_MOUNTS=1 PSIOS_TEST_BLOCK_LOOP=1 \
             python3 -B -m unittest discover -s tests -p test_block_inventory.py -v
-      - name: Pair and inspect real Tasks in headless Chrome
-        run: PSIOS_TEST_SHELL_BROWSER=1 python3 -B -m unittest discover -s tests -p test_shell.py -k test_browser -v
+      - name: Pair and inspect real Tasks and applications in headless Chrome
+        run: PSIOS_TEST_SHELL_BROWSER=1 PSIOS_TEST_SHELL_OCI=1 python3 -B -m unittest discover -s tests -p test_shell.py -k test_browser -v
       - name: Verify scoped IPv6 probes across a real private veth pair
         run: |
           for mode in eui64 none; do

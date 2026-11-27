@@ -80,6 +80,8 @@ enum Endpoint {
     ObserveEnd,
     Node,
     Tasks,
+    Applications,
+    ApplicationReleases,
     Task,
     TaskHistory,
     TaskArtifact,
@@ -99,6 +101,13 @@ struct Empty {}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Page {
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApplicationReleases {
+    id: String,
     cursor: Option<String>,
 }
 
@@ -148,6 +157,8 @@ struct CancelPendingTask {
 
 enum CoreRequest {
     Call(&'static str, Value),
+    Applications(Page),
+    ApplicationReleases(ApplicationReleases),
     Artifact(TaskArtifact),
     CancelPending(CancelPendingTask),
 }
@@ -162,6 +173,74 @@ impl CoreRequest {
         match self {
             Self::Call(method, params) => {
                 Ok(json_response(StatusCode::OK, client.call(method, params)?))
+            }
+            Self::Applications(page) => {
+                let snapshot = client.call(
+                    "Resource.List",
+                    json!({"kind":"Application","limit":8,"cursor":page.cursor}),
+                )?;
+                let references = snapshot["items"].as_array().ok_or_else(|| {
+                    ApiError::new("RecoveryRequired", "application snapshot is malformed")
+                })?;
+                let mut items = Vec::with_capacity(references.len());
+                for reference in references {
+                    check()?;
+                    let app = client.call("Resource.Resolve", json!({"reference":reference}))?;
+                    if app["reference"] != *reference || app["resource"]["kind"] != "Application" {
+                        return Err(ApiError::new(
+                            "RecoveryRequired",
+                            "application reference did not resolve exactly",
+                        )
+                        .into());
+                    }
+                    // The resource envelope also contains execution configuration.
+                    // Send only the catalog fields used by the embedded page.
+                    items.push(json!({
+                        "reference":reference,
+                        "name":app["resource"]["spec"]["name"],
+                        "lifecycle":app["resource"]["status"]["lifecycle"],
+                    }));
+                }
+                Ok(json_response(
+                    StatusCode::OK,
+                    json!({
+                        "items": items,
+                        "next_cursor": snapshot["next_cursor"],
+                    }),
+                ))
+            }
+            Self::ApplicationReleases(request) => {
+                let page = client.call(
+                    "Application.ListReleases",
+                    json!({"application_id":request.id,"cursor":request.cursor,"limit":8}),
+                )?;
+                let releases = page["items"].as_array().ok_or_else(|| {
+                    ApiError::new(
+                        "RecoveryRequired",
+                        "application release snapshot is malformed",
+                    )
+                })?;
+                let items = releases
+                    .iter()
+                    .map(|release| {
+                        json!({
+                            "release_ref": release["release_ref"],
+                            "release_version": release["release_version"],
+                            "package_format": release["package_format"],
+                            "state": release["state"],
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                Ok(json_response(
+                    StatusCode::OK,
+                    json!({
+                        "application_ref": page["application_ref"],
+                        "application_lifecycle": page["application_lifecycle"],
+                        "selected_release_ref": page["selected_release_ref"],
+                        "items": items,
+                        "next_cursor": page["next_cursor"],
+                    }),
+                ))
             }
             Self::CancelPending(request) => {
                 let task = client.call("Task.Get", json!({"id":request.id}))?;
@@ -321,6 +400,12 @@ fn rpc(endpoint: Endpoint, data: Value) -> Result<CoreRequest, Fault> {
                 json!({"kind":"Task","limit":20,"cursor":page.cursor}),
             ))
         }
+        Endpoint::Applications => Ok(CoreRequest::Applications(
+            serde_json::from_value(data).map_err(|_| INVALID)?,
+        )),
+        Endpoint::ApplicationReleases => Ok(CoreRequest::ApplicationReleases(
+            serde_json::from_value(data).map_err(|_| INVALID)?,
+        )),
         Endpoint::Task => {
             let task: Task = serde_json::from_value(data).map_err(|_| INVALID)?;
             Ok(CoreRequest::Call("Task.Get", json!({"id":task.id})))
@@ -412,6 +497,8 @@ impl Shell {
             "/api/session-end" => Endpoint::ObserveEnd,
             "/api/node" => Endpoint::Node,
             "/api/tasks" => Endpoint::Tasks,
+            "/api/applications" => Endpoint::Applications,
+            "/api/application-releases" => Endpoint::ApplicationReleases,
             "/api/task" => Endpoint::Task,
             "/api/cancel-pending-task" if self.cancel_pending_tasks => Endpoint::CancelPendingTask,
             "/api/task-history" => Endpoint::TaskHistory,

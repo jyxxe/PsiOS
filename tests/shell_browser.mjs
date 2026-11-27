@@ -156,6 +156,39 @@ async function test() {
   await waitFor("paired desktop", '!document.querySelector("#workspace").hidden && !document.querySelector("#empty-desktop").hidden');
   assert.ok(await evaluate('document.activeElement.id === "nav-node" && document.querySelectorAll(".app-window:not([hidden])").length === 0'));
   assert.ok(!requests.some(url => ["/api/node", "/api/tasks"].includes(new URL(url).pathname)));
+  if (input.applicationCatalog) {
+    await click("#nav-applications");
+    await waitFor("first application page", 'document.querySelectorAll("#application-rows button").length === 8');
+    await click("#applications-next");
+    await waitFor("the last application page", 'document.querySelector("#application-rows button")?.textContent === "catalog-8"');
+    await click("#applications-previous");
+    await waitFor("return to the first application page", 'document.querySelectorAll("#application-rows button").length === 8');
+    await click('#application-rows button[data-application-id="' + input.application + '"]');
+    await waitFor("first release page", 'document.querySelectorAll(".release-list li").length === 8');
+    assert.ok(await evaluate('document.activeElement.id === "application-detail" && document.querySelector(".release-list").textContent.includes("已选用")'));
+    await click("#releases-next");
+    await waitFor("second release page", 'document.querySelectorAll(".release-list li").length === 1 && document.querySelector(".release-list li strong").textContent === "9.0.0"');
+    await send("Emulation.setDeviceMetricsOverride", {
+      width: 360, height: 800, screenWidth: 360, screenHeight: 800, deviceScaleFactor: 1, mobile: true,
+    });
+    await waitFor("narrow catalog viewport", "window.innerWidth === 360");
+    assert.equal(await evaluate("document.documentElement.scrollWidth"), 360);
+    await click("#nav-tasks");
+    await waitFor("another app stays open", 'document.querySelectorAll("#task-rows button").length > 0');
+    await keyboardActivate('#window-applications [data-action="minimize"]');
+    assert.ok(await evaluate('document.querySelector("#application-content").textContent === "" && document.querySelector("#application-rows").textContent === ""'));
+    writeSync(input.control_fd, Buffer.from("R"));
+    const signal = Buffer.alloc(1);
+    assert.equal(readSync(input.control_fd, signal), 1);
+    assert.equal(signal.toString(), "K");
+    await keyboardActivate("#nav-applications");
+    await waitFor("release scope checked again", 'document.querySelector("#application-content .error") !== null');
+    assert.ok(await evaluate('document.querySelector(".release-list") === null && document.querySelectorAll("#task-rows button").length > 0'));
+    await click("#logout");
+    await waitFor("cleared catalog on disconnect", 'document.querySelector("#workspace").hidden && document.querySelector("#application-rows").textContent === ""');
+    assert.deepEqual(exceptions, []);
+    return;
+  }
   if (input.navigateBack) {
     await click("#nav-node");
     await waitFor("populated inventory", 'document.querySelector("#node-view").textContent.includes(' + JSON.stringify(input.node) + ')');

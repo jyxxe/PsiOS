@@ -127,13 +127,27 @@ class McpTaskTests(McpTaskFixture, unittest.TestCase):
         self.assertEqual(repeated["taskId"], handle)
         self.assertEqual(self.tasks(), [original])
         self.scheduling("Enabled")
-        settled = self.wait_status(recovered, handle)
+        stale = self.wait_status(recovered, handle)
+        self.assertEqual(stale["result"]["structuredContent"], {
+            "code": "ApprovalInvalidated", "task_id": original["resource_id"],
+        })
+        self.assertEqual(n.get(original["resource_id"])["value"]["result"]["artifact_refs"], [])
+        fresh_key = key()
+        fresh = self.task_call(recovered, "tools/call", {"name": tool}, invocation=fresh_key)["result"]["taskId"]
+        self.assertNotEqual(fresh, handle)
+        settled = self.wait_status(recovered, fresh)
         report = self.check_receipt(settled["result"], tool, grant)
-        self.assertEqual(report["task_id"], original["resource_id"])
         self.assertEqual(report["result"]["boot_id"], n.call("Node.Get", {})["state"]["boot_id"])
-        self.assertEqual(len(self.tasks()), 1)
+        self.assertEqual({task["resource_id"] for task in self.tasks()}, {original["resource_id"], report["task_id"]})
+        recovered.close()
+        n.stop(signal.SIGKILL)
+        n.start()
+        reconnected = self.task_wire(grant, extra=("--tool", tool))
+        self.assertEqual(self.wait_status(reconnected, fresh), settled)
+        self.assertEqual(self.task_call(reconnected, "tools/call", {"name": tool},
+                                        invocation=fresh_key)["result"]["taskId"], fresh)
         n.call("Grant.Revoke", target(grant["grant_ref"]))
-        self.assertEqual(self.task_call(recovered, "tasks/get", {"taskId": handle})["error"]["code"], -32602)
+        self.assertEqual(self.task_call(reconnected, "tasks/get", {"taskId": fresh})["error"]["code"], -32602)
 
     def test_lost_stdio_response_rejoins_one_task_across_daemon_and_adapter_restart(self):
         n = self.node

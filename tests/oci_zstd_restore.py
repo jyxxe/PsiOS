@@ -88,6 +88,12 @@ def main(binaries, previous=None):
                 old["node_id"], 135, True), before
             node.start()
             assert node.call("Resource.Resolve", {"reference": old_receipt["capture_ref"]})["value"] == old_proof
+            node.stop()
+            verified_old = verify_authority(node)
+            assert (verified_old["database_format"], verified_old["migration_required"]) == (136, False), verified_old
+            node.start()
+            node.call("Artifact.Withdraw", {"reference": old_receipt["artifact_ref"],
+                                           "reason": "retain the prior compatibility receipt"})
 
         receipt, proof = capture(node, image_id, info["ID"], delegation)
         assert proof["image"]["diff_ids"] == [diffid], proof

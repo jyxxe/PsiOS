@@ -17,7 +17,7 @@ class KernelInventoryTests(unittest.TestCase):
     def status(self):
         return self.node.call("Tool.Call", {
             "tool": "system.status", "input": {}, "delegation_id": "owner-delegation",
-        })["result"]
+        })
 
     def assert_live_status(self):
         earliest = time.clock_gettime(time.CLOCK_BOOTTIME)

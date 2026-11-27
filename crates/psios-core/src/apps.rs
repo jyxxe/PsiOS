@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, process::Command};
 
 pub(crate) mod artifact_install;
+pub(crate) mod attached_read;
 pub(crate) mod capture;
 pub(crate) mod catalog;
 mod cgroup;
@@ -578,7 +579,10 @@ impl Engine<'_> {
         self.absent(w, cid, engine)
     }
     fn managed(&self, w: &Work, id: &str, start_op: &str) -> Result<Value> {
-        if let Some(engine) = w.target.body["engine_id"].as_str() {
+        self.managed_application(&w.target, id, start_op)
+    }
+    fn managed_application(&self, application: &Doc, id: &str, start_op: &str) -> Result<Value> {
+        if let Some(engine) = application.body["engine_id"].as_str() {
             require(
                 self.identity()? == engine,
                 "PreconditionFailed",
@@ -588,8 +592,8 @@ impl Engine<'_> {
         let v = self.inspect("container", id)?;
         require(
             v["Id"] == id
-                && v["Config"]["Labels"]["io.psios.application"] == w.target.id
-                && v["Image"] == w.target.spec["image_id"]
+                && v["Config"]["Labels"]["io.psios.application"] == application.id
+                && v["Image"] == application.spec["image_id"]
                 && v["Config"]["Labels"]["io.psios.operation"] == start_op,
             "PreconditionFailed",
             "container identity mismatch",

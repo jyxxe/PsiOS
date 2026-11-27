@@ -794,7 +794,9 @@ psios-mcp --socket /run/psios/api.sock --service-uid PSIOS_UID \
 
 格式 141 可在两代协议上加 `--volume-files VOLUME_ID`。将该卷 ID 和 `volume.files` 纳入同一委托。工具可按相对 `path` 列出目录，空路径代表该卷根目录。每页最多 32 项，Core 将目录制品限制为 12 KiB，并在较长文件名需要更多空间时提早分页。继续读取时，将返回的 `next_after` 作为 `after`，连同原路径和返回的 `volume_version` 一并传回。Core 会拒绝已经变更的卷版本。同一查询可通过现代 Tasks 的原调用键恢复结果。[目录授权、分页与重启验收](../tests/test_mcp_bound_read_tools.py) · [持久句柄验收](../tests/test_mcp_tasks.py)
 
-格式 142 可用 `--volume-read-chunk VOLUME_ID` 为两代协议公开 `volume.read_chunk`。授权须明确列出该卷。工具从相对 `path` 读取每次最多 6 KiB 的普通文件数据，返回 Base64、块摘要、下一偏移和 EOF。继续读取时将 `next_offset` 作为 `offset`，连同相同路径、`volume_version` 和 `file_revision` 传回。卷版本或文件身份变化后从零重新读。Core 会拒绝链接、嵌套挂载及已经被运行中工作负载占用的卷。[真实二进制与变更拒绝](../tests/test_mcp_bound_read_tools.py) · [在途查询恢复](../tests/test_mcp_tasks.py)
+格式 142 可用 `--volume-read-chunk VOLUME_ID` 为两代协议公开 `volume.read_chunk`。授权须明确列出该卷。工具从相对 `path` 读取每次最多 6 KiB 的普通文件数据，返回 Base64、块摘要、下一偏移和 EOF。继续读取时将 `next_offset` 作为 `offset`，连同相同路径、`volume_version` 和 `file_revision` 传回。卷版本或文件身份变化后从零重新读。Core 会拒绝链接和嵌套挂载。[真实二进制与变更拒绝](../tests/test_mcp_bound_read_tools.py) · [在途查询恢复](../tests/test_mcp_tasks.py)
+
+格式 144 的 `volume.files` 和 `volume.read_chunk` 可与正在运行的只读 OCI 挂载并行。Core 持有该卷的读取锁，并在读取前后通过 Linux 核对原容器调用、挂载命名空间、卷 inode 和只读状态。外部重启或观测不一致时，读取失败且不发布制品。可写挂载的卷仍需先停止工作负载。写入、备份与其他卷工具沿用现有卷锁规则。[真实 Docker 和 MCP 路径](../tests/oci_read_only_volume.py)
 
 ### 现代 MCP Tasks
 

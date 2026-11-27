@@ -674,6 +674,7 @@ pub struct Work {
     pub start_checkpoint: Option<Doc>,
     pub publication_checkpoint: Option<Doc>,
     pub volume: Option<Doc>,
+    pub(crate) attached_read: Option<apps::attached_read::AttachedRead>,
     pub(crate) restore_image: Option<apps::restore_image::Prepared>,
     pub(crate) restore_image_inspection: Option<apps::restore_image::Recorded>,
     pub(crate) stop_cleanup: Option<apps::stop::Prepared>,
@@ -1295,7 +1296,7 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
     } else {
         None
     };
-    let w = Work {
+    let mut w = Work {
         start_checkpoint,
         publication_checkpoint,
         launch,
@@ -1310,6 +1311,7 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
         data,
         inline,
         volume,
+        attached_read: None,
         restore_image,
         restore_image_inspection,
         stop_cleanup,
@@ -1321,7 +1323,7 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
         network_trial_inspection,
     };
     node::reserve(db, &w)?;
-    storage::reserve(db, &w)?;
+    storage::reserve(db, &mut w)?;
     if matches!(w.action, Action::Backup(_)) {
         storage::publication::begin(db, &w)?;
     }

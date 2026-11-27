@@ -394,12 +394,14 @@ def check_native_mount_topology(c):
     report = call(c, "Artifact.Read", {"reference": task["result"]["artifact_refs"][0]})
     assert report["mount_namespace_inode"] == c.run("stat -Lc %i /proc/self/ns/mnt")
     mounts = {mount["mount_point"]: mount for mount in report["mounts"] if isinstance(mount["mount_point"], str)}
-    state, settings, homes, local_home, scratch = [mounts[path] for path in
-        ("/var/lib", "/etc", "/mnt/psios-homes", "/home/psios", "/tmp")]
+    state, settings, homes, local_home, scratch, shared = [mounts[path] for path in
+        ("/var/lib", "/etc", "/mnt/psios-homes", "/home/psios", "/tmp", "/dev/shm")]
     assert state["filesystem_type"] == "ext4" and {"nodev", "nosuid", "noexec"}.issubset(state["flags"]), state
     assert settings["device"] == state["device"] and settings["filesystem_root"] == "/etc", settings
     assert homes["filesystem_type"] == "ext4" and homes["device"] != state["device"], homes
     assert local_home["device"] == homes["device"] and local_home["filesystem_root"] == "/psios", local_home
+    assert shared["filesystem_type"] == "tmpfs" and {"nodev", "nosuid", "noexec"}.issubset(shared["flags"]), shared
+    assert shared["device"] != scratch["device"], (shared, scratch)
     assert scratch["filesystem_type"] == "tmpfs" and {"nodev", "nosuid"}.issubset(scratch["flags"]), scratch
 
 
@@ -588,12 +590,15 @@ def exercise(args, work):
         # Unrelated tool grants issued by the checks above must preserve chat sends.
         first = check_state(c)
         assert not first[1]["deduplicated"]
+        assert c.run("stat -c '%u:%g:%a' /dev/shm") == "0:0:1777"
+        c.run("umask 077; echo volatile > /dev/shm/psios-cut")
         pending_schedule = schedule_across_power_cut(c)
         hold_terminal(c)
         # SIGKILL the VM with the OS and Core still running.
     with boot(work, image) as c:
         c.login("psios", operator)
         assert c.run("./observe") == "persisted"
+        c.run("test ! -e /dev/shm/psios-cut && touch /dev/shm/psios-shutdown")
         c.run("test ! -e /dev/pts/0 && test ! -e /tmp/psios-scratch-marker && test ! -e /tmp/psios-root-scratch && "
               "touch /tmp/psios-scratch-marker")
         # Only the executable was synced before the power cut. The fill file
@@ -626,6 +631,8 @@ def exercise(args, work):
               "p=$!; sleep 0.1; test \"$(readlink /proc/$p/cwd)\" = /root")
         c.run("(cd /tmp && trap '' TERM HUP && exec tail -f ./psios-scratch-marker) "
               "</dev/null >/dev/null 2>&1 & p=$!; sleep 0.1; test \"$(readlink /proc/$p/cwd)\" = /tmp")
+        c.run("(cd /dev/shm && trap '' TERM HUP && exec tail -f ./psios-shutdown) "
+              "</dev/null >/dev/null 2>&1 & p=$!; sleep 0.1; test \"$(readlink /proc/$p/cwd)\" = /dev/shm")
         hold_terminal(c)
         c.send("poweroff")
         serial = c.until(b"Power down", timeout=30)
@@ -637,7 +644,7 @@ def exercise(args, work):
         c.until(b"Login incorrect")
         c.login("psios", rotated)
         assert c.run("./observe") == "persisted"
-        c.run("test ! -e /tmp/psios-scratch-marker")
+        c.run("test ! -e /tmp/psios-scratch-marker && test ! -e /dev/shm/psios-shutdown")
         c.run("test ! -r /root/maintenance")
         assert json.loads(c.run("psiosctl whoami"))["authority_id"] == first[0]
         c.send("exit")
@@ -704,8 +711,8 @@ def exercise(args, work):
     assert sha(image) == pre_reject
     print(f"Verified source {deployment['source_commit']}, node {first[0]}, task {first[1]['task_id']}, "
           "matched deployment receipt, authenticated UEFI console, private persistent homes, full-home isolation, "
-          "bounded volatile /tmp, offline management, Task, schedule, workflow and chat recovery after power loss, "
-          "clean shutdown with active home, /tmp and PTY handles, external rescue, clean ext4 "
+          "bounded volatile /tmp and /dev/shm, offline management, Task, schedule, workflow and chat recovery after power loss, "
+          "clean shutdown with active home, /tmp, /dev/shm and PTY handles, external rescue, clean ext4 "
           "after authority refusal, consumed enrollment and damaged payload and mismatched state/home refusal.")
 
 

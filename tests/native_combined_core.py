@@ -83,12 +83,20 @@ def recover_backup(console):
     assert console.run("stat -c '%a' recovery/data/record") == "600"
 
 
-def stage_terminal_check(work, disk):
-    # Install the test executable into the disposable guest's private root home.
-    # The EFI image and all deployed programs remain the ones produced by the installer.
-    probe = work / "pty-check"
-    subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-static", "-s",
-                    REPO / "tests/native_pty.c", "-o", probe], check=True, timeout=60)
+def stage_checks(work, disk):
+    # Stage acceptance programs in the disposable root home, outside the EFI payload.
+    programs = {}
+    commands = []
+    for name in ("pty", "shm"):
+        filename = f"{name}-check"
+        probe = work / filename
+        subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-static", "-s",
+                        REPO / f"tests/native_{name}.c", "-o", probe], check=True, timeout=60)
+        programs[filename] = sha(probe)
+        commands.extend([f"write {filename} /root/{filename}",
+                         f"set_inode_field /root/{filename} uid 0",
+                         f"set_inode_field /root/{filename} gid 0",
+                         f"set_inode_field /root/{filename} mode 0100700"])
     table = json.loads(subprocess.check_output(["sfdisk", "--json", disk]))["partitiontable"]
     home = table["partitions"][2]
     start, size = [home[key] * table["sectorsize"] for key in ("start", "size")]
@@ -96,13 +104,11 @@ def stage_terminal_check(work, disk):
     assert start % mib == 0 and size % mib == 0
     partition = work / "test-home.ext4"
     extract_partition(disk, partition, start // mib, size // mib)
-    commands = ("write pty-check /root/pty-check\nset_inode_field /root/pty-check uid 0\n"
-                "set_inode_field /root/pty-check gid 0\nset_inode_field /root/pty-check mode 0100700\n")
-    subprocess.run(["debugfs", "-w", "-f", "-", partition], input=commands, text=True,
+    subprocess.run(["debugfs", "-w", "-f", "-", partition], input="\n".join(commands) + "\n", text=True,
                    cwd=work, check=True, stdout=subprocess.DEVNULL)
     replace_partition(disk, partition, start // mib)
     partition.unlink()
-    return sha(probe)
+    return programs
 
 
 def exercise(args, work):
@@ -113,7 +119,7 @@ def exercise(args, work):
     disk = work / "combined.raw"
     subprocess.run([*installer(args, disk, args.archive), "--console-hash", operator_hash,
                     "--root-console-hash", root_hash], check=True, stdout=subprocess.DEVNULL, timeout=140)
-    probe_digest = stage_terminal_check(work, disk)
+    programs = stage_checks(work, disk)
     with boot(work, disk, pace_commands=True) as console:
         console.login("psios", user)
         assert console.run("stat -c '%a' /dev/pts/ptmx") == "666"
@@ -125,12 +131,15 @@ def exercise(args, work):
         recover_backup(console)
         console.send("exit")
         console.login("root", root)
-        assert console.run("stat -c '%u:%g:%a' /root/pty-check") == "0:0:700"
-        assert console.run("sha256sum /root/pty-check").split()[0] == probe_digest
+        for filename, digest in programs.items():
+            assert console.run(f"stat -c '%u:%g:%a' /root/{filename}") == "0:0:700"
+            assert console.run(f"sha256sum /root/{filename}").split()[0] == digest
         assert console.run("/root/pty-check") == "private PTY I/O, resize, 64-pair limit and reuse passed"
+        assert console.run("/root/shm-check") == (
+            "POSIX shared memory exchange, permissions, byte and inode limits and recovery passed")
         poweroff(console)
     check_clean_shutdown(disk)
-    print("PASS block layout, pressure, durable Task.Wait, backup export, detached recovery, user PTYs and clean shutdown")
+    print("PASS block layout, pressure, durable Task.Wait, backup export, detached recovery, user PTYs, POSIX shared memory and clean shutdown")
 
 
 if __name__ == "__main__":

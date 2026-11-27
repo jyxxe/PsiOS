@@ -129,6 +129,9 @@ mkdir -p /tmp
 [ -d /tmp ] && [ ! -L /tmp ] || exit 1
 mount -t tmpfs -o nodev,nosuid,size=32m,nr_inodes=4096,mode=1777 tmpfs /tmp
 if [ "$trial_boot" = no ]; then
+    stage=shared-memory
+    mkdir -p /dev/shm
+    mount -t tmpfs -o nodev,nosuid,noexec,size=16m,nr_inodes=1024,mode=1777 tmpfs /dev/shm
     stage=pseudo-terminals
     mkdir -p /dev/pts
     mount -t devpts -o nosuid,noexec,newinstance,ptmxmode=0666,mode=0600,max=64 devpts /dev/pts

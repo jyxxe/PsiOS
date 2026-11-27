@@ -43,7 +43,7 @@ function leave(text, error = false) {
   code.focus();
 }
 
-async function request(path, body, token = bearer) {
+async function post(path, body, token = bearer) {
   const headers = { "Content-Type": "application/json" };
   if (token) headers.Authorization = "Bearer " + token;
   let response;
@@ -62,14 +62,18 @@ async function request(path, body, token = bearer) {
   if (response.status === 401 && token && token === bearer) {
     leave("会话已失效。请在终端重新启动 Shell。", true);
   }
-  const result = await response.json();
   if (!response.ok) {
+    const result = await response.json();
     const description = result.error?.message || "请求失败";
     const error = new Error(description);
     error.code = result.error?.code;
     throw error;
   }
-  return result;
+  return response;
+}
+
+async function request(path, body, token = bearer) {
+  return (await post(path, body, token)).json();
 }
 
 function element(tag, text, className) {
@@ -166,8 +170,11 @@ function artifactView(taskId, references) {
   const preview = element("button", "预览");
   preview.id = "preview-artifact";
   preview.type = "button";
+  const download = element("button", "下载");
+  download.id = "download-artifact";
+  download.type = "button";
   const controls = element("div", undefined, "artifact-controls");
-  controls.append(choices, preview);
+  controls.append(choices, preview, download);
   const referenceBox = element("pre", undefined, "artifact-reference");
   referenceBox.setAttribute("aria-label", "固定制品引用");
   const notice = element("p", "", "message");
@@ -188,28 +195,54 @@ function artifactView(taskId, references) {
   choices.addEventListener("change", clear);
   clear();
 
-  preview.addEventListener("click", async () => {
-    if (preview.disabled) return;
+  async function readArtifact(save) {
+    if (choices.disabled) return;
     clear();
     const reference = references[choices.selectedIndex];
-    preview.disabled = choices.disabled = true;
+    preview.disabled = download.disabled = choices.disabled = true;
     message(notice, "正在核对制品…");
     try {
-      const result = await request("/api/task-artifact", { task_id: taskId, reference });
-      if (!section.isConnected) return;
-      content.textContent = result.content_json;
-      content.hidden = false;
-      message(notice, "已核对固定版本的 SHA-256 摘要。");
-      content.focus();
+      const response = await post("/api/task-artifact", { task_id: taskId, reference, download: save });
+      if (save) {
+        const bytes = await response.arrayBuffer();
+        const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+        const hex = Array.from(hash, (byte) => byte.toString(16).padStart(2, "0")).join("");
+        if ("sha256:" + hex !== reference.digest) throw new Error("下载内容与所选制品的 SHA-256 不符。");
+        if (!section.isConnected) return;
+        const url = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
+        const link = element("a");
+        link.href = url;
+        link.download = "psios-" + hex + ".bin";
+        section.append(link);
+        try {
+          link.click();
+        } finally {
+          link.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 0);
+        }
+        message(notice, "摘要已核验，已提交浏览器下载。");
+      } else {
+        const result = await response.json();
+        if (!section.isConnected) return;
+        content.textContent = result.content_json;
+        content.hidden = false;
+        message(notice, "已核对固定版本的 SHA-256 摘要。");
+        content.focus();
+      }
     } catch (error) {
       if (!section.isConnected) return;
-      message(notice, error.code === "QuotaExceeded"
-        ? "制品超过 64 KiB。可将上述引用交给 psiosctl artifact 导出。"
-        : error.message, true);
+      if (error.code === "QuotaExceeded") {
+        message(notice, save ? "制品超过 8 MiB。可用 psiosctl artifact 的 --max-bytes 选项导出。"
+          : "制品超过 64 KiB。可以下载后查看。", true);
+      } else {
+        message(notice, error.message, true);
+      }
     } finally {
-      preview.disabled = choices.disabled = false;
+      preview.disabled = download.disabled = choices.disabled = false;
     }
-  });
+  }
+  preview.addEventListener("click", () => readArtifact(false));
+  download.addEventListener("click", () => readArtifact(true));
   return section;
 }
 

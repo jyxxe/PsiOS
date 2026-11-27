@@ -1,7 +1,9 @@
 // Exercise the embedded pages through Chrome's private DevTools pipe.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 const input = JSON.parse(readFileSync(0, "utf8"));
@@ -82,8 +84,28 @@ function click(selector) {
   return evaluate("document.querySelector(" + JSON.stringify(selector) + ").click()");
 }
 
+async function selectTask(id) {
+  const selector = '#task-rows button[data-task-id="' + id + '"]';
+  const visible = 'document.querySelector(' + JSON.stringify(selector) + ') !== null';
+  if (!await evaluate(visible)) {
+    await click(await evaluate('document.getElementById("next").disabled') ? "#previous" : "#next");
+    await waitFor("page containing the requested task", visible);
+  }
+  await click(selector);
+}
+
+async function verifyDownload(digest) {
+  await click("#download-artifact");
+  const saved = join(input.downloads, "psios-" + digest.slice("sha256:".length) + ".bin");
+  for (let attempt = 0; attempt < 160 && !existsSync(saved); attempt += 1) await delay(50);
+  const bytes = readFileSync(saved);
+  assert.equal("sha256:" + createHash("sha256").update(bytes).digest("hex"), digest);
+  return bytes;
+}
+
 async function test() {
   await send("Browser.getVersion", {}, 35_000);
+  await send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: input.downloads });
   const { targetId } = await send("Target.createTarget", { url: "about:blank" }, 30_000);
   ({ sessionId } = await send("Target.attachToTarget", { targetId, flatten: true }));
   await send("Page.enable");
@@ -117,7 +139,7 @@ async function test() {
     width: 360, height: 800, screenWidth: 360, screenHeight: 800, deviceScaleFactor: 1, mobile: true,
   });
   await waitFor("narrow viewport", "window.innerWidth === 360");
-  await click('#task-rows button[data-task-id="' + input.task + '"]');
+  await selectTask(input.task);
   await waitFor("visible task result", 'document.getElementById("task-content").textContent.includes("成功") && ' +
     'document.getElementById("task-content").textContent.includes(' + JSON.stringify(input.task) + ')');
   assert.ok(await evaluate('document.activeElement.id === "task-detail" && ' +
@@ -128,10 +150,17 @@ async function test() {
   await waitFor("verified artifact preview", 'document.getElementById("artifact-json")?.textContent.includes(' +
     JSON.stringify(input.node) + ')');
   assert.ok(await evaluate('document.activeElement.id === "artifact-json"'));
+  await verifyDownload(input.digest);
   await click("#close-task");
   assert.ok(await evaluate('document.getElementById("task-detail").hidden && ' +
     'document.activeElement.dataset.taskId === ' + JSON.stringify(input.task)));
 
+  await selectTask(input.large_task);
+  await waitFor("large artifact reference", 'document.querySelector(".artifact-reference")?.textContent.includes(' +
+    JSON.stringify(input.large_digest) + ')');
+  await click("#preview-artifact");
+  await waitFor("size limit", 'document.querySelector(".artifacts .message")?.textContent.includes("64 KiB")');
+  assert.ok((await verifyDownload(input.large_digest)).length > 2 * 128 * 1024);
   await click("#logout");
   await waitFor("cleared session", 'document.getElementById("workspace").hidden && ' +
     'document.getElementById("task-content").textContent === ""');

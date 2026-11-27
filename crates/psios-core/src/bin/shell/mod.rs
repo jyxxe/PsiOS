@@ -27,7 +27,7 @@ use std::{
 };
 use tokio::{
     net::TcpListener,
-    sync::Semaphore,
+    sync::{Semaphore, oneshot},
     task::{JoinSet, spawn_blocking},
     time::timeout,
 };
@@ -38,7 +38,8 @@ const BODY_LIMIT: usize = 4 * 1024;
 const HEADER_WAIT: Duration = Duration::from_secs(3);
 const BODY_WAIT: Duration = Duration::from_secs(2);
 const CORE_WAIT: Duration = Duration::from_secs(16);
-const ARTIFACT_LIMIT: usize = 64 * 1024;
+const PREVIEW_LIMIT: usize = 64 * 1024;
+const DOWNLOAD_LIMIT: usize = 8 * 1024 * 1024;
 
 type HttpResponse = Response<Full<Bytes>>;
 
@@ -108,6 +109,22 @@ struct Task {
 struct TaskArtifact {
     task_id: String,
     reference: ResourceRef,
+    #[serde(default)]
+    download: bool,
+}
+
+impl TaskArtifact {
+    fn check_membership(&self, client: &Client) -> ApiResult<()> {
+        let task = client.call("Task.Get", json!({"id": self.task_id}))?;
+        let reference = json!(self.reference);
+        if task["result"]["artifact_refs"]
+            .as_array()
+            .is_some_and(|items| items.contains(&reference))
+        {
+            return Ok(());
+        }
+        Err(ApiError::new("NotFound", "artifact unavailable in this Task result").into())
+    }
 }
 
 enum Read {
@@ -116,27 +133,45 @@ enum Read {
 }
 
 impl Read {
-    fn execute(self, client: &Client) -> ApiResult<Value> {
+    fn execute(
+        self,
+        client: &Client,
+        check: impl Fn() -> ApiResult<()>,
+    ) -> ApiResult<HttpResponse> {
+        check()?;
         match self {
-            Self::Call(method, params) => client.call(method, params),
+            Self::Call(method, params) => {
+                Ok(json_response(StatusCode::OK, client.call(method, params)?))
+            }
             Self::Artifact(artifact) => {
-                let task = client.call("Task.Get", json!({"id":artifact.task_id}))?;
-                let reference = json!(artifact.reference);
-                if !task["result"]["artifact_refs"]
-                    .as_array()
-                    .is_some_and(|items| items.contains(&reference))
-                {
-                    return Err(ApiError::new(
-                        "NotFound",
-                        "artifact unavailable in this Task result",
-                    )
-                    .into());
+                artifact.check_membership(client)?;
+                let limit = if artifact.download {
+                    DOWNLOAD_LIMIT
+                } else {
+                    PREVIEW_LIMIT
+                };
+                let bytes = client.artifact_bytes_checked(&artifact.reference, limit, &check)?;
+                check()?;
+                artifact.check_membership(client)?;
+                if artifact.download {
+                    let mut file = response(
+                        StatusCode::OK,
+                        "application/octet-stream",
+                        Bytes::from(bytes),
+                    );
+                    file.headers_mut().insert(
+                        header::CONTENT_DISPOSITION,
+                        HeaderValue::from_static("attachment; filename=\"psios-artifact.bin\""),
+                    );
+                    return Ok(file);
                 }
-                let bytes = client.artifact_bytes(&artifact.reference, ARTIFACT_LIMIT)?;
                 let content = String::from_utf8(bytes).map_err(|_| {
                     ApiError::new("RecoveryRequired", "verified artifact is not UTF-8")
                 })?;
-                Ok(json!({"reference":reference,"content_json":content}))
+                Ok(json_response(
+                    StatusCode::OK,
+                    json!({"reference":artifact.reference,"content_json":content}),
+                ))
             }
         }
     }
@@ -360,19 +395,33 @@ impl Shell {
             )
         })?;
         let context = self.clone();
+        // Dropping the HTTP future (including on timeout) releases the receiver.
+        // An in-flight Core read can finish, but no further chunks are requested.
+        let (consumer, active_request) = oneshot::channel::<()>();
         let work = spawn_blocking(move || {
             let _slot = slot;
-            read.execute(&context.client)
+            read.execute(&context.client, || {
+                if consumer.is_closed() {
+                    return Err(ApiError::new("Cancelled", "Shell request ended").into());
+                }
+                if !context.session.lock().is_ok_and(|mut s| !s.closed(now())) {
+                    return Err(
+                        ApiError::new("AuthenticationRequired", "Shell session ended").into(),
+                    );
+                }
+                Ok(())
+            })
         });
         let result = timeout(CORE_WAIT, work)
             .await
             .map_err(|_| UNAVAILABLE)?
             .map_err(|_| UNAVAILABLE)?;
+        drop(active_request);
         if !self.authorized(&token) {
             return Err(UNAUTHENTICATED);
         }
         Ok(match result {
-            Ok(value) => json_response(StatusCode::OK, value),
+            Ok(response) => response,
             Err(error) => {
                 if error.code == "AuthenticationRequired"
                     && let Ok(mut session) = self.session.lock()

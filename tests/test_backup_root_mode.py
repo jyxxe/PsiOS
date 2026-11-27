@@ -105,6 +105,51 @@ class BackupRootModeTests(unittest.TestCase):
         self.check_tree(root, ROOT_MODE)
         self.check_tree(source_root, ROOT_MODE)
 
+    def test_backup_preflight_and_activation_reject_unsupported_root_metadata(self):
+        node = self.node()
+        source, root = self.source(node)
+        root.chmod(0o750)
+        backups = node.state / "backups"
+        before = set(backups.iterdir())
+        key = "user.psios-root-guard"
+        payload = b"root metadata must be represented"
+        grant = node.call("Grant.Issue", {"principal_id": "local-owner", "units": 4, "ttl_seconds": 120,
+            "actions": ["task.submit", "task.read", "backup.estimate"], "tool_targets": [source["resource_id"]]})
+
+        def refused(task_id, code):
+            task = node.wait(task_id, autoapprove=True)
+            self.assertEqual((task["lifecycle"], task["conditions"][0]["type"]), ("Failed", code), task)
+            self.assertIn("extended attributes", task["conditions"][0]["message"])
+            self.assertEqual(task["result"]["artifact_refs"], [])
+
+        os.setxattr(root, key, payload)
+        prepared = node.prepare("backup.estimate", target(source),
+                                delegation=grant["delegation_ref"]["resource_id"])
+        refused(node.call("Task.Submit", prepared)["task_id"], "UnsupportedCapability")
+        refused(node.submit("backup.create", target(source)), "UnsupportedCapability")
+        self.assertEqual(os.getxattr(root, key), payload)
+        self.assertEqual(set(backups.iterdir()), before)
+        self.assertEqual(node.call("Resource.List", {"kind": "Backup"})["items"], [])
+
+        os.removexattr(root, key)
+        root.chmod(0o2750)
+        self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o2750)
+        refused(node.submit("backup.create", target(source)), "UnsupportedCapability")
+        root.chmod(0o750)
+        backup, _, manifest = self.backup(node, source)
+        self.assertEqual(json.loads(manifest)[MODE_FIELD], 0o750)
+
+        restored = node.perform("backup.restore", target(backup))
+        destination = self.data_path(node, restored)
+        self.check_tree(destination, 0o750)
+        os.setxattr(destination, key, payload)
+        refused(node.submit("volume.activate", target(restored)), "PreconditionFailed")
+        self.assertEqual(os.getxattr(destination, key), payload)
+        self.assertEqual(node.get(restored["resource_id"])["reference"], restored)
+        os.removexattr(destination, key)
+        active = node.perform("volume.activate", target(restored))
+        self.assertEqual(node.perform("volume.read", dict(target(active), name="record"))["content"], CONTENTS)
+
     def test_detached_extraction_applies_exact_mode_and_rejects_special_bits(self):
         node = self.node()
         source, _ = self.source(node)

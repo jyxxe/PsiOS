@@ -325,6 +325,8 @@ Rust SDK 的 `Client::prepare_oci_stop_continuation` 与 `psiosctl application-p
 
 从数据库格式 112 起，新备份记录卷数据根目录的普通 Unix 权限位。恢复先写入成员，再设置根目录权限和修改时间并刷盘。托管数据根须保留所有者的读取和搜索权限，可以是只读目录。恢复发布核验、`volume.activate` 和 `application.rebind_restored_volume` 会核对新证明中的根目录权限。旧备份没有该字段，仍按 `0700` 恢复并使用原证明算法。旧版 Core 无法打开已升级的权威执行写入。[权限恢复与升级验收](../tests/test_backup_root_mode.py)
 
+备份创建和预检要求数据根归 Core 的服务用户与组所有，并拒绝特殊权限位及扩展属性。新备份在暂存前检查这些条件，发布前复核。恢复校验和激活使用同样的根元数据规则，数据根变更后须重新核验方可激活。 [根元数据验收](../tests/test_backup_root_mode.py)
+
 授予核验主体 `volume.inspect_publication`、`task.submit` 和 `task.read`，并将目标限于原 Operation。观察任务重新核对实际卷目录和树内容。管理员用其制品作为 `Operation.Reconcile` 的 `evidence_ref`，Core 再检查目录的当前身份和元数据。核实已发布后登记最初的恢复卷，保留原 Task、Operation 与数据世代。卷仍需独立批准激活。[回执丢失、篡改与激活验收](../tests/test_storage_recovery.py) · [原格式升级](../tests/restore_publication_upgrade.py)
 
 格式 76 的检查点额外记录暂存目录名。完成数据与父目录同步后才提交检查点，启动时留存其绑定的暂存卷。最终目录中的原卷通过核验后报告 `Published`。原暂存目录仍有同一父目录、卷根、数据目录、身份标记及树内容，且最终路径不存在时报告 `NotApplied`。两处都存在、均不可达或身份被替换时保留原未知结果。为早期已发布检查点保留原回执核验路径。

@@ -1,7 +1,8 @@
 //! Inspect a detached volume with the backup capture's source checks and no payload I/O.
 
 use super::{
-    Capture, CaptureMode, MAX_CAPTURE_DEPTH, MAX_ENTRIES, capture_root, require_managed_root_mode,
+    Capture, CaptureMode, MAX_CAPTURE_DEPTH, MAX_ENTRIES, capture_root, checked_root_metadata,
+    require_managed_root_mode,
 };
 use crate::{Result, apps, host::Work, now};
 use serde_json::{Value, json};
@@ -13,7 +14,7 @@ pub(crate) const FORMAT: u32 = apps::health::STARTUP_FORMAT + 1;
 pub(crate) fn run(work: &Work, check: &mut impl FnMut() -> Result<()>) -> Result<Value> {
     check()?;
     let root = capture_root(work)?;
-    let before = root.metadata()?;
+    let before = checked_root_metadata(&root, "UnsupportedCapability")?;
     require_managed_root_mode(before.mode() & 0o777)?;
     let mut scan = Capture {
         mode: CaptureMode::MetadataOnly,
@@ -23,7 +24,9 @@ pub(crate) fn run(work: &Work, check: &mut impl FnMut() -> Result<()>) -> Result
         check,
     };
     scan.walk(&root, Path::new(""), 0)?;
-    scan.confirm_source(&capture_root(work)?, &before)?;
+    let current = capture_root(work)?;
+    checked_root_metadata(&current, "Conflict")?;
+    scan.confirm_source(&current, &before)?;
     let directories = scan
         .entries
         .iter()

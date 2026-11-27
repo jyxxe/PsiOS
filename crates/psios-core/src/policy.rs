@@ -69,6 +69,7 @@ pub const TOOLS: &[&str] = &[
     "volume.write",
     "volume.delete",
     "backup.create",
+    storage::estimate::TOOL,
     storage::publication::INSPECT,
     "backup.verify",
     "backup.delete",
@@ -160,6 +161,7 @@ pub fn readonly(tool: &str) -> bool {
             | apps::inventory::TOOL
             | "secret.mac"
             | "backup.verify"
+            | storage::estimate::TOOL
             | storage::publication::INSPECT
             | storage::restore_publication::INSPECT
             | "volume.read"
@@ -243,6 +245,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | node::block_device::TRACK
                     | node::block_device::OBSERVE
                     | "backup.verify"
+                    | storage::estimate::TOOL
                     | storage::file_integrity::TOOL
                     | storage::file_move::TOOL
                     | storage::file_move::INSPECT
@@ -702,6 +705,7 @@ pub fn grant(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
                     || action == node::service_state::TOOL
                     || action == node::network::probe::state::TOOL
                     || action == storage::cloning::TOOL
+                    || action == storage::estimate::TOOL
                     || action == storage::restore_publication::INSPECT
                     || action == storage::file_integrity::TOOL
                     || action == storage::file_move::TOOL

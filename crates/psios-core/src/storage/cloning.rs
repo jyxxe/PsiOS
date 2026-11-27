@@ -1,7 +1,7 @@
 //! Copy a detached local volume directly into one privately staged successor.
 use super::{
-    Capture, CaptureOutput, ModifiedTime, RestoreDestination, capture_root, create_volume,
-    require_managed_root_mode, restore_proof, restore_publication,
+    Capture, CaptureMode, CaptureOutput, ModifiedTime, RestoreDestination, capture_root,
+    create_volume, require_managed_root_mode, restore_proof, restore_publication,
 };
 use crate::{
     Result,
@@ -71,7 +71,7 @@ pub(crate) fn run(
         Some(|destination: &File| {
             root_metadata(destination, "UnsupportedCapability")?;
             let mut capture = Capture {
-                out: Some(CaptureOutput::Tree(RestoreDestination {
+                mode: CaptureMode::Copy(CaptureOutput::Tree(RestoreDestination {
                     directory: destination,
                     authority: Some(&work.cfg),
                 })),

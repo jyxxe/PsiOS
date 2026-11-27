@@ -3,6 +3,7 @@ pub(crate) mod cloning;
 mod detached;
 pub(crate) mod directory_create;
 pub(crate) mod entry_retirement;
+pub(crate) mod estimate;
 pub(crate) mod export;
 pub(crate) mod file_integrity;
 pub(crate) mod file_move;
@@ -47,6 +48,7 @@ use std::{
 pub(crate) const ROOT_MODE_FORMAT: u32 = crate::node::block_device::retirement::FORMAT + 1;
 
 const MAX_ENTRIES: usize = 4096;
+const MAX_CAPTURE_DEPTH: u32 = 32;
 // A capture permits 33 components of 240 bytes per path. Quotes and backslashes
 // can double their JSON representation. Keep room for digests and manifest metadata.
 const MAX_MANIFEST: u64 = 72 * 1024 * 1024;
@@ -133,9 +135,10 @@ pub fn reserve(db: &Db<'_>, w: &Work) -> Result<()> {
     // The application hold survives daemon shutdown and is released only after verified stop.
     if let Some(v) = &w.volume {
         if v.spec["storage_restore_phase"] == "AwaitingActivation" {
+            let can_read_staged =
+                read_holds::reader(&w.action) && !matches!(w.action, Action::EstimateBackup(_));
             require(
-                read_holds::reader(&w.action)
-                    || matches!(w.action, Action::Activate(_) | Action::Delete(_)),
+                can_read_staged || matches!(w.action, Action::Activate(_) | Action::Delete(_)),
                 "PreconditionFailed",
                 "restored volume requires activation",
             )?;
@@ -423,8 +426,14 @@ impl CaptureOutput<'_> {
     }
 }
 
+enum CaptureMode<'a> {
+    Copy(CaptureOutput<'a>),
+    DigestOnly,
+    MetadataOnly,
+}
+
 struct Capture<'a> {
-    out: Option<CaptureOutput<'a>>,
+    mode: CaptureMode<'a>,
     entries: Vec<(Entry, fs::Metadata)>,
     total: u64,
     max_bytes: u64,
@@ -446,7 +455,11 @@ fn same_source(a: &fs::Metadata, b: &fs::Metadata) -> bool {
 impl Capture<'_> {
     fn walk(&mut self, dir: &File, root: &Path, depth: u32) -> Result<()> {
         (self.check)()?;
-        require(depth <= 32, "QuotaExceeded", "backup directory depth limit")?;
+        require(
+            depth <= MAX_CAPTURE_DEPTH,
+            "QuotaExceeded",
+            "backup directory depth limit",
+        )?;
         let mut names = Vec::new();
         for e in Dir::read_from(dir).map_err(std::io::Error::from)? {
             (self.check)()?;
@@ -517,7 +530,7 @@ impl Capture<'_> {
             };
             if m.is_dir() {
                 let mut copy = None;
-                if let Some(CaptureOutput::Tree(output)) = &self.out {
+                if let CaptureMode::Copy(CaptureOutput::Tree(output)) = &self.mode {
                     require_managed_root_mode(entry.mode)?;
                     output.check_space(std::iter::empty(), 1)?;
                     let (directory, name) = entry_parent(output.directory, rel)?;
@@ -538,31 +551,40 @@ impl Capture<'_> {
                     "QuotaExceeded",
                     "backup exceeds its byte limit",
                 )?;
-                let (len, digest) = if let Some(out) = &self.out {
-                    let destination = out.destination();
-                    destination.check_space(std::iter::once(m.len()), 1)?;
-                    let mut dst = out.file(rel, self.entries.len())?;
-                    let copied = copy_captured_blob(&mut src, &mut dst, m.len(), self.check)?;
-                    if matches!(out, CaptureOutput::Tree(_)) {
-                        cloning::preserve_metadata(
-                            &dst,
-                            entry.mode,
-                            ModifiedTime::from_metadata(&m),
-                        )?;
-                    } else {
-                        dst.sync_all()?;
+                let copied = match &self.mode {
+                    CaptureMode::Copy(out) => {
+                        let destination = out.destination();
+                        destination.check_space(std::iter::once(m.len()), 1)?;
+                        let mut dst = out.file(rel, self.entries.len())?;
+                        let copied = copy_captured_blob(&mut src, &mut dst, m.len(), self.check)?;
+                        if matches!(out, CaptureOutput::Tree(_)) {
+                            cloning::preserve_metadata(
+                                &dst,
+                                entry.mode,
+                                ModifiedTime::from_metadata(&m),
+                            )?;
+                        } else {
+                            dst.sync_all()?;
+                        }
+                        destination.check_space(std::iter::empty(), 0)?;
+                        Some(copied)
                     }
-                    destination.check_space(std::iter::empty(), 0)?;
-                    copied
-                } else {
-                    copy_captured_blob(&mut src, &mut std::io::sink(), m.len(), self.check)?
+                    CaptureMode::DigestOnly => Some(copy_captured_blob(
+                        &mut src,
+                        &mut std::io::sink(),
+                        m.len(),
+                        self.check,
+                    )?),
+                    CaptureMode::MetadataOnly => None,
                 };
+                let (len, digest) =
+                    copied.map_or((m.len(), None), |(len, digest)| (len, Some(digest)));
                 require(
                     len == m.len() && same_source(&m, &src.metadata()?),
                     "Conflict",
                     "volume changed during capture",
                 )?;
-                entry.digest = Some(digest);
+                entry.digest = digest;
                 entry.bytes = len;
                 self.total += len;
                 self.entries.push((entry, m));
@@ -700,7 +722,7 @@ pub(crate) fn backup(
     })?;
     let started = now();
     let mut capture = Capture {
-        out: Some(CaptureOutput::Archive(RestoreDestination {
+        mode: CaptureMode::Copy(CaptureOutput::Archive(RestoreDestination {
             directory: stage.directory(),
             authority: Some(&w.cfg),
         })),
@@ -1301,7 +1323,7 @@ mod capture_tests {
             .unwrap();
         let before = root.metadata().unwrap();
         let mut capture = Capture {
-            out: Some(CaptureOutput::Archive(RestoreDestination {
+            mode: CaptureMode::Copy(CaptureOutput::Archive(RestoreDestination {
                 directory: &out,
                 authority: None,
             })),
@@ -1347,7 +1369,7 @@ mod capture_tests {
                 .unwrap();
             let before = root.metadata().unwrap();
             let mut capture = Capture {
-                out: Some(CaptureOutput::Archive(RestoreDestination {
+                mode: CaptureMode::Copy(CaptureOutput::Archive(RestoreDestination {
                     directory: &out,
                     authority: None,
                 })),

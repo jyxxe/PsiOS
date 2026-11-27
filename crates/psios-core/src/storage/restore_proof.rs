@@ -1,4 +1,4 @@
-use super::{BackupManifest, Capture, Entry, ModifiedTime, capture_root};
+use super::{BackupManifest, Capture, CaptureMode, Entry, ModifiedTime, capture_root};
 use crate::{MAX_BACKUP_BYTES, Result, decode, host::Work, now, require};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -132,7 +132,7 @@ pub(super) fn verify_tree_checked(
         "restored data root mode differs from its verified backup",
     )?;
     let mut capture = Capture {
-        out: None,
+        mode: CaptureMode::DigestOnly,
         entries: vec![],
         total: 0,
         max_bytes: MAX_BACKUP_BYTES,

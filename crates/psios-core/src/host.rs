@@ -165,6 +165,8 @@ pub enum Action {
     Delete(Target),
     #[serde(rename = "backup.create")]
     Backup(Target),
+    #[serde(rename = "backup.estimate")]
+    EstimateBackup(Target),
     #[serde(rename = "backup.inspect_publication")]
     InspectBackupPublication(Target),
     #[serde(rename = "backup.verify")]
@@ -522,7 +524,7 @@ impl Action {
                     "Volume",
                 )
             }
-            Self::Activate(t) | Self::Delete(t) | Self::Backup(t) => {
+            Self::Activate(t) | Self::Delete(t) | Self::Backup(t) | Self::EstimateBackup(t) => {
                 (&t.id, Some(&t.expected_resource_version), "Volume")
             }
             Self::Restore(t) | Self::VerifyBackup(t) | Self::DeleteBackup(t) => {
@@ -770,6 +772,7 @@ impl Work {
                 || matches!(
                     self.action,
                     Action::Backup(_)
+                        | Action::EstimateBackup(_)
                         | Action::CloneVolume(_)
                         | Action::VerifyVolumeFile(_)
                         | Action::RenameFile(_)
@@ -977,6 +980,7 @@ impl Work {
                 },
                 &mut check_streaming,
             ),
+            Action::EstimateBackup(_) => storage::estimate::run(self, &mut check_streaming),
             Action::VerifyVolumeFile(query) => {
                 storage::file_integrity::verify(self, query, &mut check_streaming)
             }

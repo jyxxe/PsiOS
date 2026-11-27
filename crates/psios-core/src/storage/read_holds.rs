@@ -13,6 +13,7 @@ pub(crate) fn reader(action: &Action) -> bool {
             | Action::Chunk(_)
             | Action::VolumeUsage(_)
             | Action::VerifyVolumeFile(_)
+            | Action::EstimateBackup(_)
     )
 }
 

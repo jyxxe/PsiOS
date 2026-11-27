@@ -59,6 +59,9 @@ enum Cmd {
     },
     /// Import, rotate or revoke an explicitly authorized local Secret.
     Secret {
+        /// Reuse this client-generated key with the same input after an ambiguous response.
+        #[arg(long, global = true)]
+        idempotency_key: Option<String>,
         #[command(subcommand)]
         command: SecretCommand,
     },
@@ -956,16 +959,28 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             json!({"tool": "system.status", "input": {}, "delegation_id": delegation}),
         )?,
         Cmd::Call { method, file } => c.call(&method, input(&file)?)?,
-        Cmd::Secret { command } => serde_json::to_value(match command {
-            SecretCommand::Put { name, value_file } => {
-                c.put_secret(&name, &secret_input(&value_file)?)?
-            }
+        Cmd::Secret {
+            idempotency_key,
+            command,
+        } => serde_json::to_value(match command {
+            SecretCommand::Put { name, value_file } => c.put_secret_with_key(
+                &name,
+                &secret_input(&value_file)?,
+                idempotency_key.as_deref(),
+            )?,
             SecretCommand::Rotate {
                 id,
                 revision,
                 value_file,
-            } => c.rotate_secret(&id, &revision, &secret_input(&value_file)?)?,
-            SecretCommand::Revoke { id, revision } => c.revoke_secret(&id, &revision)?,
+            } => c.rotate_secret_with_key(
+                &id,
+                &revision,
+                &secret_input(&value_file)?,
+                idempotency_key.as_deref(),
+            )?,
+            SecretCommand::Revoke { id, revision } => {
+                c.revoke_secret_with_key(&id, &revision, idempotency_key.as_deref())?
+            }
         })?,
         Cmd::ScheduleRenew { file } => c.renew_schedule(&serde_json::from_value(input(&file)?)?)?,
         Cmd::Get { id } => c.call("Resource.Get", json!({"id": id}))?,

@@ -128,6 +128,8 @@ target/debug/psiosctl --socket "$workdir/core/api.sock" --token-file "$workdir/a
 
 本机授予 `secret.manage` 的主体可用 `psiosctl secret put NAME --value-file FILE` 导入秘密，用 `psiosctl secret rotate ID --revision REV --value-file FILE` 轮换，并用 `psiosctl secret revoke ID --revision REV` 撤销。文件须由调用者拥有且仅调用者可读。省略 `--value-file` 时从管道或重定向读取。输入为 1 到 8192 字节的 UTF-8，末尾换行作为原值保留。CLI 输出仅包含新的 SecretRef。Rust SDK 对应 `Client::put_secret`、`Client::rotate_secret` 和 `Client::revoke_secret`。[真实 CLI 与权限验收](../tests/test_secret_cli.py)
 
+三项操作均可使用 `--idempotency-key KEY` 或 SDK 的 `*_secret_with_key` 方法。每个逻辑请求生成独立的客户端键。如果连接在提交后中断，带同一个键、版本和输入重试会取得原回执，即使 Secret 随后已被轮换或撤销。服务每次核验当前授权，拒绝用旧键提交不同请求。写入与回执同一事务提交，回执保存键控摘要和 SecretRef。离线核验与检查点发布验证保留的回执。[丢失响应与回执验收](../tests/test_secret_receipts.py)
+
 ## 核对本机挂载拓扑
 
 `node.mounts` 接受空对象，通过普通只读 Task 返回 Core 当前 Linux 挂载命名空间的制品。Grant 须包含 `task.submit`、`task.read` 和 `node.mounts`，可用 `tool_targets` 限定节点 ID。结果包含启动 ID、挂载命名空间 inode、观察时间，以及各挂载的 ID、父 ID、设备主次号、文件系统类型、根和挂载点。挂载点的只读标志与 superblock 的只读标志分别报告，便于区分只读 bind 与整个文件系统只读。制品也保存选定的 VFS 标志和传播组。[Linux mountinfo 定义](https://www.kernel.org/doc/html/latest/filesystems/proc.html)

@@ -34,11 +34,18 @@ class SecretCliTests(unittest.TestCase):
 
     def test_cli_preserves_exact_input_and_guards_rotation_and_revocation(self):
         first = "  synthetic UTF-8 键\n\0".encode()
-        imported = self.run_cli("put", "cli-vault-entry", data=first)
+        args = ("put", "cli-vault-entry", "--idempotency-key", "synthetic CLI request")
+        imported = self.run_cli(*args, data=first)
         self.assertEqual(imported.returncode, 0, imported.stderr)
         self.assertNotIn(first, imported.stdout + imported.stderr)
         reference = json.loads(imported.stdout)
         self.assertEqual(set(reference), {"resource_id", "version", "digest"})
+        replay = self.run_cli(*args, data=first)
+        self.assertEqual(replay.returncode, 0, replay.stderr)
+        self.assertEqual(json.loads(replay.stdout), reference)
+        changed = self.run_cli(*args, data=b"other synthetic bytes")
+        self.assertNotEqual(changed.returncode, 0)
+        self.assertIn(b"IdempotencyConflict", changed.stderr)
         self.verify_mac(reference, first)
 
         second = b"synthetic next value\n"

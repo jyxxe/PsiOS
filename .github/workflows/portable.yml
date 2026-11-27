@@ -53,7 +53,8 @@ jobs:
               python3 -B -m unittest discover -s /tests -p test_result_eviction_candidates.py -v &&
               python3 -B -m unittest discover -s /tests -p test_agent_assigned_work.py -v &&
               python3 -B -m unittest discover -s /tests -p test_work_item_priority.py -v &&
-              python3 -B -m unittest discover -s /tests -p test_authority_checkpoint.py -v'
+              python3 -B -m unittest discover -s /tests -p test_authority_checkpoint.py -v &&
+              python3 -B -m unittest discover -s /tests -p "test_secret_*.py" -v'
       - name: Recover a durable Task in an empty Linux userspace
         run: |
           python3 tests/portable_recovery.py "$RUNNER_TEMP/psios-core-linux-amd64.tar.gz" \

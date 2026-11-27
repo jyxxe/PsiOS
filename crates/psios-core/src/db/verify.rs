@@ -333,6 +333,9 @@ pub(super) fn verified_witness(
         "local owner credential does not match the authority",
     )?;
     policy::secrets::verify(copy, &checked.keys)?;
+    if checked.version >= policy::secrets::receipts::FORMAT {
+        policy::secrets::receipts::verify(copy, &checked.keys)?;
+    }
     let witness = match checked.witness.get("pending") {
         None => "Confirmed",
         Some(v) if *v == checked.head => "PendingCommitFinalization",

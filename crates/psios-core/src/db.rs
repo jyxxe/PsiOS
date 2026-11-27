@@ -192,7 +192,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = crate::local_read_tools::APPLICATION_INSPECT_FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = policy::secrets::receipts::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -587,6 +587,9 @@ impl Store {
                 }
                 if ver < artifact::ingress::windows::RELEASE_FORMAT {
                     db.c.execute_batch(artifact::ingress::windows::RELEASE_SCHEMA)?;
+                }
+                if ver < policy::secrets::receipts::FORMAT {
+                    db.c.execute_batch(policy::secrets::receipts::SCHEMA)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

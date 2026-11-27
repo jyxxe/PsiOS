@@ -4,7 +4,7 @@ use std::io::Cursor;
 use tar::{Builder, EntryType, Header};
 
 fn validate(bytes: &[u8], image: &str, diff_ids: &[String]) -> Result<Compatibility> {
-    validate_reader(Cursor::new(bytes), image, diff_ids, false)
+    validate_reader(Cursor::new(bytes), image, diff_ids, None)
 }
 
 fn canonical_load(bytes: &[u8], image: &str, diff_ids: &[String]) -> Result<Vec<u8>> {
@@ -44,13 +44,15 @@ fn gzip_bytes(bytes: &[u8]) -> Vec<u8> {
     encoded.finish().unwrap()
 }
 
-#[test]
-fn manifest_identity_keeps_original_blobs_in_an_oci_only_load() {
-    let mut fixture = Fixture::new(true);
+fn compressed_manifest(
+    fixture: &mut Fixture,
+    media: &str,
+    compress: impl FnOnce(&[u8]) -> Vec<u8>,
+) -> (Value, String, String) {
     let previous_layer = fixture.docker["Layers"][0].as_str().unwrap().to_owned();
     let plain = fixture.members.remove(&previous_layer).unwrap();
-    let encoded = gzip_bytes(&plain);
-    let layer = descriptor(&encoded, OCI_GZIP_LAYER);
+    let encoded = compress(&plain);
+    let layer = descriptor(&encoded, media);
     let layer_path = blob(layer["digest"].as_str().unwrap());
     fixture.members.insert(layer_path.clone(), encoded);
     let config_path = fixture.docker["Config"].as_str().unwrap().to_owned();
@@ -58,7 +60,14 @@ fn manifest_identity_keeps_original_blobs_in_an_oci_only_load() {
     fixture.docker["LayerSources"] = json!({(fixture.layers[0].clone()):layer});
     let manifest = json!({"schemaVersion":2,"mediaType":OCI_MANIFEST,
         "config":descriptor(&fixture.members[&config_path], OCI_CONFIG),"layers":[layer]});
-    let description = fixture.index(manifest);
+    (fixture.index(manifest), config_path, layer_path)
+}
+
+#[test]
+fn manifest_identity_keeps_original_blobs_in_an_oci_only_load() {
+    let mut fixture = Fixture::new(true);
+    let (description, config_path, layer_path) =
+        compressed_manifest(&mut fixture, OCI_GZIP_LAYER, gzip_bytes);
     let image = description["digest"].as_str().unwrap();
     let original = fixture.tar();
     assert_eq!(
@@ -66,7 +75,13 @@ fn manifest_identity_keeps_original_blobs_in_an_oci_only_load() {
         Compatibility::Unsupported("ManifestIdentity")
     );
     assert_eq!(
-        validate_reader(Cursor::new(&original), image, &fixture.layers, true).unwrap(),
+        validate_reader(
+            Cursor::new(&original),
+            image,
+            &fixture.layers,
+            Some(ManifestLayers::TarAndGzip)
+        )
+        .unwrap(),
         Compatibility::VerifiedManifest(fixture.image.clone()),
     );
     let mut load = Vec::new();
@@ -120,18 +135,18 @@ fn gzip_layers_require_single_members_and_a_matching_bounded_diffid() {
     let diff = sha256(&raw);
     let compressed = gzip_bytes(&raw);
     assert_eq!(
-        gzip::verify_layer(&compressed[..], raw.len() as u64, &diff).unwrap(),
+        compression::gzip(&compressed[..], raw.len() as u64, &diff).unwrap(),
         raw.len() as u64
     );
     assert_eq!(
-        gzip::verify_layer(&compressed[..], 512, &diff)
+        compression::gzip(&compressed[..], 512, &diff)
             .unwrap_err()
             .0
             .code,
         "QuotaExceeded"
     );
     assert_eq!(
-        gzip::verify_layer(&compressed[..], BYTE_LIMIT, &sha256(b"unrelated"))
+        compression::gzip(&compressed[..], BYTE_LIMIT, &sha256(b"unrelated"))
             .unwrap_err()
             .0
             .code,
@@ -139,12 +154,111 @@ fn gzip_layers_require_single_members_and_a_matching_bounded_diffid() {
     );
     let concatenated = [compressed.as_slice(), compressed.as_slice()].concat();
     assert_eq!(
-        gzip::verify_layer(&concatenated[..], BYTE_LIMIT, &diff)
+        compression::gzip(&concatenated[..], BYTE_LIMIT, &diff)
             .unwrap_err()
             .0
             .code,
         "PreconditionFailed"
     );
+}
+
+#[test]
+fn zstd_manifest_uses_the_current_profile_and_preserves_the_exact_encoded_blob() {
+    let mut fixture = Fixture::new(true);
+    let (descriptor, _, layer_path) = compressed_manifest(&mut fixture, OCI_ZSTD_LAYER, |plain| {
+        zstd::stream::encode_all(plain, 1).unwrap()
+    });
+    let image = descriptor["digest"].as_str().unwrap();
+    let bytes = fixture.tar();
+    assert_eq!(
+        validate_reader(
+            Cursor::new(&bytes),
+            image,
+            &fixture.layers,
+            Some(ManifestLayers::TarAndGzip)
+        )
+        .unwrap(),
+        Compatibility::Unsupported("ManifestIdentity")
+    );
+    assert_eq!(
+        validate_reader(
+            Cursor::new(&bytes),
+            image,
+            &fixture.layers,
+            Some(ManifestLayers::TarGzipAndZstd)
+        )
+        .unwrap(),
+        Compatibility::VerifiedManifest(fixture.image.clone())
+    );
+    let mut load = Vec::new();
+    let digest = write_load(
+        Cursor::new(&bytes),
+        &mut load,
+        image,
+        &fixture.layers,
+        Some(&fixture.image),
+    )
+    .unwrap();
+    assert_eq!(digest, sha256(&load));
+    let mut archive = tar::Archive::new(Cursor::new(load));
+    let mut selected = archive
+        .entries()
+        .unwrap()
+        .find_map(|entry| {
+            let entry = entry.unwrap();
+            (entry.path().unwrap().to_str() == Some(layer_path.as_str())).then_some(entry)
+        })
+        .expect("canonical OCI load contains the encoded layer");
+    let mut observed = Vec::new();
+    selected.read_to_end(&mut observed).unwrap();
+    assert_eq!(observed, fixture.members[&layer_path]);
+}
+
+#[test]
+fn zstd_verification_bounds_frames_window_and_decoded_bytes() {
+    let raw = encode(&BTreeMap::from([("file".into(), vec![1; 4096])]));
+    let diff = sha256(&raw);
+    let encoded = zstd::stream::encode_all(&raw[..], 1).unwrap();
+    assert_eq!(
+        compression::zstd(&encoded[..], BYTE_LIMIT, &diff).unwrap(),
+        raw.len() as u64
+    );
+    assert_eq!(
+        compression::zstd(&encoded[..], 512, &diff)
+            .unwrap_err()
+            .0
+            .code,
+        "QuotaExceeded"
+    );
+    let concatenated = [encoded.as_slice(), encoded.as_slice()].concat();
+    for malformed in [&encoded[..encoded.len() - 1], concatenated.as_slice()] {
+        assert_eq!(
+            compression::zstd(malformed, BYTE_LIMIT, &diff)
+                .unwrap_err()
+                .0
+                .code,
+            "PreconditionFailed"
+        );
+    }
+    assert_eq!(
+        compression::zstd(&encoded[..], BYTE_LIMIT, &sha256(b"different"))
+            .unwrap_err()
+            .0
+            .code,
+        "PreconditionFailed"
+    );
+
+    let oversized = encode(&BTreeMap::from([(
+        "large".into(),
+        vec![0; 9 * 1024 * 1024],
+    )]));
+    let mut wide = zstd::stream::write::Encoder::new(Vec::new(), 1).unwrap();
+    wide.window_log(24).unwrap();
+    wide.write_all(&oversized).unwrap();
+    let wide = wide.finish().unwrap();
+    let refused = compression::zstd(&wide[..], BYTE_LIMIT, &sha256(&oversized)).unwrap_err();
+    assert_eq!(refused.0.code, "PreconditionFailed");
+    assert!(refused.0.message.contains("decoder window"), "{refused}");
 }
 
 struct Fixture {
@@ -366,7 +480,7 @@ fn repeated_layers_share_one_cached_member_digest() {
     let member = members.file(&layer_path).unwrap();
     assert!(member.digest.get().is_none());
     assert_eq!(
-        validate_members(&members, &id, &diff_ids, false).unwrap(),
+        validate_members(&members, &id, &diff_ids, None).unwrap(),
         Compatibility::Verified
     );
     let cached = member.digest.get().unwrap();

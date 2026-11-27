@@ -178,7 +178,7 @@ pub(crate) fn export(
         staged.file(),
         &image.config_digest,
         &image.diff_ids,
-        true,
+        Some(restore_archive::ManifestLayers::TarGzipAndZstd),
     )?;
     let archive = staged.seal(u64::from(size), &digest)?;
     check_authority()?;
@@ -455,7 +455,7 @@ pub(crate) fn verify_restore_compatibility(
             input,
             &image.config_digest,
             &image.diff_ids,
-            manifest,
+            manifest.then(|| restore_archive::ManifestLayers::supported_at(format)),
         )
         .map_err(|_| {
             err(

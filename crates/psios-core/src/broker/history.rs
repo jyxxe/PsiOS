@@ -7,29 +7,12 @@ pub(crate) fn redact_late_receipt(db: &Db<'_>, doc: &mut Doc) -> Result<()> {
     let Some(receipt) = doc.body["evidence"].get("receipt") else {
         return Ok(());
     };
-    let application_logs = receipt.get("last_logs").is_some() || receipt.get("stdout").is_some();
-    let service_logs = receipt.get("entries").is_some();
-    let service_observation = receipt.get("unit").is_some()
-        && receipt.get("manager").is_some()
-        && receipt.get("active_state").is_some();
-    let node_pressure =
-        receipt["kernel"]["source"] == "LinuxProcfs" && receipt.get("core_cgroup").is_some();
     let effect = db.resolve(&doc.body["effect_ref"])?;
     let sensitive = match effect.body["action"].as_str() {
-        Some(apps::log_tail::TOOL | "application.stop") => application_logs,
-        Some(tool) if apps::is_runtime_observation(tool) => true,
-        Some(node::journal::TOOL | node::journal::SINCE_TOOL) => service_logs,
-        Some(node::service_state::TOOL) => service_observation,
-        Some(node::pressure::TOOL) => node_pressure,
-        Some(node::network::probe::TOOL | node::network::probe::state::TOOL) => true,
-        Some(
-            "service.inspect"
-            | "volume.read"
-            | "volume.read_chunk"
-            | "volume.files"
-            | "volume.usage"
-            | storage::file_integrity::TOOL,
-        ) => true,
+        Some(tool) if policy::readonly(tool) => true,
+        Some("application.stop") => {
+            receipt.get("last_logs").is_some() || receipt.get("stdout").is_some()
+        }
         _ => false,
     };
     if sensitive {

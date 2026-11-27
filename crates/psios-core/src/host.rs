@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{fs::File, path::PathBuf};
 
+pub(crate) const READ_PUBLICATION_FORMAT: u32 = agent::TARGET_AUTHORIZATION_FORMAT + 1;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Target {
@@ -788,36 +790,19 @@ impl Work {
             return apps::check_release_selection(db, &target, release_ref);
         }
         let tool = self.task.spec["task_type"].as_str().unwrap_or_default();
-        if apps::catalog::is_tool(tool) || apps::is_runtime_observation(tool) {
-            self.checkpoint_authority(db)?;
+        let read_only = policy::readonly(tool);
+        if read_only {
+            agent::check_dispatch(db, &self.task)?;
         }
-        if self.action.is_network_probe()
-            || storage::read_holds::reader(&self.action)
+        if read_only
+            || apps::catalog::is_tool(tool)
             || matches!(
                 self.action,
-                Action::InspectFileRename(_)
-                    | Action::InspectRestoredVolume(_)
-                    | Action::InspectBackupPublication(_)
-                    | Action::InspectProcess(_)
-                    | Action::Pressure {}
-                    | Action::TrackBlockDevice(_)
-                    | Action::ObserveBlockDevice(_)
-                    | Action::ServiceInspect(_)
-                    | Action::ServiceObserve(_)
-                    | Action::ServiceLogs(_)
-                    | Action::ServiceLogsSince(_)
-                    | Action::ServiceResources(_)
-                    | Action::InspectNetworkTrial(_)
-                    | Action::ListAssignedWork(_)
-                    | Action::ListAppReleases(_)
-                    | Action::InstallArtifact(_)
+                Action::InstallArtifact(_)
                     | Action::StageArtifactRelease(_)
                     | Action::RetireRelease(_)
                     | Action::RebindRestoredVolume(_)
                     | Action::CaptureOciImage(_)
-                    | Action::InspectReleaseImageRestore(_)
-                    | Action::InspectOciCreate(_)
-                    | Action::Logs(_)
             )
         {
             self.checkpoint_authority(db)?;
@@ -1085,6 +1070,7 @@ pub(crate) fn permit(
     let tool = task.spec["task_type"].as_str().unwrap();
     let delegation = db.resolve(&permit.body["authorization_ref"])?;
     policy::active(db, &task.owner)?;
+    policy::delegation(db, &task.owner, &delegation.id, "task.submit")?;
     policy::delegation(db, &task.owner, &delegation.id, tool)?;
     require(
         permit.kind == "ExecutionPermit"

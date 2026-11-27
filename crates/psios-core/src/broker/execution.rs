@@ -493,6 +493,7 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
     let t = db.get(&w.task.id)?;
     let tool = field(&t.spec, "task_type");
     let catalog = apps::catalog::is_tool(tool);
+    let read_only = policy::readonly(tool);
     if t.body["current_run_id"] != w.run.id
         || t.body["outcome_knowledge"] != "InFlight"
         || w.run.body["recovery_incarnation"] != db.incarnation
@@ -508,29 +509,13 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
         )?;
         let receipt = match result {
             Ok(_)
-                if w.action.is_network_probe()
-                    || storage::read_holds::reader(&w.action)
-                    || apps::is_runtime_observation(tool)
+                if read_only
                     || matches!(
                         w.action,
-                        Action::InspectProcess(_)
-                            | Action::Pressure {}
-                            | Action::TrackBlockDevice(_)
-                            | Action::ObserveBlockDevice(_)
-                            | Action::ServiceInspect(_)
-                            | Action::ServiceObserve(_)
-                            | Action::ServiceLogs(_)
-                            | Action::ServiceLogsSince(_)
-                            | Action::ServiceResources(_)
-                            | Action::ListAppReleases(_)
-                            | Action::InstallArtifact(_)
+                        Action::InstallArtifact(_)
                             | Action::StageArtifactRelease(_)
-                            | Action::Logs(_)
                             | Action::Stop(_)
-                            | Action::InspectNetworkTrial(_)
-                            | Action::InspectOciCreate(_)
                             | Action::DiscardOciCreate(_)
-                            | Action::InspectBackupPublication(_)
                     ) =>
             {
                 json!({"code":"Fenced"})
@@ -630,6 +615,12 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
         close(db, &t, "Cancelled", "Known", None, None)?;
         return Ok(());
     }
+    let result = if read_only {
+        // Discard adapter errors as well as samples when disclosure is no longer authorized.
+        w.check_result_publication(db).and(result)
+    } else {
+        result
+    };
     let result = result.and_then(|output| {
         require(
             !create_undispatched && cleanup_started!=Some(false),
@@ -655,7 +646,9 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
                 || matches!((&w.action, &output), (Action::Stop(_), host::Output::Receipt(v)) if v["already_absent"] == true),
             "Fenced", "OCI stop result has no witnessed command or verified absence",
         )?;
-        w.check_result_publication(db)?;
+        if !read_only {
+            w.check_result_publication(db)?;
+        }
         match &output {
             host::Output::Receipt(receipt) => {
                 if rebind {

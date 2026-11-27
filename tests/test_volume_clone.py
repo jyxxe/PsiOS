@@ -81,6 +81,86 @@ class VolumeCloneTests(unittest.TestCase):
         self.assertNotEqual(original["value"]["data_incarnation"], created["value"]["data_incarnation"])
         return spec["restore_proof"]
 
+    def test_sparse_layout_survives_capture_restore_clone_and_detached_intake(self):
+        n = self.n
+        source = n.perform("volume.create", {"name": "sparse"})
+        tree = self.data(source)
+        length = 4 * MIB + 157
+        mixed = tree / "mixed"
+        with mixed.open("xb") as f:
+            f.seek(MIB + 17)
+            f.write(b"payload")
+            f.seek(2 * MIB)
+            f.write(bytes(64 * 1024))  # allocated zero data between two holes
+            f.truncate(length)
+            f.flush()
+            os.fsync(f.fileno())
+        with (tree / "holes").open("xb") as f:
+            f.truncate(length)
+        (tree / "empty").touch()
+
+        def layout(path):
+            with path.open("rb") as f:
+                return (os.lseek(f.fileno(), 0, os.SEEK_DATA),
+                        os.lseek(f.fileno(), 2 * MIB, os.SEEK_DATA),
+                        os.lseek(f.fileno(), 2 * MIB, os.SEEK_HOLE))
+
+        try:
+            source_layout = layout(mixed)
+        except OSError as error:
+            if error.errno not in (errno.EINVAL, errno.ENOTSUP, errno.ENXIO):
+                raise
+            self.skipTest("source filesystem does not report sparse extents")
+        if not (source_layout[0] > 0 and source_layout[1] == 2 * MIB
+                and source_layout[2] < 3 * MIB):
+            self.skipTest("source filesystem does not distinguish the fixture's data and holes")
+
+        saved = n.perform("backup.create", target(source))
+        archive = self.backups / saved["resource_id"]
+        manifest = json.loads((archive / "manifest.json").read_bytes())
+        blobs = {entry["path"]: f"blob-{index}" for index, entry in enumerate(manifest["entries"])}
+        for entry in manifest["entries"]:
+            digest = hashlib.sha256((tree / entry["path"]).read_bytes()).hexdigest()
+            self.assertEqual(entry["digest"], f"sha256:{digest}")
+
+        def assert_layout(files):
+            for name, path in files.items():
+                with self.subTest(path=path):
+                    self.assertEqual(path.read_bytes(), (tree / name).read_bytes())
+                    self.assertLessEqual(path.stat().st_blocks * 512, 256 * 1024)
+                    if name == "mixed":
+                        self.assertEqual(layout(path), source_layout)
+                    if name == "holes":
+                        with path.open("rb") as f, self.assertRaises(OSError) as hole:
+                            os.lseek(f.fileno(), 0, os.SEEK_DATA)
+                        self.assertEqual(hole.exception.errno, errno.ENXIO)
+
+        assert_layout({name: archive / blob for name, blob in blobs.items()})
+        restored = n.perform("backup.restore", target(saved))
+        grant = self.grant([source["resource_id"], "local"])
+        _, pending = self.submit(source, "cloned-sparse", grant)
+        self.assertEqual(n.wait(pending)["lifecycle"], "WaitingApproval")
+        n.approve(pending)
+        clone = self.result(pending)
+        for volume in (restored, clone):
+            assert_layout({name: self.data(volume) / name for name in blobs})
+
+        receiver = Node(os.getenv("PSIOS_TEST_BIN_DIR", "target/debug"))
+        self.addCleanup(receiver.close)
+        receiver.stop()
+        digest = n.get(saved["resource_id"])["value"]["manifest_digest"]
+        subprocess.run([*receiver.daemon, "import-backup", "--directory", archive,
+                        "--manifest-digest", digest], check=True, capture_output=True, timeout=30)
+        imported = receiver.state / "backups" / saved["resource_id"]
+        assert_layout({name: imported / blob for name, blob in blobs.items()})
+
+        # Older backups can store exactly the same digest in fully allocated blobs.
+        blob = archive / blobs["mixed"]
+        blob.write_bytes(mixed.read_bytes())
+        self.assertGreaterEqual(blob.stat().st_blocks * 512, length)
+        legacy = n.perform("backup.restore", target(saved))
+        self.assertEqual((self.data(legacy) / "mixed").read_bytes(), mixed.read_bytes())
+
     def test_exact_scoped_approval_stale_source_and_independent_activation(self):
         n = self.n
         source = n.perform("volume.create", {"name": "clone-source"})

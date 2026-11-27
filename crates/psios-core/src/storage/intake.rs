@@ -1,7 +1,7 @@
 use super::{
-    backup_blob, copy_hash,
+    backup_blob,
     detached::{DetachedBackup, expected_digest, open_detached},
-    file_sizes, inspect_members, open_backup, staging,
+    file_sizes, inspect_members, open_backup, sparse, staging,
     transfer::{Attestation, ReceiverAdmission},
     validate_members,
 };
@@ -170,7 +170,8 @@ fn copy_archive(
             .write(true)
             .mode(0o600)
             .open(stage.path().join(format!("blob-{index}")))?;
-        let (bytes, digest) = copy_hash(&mut input, &mut output, entry.bytes)?;
+        let (bytes, digest) =
+            sparse::copy_to_new_file(&mut input, &mut output, entry.bytes, &mut || Ok(()))?;
         require(
             bytes == entry.bytes && digest == *expected,
             "PreconditionFailed",

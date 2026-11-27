@@ -575,6 +575,19 @@ fn replay_claim(
             )
         };
     let mut result = lease_info(&lease, &until, turn, ctx, true, digest.as_deref());
+    let usage = reserved_usage(db, s, &lease)?;
+    if let Some(timing) = usage.body.get("lease_timing") {
+        require(
+            usage.kind == "ModelUsage"
+                && usage.owner == s.owner
+                && usage.body["session_id"] == s.id
+                && usage.body["call_id"] == lease
+                && usage.body["model_ref"] == model.reference(),
+            "RecoveryRequired",
+            "model lease timing has no matching reservation",
+        )?;
+        result["lease_timing"] = timing.clone();
+    }
     inference::decorate_claim(db, model, &lease, &mut result)?;
     Ok(Some(result))
 }
@@ -658,6 +671,12 @@ fn allocate_turn(
         "session_id": s.id, "call_id": lease, "model_ref": m.reference(), "budget_ref": d.body["budget_ref"],
         "input_bytes": bytes.len(), "reserved_calls": 1, "issued_at": now()
     });
+    usage["lease_timing"] = json!(psios_api::ModelLeaseTiming::from_authority_clock(
+        &clock.boot.boot_id,
+        &clock.time_ns,
+        deadline_boot,
+        window.millis,
+    ));
     if window.metered {
         usage["reserved_lease_ms"] = json!(window.millis);
     }
@@ -686,12 +705,7 @@ fn allocate_turn(
     )?;
     let public_digest = tool_context::enabled(s).then_some(digest.as_str());
     let mut result = lease_info(&lease, &until, turn, ctx, false, public_digest);
-    result["lease_timing"] = json!(psios_api::ModelLeaseTiming::from_authority_clock(
-        &clock.boot.boot_id,
-        &clock.time_ns,
-        deadline_boot,
-        window.millis,
-    ));
+    result["lease_timing"] = usage.body["lease_timing"].clone();
     inference::decorate_claim(db, m, &lease, &mut result)?;
     Ok(Ok(result))
 }

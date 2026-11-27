@@ -223,7 +223,7 @@ Debian 软件包以 `Type=notify` 启动 Core。主进程在核对权威状态�
 
 | Task 工具 | 参数与行为 |
 | --- | --- |
-| volume.files | `target` 为卷的 ID 和预期修订。`path` 默认为根，每页最多 128 项。同一目录续页时将 `next_after` 的值原样传入 `after`，值为 `null` 时已到最后一页。 |
+| volume.files | `target` 为卷的 ID 和预期修订。`path` 默认为根，每页最多 128 项。可用 `max_result_bytes` 将页面限制在 4 到 128 KiB。同一目录续页时将 `next_after` 的值原样传入 `after`，值为 `null` 时已到最后一页。遇到嵌套挂载时整页失败，链接和特殊文件显示为 `unsupported`，大小为 `0`。 |
 | volume.mkdir、volume.remove_entry | `target, path`。创建目录，或删除单个普通文件及空目录。 |
 | volume.append | `target, path, offset, data_base64`。偏移为零时排他新建，后续追加要求实际长度等于偏移。每块最多 96 KiB，单文件上限 256 MiB。沿用主体的 Task 输入保留额度。 |
 | volume.read_chunk | `target, path, offset, limit`。取回 Base64 数据、块摘要、下一偏移和 EOF。可以从待激活的恢复卷读取。 |

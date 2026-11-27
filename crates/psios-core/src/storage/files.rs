@@ -123,12 +123,17 @@ pub(super) fn parent(root: &File, path: &str) -> Result<(File, String)> {
     };
     Ok((dir, leaf.to_owned()))
 }
-fn list(root: &File, p: &Page) -> Result<Value> {
-    let dir = if p.path.is_empty() {
-        root.try_clone()?
+fn open_directory(root: &File, path: &str) -> Result<File> {
+    if path.is_empty() {
+        Ok(root.try_clone()?)
     } else {
-        child(root, &p.path, OFlags::RDONLY | OFlags::DIRECTORY)?
-    };
+        child(root, path, OFlags::RDONLY | OFlags::DIRECTORY)
+    }
+}
+
+fn list(root: &File, p: &Page) -> Result<Value> {
+    let dir = open_directory(root, &p.path)?;
+    let directory_before = dir.metadata()?;
     let limit = p.limit.unwrap_or(32);
     let mut selected = std::collections::BTreeSet::<String>::new();
     for (i, entry) in Dir::read_from(&dir)
@@ -158,14 +163,16 @@ fn list(root: &File, p: &Page) -> Result<Value> {
             .len()
     });
     for name in selected.into_iter().take(limit) {
-        let st =
-            statat(&dir, name.as_str(), AtFlags::SYMLINK_NOFOLLOW).map_err(std::io::Error::from)?;
-        let kind = match FileType::from_raw_mode(st.st_mode) {
-            FileType::RegularFile => "file",
-            FileType::Directory => "directory",
-            _ => "unsupported",
+        // Do not collect metadata through a mount or follow a link out of the volume.
+        let meta = child(&dir, name.as_str(), OFlags::PATH)?.metadata()?;
+        let (kind, bytes) = if meta.is_file() && meta.nlink() == 1 {
+            ("file", meta.len())
+        } else if meta.is_dir() {
+            ("directory", meta.len())
+        } else {
+            ("unsupported", 0)
         };
-        let entry = json!({"name":name,"kind":kind,"bytes":st.st_size.to_string()});
+        let entry = json!({"name":name,"kind":kind,"bytes":bytes.to_string()});
         if let (Some(encoded), Some(cap)) = (&mut encoded, p.max_result_bytes) {
             let entry_bytes = entry.to_string().len() + 1;
             // Reserve an escaped cursor for this entry in case the next row does not fit.
@@ -183,6 +190,12 @@ fn list(root: &File, p: &Page) -> Result<Value> {
         last = Some(name);
         entries.push(entry);
     }
+    let current = open_directory(root, &p.path)?;
+    require(
+        same_source(&directory_before, &current.metadata()?),
+        "Conflict",
+        "directory changed while the page was being read",
+    )?;
     let cursor = if more { last } else { None };
     Ok(
         json!({"entries":entries,"next_after":cursor,"volume_version":p.target.expected_resource_version}),

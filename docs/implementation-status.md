@@ -48,7 +48,7 @@
 - 本机授权主体可分块暂存和发布通用字节，按提交偏移继续中断的上传。下载核对原始摘要，回收需要独立权限。原生 Agent 的成功模型会话可以将最终摘要发布为带模型、Skill、Provider 和租约来源的制品。已验证断线、重启、重复请求、配额、授权撤销及事务失败。[上传验收](../tests/test_artifact_ingress.py) · [模型输出发布验收](../tests/test_session_output.py)
 - `PsiOSLocalOciInstallV1` 适配器可从固定制品准备本机镜像安装或新版本暂存。批准后由 Docker 验证并运行镜像。实际验收覆盖模型输出生成声明、切换和回滚、退役后回收字节，以及持久卷和备份恢复。Agent 可按应用授权读取版本历史。[OCI 端到端验收](../tests/oci.py) · [应用与制品接口](core-runtime.md#从本机制品准备-oci-安装)
 - 本机所有者可以登记和撤销 Ed25519 发布者公钥，从指定 Docker 引擎按完整摘要捕获镜像。签名 V2 声明将归档纳入安装及暂存审批，任务和 Release 持有归档，退役后可按引用关系回收。真实 Docker 验收覆盖签名验证、撤销、归档损坏时拒绝启动及清理已创建容器。经单次审批可把有效归档导入经典 Linux amd64 Docker 缓存。强杀验收确认原导入请求及检查点可独立核实并结算，缺失观测保持未知，进程重启后禁止重放。[签名与版本验收](../tests/oci.py) · [归档与恢复验收](../tests/oci_restore.py)
-- 镜像归档支持文件上的有界流式捕获、分块读取、独立核验和精确摘要恢复。默认单次上限为 8 MiB。管理员可在节点设定更高上限，每次捕获经审批可使用最多 32 MiB。派发按批准容量预留节点级临时空间。真实 Docker 验收覆盖两次 16 MiB 捕获并发、第三次保留审批等待、普通任务继续执行，以及取消释放容量后推进原请求。[较大归档](../tests/oci_capacity.py) · [并发暂存](../tests/oci_capture_staging.py) · [独立救援](offline-rescue.md)
+- 镜像归档支持文件上的有界流式捕获、分块读取、独立核验和精确摘要恢复。默认单次上限为 8 MiB。管理员可在节点设定更高上限，每次捕获经审批可使用最多 128 MiB。派发按批准容量预留节点级临时空间。真实 Docker 验收覆盖两次 16 MiB 捕获并发、第三次保留审批等待、普通任务继续执行，以及取消释放容量后推进原请求。[较大归档](../tests/oci_capacity.py) · [并发暂存](../tests/oci_capture_staging.py) · [独立救援](offline-rescue.md)
 - WI-028 的 `AT-AIF-001`～`010` 产品验收仍待执行。缺口包括完整跨 Agent 产物接口、外部 Agent 从产物提交到安装的联合验收、OCI 以外的适配器、浏览器隔离交互预览、注册表或远端来源信任链，以及通用应用发布和更新流程。[通用产物接口](v1/docs/09-agents-models-protocols.md#911-agent-通用产物接口) · [应用化设计](v1/docs/07-applications-packages-gui.md#6-agent-artifacts-作为应用安装)
 
 ## Agent 会话与模型结算
@@ -70,6 +70,23 @@
 
 - OCI 停止和重启都记录持久命令检查点。停止回执丢失时，可在独立核实原容器已退出后授权清理，始终保留原应用和卷占用，直到观测证实容器已消失。真实 Docker 已验证普通队列满、停止与删除回执先后丢失、重启检查点失败、原审批和占用核验。应用日志按专门授权读取，停止后保留有界私有尾部。[OCI 与卷回归](../tests/oci.py) · [停止故障](../tests/oci_recovery.py) · [重启核验](../tests/oci_restart.py)
 - 注册网络探针可发布有持久证据的状态和生命周期事件。本机 TCP/DNS 验收覆盖状态变化触发 Schedule、撤权后阻止后续连接、跨命名空间重置、证据回收和保留原授权范围的旧格式升级。精确 Watch 支持 200 字节的资源筛选，游标仍满足 v1 长度契约。已验证确认位置经历重启、作用域回收及授权变化后可用同一筛选恢复。[网络探针状态](../tests/test_network_probe_state.py) · [精确作用域](../tests/test_bounded_watch_scopes.py)
+
+## 2026-11-26 审计快照复核
+
+审计基于 `262f92e`。以下记录对应 `main` 的 `643cbf0`，所列变更均在该快照之后进入主线。
+
+| 项目 | 主线行为 | 主要证据 |
+| --- | --- | --- |
+| A-01 | 备份和恢复核对卷根权限及时间。启用 `backup_user_xattrs` 后保留受限的 `user.*` 属性，激活核验覆盖属性或权限变化。ACL 和其他扩展属性命名空间会被明确拒绝。旧备份以原清单可证明的范围为准。 | [权限与属性测试](../tests/test_backup_user_xattrs.py) · [集成变更](https://github.com/jyxxe/PsiOS/pull/276) |
+| A-02 | 有权主体可在确认损坏及原保留关系后放弃 Task 结果或本地上传，释放逻辑配额并保留原证据。 | [损坏、回收与强杀](../tests/test_artifact_abandonment.py) |
+| A-03 | 拒绝、过期和归档释放活动会话或待处理邀请的名额，历史独立保留。 | [会话准入](https://github.com/jyxxe/PsiOS/pull/251) |
+| A-04 | 时间调度、资源事件调度及 Workflow 可让出被单个主体占满的顺位。继续使用原触发位置和任务键。 | [时间调度](../tests/test_schedule.py) · [资源事件](../tests/test_resource_event_schedule.py) · [工作流](../tests/test_workflow.py) |
+| A-05、A-06 | 命令截止时间覆盖输出管道退出等待，采集失败仍回收子进程。 | [执行器测试](../crates/psios-core/src/command.rs) · [修复](https://github.com/jyxxe/PsiOS/pull/178) |
+| A-07、A-10 | 打包后的 systemd 服务允许已登记的 TCP 和 DNS 探针使用 IPv4/IPv6。IPv6 验收根据配置或内核选路核对实际源地址。 | [包及 IPv6 修复](https://github.com/jyxxe/PsiOS/pull/248) |
+| A-08 | `volume.files` 原样接受上一页发出的合法 UTF-8 名字作为游标，验证覆盖控制字符、255 字节文件名和重启。 | [实际目录](../tests/test_volume_file_page.py) |
+| A-09 | 原生离线核验和试启动升级接受有界的核验复制预算，标准核验不会再卡在固定 64 MiB。 | [原生升级验证](https://github.com/jyxxe/PsiOS/pull/250) |
+
+附录 R-01 的直接会话和 Task 开启入口也已使用一致的 Model 与 Skill 范围核验。[会话目标授权](https://github.com/jyxxe/PsiOS/pull/253)
 
 ## 如何复核
 

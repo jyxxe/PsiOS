@@ -26,6 +26,8 @@ pub use model::*;
 pub use project::*;
 pub use retention::*;
 pub use schedule::ScheduleRenewalRequest;
+mod secret;
+pub use secret::MAX_SECRET_BYTES;
 pub use work_admission::*;
 pub use work_admission_blockers::*;
 mod json;
@@ -49,12 +51,12 @@ pub struct ResourceRef {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Request {
+pub struct Request<T = Value> {
     pub schema_version: String,
     pub request_id: String,
     pub method: String,
     pub token: String,
-    pub params: Value,
+    pub params: T,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

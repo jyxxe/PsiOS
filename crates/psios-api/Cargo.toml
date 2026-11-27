@@ -21,3 +21,4 @@ jsonschema = { version = "0.18.3", default-features = false, features = ["draft2
 ryu-js = "0.2"
 rustix = { version = "1", features = ["fs", "net", "process", "time"] }
 chrono = "0.4"
+zeroize = "1"

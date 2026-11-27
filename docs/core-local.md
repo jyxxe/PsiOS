@@ -120,11 +120,13 @@ target/debug/psiosctl --socket "$workdir/core/api.sock" --token-file "$workdir/a
 | Task.Get、Task.Cancel、Task.CancelOrigin、Task.Retry | Cancel 使用任务版本。CancelOrigin 接收 v1 CancelOrigin 并支持先到墓碑。Retry 需要旧任务版本和新键，创建关联的新任务。 |
 | Approval.Decide、Run.Get、Operation.Get、Operation.Reconcile | 决策绑定已显示的计划摘要、审批请求版本和单次使用单元。Reconcile 使用 Operation 的 id 和 expected_resource_version。可核实文本写入、分块追加、受管服务启停和 OCI 容器删除后的停止结果，以及有启动检查点的在运行容器。 |
 | Artifact.Get、Artifact.Read、Artifact.ReadChunk、Artifact.RepairChunk、Task.VerifyResults、Task.EvictResults | 制品查询使用固定版本 reference，分块读取另需 offset 和 length。本机所有者可修复分块、核验已结算结果，或回收已结算的只读结果。 |
-| Secret.Put、Secret.Revoke、Audit.List | Secret.Put 接受 name/value，仅返回 SecretRef。secret.mac 可使用秘密计算 HMAC。Audit.List 支持 after 和 limit。 |
+| Secret.Put、Secret.Rotate、Secret.Revoke、Audit.List | 写入返回 SecretRef，轮换和撤销使用原修订。secret.mac 可使用活动秘密计算 HMAC。Audit.List 支持 after 和 limit。 |
 | Tool.Call、Capability.Discover | 即时入口支持 system.status。执行其他注册工具通过 Task.Submit，服务端承担审批、预算、派发和回执保存。 |
 | StoragePool.Get、StoragePool.Configure、Application.Configure | 本地池实时报告容量。所有者用 CAS 开关新卷分配。应用停止后可用 CAS 修改非秘密环境配置。 |
 
 服务嵌入仓库中的 JSON Schema，无需在线获取 Schema。CLI 的 `validate task-submit FILE` 可检查结构和提交摘要。摘要使用带用途前缀的 JCS 和 SHA-256。已启用的写接口会进一步检查引用类型、当前授权、版本与真实资源身份。[v1 Schema](v1/schemas/README.md) · [RFC 8785](https://www.rfc-editor.org/rfc/rfc8785)
+
+本机授予 `secret.manage` 的主体可用 `psiosctl secret put NAME --value-file FILE` 导入秘密，用 `psiosctl secret rotate ID --revision REV --value-file FILE` 轮换，并用 `psiosctl secret revoke ID --revision REV` 撤销。文件须由调用者拥有且仅调用者可读。省略 `--value-file` 时从管道或重定向读取。输入为 1 到 8192 字节的 UTF-8，末尾换行作为原值保留。CLI 输出仅包含新的 SecretRef。Rust SDK 对应 `Client::put_secret`、`Client::rotate_secret` 和 `Client::revoke_secret`。[真实 CLI 与权限验收](../tests/test_secret_cli.py)
 
 ## 核对本机挂载拓扑
 

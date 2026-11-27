@@ -809,6 +809,8 @@ jq -n --arg id "$session" '{id:$id}' | agentctl call Session.Get
 
 `Session.ModelUsage`、Rust SDK 的 `Client::session_model_usage` 和 `psiosctl session-model-usage ID` 使用与 `Session.History` 相同的读取授权。每个会话报告已签发调用数、当前租约预扣、按经过时间结算的额度、未知调用保留的额度，以及未启用计时的调用数。每次调用会显示当前有效性和实际记账时间。Token 合计只使用已接受的 Provider 报告，同时给出有报告的调用数。根授权下全部会话的共享额度仍可用 `Budget.Get` 查询。模型切换前后的用量分别保存在各自的会话中。[实时租约和读取授权验证](../tests/test_model_provider_outcome.py)
 
+`Session.Wait` 使用与 `Session.Get` 相同的读取授权。请求包含 `id` 和 1 至 10000 毫秒的 `timeout_ms`。省略 `after_version` 时等待会话暂停或终止，传入当前引用的 `version` 时等待更新。到期返回最新授权快照，与 `Session.Get` 返回格式一致。可以用 Rust SDK 的 `Client::wait_session` 或 `psiosctl session-wait ID --wait-ms 5000`，按需追加 `--after-version VERSION`。[授权变更和状态观察验证](../tests/test_model_provider_outcome.py)
+
 模型租约在签发时绑定本节点的 Linux boot ID 和 `CLOCK_BOOTTIME`。同次系统启动中，服务重启保留原期限，系统挂起的时间计入租期。调快或调慢 UTC 时钟不会改变处理当前租约的权限。宿主重启后，旧租约的响应会被拒绝。API 的 `expires_at` 是供客户端显示的 UTC 估算。已取消但 Provider 尚未交回结果的调用，仍占用并发名额至原期限。上一启动或旧格式的调用按原 UTC 估算保留剩余名额，用于记录可能尚在外部执行的工作。绝对授权到期仍按现有 UTC 策略判断。[格式迁移测试](../tests/model_leases.py) · [虚机调时与重启测试](../tests/qemu_boot.py)
 
 格式 68 支持由管理员在 `Model.Register` 为新模型版本设定 `inference_outcome_policy: "Strict"`。在此模式下，签发租约就视为可能开始推理。重取同一个领取键只核对原租约或返回已结算回执。没有收到结算报告的租约到期后，会话暂停并记录 `Unknown`。Watchdog 主动收口，直接指定会话与队列领取也会处理旧租约，随后继续服务其他符合条件的会话。未选择严格策略的模型仍沿用原租约行为。

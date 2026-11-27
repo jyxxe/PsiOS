@@ -470,6 +470,14 @@ enum Cmd {
     SessionModelUsage {
         id: String,
     },
+    /// Wait for a Session to pause, finish, or advance past a selected revision.
+    SessionWait {
+        id: String,
+        #[arg(long)]
+        after_version: Option<String>,
+        #[arg(long, default_value_t = 5_000, value_parser = clap::value_parser!(u32).range(1..=10_000))]
+        wait_ms: u32,
+    },
     Node,
     /// Read the state of a specifically authorized enrolled block device.
     BlockDevice {
@@ -1088,6 +1096,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         } => c.pause_session(&id, &revision, &reason)?,
         Cmd::SessionResume { id, revision } => c.resume_session(&id, &revision)?,
         Cmd::SessionModelUsage { id } => serde_json::to_value(c.session_model_usage(&id)?)?,
+        Cmd::SessionWait {
+            id,
+            after_version,
+            wait_ms,
+        } => c.wait_session(&id, after_version.as_deref(), wait_ms)?,
         Cmd::TaskResults { id } => c.task_results(&id)?,
         Cmd::TaskResultEvictionPlan { file } => serde_json::to_value(
             c.prepare_result_eviction_batch(&serde_json::from_value(input(&file)?)?)?,

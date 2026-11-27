@@ -1,4 +1,5 @@
 """Exercise real local inference transport failures through the durable provider CLI."""
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler
 import json
@@ -163,6 +164,69 @@ class StrictModelProvider(unittest.TestCase):
 
     def test_queued_transport_uses_the_same_shortened_lease(self):
         self.assert_lease_bounded(queued=True)
+
+    def test_session_wait_observes_commits_and_times_out_at_the_current_revision(self):
+        node = self.node
+        session = self.open_session()
+        token = self.owner["token"]
+        initial = node.call("Session.Get", {"id": session}, token)
+        after = initial["reference"]["version"]
+        query = {"id": session, "after_version": after}
+        self.assertEqual(node.call("Session.Wait", dict(query, timeout_ms=80), token), initial)
+        for extra, code in (({"after_version": "r0001"}, "InvalidArgument"),
+                            ({"after_version": "r999999"}, "PreconditionFailed"),
+                            ({"timeout_ms": 10001}, "InvalidArgument")):
+            with self.subTest(extra=extra), self.assertRaises(Failure) as refused:
+                node.call("Session.Wait", {**query, "timeout_ms": 80, **extra}, token)
+            self.assertEqual(refused.exception.code, code)
+
+        with ThreadPoolExecutor(max_workers=1) as worker:
+            waiting = worker.submit(node.call, "Session.Wait", dict(query, timeout_ms=4000), token)
+            with self.assertRaises(TimeoutError):
+                waiting.result(timeout=0.08)
+            claim = node.call("Model.Claim", {"session_id": session, "key": key()}, self.provider["token"])
+            issued = waiting.result(timeout=2)
+        self.assertEqual(issued["session"]["lifecycle"], "ModelInFlight")
+        self.assertEqual(issued["session"]["current_lease"], claim["lease_id"])
+        self.assertEqual(issued, node.call("Session.Get", {"id": session}, token))
+        response = {"session_id": session, "lease_id": claim["lease_id"],
+                    "decision": {"action": "finish", "summary": "completed observed session"}}
+        result = node.call("Model.Respond", response, self.provider["token"])
+        terminal = node.cli(self.owner_token, "session-wait", session, "--wait-ms", "1000")
+        self.assertEqual((terminal["reference"], terminal["session"]["lifecycle"]), (result["session_ref"], "Succeeded"))
+        node.stop(signal.SIGKILL)
+        node.start()
+        self.assertEqual(node.cli(self.owner_token, "session-wait", session, "--after-version", after, "--wait-ms", "800"),
+                         terminal)
+
+    def test_session_wait_rechecks_read_permission_and_wakes_on_operator_pause(self):
+        node = self.node
+        session = self.open_session()
+        token = self.owner["token"]
+        params = {"id": session, "timeout_ms": 4000}
+        outsider, _ = node.agent(["task.read"])
+        with self.assertRaises(Failure) as unrelated:
+            node.call("Session.Wait", params, outsider["token"])
+        self.assertEqual(unrelated.exception.code, "PermissionDenied")
+
+        with ThreadPoolExecutor(max_workers=1) as worker:
+            waiting = worker.submit(node.call, "Session.Wait", params, token)
+            with self.assertRaises(TimeoutError):
+                waiting.result(timeout=0.08)
+            node.call("Grant.Revoke", target(self.grant["grant_ref"]))
+            with self.assertRaises(Failure) as revoked:
+                waiting.result(timeout=2)
+            self.assertEqual(revoked.exception.code, "PermissionDenied")
+
+        node.call("Grant.Issue", {"principal_id": self.owner["principal_id"],
+                                 "actions": ["task.read"], "units": 1, "ttl_seconds": 120})
+        initial = node.call("Session.Get", {"id": session}, token)
+        with ThreadPoolExecutor(max_workers=1) as worker:
+            waiting = worker.submit(node.call, "Session.Wait", params, token)
+            with self.assertRaises(TimeoutError):
+                waiting.result(timeout=0.08)
+            paused = node.call("Session.Pause", dict(target(initial["reference"]), reason="planned operator pause"))
+            self.assertEqual(waiting.result(timeout=2), paused)
 
     def test_model_usage_separates_active_settled_and_unknown_charges(self):
         node = self.node

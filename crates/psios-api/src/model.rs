@@ -333,6 +333,20 @@ impl Client {
         )
     }
 
+    /// Wait for a newer session revision, or for a paused or finished session.
+    /// At timeout the authority returns the latest authorized snapshot.
+    pub fn wait_session(
+        &self,
+        session: &str,
+        after_version: Option<&str>,
+        timeout_ms: u32,
+    ) -> ApiResult<Value> {
+        self.call(
+            "Session.Wait",
+            json!({"id":session,"after_version":after_version,"timeout_ms":timeout_ms}),
+        )
+    }
+
     pub fn pause_session(&self, session: &str, revision: &str, reason: &str) -> ApiResult<Value> {
         self.call(
             "Session.Pause",

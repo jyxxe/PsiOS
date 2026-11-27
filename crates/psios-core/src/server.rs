@@ -22,6 +22,7 @@ use std::{
 };
 
 type Shared = Arc<Mutex<Store>>;
+mod notification;
 
 enum WaitCondition {
     Items(&'static str),
@@ -688,6 +689,7 @@ fn resource_pressure(error: &std::io::Error) -> bool {
 }
 
 pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
+    let notification = notification::Notifier::configured()?;
     let mut db = Store::open(cfg.clone())?;
     db.transaction("storage-reclamation-custody", |db| retirement::verify(db.c))?;
     db.reclaim_oci_archives()?;
@@ -741,8 +743,22 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
             );
         }
         Ok(())
-    })();
-    if startup.is_ok() {
+    })()
+    .map_err(|error| {
+        err(
+            "DependencyUnavailable",
+            format!("could not start Core workers: {error}"),
+        )
+    })
+    .and_then(|_| {
+        let ready = !stop.load(Ordering::Acquire);
+        if ready {
+            notification.ready()?;
+        }
+        Ok(ready)
+    });
+    let announced = matches!(startup, Ok(true));
+    if announced {
         eprintln!("psiosd ready on {}", cfg.socket.display());
     } else {
         stop.store(true, Ordering::Release);
@@ -805,6 +821,12 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     }
     stop.store(true, Ordering::Release);
     changes.notify_shutdown();
+    if announced && let Err(error) = notification.stopping() {
+        eprintln!(
+            "psiosd service manager shutdown notification: {}",
+            error.0.message
+        );
+    }
     for worker in &workers {
         worker.thread().unpark();
     }
@@ -823,12 +845,7 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
         }
     }
     result?;
-    startup.map_err(|e| {
-        err(
-            "DependencyUnavailable",
-            format!("could not start Core workers: {e}"),
-        )
-    })?;
+    startup?;
     if let Some(e) = accept_error {
         return Err(e.into());
     }

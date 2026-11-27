@@ -469,6 +469,11 @@ jobs:
           sudo systemctl start "user@$(id -u).service"
           export XDG_RUNTIME_DIR="/run/user/$(id -u)"
           python3 tests/services.py
+      - name: Wait for authority recovery through the real systemd manager
+        run: |
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          PSIOS_TEST_SYSTEMD_NOTIFY=1 python3 -B -m unittest discover -s tests \
+            -p test_systemd_notify.py -k test_systemd_start -v
       - name: Invoke one explicitly granted systemd service through both MCP profiles
         run: |
           export XDG_RUNTIME_DIR="/run/user/$(id -u)"

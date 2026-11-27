@@ -2782,6 +2782,56 @@ fn install_agent_app(s: &mut Store, agent: &Value, name: &str) -> Value {
 }
 
 #[test]
+fn oci_runtime_observation_keeps_authorized_result_and_redacts_late_payload() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_, mut store) = initialized(directory.path());
+    let owner = call(&mut store, "Agent.Register", json!({"name":"oci-observer"})).unwrap();
+    let app = install_agent_app(&mut store, &owner, "late-oci-observation");
+    let task = submit(
+        &mut store,
+        "application.health",
+        json!({"id":app["resource_id"],"expected_resource_version":app["version"]}),
+    );
+    assert_eq!(claim(&mut store), task);
+    let work = dispatch(&mut store, &task);
+    let sample = work
+        .perform(|_| unreachable!("stopped OCI health is an observation"))
+        .unwrap();
+    let legacy = store
+        .transaction("fence-late-oci-observation", |db| {
+            broker::finish(db, &work, Ok(sample.clone()))?;
+            broker::finish(db, &work, Ok(sample.clone()))?;
+            let late: Value = db.c.query_row(
+                "SELECT body FROM versions WHERE kind='LateReceipt' AND body->'operation_ref'->>'resource_id'=?1",
+                [&work.op.id],
+                |row| row.get(0),
+            )?;
+            assert_eq!(late["evidence"], json!({"code":"Fenced"}));
+            Ok(db.record("LateReceipt", &work.task.owner, json!({
+                "run_ref":work.run.reference(),"operation_ref":work.op.reference(),
+                "effect_ref":work.effect.reference(),"evidence":{"receipt":sample},
+            }))?.reference())
+        })
+        .unwrap();
+    let status = call(&mut store, "Task.Get", json!({"id":task})).unwrap();
+    assert_eq!(status["lifecycle"], "Succeeded");
+    let authorized = call(
+        &mut store,
+        "Artifact.Read",
+        json!({"reference":status["result"]["artifact_refs"][0]}),
+    )
+    .unwrap();
+    assert_eq!(authorized, sample);
+    for (method, input) in [
+        ("Resource.Get", json!({"id":legacy["resource_id"]})),
+        ("Resource.Resolve", json!({"reference":legacy})),
+    ] {
+        let result = call(&mut store, method, input).unwrap();
+        assert_eq!(result["value"]["evidence"], json!({"code":"Fenced"}));
+    }
+}
+
+#[test]
 fn publisher_verification_persists_after_revocation_and_fences_new_launches() {
     use ring::{
         rand::SystemRandom,

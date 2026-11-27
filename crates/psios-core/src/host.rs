@@ -783,15 +783,8 @@ impl Work {
             let target = self.checkpoint_authority(db)?;
             return apps::check_release_selection(db, &target, release_ref);
         }
-        if apps::catalog::is_tool(self.task.spec["task_type"].as_str().unwrap_or_default()) {
-            self.checkpoint_authority(db)?;
-        }
-        if self.mount_observation_required
-            && matches!(
-                self.action,
-                Action::Health(_) | Action::InspectOciInstance(_)
-            )
-        {
+        let tool = self.task.spec["task_type"].as_str().unwrap_or_default();
+        if apps::catalog::is_tool(tool) || apps::is_runtime_observation(tool) {
             self.checkpoint_authority(db)?;
         }
         if storage::read_holds::reader(&self.action)

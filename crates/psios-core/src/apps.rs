@@ -27,6 +27,13 @@ pub(crate) mod restore_image;
 pub(crate) mod stop;
 pub(crate) mod volume_rebind;
 
+pub(crate) fn is_runtime_observation(tool: &str) -> bool {
+    matches!(
+        tool,
+        "application.health" | "application.refresh" | restart::INSPECT
+    )
+}
+
 fn environment(env: &BTreeMap<String, String>) -> Result<()> {
     require(
         env.len() <= 32

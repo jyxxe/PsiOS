@@ -95,7 +95,7 @@ class Console:
         if password.encode() in before_shell:
             raise AssertionError("guest serial console echoed the fixture password")
         marker = "PSIOSLOGIN" + secrets.token_hex(6)
-        self.send(f"stty -echo; export PS1=''; printf '\\n{marker}\\n'", paced=self.pace_commands)
+        self.send(f"stty -echo; export PS1=''; printf '\\n{marker}\\n'", paced=True)
         self.until(("\n" + marker + "\n").encode(), phase="shell login nonce")
         if user == "psios":
             self.run("for i in $(seq 1 100); do psiosctl whoami >/dev/null 2>&1 && exit 0; sleep 0.1; done; exit 1")
@@ -145,7 +145,9 @@ def boot(work, image, network_mac=None, extra_disk=None, tap=None, *, rtc_base=N
         cmd += ["-nic", "none"]
     with subprocess.Popen(cmd, cwd=work, stdin=subprocess.PIPE, stdout=subprocess.PIPE) as vm:
         try:
-            yield Console(vm, pace_commands=pace_commands)
+            # TAP tests use TCG and may run under loaded CI hosts. Pace complete
+            # commands, including the longer route and configuration requests.
+            yield Console(vm, pace_commands=pace_commands or tap is not None)
         finally:
             if vm.poll() is None:
                 vm.kill()

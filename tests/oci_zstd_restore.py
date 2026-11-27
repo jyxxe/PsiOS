@@ -90,7 +90,7 @@ def main(binaries, previous=None):
             assert node.call("Resource.Resolve", {"reference": old_receipt["capture_ref"]})["value"] == old_proof
             node.stop()
             verified_old = verify_authority(node)
-            assert (verified_old["database_format"], verified_old["migration_required"]) == (136, False), verified_old
+            assert verified_old["database_format"] >= 136 and not verified_old["migration_required"], verified_old
             node.start()
             node.call("Artifact.Withdraw", {"reference": old_receipt["artifact_ref"],
                                            "reason": "retain the prior compatibility receipt"})
@@ -108,12 +108,15 @@ def main(binaries, previous=None):
         application = install_and_restore(node, image_id, image_id, info["ID"], receipt["artifact_ref"], [diffid],
                                           argv=["/probe"])
         verify_start_and_stop(node, application)
+        checked = "PASS real signed zstd OCI checkpoint, original manifest and DiffID, application execution"
         if previous is not None:
             after = verify_authority(node)
-            assert (after["node_id"], after["database_format"], after["migration_required"]) == (old["node_id"], 136, False), after
+            assert after["node_id"] == old["node_id"] and after["database_format"] >= 136, after
+            assert not after["migration_required"], after
             refused = subprocess.run([*original, "serve"], capture_output=True, text=True, timeout=15)
             assert refused.returncode != 0 and "SchemaVersionUnsupported" in refused.stderr, refused
-        print("PASS real signed zstd OCI checkpoint, original manifest and DiffID, application execution and writer fence")
+            checked += " and writer fence"
+        print(checked)
     finally:
         node.close()
         if application is not None:

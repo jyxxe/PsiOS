@@ -362,7 +362,7 @@ class StrictModelProvider(unittest.TestCase):
         command = self.step(session, "absent-inference")
         with interrupt_worker_delivery(node, self.provider_token, command, committed=True,
                                        method="Model.ReportFailure"):
-            saved = json.loads((self.journal / "psios-model-pending.json").read_bytes())
+            saved = json.loads((self.journal / "psios-model-pending.json").read_bytes())["record"]
             self.assertEqual(saved["format"], 3)
         node.stop(signal.SIGKILL)
         node.start()

@@ -4,18 +4,13 @@ use crate::{ApiError, ApiResult, Client, ResourceRef, canonical, parse, sha256};
 use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags, open, openat, renameat_with, unlinkat};
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use std::{
-    fs::File,
-    io::{Read, Write},
-    os::unix::fs::MetadataExt,
-    path::Path,
-    time::Duration,
-};
+use serde_json::{Value, json, value::RawValue};
+use std::{fs::File, io::Read, os::unix::fs::MetadataExt, path::Path, time::Duration};
 
 const PENDING: &str = "psios-model-pending.json";
 const STAGING: &str = ".psios-model-pending.tmp";
-const LIMIT: u64 = 72 * 1024;
+const RECORD_LIMIT: u64 = 72 * 1024;
+const FILE_LIMIT: u64 = RECORD_LIMIT + 256;
 const LATE_DECISION_FORMAT: u32 = 4;
 const DECISION_REJECTION_FORMAT: u32 = 5;
 
@@ -35,6 +30,17 @@ struct Pending {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     late_decision_model_ref: Option<ResourceRef>,
     request: Delivery,
+}
+
+// Keep the delivery format independent of the local file format. Hash the exact
+// stored JSON bytes, including numeric spellings, before decoding a delivery.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct JournalEnvelope<'a> {
+    journal_version: u32,
+    record_sha256: &'a str,
+    #[serde(borrow)]
+    record: &'a RawValue,
 }
 
 impl Pending {
@@ -83,6 +89,37 @@ impl Pending {
         } else {
             self.format == self.request.format()
         }
+    }
+
+    fn from_journal(bytes: &[u8]) -> ApiResult<Self> {
+        let invalid = || ApiError::new("RecoveryRequired", "invalid retained provider decision");
+        if bytes.iter().find(|byte| !byte.is_ascii_whitespace()) != Some(&b'{') {
+            return Err(invalid().into());
+        }
+        let record_bytes = match serde_json::from_slice::<JournalEnvelope<'_>>(bytes) {
+            Ok(envelope) => {
+                let raw = envelope.record.get().as_bytes();
+                if envelope.journal_version != 1 || sha256(raw) != envelope.record_sha256 {
+                    return Err(invalid().into());
+                }
+                raw
+            }
+            // Prior writers stored just a Pending object. Its strict schema
+            // rejects a damaged envelope, including one with missing fields.
+            Err(_) => bytes,
+        };
+        if record_bytes.len() as u64 > RECORD_LIMIT {
+            return Err(invalid().into());
+        }
+        let value = parse(record_bytes).map_err(|_| invalid())?;
+        if !value.is_object() {
+            return Err(invalid().into());
+        }
+        let record: Self = serde_json::from_value(value).map_err(|_| invalid())?;
+        if !record.valid_format() {
+            return Err(invalid().into());
+        }
+        Ok(record)
     }
 
     fn verify_origin(
@@ -161,7 +198,7 @@ impl Journal {
             || m.nlink() != 1
             || m.mode() & 0o077 != 0
             || m.uid() != rustix::process::geteuid().as_raw()
-            || m.len() > LIMIT
+            || m.len() > FILE_LIMIT
         {
             return Err(ApiError::new(
                 "RecoveryRequired",
@@ -170,18 +207,17 @@ impl Journal {
             .into());
         }
         let mut bytes = Vec::new();
-        f.take(LIMIT + 1)
+        f.take(FILE_LIMIT + 1)
             .read_to_end(&mut bytes)
             .map_err(storage_error)?;
-        let invalid = || ApiError::new("RecoveryRequired", "invalid retained provider decision");
-        if bytes.len() as u64 > LIMIT {
-            return Err(invalid().into());
+        if bytes.len() as u64 > FILE_LIMIT {
+            return Err(ApiError::new(
+                "RecoveryRequired",
+                "retained provider file exceeds its limit",
+            )
+            .into());
         }
-        let record: Pending =
-            serde_json::from_value(parse(&bytes).map_err(|_| invalid())?).map_err(|_| invalid())?;
-        if !record.valid_format() {
-            return Err(invalid().into());
-        }
+        let record = Pending::from_journal(&bytes)?;
         // A previous fsync of the renamed directory entry may have returned an
         // error. Establish its durability before allowing any retransmission.
         self.0.sync_all().map_err(storage_error)?;
@@ -189,12 +225,18 @@ impl Journal {
     }
 
     fn retain(&self, record: &Pending) -> ApiResult<()> {
-        let mut bytes = vec![0; LIMIT as usize];
+        let mut bytes = vec![0; RECORD_LIMIT as usize];
         let mut buffer = std::io::Cursor::new(bytes.as_mut_slice());
         serde_json::to_writer(&mut buffer, record).map_err(|_| {
             ApiError::new("QuotaExceeded", "decision exceeds local retention limit")
         })?;
         let size = buffer.position() as usize;
+        let record = &bytes[..size];
+        let envelope = JournalEnvelope {
+            journal_version: 1,
+            record_sha256: &sha256(record),
+            record: serde_json::from_slice(record).map_err(storage_error)?,
+        };
         let mut f = File::from(
             openat(
                 &self.0,
@@ -204,9 +246,8 @@ impl Journal {
             )
             .map_err(storage_error)?,
         );
-        f.write_all(&bytes[..size])
-            .and_then(|_| f.sync_all())
-            .map_err(storage_error)?;
+        serde_json::to_writer(&mut f, &envelope).map_err(storage_error)?;
+        f.sync_all().map_err(storage_error)?;
         renameat_with(&self.0, STAGING, &self.0, PENDING, RenameFlags::NOREPLACE)
             .map_err(storage_error)?;
         self.0.sync_all().map_err(storage_error)
@@ -565,11 +606,36 @@ mod tests {
         ] {
             let original = json!({"format":format,"request":request,"authority":"local-fixture",
                 "provider":"provider-fixture","claim_key":"fixture"});
-            let restored: Pending = serde_json::from_value(original.clone()).unwrap();
+            let restored = Pending::from_journal(&serde_json::to_vec(&original).unwrap()).unwrap();
             assert!(restored.valid_format());
             assert_eq!(restored.request.format(), format);
             assert_eq!(restored.request.method(), method);
             assert_eq!(json!(restored), original);
+        }
+    }
+
+    #[test]
+    fn journal_envelope_verifies_the_original_record_bytes() {
+        let record = r#"{"format":5,"provider":"p","authority":"n","claim_key":"k","late_decision_model_ref":{"resource_id":"m","version":"r1","digest":"d"},"request":{"session_id":"s","lease_id":"l","decision":{"action":"tool","tool":"t","input":{"factor":1.00}},"decision_rejection_policy":"UndeclaredToolV1"}}"#;
+        let digest = sha256(record.as_bytes());
+        let wrapped =
+            format!(r#"{{"journal_version":1,"record_sha256":"{digest}","record":{record}}}"#);
+        for valid in [record, &wrapped] {
+            assert_eq!(Pending::from_journal(valid.as_bytes()).unwrap().format, 5);
+        }
+        for invalid in [
+            wrapped.replace("1.00", "1.0"),
+            wrapped.replace(r#""journal_version":1"#, r#""journal_version":2"#),
+            wrapped.replace(
+                r#""journal_version":1"#,
+                r#""journal_version":1,"journal_version":1"#,
+            ),
+            format!(r#"[1,"{digest}",{record}]"#),
+            format!(r#"{{"record":{record},"journal_version":1}}"#),
+        ] {
+            assert!(
+                matches!(Pending::from_journal(invalid.as_bytes()), Err(e) if e.code == "RecoveryRequired")
+            );
         }
     }
 
@@ -591,7 +657,7 @@ mod tests {
             "format":LATE_DECISION_FORMAT,"authority":"authority-fixture","provider":"provider-fixture",
             "queue_model":model,"late_decision_model_ref":model,"claim_key":"claim-fixture","request":request,
         });
-        let saved: Pending = serde_json::from_value(pending.clone()).unwrap();
+        let saved = Pending::from_journal(&serde_json::to_vec(&pending).unwrap()).unwrap();
         assert!(saved.valid_format());
         assert_eq!(json!(saved), pending);
         for (field, wrong) in [

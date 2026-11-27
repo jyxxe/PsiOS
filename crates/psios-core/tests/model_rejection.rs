@@ -262,8 +262,9 @@ fn rejected_decision_replays_without_tool_effect_or_second_inference() {
     assert_eq!(request["session_id"], session_id);
     assert_eq!(request["decision_rejection_policy"], POLICY);
     let pending: Value = serde_json::from_slice(&fs::read(journal.join(PENDING)).unwrap()).unwrap();
-    assert_eq!(pending["format"], 5);
-    assert_eq!(pending["request"], request);
+    assert_eq!(pending["journal_version"], 1);
+    assert_eq!(pending["record"]["format"], 5);
+    assert_eq!(pending["record"]["request"], request);
     assert_eq!(
         receipt["rejection"],
         json!({"policy":POLICY,"code":"ToolNotDeclared"})

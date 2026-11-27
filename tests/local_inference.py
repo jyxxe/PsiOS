@@ -108,7 +108,7 @@ def exercise(node, endpoint, work, *, metered):
     sid = start()
     cfg.write_text(json.dumps(config))
     with interrupt_delivery(node, credential, sid, "first", journal, committed=False, local_model=cfg):
-        pending = json.loads((journal / "psios-model-pending.json").read_bytes())
+        pending = json.loads((journal / "psios-model-pending.json").read_bytes())["record"]
         assert pending["format"] == (2 if metered else 1)
         retained_usage = pending["request"].get("usage")
         assert (retained_usage is not None) == metered

@@ -12,13 +12,21 @@ import unittest
 
 from support import Failure, Node
 from test_artifact_ingress import chunk, upload_request
+from test_artifact_install import grant
+
+
+def uploader(node, name):
+    actor = node.call("Agent.Register", {"name": name})
+    authority = node.call("Node.Get", {})["reference"]["resource_id"]
+    permitted = grant(node, actor["principal_id"], ["artifact.upload", "artifact.read"], [authority])
+    return actor, permitted
 
 
 class PreparedUploadTests(unittest.TestCase):
     def setUp(self):
         self.node = Node(os.getenv("PSIOS_TEST_BIN_DIR", "target/debug"))
         self.addCleanup(self.node.close)
-        self.agent, self.grant = self.node.agent(["artifact.upload", "artifact.read"])
+        self.agent, self.grant = uploader(self.node, "prepared-uploader")
         self.token = self.agent["token"]
 
     def declared(self, contents, *, bound=False):
@@ -64,7 +72,7 @@ class PreparedUploadTests(unittest.TestCase):
         body = b"private exact upload bytes"
         request = self.prepare(body, bound=True)
         self.assertEqual(self.capacity()["receipts"], 0)
-        other, _ = n.agent(["artifact.upload"])
+        other, _ = uploader(n, "other-uploader")
         self.denied("PermissionDenied", "Artifact.Stage", request, other["token"])
         self.denied("PermissionDenied", "Artifact.Stage", dict(request, declared_media_type="text/plain"))
         self.denied("PermissionDenied", "Artifact.Stage", dict(request, key="psios-upload-v1-forged"))
@@ -153,7 +161,7 @@ class PreparedUploadTests(unittest.TestCase):
     def test_upgrade_keeps_a_legacy_key_and_fences_the_previous_writer(self):
         prior = Node(Path(os.environ["PSIOS_UPLOAD_WINDOW_PREVIOUS_BIN_DIR"]))
         self.addCleanup(prior.close)
-        actor, _ = prior.agent(["artifact.upload"])
+        actor, _ = uploader(prior, "legacy-uploader")
         token = actor["token"]
         request = upload_request(b"existing historical stage", key="psios-upload-v1-legacy-request")
         staged = prior.call("Artifact.Stage", request, token)

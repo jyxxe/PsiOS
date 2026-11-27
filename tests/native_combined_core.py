@@ -91,7 +91,7 @@ def exercise(args, work):
     disk = work / "combined.raw"
     subprocess.run([*installer(args, disk, args.archive), "--console-hash", operator_hash,
                     "--root-console-hash", root_hash], check=True, stdout=subprocess.DEVNULL, timeout=140)
-    with boot(work, disk) as console:
+    with boot(work, disk, pace_commands=True) as console:
         console.login("psios", user)
         observations(console)
         wait_through_cordon(console)

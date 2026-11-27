@@ -532,7 +532,7 @@ fn descriptor(tool: &LocalReadBinding, protocol: Protocol) -> Value {
             "Measure file and allocation usage of the configured volume root."
         }
         LocalReadBinding::VolumeFiles { .. } => {
-            "List a directory in the configured volume. Continue with next_after and volume_version from the previous page."
+            "List a directory in the configured volume. Continue with next_after, volume_version and directory_revision from the previous page."
         }
         LocalReadBinding::VolumeReadChunk { .. } => {
             "Read a bounded Base64 chunk in the configured volume. Continue with next_offset, volume_version and file_revision."
@@ -561,6 +561,7 @@ fn descriptor(tool: &LocalReadBinding, protocol: Protocol) -> Value {
             "path":{"type":"string","default":"","maxLength":2048},
             "limit":{"type":["integer","null"],"minimum":1,"maximum":MAX_VOLUME_FILES_PAGE},
             "after":{"type":["string","null"],"minLength":1,"maxLength":255},
+            "directory_revision":{"type":["string","null"],"pattern":"^sha256:[0-9a-f]{64}$"},
             "volume_version":{"type":["string","null"],"minLength":1,"maxLength":128}
         });
     }

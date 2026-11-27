@@ -16,6 +16,8 @@ pub(crate) const NODE_INVENTORY_FORMAT: u32 = crate::storage::xattrs::FORMAT + 1
 pub(crate) const VOLUME_FILES_FORMAT: u32 = crate::apps::mount_observation::READ_ONLY_FORMAT + 1;
 pub(crate) const VOLUME_FILE_CHUNK_FORMAT: u32 = VOLUME_FILES_FORMAT + 1;
 pub(crate) const APPLICATION_INSPECT_FORMAT: u32 = crate::apps::restart::USAGE_FORMAT + 1;
+pub(crate) const VOLUME_DIRECTORY_REVISION_FORMAT: u32 =
+    crate::policy::secrets::receipts::FORMAT + 1;
 
 pub(crate) fn agent(db: &Db<'_>, actor: &str) -> Result<()> {
     let principal = db.of(actor, "Principal")?;

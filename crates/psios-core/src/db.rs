@@ -192,7 +192,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = policy::secrets::receipts::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = crate::local_read_tools::VOLUME_DIRECTORY_REVISION_FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,

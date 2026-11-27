@@ -75,6 +75,48 @@ class VolumeFilePages(unittest.TestCase):
                 node.stop(signal.SIGKILL)
                 node.start()
 
+    def test_pinned_membership_survives_restart_and_rejects_insertions_and_replacements(self):
+        node = Node()
+        self.addCleanup(node.close)
+        volume = node.perform("volume.create", {"name": "directory-membership"})
+        root = node.state / "volumes" / volume["resource_id"] / "data"
+        directory = root / "reports"
+        directory.mkdir()
+        for name in ("b", "d"):
+            (directory / name).touch()
+        query = {"target": target(volume), "path": "reports", "limit": 1}
+        first = node.perform("volume.files", query)
+        revision = first["directory_revision"]
+        self.assertRegex(revision, r"^sha256:[0-9a-f]{64}$")
+        next_page = dict(query, after=first["next_after"], expected_directory_revision=revision)
+        node.stop(signal.SIGKILL)
+        node.start()
+        (directory / "d").write_bytes(b"now six")
+        second = node.perform("volume.files", next_page)
+        self.assertEqual(second["directory_revision"], revision)
+        self.assertEqual(second["entries"], [{"name": "d", "kind": "file", "bytes": "7"}])
+
+        (directory / "a").touch()
+        stale = node.wait(node.submit("volume.files", next_page))
+        self.assertEqual(stale["conditions"][0]["reason"], "Conflict", stale)
+        self.assertEqual(stale["result"]["artifact_refs"], [])
+        fresh = node.perform("volume.files", query)
+        self.assertEqual((fresh["volume_version"], fresh["next_after"]), (first["volume_version"], "a"))
+        self.assertNotEqual(fresh["directory_revision"], revision)
+        # Even an identically populated replacement cannot reuse the original directory's revision.
+        directory.rename(root / "previous")
+        directory.mkdir()
+        for name in ("b", "d"):
+            (directory / name).touch()
+        replaced = node.wait(node.submit("volume.files", next_page))
+        self.assertEqual(replaced["conditions"][0]["reason"], "Conflict", replaced)
+        self.assertEqual(replaced["result"]["artifact_refs"], [])
+        self.assertEqual(node.perform("volume.files", dict(query, after="b"))["entries"][0]["name"], "d")
+        for invalid in ("bad", "sha256:" + "A" * 64):
+            with self.assertRaises(Failure) as rejected:
+                node.prepare("volume.files", dict(query, expected_directory_revision=invalid))
+            self.assertEqual(rejected.exception.code, "InvalidArgument")
+
     def test_cursor_shape_does_not_expand_filesystem_paths(self):
         node = Node()
         self.addCleanup(node.close)

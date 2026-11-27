@@ -942,6 +942,13 @@ jobs:
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format138" "$RUNNER_TEMP/psios-compatibility-target"
           PSIOS_MCP_PAGE_PREVIOUS_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
             python3 -B -m unittest discover -s tests -p test_mcp_tasks.py -k test_format_138_unpaged_handle -v
+      - name: Preserve the exact directory Task and artifact from format 147 during upgrade
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format147"
+          git archive e22ba53a3df52ad9dbffb4c4ce82b6fabc3b1957 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format147"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format147" "$RUNNER_TEMP/psios-compatibility-target"
+          PSIOS_DIRECTORY_PREVIOUS_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
+            python3 -B -m unittest discover -s tests -p test_mcp_tasks.py -k test_format_147_directory_handle -v
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

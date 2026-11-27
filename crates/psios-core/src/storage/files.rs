@@ -20,6 +20,7 @@ pub struct Page {
     #[serde(default)]
     pub path: String,
     pub after: Option<String>,
+    pub expected_directory_revision: Option<String>,
     pub limit: Option<usize>,
     pub max_result_bytes: Option<usize>,
 }
@@ -78,6 +79,13 @@ pub fn validate(a: &Action) -> Result<()> {
     match a {
         Action::Files(p) => {
             path(&p.path, true)?;
+            require(
+                p.expected_directory_revision
+                    .as_deref()
+                    .is_none_or(psios_api::valid_volume_entry_revision),
+                "InvalidArgument",
+                "invalid volume directory revision",
+            )?;
             if let Some(after) = &p.after {
                 // The cursor is a name from readdir and is used only for ordering.
                 require(
@@ -143,6 +151,15 @@ fn list(root: &File, p: &Page) -> Result<Value> {
     let dir = open_directory(root, &p.path)?;
     let directory_before = dir.metadata()?;
     let limit = p.limit.unwrap_or(32);
+    let mut membership = Sha256::new();
+    membership.update(canonical(&json!([
+        "psios/volume-directory-revision/1",
+        p.target.id,
+        p.target.expected_resource_version,
+        p.path,
+        directory_before.dev(),
+        directory_before.ino()
+    ])));
     let mut selected = std::collections::BTreeSet::<String>::new();
     for (i, entry) in Dir::read_from(&dir)
         .map_err(std::io::Error::from)?
@@ -154,7 +171,13 @@ fn list(root: &File, p: &Page) -> Result<Value> {
             .file_name()
             .to_str()
             .map_err(|_| err("UnsupportedCapability", "non-UTF8 filename"))?;
-        if matches!(name, "." | "..") || p.after.as_deref().is_some_and(|a| name <= a) {
+        if matches!(name, "." | "..") {
+            continue;
+        }
+        // Include names on both sides of the cursor. Linux names cannot contain NUL.
+        membership.update([0]);
+        membership.update(name.as_bytes());
+        if p.after.as_deref().is_some_and(|a| name <= a) {
             continue;
         }
         selected.insert(name.to_owned());
@@ -162,14 +185,22 @@ fn list(root: &File, p: &Page) -> Result<Value> {
             selected.pop_last();
         }
     }
+    let revision = format!("sha256:{:x}", membership.finalize());
+    require(
+        p.expected_directory_revision
+            .as_ref()
+            .is_none_or(|expected| *expected == revision),
+        "Conflict",
+        "volume directory changed between pages",
+    )?;
     let mut more = selected.len() > limit;
     let mut entries = Vec::new();
     let mut last = None;
-    let mut encoded = p.max_result_bytes.map(|_| {
-        json!({"entries":[],"next_after":null,"volume_version":p.target.expected_resource_version})
-            .to_string()
-            .len()
+    let mut page = json!({
+        "entries": [], "next_after": null, "volume_version": p.target.expected_resource_version,
+        "directory_revision": revision,
     });
+    let mut encoded = p.max_result_bytes.map(|_| page.to_string().len());
     for name in selected.into_iter().take(limit) {
         // Do not collect metadata through a mount or follow a link out of the volume.
         let meta = child(&dir, name.as_str(), OFlags::PATH)?.metadata()?;
@@ -204,10 +235,11 @@ fn list(root: &File, p: &Page) -> Result<Value> {
         "Conflict",
         "directory changed while the page was being read",
     )?;
-    let cursor = if more { last } else { None };
-    Ok(
-        json!({"entries":entries,"next_after":cursor,"volume_version":p.target.expected_resource_version}),
-    )
+    page["entries"] = Value::Array(entries);
+    if more {
+        page["next_after"] = json!(last);
+    }
+    Ok(page)
 }
 fn read(root: &File, p: &ReadChunk) -> Result<Value> {
     let mut f = child(root, &p.path, OFlags::RDONLY)?;

@@ -192,7 +192,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = apps::catalog::FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = chat::CAPACITY_FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -578,6 +578,9 @@ impl Store {
                 }
                 if ver < storage::publication::FORMAT {
                     db.c.execute_batch(storage::publication::DISPOSAL_SCHEMA)?;
+                }
+                if ver < chat::CAPACITY_FORMAT {
+                    db.c.execute_batch(chat::CAPACITY_SCHEMA)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

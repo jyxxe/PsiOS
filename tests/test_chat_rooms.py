@@ -12,7 +12,7 @@ ACTIONS = ["chat.invite", "chat.read", "chat.send"]
 
 class RoomTests(unittest.TestCase):
     def setUp(self):
-        self.node = Node("target/debug")
+        self.node = Node()
         self.addCleanup(self.node.close)
         self.alice, self.alice_grant = self.node.agent(ACTIONS)
         self.bob, self.bob_grant = self.node.agent(ACTIONS)
@@ -179,6 +179,54 @@ class RoomTests(unittest.TestCase):
         self.rejected("PermissionDenied", "Conversation.Respond", dict(self.version(fresh["conversation"]),
             membership_id=invitation["membership_id"], accept=True), self.c)
         self.assertEqual(self.send(reopened, self.b, "written after reopen")["conversation_seq"], "2")
+
+    def test_reopening_reacquires_capacity_for_all_existing_members(self):
+        n = self.node
+        room = self.join(self.create(), self.bob)
+        archived = n.call("Conversation.Archive", self.version(room), self.a)
+        admitted = [n.call("Conversation.OpenDirect", {
+            "key": key(), "name": f"follow-up-{index}", "ttl_seconds": 120,
+            "recipient_principal_id": self.bob["principal_id"],
+        }, self.c) for index in range(64)]
+        self.rejected("QueueFull", "Conversation.Reopen", self.version(archived), self.a)
+        self.assertEqual(self.get(room, self.a), archived)
+        n.call("Conversation.Respond", dict(self.version(admitted[0]), accept=False), self.b)
+        reopened = n.call("Conversation.Reopen", self.version(archived), self.a)
+        self.assertEqual(reopened["lifecycle"], "Active")
+        self.assertEqual(self.send(reopened, self.b, "retained member can write again")["conversation_seq"], "1")
+
+    def test_declined_room_membership_versions_leave_seats_available(self):
+        room = self.create(capacity=2)
+        for _ in range(128):
+            invitation = self.invite(room, self.bob)
+            response = self.node.call("Conversation.Respond", dict(
+                self.version(invitation["conversation"]), membership_id=invitation["membership_id"],
+                accept=False), self.b)
+            self.assertEqual(response["lifecycle"], "Active")
+            room = response
+        joined = self.join(room, self.bob)
+        self.assertEqual(self.send(joined, self.b, "accepted the current invitation")["conversation_seq"], "1")
+
+    def test_node_limit_counts_live_rooms_and_retains_archived_history(self):
+        n = self.node
+        owners = [self.a, self.b, self.c] + [n.agent(ACTIONS)[0]["token"] for _ in range(5)]
+        earliest = None
+        for owner in owners:
+            for index in range(64):
+                room = n.call("Conversation.OpenRoom", {"key": key(), "name": f"room-{index}",
+                              "capacity": 2, "ttl_seconds": 600}, owner)
+                if earliest is None:
+                    earliest = room
+        successor = n.agent(ACTIONS)[0]["token"]
+        request = {"key": key(), "name": "replacement room", "capacity": 2, "ttl_seconds": 600}
+        self.rejected("QueueFull", "Conversation.OpenRoom", request, successor)
+        archived = n.call("Conversation.Archive", self.version(earliest), self.a)
+        n.stop(signal.SIGKILL)
+        n.start()
+        admitted = n.call("Conversation.OpenRoom", request, successor)
+        self.assertEqual(admitted["lifecycle"], "Active")
+        self.assertEqual(self.get(earliest, self.a), archived)
+        self.rejected("QueueFull", "Conversation.Reopen", self.version(archived), self.a)
 
     def test_history_begins_at_join_and_hidden_reply_is_filtered(self):
         n = self.node

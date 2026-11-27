@@ -213,21 +213,6 @@ pub(super) fn get(db: &Db<'_>, actor: &str, id: &str) -> Result<Value> {
     room.view(db, &member)
 }
 
-pub(super) fn list(db: &Db<'_>, actor: &str) -> Result<Vec<Value>> {
-    let mut stmt = db.c.prepare(
-        "SELECT conversation FROM room_memberships WHERE principal=?1 AND phase IN('Invited','Active') ORDER BY conversation"
-    )?;
-    let mut items = Vec::new();
-    for row in stmt.query_map([actor], |row| row.get::<_, String>(0))? {
-        match get(db, actor, &row?) {
-            Ok(view) => items.push(view),
-            Err(error) if error.0.code == "PermissionDenied" => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(items)
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Open {
@@ -259,9 +244,10 @@ pub fn open(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
         return room.view(db, &current_member(db, &id, actor)?);
     }
     db.cfg.check_admission_space()?;
-    conversation_capacity(db)?;
-    principal_capacity(db, actor, None)?;
-    let expires = Utc::now().timestamp() + i64::from(p.ttl_seconds);
+    let stamp = Utc::now().timestamp();
+    conversation_capacity(db, stamp)?;
+    principal_capacity(db, actor, None, stamp)?;
+    let expires = stamp + i64::from(p.ttl_seconds);
     db.c.execute("INSERT INTO chat_logs(id) VALUES(?1)", [&id])?;
     db.c.execute(
         "INSERT INTO chat_rooms(id,owner,name,capacity,expires,created_at,creation_digest)
@@ -313,18 +299,19 @@ pub fn invite(db: &Db<'_>, actor: &str, value: &Value) -> Result<Value> {
     )?;
     policy::active(db, &p.principal_id)?;
     db.cfg.check_admission_space()?;
-    principal_capacity(db, &p.principal_id, Some(&room.id))?;
+    principal_capacity(db, &p.principal_id, Some(&room.id), stamp)?;
     db.c.execute(
         "UPDATE room_memberships SET phase='Expired',reason='InvitationExpired'
          WHERE conversation=?1 AND phase='Invited' AND invitation_until<=?2",
         params![room.id, stamp],
     )?;
-    let (reserved, total): (u32,u32) = db.c.query_row(
-        "SELECT count(*) FILTER (WHERE phase IN('Invited','Active')),count(*) FROM room_memberships WHERE conversation=?1",
-        [&room.id], |row| Ok((row.get(0)?,row.get(1)?)),
+    let reserved: u32 = db.c.query_row(
+        "SELECT count(*) FROM room_memberships WHERE conversation=?1 AND phase IN('Invited','Active')",
+        [&room.id],
+        |row| row.get(0),
     )?;
     require(
-        reserved < room.capacity && total < 128,
+        reserved < room.capacity,
         "QueueFull",
         "room membership capacity reached",
     )?;
@@ -421,12 +408,20 @@ pub fn reopen(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
     let p: Conditional = decode(request)?;
     let (room, owner) = owned(db, actor, &p.id)?;
     room.cas(&p.expected_resource_version)?;
+    let stamp = Utc::now().timestamp();
     require(
-        room.phase == "Archived" && Utc::now().timestamp() < room.expires,
+        room.phase == "Archived" && stamp < room.expires,
         "PreconditionFailed",
         "only archived, unexpired rooms can be reopened",
     )?;
     db.cfg.check_admission_space()?;
+    conversation_capacity(db, stamp)?;
+    let mut roster = db.c.prepare(
+        "SELECT principal FROM room_memberships WHERE conversation=?1 AND phase='Active'",
+    )?;
+    for principal in roster.query_map([&room.id], |row| row.get::<_, String>(0))? {
+        principal_capacity(db, &principal?, Some(&room.id), stamp)?;
+    }
     let invitations_changed = retire_admissions(db, &room.id)?;
     db.c.execute(
         "UPDATE chat_rooms SET phase='Active',revision=revision+1,

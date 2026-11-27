@@ -447,11 +447,15 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 
 新预约遵循节点的权威存储预留。已有预约仍可查阅、取消或到期处理。批次遇到写入错误会整批回滚，其他到期预约继续处理。报告的释放量为原制品的逻辑字节数。
 
+只读 Task 的分块永久丢失时，先用 `Task.VerifyResults` 确认 `Unavailable`，再由本机所有者用当前任务修订和理由调用 `Task.AbandonResults`。对应 CLI 是 `task-abandon-results ID --revision REV --reason REASON`。Core 在提交时复核原不可变清单、实际损坏及所有现有保留关系。成功后保留原 Run、Operation 和制品引用，原子移除剩余分块并释放配额。独立回执记录原逻辑占用和实际移除的字节数。[损坏、恢复与配额验收](../tests/test_artifact_abandonment.py)
+
 ## 本机制品暂存与发布
 
 `Artifact.UploadProfile` 公布 `OpaqueBytesV1` 的分块、大小、暂存期限及配额。上传主体需要以本机 Node 为目标的 `artifact.upload` Grant。`Artifact.Stage` 固定提交键、预计字节数、SHA-256、声明媒体类型和期限。`Artifact.Stage.PutChunk` 按已提交偏移接收 128 KiB 定长块及末块。中断后通过 `Artifact.Stage.Get` 取得继续位置，用同一键和输入恢复。
 
 `Artifact.Publish` 重新核对全部字节后原子提交不可变引用及来源，发布重试返回原回执。可见内容的媒体类型为 `application/octet-stream`，提交者提供的媒体类型作为独立声明保留。发布前可以丢弃暂存，过期块由后台回收。读取原始字节需要 `artifact.read`。`Artifact.Withdraw` 使用额外的 `artifact.withdraw` Grant 和确切引用，回收字节并保留审计凭据。
+
+本机 SQLite 上传发生已确认的内容丢失时，同一撤回授权可调用 `Artifact.AbandonUpload`。使用固定的 Artifact 引用和非空理由。`psiosctl artifact-abandon-upload --reason REASON` 从标准输入读取引用。安装、发布版本或 Agent 会话仍持有该引用时，Core 拒绝释放。回执保留原清单、损坏证据以及释放的逻辑和剩余字节。[损坏上传与安装保留验收](../tests/test_artifact_abandonment.py)
 
 `psiosctl artifact-upload ./bundle.bin --key build-1` 和 Rust SDK 的 `Client::upload_artifact` 从已提交偏移继续，`psiosctl artifact` 使用返回的引用导出并校验原始字节。安装适配器可以按固定引用读取已发布制品。[中断、权限、配额和损坏验收](../tests/test_artifact_ingress.py) · [格式 53 升级](../tests/artifact_ingress_upgrade.py)
 
@@ -817,6 +821,8 @@ Rust SDK 的 `SessionModel::accepts_undeclared_tool_rejection` 默认关闭。�
 本机 CPU 模型可通过 UID 绑定的 Unix socket 生成结构化盘点决策，复用同一 Provider 身份、租约和决策暂存目录。[本机推理配置与范围](local-inference.md)
 
 `Session.History` 返回模型轮次、子任务和尝试关系。`Session.Cancel` 关闭后续派发并取消已链接的任务。`Session.Extend` 通过 CAS 增加本次会话的轮次上限，根授权额度独立生效。对于可安全重试的失败子任务，`Session.RetryTask` 使用会话 ID、会话预期修订、原 `task_id` 和新 `key`，沿用同一模型决策，在原任务和会话历史中追加记录。接受新的重试前复核主体的 32 个活动会话上限。通过 Provider 队列执行的会话同时遵守固定模型的 128 个活动会话上限。已接受的请求在授权仍有效时可用同一键重获原回执。未知写入继续占用原目标，等待核实。
+
+格式 127 统一 `Session.Open` 与 `agent.session.start` 的消费者目标范围。若原委托设置了 `tool_targets`，其中须同时包含固定的 Skill 和主 Model，Provider 仍须具备覆盖该 Model 的 `model.serve`。领取、模型响应、恢复和工具执行均复核会话的原委托。升级后，缺少任一目标的旧队列会话会在被扫描时进入 `ModelAuthorizationDenied`，所有者仍可查询历史或取消。需要继续执行时，可使用完整的委托新建会话。 [Unix API 验收](../tests/test_model_queue.py)
 
 ### 在安全点暂停会话
 

@@ -110,11 +110,10 @@ pub(super) fn check_open(
     if candidates.is_empty() {
         return Ok(());
     }
-    let delegation = authority(db, session)?;
-    policy::tool_scope(db, &delegation.reference(), &primary.id)?;
+    let scope = authority(db, session)?.reference();
     for reference in candidates {
         let candidate = registry::pinned(db, reference, "Model")?;
-        policy::tool_scope(db, &delegation.reference(), &candidate.id)?;
+        policy::tool_scope(db, &scope, &candidate.id)?;
         compatible(primary, &candidate)?;
     }
     Ok(())

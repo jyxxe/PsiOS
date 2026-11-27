@@ -185,7 +185,8 @@ class AgentSafePointPauseTests(unittest.TestCase):
         self.n.call("Artifact.Stage.PutChunk", chunk(stage, 0, payload), self.actor_token)
         reference = self.n.call("Artifact.Publish", {"stage_id": stage["stage_id"]}, self.actor_token)["artifact_ref"]
         grant = self.issue(self.actions + ["session.context.read", "artifact.read"],
-                           [node_id, self.model["resource_id"], reference["resource_id"], "profile-local"])
+                           [node_id, self.model["resource_id"], self.skill["resource_id"],
+                            reference["resource_id"], "profile-local"])
         session = self.opened(grant=grant, input_artifacts=[{"name": "pinned", "reference": reference, "kind": "Json"}])
         parked = self.pause(session, "Keep evidence during the pause")
         withdrawal = {"reference": reference, "reason": "session closed"}

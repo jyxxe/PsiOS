@@ -42,7 +42,7 @@ def main(previous):
         grant = node.call("Grant.Issue", {
             "principal_id": agent["principal_id"], "units": 2, "model_calls": 2, "ttl_seconds": 120,
             "actions": ["session.run", "task.submit", "task.read", "system.status", "session.failover"],
-            "tool_targets": [primary["resource_id"], model["resource_id"], "profile-local"],
+            "tool_targets": [primary["resource_id"], model["resource_id"], skill["resource_id"], "profile-local"],
         })
         opened = node.call("Session.Open", {
             **params, "key": key(), "delegation_id": grant["delegation_ref"]["resource_id"],

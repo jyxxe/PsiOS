@@ -865,6 +865,20 @@ jobs:
           git archive aaf9cce57d1878db7e193535dfce339788b20357 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format124"
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format124" "$RUNNER_TEMP/psios-compatibility-target"
           python3 -B tests/chat_capacity_upgrade.py --previous-bin "$RUNNER_TEMP/psios-compatibility-target/debug"
+      - name: Preserve a format 125 result-eviction receipt and fence its writer
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format125"
+          git archive 1d6d82d93644e6560900ae5bc0ce3a3d24ad3a40 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format125"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format125" "$RUNNER_TEMP/psios-compatibility-target"
+          PSIOS_TEST_ARTIFACT_PREVIOUS_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
+            python3 -B -m unittest discover -s tests -p test_artifact_abandonment.py -k test_format_125_receipt -v
+      - name: Preserve format 126 sessions while applying consistent execution targets
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format126"
+          git archive 12bda505371627bd3a364f216a4e34ce9839b6eb Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format126"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format126" "$RUNNER_TEMP/psios-compatibility-target"
+          PSIOS_TEST_SESSION_SCOPE_PREVIOUS_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
+            python3 -B -m unittest discover -s tests -p test_model_queue.py -k test_format_126_pauses -v
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

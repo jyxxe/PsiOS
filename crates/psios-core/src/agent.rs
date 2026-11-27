@@ -33,6 +33,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 pub(crate) const START_SESSION: &str = "agent.session.start";
+pub(crate) const TARGET_AUTHORIZATION_FORMAT: u32 = artifact::abandonment::FORMAT + 1;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -164,6 +165,10 @@ fn deps(db: &Db<'_>, s: &Doc) -> Result<(Doc, Doc, Doc)> {
         policy::delegation(db, &s.owner, did, action)?;
     }
     let skill = registry::pinned(db, &s.spec["skill_ref"], "Skill")?;
+    let model = registry::pinned(db, &s.spec["model_ref"], "Model")?;
+    let scope = d.reference();
+    policy::tool_scope(db, &scope, &skill.id)?;
+    policy::tool_scope(db, &scope, &model.id)?;
     for (tool, reference) in skill.spec["tool_refs"].as_object().unwrap() {
         policy::delegation(db, &s.owner, did, tool)?;
         require(
@@ -172,11 +177,10 @@ fn deps(db: &Db<'_>, s: &Doc) -> Result<(Doc, Doc, Doc)> {
             "tool implementation changed",
         )?;
     }
-    let m = registry::pinned(db, &s.spec["model_ref"], "Model")?;
-    let provider = m.spec["provider_principal_id"].as_str().unwrap();
+    let provider = model.spec["provider_principal_id"].as_str().unwrap();
     policy::active(db, provider)?;
-    policy::can_target(db, provider, "model.serve", &m.id)?;
-    Ok((d, skill, m))
+    policy::can_target(db, provider, "model.serve", &model.id)?;
+    Ok((d, skill, model))
 }
 pub fn open(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     open_session(db, actor, p, None, None)

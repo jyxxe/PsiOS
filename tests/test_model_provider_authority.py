@@ -26,7 +26,8 @@ class ModelProviderAuthorityTests(unittest.TestCase):
         self.session_grant = self.node.call("Grant.Issue", {
             "principal_id": self.owner["principal_id"],
             "actions": ["session.run", "task.submit", "task.read", "system.status"],
-            "tool_targets": [self.model["resource_id"], self.other_model["resource_id"], "profile-local"],
+            "tool_targets": [self.model["resource_id"], self.other_model["resource_id"],
+                             self.skill["resource_id"], "profile-local"],
             "model_calls": 12,
             "model_lease_ms": 540_000,
             "units": 12,

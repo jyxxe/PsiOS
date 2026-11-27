@@ -301,7 +301,7 @@ class AgentToolContext(AgentToolContextFixture, unittest.TestCase):
         alternative, model = self.register_provider()
         node_id = n.call("Node.Get", {})["reference"]["resource_id"]
         grant = self.grant_for(["session.failover"], ["profile-local", node_id,
-                               self.model["resource_id"], model["resource_id"]])
+                               self.model["resource_id"], model["resource_id"], self.skill["resource_id"]])
         session = self.open(context_policy="ReferencesOnly", grant=grant, tool_context_window=3,
                             fallback_model_refs=[model])
         first, first_ref = self.observe(self.claim(), self.tools[0])

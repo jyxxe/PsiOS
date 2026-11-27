@@ -46,14 +46,14 @@ class ModelLateDecisionTests(unittest.TestCase):
         })
         self.provider_grant = self.serve_grant(self.provider)
         self.serve_grant(self.other)
-        self.session_grant = n.call("Grant.Issue", {
-            "principal_id": self.owner["principal_id"], "actions": ["session.run", "task.submit", "task.read", "system.status"],
-            "tool_targets": [self.model["resource_id"], "profile-local"],
-            "model_calls": 4, "model_lease_ms": 4 * self.lease_seconds * 1000, "units": 4, "ttl_seconds": 180,
-        })
         self.skill = n.call("Skill.Publish", {
             "name": "late-response-status", "version": "1", "license": "0BSD", "source": "local-test",
             "tools": ["system.status"], "instructions": "Use the local system status tool.",
+        })
+        self.session_grant = n.call("Grant.Issue", {
+            "principal_id": self.owner["principal_id"], "actions": ["session.run", "task.submit", "task.read", "system.status"],
+            "tool_targets": [self.model["resource_id"], self.skill["resource_id"], "profile-local"],
+            "model_calls": 4, "model_lease_ms": 4 * self.lease_seconds * 1000, "units": 4, "ttl_seconds": 180,
         })
         self.provider_token = n.base / "late-provider.token"
         self.provider_token.write_text(self.provider["token"])

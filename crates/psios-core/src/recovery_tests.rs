@@ -340,7 +340,7 @@ fn strict_model_lease_binding_is_witnessed_and_cannot_become_legacy() {
         json!({
             "principal_id":runner["principal_id"],
             "actions":["session.run","task.submit","task.read","system.status"],
-            "tool_targets":[model["resource_id"],"profile-local"],"ttl_seconds":120,
+            "tool_targets":[model["resource_id"],skill["resource_id"],"profile-local"],"ttl_seconds":120,
             "units":2,"model_calls":2,"model_lease_ms":60000,
         }),
     )

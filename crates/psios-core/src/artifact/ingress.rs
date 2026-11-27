@@ -1,5 +1,5 @@
 //! Durable ingress for opaque local artifacts. Publication verifies exact bytes.
-use super::{CHUNK_BYTES, RAW_LAYOUT};
+use super::{CHUNK_BYTES, RAW_LAYOUT, abandonment};
 use crate::{
     Empty, Error, Result, after,
     db::{Db, Doc, find},
@@ -29,6 +29,7 @@ const TOTAL_STAGES: u32 = 32;
 const OWNER_REQUESTS: u32 = 4096;
 const TOTAL_REQUESTS: u32 = 65536;
 const WITHDRAWAL: &str = "ArtifactWithdrawal";
+pub(super) const ABANDONMENT: &str = "ArtifactAbandonment";
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -152,7 +153,7 @@ pub(crate) fn profile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value>
     }))
 }
 
-fn valid_digest(value: &str) -> bool {
+pub(super) fn valid_digest(value: &str) -> bool {
     value.strip_prefix("sha256:").is_some_and(|hex| {
         hex.len() == 64
             && hex
@@ -744,9 +745,12 @@ pub(super) fn retention(conn: &Connection, artifact: &Doc) -> Result<Option<Doc>
         match (state.as_str(), &receipt) {
             ("Published", None) => true,
             ("Withdrawn", Some(doc)) => {
-                doc.kind == WITHDRAWAL
+                matches!(doc.kind.as_str(), WITHDRAWAL | ABANDONMENT)
+                    && doc.rev == 1
                     && doc.owner == owner
                     && doc.body["artifact_ref"] == artifact.reference()
+                    && (doc.kind != ABANDONMENT
+                        || doc.body["damage"]["artifact_ref"] == artifact.reference())
             }
             _ => false,
         },
@@ -764,6 +768,22 @@ struct Withdraw {
 }
 
 pub(crate) fn withdraw(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
+    release_upload(db, actor, params, WITHDRAWAL)
+}
+
+pub(crate) fn abandon(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
+    release_upload(db, actor, params, ABANDONMENT)
+}
+
+fn release_view(receipt: &Doc, artifact: &Value) -> Value {
+    if receipt.kind == ABANDONMENT {
+        json!({"abandonment_ref":receipt.reference(),"artifact_ref":artifact})
+    } else {
+        json!({"withdrawal_ref":receipt.reference(),"artifact_ref":artifact})
+    }
+}
+
+fn release_upload(db: &Db<'_>, actor: &str, params: &Value, kind: &str) -> Result<Value> {
     authorize(db, actor, WITHDRAW)?;
     let p: Withdraw = decode(params)?;
     require(
@@ -780,11 +800,11 @@ pub(crate) fn withdraw(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value
     )?;
     if let Some(receipt) = retention(db.c, &artifact)? {
         require(
-            receipt.body["reason"] == p.reason,
+            receipt.kind == kind && receipt.body["reason"] == p.reason,
             "IdempotencyConflict",
-            "artifact withdrawal already recorded with another reason",
+            "artifact release already recorded with another request",
         )?;
-        return Ok(json!({"withdrawal_ref":receipt.reference(),"artifact_ref":p.reference}));
+        return Ok(release_view(&receipt, &p.reference));
     }
     require(
         !crate::apps::artifact_install::pinned(db, &artifact.id)?,
@@ -798,17 +818,42 @@ pub(crate) fn withdraw(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value
     )?;
     let manifest = super::Manifest::read(&artifact)?
         .ok_or_else(|| err("RecoveryRequired", "artifact manifest unavailable"))?;
+    let damage = if kind == ABANDONMENT {
+        require(
+            artifact.spec["content_layout"] == RAW_LAYOUT
+                && artifact.spec["source"]["kind"] == "LocalSubmission",
+            "UnsupportedCapability",
+            "abandonment requires a local SQLite upload",
+        )?;
+        require(
+            manifest.size <= MAX_BYTES as usize,
+            "QuotaExceeded",
+            "upload exceeds the abandonment verification limit",
+        )?;
+        let inventory = abandonment::inventory(db.c, &manifest)?;
+        let evidence = inventory
+            .damage
+            .ok_or_else(|| err("PreconditionFailed", "no upload damage remains to abandon"))?;
+        Some((inventory.count, inventory.bytes, evidence))
+    } else {
+        None
+    };
+    let expected = damage.as_ref().map_or_else(
+        || {
+            if super::files::managed(&artifact) {
+                0
+            } else {
+                manifest.chunks.len()
+            }
+        },
+        |(count, _, _)| *count,
+    );
     let count = db.c.execute(
         "DELETE FROM artifact_chunks WHERE artifact_id=?1 AND artifact_rev=?2",
         params![artifact.id, artifact.rev],
     )?;
     require(
-        count
-            == if super::files::managed(&artifact) {
-                0
-            } else {
-                manifest.chunks.len()
-            },
+        count == expected,
         "RecoveryRequired",
         "uploaded artifact chunks are incomplete",
     )?;
@@ -816,9 +861,27 @@ pub(crate) fn withdraw(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value
         "UPDATE artifact_uploads SET state='Withdrawn' WHERE artifact_id=?1",
         [&artifact.id],
     )?;
-    let receipt = db.create(WITHDRAWAL,&withdrawal_id(&artifact),&artifact.owner,
+    let (body, method, decision) = if let Some((_, bytes, evidence)) = damage {
+        (
+            json!({"artifact_ref":p.reference,"reason":p.reason,"abandoned_at":now(),"abandoned_by":actor,
+            "damage":evidence,"content_bytes_removed":bytes.to_string(),"logical_bytes_released":manifest.size.to_string()}),
+            "Artifact.AbandonUpload",
+            "Abandoned",
+        )
+    } else {
+        (
+            json!({"artifact_ref":p.reference,"reason":p.reason,"withdrawn_at":now(),"withdrawn_by":actor}),
+            "Artifact.Withdraw",
+            "Withdrawn",
+        )
+    };
+    let receipt = db.create(
+        kind,
+        &withdrawal_id(&artifact),
+        &artifact.owner,
         json!({"artifact_id":artifact.id}),
-        json!({"artifact_ref":p.reference,"reason":p.reason,"withdrawn_at":now(),"withdrawn_by":actor}))?;
-    db.audit(actor, "Artifact.Withdraw", Some(&artifact.id), "Withdrawn")?;
-    Ok(json!({"withdrawal_ref":receipt.reference(),"artifact_ref":p.reference}))
+        body,
+    )?;
+    db.audit(actor, method, Some(&artifact.id), decision)?;
+    Ok(release_view(&receipt, &p.reference))
 }

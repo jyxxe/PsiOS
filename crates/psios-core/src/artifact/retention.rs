@@ -2,7 +2,7 @@ pub(crate) mod batch;
 pub(crate) mod delayed;
 pub(crate) mod selection;
 
-use super::{CHUNK_BYTES, Manifest, is_task_output, repair, stored_digest};
+use super::{CHUNK_BYTES, Manifest, abandonment, is_task_output, repair, stored_digest};
 use crate::{
     Error, Result, agent,
     db::{Db, Doc, find},
@@ -16,6 +16,7 @@ use std::collections::BTreeSet;
 
 pub(crate) const FORMAT: u32 = 31;
 const KIND: &str = "TaskResultEviction";
+const ABANDONMENT: &str = "TaskResultAbandonment";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -75,6 +76,15 @@ pub(super) struct Candidate {
     task: Doc,
     artifacts: Vec<CandidateArtifact>,
     bytes: u128,
+    disposition: Disposition,
+}
+
+enum Disposition {
+    Eviction,
+    Abandonment {
+        damage: Vec<Value>,
+        surviving_bytes: u128,
+    },
 }
 
 struct CandidateArtifact {
@@ -94,12 +104,16 @@ fn receipt_id(task: &str) -> String {
 }
 
 fn view(d: &Doc) -> Value {
-    json!({"reference":d.reference(),"eviction":d.body})
+    if matches!(d.kind.as_str(), ABANDONMENT | super::ingress::ABANDONMENT) {
+        json!({"reference":d.reference(),"abandonment":d.body})
+    } else {
+        json!({"reference":d.reference(),"eviction":d.body})
+    }
 }
 
 fn validate_record(record: &Doc, task: &Doc) -> Result<()> {
     require(
-        record.kind == KIND
+        matches!(record.kind.as_str(), KIND | ABANDONMENT)
             && record.rev == 1
             && record.owner == task.owner
             && task.kind == "Task"
@@ -108,8 +122,24 @@ fn validate_record(record: &Doc, task: &Doc) -> Result<()> {
             && record.body["task_ref"] == task.reference()
             && record.body["previous_task_ref"]["resource_id"] == task.id,
         "RecoveryRequired",
-        "result eviction disagrees with the producing Task",
-    )
+        "result retention disagrees with the producing Task",
+    )?;
+    if record.kind == ABANDONMENT {
+        let refs = task.body["result"]["artifact_refs"].as_array();
+        require(
+            record.body["damage"].as_array().is_some_and(|evidence| {
+                !evidence.is_empty()
+                    && refs.is_some_and(|refs| {
+                        evidence
+                            .iter()
+                            .all(|entry| refs.contains(&entry["artifact_ref"]))
+                    })
+            }),
+            "RecoveryRequired",
+            "result abandonment does not describe its own artifact damage",
+        )?;
+    }
+    Ok(())
 }
 
 pub(super) fn task_receipt(conn: &Connection, task: &Doc) -> Result<Option<Doc>> {
@@ -206,21 +236,34 @@ fn read_only_tool<'a>(conn: &Connection, task: &'a Doc) -> CandidateResult<&'a s
 }
 
 pub fn evict(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
+    release_request(db, actor, params, KIND)
+}
+
+pub fn abandon(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
+    release_request(db, actor, params, ABANDONMENT)
+}
+
+fn release_request(db: &Db<'_>, actor: &str, params: &Value, kind: &str) -> Result<Value> {
     policy::admin(actor)?;
     let p: Evict = decode(params)?;
     validate_reason(&p.reason)?;
     let task = db.of(&p.id, "Task")?;
     if let Some(record) = task_receipt(db.c, &task)? {
         require(
-            record.body["previous_task_ref"]["version"] == p.expected_resource_version
+            record.kind == kind
+                && record.body["previous_task_ref"]["version"] == p.expected_resource_version
                 && record.body["reason"] == p.reason,
             "Conflict",
-            "task results were already evicted with a different request",
+            "task results were already released with a different request",
         )?;
         return Ok(view(&record));
     }
     task.cas(&p.expected_resource_version)?;
-    let candidate = prepare_candidate(db, task)?;
+    let candidate = if kind == ABANDONMENT {
+        prepare_abandonment(db, task)?
+    } else {
+        prepare_candidate(db, task)?
+    };
     apply_candidate(db, actor, &p.reason, candidate)
 }
 
@@ -249,6 +292,7 @@ fn require_current(db: &Db<'_>, task: &Doc) -> Result<()> {
 fn inspect_candidate(
     db: &Db<'_>,
     task: &Doc,
+    availability: &str,
     mut inspect_payload: impl FnMut(&Doc, &Manifest<'_>) -> Result<()>,
 ) -> CandidateResult<u128> {
     require_current(db, task)?;
@@ -260,8 +304,12 @@ fn inspect_candidate(
                 Some("Succeeded" | "Cancelled")
             )
             && task.body["outcome_knowledge"] == "Known"
-            && task.body["result"]["availability"] == "Available",
-        "eviction requires a settled Task with available results",
+            && task.body["result"]["availability"] == availability,
+        if availability == "Unavailable" {
+            "abandonment requires a settled Task with verified unavailable results"
+        } else {
+            "eviction requires a settled Task with available results"
+        },
     )?;
     eligible(
         policy::readonly(read_only_tool(db.c, task)?),
@@ -354,7 +402,7 @@ fn inspect_candidate(
 }
 
 pub(super) fn candidate_metadata(db: &Db<'_>, task: &Doc) -> Result<CandidateMetadata> {
-    match inspect_candidate(db, task, |_, _| Ok(())) {
+    match inspect_candidate(db, task, "Available", |_, _| Ok(())) {
         Ok(bytes) => Ok(CandidateMetadata::Ready(bytes)),
         Err(CandidateError::Pinned(_)) => Ok(CandidateMetadata::Pinned),
         Err(CandidateError::Ineligible(_)) => Ok(CandidateMetadata::Ineligible),
@@ -381,7 +429,7 @@ pub(super) fn candidate_metadata(db: &Db<'_>, task: &Doc) -> Result<CandidateMet
 /// Checks live retention and content, keeping only metadata needed by this transaction.
 pub(super) fn prepare_candidate(db: &Db<'_>, task: Doc) -> Result<Candidate> {
     let mut artifacts = Vec::new();
-    let bytes = inspect_candidate(db, &task, |artifact, manifest| {
+    let bytes = inspect_candidate(db, &task, "Available", |artifact, manifest| {
         manifest.verify(db.c)?;
         let stored: i64 = db.c.query_row(
             "SELECT count(*) FROM artifact_chunks WHERE artifact_id=?1 AND artifact_rev=?2",
@@ -404,6 +452,45 @@ pub(super) fn prepare_candidate(db: &Db<'_>, task: Doc) -> Result<Candidate> {
         task,
         artifacts,
         bytes,
+        disposition: Disposition::Eviction,
+    })
+}
+
+fn prepare_abandonment(db: &Db<'_>, task: Doc) -> Result<Candidate> {
+    let mut artifacts = Vec::new();
+    let mut damage = Vec::new();
+    let mut surviving_bytes = 0u128;
+    let mut remaining = abandonment::MAX_BYTES;
+    let bytes = inspect_candidate(db, &task, "Unavailable", |artifact, manifest| {
+        remaining = remaining.checked_sub(manifest.size).ok_or_else(|| {
+            err(
+                "QuotaExceeded",
+                "task results exceed the abandonment verification limit",
+            )
+        })?;
+        let inventory = abandonment::inventory(db.c, manifest)?;
+        surviving_bytes += u128::from(inventory.bytes);
+        damage.extend(inventory.damage);
+        artifacts.push(CandidateArtifact {
+            id: artifact.id.clone(),
+            rev: artifact.rev,
+            chunks: inventory.count,
+        });
+        Ok(())
+    })?;
+    require(
+        !damage.is_empty(),
+        "PreconditionFailed",
+        "no artifact damage remains to abandon",
+    )?;
+    Ok(Candidate {
+        task,
+        artifacts,
+        bytes,
+        disposition: Disposition::Abandonment {
+            damage,
+            surviving_bytes,
+        },
     })
 }
 
@@ -417,12 +504,13 @@ pub(super) fn apply_candidate(
     require(
         !db.c.is_autocommit(),
         "RecoveryRequired",
-        "result eviction requires an authority transaction",
+        "result retention requires an authority transaction",
     )?;
     let Candidate {
         task,
         artifacts,
         bytes,
+        disposition,
     } = candidate;
     require_current(db, &task)?;
     for artifact in artifacts {
@@ -439,18 +527,31 @@ pub(super) fn apply_candidate(
     let mut body = task.body.clone();
     body["result"]["availability"] = json!("Evicted");
     let updated = db.status(&task, body)?;
+    let mut record_body = json!({
+        "previous_task_ref": task.reference(), "task_ref": updated.reference(),
+        "artifact_refs": task.body["result"]["artifact_refs"], "reason": reason, "evicted_at": now(),
+        "evicted_by": actor, "content_bytes_removed": bytes.to_string()
+    });
+    let (kind, method, decision) = match disposition {
+        Disposition::Eviction => (KIND, "Task.EvictResults", "Evicted"),
+        Disposition::Abandonment {
+            damage,
+            surviving_bytes,
+        } => {
+            record_body["content_bytes_removed"] = json!(surviving_bytes.to_string());
+            record_body["logical_bytes_released"] = json!(bytes.to_string());
+            record_body["damage"] = json!(damage);
+            (ABANDONMENT, "Task.AbandonResults", "Abandoned")
+        }
+    };
     let record = db.create(
-        KIND,
+        kind,
         &receipt_id(&task.id),
         &task.owner,
         json!({"task_id":task.id}),
-        json!({
-            "previous_task_ref": task.reference(), "task_ref": updated.reference(),
-            "artifact_refs": task.body["result"]["artifact_refs"], "reason": reason, "evicted_at": now(),
-            "evicted_by": actor, "content_bytes_removed": bytes.to_string()
-        }),
+        record_body,
     )?;
-    db.audit(actor, "Task.EvictResults", Some(&task.id), "Evicted")?;
+    db.audit(actor, method, Some(&task.id), decision)?;
     Ok(view(&record))
 }
 

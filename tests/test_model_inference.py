@@ -33,7 +33,8 @@ class StrictModelInference(unittest.TestCase):
     def grant(self, calls=8):
         return self.n.call("Grant.Issue", {"principal_id": self.owner["principal_id"],
             "actions": ["task.submit", "task.read", "session.run", "session.failover", "system.status"],
-            "tool_targets": [self.model["resource_id"], self.alternate["resource_id"], "profile-local"],
+            "tool_targets": [self.model["resource_id"], self.alternate["resource_id"],
+                             self.skill["resource_id"], "profile-local"],
             "units": 8, "model_calls": calls, "model_lease_ms": 48000, "ttl_seconds": 180})
 
     def open(self, queued=True, grant=None):

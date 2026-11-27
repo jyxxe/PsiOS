@@ -183,6 +183,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Artifact.Stage.Discard" => artifact::ingress::discard(db, actor, p),
         "Artifact.Publish" => artifact::ingress::publish(db, actor, p),
         "Artifact.Withdraw" => artifact::ingress::withdraw(db, actor, p),
+        "Artifact.AbandonUpload" => artifact::ingress::abandon(db, actor, p),
         "Artifact.PublisherKey.Register" => apps::publisher::register(db, actor, p),
         "Artifact.PublisherKey.Revoke" => apps::publisher::revoke(db, actor, p),
         "Artifact.Read" | "Artifact.Get" | "Artifact.ReadChunk" => {
@@ -277,6 +278,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Task.Prepare" => broker::prepare(db, actor, p),
         "Task.DiscardPreparation" => broker::discard_preparation(db, actor, p),
         "Task.EvictResults" => artifact::retention::evict(db, actor, p),
+        "Task.AbandonResults" => artifact::retention::abandon(db, actor, p),
         "Task.ResultEvictionCandidates" => artifact::retention::selection::list(db, actor, p),
         "Task.PrepareResultEvictionBatch" => artifact::retention::batch::prepare(db, actor, p),
         "Task.ApplyResultEvictionBatch" => artifact::retention::batch::apply(db, actor, p),

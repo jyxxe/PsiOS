@@ -15,6 +15,7 @@ use std::{
     path::Path,
 };
 
+pub(crate) mod abandonment;
 pub(crate) mod availability;
 pub(crate) mod capacity;
 pub(crate) mod files;

@@ -215,6 +215,31 @@ impl Client {
         )
     }
 
+    /// Abandon the verified unavailable results of one exact settled read-only Task.
+    pub fn abandon_task_results(
+        &self,
+        id: &str,
+        expected_resource_version: &str,
+        reason: &str,
+    ) -> ApiResult<serde_json::Value> {
+        self.call(
+            "Task.AbandonResults",
+            json!({"id":id,"expected_resource_version":expected_resource_version,"reason":reason}),
+        )
+    }
+
+    /// Release a damaged local upload by its immutable published reference.
+    pub fn abandon_uploaded_artifact(
+        &self,
+        reference: &ResourceRef,
+        reason: &str,
+    ) -> ApiResult<serde_json::Value> {
+        self.call(
+            "Artifact.AbandonUpload",
+            json!({"reference":reference,"reason":reason}),
+        )
+    }
+
     /// Verify the entire source before repairing available chunks at the pinned reference.
     /// Each accepted repair is durable and safe to repeat with the original bytes.
     pub fn repair_artifact(

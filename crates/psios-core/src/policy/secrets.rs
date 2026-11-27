@@ -7,11 +7,15 @@ use ring::{
 use rusqlite::{Connection, OptionalExtension};
 use zeroize::Zeroizing;
 
+pub(crate) mod receipts;
+use receipts::Mutation;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SecretPut {
     name: String,
     value: String,
+    idempotency_key: Option<String>,
 }
 fn vault(keys: &[u8]) -> Result<aead::LessSafeKey> {
     let material = keys
@@ -26,20 +30,34 @@ pub fn secret_put(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     can(db, actor, "secret.manage")?;
     let s: SecretPut = decode(p)?;
     label(&s.name)?;
+    let value = Zeroizing::new(s.value);
     require(
-        (1..=MAX_SECRET_BYTES).contains(&s.value.len()),
+        (1..=MAX_SECRET_BYTES).contains(&value.len()),
         "InvalidArgument",
         "secret size outside limit",
     )?;
-    let count:u32=db.c.query_row("SELECT count(*) FROM current WHERE kind='Secret' AND owner=?1 AND body->>'lifecycle'='Active'",[actor],|r|r.get(0))?;
-    require(count < 256, "QuotaExceeded", "active secret quota exceeded")?;
-    let d = db.record(
-        "Secret",
-        actor,
-        json!({"name": s.name, "lifecycle": "Active", "use": "secret.mac","key_version":1}),
-    )?;
-    seal_secret(db, &d, s.value)?;
-    Ok(d.reference())
+    Mutation {
+        method: "Secret.Put",
+        request_key: s.idempotency_key.as_deref(),
+        target: &s.name,
+        expected: None,
+        value: Some(&value),
+    }
+    .execute(db, actor, || {
+        let count: u32 = db.c.query_row(
+            "SELECT count(*) FROM current WHERE kind='Secret' AND owner=?1 AND body->>'lifecycle'='Active'",
+            [actor],
+            |r| r.get(0),
+        )?;
+        require(count < 256, "QuotaExceeded", "active secret quota exceeded")?;
+        let secret = db.record(
+            "Secret",
+            actor,
+            json!({"name": s.name, "lifecycle": "Active", "use": "secret.mac", "key_version": 1}),
+        )?;
+        seal_secret(db, &secret, &value)?;
+        Ok(secret)
+    })
 }
 fn secret_aad(d: &Doc) -> Vec<u8> {
     match d.body["key_version"].as_u64() {
@@ -47,12 +65,12 @@ fn secret_aad(d: &Doc) -> Vec<u8> {
         None => d.id.as_bytes().to_vec(), // prior on-disk ciphertext uses the stable ID alone
     }
 }
-fn seal_secret(db: &Db<'_>, d: &Doc, value: String) -> Result<()> {
+fn seal_secret(db: &Db<'_>, d: &Doc, value: &str) -> Result<()> {
     let mut nonce = [0u8; 12];
     SystemRandom::new()
         .fill(&mut nonce)
         .map_err(|_| err("InternalError", "entropy unavailable"))?;
-    let mut bytes = Zeroizing::new(value.into_bytes());
+    let mut bytes = Zeroizing::new(value.as_bytes().to_vec());
     vault(db.keys)?
         .seal_in_place_append_tag(
             aead::Nonce::assume_unique_for_key(nonce),
@@ -72,41 +90,69 @@ struct Rotate {
     id: String,
     expected_resource_version: String,
     value: String,
+    idempotency_key: Option<String>,
 }
 pub fn secret_rotate(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     can(db, actor, "secret.manage")?;
     let v: Rotate = decode(p)?;
-    let d = db.of(&v.id, "Secret")?;
-    owned(actor, &d)?;
-    d.cas(&v.expected_resource_version)?;
+    let value = Zeroizing::new(v.value);
     require(
-        d.body["lifecycle"] == "Active",
-        "PreconditionFailed",
-        "revoked secret cannot be rotated",
-    )?;
-    require(
-        (1..=MAX_SECRET_BYTES).contains(&v.value.len()),
+        (1..=MAX_SECRET_BYTES).contains(&value.len()),
         "InvalidArgument",
         "secret size outside limit",
     )?;
-    let mut b = d.body.clone();
-    b["key_version"] = json!(b["key_version"].as_u64().unwrap_or(1) + 1);
-    let rotated = db.status(&d, b)?;
-    seal_secret(db, &rotated, v.value)?;
-    epoch(db)?;
-    Ok(rotated.reference())
+    Mutation {
+        method: "Secret.Rotate",
+        request_key: v.idempotency_key.as_deref(),
+        target: &v.id,
+        expected: Some(&v.expected_resource_version),
+        value: Some(&value),
+    }
+    .execute(db, actor, || {
+        let secret = db.of(&v.id, "Secret")?;
+        owned(actor, &secret)?;
+        secret.cas(&v.expected_resource_version)?;
+        require(
+            secret.body["lifecycle"] == "Active",
+            "PreconditionFailed",
+            "revoked secret cannot be rotated",
+        )?;
+        let mut body = secret.body.clone();
+        body["key_version"] = json!(body["key_version"].as_u64().unwrap_or(1) + 1);
+        let rotated = db.status(&secret, body)?;
+        seal_secret(db, &rotated, &value)?;
+        epoch(db)?;
+        Ok(rotated)
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Revoke {
+    id: String,
+    expected_resource_version: String,
+    idempotency_key: Option<String>,
 }
 pub fn secret_revoke(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     can(db, actor, "secret.manage")?;
-    let p: Conditional = decode(p)?;
-    let d = db.of(&p.id, "Secret")?;
-    owned(actor, &d)?;
-    d.cas(&p.expected_resource_version)?;
-    db.c.execute("DELETE FROM secrets WHERE id=?1", [&d.id])?;
-    let mut b = d.body.clone();
-    b["lifecycle"] = json!("Revoked");
-    epoch(db)?;
-    Ok(db.status(&d, b)?.reference())
+    let v: Revoke = decode(p)?;
+    Mutation {
+        method: "Secret.Revoke",
+        request_key: v.idempotency_key.as_deref(),
+        target: &v.id,
+        expected: Some(&v.expected_resource_version),
+        value: None,
+    }
+    .execute(db, actor, || {
+        let secret = db.of(&v.id, "Secret")?;
+        owned(actor, &secret)?;
+        secret.cas(&v.expected_resource_version)?;
+        db.c.execute("DELETE FROM secrets WHERE id=?1", [&secret.id])?;
+        let mut body = secret.body.clone();
+        body["lifecycle"] = json!("Revoked");
+        epoch(db)?;
+        db.status(&secret, body)
+    })
 }
 fn checked_payload(conn: &Connection, id: &str) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>)> {
     let tag_bytes = aead::AES_256_GCM.tag_len();

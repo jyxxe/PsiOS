@@ -312,6 +312,17 @@ jobs:
             mount -t tmpfs -o size=5m,nr_inodes=256,mode=0700 tmpfs "$1"
             PSIOS_TEST_EXPORT_RESUME_TARGET="$1" python3 -B -m unittest discover -s tests -p test_backup_export.py -k test_resumed_preflight -v
           ' psios-detached "$scratch"
+  early-format-migration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Build the current Core for upgrade and host integration tests
+        run: |
+          rustup toolchain install 1.100.0 --profile minimal
+          CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo +1.100.0 build --locked --workspace
       - name: Migrate active and completed model calls from format 4
         run: |
           mkdir "$RUNNER_TEMP/psios-format4"
@@ -1030,7 +1041,7 @@ jobs:
 
   package-provenance:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'jyxxe/PsiOS'
-    needs: [linux, host-package, guest-boot]
+    needs: [linux, early-format-migration, host-package, guest-boot]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

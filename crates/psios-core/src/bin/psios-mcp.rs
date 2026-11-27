@@ -65,7 +65,8 @@ struct Options {
 }
 
 fn parse_tool(name: &str) -> Result<LocalReadTool, &'static str> {
-    serde_json::from_value(json!(name)).map_err(|_| "expected system.status or node.pressure")
+    serde_json::from_value(json!(name))
+        .map_err(|_| "expected system.status, node.pressure, node.inventory or node.devices")
 }
 
 fn parse_target(id: &str) -> Result<String, &'static str> {
@@ -459,6 +460,12 @@ fn descriptor(tool: &LocalReadBinding, protocol: Protocol) -> Value {
         }
         LocalReadBinding::NodePressure {} => {
             "Sample Linux kernel and Core cgroup resource pressure on the local node."
+        }
+        LocalReadBinding::NodeInventory {} => {
+            "Observe verified Linux kernel, CPU, memory and load data on the local node."
+        }
+        LocalReadBinding::NodeDevices {} => {
+            "Read a verified snapshot of local Linux block devices and their current disk sequences."
         }
         LocalReadBinding::VolumeUsage { .. } => {
             "Measure file and allocation usage of the configured volume root."

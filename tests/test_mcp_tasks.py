@@ -62,6 +62,79 @@ class McpTaskFixture(McpFixture):
 
 
 class McpTaskTests(McpTaskFixture, unittest.TestCase):
+    @unittest.skipUnless(os.getenv("PSIOS_MCP_NODE_PREVIOUS_BIN_DIR"), "requires pinned format-137 binaries")
+    def test_format_137_keeps_original_device_receipt_while_enabling_mcp_discovery(self):
+        node = Node(os.environ["PSIOS_MCP_NODE_PREVIOUS_BIN_DIR"])
+        self.addCleanup(node.close)
+        actor = node.call("Agent.Register", {"name": "retained-inventory-caller"})
+        scope = node.call("Node.Get", {})["reference"]["resource_id"]
+        grant = node.call("Grant.Issue", {
+            "principal_id": actor["principal_id"], "actions": ["task.submit", "task.read", "node.devices"],
+            "tool_targets": [scope], "units": 3, "ttl_seconds": 90,
+        })
+        discovery = {"delegation_id": grant["delegation_ref"]["resource_id"], "tools": ["node.devices"]}
+        with self.assertRaises(Failure) as unsupported:
+            node.call("Capability.LocalReadTools", discovery, actor["token"])
+        self.assertEqual(unsupported.exception.code, "InvalidArgument")
+        prepared = node.prepare("node.devices", {}, delegation=discovery["delegation_id"], token=actor["token"])
+        task = node.call("Task.Submit", prepared, actor["token"])["task_id"]
+        settled = node.wait(task)
+        self.assertEqual(settled["lifecycle"], "Succeeded", settled)
+        artifact, = settled["result"]["artifact_refs"]
+        original = node.call("Artifact.Read", {"reference": artifact}, actor["token"])
+        node.stop(signal.SIGKILL)
+        old = json.loads(subprocess.check_output([*node.daemon, "verify"], timeout=20))
+        self.assertEqual((old["database_format"], old["migration_required"]), (137, False))
+        node.binaries = self.node.binaries
+        node.daemon[0] = str(node.binaries / "psiosd")
+        pending = json.loads(subprocess.check_output([*node.daemon, "verify"], timeout=20))
+        self.assertEqual((pending["node_id"], pending["database_format"], pending["migration_required"]),
+                         (old["node_id"], 137, True))
+        node.start()
+        self.assertEqual(node.call("Capability.LocalReadTools", discovery, actor["token"]), {"tools": ["node.devices"]})
+        self.assertEqual(node.call("Task.Get", {"id": task}, actor["token"]), settled)
+        self.assertEqual(node.call("Artifact.Read", {"reference": artifact}, actor["token"]), original)
+
+    def test_verified_device_inventory_handle_survives_restart_and_rejects_older_writer(self):
+        n = self.node
+        tool = "node.devices"
+        grant = n.call("Grant.Issue", {
+            "principal_id": self.agent["principal_id"], "actions": ["task.submit", "task.read", tool],
+            "tool_targets": [self.node_id], "units": 3, "ttl_seconds": 90,
+        })
+        invocation = key()
+        self.scheduling("Cordoned")
+        first = self.task_wire(grant, extra=("--tool", tool))
+        accepted = self.task_call(first, "tools/call", {"name": tool}, invocation=invocation)["result"]
+        self.assertEqual((accepted["resultType"], accepted["status"]), ("task", "working"), accepted)
+        handle = accepted["taskId"]
+        original, = self.tasks()
+        first.close()
+        n.stop(signal.SIGKILL)
+        checked = json.loads(subprocess.check_output([*n.daemon, "verify"], timeout=20))
+        self.assertGreaterEqual(checked["database_format"], 138)
+        self.assertEqual(checked["sqlite_integrity"], "Verified")
+        if previous := os.getenv("PSIOS_MCP_NODE_PREVIOUS_BIN_DIR"):
+            before = (n.witness / "head").read_bytes()
+            rejected = subprocess.run([Path(previous) / "psiosd", *n.daemon[1:], "serve"],
+                                      capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(rejected.returncode, 0, rejected)
+            self.assertIn("SchemaVersionUnsupported", rejected.stderr)
+            self.assertEqual((n.witness / "head").read_bytes(), before)
+        n.start()
+        recovered = self.task_wire(grant, extra=("--tool", tool))
+        repeated = self.task_call(recovered, "tools/call", {"name": tool}, invocation=invocation)["result"]
+        self.assertEqual(repeated["taskId"], handle)
+        self.assertEqual(self.tasks(), [original])
+        self.scheduling("Enabled")
+        settled = self.wait_status(recovered, handle)
+        report = self.check_receipt(settled["result"], tool, grant)
+        self.assertEqual(report["task_id"], original["resource_id"])
+        self.assertEqual(report["result"]["boot_id"], n.call("Node.Get", {})["state"]["boot_id"])
+        self.assertEqual(len(self.tasks()), 1)
+        n.call("Grant.Revoke", target(grant["grant_ref"]))
+        self.assertEqual(self.task_call(recovered, "tasks/get", {"taskId": handle})["error"]["code"], -32602)
+
     def test_lost_stdio_response_rejoins_one_task_across_daemon_and_adapter_restart(self):
         n = self.node
         grant = self.grant([self.profile])

@@ -200,9 +200,13 @@ impl Record {
             "MCP task delegation changed",
         )?;
         let target = &self.spec.target_ref.resource_id;
-        if self.spec.tool.target().is_some()
-            && !local_read_tools::explicitly_scoped(db, &delegation, target)?
-        {
+        let explicit_scope = self.spec.tool.target().is_some()
+            || self
+                .spec
+                .tool
+                .unbound_tool()
+                .is_some_and(psios_api::LocalReadTool::requires_node_scope);
+        if explicit_scope && !local_read_tools::explicitly_scoped(db, &delegation, target)? {
             return Err(unavailable());
         }
         policy::tool_scope(db, &delegation.reference(), target)?;
@@ -623,6 +627,11 @@ fn verify_binding(conn: &Connection, authority: &str, saved: &Record) -> Result<
                 .tool
                 .target()
                 .is_none_or(|(id, kind)| target.id == id && target.kind == kind)
+            && (!spec
+                .tool
+                .unbound_tool()
+                .is_some_and(psios_api::LocalReadTool::requires_node_scope)
+                || target.kind == "Node" && target.id == authority)
             && delegation.owner == saved.owner
             && delegation.kind == "Delegation"
             && receipt["task_revision"] == spec.task_ref.version

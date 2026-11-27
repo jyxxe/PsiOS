@@ -192,7 +192,8 @@ class PreparedUploadTests(unittest.TestCase):
         with fault_log.open("wb") as output:
             n.start(stderr=output)
         time.sleep(5.2)
-        self.assertTrue(self.api("Artifact.ReadChunk", {**reference, "offset": 0, "length": 1})["data_base64"])
+        read = {"reference": reference, "offset": 0, "length": 1}
+        self.assertTrue(self.api("Artifact.ReadChunk", read)["data_base64"])
         self.assertEqual(self.api("Artifact.Stage", request), published)
         self.denied("QuotaExceeded", "Artifact.Stage", upload_request(b"next item"))
         receipt = self.api("Artifact.Withdraw", release)
@@ -218,7 +219,7 @@ class PreparedUploadTests(unittest.TestCase):
         self.denied("DeadlineExceeded", "Artifact.Stage", request)
         self.assertEqual(self.api("Artifact.Withdraw", release), receipt)
         self.denied("IdempotencyConflict", "Artifact.Withdraw", {**release, "reason": "other release"})
-        self.denied("ResultEvicted", "Artifact.ReadChunk", {**reference, "offset": 0, "length": 1})
+        self.denied("ResultEvicted", "Artifact.ReadChunk", read)
         self.assertEqual(self.api("Artifact.Stage", upload_request(b"next item"))["state"], "Open")
         audit = json.dumps(n.call("Audit.List", {}))
         self.assertIn("ReleasedPreparation", audit)

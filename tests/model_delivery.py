@@ -44,7 +44,8 @@ def interrupt_worker_delivery(node, token_file, args, *, committed, timeout=10, 
                     with peer:
                         peer.settimeout(10)
                         request = frame(peer)
-                        decision = json.loads(request[4:])["method"] == method
+                        request_method = json.loads(request[4:])["method"]
+                        decision = request_method == method
                         if not decision or committed:
                             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as upstream:
                                 upstream.settimeout(10)
@@ -52,7 +53,13 @@ def interrupt_worker_delivery(node, token_file, args, *, committed, timeout=10, 
                                 upstream.sendall(request)
                                 reply = frame(upstream)
                             if not decision:
-                                peer.sendall(reply)
+                                try:
+                                    peer.sendall(reply)
+                                except (BrokenPipeError, ConnectionResetError):
+                                    # The provider can end its read-only status poll while
+                                    # its decision still needs the original delivery barrier.
+                                    if request_method != "Model.LeaseStatus":
+                                        raise
                                 continue
                             assert "result" in json.loads(reply[4:])
                         yield

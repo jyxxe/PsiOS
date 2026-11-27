@@ -16,7 +16,7 @@ from oci_restore import current_image
 from support import Node, key, target
 
 
-def import_fixture(directory, tag):
+def fixture_layer(directory, tag):
     source = directory / "manifest-probe.c"
     probe = directory / "manifest-probe"
     source.write_text('''#include <stdio.h>
@@ -35,7 +35,11 @@ int main(void) {
         member.size = len(contents)
         layer.addfile(member, io.BytesIO(contents))
         layer.add(probe, arcname="probe")
-    return subprocess.check_output([*DOCKER, "image", "import", "-", tag], input=archive.getvalue(),
+    return archive.getvalue()
+
+
+def import_fixture(directory, tag):
+    return subprocess.check_output([*DOCKER, "image", "import", "-", tag], input=fixture_layer(directory, tag),
                                    timeout=20).decode().strip()
 
 

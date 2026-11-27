@@ -295,6 +295,8 @@ Core 通过已打开的目录和文件描述符流式校验私有普通文件。
 
 `application.inspect_instance` 校验实际容器、发布配置、卷挂载、Linux 启动身份和有效资源限制。将结果中的 `boot_id`、`started_at` 分别作为 `expected_boot_id`、`expected_started_at`，连同应用 ID 与当前修订提交 `application.restart`。两项能力均需显式授权。应用绑定卷时，授权目标同时包含应用和卷。
 
+格式 145 可在 `application.inspect_instance` 中加 `"include_usage":true`。结果的 `resource_usage` 包含 Linux 单调时钟采样区间、CPU 用时和节流计数、实际内存与进程数、压力和内核事件。Core 会在读完后核对同一容器调用及 cgroup 身份，条件变化会使采样失败。该参数要求 cgroup v2，具体内核计数不可用时逐项报告状态。[真实 Docker 配额、用量与重启验收](../tests/oci_read_only_volume.py)
+
 重启需独立审批。Core 在调用 OCI 引擎前核对启动身份并持久记录检查点，在回执中保存同一容器和 Linux 启动下的新启动身份。未知结果保留应用与卷的操作约束。用新的观察制品对账，确认后登记在原 Task 与 Operation 下。[真实 OCI 引擎验收](../tests/oci_restart.py)
 
 从格式 74 起，安装或暂存 OCI Release 时，可在直接请求或签名制品的 `install` 段显式加入 `health_check`。字段为 `argv`、`interval_ms`、`timeout_ms` 和 `retries`。按镜像配置摘要核对 Docker 的 exec 形式 `CMD`，要求命令和时间设置与批准输入完全一致。探针最多 16 个参数，首项为容器内的绝对路径。间隔为 1000 至 60000 毫秒，探针进程超时为 100 至 5000 毫秒且不得超过间隔，重试次数为 1 至 5。省略 `health_check` 时 Docker 健康检查保持禁用。

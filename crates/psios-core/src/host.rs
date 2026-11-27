@@ -238,7 +238,7 @@ pub enum Action {
     #[serde(rename = "application.restart")]
     RestartApp(apps::restart::Request),
     #[serde(rename = "application.inspect_instance")]
-    InspectOciInstance(Target),
+    InspectOciInstance(apps::restart::Inspection),
     #[serde(rename = "application.uninstall")]
     Uninstall(Target),
     #[serde(rename = "application.health")]
@@ -557,6 +557,9 @@ impl Action {
                 (&t.id, Some(&t.expected_resource_version), "Operation")
             }
             Self::RestartApp(p) => (&p.id, Some(&p.expected_resource_version), "Application"),
+            Self::InspectOciInstance(p) => {
+                (&p.id, Some(&p.expected_resource_version), "Application")
+            }
             Self::InspectOciCreate(p) => {
                 policy::admin(actor)?;
                 (&p.id, Some(&p.expected_resource_version), "Operation")
@@ -616,7 +619,6 @@ impl Action {
             | Self::Refresh(t)
             | Self::Start(t)
             | Self::Stop(t)
-            | Self::InspectOciInstance(t)
             | Self::Uninstall(t)
             | Self::Health(t)
             | Self::Logs(t) => (&t.id, Some(&t.expected_resource_version), "Application"),

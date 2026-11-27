@@ -4,7 +4,7 @@ use crate::{
     Result,
     db::{Db, Doc},
     err,
-    host::Work,
+    host::{Action, Work},
     now, require,
 };
 use chrono::DateTime;
@@ -16,6 +16,7 @@ pub(crate) const TOOL: &str = "application.restart";
 pub(crate) const INSPECT: &str = "application.inspect_instance";
 pub(crate) const FORMAT: u32 = crate::storage::restore_publication::FORMAT + 1;
 pub(crate) const CUSTODY_FORMAT: u32 = super::stop::FORMAT + 1;
+pub(crate) const USAGE_FORMAT: u32 = super::attached_read::FORMAT + 1;
 
 mod journal;
 mod settlement;
@@ -28,6 +29,15 @@ pub(crate) fn migrate(db: &Db<'_>) -> Result<()> {
 
 const INTENT: &str = "OCIRestartIntent";
 const CHECKPOINT: &str = "OCIRestartCheckpoint";
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Inspection {
+    pub(crate) id: String,
+    pub(crate) expected_resource_version: String,
+    #[serde(default)]
+    include_usage: bool,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -114,7 +124,9 @@ pub(crate) fn observe(work: &Work) -> Result<Value> {
         "PreconditionFailed",
         "container is not running an active invocation",
     )?;
-    let limits = profile.observe_limits(cid, state, launch)?;
+    let include_usage =
+        matches!(&work.action, Action::InspectOciInstance(query) if query.include_usage);
+    let (limits, usage) = profile.observe_controls(cid, state, launch, include_usage)?;
     require(
         e.identity()? == profile.id && boot_id()? == boot,
         "PreconditionFailed",
@@ -126,6 +138,20 @@ pub(crate) fn observe(work: &Work) -> Result<Value> {
         "process_running":true,"runtime_state":"Running",
         "effective_limits":limits,"observed_at":now()
     });
+    if let Some(usage) = usage {
+        let confirmation = e.managed(work, cid, start_op)?;
+        let state = &confirmation["State"];
+        require(
+            state["Running"] == true
+                && state["Status"] == "running"
+                && state["Paused"] == false
+                && state["Pid"] == pid
+                && state["StartedAt"] == started_at,
+            "PreconditionFailed",
+            "OCI invocation changed before resource usage was returned",
+        )?;
+        observation["resource_usage"] = usage;
+    }
     e.observe_mount(work, &profile, cid, start_op, state, &mut observation)?;
     super::health::status(&mut observation, launch.health_check.as_ref(), state);
     Ok(observation)

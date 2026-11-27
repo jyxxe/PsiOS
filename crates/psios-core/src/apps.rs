@@ -350,11 +350,22 @@ struct EngineProfile {
     unified_cgroups: bool,
 }
 impl EngineProfile {
-    fn observe_limits(&self, cid: &str, state: &Value, release: &Install) -> Result<Value> {
+    fn observe_controls(
+        &self,
+        cid: &str,
+        state: &Value,
+        release: &Install,
+        include_usage: bool,
+    ) -> Result<(Value, Option<Value>)> {
         if self.unified_cgroups {
-            cgroup::observe(cid, state, release)
+            cgroup::observe(cid, state, release, include_usage)
         } else {
-            Ok(json!({"source": "DockerCgroupV1"}))
+            require(
+                !include_usage,
+                "UnsupportedCapability",
+                "OCI resource usage requires a local cgroup v2 engine",
+            )?;
+            Ok((json!({"source": "DockerCgroupV1"}), None))
         }
     }
 }
@@ -795,8 +806,9 @@ pub fn start(
         .ok_or_else(|| err("OutcomeUnknown", "running state unavailable"))?;
     let limits = if running {
         engine
-            .observe_limits(&cid, state, s)
+            .observe_controls(&cid, state, s, false)
             .map_err(|e| err("OutcomeUnknown", e.0.message))?
+            .0
     } else {
         Value::Null
     };
@@ -945,8 +957,9 @@ fn observe_start(w: &Work, e: &Engine<'_>, checkpoint: &Doc) -> Result<Value> {
     let running = state["Running"] == true && state["Status"] == "running";
     let limits = if running {
         engine
-            .observe_limits(cid, state, launch)
+            .observe_controls(cid, state, launch, false)
             .map_err(|e| err("PreconditionFailed", e.0.message))?
+            .0
     } else {
         Value::Null
     };

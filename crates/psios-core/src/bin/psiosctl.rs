@@ -231,6 +231,8 @@ enum Cmd {
         #[arg(long)]
         delegation_ref: Option<String>,
     },
+    /// Show upload staging, retained bytes and durable receipt capacity.
+    ArtifactUploadCapacity,
     /// Register an Ed25519 public key for an existing publisher principal.
     ArtifactPublisherKeyRegister {
         principal_id: String,
@@ -1129,6 +1131,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             };
             serde_json::to_value(receipt)?
         }
+        Cmd::ArtifactUploadCapacity => serde_json::to_value(c.artifact_upload_capacity()?)?,
         Cmd::ArtifactPublisherKeyRegister {
             principal_id,
             public_key_base64,

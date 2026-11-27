@@ -7,7 +7,9 @@ use crate::{
     storage::oci_archive::Sealed,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use psios_api::{ApiError, ResourceRef, canonical, id, sha256};
+use psios_api::{
+    ApiError, ArtifactUploadCapacity, ArtifactUploadUsage, ResourceRef, canonical, id, sha256,
+};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -26,8 +28,8 @@ pub(crate) const OWNER_BYTES: u32 = 32 * 1024 * 1024;
 pub(super) const TOTAL_BYTES: u32 = 128 * 1024 * 1024;
 const OWNER_STAGES: u32 = 4;
 const TOTAL_STAGES: u32 = 32;
-const OWNER_REQUESTS: u32 = 4096;
-const TOTAL_REQUESTS: u32 = 65536;
+pub(crate) const OWNER_REQUESTS: u32 = 4096;
+pub(crate) const TOTAL_REQUESTS: u32 = 65536;
 const WITHDRAWAL: &str = "ArtifactWithdrawal";
 pub(super) const ABANDONMENT: &str = "ArtifactAbandonment";
 
@@ -144,13 +146,93 @@ fn authorize_stage(db: &Db<'_>, actor: &str, stage_id: &str) -> Result<()> {
 pub(crate) fn profile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     let _: Empty = decode(params)?;
     authorize(db, actor, UPLOAD)?;
+    let (owner_receipts, total_receipts) = db.cfg.artifact_upload_receipt_limits();
     Ok(json!({
         "format":"OpaqueBytesV1","media_type":"application/octet-stream",
         "max_bytes":MAX_BYTES,"chunk_bytes":CHUNK_BYTES,"owner_bytes":OWNER_BYTES,
         "total_bytes":TOTAL_BYTES,"owner_open_stages":OWNER_STAGES,"total_open_stages":TOTAL_STAGES,
+        "owner_receipts":owner_receipts,"total_receipts":total_receipts,
         "min_ttl_seconds":5,"max_ttl_seconds":3600,
         "exact_delegation":true,
     }))
+}
+
+struct Charge {
+    reserved_bytes: u32,
+    retained_bytes: u32,
+    open_stages: u32,
+    receipts: u32,
+}
+
+impl Charge {
+    fn view(
+        &self,
+        byte_limit: u32,
+        open_stage_limit: u32,
+        receipt_limit: u32,
+    ) -> ArtifactUploadUsage {
+        ArtifactUploadUsage {
+            reserved_bytes: self.reserved_bytes,
+            retained_bytes: self.retained_bytes,
+            byte_limit,
+            open_stages: self.open_stages,
+            open_stage_limit,
+            receipts: self.receipts,
+            receipt_limit,
+            remaining_receipts: receipt_limit.saturating_sub(self.receipts),
+        }
+    }
+
+    fn full(&self, added: u32, bytes: u32, stages: u32) -> bool {
+        self.open_stages >= stages
+            || self
+                .reserved_bytes
+                .saturating_add(self.retained_bytes)
+                .saturating_add(added)
+                > bytes
+    }
+}
+
+fn charges(db: &Db<'_>, actor: &str) -> Result<(Charge, Charge)> {
+    Ok(db.c.query_row(
+        "SELECT coalesce(sum(size_bytes) FILTER(WHERE owner=?1 AND state='Open'),0),
+                coalesce(sum(size_bytes) FILTER(WHERE owner=?1 AND state='Published'),0),
+                count(*) FILTER(WHERE owner=?1 AND state='Open'),
+                (SELECT count(*) FROM artifact_uploads WHERE owner=?1),
+                coalesce(sum(size_bytes) FILTER(WHERE state='Open'),0),
+                coalesce(sum(size_bytes) FILTER(WHERE state='Published'),0),
+                count(*) FILTER(WHERE state='Open'),
+                (SELECT count(*) FROM artifact_uploads)
+         FROM artifact_uploads INDEXED BY artifact_active_uploads WHERE state IN ('Open','Published')",
+        [actor],
+        |row| {
+            let read = |at: usize| -> rusqlite::Result<Charge> {
+                Ok(Charge {
+                    reserved_bytes: row.get(at)?,
+                    retained_bytes: row.get(at + 1)?,
+                    open_stages: row.get(at + 2)?,
+                    receipts: row.get(at + 3)?,
+                })
+            };
+            Ok((read(0)?, read(4)?))
+        },
+    )?)
+}
+
+pub(crate) fn capacity(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
+    let _: Empty = decode(params)?;
+    let can_view_node = actor == policy::OWNER;
+    if can_view_node {
+        policy::active(db, actor)?;
+    } else {
+        authorize(db, actor, UPLOAD)?;
+    }
+    let (principal, node) = charges(db, actor)?;
+    let (principal_limit, node_limit) = db.cfg.artifact_upload_receipt_limits();
+    Ok(serde_json::to_value(ArtifactUploadCapacity {
+        principal: principal.view(OWNER_BYTES, OWNER_STAGES, principal_limit),
+        node: can_view_node.then(|| node.view(TOTAL_BYTES, TOTAL_STAGES, node_limit)),
+    })?)
 }
 
 pub(super) fn valid_digest(value: &str) -> bool {
@@ -175,25 +257,15 @@ pub(super) fn valid_media_type(value: &str) -> bool {
 }
 
 pub(crate) fn check_capacity(db: &Db<'_>, actor: &str, bytes: u32) -> Result<()> {
-    let (total, own, total_open, owner_open, total_count, owner_count): (u32, u32, u32, u32, u32, u32) =
-        db.c.query_row(
-            "SELECT coalesce(sum(size_bytes),0),
-                    coalesce(sum(size_bytes) FILTER(WHERE owner=?1),0),
-                    count(*) FILTER(WHERE state='Open'),count(*) FILTER(WHERE owner=?1 AND state='Open'),
-                    (SELECT count(*) FROM artifact_uploads),
-                    (SELECT count(*) FROM artifact_uploads WHERE owner=?1)
-               FROM artifact_uploads INDEXED BY artifact_active_uploads WHERE state IN ('Open','Published')",
-            [actor], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
-        )?;
+    let (principal, node) = charges(db, actor)?;
+    let (principal_limit, node_limit) = db.cfg.artifact_upload_receipt_limits();
     require(
-        total_count < TOTAL_REQUESTS && owner_count < OWNER_REQUESTS,
+        node.receipts < node_limit && principal.receipts < principal_limit,
         "QuotaExceeded",
         "artifact upload receipt capacity reached",
     )?;
-    if total_open >= TOTAL_STAGES
-        || owner_open >= OWNER_STAGES
-        || total.saturating_add(bytes) > TOTAL_BYTES
-        || own.saturating_add(bytes) > OWNER_BYTES
+    if node.full(bytes, TOTAL_BYTES, TOTAL_STAGES)
+        || principal.full(bytes, OWNER_BYTES, OWNER_STAGES)
     {
         let mut quota = ApiError::new(
             "QuotaExceeded",

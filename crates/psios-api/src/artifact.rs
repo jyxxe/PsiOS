@@ -1,6 +1,6 @@
 use crate::{ApiError, ApiResult, Client, MAX_ARTIFACT_CHUNK, ResourceRef};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::io::{Error, ErrorKind, Read, Seek, SeekFrom};
@@ -17,6 +17,25 @@ pub struct ArtifactUploadReceipt {
     pub stage_id: String,
     pub reference: ResourceRef,
     pub size_bytes: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ArtifactUploadCapacity {
+    pub principal: ArtifactUploadUsage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node: Option<ArtifactUploadUsage>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ArtifactUploadUsage {
+    pub reserved_bytes: u32,
+    pub retained_bytes: u32,
+    pub byte_limit: u32,
+    pub open_stages: u32,
+    pub open_stage_limit: u32,
+    pub receipts: u32,
+    pub receipt_limit: u32,
+    pub remaining_receipts: u32,
 }
 
 fn source_error(error: Error) -> Box<ApiError> {
@@ -36,6 +55,17 @@ fn source_error(error: Error) -> Box<ApiError> {
 }
 
 impl Client {
+    /// Read the caller's committed upload charges and, for the local owner, the node totals.
+    pub fn artifact_upload_capacity(&self) -> ApiResult<ArtifactUploadCapacity> {
+        serde_json::from_value(self.call("Artifact.UploadCapacity", json!({}))?).map_err(|_| {
+            ApiError::new(
+                "RecoveryRequired",
+                "invalid artifact upload capacity response",
+            )
+            .into()
+        })
+    }
+
     /// Register a byte stream and resume at the authority's committed offset.
     /// Retrying with the same key and unchanged source retrieves a committed publication.
     pub fn upload_artifact(

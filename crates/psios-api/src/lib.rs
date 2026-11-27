@@ -8,7 +8,9 @@ mod project;
 mod retention;
 mod work_admission;
 mod work_admission_blockers;
-pub use artifact::{ArtifactRepairReceipt, ArtifactUploadReceipt};
+pub use artifact::{
+    ArtifactRepairReceipt, ArtifactUploadCapacity, ArtifactUploadReceipt, ArtifactUploadUsage,
+};
 pub use backup::{BackupChunk, BackupMember, BackupMemberReceipt};
 pub use mcp::{
     LocalReadBinding, LocalReadTool, LocalReadToolsRequest, ResolveLocalReadToolsRequest,

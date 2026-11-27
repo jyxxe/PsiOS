@@ -1,7 +1,7 @@
 // Exercise the embedded pages through Chrome's private DevTools pipe.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readSync, writeSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -84,6 +84,13 @@ function click(selector) {
   return evaluate("document.querySelector(" + JSON.stringify(selector) + ").click()");
 }
 
+async function keyboardActivate(selector) {
+  await evaluate("document.querySelector(" + JSON.stringify(selector) + ").focus()");
+  await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter",
+    text: "\r", unmodifiedText: "\r", windowsVirtualKeyCode: 13 });
+  await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+}
+
 async function selectTask(id) {
   const selector = '#task-rows button[data-task-id="' + id + '"]';
   const visible = 'document.querySelector(' + JSON.stringify(selector) + ') !== null';
@@ -103,9 +110,32 @@ async function verifyDownload(digest) {
   return bytes;
 }
 
+async function verifyRevokedWindow() {
+  await click("#nav-node");
+  await waitFor("permitted node inventory", 'document.querySelector("#node-view").textContent.includes(' + JSON.stringify(input.node) + ')');
+  await click("#nav-tasks");
+  await waitFor("agent's own task", 'document.querySelector("#task-rows button") !== null');
+  await selectTask(input.task);
+  await waitFor("completed Task", 'document.querySelector("#task-content").textContent.includes("成功")');
+  await keyboardActivate('#window-node [data-action="minimize"]');
+  assert.ok(await evaluate('document.querySelector("#node-view").textContent === ""'));
+  writeSync(input.control_fd, Buffer.from("R"));
+  const reply = Buffer.alloc(1);
+  assert.equal(readSync(input.control_fd, reply), 1);
+  assert.equal(reply.toString(), "K");
+  await keyboardActivate("#nav-node");
+  await waitFor("refused inventory after restoration", 'document.querySelector("#status-node").classList.contains("error")');
+  assert.ok(await evaluate('document.querySelector("#node-view").textContent === "" && !document.querySelector("#window-tasks").hidden && ' +
+    'document.querySelector("#task-content").textContent.includes(' + JSON.stringify(input.task) + ')'));
+  await click("#logout");
+  await waitFor("cleared desktop", 'document.querySelector("#workspace").hidden && document.querySelector("#task-content").textContent === ""');
+  assert.deepEqual(exceptions, []);
+  assert.ok(requests.every(url => new URL(url).origin === input.origin));
+}
+
 async function test() {
   await send("Browser.getVersion", {}, 35_000);
-  await send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: input.downloads });
+  if (input.downloads) await send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: input.downloads });
   const { targetId } = await send("Target.createTarget", { url: "about:blank" }, 30_000);
   ({ sessionId } = await send("Target.attachToTarget", { targetId, flatten: true }));
   await send("Page.enable");
@@ -122,9 +152,17 @@ async function test() {
   await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter",
     text: "\r", unmodifiedText: "\r", windowsVirtualKeyCode: 13 });
   await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+  await waitFor("paired desktop", '!document.querySelector("#workspace").hidden && !document.querySelector("#empty-desktop").hidden');
+  assert.ok(await evaluate('document.activeElement.id === "nav-node" && document.querySelectorAll(".app-window:not([hidden])").length === 0'));
+  assert.ok(!requests.some(url => ["/api/node", "/api/tasks"].includes(new URL(url).pathname)));
+  if (input.control_fd !== undefined) return verifyRevokedWindow();
+  await send("Emulation.setDeviceMetricsOverride", {
+    width: 1280, height: 860, screenWidth: 1280, screenHeight: 860, deviceScaleFactor: 1, mobile: false,
+  });
+  await click("#nav-node");
   await waitFor("authorized node", 'document.getElementById("node-view").textContent.includes(' +
     JSON.stringify(input.node) + ')');
-  assert.ok(await evaluate('document.activeElement.id === "view-title" && ' +
+  assert.ok(await evaluate('document.activeElement.id === "title-node" && ' +
     'document.getElementById("code").value === "" && document.cookie === "" && ' +
     'localStorage.length === 0 && sessionStorage.length === 0'));
 
@@ -144,6 +182,24 @@ async function test() {
 
   await click("#nav-tasks");
   await waitFor("first page", 'document.querySelectorAll("#task-rows button").length === 20');
+  assert.ok(await evaluate(`document.querySelector("#window-node").getBoundingClientRect().right <=
+    document.querySelector("#window-tasks").getBoundingClientRect().left &&
+    document.querySelector("#active-app").textContent === "任务中心"`));
+  assert.ok(await evaluate(`(() => {
+    const tasks = document.querySelector("#window-tasks .window-body");
+    tasks.scrollTop = tasks.scrollHeight;
+    const independent = tasks.scrollTop > 0 && document.scrollingElement.scrollTop === 0 &&
+      document.querySelector("#window-node .window-body").scrollTop === 0;
+    tasks.scrollTop = 0;
+    return independent;
+  })()`));
+  await click('#window-tasks [data-action="maximize"]');
+  assert.ok(await evaluate('document.querySelector("#window-node").hidden && document.querySelector("#window-tasks").classList.contains("maximized")'));
+  await click('#window-tasks [data-action="maximize"]');
+  assert.ok(await evaluate('!document.querySelector("#window-node").hidden'));
+  await click("#nav-node");
+  assert.ok(await evaluate('document.activeElement.id === "title-node" && !document.querySelector("#window-tasks").hidden'));
+  await click("#nav-tasks");
   await click("#next");
   await waitFor("second page", 'document.querySelectorAll("#task-rows button").length === 2');
   await click("#previous");
@@ -194,12 +250,28 @@ async function test() {
   assert.ok((await verifyDownload(input.large_digest)).length > 2 * 128 * 1024);
   await selectTask(input.pending);
   await waitFor("pending Task action", 'document.querySelector(".task-cancel button") !== null');
+  await click('#window-tasks [data-action="minimize"]');
+  assert.ok(await evaluate(`document.querySelector("#nav-tasks").dataset.state === "minimized" &&
+    document.querySelector("#task-content").textContent === "" && document.activeElement.id === "title-node"`));
+  await click("#nav-tasks");
+  await waitFor("restored pending Task", 'document.querySelector(".task-cancel button") !== null');
+  await click('#window-tasks [data-action="close"]');
+  assert.ok(await evaluate('document.querySelector("#nav-tasks").dataset.state === "closed" && document.querySelector("#task-rows").textContent === ""'));
+  await click("#nav-tasks");
+  await waitFor("reopened task list", 'document.querySelectorAll("#task-rows button").length === 20');
+  assert.ok(await evaluate('document.querySelector("#task-detail").hidden'));
+  await selectTask(input.pending);
+  await waitFor("same pending Task", 'document.querySelector(".task-cancel button") !== null');
+  const cancelRequests = () => requests.filter(url => new URL(url).pathname === "/api/cancel-pending-task").length;
+  assert.equal(cancelRequests(), 0);
   await click(".task-cancel button");
   await waitFor("authoritative cancellation", 'document.getElementById("task-content").textContent.includes("已取消")');
   assert.ok(await evaluate('!document.querySelector(".task-cancel button") && document.activeElement.id === "task-detail"'));
+  assert.equal(cancelRequests(), 1);
   await click("#logout");
   await waitFor("cleared session", 'document.getElementById("workspace").hidden && ' +
     'document.getElementById("task-content").textContent === ""');
+  assert.ok(await evaluate('document.querySelector("#node-view").textContent === "" && document.querySelectorAll(".app-window:not([hidden])").length === 0'));
   assert.deepEqual(exceptions, []);
   assert.ok(requests.length > 6 && requests.every((url) => new URL(url).origin === input.origin));
 }

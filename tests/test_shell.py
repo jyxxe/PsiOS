@@ -138,6 +138,43 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(shell.process.wait(timeout=5), 0)
         self.assertEqual(self.node.call("Task.Get", {"id": pending})["lifecycle"], "Cancelled")
 
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
+    def test_restoring_an_app_rechecks_its_grant_without_losing_the_other_window(self):
+        node = self.node
+        agent, work = node.agent(["task.submit", "system.status", "task.read", "resource.read"])
+        inventory = node.call("Grant.Issue", {"principal_id": agent["principal_id"],
+                                              "actions": ["node.inventory"], "units": 8, "ttl_seconds": 300})
+        prepared = node.prepare("system.status", {}, token=agent["token"],
+                                delegation=work["delegation_ref"]["resource_id"])
+        task = node.call("Task.Submit", prepared, agent["token"])["task_id"]
+        self.assertEqual(node.wait(task)["lifecycle"], "Succeeded")
+        identity = node.base / "reader.token"
+        identity.touch(mode=0o600)
+        identity.write_text(agent["token"])
+        shell = self.shell(identity)
+        parent, child = socket.socketpair()
+        with parent, child:
+            parent.settimeout(45)
+            args = dict(origin=shell.origin, code=shell.code, task=task,
+                        node=node.call("Node.Get", {})["reference"]["resource_id"],
+                        profile=str(node.base / "browser"), control_fd=child.fileno())
+            with subprocess.Popen(["node", str(Path(__file__).with_name("shell_browser.mjs")),
+                                   os.environ.get("PSIOS_TEST_CHROME", "google-chrome")],
+                                  stdin=subprocess.PIPE, pass_fds=(child.fileno(),)) as browser:
+                child.close()
+                try:
+                    browser.stdin.write(json.dumps(args).encode())
+                    browser.stdin.close()
+                    self.assertEqual(parent.recv(1), b"R")
+                    node.call("Grant.Revoke", target(inventory["grant_ref"]))
+                    parent.sendall(b"K")
+                    self.assertEqual(browser.wait(timeout=55), 0)
+                finally:
+                    if browser.poll() is None:
+                        browser.kill()
+        self.assertEqual(shell.process.wait(timeout=5), 0)
+        self.assertEqual(node.call("Task.Get", {"id": task})["lifecycle"], "Succeeded")
+
     def test_isolates_credentials_and_only_exposes_bounded_read_routes(self):
         shell = self.shell()
         status, headers, page = shell.http("/", method="GET")

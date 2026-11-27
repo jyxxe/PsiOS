@@ -55,6 +55,10 @@ pub struct Config {
     pub oci_effective_volume_observation: bool,
     #[serde(default = "default_oci_capture_bytes")]
     pub oci_capture_max_bytes: u32,
+    #[serde(default = "default_oci_capture_staging_bytes")]
+    pub oci_capture_staging_max_bytes: u32,
+    #[serde(default)]
+    pub oci_archive_storage: OciArchiveStorage,
     #[serde(default)]
     pub authority_reserve: AuthorityReserve,
     #[serde(default = "default_backup_max_bytes")]
@@ -76,6 +80,22 @@ pub struct AuthorityReserve {
 pub struct ArtifactUploadHistoryLimit {
     pub per_principal: u32,
     pub node: u32,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OciArchiveStorage {
+    pub principal_bytes: u32,
+    pub node_bytes: u32,
+}
+
+impl Default for OciArchiveStorage {
+    fn default() -> Self {
+        Self {
+            principal_bytes: 32 * 1024 * 1024,
+            node_bytes: 128 * 1024 * 1024,
+        }
+    }
 }
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -187,6 +207,10 @@ fn default_docker() -> PathBuf {
 fn default_oci_capture_bytes() -> u32 {
     storage::oci_archive::DEFAULT_CAPTURE_BYTES
 }
+
+fn default_oci_capture_staging_bytes() -> u32 {
+    storage::oci_archive::DEFAULT_STAGING_BYTES
+}
 impl Default for Config {
     fn default() -> Self {
         Self::local(Path::new("/var/lib/psios"))
@@ -231,6 +255,8 @@ impl Config {
             docker_socket: default_docker(),
             oci_effective_volume_observation: false,
             oci_capture_max_bytes: default_oci_capture_bytes(),
+            oci_capture_staging_max_bytes: default_oci_capture_staging_bytes(),
+            oci_archive_storage: OciArchiveStorage::default(),
             authority_reserve: AuthorityReserve::default(),
             backup_max_bytes: DEFAULT_BACKUP_MAX_BYTES,
             backup_capture_timeout_seconds: DEFAULT_BACKUP_CAPTURE_TIMEOUT_SECONDS,
@@ -333,7 +359,21 @@ impl Config {
         require(
             (1..=storage::oci_archive::MAX_BYTES).contains(&self.oci_capture_max_bytes),
             "InvalidArgument",
-            "OCI capture max must be between 1 and 33554432 bytes",
+            "OCI capture maximum must be between 1 byte and 128 MiB",
+        )?;
+        require(
+            (self.oci_capture_max_bytes..=storage::oci_archive::MAX_STAGING_BYTES)
+                .contains(&self.oci_capture_staging_max_bytes),
+            "InvalidArgument",
+            "OCI staging capacity must cover one maximum capture and stay within 512 MiB",
+        )?;
+        require(
+            self.oci_capture_max_bytes <= self.oci_archive_storage.principal_bytes
+                && (self.oci_archive_storage.principal_bytes
+                    ..=storage::oci_archive::MAX_RETAINED_BYTES)
+                    .contains(&self.oci_archive_storage.node_bytes),
+            "InvalidArgument",
+            "OCI retained capacity must cover one maximum capture, fit the principal within the node, and stay within 2 GiB",
         )?;
         require(
             (1..=MAX_BACKUP_BYTES).contains(&self.backup_max_bytes),

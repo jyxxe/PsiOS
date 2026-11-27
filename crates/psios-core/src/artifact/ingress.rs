@@ -1,7 +1,7 @@
 //! Durable ingress for opaque local artifacts. Publication verifies exact bytes.
 use super::{CHUNK_BYTES, RAW_LAYOUT, abandonment};
 use crate::{
-    Empty, Error, Result, after,
+    Config, Empty, Error, Result, after, apps,
     db::{Db, Doc, find},
     decode, err, label, now, policy, require,
     storage::oci_archive::Sealed,
@@ -32,6 +32,21 @@ pub(crate) const OWNER_REQUESTS: u32 = 4096;
 pub(crate) const TOTAL_REQUESTS: u32 = 65536;
 const WITHDRAWAL: &str = "ArtifactWithdrawal";
 pub(super) const ABANDONMENT: &str = "ArtifactAbandonment";
+
+#[derive(Clone, Copy)]
+enum Profile {
+    Raw,
+    OciArchive,
+}
+
+impl Profile {
+    fn maximum(self, config: &Config) -> u32 {
+        match self {
+            Self::Raw => MAX_BYTES,
+            Self::OciArchive => config.oci_capture_max_bytes,
+        }
+    }
+}
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -160,6 +175,8 @@ pub(crate) fn profile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value>
 struct Charge {
     reserved_bytes: u32,
     retained_bytes: u32,
+    oci_archive_bytes: u32,
+    oci_archive_disposal_bytes: u32,
     open_stages: u32,
     receipts: u32,
 }
@@ -168,6 +185,7 @@ impl Charge {
     fn view(
         &self,
         byte_limit: u32,
+        oci_archive_byte_limit: u32,
         open_stage_limit: u32,
         receipt_limit: u32,
     ) -> ArtifactUploadUsage {
@@ -175,6 +193,9 @@ impl Charge {
             reserved_bytes: self.reserved_bytes,
             retained_bytes: self.retained_bytes,
             byte_limit,
+            oci_archive_retained_bytes: self.oci_archive_bytes,
+            oci_archive_pending_disposal_bytes: self.oci_archive_disposal_bytes,
+            oci_archive_byte_limit,
             open_stages: self.open_stages,
             open_stage_limit,
             receipts: self.receipts,
@@ -195,26 +216,37 @@ impl Charge {
 
 fn charges(db: &Db<'_>, actor: &str) -> Result<(Charge, Charge)> {
     Ok(db.c.query_row(
-        "SELECT coalesce(sum(size_bytes) FILTER(WHERE owner=?1 AND state='Open'),0),
-                coalesce(sum(size_bytes) FILTER(WHERE owner=?1 AND state='Published'),0),
+        "WITH archives AS (
+             SELECT coalesce(sum(u.size_bytes) FILTER(WHERE u.owner=?1 AND u.state='Published'),0) AS owned,
+                    coalesce(sum(u.size_bytes) FILTER(WHERE u.owner=?1 AND u.state='Withdrawn'),0) AS owned_disposal,
+                    coalesce(sum(u.size_bytes) FILTER(WHERE u.state='Published'),0) AS published,
+                    coalesce(sum(u.size_bytes) FILTER(WHERE u.state='Withdrawn'),0) AS disposal
+             FROM artifact_uploads u LEFT JOIN oci_archive_blobs b ON b.artifact=u.artifact_id
+             WHERE u.source_kind=?2 AND (u.state='Published' OR (u.state='Withdrawn' AND b.disposed=0))
+         ) SELECT coalesce(sum(size_bytes) FILTER(WHERE owner=?1 AND state='Open'),0),
+                coalesce(sum(size_bytes) FILTER(WHERE owner=?1 AND state='Published' AND source_kind<>?2),0),
+                (SELECT owned FROM archives),(SELECT owned_disposal FROM archives),
                 count(*) FILTER(WHERE owner=?1 AND state='Open'),
                 (SELECT count(*) FROM artifact_uploads WHERE owner=?1),
                 coalesce(sum(size_bytes) FILTER(WHERE state='Open'),0),
-                coalesce(sum(size_bytes) FILTER(WHERE state='Published'),0),
+                coalesce(sum(size_bytes) FILTER(WHERE state='Published' AND source_kind<>?2),0),
+                (SELECT published FROM archives),(SELECT disposal FROM archives),
                 count(*) FILTER(WHERE state='Open'),
                 (SELECT count(*) FROM artifact_uploads)
          FROM artifact_uploads INDEXED BY artifact_active_uploads WHERE state IN ('Open','Published')",
-        [actor],
+        params![actor, apps::capture::SOURCE],
         |row| {
             let read = |at: usize| -> rusqlite::Result<Charge> {
                 Ok(Charge {
                     reserved_bytes: row.get(at)?,
                     retained_bytes: row.get(at + 1)?,
-                    open_stages: row.get(at + 2)?,
-                    receipts: row.get(at + 3)?,
+                    oci_archive_bytes: row.get(at + 2)?,
+                    oci_archive_disposal_bytes: row.get(at + 3)?,
+                    open_stages: row.get(at + 4)?,
+                    receipts: row.get(at + 5)?,
                 })
             };
-            Ok((read(0)?, read(4)?))
+            Ok((read(0)?, read(6)?))
         },
     )?)
 }
@@ -229,9 +261,16 @@ pub(crate) fn capacity(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value
     }
     let (principal, node) = charges(db, actor)?;
     let (principal_limit, node_limit) = db.cfg.artifact_upload_receipt_limits();
+    let archive = &db.cfg.oci_archive_storage;
     Ok(serde_json::to_value(ArtifactUploadCapacity {
-        principal: principal.view(OWNER_BYTES, OWNER_STAGES, principal_limit),
-        node: can_view_node.then(|| node.view(TOTAL_BYTES, TOTAL_STAGES, node_limit)),
+        principal: principal.view(
+            OWNER_BYTES,
+            archive.principal_bytes,
+            OWNER_STAGES,
+            principal_limit,
+        ),
+        node: can_view_node
+            .then(|| node.view(TOTAL_BYTES, archive.node_bytes, TOTAL_STAGES, node_limit)),
     })?)
 }
 
@@ -256,7 +295,11 @@ pub(super) fn valid_media_type(value: &str) -> bool {
         })
 }
 
-pub(crate) fn check_capacity(db: &Db<'_>, actor: &str, bytes: u32) -> Result<()> {
+pub(crate) fn check_oci_capacity(db: &Db<'_>, actor: &str, bytes: u32) -> Result<()> {
+    check_capacity(db, actor, bytes, Profile::OciArchive)
+}
+
+fn check_capacity(db: &Db<'_>, actor: &str, bytes: u32, profile: Profile) -> Result<()> {
     let (principal, node) = charges(db, actor)?;
     let (principal_limit, node_limit) = db.cfg.artifact_upload_receipt_limits();
     require(
@@ -264,13 +307,29 @@ pub(crate) fn check_capacity(db: &Db<'_>, actor: &str, bytes: u32) -> Result<()>
         "QuotaExceeded",
         "artifact upload receipt capacity reached",
     )?;
-    if node.full(bytes, TOTAL_BYTES, TOTAL_STAGES)
-        || principal.full(bytes, OWNER_BYTES, OWNER_STAGES)
-    {
-        let mut quota = ApiError::new(
-            "QuotaExceeded",
+    let archive = &db.cfg.oci_archive_storage;
+    let (full, message) = match profile {
+        Profile::Raw => (
+            node.full(bytes, TOTAL_BYTES, TOTAL_STAGES)
+                || principal.full(bytes, OWNER_BYTES, OWNER_STAGES),
             "artifact upload staging or retained bytes are full",
-        );
+        ),
+        Profile::OciArchive => (
+            principal
+                .oci_archive_bytes
+                .saturating_add(principal.oci_archive_disposal_bytes)
+                .saturating_add(bytes)
+                > archive.principal_bytes
+                || node
+                    .oci_archive_bytes
+                    .saturating_add(node.oci_archive_disposal_bytes)
+                    .saturating_add(bytes)
+                    > archive.node_bytes,
+            "OCI archive storage capacity is full",
+        ),
+    };
+    if full {
+        let mut quota = ApiError::new("QuotaExceeded", message);
         quota.retryable = true;
         quota.retry_condition = "SameRequestAfterBackoff".into();
         return Err(Error(Box::new(quota)));
@@ -280,11 +339,11 @@ pub(crate) fn check_capacity(db: &Db<'_>, actor: &str, bytes: u32) -> Result<()>
 
 pub(crate) fn stage(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     authorize(db, actor, UPLOAD)?;
-    let stage = begin_stage(db, actor, decode(params)?, MAX_BYTES)?;
+    let stage = begin_stage(db, actor, decode(params)?, Profile::Raw)?;
     response(db, &stage)
 }
 
-fn begin_stage(db: &Db<'_>, actor: &str, p: Start, maximum: u32) -> Result<Stage> {
+fn begin_stage(db: &Db<'_>, actor: &str, p: Start, profile: Profile) -> Result<Stage> {
     label(&p.key)?;
     require(
         valid_digest(&p.digest)
@@ -294,7 +353,7 @@ fn begin_stage(db: &Db<'_>, actor: &str, p: Start, maximum: u32) -> Result<Stage
         "invalid artifact digest, media type or upload lifetime",
     )?;
     require(
-        (1..=maximum).contains(&p.size_bytes),
+        (1..=profile.maximum(db.cfg)).contains(&p.size_bytes),
         "QuotaExceeded",
         "artifact size outside ingress profile",
     )?;
@@ -321,7 +380,7 @@ fn begin_stage(db: &Db<'_>, actor: &str, p: Start, maximum: u32) -> Result<Stage
         authority::authorize(db, actor, reference)?;
     }
     db.cfg.check_admission_space()?;
-    check_capacity(db, actor, p.size_bytes)?;
+    check_capacity(db, actor, p.size_bytes, profile)?;
     let id = id(if p.delegation_ref.is_some() {
         authority::STAGE_PREFIX
     } else {
@@ -486,7 +545,7 @@ pub(crate) fn publish_generated_reader(
         "QuotaExceeded",
         "generated content is outside the artifact ingress profile",
     )?;
-    let mut stage = generated(db, actor, size, digest, media, MAX_BYTES)?;
+    let mut stage = generated(db, actor, size, digest, media, Profile::Raw)?;
     let mut buffer = vec![0; (size as usize).min(CHUNK_BYTES)];
     while stage.received < size {
         let count = ((size - stage.received) as usize).min(buffer.len());
@@ -508,7 +567,7 @@ fn generated(
     size: u32,
     digest: &str,
     media: &str,
-    maximum: u32,
+    profile: Profile,
 ) -> Result<Stage> {
     authorize(db, actor, UPLOAD)?;
     begin_stage(
@@ -522,7 +581,7 @@ fn generated(
             ttl_seconds: 120,
             delegation_ref: None,
         },
-        maximum,
+        profile,
     )
 }
 
@@ -535,7 +594,7 @@ pub(crate) fn publish_managed_oci(
     source: Value,
 ) -> Result<Value> {
     require(
-        source["kind"] == "LocalOciImageCapture",
+        source["kind"] == apps::capture::SOURCE,
         "RecoveryRequired",
         "managed payload has wrong source",
     )?;
@@ -546,7 +605,7 @@ pub(crate) fn publish_managed_oci(
         archive.size(),
         archive.digest(),
         media,
-        db.cfg.oci_capture_max_bytes,
+        Profile::OciArchive,
     )?;
     require_open(db, &stage)?;
     let artifact = create_artifact(

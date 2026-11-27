@@ -22,6 +22,7 @@ from uuid import uuid4
 TOOL = "application.capture_oci_image"
 MEDIA = "application/vnd.psios.docker-image.v1+tar"
 MAX = 8 * 1024 * 1024
+MAX_CAPTURE = 128 * 1024 * 1024
 CHUNK = 128 * 1024
 SOCKET = "/var/run/docker.sock"
 DOCKER = ["docker", "--host", "unix://" + SOCKET]
@@ -232,13 +233,12 @@ def main(binaries):
         assert materialized["Id"] == image_id and not materialized["RepoTags"], materialized
         assert materialized["RootFS"]["Layers"] == proof["image"]["diff_ids"], materialized
 
-        staged = [n.call("Artifact.Stage", {"key": key(), "size_bytes": MAX, "ttl_seconds": 60,
-            "declared_media_type": "application/octet-stream", "digest": "sha256:" + "1" * 64}) for _ in range(3)]
-        # Fill the remaining owner capacity with the fourth upload reservation.
-        remaining = MAX - len(data)
-        staged += [n.call("Artifact.Stage", {"key": key(), "size_bytes": remaining, "ttl_seconds": 60,
-            "declared_media_type": "application/octet-stream", "digest": "sha256:" + "2" * 64})]
-        assert_failed(n.wait(submit(), autoapprove=True), "QuotaExceeded")
+        upload = {"size_bytes": MAX, "ttl_seconds": 60, "declared_media_type": "application/octet-stream",
+                  "digest": "sha256:" + "1" * 64}
+        staged = [n.call("Artifact.Stage", {**upload, "key": key()}) for _ in range(4)]
+        denied(n, "QuotaExceeded", "Artifact.Stage", {**upload, "key": key()})
+        usage = n.call("Artifact.UploadCapacity", {})["principal"]
+        assert usage["reserved_bytes"] == 4 * MAX and usage["oci_archive_retained_bytes"] == len(data), usage
         for stage in staged:
             n.call("Artifact.Stage.Discard", {"stage_id": stage["stage_id"]})
 

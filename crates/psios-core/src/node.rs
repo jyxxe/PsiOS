@@ -128,7 +128,7 @@ pub fn get(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         json!({"reference":d.reference(),"state":d.body,"queue":groups,
         "admission":broker::admission::status(db)?,
         "oci_capture_staging":{"reserved_bytes":apps::capture::reserved_staging_bytes(db)?,
-                               "max_bytes":apps::capture::STAGING_BYTES},
+                               "max_bytes":db.cfg.oci_capture_staging_max_bytes},
         "authority_storage":db.cfg.authority_storage()?}),
     )
 }

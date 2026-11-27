@@ -1,5 +1,5 @@
 //! Custody of immutable generated OCI payloads selected by the SQLite authority.
-use crate::storage::oci_archive::MAX_BYTES;
+use crate::storage::oci_archive::{MAX_BYTES, MAX_RETAINED_BYTES};
 use crate::{
     Result,
     db::{Db, Doc},
@@ -129,16 +129,22 @@ pub(crate) fn selected(conn: &Connection, format: u32) -> Result<BTreeMap<String
             ))
         })?
         .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+    let (member_limit, aggregate_limit) = if format >= crate::apps::capture::CAPACITY_PROFILE_FORMAT
+    {
+        (MAX_BYTES, MAX_RETAINED_BYTES)
+    } else {
+        (32 * 1024 * 1024, super::ingress::TOTAL_BYTES)
+    };
     require(
         members.len() <= MAX_FILES
             && members
                 .values()
-                .all(|member| (1..=u64::from(MAX_BYTES)).contains(&member.size_bytes))
+                .all(|member| (1..=u64::from(member_limit)).contains(&member.size_bytes))
             && members
                 .values()
                 .map(|member| member.size_bytes)
                 .sum::<u64>()
-                <= u64::from(super::ingress::TOTAL_BYTES),
+                <= u64::from(aggregate_limit),
         "RecoveryRequired",
         "managed archive set exceeds its authority bounds",
     )?;
@@ -196,7 +202,9 @@ pub(crate) fn check_checkpoint_payloads(
 
 pub(crate) fn reclaim(conn: &Connection, state: &Path) -> Result<()> {
     verify_registry(conn)?;
-    let live: BTreeSet<_> = selected(conn, FORMAT)?.into_keys().collect();
+    let live: BTreeSet<_> = selected(conn, crate::db::CURRENT_FORMAT)?
+        .into_keys()
+        .collect();
     let depot = Depot::open(state)?;
     require(
         depot.is_some() || live.is_empty(),

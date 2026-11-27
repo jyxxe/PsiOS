@@ -16,10 +16,10 @@ use std::{fs::File, path::Path, time::Duration};
 pub(crate) const FORMAT: u32 = super::publisher::FORMAT + 1;
 // Older writers use an 8 MiB immutable archive bound throughout the authority.
 pub(crate) const CAPACITY_FORMAT: u32 = artifact::files::FORMAT + 1;
+pub(crate) const CAPACITY_PROFILE_FORMAT: u32 = crate::schedule::renewal::FORMAT + 1;
 pub(crate) const SCHEMA: &str = include_str!("capture.sql");
 pub(crate) const TOOL: &str = "application.capture_oci_image";
-pub(crate) const STAGING_BYTES: u32 = artifact::ingress::OWNER_BYTES;
-const SOURCE: &str = "LocalOciImageCapture";
+pub(crate) const SOURCE: &str = "LocalOciImageCapture";
 const PROOF: &str = "OciImageCapture";
 const MEDIA: &str = "application/vnd.psios.docker-image.v1+tar";
 const ARCHIVE_FORMAT: &str = "DockerImageArchiveV1";
@@ -51,7 +51,7 @@ impl Request {
         require(
             (1..=MAX_BYTES).contains(&self.max_archive_bytes),
             "InvalidArgument",
-            "OCI capture byte limit must be between 1 and 33554432",
+            "OCI capture byte limit must be between 1 byte and 128 MiB",
         )
     }
 
@@ -190,7 +190,7 @@ pub(crate) fn export(
 
 pub(crate) fn check_capacity(db: &Db<'_>, work: &Work, capture: &Captured) -> Result<()> {
     db.cfg.check_admission_space()?;
-    artifact::ingress::check_capacity(db, &work.task.owner, capture.archive.size())
+    artifact::ingress::check_oci_capacity(db, &work.task.owner, capture.archive.size())
 }
 
 pub(crate) fn publish(db: &Db<'_>, work: &Work, capture: Captured) -> Result<Value> {

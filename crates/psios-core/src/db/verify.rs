@@ -152,6 +152,7 @@ pub(super) fn check_artifacts(
     }
     if identity.database_format >= artifact::files::FORMAT {
         artifact::files::verify_registry(conn)?;
+        artifact::files::selected(conn, identity.database_format)?;
     }
     if identity.database_format >= artifact::FORMAT {
         artifact::verify(conn, Some(state))?;

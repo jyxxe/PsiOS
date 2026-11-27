@@ -31,6 +31,12 @@ pub struct ArtifactUploadUsage {
     pub reserved_bytes: u32,
     pub retained_bytes: u32,
     pub byte_limit: u32,
+    #[serde(default)]
+    pub oci_archive_retained_bytes: u32,
+    #[serde(default)]
+    pub oci_archive_pending_disposal_bytes: u32,
+    #[serde(default)]
+    pub oci_archive_byte_limit: u32,
     pub open_stages: u32,
     pub open_stage_limit: u32,
     pub receipts: u32,

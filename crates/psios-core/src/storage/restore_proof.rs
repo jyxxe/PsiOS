@@ -1,4 +1,6 @@
-use super::{BackupManifest, Capture, CaptureMode, Entry, ModifiedTime, capture_root};
+use super::{
+    BackupManifest, Capture, CaptureMode, Entry, ModifiedTime, capture_root, checked_root_metadata,
+};
 use crate::{MAX_BACKUP_BYTES, Result, decode, host::Work, now, require};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -85,19 +87,14 @@ pub(super) fn check_clone_proof(proof: &Value) -> Result<()> {
 
 pub(super) fn verify(w: &Work) -> Result<Value> {
     let clone = w.target.spec["cloned_from"].is_object();
-    let open = || {
-        let root = capture_root(w)?;
-        if clone {
-            super::cloning::root_metadata(&root, "PreconditionFailed")?;
-        }
-        Ok(root)
-    };
+    let open = || capture_root(w);
     let Some(expected) = w.target.spec.get("restore_proof") else {
         require(
             !clone,
             "RecoveryRequired",
             "volume clone lacks its captured content proof",
         )?;
+        checked_root_metadata(&open()?, "PreconditionFailed")?;
         // Pending clones from earlier authorities have no committed content fingerprint.
         return Ok(json!({}));
     };
@@ -124,7 +121,7 @@ pub(super) fn verify_tree_checked(
     check: &mut impl FnMut() -> Result<()>,
 ) -> Result<()> {
     let expected: RestoreProof = decode(expected)?;
-    let before = root.metadata()?;
+    let before = checked_root_metadata(root, "PreconditionFailed")?;
     let root_mode = expected.root_mode_unix_v1.map(|_| before.mode() & 0o7777);
     require(
         root_mode == expected.root_mode_unix_v1 && root_mode.is_none_or(|mode| mode <= 0o777),
@@ -155,5 +152,7 @@ pub(super) fn verify_tree_checked(
         "PreconditionFailed",
         "restored volume no longer matches its verified backup tree",
     )?;
-    capture.confirm_source(&reopen()?, &before)
+    let current = reopen()?;
+    checked_root_metadata(&current, "PreconditionFailed")?;
+    capture.confirm_source(&current, &before)
 }

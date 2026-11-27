@@ -228,6 +228,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
             apps::artifact_install::prepare(db, actor, p, apps::artifact_install::STAGE_TOOL)
         }
         "Schedule.Create" => schedule::create(db, actor, p),
+        "Schedule.Renew" => schedule::renewal::renew(db, actor, p),
         "Schedule.Get" => schedule::get(db, actor, p, "Schedule"),
         "Schedule.TriggerGet" => schedule::get(db, actor, p, "ScheduleTrigger"),
         "Schedule.Cancel" => schedule::cancel(db, actor, p),

@@ -76,7 +76,7 @@ pub(super) fn create(db: &Db<'_>, actor: &str, p: &Create, supplied: &Rule) -> R
         expires_at: timestamp(expires),
         ..supplied.clone()
     };
-    let id = schedule_id(db, actor, &p.key)?;
+    let id = schedule_id(&db.meta("authority")?, actor, &p.key);
     let creation = sha256(&canonical(
         &json!([p.tool,p.input,p.delegation_id,{"event":rule}]),
     ));

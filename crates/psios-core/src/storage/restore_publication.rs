@@ -1,5 +1,7 @@
 //! Authenticate a volume publication when the original atomic rename lost its receipt.
-use super::{catalog_volume, child, filename, regular, restore_proof, staging, usage};
+use super::{
+    catalog_volume, checked_root_metadata, child, filename, regular, restore_proof, staging, usage,
+};
 use crate::{
     Config, Result,
     config::private_dir,
@@ -389,7 +391,7 @@ fn open_candidate(config: &Config, checkpoint: &Doc) -> Result<(Publication, Can
     if checkpoint.body.get("create_source").is_some() {
         creation::check_empty(&data)?;
     } else if checkpoint.body.get("clone_source").is_some() {
-        super::cloning::root_metadata(&data, "PreconditionFailed")?;
+        checked_root_metadata(&data, "PreconditionFailed")?;
     }
     // Check the alternate name after the anchored opens as well. A competing
     // or substituted directory never authorizes release of the backup hold.

@@ -6,6 +6,7 @@ mod mcp;
 mod model;
 mod project;
 mod retention;
+mod schedule;
 mod work_admission;
 mod work_admission_blockers;
 pub use artifact::{
@@ -19,6 +20,7 @@ pub use mcp::{
 pub use model::*;
 pub use project::*;
 pub use retention::*;
+pub use schedule::ScheduleRenewalRequest;
 pub use work_admission::*;
 pub use work_admission_blockers::*;
 mod json;

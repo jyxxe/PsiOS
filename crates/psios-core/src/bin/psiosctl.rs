@@ -56,6 +56,11 @@ enum Cmd {
         #[arg(default_value = "-")]
         file: String,
     },
+    /// Renew a completed interval schedule using a JSON request from a file or stdin.
+    ScheduleRenew {
+        #[arg(default_value = "-")]
+        file: String,
+    },
     Get {
         id: String,
     },
@@ -856,6 +861,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             json!({"tool": "system.status", "input": {}, "delegation_id": delegation}),
         )?,
         Cmd::Call { method, file } => c.call(&method, input(&file)?)?,
+        Cmd::ScheduleRenew { file } => c.renew_schedule(&serde_json::from_value(input(&file)?)?)?,
         Cmd::Get { id } => c.call("Resource.Get", json!({"id": id}))?,
         Cmd::List { kind, id } => {
             c.resource_snapshot(kind.as_deref(), id.as_deref(), None, None)?

@@ -35,6 +35,10 @@ use serde_json::{Value, json};
 pub(crate) const START_SESSION: &str = "agent.session.start";
 pub(crate) const TARGET_AUTHORIZATION_FORMAT: u32 = artifact::abandonment::FORMAT + 1;
 
+pub(crate) fn launched_session_id(task: &Doc) -> String {
+    registry::stable("session", json!([task.owner, "task", task.id]))
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SessionBlueprint {
@@ -229,13 +233,12 @@ fn open_session(
     if with_inputs {
         spec["tool_context_window"] = json!(context_window);
     }
-    let identity = if let Some(task) = origin_task {
+    let sid = if let Some(task) = origin_task {
         spec["origin_task_ref"] = task.reference();
-        json!([actor, "task", task.id])
+        launched_session_id(task)
     } else {
-        json!([actor, o.key])
+        registry::stable("session", json!([actor, o.key]))
     };
-    let sid = registry::stable("session", identity);
     if let Some(existing) = db.find(&sid)? {
         require(
             existing.spec == spec,

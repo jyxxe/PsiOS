@@ -39,7 +39,10 @@ use std::{
     collections::BTreeMap,
     fs::{self, File, Permissions},
     io::{Read, Write},
-    os::unix::fs::{MetadataExt, PermissionsExt},
+    os::{
+        fd::AsFd,
+        unix::fs::{MetadataExt, PermissionsExt},
+    },
     path::{Path, PathBuf},
 };
 
@@ -78,6 +81,20 @@ fn registered_root(d: &Doc, meta: &fs::Metadata) -> Result<()> {
         "PreconditionFailed",
         "volume root changed",
     )
+}
+
+fn checked_root_metadata(root: &File, failure: &str) -> Result<fs::Metadata> {
+    let metadata = root.metadata()?;
+    require(
+        metadata.is_dir()
+            && metadata.uid() == rustix::process::geteuid().as_raw()
+            && metadata.gid() == rustix::process::getegid().as_raw()
+            && metadata.mode() & 0o7000 == 0
+            && rustix::fs::flistxattr_query(root.as_fd()).is_ok_and(|length| length == 0),
+        failure,
+        "volume root requires authority ownership, ordinary mode and no extended attributes",
+    )?;
+    Ok(metadata)
 }
 
 pub fn volume_dir(cfg: &Config, d: &Doc) -> Result<PathBuf> {
@@ -516,7 +533,6 @@ impl Capture<'_> {
                 "UnsupportedCapability",
                 "unsupported file identity or mode in backup",
             )?;
-            use std::os::fd::AsFd;
             require(
                 rustix::fs::flistxattr_query(src.as_fd()).is_ok_and(|n| n == 0),
                 "UnsupportedCapability",
@@ -683,7 +699,7 @@ pub(crate) fn restored_fingerprint(cfg: &Config, volume: &Doc) -> Result<String>
 fn open_rebind_root(cfg: &Config, volume: &Doc) -> Result<File> {
     let root = open_volume_root(cfg, volume)?;
     if volume.spec.get("cloned_from").is_some() {
-        cloning::root_metadata(&root, "PreconditionFailed")?;
+        checked_root_metadata(&root, "PreconditionFailed")?;
     }
     Ok(root)
 }
@@ -715,6 +731,10 @@ pub(crate) fn backup(
     check: &mut impl FnMut() -> Result<()>,
 ) -> Result<Value> {
     check()?;
+    let source = capture_root(w)?;
+    let before = checked_root_metadata(&source, "UnsupportedCapability")?;
+    let root_mode = before.mode() & 0o777;
+    require_managed_root_mode(root_mode)?;
     let parent = w.cfg.state_dir.join("backups");
     let bid = format!("backup-{}", w.op.id);
     let mut stage = staging::create(&parent, |root| {
@@ -731,10 +751,6 @@ pub(crate) fn backup(
         max_bytes: w.cfg.backup_max_bytes,
         check,
     };
-    let source = capture_root(w)?;
-    let before = source.metadata()?;
-    let root_mode = before.mode() & 0o777;
-    require_managed_root_mode(root_mode)?;
     capture.walk(&source, Path::new(""), 0)?;
     let manifest = json!({
         "schema_version": VERSION,
@@ -764,6 +780,7 @@ pub(crate) fn backup(
     w.cfg
         .check_managed_space(stage.directory(), std::iter::empty(), 0)?;
     let current = capture_root(w)?;
+    checked_root_metadata(&current, "Conflict")?;
     capture.confirm_source(&current, &before)?;
     let receipt = json!({
         "id": bid,

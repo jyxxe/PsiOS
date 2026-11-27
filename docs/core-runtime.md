@@ -325,6 +325,8 @@ Rust SDK 的 `Client::prepare_oci_stop_continuation` 与 `psiosctl application-p
 
 从数据库格式 112 起，新备份记录卷数据根目录的普通 Unix 权限位。恢复先写入成员，再设置根目录权限和修改时间并刷盘。托管数据根须保留所有者的读取和搜索权限，可以是只读目录。恢复发布核验、`volume.activate` 和 `application.rebind_restored_volume` 会核对新证明中的根目录权限。旧备份没有该字段，仍按 `0700` 恢复并使用原证明算法。旧版 Core 无法打开已升级的权威执行写入。[权限恢复与升级验收](../tests/test_backup_root_mode.py)
 
+备份创建和预检要求数据根归 Core 的服务用户与组所有，并拒绝特殊权限位及扩展属性。新备份在暂存前检查这些条件，发布前复核。恢复校验和激活使用同样的根元数据规则，数据根变更后须重新核验方可激活。 [根元数据验收](../tests/test_backup_root_mode.py)
+
 授予核验主体 `volume.inspect_publication`、`task.submit` 和 `task.read`，并将目标限于原 Operation。观察任务重新核对实际卷目录和树内容。管理员用其制品作为 `Operation.Reconcile` 的 `evidence_ref`，Core 再检查目录的当前身份和元数据。核实已发布后登记最初的恢复卷，保留原 Task、Operation 与数据世代。卷仍需独立批准激活。[回执丢失、篡改与激活验收](../tests/test_storage_recovery.py) · [原格式升级](../tests/restore_publication_upgrade.py)
 
 格式 76 的检查点额外记录暂存目录名。完成数据与父目录同步后才提交检查点，启动时留存其绑定的暂存卷。最终目录中的原卷通过核验后报告 `Published`。原暂存目录仍有同一父目录、卷根、数据目录、身份标记及树内容，且最终路径不存在时报告 `NotApplied`。两处都存在、均不可达或身份被替换时保留原未知结果。为早期已发布检查点保留原回执核验路径。
@@ -571,6 +573,8 @@ jq -n --arg id "$schedule" '{id:$id}' | ctl call Schedule.Get
 间隔为 1 至 86400 秒，触发次数为 2 至 32。每次触发时间和截止时间都以首轮输入为基准，按间隔顺延。末轮截止时间须在委托和 Grant 的共同有效期内。`Skip` 在积压时只保留最新的到期触发。`BoundedCatchUp` 保留最新的至多 8 个到期触发，具体数量由 `limit` 指定。这两种策略都会先记录超出自身截止时间的触发。`overlap` 可取 `Allow` 或 `Skip`。取 `Skip` 时，上一项 Task 尚未结算或结果知识为 `Unknown` 会跳过本轮。
 
 进行中的调度通过 `Schedule.Get` 返回 `next` 和已结算的 `trigger_refs`。同一逻辑时刻的触发 ID 与调度定义绑定，重启后继续使用。对引用中的 ID 调用 `Schedule.TriggerGet` 可读取该轮的状态、原因及 Task 回执，读取权限限于调度所有者与本机管理员。序列用尽后返回 `Completed`。每轮分别记录已触发、已过期或已跳过。遇到永久的准入拒绝时记录该轮拒绝并结束序列。取消仍需当前修订，取消后的已提交任务可以继续用原入口管理。[格式 10 升级](../tests/schedule_repeat_upgrade.py)
+
+格式 131 允许用 `Schedule.Renew` 续期已完成的固定间隔序列。请求包含原 `id`、`expected_resource_version`、新 `key`、当前 `delegation_id`、首轮 `run_at` 和 `deadline_at`。Core 复核原触发记录、Task、关联 Workflow 或 Session 的结算状态，以及新委托对原工具和目标的权限。新序列沿用原输入和间隔规则，每个原序列只接受一次续期。回执固定新旧引用和已结算的 Task，可用相同请求重放。CLI 接受 `psiosctl schedule-renew REQUEST.json`，Rust SDK 提供 `renew_schedule`。 [真实调度、并发及恢复验收](../tests/test_schedule_renewal.py)
 
 `Schedule.Create` 也可用 `calendar` 提交有限期的当地日历规则。日历请求省略 `run_at`、`deadline_at` 和 `repeat`。以下规则从 2027 年 11 月 7 日起每天当地 01:30 触发，持续两天。
 

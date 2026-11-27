@@ -155,7 +155,10 @@ jobs:
       - name: Pair and inspect real Tasks in headless Chrome
         run: PSIOS_TEST_SHELL_BROWSER=1 python3 -B -m unittest discover -s tests -p test_shell.py -k test_browser -v
       - name: Verify scoped IPv6 probes across a real private veth pair
-        run: sudo unshare --net --propagation private python3 -B tests/network_probe_netns.py
+        run: |
+          for mode in eui64 none; do
+            sudo unshare --net --propagation private python3 -B tests/network_probe_netns.py --addrgenmode "$mode"
+          done
       - name: Reset durable probe observations across real network namespaces
         run: |
           sudo unshare --net sh -ec '

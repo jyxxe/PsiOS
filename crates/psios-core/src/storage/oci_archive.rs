@@ -18,7 +18,10 @@ use std::{
 pub(crate) const ROOT: &str = "oci-archives";
 const PAYLOAD: &str = "payload";
 pub(crate) const DEFAULT_CAPTURE_BYTES: u32 = 8 * 1024 * 1024;
-pub(crate) const MAX_BYTES: u32 = 32 * 1024 * 1024;
+pub(crate) const MAX_BYTES: u32 = 128 * 1024 * 1024;
+pub(crate) const DEFAULT_STAGING_BYTES: u32 = 32 * 1024 * 1024;
+pub(crate) const MAX_STAGING_BYTES: u32 = 512 * 1024 * 1024;
+pub(crate) const MAX_RETAINED_BYTES: u32 = 2 * 1024 * 1024 * 1024;
 
 pub(crate) struct Depot {
     path: PathBuf,

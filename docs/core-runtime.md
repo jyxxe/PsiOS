@@ -495,9 +495,11 @@ Core 核对原会话、模型租约及决策摘要，在一个事务中提交原
 
 `application.capture_oci_image` 接受 `image_id`、`expected_engine_id` 和可选的整数 `max_archive_bytes`。本机所有者使用显式限定在当前 Node 的任务委托和 `artifact.upload` 授权，提交后再批准包含镜像、引擎和原始输入的计划。省略上限时，任务固定使用 8 MiB，配置提高后也沿用该值。适配器从配置的本机 Docker Engine 以完整镜像配置摘要导出有层的 Linux amd64 镜像，前后核对引擎身份和层摘要。
 
-守护进程配置 `oci_capture_max_bytes` 默认 8388608 字节，可设为 1 至 33554432 字节。例如，设为 16777216 后，可使用 `psiosctl application-prepare-image-capture --image-id "$image" --engine-id "$engine" --max-archive-bytes 16777216 --delegation "$capture_delegation" --key capture-1` 准备一份显式申请 16 MiB 的请求。SDK 提供 `Client::prepare_oci_image_capture`。提交和执行时都会重查配置，配置低于请求上限时拒绝捕获。制品继续计入 32 MiB 所有者额度与 128 MiB Node 额度，公开 `Artifact.Stage` 的单份上限为 8 MiB。
+守护进程配置 `oci_capture_max_bytes` 默认 8 MiB，最高 128 MiB。例如，可用 `psiosctl application-prepare-image-capture --image-id "$image" --engine-id "$engine" --max-archive-bytes 16777216 --delegation "$capture_delegation" --key capture-1` 准备一份显式申请 16 MiB 的请求。SDK 提供 `Client::prepare_oci_image_capture`。提交和执行时都会按当前配置检查批准的申请上限。原始 `Artifact.Stage` 的单份上限为 8 MiB。
 
-已领取或执行中的捕获按各自批准的上限预留暂存容量，总共最多 32 MiB。已审批的捕获等待足够容量时保留在队列中，其他符合条件的任务可以执行。执行中的捕获取消后仍占用容量，直到原执行结算。`Node.Get` 的 `oci_capture_staging` 字段显示预留字节和上限，已提交制品仍按原额度单独计量。
+已领取或执行中的捕获按各自批准的上限预留暂存容量。`oci_capture_staging_max_bytes` 默认 32 MiB，最高 512 MiB。已审批的捕获等待足够容量时保留在队列中，其他符合条件的任务可以执行。执行中的捕获取消后仍占用容量，直到原执行结算。`Node.Get` 的 `oci_capture_staging` 字段显示预留字节和上限。
+
+格式 132 将已保留的 OCI 归档和原始上传分别计量。`oci_archive_storage` 的 `principal_bytes` 与 `node_bytes` 默认分别为 32 MiB 和 128 MiB，Node 最高 2 GiB。主体上限和暂存上限都须容纳一次最大捕获，主体上限须在 Node 上限以内。`Artifact.UploadCapacity` 返回 `oci_archive_retained_bytes`、`oci_archive_pending_disposal_bytes` 和 `oci_archive_byte_limit`。等待删除的 OCI 归档持续占用容量，直到文件回收结算。两个存储池仍共用上传历史回执上限。调低配置后既有归档仍可校验、读取和恢复。格式升级会阻止旧 Core 写入扩大后的归档状态。
 
 导出前按批准的上限检查状态盘的块和 inode 余量。Docker 的输出分块写入状态盘的私有暂存目录，同时计算原始摘要。Core 复核 tar 成员，再把已同步的归档发布为 `ManagedOciArchiveV1`，将其制品元数据、`LocalOciImageCapture` 来源、`OciImageCapture` 凭据和 Task 回执记录在同一见证事务。新凭据和回执同时记录批准的上限。回执提交后才能读取归档。`Artifact.ReadChunk` 仍受独立授权并按固定分块核验字节。`artifact.withdraw` 提交后由清理器回收文件。事务回滚可清理当前未引用的文件，见证状态未确定时留待启动按已确认的数据库回收。[真实 Docker 导出和独立重载验收](../tests/oci_capture.py)
 
@@ -517,7 +519,7 @@ Core 核对原会话、模型租约及决策摘要，在一个事务中提交原
 
 `psiosctl application-prepare-image-restore --key restore-1 --delegation "$restore_delegation" restore.json` 从文件读取 `application_ref`、`release_ref`、`image_archive_ref`、`publisher_key_ref` 和 `expected_engine_id`。`psiosctl application-prepare-image-restore-inspection --key inspect-1 --delegation "$inspection_delegation" operation-ref.json` 读取待核实的原 Operation 引用。两个命令均输出可通过 `psiosctl call Task.Submit` 提交的 JSON。Core 按应用或 Operation 的 ID 和版本解析目标，在受理时绑定完整资源引用。Rust SDK 提供 `Client::prepare_release_image_restore` 和 `Client::prepare_release_image_restore_inspection`，沿用同一 Task 流程。
 
-该能力使用 Linux amd64 Docker Engine API v1.44 的经典 `overlay2` 或 `vfs` 镜像存储。服务复核仍有效的签名以及保留归档的完整字节，将核验过的镜像配置和层分块写入单镜像无标签归档。导入前封印文件描述符并记录两个归档的 SHA-256。恢复拒绝压缩层、稀疏层和扩展层元数据，累计层字节及生成的导入归档各以 32 MiB 为上限。导入使用绑定同一个 Engine 的本机 Unix 连接，依赖 Docker 及其文件系统报告空间或运行错误。
+该能力使用 Linux amd64 Docker Engine API v1.44 的经典 `overlay2` 或 `vfs` 镜像存储。服务复核仍有效的签名以及保留归档的完整字节，将核验过的镜像配置和层分块写入单镜像无标签归档。导入前封印文件描述符并记录两个归档的 SHA-256。恢复拒绝压缩层、稀疏层和扩展层元数据，累计层字节及生成的导入归档各以 128 MiB 为上限。导入使用绑定同一个 Engine 的本机 Unix 连接，依赖 Docker 及其文件系统报告空间或运行错误。
 
 只有检查点提交后才向 Docker 发起一次导入。中断后，待核实的原 Operation 对应用和该引擎内的镜像保持独占。使用单独委托提交只读 `application.inspect_release_image_restore`，以原 Operation 的 `target` 为输入，并覆盖原计划资源。精确引擎上的镜像摘要及有序层 DiffID 得到确认后，可向 `Operation.Reconcile` 提供新的检查结果。镜像缺失、引擎身份变化或不匹配的结果都会保留 `OutcomeUnknown`。观察和结算原 Operation 不会重发导入。离线校验核对原检查点和结算证据。发行版本退役后，已合法回收的原始字节可只保留历史摘要和回执。[真实 Docker 进程中断和恢复验收](../tests/oci_restore.py)
 

@@ -1262,8 +1262,10 @@ fn a_root_budget_slot_is_held_through_claim_and_dispatch() {
 fn oci_capture_staging_uses_approved_byte_limits_and_releases_with_the_lease() {
     let tmp = tempfile::tempdir().unwrap();
     let mut cfg = Config::local(&tmp.path().join("core"));
-    let budget = apps::capture::STAGING_BYTES;
+    let budget = 2 * storage::oci_archive::DEFAULT_STAGING_BYTES;
     cfg.oci_capture_max_bytes = budget;
+    cfg.oci_capture_staging_max_bytes = budget;
+    cfg.oci_archive_storage.principal_bytes = budget;
     Store::init(&cfg).unwrap();
     let mut store = Store::open(cfg.clone()).unwrap();
     let node = call(&mut store, "Node.Get", json!({})).unwrap()["reference"]["resource_id"].clone();

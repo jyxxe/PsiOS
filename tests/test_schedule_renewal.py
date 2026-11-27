@@ -107,7 +107,7 @@ class ScheduleRenewalTests(unittest.TestCase):
         self.assertEqual(self.get(predecessor), previous)
         n.stop(signal.SIGKILL)
         check = json.loads(subprocess.check_output([*n.daemon, "verify", "--scratch-dir", n.base], timeout=20))
-        self.assertEqual(check["database_format"], 131)
+        self.assertGreaterEqual(check["database_format"], 131)
         n.start()
         repeat = subprocess.check_output([n.binaries / "psiosctl", "--config", n.config, "schedule-renew"],
                                          input=json.dumps(accepted).encode(), timeout=15)
@@ -247,8 +247,8 @@ class ScheduleRenewalTests(unittest.TestCase):
         self.assertEqual(self.get(renewal["schedule_ref"])["state"]["predecessor_ref"], completed["reference"])
         n.stop(signal.SIGKILL)
         migrated = verify(n.daemon)
-        self.assertEqual((migrated["node_id"], migrated["database_format"], migrated["migration_required"]),
-                         (old["node_id"], 131, False))
+        self.assertEqual((migrated["node_id"], migrated["migration_required"]), (old["node_id"], False))
+        self.assertGreaterEqual(migrated["database_format"], 131)
         refused = subprocess.run([*previous, "serve"], capture_output=True, text=True, timeout=15)
         self.assertNotEqual(refused.returncode, 0, refused)
         self.assertIn("SchemaVersionUnsupported", refused.stderr)

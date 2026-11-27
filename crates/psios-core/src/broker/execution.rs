@@ -96,7 +96,7 @@ pub fn claim(db: &Db<'_>) -> Result<Option<String>> {
         return Ok(None);
     }
     dependencies::advance(db)?;
-    let remaining_staging_bytes = u64::from(apps::capture::STAGING_BYTES)
+    let remaining_staging_bytes = u64::from(db.cfg.oci_capture_staging_max_bytes)
         .saturating_sub(apps::capture::reserved_staging_bytes(db)?);
     // Use the pinned input revision for eligibility. Normal preflight and the
     // reservation check below still resolve the exact input and its digest.
@@ -208,7 +208,8 @@ pub fn dispatch(db: &Db<'_>, task: &str) -> Result<Option<Work>> {
         "required task outputs became unavailable before dispatch",
     )?;
     if t.spec["task_type"] == apps::capture::TOOL
-        && apps::capture::reserved_staging_bytes(db)? > u64::from(apps::capture::STAGING_BYTES)
+        && apps::capture::reserved_staging_bytes(db)?
+            > u64::from(db.cfg.oci_capture_staging_max_bytes)
     {
         recovery::requeue(
             db,

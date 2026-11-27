@@ -56,6 +56,8 @@ class ArtifactUploadCapacityTests(unittest.TestCase):
             "reserved_bytes": len(payload), "retained_bytes": 0, "open_stages": 1, "receipts": 1,
             "byte_limit": 32 * 1024 * 1024, "open_stage_limit": 4, "receipt_limit": 4096,
             "remaining_receipts": 4095,
+            "oci_archive_retained_bytes": 0, "oci_archive_byte_limit": 32 * 1024 * 1024,
+            "oci_archive_pending_disposal_bytes": 0,
         })
         peer = self.capacity(other)
         self.assertEqual(set(peer), {"principal"})
@@ -141,3 +143,23 @@ class ArtifactUploadCapacityTests(unittest.TestCase):
                 checked = subprocess.run(self.n.daemon + ["check"], capture_output=True, text=True, timeout=15)
                 self.assertNotEqual(checked.returncode, 0)
                 self.assertIn("invalid artifact upload history limits", checked.stderr)
+
+    def test_archive_profile_rejects_a_capture_that_cannot_fit_its_limits(self):
+        self.n.stop()
+        mib = 1024 * 1024
+        profile = {"oci_capture_max_bytes": 64 * mib, "oci_capture_staging_max_bytes": 96 * mib,
+                   "oci_archive_storage": {"principal_bytes": 128 * mib, "node_bytes": 256 * mib}}
+        cases = [
+            ({"oci_capture_max_bytes": 129 * mib}, "OCI capture maximum"),
+            ({"oci_capture_staging_max_bytes": 63 * mib}, "OCI staging capacity"),
+            ({"oci_capture_staging_max_bytes": 513 * mib}, "OCI staging capacity"),
+            ({"oci_archive_storage": {"principal_bytes": 63 * mib, "node_bytes": 256 * mib}}, "OCI retained capacity"),
+            ({"oci_archive_storage": {"principal_bytes": 128 * mib, "node_bytes": 127 * mib}}, "OCI retained capacity"),
+            ({"oci_archive_storage": {"principal_bytes": 128 * mib, "node_bytes": 2049 * mib}}, "OCI retained capacity"),
+        ]
+        for settings, message in cases:
+            with self.subTest(settings=settings):
+                self.n.config.write_text(json.dumps({**self.settings, **profile, **settings}))
+                checked = subprocess.run(self.n.daemon + ["check"], capture_output=True, text=True, timeout=15)
+                self.assertNotEqual(checked.returncode, 0, checked)
+                self.assertIn(message, checked.stderr)

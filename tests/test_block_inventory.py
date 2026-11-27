@@ -1,9 +1,11 @@
 """Observe real Linux block devices through the scope-controlled node tool."""
 import os
 from pathlib import Path
+import subprocess
 import unittest
 
 from support import Node
+from test_block_layout import attached, scratch_gpt
 from test_pressure import private_bind
 
 
@@ -34,6 +36,35 @@ class BlockInventoryTests(unittest.TestCase):
 
     def test_verified_inventory_matches_real_block_devices(self):
         self.assert_matches_kernel(self.inventory())
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_BLOCK_LOOP") == "1", "requires read-only loop fixtures")
+    def test_resize_and_device_number_reuse_are_visible_in_inventory(self):
+        first = self.node.base / "first-inventory.raw"
+        second = self.node.base / "second-inventory.raw"
+        scratch_gpt(first)
+        scratch_gpt(second)
+
+        def get(name):
+            report = self.inventory()
+            row, = [row for row in report["devices"] if row["name"] == name]
+            self.assertTrue(row["read_only"], row)
+            return row
+
+        with attached(first) as (name, _):
+            original = get(name)
+            self.assertGreater(int(original["disk_sequence"]), 0)
+            with first.open("r+b") as image:
+                image.truncate(18 * 1024 * 1024)
+            subprocess.run(["losetup", "--set-capacity", Path("/dev") / name], check=True, timeout=8)
+            resized = get(name)
+            self.assertEqual(resized["disk_sequence"], original["disk_sequence"])
+            self.assertNotEqual(resized["sectors_512"], original["sectors_512"])
+
+        with attached(second, name):
+            reused = get(name)
+            self.assertEqual(reused["major_minor"], original["major_minor"])
+            self.assertEqual(reused["sectors_512"], original["sectors_512"])
+            self.assertNotEqual(reused["disk_sequence"], original["disk_sequence"])
 
     @unittest.skipUnless(os.getenv("PSIOS_TEST_BLOCK_INVENTORY_MOUNTS") == "1", "requires a private mount namespace")
     def test_refuse_foreign_sysfs_index_and_attribute(self):

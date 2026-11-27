@@ -36,8 +36,11 @@ function leave(text, error = false) {
   bearer = null;
   canCancelPending = false;
   workspace.hidden = true;
-  for (const id of apps.keys()) hideWindow(id, "closed");
+  for (const app of apps.values()) app.state = "closed";
   active = maximized = null;
+  cursors = [null];
+  nextCursor = selectedTask = null;
+  updateDesktop();
   byId("principal").textContent = "";
   message(status, "");
   code.value = "";
@@ -482,11 +485,29 @@ async function loadTasks(target = cursors, task = selectedTask) {
   }
 }
 
+function showWindow(id, app, shown) {
+  if (app.window.hidden === !shown) return;
+  app.window.hidden = !shown;
+  if (shown) {
+    if (id === "node") loadNode();
+    else loadTasks();
+    return;
+  }
+  if (id === "node") {
+    nodeUpdate += 1;
+    nodeView.replaceChildren();
+  } else {
+    taskUpdate += 1;
+    clearTaskView();
+  }
+  message(app.status, "");
+}
+
 function updateDesktop() {
   let visible = 0;
   for (const [id, app] of apps) {
     const shown = app.state === "open" && (!maximized || maximized === id);
-    app.window.hidden = !shown;
+    showWindow(id, app, shown);
     if (shown) visible += 1;
     app.window.classList.toggle("focused", id === active);
     app.window.classList.toggle("maximized", id === maximized);
@@ -511,34 +532,21 @@ function focusApp(id) {
 
 function openWindow(id) {
   const app = apps.get(id);
-  const reload = app.state !== "open";
   if (maximized !== id) maximized = null;
   app.state = "open";
   active = id;
   updateDesktop();
   app.title.focus();
-  if (reload) {
-    if (id === "node") loadNode();
-    else loadTasks();
-  }
 }
 
 function hideWindow(id, state) {
   const app = apps.get(id);
   app.state = state;
   if (maximized === id) maximized = null;
-  if (id === "node") {
-    nodeUpdate += 1;
-    nodeView.replaceChildren();
-  } else {
-    taskUpdate += 1;
-    clearTaskView();
-    if (state === "closed") {
-      cursors = [null];
-      nextCursor = selectedTask = null;
-    }
+  if (id === "tasks" && state === "closed") {
+    cursors = [null];
+    nextCursor = selectedTask = null;
   }
-  message(app.status, "");
   if (active === id) active = Array.from(apps.keys()).find(key => apps.get(key).state === "open") ?? null;
   updateDesktop();
   if (!workspace.hidden) {

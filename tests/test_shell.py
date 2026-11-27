@@ -140,6 +140,13 @@ class ShellTests(unittest.TestCase):
 
     @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
     def test_restoring_an_app_rechecks_its_grant_without_losing_the_other_window(self):
+        self.check_window_restoration(covered=False)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
+    def test_revealing_a_covered_app_rechecks_its_grant_without_losing_the_maximized_task(self):
+        self.check_window_restoration(covered=True)
+
+    def check_window_restoration(self, *, covered):
         node = self.node
         agent, work = node.agent(["task.submit", "system.status", "task.read", "resource.read"])
         inventory = node.call("Grant.Issue", {"principal_id": agent["principal_id"],
@@ -157,7 +164,7 @@ class ShellTests(unittest.TestCase):
             parent.settimeout(45)
             args = dict(origin=shell.origin, code=shell.code, task=task,
                         node=node.call("Node.Get", {})["reference"]["resource_id"],
-                        profile=str(node.base / "browser"), control_fd=child.fileno())
+                        profile=str(node.base / "browser"), control_fd=child.fileno(), covered=covered)
             with subprocess.Popen(["node", str(Path(__file__).with_name("shell_browser.mjs")),
                                    os.environ.get("PSIOS_TEST_CHROME", "google-chrome")],
                                   stdin=subprocess.PIPE, pass_fds=(child.fileno(),)) as browser:

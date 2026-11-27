@@ -117,13 +117,14 @@ async function verifyRevokedWindow() {
   await waitFor("agent's own task", 'document.querySelector("#task-rows button") !== null');
   await selectTask(input.task);
   await waitFor("completed Task", 'document.querySelector("#task-content").textContent.includes("成功")');
-  await keyboardActivate('#window-node [data-action="minimize"]');
+  const cover = '#window-tasks [data-action="maximize"]';
+  await keyboardActivate(input.covered ? cover : '#window-node [data-action="minimize"]');
   assert.ok(await evaluate('document.querySelector("#node-view").textContent === ""'));
   writeSync(input.control_fd, Buffer.from("R"));
   const reply = Buffer.alloc(1);
   assert.equal(readSync(input.control_fd, reply), 1);
   assert.equal(reply.toString(), "K");
-  await keyboardActivate("#nav-node");
+  await keyboardActivate(input.covered ? cover : "#nav-node");
   await waitFor("refused inventory after restoration", 'document.querySelector("#status-node").classList.contains("error")');
   assert.ok(await evaluate('document.querySelector("#node-view").textContent === "" && !document.querySelector("#window-tasks").hidden && ' +
     'document.querySelector("#task-content").textContent.includes(' + JSON.stringify(input.task) + ')'));

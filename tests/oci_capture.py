@@ -22,6 +22,7 @@ from uuid import uuid4
 TOOL = "application.capture_oci_image"
 MEDIA = "application/vnd.psios.docker-image.v1+tar"
 MAX = 8 * 1024 * 1024
+MAX_CAPTURE = 128 * 1024 * 1024
 CHUNK = 128 * 1024
 SOCKET = "/var/run/docker.sock"
 DOCKER = ["docker", "--host", "unix://" + SOCKET]

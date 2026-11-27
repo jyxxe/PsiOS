@@ -5,6 +5,7 @@ import os
 import subprocess
 import unittest
 
+from oci_capture import MAX_CAPTURE
 from support import Failure, Node
 from test_artifact_install import grant
 
@@ -45,13 +46,21 @@ class OciCaptureCli(unittest.TestCase):
 
         invalid = subprocess.run([node.binaries / "psiosctl", "--socket", node.socket,
                                   "--token-file", token_file, *base, "--key", "capture-too-large",
-                                  "--max-archive-bytes", str(32 * 1024 * 1024 + 1)],
+                                  "--max-archive-bytes", str(MAX_CAPTURE + 1)],
                                  capture_output=True, timeout=5)
         self.assertNotEqual(invalid.returncode, 0)
         self.assertEqual(invalid.stdout, b"")
         self.assertIn(b"InvalidArgument", invalid.stderr)
 
+        ceiling = node.cli(token_file, *base, "--key", "capture-at-maximum",
+                           "--max-archive-bytes", str(MAX_CAPTURE))
+        self.assertEqual(node.call("Resource.Resolve", {"reference": ceiling["input_ref"]})["value"]["max_archive_bytes"],
+                         MAX_CAPTURE)
+        self.assertEqual(node.call("Task.LookupSubmission", ceiling)["status"], "AbsentWithinWindow")
         grant(node, "local-owner", ["artifact.upload"], [node_id])
+        with self.assertRaises(Failure) as disabled:
+            node.call("Task.Submit", ceiling)
+        self.assertEqual(disabled.exception.code, "QuotaExceeded")
         admitted = node.call("Task.Submit", request)
         waiting = node.wait(admitted["task_id"])
         self.assertEqual(waiting["lifecycle"], "WaitingApproval")

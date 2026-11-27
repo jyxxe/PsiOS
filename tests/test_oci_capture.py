@@ -4,7 +4,7 @@ import os
 import subprocess
 import unittest
 
-from oci_capture import MAX, TOOL, assert_failed, denied, grant, no_lost_publication
+from oci_capture import MAX, MAX_CAPTURE, TOOL, assert_failed, denied, grant, no_lost_publication
 from support import Node, key, target
 
 
@@ -22,7 +22,7 @@ class LocalCaptureAdmission(unittest.TestCase):
         grant(node, owner, "artifact.upload")
         scope = grant(node, owner, "task.submit", "task.read", TOOL)["delegation_ref"]["resource_id"]
         capture = {"image_id": "sha256:" + "1" * 64, "expected_engine_id": "absent-engine-id"}
-        for invalid in (0, 4 * MAX + 1, None):
+        for invalid in (0, MAX_CAPTURE + 1, None):
             denied(node, "InvalidArgument", "Task.Prepare", {"tool": TOOL, "key": key(),
                 "input": dict(capture, max_archive_bytes=invalid), "delegation_id": scope})
         capture["max_archive_bytes"] = 2 * MAX
@@ -30,7 +30,7 @@ class LocalCaptureAdmission(unittest.TestCase):
         denied(node, "QuotaExceeded", "Task.Submit", ready)
 
         node.stop()
-        node.config.write_text(json.dumps(dict(config, oci_capture_max_bytes=4 * MAX + 1)))
+        node.config.write_text(json.dumps(dict(config, oci_capture_max_bytes=MAX_CAPTURE + 1)))
         invalid = subprocess.run(node.daemon + ["verify"], capture_output=True, timeout=10)
         self.assertNotEqual(invalid.returncode, 0)
         self.assertIn(b"InvalidArgument", invalid.stderr)

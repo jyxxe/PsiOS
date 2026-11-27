@@ -155,7 +155,7 @@ function renderNode(result) {
 
 const lifecycles = {
   WaitingApproval: "等待审批", Queued: "已排队", Running: "执行中",
-  Succeeded: "成功", Failed: "失败", Cancelled: "已取消", Paused: "已暂停",
+  Succeeded: "成功", Failed: "失败", Cancelling: "正在取消", Cancelled: "已取消", Paused: "已暂停",
 };
 
 function artifactView(taskId, references) {
@@ -246,6 +246,83 @@ function artifactView(taskId, references) {
   return section;
 }
 
+function historyView(task) {
+  const panel = element("details", undefined, "task-history");
+  const summary = element("summary", "执行历史");
+  const boundary = element("p", "截至任务修订 " + task.task_revision, "history-boundary");
+  const list = element("ol");
+  list.tabIndex = -1;
+  list.setAttribute("aria-label", "当前页的历史修订");
+  const notice = element("p", "", "message");
+  notice.setAttribute("role", "status");
+  const controls = element("div", undefined, "history-controls");
+  const back = element("button", "上一页");
+  const forward = element("button", "下一页");
+  back.type = forward.type = "button";
+  controls.append(back, forward);
+  controls.hidden = true;
+  panel.append(summary, boundary, list, notice, controls);
+  let pages = [null];
+  let nextAfter = null;
+  let generation = 0;
+
+  async function loadPage(target, focus = false) {
+    const generationAtRequest = ++generation;
+    list.replaceChildren();
+    controls.hidden = true;
+    message(notice, "正在读取历史…");
+    try {
+      const page = await request("/api/task-history", {
+        id: task.task_id, through_version: task.task_revision, after_version: target.at(-1),
+      });
+      if (!panel.isConnected || generationAtRequest !== generation) return;
+      pages = target;
+      nextAfter = page.next_after_version;
+      for (const entry of page.items) {
+        const row = element("li");
+        const state = lifecycles[entry.lifecycle] ?? entry.lifecycle;
+        row.append(element("strong", entry.reference.version + " · " + state));
+        const time = element("time", entry.at);
+        time.dateTime = entry.at;
+        row.append(time);
+        const properties = [["结果确认", entry.outcome_knowledge, true]];
+        if (entry.run_id) properties.push(["Run ID", entry.run_id, true]);
+        for (const ref of entry.operation_refs ?? []) {
+          properties.push(["Operation", ref.resource_id + " · " + ref.version, true]);
+        }
+        if (entry.result_availability) properties.push(["制品状态", entry.result_availability, true]);
+        row.append(fields(properties));
+        for (const condition of entry.conditions ?? []) {
+          row.append(element("p", condition.message || condition.reason || condition.type));
+        }
+        list.append(row);
+      }
+      message(notice, page.items.length ? "" : "此修订范围内没有历史记录。");
+      back.disabled = pages.length === 1;
+      forward.disabled = !nextAfter;
+      controls.hidden = back.disabled && forward.disabled;
+      if (focus) list.focus();
+    } catch (error) {
+      if (!panel.isConnected || generationAtRequest !== generation) return;
+      message(notice, error.message, true);
+    }
+  }
+
+  panel.addEventListener("toggle", () => {
+    if (panel.open) {
+      loadPage([null]);
+    } else {
+      generation += 1;
+      list.replaceChildren();
+      controls.hidden = true;
+      message(notice, "");
+    }
+  });
+  back.addEventListener("click", () => loadPage(pages.slice(0, -1), true));
+  forward.addEventListener("click", () => loadPage([...pages, nextAfter], true));
+  return panel;
+}
+
 function renderTask(task) {
   taskContent.replaceChildren(fields([
     ["ID", task.task_id, true],
@@ -261,6 +338,7 @@ function renderTask(task) {
     }
     taskContent.append(list);
   }
+  taskContent.append(historyView(task));
   const references = task.result?.artifact_refs;
   if (references?.length) taskContent.append(artifactView(task.task_id, references));
 }

@@ -139,6 +139,17 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .artifact-json { max-height: 45vh; overflow: auto; }
 .artifacts .message:empty { display: none; }
 
+.task-history { margin-top: 1.25rem; border-top: 1px solid var(--border); }
+.task-history summary { padding: .75rem 0; cursor: pointer; font-weight: 630; }
+.task-history summary:focus-visible { outline: 2px solid var(--accent); }
+.task-history ol { padding-inline-start: 1.5rem; margin: 0; }
+.task-history li { margin: .75rem 0; overflow-wrap: anywhere; }
+.task-history time { display: block; color: var(--muted); font-size: .86rem; }
+.task-history dl { margin-top: .35rem; }
+.task-history .message:empty { display: none; }
+.history-boundary { color: var(--muted); }
+.history-controls { display: flex; gap: .6rem; }
+
 .conditions { margin: .75rem 0 0; padding-inline-start: 1.4rem; overflow-wrap: anywhere; }
 .reserve { display: block; height: .7rem; width: 100%; margin-top: 1rem; accent-color: var(--accent); }
 .reserve-low { color: var(--fault); margin-top: .7rem; }

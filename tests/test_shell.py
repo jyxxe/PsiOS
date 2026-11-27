@@ -113,6 +113,7 @@ class ShellTests(unittest.TestCase):
         subprocess.run(
             ["node", str(Path(__file__).with_name("shell_browser.mjs")), browser],
             input=json.dumps(dict(origin=shell.origin, code=shell.code, task=task, digest=digest,
+                                  history=self.node.call("Task.History", {"id": task})["items"],
                                   large_task=large_task, large_digest=large_ref["digest"], downloads=str(downloads),
                                   node=self.node.call("Node.Get", {})["reference"]["resource_id"],
                                   profile=str(self.node.base / "browser"))),
@@ -200,6 +201,46 @@ class ShellTests(unittest.TestCase):
         self.assertGreater(int(node["authority_storage"]["state"]["capacity_bytes"]), 0)
         self.assertEqual(shell.http("/api/task", {"id": representative}, token)[2], completed)
 
+    def test_history_pins_a_task_revision_across_approval_and_restart(self):
+        node = self.node
+        volume = node.perform("volume.create", {"name": "history"})
+        task = node.submit("volume.write", {**target(volume), "name": "record", "content": "history"})
+        initial = node.call("Task.Get", {"id": task})
+        self.assertEqual(initial["lifecycle"], "WaitingApproval")
+        shell = self.shell()
+        token = shell.pair()["token"]
+
+        def history(request):
+            status, _, page = shell.http("/api/task-history", request, token)
+            self.assertEqual(status, 200, page)
+            return page
+
+        pinned = {"id": task, "through_version": initial["task_revision"]}
+        first = history(pinned)
+        self.assertEqual(first, node.call("Task.History", {**pinned, "limit": 3}))
+        node.approve(task)
+        completed = node.wait(task)
+        self.assertEqual(completed["lifecycle"], "Succeeded")
+        self.assertEqual(history(pinned), first)
+
+        latest = {"id": task, "through_version": completed["task_revision"]}
+        page = history(latest)
+        self.assertEqual(len(page["items"]), 3)
+        self.assertIsNotNone(page["next_after_version"])
+        items = list(page["items"])
+        node.stop(signal.SIGKILL)
+        self.error(shell, 503, "DependencyUnavailable", "/api/task-history", data=latest, token=token)
+        node.start()
+        while page["next_after_version"]:
+            page = history({**latest, "after_version": page["next_after_version"]})
+            items.extend(page["items"])
+        self.assertEqual(items, node.call("Task.History", latest)["items"])
+        self.assertEqual(items[-1]["run_id"], completed["current_run_id"])
+        self.error(shell, 409, "PreconditionFailed", "/api/task-history",
+                   data={**latest, "after_version": "r999"}, token=token)
+        self.error(shell, 400, "InvalidArgument", "/api/task-history", data={"id": task}, token=token)
+        self.error(shell, 400, "InvalidArgument", "/api/task-history", data={**latest, "limit": 128}, token=token)
+
     def test_scoped_reads_grant_and_identity_revocation(self):
         owner_task = self.node.submit("system.status", {})
         owner_reference = self.node.wait(owner_task)["result"]["artifact_refs"][0]
@@ -217,6 +258,8 @@ class ShellTests(unittest.TestCase):
             self.error(shell, 403, "PermissionDenied", "/api/task-artifact",
                        data={"task_id": owner_task, "reference": owner_reference, "download": download}, token=token)
 
+        self.error(shell, 403, "PermissionDenied", "/api/task-history",
+                   data={"id": owner_task, "through_version": "r1"}, token=token)
         delegated = self.node.prepare("system.status", {}, token=agent["token"],
                                       delegation=grant["delegation_ref"]["resource_id"])
         task = self.node.call("Task.Submit", delegated, agent["token"])["task_id"]
@@ -231,7 +274,13 @@ class ShellTests(unittest.TestCase):
         download = {"task_id": task, "reference": reference, "download": True}
         status, _, raw = shell.http("/api/task-artifact", download, token)
         self.assertEqual((status, "sha256:" + hashlib.sha256(raw).hexdigest()), (200, reference["digest"]))
+        history_request = {"id": task, "through_version": body["task_revision"]}
+        status, _, page = shell.http("/api/task-history", history_request, token)
+        self.assertEqual(status, 200)
+        self.assertTrue(page["next_after_version"])
         self.node.call("Grant.Revoke", target(grant["grant_ref"]))
+        self.error(shell, 403, "PermissionDenied", "/api/task-history",
+                   data={**history_request, "after_version": page["next_after_version"]}, token=token)
         self.error(shell, 403, "PermissionDenied", "/api/task-artifact", data=download, token=token)
         self.error(shell, 403, "PermissionDenied", "/api/tasks", data={}, token=token)
         self.node.call("Principal.Revoke", target(self.node.get(agent["principal_id"])["reference"]))

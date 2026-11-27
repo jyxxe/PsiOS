@@ -16,7 +16,9 @@ import time
 from oci import stage_from_artifact
 from oci_mount_observation import verify_kernel
 from support import Failure, Node, key, target
+from test_mcp_modern_stdio import PROFILE as MODERN, request as modern_request
 from test_mcp_stdio import Wire
+from test_mcp_tasks import task_params
 
 
 DOCKER = ["docker", "--host", "unix:///var/run/docker.sock"]
@@ -108,6 +110,18 @@ def agent_volume(node):
     return seeded["volume_ref"], agent
 
 
+def install_agent_application(node, spec, volume, agent):
+    grant = node.call("Grant.Issue", {"principal_id": agent["principal_id"],
+        "actions": ["task.submit", "task.read", "application.install"],
+        "tool_targets": [volume["resource_id"]], "units": 1, "ttl_seconds": 120})
+    request = node.prepare("application.install", dict(spec, volume=target(volume), volume_access="ReadOnly"),
+                           token=agent["token"], delegation=grant["delegation_ref"]["resource_id"])
+    task = node.wait(node.call("Task.Submit", request, agent["token"])["task_id"], autoapprove=True)
+    assert task["lifecycle"] == "Succeeded", task
+    artifact, = task["result"]["artifact_refs"]
+    return node.call("Artifact.Read", {"reference": artifact}, agent["token"])
+
+
 def verify_shared_reads(node, volume):
     current = node.get(volume["resource_id"])["reference"]
     files = {"target": target(current)}
@@ -174,6 +188,79 @@ def verify_cgroup_usage(report):
     assert memory["status"] == "Observed" and 0 < memory["value"] <= limits["memory_max_bytes"], memory
     pids = measured["pids"]["current"]
     assert pids["status"] == "Observed" and pids["value"] == int((group / "pids.current").read_text()), pids
+
+
+def verify_agent_application(node, app, volume, agent):
+    tool = "application.inspect_instance"
+    token = node.base / "read-only-agent.token"
+    actions = ["task.submit", "task.read", tool]
+
+    def scoped(ids):
+        return node.call("Grant.Issue", {"principal_id": agent["principal_id"], "actions": actions,
+            "tool_targets": ids, "units": 2, "ttl_seconds": 120})
+
+    def adapter(grant, modern=False):
+        arguments = [str(node.binaries / "psios-mcp"), "--socket", str(node.socket),
+                     "--token-file", str(token), "--delegation", grant["delegation_ref"]["resource_id"],
+                     "--application-inspect", app["resource_id"]]
+        if modern:
+            arguments.extend(["--protocol", MODERN, "--tasks-endpoint", "application-usage"])
+        return Wire(arguments)
+
+    def modern(wire, method, fields=None, invocation=None):
+        wire.id += 1
+        return modern_request(wire, wire.id, method, task_params(fields, invocation=invocation))
+
+    def verify_result(result):
+        assert not result["isError"], result
+        receipt = result["structuredContent"]
+        report = receipt["result"]
+        assert report["application_ref"] == app, report
+        verify_cgroup_usage(report)
+        task = node.call("Task.Get", {"id": receipt["task_id"]}, agent["token"])
+        artifact, = task["result"]["artifact_refs"]
+        assert node.call("Artifact.Read", {"reference": artifact}, agent["token"]) == report
+
+    query = {"name": tool, "arguments": {"include_usage": True}}
+    with closing(adapter(scoped([app["resource_id"]]))) as denied:
+        denied.initialize()
+        assert denied.request("tools/list")["result"]["tools"] == []
+        result = denied.request("tools/call", query)["result"]
+        assert result["structuredContent"] == {"code": "PermissionDenied"}, result
+
+    allowed = scoped([app["resource_id"], volume["resource_id"]])
+    with closing(adapter(allowed)) as client:
+        client.initialize()
+        offered, = client.request("tools/list")["result"]["tools"]
+        assert offered["name"] == tool and offered["annotations"]["readOnlyHint"], offered
+        invalid = client.request("tools/call", {"name": tool, "arguments": {
+            "include_usage": True, "target_id": "unchecked-application"}})["result"]
+        assert invalid["structuredContent"] == {"code": "InvalidArgument"}, invalid
+        verify_result(client.request("tools/call", query)["result"])
+
+    invocation = key()
+    with closing(adapter(allowed, modern=True)) as client:
+        accepted = modern(client, "tools/call", query, invocation)["result"]
+        handle = {"taskId": accepted["taskId"]}
+        deadline = time.monotonic() + 10
+        while True:
+            snapshot = modern(client, "tasks/get", handle)["result"]
+            if snapshot["status"] == "completed":
+                break
+            assert time.monotonic() < deadline, snapshot
+            time.sleep(0.05)
+        verify_result(snapshot["result"])
+    node.stop(signal.SIGKILL)
+    node.start()
+    with closing(adapter(allowed, modern=True)) as resumed:
+        assert modern(resumed, "tools/call", query, invocation)["result"]["taskId"] == handle["taskId"]
+        assert modern(resumed, "tasks/get", handle)["result"] == snapshot
+        changed = modern(resumed, "tools/call", {"name": tool}, invocation)["result"]
+        assert changed["structuredContent"] == {"code": "IdempotencyConflict"}, changed
+        node.call("Grant.Revoke", target(allowed["grant_ref"]))
+        assert modern(resumed, "tools/list")["result"]["tools"] == []
+        assert modern(resumed, "tasks/get", handle)["error"]["code"] == -32602
+    print("PASS both MCP profiles inspected the exact OCI application and recovered the original Task")
 
 
 def refuse_other_invocation(node, spec, volume, app_ids):
@@ -298,7 +385,7 @@ def exercise(node, image, app_ids):
 
     volume, agent = agent_volume(node)
     data = node.state / "volumes" / volume["resource_id"] / "data"
-    app = node.perform("application.install", dict(spec, volume=target(volume), volume_access="ReadOnly"))
+    app = install_agent_application(node, spec, volume, agent)
     app_id = app["resource_id"]
     app_ids.append(app_id)
     assert release_mode(node, node.get(app_id)["resource"]["spec"]["release_ref"]) == "ReadOnly"
@@ -309,6 +396,7 @@ def exercise(node, image, app_ids):
     assert (refused["lifecycle"], refused["conditions"][0]["type"]) == ("Failed", "Conflict"), refused
     verify_shared_reads(node, volume)
     verify_agent_read(node, volume, agent)
+    verify_agent_application(node, app, volume, agent)
 
     node.stop(signal.SIGKILL)
     offline = json.loads(subprocess.check_output([*node.daemon, "verify"], timeout=20))

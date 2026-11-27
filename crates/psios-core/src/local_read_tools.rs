@@ -15,6 +15,7 @@ use std::collections::HashSet;
 pub(crate) const NODE_INVENTORY_FORMAT: u32 = crate::storage::xattrs::FORMAT + 1;
 pub(crate) const VOLUME_FILES_FORMAT: u32 = crate::apps::mount_observation::READ_ONLY_FORMAT + 1;
 pub(crate) const VOLUME_FILE_CHUNK_FORMAT: u32 = VOLUME_FILES_FORMAT + 1;
+pub(crate) const APPLICATION_INSPECT_FORMAT: u32 = crate::apps::restart::USAGE_FORMAT + 1;
 
 pub(crate) fn agent(db: &Db<'_>, actor: &str) -> Result<()> {
     let principal = db.of(actor, "Principal")?;
@@ -116,10 +117,10 @@ pub(crate) fn resolve_binding(
         let Some(target) = db.find(id)? else {
             return Ok(None);
         };
-        let lifecycle = if kind == "Volume" {
-            "Available"
-        } else {
-            "Registered"
+        let lifecycle = match kind {
+            "Volume" => "Available",
+            "Application" => "Running",
+            _ => "Registered",
         };
         if target.kind != kind || target.body["lifecycle"] != lifecycle {
             return Ok(None);
@@ -161,7 +162,15 @@ pub(crate) fn resolve_binding(
     {
         return Ok(None);
     }
-    action.audience(db, actor, &delegation.reference(), &target)?;
+    let audience = action.audience(db, actor, &delegation.reference(), &target)?;
+    if matches!(binding, LocalReadBinding::ApplicationInspect { .. }) {
+        for reference in audience.iter().skip(1) {
+            let reference: ResourceRef = decode(reference)?;
+            if !explicitly_scoped(db, delegation, &reference.resource_id)? {
+                return Ok(None);
+            }
+        }
+    }
     let target_ref = decode(&target.reference())?;
     require(
         exact.is_none_or(|reference| reference == target_ref),
@@ -186,7 +195,7 @@ pub(crate) fn resolve(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value>
                 .iter()
                 .all(|binding| tools.insert(binding.name())),
         "InvalidArgument",
-        "one to six distinct local read tools required",
+        "one to seven distinct local read tools required",
     )?;
     for binding in &request.bindings {
         if let Some((id, _)) = binding.target() {

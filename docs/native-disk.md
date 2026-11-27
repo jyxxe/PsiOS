@@ -99,6 +99,8 @@ sudo python3 native/install.py apply --plan-digest "$APPROVED_PLAN_SHA256" --sta
 sudo python3 native/install.py inspect --state-dir "$INSTALL_STATE"
 ```
 
+安装器在操作记录目录所在的文件系统暂存工厂盘。复制时按完整逻辑内容核对固定的 SHA-256，全零的 1 MiB 区段可在临时普通文件中保留为空洞。记录目录还需要容纳分区检查用的暂存文件。目标块设备仍按整盘逻辑长度写入并回读。[安装源校验](../images/native/install_source.py) · [安装验收](../tests/native_install.py)
+
 操作者从 Plan 核对目标序列号、设备代次、分区和来源摘要，再将该份计划的 `plan_digest` 用于批准。执行会排他打开同一整盘，重新核对身份和空白字节，在首次写入前刷盘保存 `WriteIssued`。各分区内容刷盘后才写入两份 GPT。设备完成刷盘并全盘回读匹配后，回执进入 `Verified`。成功回执可重复读取。执行中断后，同次宿主启动内可用 `inspect` 对原目标核实完全写入的结果。部分写入或目标身份变化保持 `RecoveryRequired`，原计划停止派发。开发验收可通过 `--allow-loop` 选用专用 loop 测试盘。[Linux 块设备排他打开](https://man7.org/linux/man-pages/man2/open.2.html)
 
 ## 使用已登记证书构建 Secure Boot 盘

@@ -177,7 +177,7 @@ def stage_image(work: Path, image: Path, receipt: Path, receipt_sha256: str) -> 
         initramfs_sha256 = digest_field(manifest.get("installed_initramfs_sha256"), "installed initramfs")
         size = layout.image_mib * MIB
         staged_image = scratch / "factory.raw"
-        create.boot_media.pinned_copy(image, staged_image, image_sha256, size)
+        create.boot_media.pinned_copy(image, staged_image, image_sha256, size, sparse=True)
         if staged_image.stat().st_size != size:
             raise ValueError("factory image size does not match the pinned receipt")
         gpt = gpt_facts(scratch, staged_image, layout)

@@ -443,8 +443,24 @@ def source_fixture(args, work):
     return source, receipt, sha(receipt), secret
 
 
+def check_factory_staging(work, installer, source, receipt, approval):
+    # Exercise the source validator shipped alongside the installer under test.
+    sys.path.insert(0, str(installer.resolve(strict=True).parent))
+    from install_source import stage_image
+
+    with tempfile.TemporaryDirectory(dir=work) as staging:
+        image, facts = stage_image(Path(staging), source, receipt, approval)
+        copied = image.stat()
+        assert copied.st_size == source.stat().st_size == facts["size_bytes"]
+        assert sha(image) == facts["image_sha256"] == sha(source)
+        # The freshly formatted state and home partitions have ample empty space.
+        assert copied.st_blocks * 512 < copied.st_size // 2, (copied.st_size, copied.st_blocks)
+
+
 def exercise(args, work):
     source, receipt, approval, secret = source_fixture(args, work)
+    if not args.source_image:
+        check_factory_staging(work, args.installer, source, receipt, approval)
     fixture = Installer(args.installer.resolve(strict=True), source, receipt, approval)
     rejected_state_storage(work, fixture)
     rejected_media(work, fixture)

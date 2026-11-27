@@ -1,5 +1,5 @@
 """Exercise the local browser boundary against a real psiosd process."""
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import closing
 import hashlib
 from http.client import HTTPConnection
@@ -11,6 +11,7 @@ import signal
 import sqlite3
 import socket
 import subprocess
+import time
 import unittest
 from threading import Event
 from urllib.parse import urlsplit
@@ -97,6 +98,34 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertIsNone(headers["Access-Control-Allow-Origin"])
 
+    def test_one_passive_session_observer_leaves_core_calls_available(self):
+        shell = self.shell()
+        token = shell.pair()["token"]
+        self.error(shell, 401, "AuthenticationRequired", "/api/session-end", data={})
+        self.error(shell, 401, "AuthenticationRequired", "/api/session-end", data={}, token="x" * 32)
+        self.error(shell, 400, "InvalidArgument", "/api/session-end", data={"token": token}, token=token)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            waiting = [pool.submit(shell.http, "/api/session-end", {}, token) for _ in range(2)]
+            done, pending = wait(waiting, timeout=5, return_when=FIRST_COMPLETED)
+            self.assertEqual(len(done), 1)
+            status, _, error = done.pop().result()
+            self.assertEqual((status, error["error"]["code"]), (409, "Conflict"))
+            self.assertEqual(shell.http("/api/node", {}, token)[0], 200)
+            self.assertEqual(shell.http("/api/logout", {}, token)[0], 200)
+            status, _, ended = pending.pop().result(timeout=5)
+            self.assertEqual((status, ended), (200, {"ended": True}))
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
+    def test_browser_back_to_a_paired_page_requires_a_new_session(self):
+        shell = self.shell()
+        args = dict(origin=shell.origin, code=shell.code, navigateBack=True,
+                    node=self.node.call("Node.Get", {})["reference"]["resource_id"],
+                    profile=str(self.node.base / "browser"))
+        subprocess.run(["node", str(Path(__file__).with_name("shell_browser.mjs")),
+                        os.environ.get("PSIOS_TEST_CHROME", "google-chrome")],
+                       input=json.dumps(args), text=True, check=True, timeout=50)
+        self.error(shell, 401, "AuthenticationRequired", "/api/session", data={"code": shell.code})
+
     @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
     def test_browser_pairs_reads_tasks_and_restores_selection_focus(self):
         task = self.node.submit("system.status", {})
@@ -139,12 +168,56 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(self.node.call("Task.Get", {"id": pending})["lifecycle"], "Cancelled")
 
     @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
-    def test_restoring_an_app_rechecks_its_grant_without_losing_the_other_window(self):
+    def test_browser_restoring_an_app_rechecks_its_grant_without_losing_the_other_window(self):
         self.check_window_restoration(covered=False)
 
     @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
-    def test_revealing_a_covered_app_rechecks_its_grant_without_losing_the_maximized_task(self):
+    def test_browser_revealing_a_covered_app_rechecks_its_grant_without_losing_the_maximized_task(self):
         self.check_window_restoration(covered=True)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
+    def test_browser_scrubs_both_live_windows_on_cli_exit(self):
+        self.check_ended_session(signal.SIGTERM)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
+    def test_browser_scrubs_both_live_windows_on_cli_kill(self):
+        self.check_ended_session(signal.SIGKILL)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_REAL_IDLE"), "waits for the real five-minute idle deadline")
+    def test_browser_idle_session_ends_without_user_input(self):
+        self.check_ended_session(None)
+
+    def check_ended_session(self, exit_signal):
+        node = self.node
+        task = node.submit("system.status", {})
+        self.assertEqual(node.wait(task)["lifecycle"], "Succeeded")
+        shell = self.shell()
+        parent, child = socket.socketpair()
+        with parent, child:
+            parent.settimeout(45)
+            args = dict(origin=shell.origin, code=shell.code, endSession=True, realIdle=exit_signal is None, task=task,
+                        node=node.call("Node.Get", {})["reference"]["resource_id"],
+                        profile=str(node.base / "browser"), control_fd=child.fileno())
+            with subprocess.Popen(["node", str(Path(__file__).with_name("shell_browser.mjs")),
+                                   os.environ.get("PSIOS_TEST_CHROME", "google-chrome")],
+                                  stdin=subprocess.PIPE, pass_fds=(child.fileno(),)) as browser:
+                child.close()
+                try:
+                    browser.stdin.write(json.dumps(args).encode())
+                    browser.stdin.close()
+                    self.assertEqual(parent.recv(1), b"R")
+                    started = time.monotonic()
+                    if exit_signal:
+                        shell.process.send_signal(exit_signal)
+                    self.assertEqual(shell.process.wait(timeout=10 if exit_signal else 320),
+                                     -signal.SIGKILL if exit_signal == signal.SIGKILL else 0)
+                    if not exit_signal:
+                        self.assertGreaterEqual(time.monotonic() - started, 285)
+                    parent.sendall(b"K")
+                    self.assertEqual(browser.wait(timeout=30), 0)
+                finally:
+                    if browser.poll() is None:
+                        browser.kill()
 
     def check_window_restoration(self, *, covered):
         node = self.node

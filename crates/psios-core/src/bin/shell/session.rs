@@ -2,6 +2,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::{hmac, rand};
 use rustix::time::{ClockId, clock_gettime};
 use std::time::Duration;
+use tokio::sync::oneshot;
 
 const PAIRING_LIFETIME: Duration = Duration::from_secs(120);
 const IDLE_LIFETIME: Duration = Duration::from_secs(300);
@@ -35,6 +36,7 @@ enum Grant {
 pub(super) struct Session {
     key: hmac::Key,
     grant: Grant,
+    observer: Option<oneshot::Sender<()>>,
 }
 
 impl Session {
@@ -45,7 +47,11 @@ impl Session {
             tag: hmac::sign(&key, code.as_bytes()),
             expires: now + PAIRING_LIFETIME,
         };
-        Ok(Self { key, grant })
+        Ok(Self {
+            key,
+            grant,
+            observer: None,
+        })
     }
 
     pub(super) fn closed(&mut self, now: Duration) -> bool {
@@ -78,14 +84,18 @@ impl Session {
         true
     }
 
-    pub(super) fn authorize(&mut self, token: &str, now: Duration) -> bool {
+    pub(super) fn accepts(&mut self, token: &str, now: Duration) -> bool {
         if self.closed(now) {
             return false;
         }
         let Grant::Active { tag, .. } = &self.grant else {
             return false;
         };
-        if !self.matches(token, tag) {
+        self.matches(token, tag)
+    }
+
+    pub(super) fn authorize(&mut self, token: &str, now: Duration) -> bool {
+        if !self.accepts(token, now) {
             return false;
         }
         if let Grant::Active { idle, .. } = &mut self.grant {
@@ -94,8 +104,26 @@ impl Session {
         true
     }
 
+    // Register after checking the bearer under the same session lock. Waiting
+    // for the end is passive: it neither renews the grant nor calls the Core.
+    pub(super) fn observe_end(&mut self) -> Option<oneshot::Receiver<()>> {
+        if self
+            .observer
+            .as_ref()
+            .is_some_and(|sender| !sender.is_closed())
+        {
+            return None;
+        }
+        let (sender, receiver) = oneshot::channel();
+        self.observer = Some(sender);
+        Some(receiver)
+    }
+
     pub(super) fn close(&mut self) {
         self.grant = Grant::Closed;
+        if let Some(sender) = self.observer.take() {
+            let _ = sender.send(());
+        }
     }
 
     fn matches(&self, submitted: &str, expected: &hmac::Tag) -> bool {
@@ -120,6 +148,22 @@ mod tests {
         assert!(!session.pair(&code, &other, at));
         assert!(!session.authorize(&code, at + IDLE_LIFETIME / 2));
         assert!(!session.authorize(&token, at + IDLE_LIFETIME));
+    }
+
+    #[test]
+    fn end_observation_is_exclusive_and_does_not_renew_idle() {
+        let at = now();
+        let code = secret().unwrap();
+        let token = secret().unwrap();
+        let mut session = Session::new(&code, at).unwrap();
+        assert!(session.pair(&code, &token, at));
+        assert!(session.accepts(&token, at + IDLE_LIFETIME / 2));
+        let abandoned = session.observe_end().unwrap();
+        assert!(session.observe_end().is_none());
+        drop(abandoned);
+        let mut replacement = session.observe_end().unwrap();
+        assert!(session.closed(at + IDLE_LIFETIME));
+        assert_eq!(replacement.try_recv(), Ok(()));
     }
 
     #[test]

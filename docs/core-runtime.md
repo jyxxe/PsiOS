@@ -226,7 +226,7 @@ Debian 软件包以 `Type=notify` 启动 Core。主进程在核对权威状态�
 | volume.files | `target` 为卷的 ID 和预期修订。`path` 默认为根，每页最多 128 项。可用 `max_result_bytes` 将页面限制在 4 到 128 KiB。同一目录续页时将 `next_after` 的值原样传入 `after`，值为 `null` 时已到最后一页。遇到嵌套挂载时整页失败，链接和特殊文件显示为 `unsupported`，大小为 `0`。 |
 | volume.mkdir、volume.remove_entry | `target, path`。创建目录，或删除单个普通文件及空目录。 |
 | volume.append | `target, path, offset, data_base64`。偏移为零时排他新建，后续追加要求实际长度等于偏移。每块最多 96 KiB，单文件上限 256 MiB。沿用主体的 Task 输入保留额度。 |
-| volume.read_chunk | `target, path, offset, limit`。取回 Base64 数据、块摘要、下一偏移和 EOF。可以从待激活的恢复卷读取。 |
+| volume.read_chunk | `target, path, offset, limit`。取回 Base64 数据、块摘要、下一偏移、EOF、卷版本及文件修订。续读可提交 `expected_file_revision`，文件变化时返回冲突。可以从待激活的恢复卷读取。 |
 | application.stage_release | `target` 指应用，`release` 使用安装参数，省略 volume。依据本机 OCI 摘要生成属于同一应用的清单和不可变 Release，保留当前部署。 |
 | application.stage_artifact_release | `target, reference`。在应用和制品范围内批准新的不可变 Release，继承现有应用的卷绑定。制品保留和来源凭据随版本提交。 |
 | application.releases | `application_id`、可选 `cursor, limit`。在授予的应用范围内分页读取版本及选定状态。 |
@@ -791,6 +791,8 @@ psios-mcp --socket /run/psios/api.sock --service-uid PSIOS_UID \
 `volume.usage` 和 `service.inspect` 接受空参数。适配器从 `Capability.ResolveLocalReadTools` 取得声明资源的当前精确引用，以该修订构造 Native Task，并在返回结果前复查授权和精确引用。工具列表可按当前权限刷新，查看列表不消耗任务预算。Core 的卷持有、扫描限制和 systemd 登记校验照常执行。[实际 Volume 和 systemd 验收](../tests/test_mcp_bound_read_tools.py)
 
 格式 141 可在两代协议上加 `--volume-files VOLUME_ID`。将该卷 ID 和 `volume.files` 纳入同一委托。工具可按相对 `path` 列出目录，空路径代表该卷根目录。每页最多 32 项，Core 将目录制品限制为 12 KiB，并在较长文件名需要更多空间时提早分页。继续读取时，将返回的 `next_after` 作为 `after`，连同原路径和返回的 `volume_version` 一并传回。Core 会拒绝已经变更的卷版本。同一查询可通过现代 Tasks 的原调用键恢复结果。[目录授权、分页与重启验收](../tests/test_mcp_bound_read_tools.py) · [持久句柄验收](../tests/test_mcp_tasks.py)
+
+格式 142 可用 `--volume-read-chunk VOLUME_ID` 为两代协议公开 `volume.read_chunk`。授权须明确列出该卷。工具从相对 `path` 读取每次最多 6 KiB 的普通文件数据，返回 Base64、块摘要、下一偏移和 EOF。继续读取时将 `next_offset` 作为 `offset`，连同相同路径、`volume_version` 和 `file_revision` 传回。卷版本或文件身份变化后从零重新读。Core 会拒绝链接、嵌套挂载及已经被运行中工作负载占用的卷。[真实二进制与变更拒绝](../tests/test_mcp_bound_read_tools.py) · [在途查询恢复](../tests/test_mcp_tasks.py)
 
 ### 现代 MCP Tasks
 

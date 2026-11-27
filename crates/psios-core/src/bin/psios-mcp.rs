@@ -5,8 +5,9 @@ mod modern;
 use clap::{Parser, ValueEnum};
 use psios_api::{
     ApiError, ApiResult, Client, LocalReadBinding, LocalReadTool, LocalReadToolsRequest,
-    MAX_BLOCK_INVENTORY_PAGE, MAX_VOLUME_FILES_PAGE, ResolveLocalReadToolsRequest,
-    ResolvedLocalReadTool, ResourceRef, VolumeFilesQuery, id, parse,
+    MAX_BLOCK_INVENTORY_PAGE, MAX_VOLUME_FILE_CHUNK, MAX_VOLUME_FILE_OFFSET, MAX_VOLUME_FILES_PAGE,
+    ResolveLocalReadToolsRequest, ResolvedLocalReadTool, ResourceRef, VolumeFileChunkQuery,
+    VolumeFilesQuery, id, parse,
 };
 use rustix::{fs::OFlags, process::geteuid};
 use serde_json::{Map, Value, json};
@@ -57,6 +58,9 @@ struct Options {
     /// Include paginated directory metadata for one exact Volume ID.
     #[arg(long, value_name = "VOLUME_ID", value_parser = parse_target)]
     volume_files: Option<String>,
+    /// Include bounded binary file reads for one exact Volume ID.
+    #[arg(long, value_name = "VOLUME_ID", value_parser = parse_target)]
+    volume_read_chunk: Option<String>,
     /// Include observations for one exact registered HostService ID.
     #[arg(long, value_name = "HOST_SERVICE_ID", value_parser = parse_target)]
     service_inspect: Option<String>,
@@ -325,8 +329,25 @@ impl Adapter {
                         query,
                     }
                 }
+                LocalReadBinding::VolumeReadChunk { target_id, .. } => {
+                    let Ok(query) =
+                        serde_json::from_value::<VolumeFileChunkQuery>(Value::Object(args.clone()))
+                    else {
+                        return Ok(tool_error("InvalidArgument", None));
+                    };
+                    if !query.within_limits() {
+                        return Ok(tool_error("InvalidArgument", None));
+                    }
+                    LocalReadBinding::VolumeReadChunk {
+                        target_id: target_id.clone(),
+                        query: Some(query),
+                    }
+                }
                 _ => return Ok(tool_error("InvalidArgument", None)),
             },
+            _ if matches!(configured, LocalReadBinding::VolumeReadChunk { .. }) => {
+                return Ok(tool_error("InvalidArgument", None));
+            }
             _ => configured.clone(),
         };
         if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
@@ -497,6 +518,9 @@ fn descriptor(tool: &LocalReadBinding, protocol: Protocol) -> Value {
         LocalReadBinding::VolumeFiles { .. } => {
             "List a directory in the configured volume. Continue with next_after and volume_version from the previous page."
         }
+        LocalReadBinding::VolumeReadChunk { .. } => {
+            "Read a bounded Base64 chunk in the configured volume. Continue with next_offset, volume_version and file_revision."
+        }
         LocalReadBinding::ServiceInspect { .. } => "Observe the configured systemd service state.",
     };
     let mut descriptor = json!({"name":tool.name(),"description":description,
@@ -519,6 +543,16 @@ fn descriptor(tool: &LocalReadBinding, protocol: Protocol) -> Value {
             "limit":{"type":["integer","null"],"minimum":1,"maximum":MAX_VOLUME_FILES_PAGE},
             "after":{"type":["string","null"],"minLength":1,"maxLength":255},
             "volume_version":{"type":["string","null"],"minLength":1,"maxLength":128}
+        });
+    }
+    if matches!(tool, LocalReadBinding::VolumeReadChunk { .. }) {
+        descriptor["inputSchema"]["required"] = json!(["path"]);
+        descriptor["inputSchema"]["properties"] = json!({
+            "path":{"type":"string","minLength":1,"maxLength":2048},
+            "offset":{"type":"integer","default":0,"minimum":0,"maximum":MAX_VOLUME_FILE_OFFSET},
+            "limit":{"type":["integer","null"],"minimum":1,"maximum":MAX_VOLUME_FILE_CHUNK},
+            "volume_version":{"type":["string","null"],"minLength":1,"maxLength":128},
+            "file_revision":{"type":["string","null"],"pattern":"^sha256:[0-9a-f]{64}$"}
         });
     }
     if matches!(protocol, Protocol::Legacy) {
@@ -605,6 +639,12 @@ fn main() -> io::Result<()> {
         bindings.push(LocalReadBinding::VolumeFiles {
             target_id,
             query: VolumeFilesQuery::default(),
+        });
+    }
+    if let Some(target_id) = options.volume_read_chunk {
+        bindings.push(LocalReadBinding::VolumeReadChunk {
+            target_id,
+            query: None,
         });
     }
     if let Some(target_id) = options.service_inspect {

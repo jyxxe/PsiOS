@@ -1,5 +1,7 @@
 """Run both external MCP profiles against exact existing Volume and HostService tools."""
+import base64
 from contextlib import closing
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -38,17 +40,6 @@ class McpBoundReadToolsTests(McpFixture, unittest.TestCase):
         return self.node.call("Capability.ResolveLocalReadTools", {
             "delegation_id": grant["delegation_ref"]["resource_id"], "bindings": list(bindings),
         }, self.agent["token"])["tools"]
-
-    def create_owned_volume(self):
-        n = self.node
-        token = self.agent["token"]
-        create = self.issue(["task.submit", "task.read", "volume.create"])
-        prepared = n.prepare("volume.create", {"name": "mcp-agent-owned"}, token=token,
-                             delegation=create["delegation_ref"]["resource_id"])
-        made = n.wait(n.call("Task.Submit", prepared, token)["task_id"], autoapprove=True)
-        self.assertEqual(made["lifecycle"], "Succeeded", made)
-        [artifact] = made["result"]["artifact_refs"]
-        return n.call("Artifact.Read", {"reference": artifact}, token)
 
     def assert_input(self, task_id, expected):
         task = self.node.get(task_id)
@@ -179,6 +170,70 @@ class McpBoundReadToolsTests(McpFixture, unittest.TestCase):
         self.assertEqual(client("tools/list")["result"]["tools"], [])
         denied = client("tools/call", {"name": tool, "arguments": {"path": "reports"}})["result"]
         self.assertEqual(denied["structuredContent"], {"code": "PermissionDenied"})
+
+    def test_bound_binary_chunks_reject_a_changed_file_with_the_same_volume_revision(self):
+        n = self.node
+        tool = "volume.read_chunk"
+        volume = self.create_owned_volume()
+        volume_id = volume["resource_id"]
+        root = n.state / "volumes" / volume_id / "data"
+        directory = root.joinpath(*(['"' * 240] * 8))
+        directory.mkdir(parents=True)
+        file = directory / "binary"
+        path = str(file.relative_to(root))
+        content = bytes(range(256)) * 25
+        file.write_bytes(content)
+        maximum = 6 * 1024
+        binding = {"tool": tool, "target_id": volume_id}
+        actions = ["task.submit", "task.read", tool]
+        self.assertEqual(self.resolve(self.issue(actions), binding), [])
+        exact = self.issue(actions, [volume_id])
+        self.assertEqual(self.resolve(exact, binding), [{"tool": tool, "target_ref": volume}])
+        with self.assertRaises(Failure) as missing:
+            n.call("McpTask.Start", {"endpoint": "binary-reader",
+                "delegation_id": exact["delegation_ref"]["resource_id"], "invocation_key": key(),
+                "binding": binding, "ttl_seconds": 90}, self.agent["token"])
+        self.assertEqual(missing.exception.code, "InvalidArgument")
+
+        continuation = None
+        for profile in (LEGACY, MODERN):
+            with self.subTest(profile=profile):
+                client = self.bound_wire(exact, profile, "--volume-read-chunk", volume_id)
+                listed, = client("tools/list")["result"]["tools"]
+                self.assertEqual(listed["inputSchema"]["required"], ["path"])
+                self.assertEqual(listed["inputSchema"]["properties"]["limit"]["maximum"], maximum)
+                for invalid in ({}, {"path": path, "offset": 1}, {"path": path, "limit": maximum + 1},
+                                {"path": "../outside"}, {"path": path, "target": target(volume)}):
+                    rejected = client("tools/call", {"name": tool, "arguments": invalid})["result"]
+                    self.assertEqual(rejected["structuredContent"], {"code": "InvalidArgument"}, rejected)
+                response = client("tools/call", {"name": tool, "arguments": {"path": path}})["result"]
+                first = self.check_receipt(response, tool, exact)["result"]
+                self.assertLess(len(response["content"][0]["text"].encode("utf-8")), 16 * 1024)
+                self.assertEqual((first["volume_version"], first["offset"], first["next_offset"], first["eof"]),
+                                 (volume["version"], 0, maximum, False))
+                self.assertEqual(base64.b64decode(first["data_base64"], validate=True), content[:maximum])
+                self.assertEqual(first["digest"], "sha256:" + hashlib.sha256(content[:maximum]).hexdigest())
+                continuation = {"path": path, "offset": first["next_offset"],
+                                "file_revision": first["file_revision"], "volume_version": first["volume_version"]}
+                response = client("tools/call", {"name": tool, "arguments": continuation})["result"]
+                last = self.check_receipt(response, tool, exact)["result"]
+                self.assertEqual((last["next_offset"], last["total_bytes"], last["eof"]),
+                                 (len(content), len(content), True))
+                self.assertEqual(last["file_revision"], first["file_revision"])
+                self.assertEqual(base64.b64decode(last["data_base64"], validate=True), content[maximum:])
+
+        substitute = directory / "replacement"
+        substitute.write_bytes(content)
+        substitute.replace(file)
+        self.assertEqual(n.get(volume_id)["reference"], volume)
+        denied = client("tools/call", {"name": tool, "arguments": continuation})["result"]
+        self.assertTrue(denied["isError"], denied)
+        self.assertEqual(denied["structuredContent"]["code"], "Conflict", denied)
+        failed = n.call("Task.Get", {"id": denied["structuredContent"]["task_id"]})
+        self.assertEqual((failed["lifecycle"], failed["result"]["artifact_refs"]), ("Failed", []))
+        fresh = client("tools/call", {"name": tool, "arguments": {"path": path, "limit": 1}})["result"]
+        first = self.check_receipt(fresh, tool, exact)["result"]
+        self.assertNotEqual(first["file_revision"], continuation["file_revision"])
 
     def test_measure_only_the_fixed_owned_volume_and_resolve_its_current_revision(self):
         n = self.node

@@ -14,6 +14,7 @@ use std::collections::HashSet;
 
 pub(crate) const NODE_INVENTORY_FORMAT: u32 = crate::storage::xattrs::FORMAT + 1;
 pub(crate) const VOLUME_FILES_FORMAT: u32 = crate::apps::mount_observation::READ_ONLY_FORMAT + 1;
+pub(crate) const VOLUME_FILE_CHUNK_FORMAT: u32 = VOLUME_FILES_FORMAT + 1;
 
 pub(crate) fn agent(db: &Db<'_>, actor: &str) -> Result<()> {
     let principal = db.of(actor, "Principal")?;
@@ -123,17 +124,31 @@ pub(crate) fn resolve_binding(
         if target.kind != kind || target.body["lifecycle"] != lifecycle {
             return Ok(None);
         }
+        if matches!(
+            binding,
+            LocalReadBinding::VolumeReadChunk { query: None, .. }
+        ) {
+            policy::owned(actor, &target)?;
+            return Ok(Some(ResolvedLocalReadTool {
+                tool: name.to_owned(),
+                target_ref: decode(&target.reference())?,
+            }));
+        }
         Some(decode(&target.reference())?)
     } else {
         None
     };
-    if let LocalReadBinding::VolumeFiles { query, .. } = binding {
-        require(
-            query.within_limits(),
-            "InvalidArgument",
-            "volume directory page parameters are outside the local profile",
-        )?;
-    }
+    require(
+        match binding {
+            LocalReadBinding::VolumeFiles { query, .. } => query.within_limits(),
+            LocalReadBinding::VolumeReadChunk {
+                query: Some(query), ..
+            } => query.within_limits(),
+            _ => true,
+        },
+        "InvalidArgument",
+        "volume read parameters are outside the local profile",
+    )?;
     let input = binding
         .task_input(exact.as_ref())
         .ok_or_else(|| err("RecoveryRequired", "local read tool target is inconsistent"))?;
@@ -171,7 +186,7 @@ pub(crate) fn resolve(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value>
                 .iter()
                 .all(|binding| tools.insert(binding.name())),
         "InvalidArgument",
-        "one to five distinct local read tools required",
+        "one to six distinct local read tools required",
     )?;
     for binding in &request.bindings {
         if let Some((id, _)) = binding.target() {

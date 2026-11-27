@@ -235,16 +235,15 @@ pub(crate) fn not_dispatched(db: &Db<'_>, op: &Doc) -> Result<bool> {
 pub(crate) fn record(db: &Db<'_>, work: &Work, request: &Request, before: &Value) -> Result<()> {
     let record = journal::load(db.c, &work.op, journal::epoch(db.c)?)?;
     record.custody.holds(db.c, &work.op, true)?;
+    let access = super::selected_volume_access(db.c, &record.custody.app)?;
     require(
         record.modern
             && record.checkpoint.is_none()
             && record.custody.sample(before)
             && (!work.mount_observation_required
-                || record
-                    .custody
-                    .volume
-                    .as_ref()
-                    .is_some_and(|volume| super::mount_observation::matches(volume, before)))
+                || record.custody.volume.as_ref().is_some_and(|volume| {
+                    super::mount_observation::matches(volume, before, access)
+                }))
             && request.matches(before)
             && before["boot_id"] == boot_id()?
             && record.custody.app.reference() == work.target.reference()
@@ -313,17 +312,17 @@ fn confirmed(db: &Db<'_>, op: &Doc, app: &Doc, after: &Value) -> Result<Doc> {
     let checkpoint = record
         .checkpoint
         .ok_or_else(|| err("RecoveryRequired", "no committed OCI restart checkpoint"))?;
+    let access = super::selected_volume_access(db.c, app)?;
     require(
         record.custody.app.reference() == app.reference()
             && record.custody.running(after)
             && changed(&checkpoint.body["before"], after)
-            && (!(super::mount_observation::required(&checkpoint)
+            && (!(access.read_only()
+                || super::mount_observation::required(&checkpoint)
                 || db.cfg.oci_effective_volume_observation && record.custody.volume.is_some())
-                || record
-                    .custody
-                    .volume
-                    .as_ref()
-                    .is_some_and(|volume| super::mount_observation::matches(volume, after)))
+                || record.custody.volume.as_ref().is_some_and(|volume| {
+                    super::mount_observation::matches(volume, after, access)
+                }))
             && (!record.modern || after["boot_id"] == boot_id()?),
         "OutcomeUnknown",
         "inspection does not confirm restart of the checkpointed invocation",

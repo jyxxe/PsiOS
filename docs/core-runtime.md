@@ -287,7 +287,9 @@ Core 通过已打开的目录和文件描述符流式校验私有普通文件。
 
 ### 重启正在运行的 OCI 实例
 
-配置 `oci_effective_volume_observation: true` 可为带卷的 OCI 启动、重启与检查启用 Linux 实际挂载核验。此配置默认关闭。启用需要本机 cgroup v2 和服务 UID 对容器进程的 `/proc` 观测权限。Core 在启动后固定进程身份，对照卷已登记的设备与 inode，核实独立挂载命名空间中的 `/data` 是私有、可写且没有嵌套挂载。运行实例的 `mount_observation` 保存卷引用、挂载 ID、启动标识和采样时间。
+配置 `oci_effective_volume_observation: true` 可为带卷的 OCI 启动、重启与检查启用 Linux 实际挂载核验。此配置默认关闭。启用需要本机 cgroup v2 和服务 UID 对容器进程的 `/proc` 观测权限。Core 在启动后固定进程身份，对照卷已登记的设备与 inode，核实独立挂载命名空间中的 `/data` 具有批准的访问模式、采用私有传播且没有嵌套挂载。运行实例的 `mount_observation` 保存卷引用、挂载 ID、启动标识和采样时间。
+
+从格式 140 起，安装时可对批准的卷声明 `"volume_access":"ReadOnly"`，签名安装制品也可携带这一字段。选定 Release 保存请求的访问模式。暂存新版本时省略该字段会继承当前选定版本的模式。只读模式下必须同时通过 Docker 配置和实际 Linux 挂载核验，卷继续由该应用独占绑定，停止后释放占用。启动回执丢失后，原检查点仍要求观察原容器的只读挂载，再对账原 Operation。[容器实际写入拒绝、重启、签名版本与回执恢复验收](../tests/oci_read_only_volume.py)
 
 原启动或重启的检查点会保留核验要求。内核进程进入批准 UID 与执行入口的短暂过程中，Core 可在同一固定进程上重新读取证据。若 Docker 已执行启动而无法核实挂载，操作维持 `OutcomeUnknown` 并保留占用。重新对账须取得同一容器现有运行的有效核验样本。持续访问拒绝、不同 inode 或容器已退出时，旧操作继续等待处置。格式 102 保留已有运行实例与原检查点，可对其采集新的独立证据。[真实挂载和故障验收](../tests/oci_mount_observation.py) · [格式升级验收](../tests/oci_mount_observation_upgrade.py)
 

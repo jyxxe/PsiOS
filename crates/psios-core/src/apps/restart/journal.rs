@@ -100,6 +100,7 @@ impl Custody {
             )?;
             let volume = resolve(conn, &subjects[1])?;
             let attachment = resolve(conn, &volume.body["attachment_refs"][0])?;
+            let access = json!(super::super::selected_volume_access(conn, &app)?);
             require(
                 volume.id == id
                     && volume.kind == "Volume"
@@ -111,7 +112,8 @@ impl Custody {
                     && attachment.body["workload_id"] == app.id
                     && attachment.body["data_incarnation"] == volume.body["data_incarnation"]
                     && attachment.body["lifecycle"] == "Attached"
-                    && attachment.body["effective_access"] == "ReadWrite",
+                    && attachment.body["requested_access"] == access
+                    && attachment.body["effective_access"] == access,
                 "RecoveryRequired",
                 "OCI restart plan has no matching volume attachment",
             )?;

@@ -9,7 +9,7 @@ from support import Failure, Node, key, target
 
 class VolumeUsageTests(unittest.TestCase):
     def setUp(self):
-        self.node = Node("target/debug")
+        self.node = Node()
         self.addCleanup(self.node.close)
         self.volume = self.node.perform("volume.create", {"name": "measured-volume"})
         self.root = self.node.state / "volumes" / self.volume["resource_id"] / "data"

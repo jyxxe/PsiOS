@@ -275,6 +275,7 @@ fn normalized_digest<'a>(
                         std::io::sink(),
                         &binding.image_id,
                         &binding.diff_ids,
+                        binding.manifest_config_digest.as_deref(),
                     )?),
                 };
             entry.insert(digest)
@@ -299,6 +300,7 @@ pub(crate) fn verify(conn: &Connection, state: &Path) -> Result<()> {
         require(
             verified.reference() == proof.reference()
                 && proof.body["image"]["diff_ids"] == json!(binding.diff_ids)
+                && manifest_config_digest(&proof) == binding.manifest_config_digest
                 && task.kind == "Task"
                 && task.owner == op.owner
                 && task.spec["task_type"] == TOOL

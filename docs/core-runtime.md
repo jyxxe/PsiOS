@@ -519,7 +519,9 @@ Core 核对原会话、模型租约及决策摘要，在一个事务中提交原
 
 `psiosctl application-prepare-image-restore --key restore-1 --delegation "$restore_delegation" restore.json` 从文件读取 `application_ref`、`release_ref`、`image_archive_ref`、`publisher_key_ref` 和 `expected_engine_id`。`psiosctl application-prepare-image-restore-inspection --key inspect-1 --delegation "$inspection_delegation" operation-ref.json` 读取待核实的原 Operation 引用。两个命令均输出可通过 `psiosctl call Task.Submit` 提交的 JSON。Core 按应用或 Operation 的 ID 和版本解析目标，在受理时绑定完整资源引用。Rust SDK 提供 `Client::prepare_release_image_restore` 和 `Client::prepare_release_image_restore_inspection`，沿用同一 Task 流程。
 
-该能力使用 Linux amd64 Docker Engine API v1.44 的经典 `overlay2` 或 `vfs` 镜像存储。服务复核仍有效的签名以及保留归档的完整字节，将核验过的镜像配置和层分块写入单镜像无标签归档。导入前封印文件描述符并记录两个归档的 SHA-256。恢复拒绝压缩层、稀疏层和扩展层元数据，累计层字节及生成的导入归档各以 128 MiB 为上限。导入使用绑定同一个 Engine 的本机 Unix 连接，依赖 Docker 及其文件系统报告空间或运行错误。
+经典镜像恢复使用 Linux amd64 Docker Engine API v1.44 的 `overlay2` 或 `vfs` 镜像存储。服务复核仍有效的签名以及保留归档的完整字节，将核验过的镜像配置和层分块写入单镜像无标签归档。导入前封印文件描述符并记录两个归档的 SHA-256。经典恢复接受普通 tar 层，拒绝稀疏层和扩展层元数据，累计层字节及生成的导入归档各以 128 MiB 为上限。导入使用绑定同一个 Engine 的本机 Unix 连接，依赖 Docker 及其文件系统报告空间或运行错误。
+
+格式 133 增加 Docker containerd 镜像存储的恢复路径。捕获绑定 OCI manifest 摘要，校验单镜像索引、原配置、层描述符和解码后的 DiffID。支持普通 tar 或单成员 gzip 层，整个层链解码后最多 128 MiB。Core 用经过验证的原始配置、manifest 和层重新封装无标签 OCI 文件，保留这些内容的原摘要。恢复和重启对账均要求实际 Engine 使用与归档匹配的镜像存储。已有的 `ManifestIdentity` 历史回执可继续验证，重新捕获可取得新恢复证明。 [真实 Docker containerd 验收](../tests/oci_manifest_restore.py)
 
 只有检查点提交后才向 Docker 发起一次导入。中断后，待核实的原 Operation 对应用和该引擎内的镜像保持独占。使用单独委托提交只读 `application.inspect_release_image_restore`，以原 Operation 的 `target` 为输入，并覆盖原计划资源。精确引擎上的镜像摘要及有序层 DiffID 得到确认后，可向 `Operation.Reconcile` 提供新的检查结果。镜像缺失、引擎身份变化或不匹配的结果都会保留 `OutcomeUnknown`。观察和结算原 Operation 不会重发导入。离线校验核对原检查点和结算证据。发行版本退役后，已合法回收的原始字节可只保留历史摘要和回执。[真实 Docker 进程中断和恢复验收](../tests/oci_restore.py)
 

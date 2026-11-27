@@ -1,4 +1,5 @@
 //! Classify exact Docker save bytes without extracting files or executing the loader.
+mod gzip;
 use super::valid_image_id;
 use crate::{Result, decode, err, require, storage::oci_archive::MAX_BYTES};
 use psios_api::parse;
@@ -13,7 +14,9 @@ use std::{
 
 pub(crate) const FORMAT: u32 = super::release_archive::FORMAT + 1;
 pub(crate) const SCHEMA: &str = include_str!("restore_archive.sql");
+pub(crate) const MANIFEST_IDENTITY_FORMAT: u32 = super::capture::CAPACITY_PROFILE_FORMAT + 1;
 const PROFILE: &str = "DockerClassicTaglessSaveV1";
+const OCI_PROFILE: &str = "DockerOciTaglessSaveV1";
 const MAX_ENTRIES: usize = 512;
 const MAX_METADATA: usize = 128 * 1024;
 const BLOCK: usize = 512;
@@ -21,27 +24,33 @@ const OCI_INDEX: &str = "application/vnd.oci.image.index.v1+json";
 const OCI_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
 const OCI_CONFIG: &str = "application/vnd.oci.image.config.v1+json";
 const OCI_LAYER: &str = "application/vnd.oci.image.layer.v1.tar";
+const OCI_GZIP_LAYER: &str = "application/vnd.oci.image.layer.v1.tar+gzip";
 const DOCKER_MANIFEST: &str = "application/vnd.docker.distribution.manifest.v2+json";
 const DOCKER_CONFIG: &str = "application/vnd.docker.container.image.v1+json";
 const DOCKER_LAYER: &str = "application/vnd.docker.image.rootfs.diff.tar";
+const DOCKER_GZIP_LAYER: &str = "application/vnd.docker.image.rootfs.diff.tar.gzip";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(super) enum Compatibility {
     Verified,
+    VerifiedManifest(String),
     Unsupported(&'static str),
 }
 
 impl Compatibility {
-    pub fn status(self) -> &'static str {
+    pub fn status(&self) -> &'static str {
         match self {
-            Self::Verified => "Verified",
+            Self::Verified | Self::VerifiedManifest(_) => "Verified",
             Self::Unsupported(_) => "Unsupported",
         }
     }
 
-    pub fn evidence(self) -> Value {
+    pub fn evidence(&self) -> Value {
         match self {
             Self::Verified => json!({"status":"Verified","profile":PROFILE}),
+            Self::VerifiedManifest(configuration_digest) => {
+                json!({"status":"Verified","profile":OCI_PROFILE,"config_digest":configuration_digest})
+            }
             Self::Unsupported(reason) => json!({"status":"Unsupported","reason":reason}),
         }
     }
@@ -49,13 +58,25 @@ impl Compatibility {
     pub fn valid_evidence(status: &str, value: &Value) -> bool {
         match status {
             "Unverified" => value.is_null(),
-            "Verified" => value == &Self::Verified.evidence(),
+            "Verified" => {
+                value == &Self::Verified.evidence()
+                    || value["config_digest"]
+                        .as_str()
+                        .filter(|digest| valid_image_id(digest))
+                        .is_some_and(|digest| {
+                            value == &Self::VerifiedManifest(digest.to_owned()).evidence()
+                        })
+            }
             "Unsupported" => ["ArchiveLayout", "ManifestIdentity", "CompressedLayer"]
                 .iter()
                 .any(|reason| value == &Self::Unsupported(reason).evidence()),
             _ => false,
         }
     }
+}
+
+pub(super) fn manifest_profile(evidence: &Value) -> bool {
+    evidence["profile"] == OCI_PROFILE
 }
 
 fn invalid(message: &str) -> crate::Error {
@@ -422,19 +443,25 @@ impl Descriptor {
 fn layer_media(media: &str) -> Result<bool> {
     match media {
         OCI_LAYER | DOCKER_LAYER => Ok(false),
-        "application/vnd.oci.image.layer.v1.tar+gzip"
-        | "application/vnd.oci.image.layer.v1.tar+zstd"
-        | "application/vnd.docker.image.rootfs.diff.tar.gzip" => Ok(true),
+        OCI_GZIP_LAYER | "application/vnd.oci.image.layer.v1.tar+zstd" | DOCKER_GZIP_LAYER => {
+            Ok(true)
+        }
         _ => Err(invalid(
             "OCI archive contains an unsupported or foreign layer descriptor",
         )),
     }
 }
 
+struct OciGraph {
+    manifest_digest: String,
+    layers: Vec<Descriptor>,
+    compressed: bool,
+}
+
 fn validate_oci(
     members: &Members<impl Read + Seek>,
     docker: &DockerManifest,
-) -> Result<Option<(String, bool)>> {
+) -> Result<Option<OciGraph>> {
     let layout = members.files.contains_key("oci-layout");
     let index = members.files.contains_key("index.json");
     require(
@@ -515,7 +542,11 @@ fn validate_oci(
         )?;
         compressed |= layer_media(&layer.media_type)?;
     }
-    Ok(Some((descriptor.digest, compressed)))
+    Ok(Some(OciGraph {
+        manifest_digest: descriptor.digest,
+        layers,
+        compressed,
+    }))
 }
 
 fn compressed(mut input: impl Read, length: u64) -> Result<bool> {
@@ -609,22 +640,23 @@ pub(super) fn validate_reader(
     mut input: impl Read + Seek,
     image: &str,
     diff_ids: &[String],
+    manifest_identity: bool,
 ) -> Result<Compatibility> {
     let length = input_length(&mut input)?;
     if compressed(&mut input, length)? {
         return Ok(Compatibility::Unsupported("ArchiveLayout"));
     }
     let members = Members::read(input, length)?;
-    validate_members(&members, image, diff_ids)
+    validate_members(&members, image, diff_ids, manifest_identity)
 }
 
-// Produce a single classic Docker manifest from the validated members. Never pass
-// original outer tar headers or JSON alias fields to Docker's different parsers.
+// Supply canonical tar headers and only the manifest format selected at capture.
 pub(super) fn write_load(
     mut input: impl Read + Seek,
     output: impl Write,
     image: &str,
     diff_ids: &[String],
+    expected_config: Option<&str>,
 ) -> Result<String> {
     let length = input_length(&mut input)?;
     require(
@@ -633,13 +665,29 @@ pub(super) fn write_load(
         "restore requires an uncompressed outer tar",
     )?;
     let members = Members::read(input, length)?;
-    require(
-        validate_members(&members, image, diff_ids)? == Compatibility::Verified,
-        "UnsupportedCapability",
-        "captured archive does not meet the classic Docker restore profile",
-    )?;
+    let compatibility = validate_members(&members, image, diff_ids, expected_config.is_some())?;
+    let manifest_identity = match (expected_config, compatibility) {
+        (None, Compatibility::Verified) => false,
+        (Some(expected), Compatibility::VerifiedManifest(actual)) => {
+            require(
+                expected == actual,
+                "PreconditionFailed",
+                "OCI archive configuration disagrees with the captured config digest",
+            )?;
+            true
+        }
+        _ => {
+            return Err(err(
+                "UnsupportedCapability",
+                "captured archive does not meet its recorded Docker restore profile",
+            ));
+        }
+    };
     let manifests: Vec<DockerManifest> = decode(&members.metadata("manifest.json")?)?;
     let docker = &manifests[0];
+    if manifest_identity {
+        return write_oci_load(&members, docker, image, output);
+    }
     let config = members.file(&docker.config)?;
     let config_path = format!("blobs/sha256/{}", &image[7..]);
     let mut layers = Vec::with_capacity(diff_ids.len());
@@ -688,6 +736,27 @@ pub(super) fn write_load(
         &manifest[..],
     )?;
     let mut output = canonical.into_inner()?;
+    output.flush()?;
+    Ok(output.finish())
+}
+
+fn write_oci_load(
+    members: &Members<impl Read + Seek>,
+    docker: &DockerManifest,
+    image: &str,
+    output: impl Write,
+) -> Result<String> {
+    let manifest_blob = format!("blobs/sha256/{}", &image[7..]);
+    let paths = ["index.json", "oci-layout", &manifest_blob, &docker.config]
+        .into_iter()
+        .chain(docker.layers.iter().map(String::as_str))
+        .collect::<BTreeSet<_>>();
+    let mut archive = tar::Builder::new(HashOutput::new(output));
+    for path in paths {
+        let member = members.file(path)?;
+        append_canonical(&mut archive, path, member.size, members.reader(member)?)?;
+    }
+    let mut output = archive.into_inner()?;
     output.flush()?;
     Ok(output.finish())
 }
@@ -791,6 +860,7 @@ fn validate_members(
     members: &Members<impl Read + Seek>,
     image: &str,
     diff_ids: &[String],
+    manifest_identity: bool,
 ) -> Result<Compatibility> {
     if !members.files.contains_key("manifest.json") {
         return Ok(Compatibility::Unsupported("ArchiveLayout"));
@@ -848,20 +918,63 @@ fn validate_members(
         }
     }
     if config_digest != image {
-        if oci.as_ref().is_some_and(|(manifest, _)| manifest == image) {
+        if let Some(graph) = oci.as_ref().filter(|graph| graph.manifest_digest == image) {
+            if manifest_identity && compatible_paths(members, docker, config_digest, true)? {
+                match verify_manifest_layers(members, graph, docker, diff_ids) {
+                    Ok(true) => {
+                        return Ok(Compatibility::VerifiedManifest(config_digest.to_owned()));
+                    }
+                    Err(error) if error.0.code != "UnsupportedCapability" => return Err(error),
+                    Ok(false) | Err(_) => {}
+                }
+            }
             return Ok(Compatibility::Unsupported("ManifestIdentity"));
         }
         return Err(invalid(
             "OCI archive configuration digest differs from the inspected image ID",
         ));
     }
-    if compressed_layer || oci.as_ref().is_some_and(|(_, compressed)| *compressed) {
+    if compressed_layer || oci.as_ref().is_some_and(|graph| graph.compressed) {
         return Ok(Compatibility::Unsupported("CompressedLayer"));
     }
     if !compatible_paths(members, docker, config_digest, oci.is_some())? {
         return Ok(Compatibility::Unsupported("ArchiveLayout"));
     }
     Ok(Compatibility::Verified)
+}
+
+fn verify_manifest_layers(
+    members: &Members<impl Read + Seek>,
+    graph: &OciGraph,
+    docker: &DockerManifest,
+    diff_ids: &[String],
+) -> Result<bool> {
+    let mut remaining = BYTE_LIMIT;
+    for ((descriptor, path), diff_id) in graph.layers.iter().zip(&docker.layers).zip(diff_ids) {
+        let payload = members.file(path)?;
+        let size = match descriptor.media_type.as_str() {
+            OCI_GZIP_LAYER | DOCKER_GZIP_LAYER => {
+                gzip::verify_layer(members.reader(payload)?, remaining, diff_id)?
+            }
+            OCI_LAYER | DOCKER_LAYER => {
+                require(
+                    payload.size <= remaining,
+                    "QuotaExceeded",
+                    "OCI layer chain exceeds the byte limit",
+                )?;
+                require(
+                    members.digest(payload)? == *diff_id,
+                    "PreconditionFailed",
+                    "OCI layer disagrees with its inspected DiffID",
+                )?;
+                check_inner_layer(members.reader(payload)?, payload.size)?;
+                payload.size
+            }
+            _ => return Ok(false),
+        };
+        remaining -= size;
+    }
+    Ok(true)
 }
 
 #[cfg(test)]

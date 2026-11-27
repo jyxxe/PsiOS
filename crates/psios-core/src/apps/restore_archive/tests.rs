@@ -4,12 +4,12 @@ use std::io::Cursor;
 use tar::{Builder, EntryType, Header};
 
 fn validate(bytes: &[u8], image: &str, diff_ids: &[String]) -> Result<Compatibility> {
-    validate_reader(Cursor::new(bytes), image, diff_ids)
+    validate_reader(Cursor::new(bytes), image, diff_ids, false)
 }
 
 fn canonical_load(bytes: &[u8], image: &str, diff_ids: &[String]) -> Result<Vec<u8>> {
     let mut output = Vec::new();
-    let digest = write_load(Cursor::new(bytes), &mut output, image, diff_ids)?;
+    let digest = write_load(Cursor::new(bytes), &mut output, image, diff_ids, None)?;
     assert_eq!(digest, sha256(&output));
     Ok(output)
 }
@@ -36,6 +36,115 @@ fn blob(digest: &str) -> String {
 
 fn descriptor(payload: &[u8], media_type: &str) -> Value {
     json!({"size":payload.len(),"digest":sha256(payload),"mediaType":media_type})
+}
+
+fn gzip_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut encoded = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoded.write_all(bytes).unwrap();
+    encoded.finish().unwrap()
+}
+
+#[test]
+fn manifest_identity_keeps_original_blobs_in_an_oci_only_load() {
+    let mut fixture = Fixture::new(true);
+    let previous_layer = fixture.docker["Layers"][0].as_str().unwrap().to_owned();
+    let plain = fixture.members.remove(&previous_layer).unwrap();
+    let encoded = gzip_bytes(&plain);
+    let layer = descriptor(&encoded, OCI_GZIP_LAYER);
+    let layer_path = blob(layer["digest"].as_str().unwrap());
+    fixture.members.insert(layer_path.clone(), encoded);
+    let config_path = fixture.docker["Config"].as_str().unwrap().to_owned();
+    fixture.docker["Layers"] = json!([layer_path]);
+    fixture.docker["LayerSources"] = json!({(fixture.layers[0].clone()):layer});
+    let manifest = json!({"schemaVersion":2,"mediaType":OCI_MANIFEST,
+        "config":descriptor(&fixture.members[&config_path], OCI_CONFIG),"layers":[layer]});
+    let description = fixture.index(manifest);
+    let image = description["digest"].as_str().unwrap();
+    let original = fixture.tar();
+    assert_eq!(
+        validate(&original, image, &fixture.layers).unwrap(),
+        Compatibility::Unsupported("ManifestIdentity")
+    );
+    assert_eq!(
+        validate_reader(Cursor::new(&original), image, &fixture.layers, true).unwrap(),
+        Compatibility::VerifiedManifest(fixture.image.clone()),
+    );
+    let mut load = Vec::new();
+    assert_eq!(
+        write_load(
+            Cursor::new(&original),
+            &mut load,
+            image,
+            &fixture.layers,
+            Some(&sha256(b"unrelated config")),
+        )
+        .unwrap_err()
+        .0
+        .code,
+        "PreconditionFailed"
+    );
+    assert!(load.is_empty());
+    let normalized = write_load(
+        Cursor::new(original),
+        &mut load,
+        image,
+        &fixture.layers,
+        Some(&fixture.image),
+    )
+    .unwrap();
+    assert_eq!(normalized, sha256(&load));
+    let mut archive = tar::Archive::new(Cursor::new(load));
+    let mut entries = BTreeMap::new();
+    for entry in archive.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let name = entry.path().unwrap().to_str().unwrap().to_owned();
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data).unwrap();
+        entries.insert(name, data);
+    }
+    assert_eq!(entries.len(), 5);
+    for path in [
+        "index.json",
+        "oci-layout",
+        &blob(image),
+        &config_path,
+        &layer_path,
+    ] {
+        assert_eq!(entries[path], fixture.members[path]);
+    }
+}
+
+#[test]
+fn gzip_layers_require_single_members_and_a_matching_bounded_diffid() {
+    let raw = encode(&BTreeMap::from([("file".into(), vec![1; 4096])]));
+    let diff = sha256(&raw);
+    let compressed = gzip_bytes(&raw);
+    assert_eq!(
+        gzip::verify_layer(&compressed[..], raw.len() as u64, &diff).unwrap(),
+        raw.len() as u64
+    );
+    assert_eq!(
+        gzip::verify_layer(&compressed[..], 512, &diff)
+            .unwrap_err()
+            .0
+            .code,
+        "QuotaExceeded"
+    );
+    assert_eq!(
+        gzip::verify_layer(&compressed[..], BYTE_LIMIT, &sha256(b"unrelated"))
+            .unwrap_err()
+            .0
+            .code,
+        "PreconditionFailed"
+    );
+    let concatenated = [compressed.as_slice(), compressed.as_slice()].concat();
+    assert_eq!(
+        gzip::verify_layer(&concatenated[..], BYTE_LIMIT, &diff)
+            .unwrap_err()
+            .0
+            .code,
+        "PreconditionFailed"
+    );
 }
 
 struct Fixture {
@@ -257,7 +366,7 @@ fn repeated_layers_share_one_cached_member_digest() {
     let member = members.file(&layer_path).unwrap();
     assert!(member.digest.get().is_none());
     assert_eq!(
-        validate_members(&members, &id, &diff_ids).unwrap(),
+        validate_members(&members, &id, &diff_ids, false).unwrap(),
         Compatibility::Verified
     );
     let cached = member.digest.get().unwrap();

@@ -10,7 +10,8 @@ mod schedule;
 mod work_admission;
 mod work_admission_blockers;
 pub use artifact::{
-    ArtifactRepairReceipt, ArtifactUploadCapacity, ArtifactUploadReceipt, ArtifactUploadUsage,
+    ArtifactRepairReceipt, ArtifactStagePreparation, ArtifactUploadCapacity, ArtifactUploadReceipt,
+    ArtifactUploadUsage, PreparedArtifactStage,
 };
 pub use backup::{BackupChunk, BackupMember, BackupMemberReceipt};
 pub use mcp::{

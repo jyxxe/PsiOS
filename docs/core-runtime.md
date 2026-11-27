@@ -465,7 +465,9 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 
 `Artifact.UploadProfile` 公布 `OpaqueBytesV1` 的分块、大小、暂存期限及配额。上传主体需要以本机 Node 为目标的 `artifact.upload` Grant。`Artifact.Stage` 固定提交键、预计字节数、SHA-256、声明媒体类型和期限。`Artifact.Stage.PutChunk` 按已提交偏移接收 128 KiB 定长块及末块。中断后通过 `Artifact.Stage.Get` 取得继续位置，用同一键和输入恢复。
 
-`Artifact.UploadCapacity` 和 `psiosctl artifact-upload-capacity` 显示调用主体的暂存字节、发布保留字节、开放的暂存、历史回执和剩余回执数。本机所有者还可查看节点总量。历史回执默认每主体最多 4096 条、每节点最多 65536 条，可在 Core 配置的 `artifact_upload_history` 中以 `per_principal` 和 `node` 设置更低的上限。上限作用于新建暂存，已受理的阶段可继续结算或按原键重放。丢弃、过期和撤回仍保留历史回执。 [Unix API 与并发验收](../tests/test_artifact_upload_capacity.py)
+`Artifact.UploadCapacity` 和 `psiosctl artifact-upload-capacity` 显示调用主体的暂存字节、发布保留字节、开放的暂存、历史回执和剩余回执数。本机所有者还可查看节点总量。历史回执默认每主体最多 4096 条、每节点最多 65536 条，可在 Core 配置的 `artifact_upload_history` 中以 `per_principal` 和 `node` 设置更低的上限。上限作用于新建暂存，已受理的阶段可继续结算或按原键重放。使用普通提交键的上传在丢弃、过期和撤回后保留历史回执。 [Unix API 与并发验收](../tests/test_artifact_upload_capacity.py)
+
+格式 135 提供 `Artifact.Stage.Prepare`。用 `size_bytes`、`digest`、`declared_media_type`、`ttl_seconds` 和可选 `delegation_ref` 申请一个键。CLI 使用 `psiosctl artifact-prepare-upload metadata.json`，Rust SDK 使用 `Client::prepare_artifact_stage`。在准备窗口内把返回的 `key` 和原始字段提交给 `Artifact.Stage`，或传给既有 `psiosctl artifact-upload --key KEY` 并使用相同的声明参数。准备本身不占用上传或回执名额。键绑定发起主体、内容与原委托，并在同一次 Linux 启动及权威恢复世代内按单调时钟判断能否新建。已打开的暂存继续遵循自己的到期时间。准备窗口结束后，后台回收已丢弃或过期的未发布暂存回执，并保留审计事件。使用原键无法重建已回收的暂存。已发布的内容及其回执继续遵循既有保留规则。 [准备键与回收验证](../tests/test_artifact_stage_windows.py)
 
 `Artifact.Publish` 重新核对全部字节后原子提交不可变引用及来源，发布重试返回原回执。可见内容的媒体类型为 `application/octet-stream`，提交者提供的媒体类型作为独立声明保留。发布前可以丢弃暂存，过期块由后台回收。读取原始字节需要 `artifact.read`。`Artifact.Withdraw` 使用额外的 `artifact.withdraw` Grant 和确切引用，回收字节并保留审计凭据。
 
@@ -810,6 +812,10 @@ jq -n --arg id "$session" '{id:$id}' | agentctl call Session.Get
 `SessionModel` 是 Rust Provider 接口。其他语言可以用同一协议实现 `Model.Claim` 和 `Model.Respond`，提交 `tool`、`finish` 或 `fail` 决策。Model 登记可用 `max_in_flight` 设置 1 至 32 个并发租约，默认 4。每次签发租约计入会话次数和共享的根 `model_calls` 预算。当 Claim 返回 `usage_format: "tokens.v1"` 时，Provider 可以随决策提交 `usage`，其中 `input_tokens` 和 `output_tokens` 各为 0 至 4294967295 的整数。Core 在接受决策的同一事务中更新本次调用原有的 ModelUsage，回执的 `usage_ref` 固定该修订。相同租约只能重放原决策和原用量。缺少报告或租约被围栏隔离时，实际 Token 数保持未知。Token 数由 Provider 声明，供应商账单待实现。当前传输是经过本机认证的 Provider 进程，Provider 的网络隔离由部署管理。Core 没有配置自动云端回退。
 
 `Grant.Issue` 可选 `model_lease_ms` 为同一根预算下的所有会话和委托设置租约时间额度。`Budget.Get` 返回最大额度、已记账时间和剩余时间。领取时预扣本次租约的完整上限，剩余额度较少时缩短签发的租约。当前租约响应获接受时，权威按同一 Linux 启动与时间命名空间的经过时间结算并退回剩余预扣，`usage_ref` 记录 `authority_elapsed_lease_ms`。取消、过期或无法确认结束的租约保留原预扣。暂时占满额度的根预算仍可等待退款，其他预算可继续领取。格式 37 保留原调用次数、在途租约和未指定时间额度的授权。[时间预算与故障验收](../tests/test_model_queue.py) · [真实旧格式升级](../tests/model_time_upgrade.py)
+
+`Session.ModelUsage`、Rust SDK 的 `Client::session_model_usage` 和 `psiosctl session-model-usage ID` 使用与 `Session.History` 相同的读取授权。每个会话报告已签发调用数、当前租约预扣、按经过时间结算的额度、未知调用保留的额度，以及未启用计时的调用数。每次调用会显示当前有效性和实际记账时间。Token 合计只使用已接受的 Provider 报告，同时给出有报告的调用数。根授权下全部会话的共享额度仍可用 `Budget.Get` 查询。模型切换前后的用量分别保存在各自的会话中。[实时租约和读取授权验证](../tests/test_model_provider_outcome.py)
+
+`Session.Wait` 使用与 `Session.Get` 相同的读取授权。请求包含 `id` 和 1 至 10000 毫秒的 `timeout_ms`。省略 `after_version` 时等待会话暂停或终止，传入当前引用的 `version` 时等待更新。到期返回最新授权快照，与 `Session.Get` 返回格式一致。可以用 Rust SDK 的 `Client::wait_session` 或 `psiosctl session-wait ID --wait-ms 5000`，按需追加 `--after-version VERSION`。[授权变更和状态观察验证](../tests/test_model_provider_outcome.py)
 
 模型租约在签发时绑定本节点的 Linux boot ID 和 `CLOCK_BOOTTIME`。同次系统启动中，服务重启保留原期限，系统挂起的时间计入租期。调快或调慢 UTC 时钟不会改变处理当前租约的权限。宿主重启后，旧租约的响应会被拒绝。API 的 `expires_at` 是供客户端显示的 UTC 估算。已取消但 Provider 尚未交回结果的调用，仍占用并发名额至原期限。上一启动或旧格式的调用按原 UTC 估算保留剩余名额，用于记录可能尚在外部执行的工作。绝对授权到期仍按现有 UTC 策略判断。[格式迁移测试](../tests/model_leases.py) · [虚机调时与重启测试](../tests/qemu_boot.py)
 

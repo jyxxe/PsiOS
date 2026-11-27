@@ -236,6 +236,12 @@ enum Cmd {
         #[arg(long)]
         delegation_ref: Option<String>,
     },
+    /// Prepare a bounded key for the supplied upload metadata.
+    ArtifactPrepareUpload {
+        /// JSON upload metadata from a file or stdin.
+        #[arg(default_value = "-")]
+        file: String,
+    },
     /// Show upload staging, retained bytes and durable receipt capacity.
     ArtifactUploadCapacity,
     /// Register an Ed25519 public key for an existing publisher principal.
@@ -465,6 +471,18 @@ enum Cmd {
         id: String,
         #[arg(long)]
         revision: String,
+    },
+    /// Show model calls, lease-time charges, and provider-reported tokens for a Session.
+    SessionModelUsage {
+        id: String,
+    },
+    /// Wait for a Session to pause, finish, or advance past a selected revision.
+    SessionWait {
+        id: String,
+        #[arg(long)]
+        after_version: Option<String>,
+        #[arg(long, default_value_t = 5_000, value_parser = clap::value_parser!(u32).range(1..=10_000))]
+        wait_ms: u32,
     },
     Node,
     /// Read the state of a specifically authorized enrolled block device.
@@ -1083,6 +1101,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             reason,
         } => c.pause_session(&id, &revision, &reason)?,
         Cmd::SessionResume { id, revision } => c.resume_session(&id, &revision)?,
+        Cmd::SessionModelUsage { id } => serde_json::to_value(c.session_model_usage(&id)?)?,
+        Cmd::SessionWait {
+            id,
+            after_version,
+            wait_ms,
+        } => c.wait_session(&id, after_version.as_deref(), wait_ms)?,
         Cmd::TaskResults { id } => c.task_results(&id)?,
         Cmd::TaskResultEvictionPlan { file } => serde_json::to_value(
             c.prepare_result_eviction_batch(&serde_json::from_value(input(&file)?)?)?,
@@ -1138,6 +1162,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             serde_json::to_value(receipt)?
         }
         Cmd::ArtifactUploadCapacity => serde_json::to_value(c.artifact_upload_capacity()?)?,
+        Cmd::ArtifactPrepareUpload { file } => serde_json::to_value(
+            c.prepare_artifact_stage(&serde_json::from_value(input(&file)?)?)?,
+        )?,
         Cmd::ArtifactPublisherKeyRegister {
             principal_id,
             public_key_base64,

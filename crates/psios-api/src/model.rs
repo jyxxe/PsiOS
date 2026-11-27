@@ -3,12 +3,14 @@ mod journal;
 mod lease;
 #[cfg(feature = "local-inference")]
 mod local;
+mod usage;
 use crate::{ApiError, ApiResult, Client, ResourceRef};
 pub use lease::{ModelInvocation, ModelLeaseStatus, ModelLeaseStatusRequest, ModelLeaseTiming};
 #[cfg(feature = "local-inference")]
 pub use local::LocalInventoryModel;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+pub use usage::*;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -328,6 +330,20 @@ impl Client {
         self.call(
             "Session.Resume",
             json!({"id":session,"expected_resource_version":revision}),
+        )
+    }
+
+    /// Wait for a newer session revision, or for a paused or finished session.
+    /// At timeout the authority returns the latest authorized snapshot.
+    pub fn wait_session(
+        &self,
+        session: &str,
+        after_version: Option<&str>,
+        timeout_ms: u32,
+    ) -> ApiResult<Value> {
+        self.call(
+            "Session.Wait",
+            json!({"id":session,"after_version":after_version,"timeout_ms":timeout_ms}),
         )
     }
 

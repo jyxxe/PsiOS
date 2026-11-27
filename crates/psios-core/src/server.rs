@@ -27,45 +27,59 @@ enum WaitCondition {
     Items(&'static str),
     Available,
     Task(Option<i64>),
+    Session(Option<i64>),
 }
 
-fn task_revision(value: &str) -> Option<i64> {
+fn resource_revision(value: &str) -> Option<i64> {
     let revision = value.strip_prefix('r')?.parse::<i64>().ok()?;
     (revision > 0 && value == format!("r{revision}")).then_some(revision)
 }
 
-impl WaitCondition {
-    fn task(params: &mut Value) -> Result<Self> {
-        let version = params
-            .as_object_mut()
-            .and_then(|fields| fields.remove("after_version"));
-        let version =
-            match version {
-                None | Some(Value::Null) => None,
-                Some(value) => Some(value.as_str().and_then(task_revision).ok_or_else(|| {
-                    err("InvalidArgument", "after_version must be a task revision")
-                })?),
-            };
-        Ok(Self::Task(version))
+fn wait_after(params: &mut Value, message: &str) -> Result<Option<i64>> {
+    match params
+        .as_object_mut()
+        .and_then(|fields| fields.remove("after_version"))
+    {
+        None | Some(Value::Null) => Ok(None),
+        Some(raw) => raw
+            .as_str()
+            .and_then(resource_revision)
+            .map(Some)
+            .ok_or_else(|| err("InvalidArgument", message)),
     }
+}
 
+fn revision_advanced(value: &Value, after: i64, missing: &str, future: &str) -> Result<bool> {
+    let current = value
+        .as_str()
+        .and_then(resource_revision)
+        .ok_or_else(|| err("RecoveryRequired", missing))?;
+    crate::require(current >= after, "PreconditionFailed", future)?;
+    Ok(current > after)
+}
+
+impl WaitCondition {
     fn ready(&self, value: &Value) -> Result<bool> {
         match self {
             Self::Items(key) => Ok(value[key].as_array().is_some_and(|items| !items.is_empty())),
             Self::Available => Ok(value["available"] == true),
             Self::Task(None) => Ok(psios_api::task_wait_ready(value)),
-            Self::Task(Some(after)) => {
-                let current = value["task_revision"]
-                    .as_str()
-                    .and_then(task_revision)
-                    .ok_or_else(|| err("RecoveryRequired", "task revision is unavailable"))?;
-                crate::require(
-                    current >= *after,
-                    "PreconditionFailed",
-                    "task wait revision is ahead of current state",
-                )?;
-                Ok(current > *after)
-            }
+            Self::Task(Some(after)) => revision_advanced(
+                &value["task_revision"],
+                *after,
+                "task revision is unavailable",
+                "task wait revision is ahead of current state",
+            ),
+            Self::Session(None) => Ok(matches!(
+                value["session"]["lifecycle"].as_str(),
+                Some("Succeeded" | "Failed" | "Cancelled" | "Paused")
+            )),
+            Self::Session(Some(after)) => revision_advanced(
+                &value["reference"]["version"],
+                *after,
+                "session revision is unavailable",
+                "session wait revision is ahead of current state",
+            ),
         }
     }
 }
@@ -147,7 +161,20 @@ fn connection(s: &Shared, stream: &mut UnixStream, stop: &AtomicBool) -> Result<
             }
             "Mailbox.Wait" => Some(("Mailbox.Read", WaitCondition::Items("items"))),
             "Model.WaitNext" => Some(("Model.ClaimNext", WaitCondition::Available)),
-            "Task.Wait" => Some(("Task.Get", WaitCondition::task(&mut r.params)?)),
+            "Task.Wait" => Some((
+                "Task.Get",
+                WaitCondition::Task(wait_after(
+                    &mut r.params,
+                    "after_version must be a task revision",
+                )?),
+            )),
+            "Session.Wait" => Some((
+                "Session.Get",
+                WaitCondition::Session(wait_after(
+                    &mut r.params,
+                    "after_version must be a session revision",
+                )?),
+            )),
             _ => None,
         };
         if let Some((method, ready)) = wait {
@@ -435,6 +462,17 @@ fn reclaim_storage(s: Shared, stop: Arc<AtomicBool>, config: Config) -> Result<(
         {
             eprintln!(
                 "psiosd artifact upload authority reclamation: {}",
+                error.0.code
+            );
+        }
+        if !stop.load(Ordering::Acquire)
+            && let Err(error) = state(&s)?.transaction(
+                "artifact-upload-window",
+                crate::artifact::ingress::windows::reclaim,
+            )
+        {
+            eprintln!(
+                "psiosd prepared upload receipt reclamation: {}",
                 error.0.code
             );
         }

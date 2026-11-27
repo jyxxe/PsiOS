@@ -924,6 +924,13 @@ jobs:
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format130" "$RUNNER_TEMP/psios-compatibility-target"
           PSIOS_SCHEDULE_RENEWAL_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
             python3 -B -m unittest discover -s tests -p test_schedule_renewal.py -k test_format_130 -v
+      - name: Restore a format 133 backup after upgrading the volume entry limit
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format133"
+          git archive 080f6be34dc38497ca584ec2c777ed7bb7848538 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format133"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format133" "$RUNNER_TEMP/psios-compatibility-target"
+          PSIOS_BACKUP_ENTRIES_PREVIOUS_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
+            python3 -B -m unittest discover -s tests -p test_backup_estimate.py -k test_existing_fixed_limit -v
       - name: Preserve a genuine format 138 device inventory handle and fence the old writer
         run: |
           mkdir "$RUNNER_TEMP/psios-format138"

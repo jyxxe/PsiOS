@@ -17,6 +17,7 @@ pub(crate) mod reconcile_file;
 mod restore_proof;
 pub(crate) mod restore_publication;
 pub(crate) mod retirement;
+mod sparse;
 mod staging;
 pub(crate) mod transfer;
 pub(crate) mod usage;
@@ -665,7 +666,8 @@ impl<'a> Capture<'a> {
                         let destination = out.destination();
                         destination.check_space(std::iter::once(m.len()), 1)?;
                         let mut dst = out.file(rel, self.entries.len())?;
-                        let copied = copy_captured_blob(&mut src, &mut dst, m.len(), self.check)?;
+                        let copied =
+                            copy_captured_blob(&mut src, Some(&mut dst), m.len(), self.check)?;
                         if matches!(out, CaptureOutput::Tree(_)) {
                             if let Some(attributes) = &attributes {
                                 attributes.install(&dst)?;
@@ -681,12 +683,9 @@ impl<'a> Capture<'a> {
                         destination.check_space(std::iter::empty(), 0)?;
                         Some(copied)
                     }
-                    CaptureMode::DigestOnly => Some(copy_captured_blob(
-                        &mut src,
-                        &mut std::io::sink(),
-                        m.len(),
-                        self.check,
-                    )?),
+                    CaptureMode::DigestOnly => {
+                        Some(copy_captured_blob(&mut src, None, m.len(), self.check)?)
+                    }
                     CaptureMode::MetadataOnly => None,
                 };
                 let (len, digest) =
@@ -746,11 +745,15 @@ impl<'a> Capture<'a> {
 }
 fn copy_captured_blob(
     source: &mut File,
-    output: &mut impl Write,
+    output: Option<&mut File>,
     size: u64,
     check: &mut dyn FnMut() -> Result<()>,
 ) -> Result<(u64, String)> {
-    copy_hash_checked(source, output, size, check).map_err(|error| {
+    let result = match output {
+        Some(file) => sparse::copy_to_new_file(source, file, size, check),
+        None => copy_hash_checked(source, &mut std::io::sink(), size, check),
+    };
+    result.map_err(|error| {
         if error.0.code == "QuotaExceeded" {
             err("Conflict", "volume file grew during capture")
         } else {
@@ -770,6 +773,17 @@ fn copy_hash_checked(
     check: &mut dyn FnMut() -> Result<()>,
 ) -> Result<(u64, String)> {
     let mut hash = Sha256::new();
+    let len = hash_stream(r, w, max, &mut hash, check)?;
+    Ok((len, format!("sha256:{:x}", hash.finalize())))
+}
+
+fn hash_stream(
+    r: &mut impl Read,
+    w: &mut impl Write,
+    max: u64,
+    hash: &mut Sha256,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<u64> {
     let mut buf = [0u8; 32 * 1024];
     let mut len = 0;
     loop {
@@ -783,7 +797,7 @@ fn copy_hash_checked(
         hash.update(&buf[..n]);
         w.write_all(&buf[..n])?
     }
-    Ok((len, format!("sha256:{:x}", hash.finalize())))
+    Ok(len)
 }
 fn capture_root(w: &Work) -> Result<File> {
     open_volume_root(&w.cfg, &w.target)
@@ -1252,7 +1266,9 @@ fn inspect_members(
                 None
             };
             let (len, hash) = match &mut output {
-                Some(file) => copy_hash(&mut original, file, e.bytes)?,
+                Some(file) => {
+                    sparse::copy_to_new_file(&mut original, file, e.bytes, &mut || Ok(()))?
+                }
                 None => copy_hash(&mut original, &mut std::io::sink(), e.bytes)?,
             };
             require(
@@ -1525,8 +1541,8 @@ mod capture_tests {
             .write_all(&[b'y'; 1024])
             .unwrap();
         let mut staged = tempfile::tempfile().unwrap();
-        let refusal =
-            copy_captured_blob(&mut source, &mut staged, reserved, &mut || Ok(())).unwrap_err();
+        let refusal = copy_captured_blob(&mut source, Some(&mut staged), reserved, &mut || Ok(()))
+            .unwrap_err();
         assert_eq!(refusal.0.code, "Conflict");
         assert!(staged.metadata().unwrap().len() <= reserved);
     }

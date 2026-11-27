@@ -39,7 +39,9 @@ class BackupCaptureControlTests(unittest.TestCase):
             stage = next(self.backups.glob(".stage-*/blob-0"), None)
             if stage is not None:
                 try:
-                    if 1024 * 1024 <= stage.stat().st_size < self.size:
+                    # The written prefix reaches staging before hashing the long trailing hole.
+                    # That hole can stay unallocated until the final logical length is set.
+                    if 0 < stage.stat().st_size < self.size:
                         return stage
                 except FileNotFoundError:
                     pass

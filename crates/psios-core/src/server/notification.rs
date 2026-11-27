@@ -28,7 +28,7 @@ impl Notifier {
         };
         let address = match name.as_bytes() {
             [b'/', ..] => SocketAddr::from_pathname(&name),
-            [b'@', name @ [_, ..]] => SocketAddr::from_abstract_name(name),
+            [b'@', name @ ..] if !name.is_empty() => SocketAddr::from_abstract_name(name),
             _ => {
                 return Err(err(
                     "InvalidArgument",

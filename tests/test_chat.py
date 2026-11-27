@@ -18,7 +18,7 @@ ACTIONS = ["chat.invite", "chat.read", "chat.send"]
 
 class DirectChatTests(unittest.TestCase):
     def setUp(self):
-        self.node = Node("target/debug")
+        self.node = Node()
         self.addCleanup(self.node.close)
         self.alice, self.alice_grant = self.node.agent(ACTIONS)
         self.bob, self.bob_grant = self.node.agent(ACTIONS)
@@ -84,6 +84,45 @@ class DirectChatTests(unittest.TestCase):
         n.call("Grant.Issue", {"principal_id": "local-owner", "actions": ["chat.read"], "units": 1, "ttl_seconds": 60})
         self.rejected("PermissionDenied", "Conversation.Get", {"id": room["id"]})
         self.assertEqual(n.call("Resource.List", {"kind": "Conversation"})["items"], [])
+
+    def test_declined_and_expired_invitations_release_slots_and_preserve_paged_history(self):
+        n = self.node
+        pending = [n.call("Conversation.OpenDirect", self.invitation(f"work-{index}"), self.a)
+                   for index in range(64)]
+        self.rejected("QueueFull", "Conversation.OpenDirect", self.invitation(), self.a)
+        declined = self.respond(pending[0], accept=False)
+        expiring = n.call("Conversation.OpenDirect", self.invitation("short invitation", 1), self.a)
+        after(expiring["invitation_valid_until"])
+        n.stop(signal.SIGKILL)
+        n.start()
+
+        def open_invitation(request):
+            try:
+                return n.call("Conversation.OpenDirect", request, self.a)
+            except Failure as error:
+                self.assertEqual(error.code, "QueueFull", error)
+                return None
+
+        with ThreadPoolExecutor(max_workers=2) as callers:
+            admissions = list(callers.map(open_invitation, [self.invitation(), self.invitation()]))
+        admitted, = [item for item in admissions if item is not None]
+        self.assertEqual(n.call("Conversation.Get", {"id": declined["id"]}, self.b), declined)
+        self.assertEqual(n.call("Conversation.Get", {"id": expiring["id"]}, self.b)["members"][1]["lifecycle"], "Expired")
+
+        expected = sorted([item["id"] for item in [*pending, expiring, admitted]])
+        received = []
+        params = {"limit": 16}
+        for offset in range(0, len(expected), params["limit"]):
+            page = n.call("Conversation.List", params, self.b)
+            ids = [item["id"] for item in page["items"]]
+            end = offset + params["limit"]
+            self.assertEqual(ids, expected[offset:end])
+            self.assertEqual(page["next_after_id"], ids[-1] if end < len(expected) else None)
+            received.extend(ids)
+            params["after_id"] = page["next_after_id"]
+        self.assertEqual(received, expected)
+        self.assertEqual(n.call("Conversation.List", {"limit": 16}, self.e), {"items": [], "next_after_id": None})
+        self.rejected("InvalidArgument", "Conversation.List", {"limit": 65}, self.b)
 
     def test_lost_ack_and_process_crash_keep_one_sequence_and_authenticated_sender(self):
         n = self.node

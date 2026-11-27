@@ -692,6 +692,8 @@ Core 在真正派发时重查项目成员、授权和工作项修订。在同一
 
 ## 本机会话
 
+节点支持最多 512 个占用名额的会话，单主体最多 64 个。活跃私聊、未到期私聊邀请以及活跃房间会占用相应名额。拒绝、到期和归档释放名额，已授权的历史和原幂等回执继续保留。`Conversation.List` 按会话 ID 排序，默认及最大每页 64 条。续页传回 `next_after_id` 作为 `after_id`，本页按调用时的权限返回。[格式 124 容量迁移](../tests/chat_capacity_upgrade.py)
+
 ### 私聊
 
 通过 `Conversation.OpenDirect` 提交 `key`、`name`、`recipient_principal_id` 和邀请 `ttl_seconds`。发起者需要 `chat.invite` 与 `chat.read`，受邀主体可用 `Conversation.List` 查找邀请，再以 `Conversation.Respond` 提交会话 ID、`expected_resource_version` 和 `accept`。一份会话固定两位主体，同一主体对可创建不同名称的多个会话。
@@ -712,7 +714,7 @@ Core 在真正派发时重查项目成员、授权和工作项修订。在同一
 
 房间使用与私聊相同的 `Message.Prepare`、`Message.Send`、读取与已读确认接口。历史政策固定为 `FromJoin`。接受邀请时记录当时的消息序号。之后仅能读取加入后的消息，指向此前正文的回复链接对该成员省略。发送窗口、历史游标和已读位点绑定成员实例。消息提交、成员变化和撤权都由同一个 Core 写事务裁决，消息回执记录提交时的成员修订和写者代次。
 
-房间容量计算包括未到期的待接受邀请。节点限制会话总量、成员记录和保留正文。群聊当前提供本机持久文本、明确邀请和拉取，后续接入线程、订阅投递、附件与 Agent 唤醒。[群聊权限、并发与恢复](../tests/test_chat_rooms.py) · [格式 19 原地升级](../tests/rooms_upgrade.py)
+房间席位计入活跃成员和未到期的待接受邀请。重开归档房间时在同一事务内为节点和现有成员重新核对名额。保留正文仍受会话和节点配额约束，新增记录受权威存储余量约束。群聊当前提供本机持久文本、明确邀请和拉取，后续接入线程、订阅投递、附件与 Agent 唤醒。[群聊权限、并发与恢复](../tests/test_chat_rooms.py) · [格式 19 原地升级](../tests/rooms_upgrade.py)
 
 ## 通过 MCP STDIO 调用本机只读工具
 

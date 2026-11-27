@@ -14,6 +14,8 @@ pub use room::{invite, leave, open as open_room, remove, reopen, transfer_owner}
 pub const INVITE: &str = "chat.invite";
 pub const READ: &str = "chat.read";
 pub const SEND: &str = "chat.send";
+pub(crate) const CAPACITY_FORMAT: u32 = crate::apps::catalog::FORMAT + 1;
+pub(crate) const CAPACITY_SCHEMA: &str = include_str!("chat/capacity.sql");
 
 const SELECT: &str = "SELECT d.id,inviter,invitee,name,phase,revision,l.last_seq,invitation_until,created_at,
                      creation_digest,l.writer_epoch FROM direct_chats d JOIN chat_logs l ON l.id=d.id";
@@ -150,28 +152,35 @@ fn access(db: &Db<'_>, actor: &str, id: &str) -> Result<Access> {
     })
 }
 
-fn conversation_capacity(db: &Db<'_>) -> Result<()> {
-    let total: u32 =
-        db.c.query_row("SELECT count(*) FROM chat_logs", [], |row| row.get(0))?;
+fn conversation_capacity(db: &Db<'_>, stamp: i64) -> Result<()> {
+    let total: u32 = db.c.query_row(
+        "SELECT (SELECT count(*) FROM direct_chats WHERE phase='Active')
+              + (SELECT count(*) FROM direct_chats WHERE phase='Invited' AND invitation_until>?1)
+              + (SELECT count(*) FROM chat_rooms WHERE phase='Active' AND expires>?1)",
+        [stamp],
+        |row| row.get(0),
+    )?;
     require(
         total < 512,
         "QueueFull",
-        "node conversation capacity reached",
+        "node active conversation capacity reached",
     )
 }
 
-fn principal_capacity(db: &Db<'_>, actor: &str, current: Option<&str>) -> Result<()> {
+fn principal_capacity(db: &Db<'_>, actor: &str, current: Option<&str>, stamp: i64) -> Result<()> {
     let count: u32 = db.c.query_row(
-        "SELECT (SELECT count(*) FROM direct_chats WHERE inviter=?1 OR invitee=?1)
-              + (SELECT count(DISTINCT conversation) FROM room_memberships
-                 WHERE principal=?1 AND (?2 IS NULL OR conversation!=?2))",
-        params![actor, current],
+        "SELECT (SELECT count(*) FROM direct_chats WHERE (inviter=?1 OR invitee=?1)
+                   AND phase IN('Active','Invited') AND (phase='Active' OR invitation_until>?3))
+              + (SELECT count(*) FROM room_memberships m JOIN chat_rooms r ON r.id=m.conversation
+                 WHERE m.principal=?1 AND (?2 IS NULL OR r.id!=?2) AND r.phase='Active' AND r.expires>?3
+                   AND m.phase IN('Active','Invited') AND (m.phase='Active' OR m.invitation_until>?3))",
+        params![actor, current, stamp],
         |row| row.get(0),
     )?;
     require(
         count < 64,
         "QueueFull",
-        "principal conversation capacity reached",
+        "principal active conversation capacity reached",
     )
 }
 
@@ -229,11 +238,12 @@ pub fn open(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
     }
     policy::active(db, &p.recipient_principal_id)?;
     db.cfg.check_admission_space()?;
-    conversation_capacity(db)?;
+    let stamp = Utc::now().timestamp();
+    conversation_capacity(db, stamp)?;
     for person in [actor, &p.recipient_principal_id] {
-        principal_capacity(db, person, None)?;
+        principal_capacity(db, person, None, stamp)?;
     }
-    let until = Utc::now().timestamp() + i64::from(p.ttl_seconds);
+    let until = stamp + i64::from(p.ttl_seconds);
     db.c.execute("INSERT INTO chat_logs(id) VALUES(?1)", [&id])?;
     db.c.execute(
         "INSERT INTO direct_chats(id,inviter,invitee,name,invitation_until,created_at,creation_digest)
@@ -245,32 +255,68 @@ pub fn open(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
 
 pub fn get(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
     let p: ById = decode(request)?;
-    if room::is_room(&p.id) {
-        return room::get(db, actor, &p.id);
+    view(db, actor, &p.id)
+}
+
+fn view(db: &Db<'_>, actor: &str, id: &str) -> Result<Value> {
+    if room::is_room(id) {
+        return room::get(db, actor, id);
     }
-    Ok(member(db, actor, &p.id)?.view())
+    Ok(member(db, actor, id)?.view())
 }
 
 pub fn list(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
-    struct List {}
-    let _: List = decode(request)?;
+    struct List {
+        after_id: Option<String>,
+        limit: Option<usize>,
+    }
+    let p: List = decode(request)?;
     policy::can(db, actor, READ)?;
-    let mut statement = db.c.prepare(&format!(
-        "{SELECT} WHERE inviter=?1 OR invitee=?1 ORDER BY created_at,d.id"
-    ))?;
-    let mut items = Vec::new();
-    for row in statement.query_map([actor], Chat::from_row)? {
-        let chat = row?;
-        match policy::can_target(db, actor, READ, &chat.id) {
-            Ok(()) => items.push(chat.view()),
+    let limit = p.limit.unwrap_or(64);
+    require(
+        (1..=64).contains(&limit),
+        "InvalidArgument",
+        "invalid conversation page size",
+    )?;
+    if let Some(after) = &p.after_id {
+        let digest = after
+            .strip_prefix("direct-")
+            .or_else(|| after.strip_prefix("room-"));
+        require(
+            digest.is_some_and(|s| {
+                s.len() == 64
+                    && s.bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            }),
+            "InvalidArgument",
+            "invalid conversation page position",
+        )?;
+    }
+    let mut statement = db.c.prepare(
+        "SELECT id FROM direct_chats WHERE (inviter=?1 OR invitee=?1) AND id>?2
+          UNION ALL
+         SELECT conversation FROM room_memberships
+          WHERE principal=?1 AND phase IN('Invited','Active') AND conversation>?2
+         ORDER BY id",
+    )?;
+    let mut items = Vec::<Value>::with_capacity(limit);
+    let mut next_after_id = None;
+    for row in statement.query_map(params![actor, p.after_id.as_deref().unwrap_or("")], |row| {
+        row.get::<_, String>(0)
+    })? {
+        match view(db, actor, &row?) {
+            Ok(_) if items.len() == limit => {
+                next_after_id = items.last().map(|item| item["id"].clone());
+                break;
+            }
+            Ok(item) => items.push(item),
             Err(error) if error.0.code == "PermissionDenied" => {}
             Err(error) => return Err(error),
         }
     }
-    items.extend(room::list(db, actor)?);
-    Ok(json!({"items": items}))
+    Ok(json!({"items": items, "next_after_id":next_after_id}))
 }
 
 #[derive(Deserialize)]

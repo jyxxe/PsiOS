@@ -863,7 +863,9 @@ Provider 可用 `Model.ReportFailure` 提交 `session_id`、`model_ref`、`lease
 
 `ReferencesOnly` 给模型上一步的结果引用，`LocalToolResults` 允许将授权结果正文交给指定本机 Provider。两种模式都核对当前权限与大小。Session 固定 Skill、工具和 Model 修订。退役依赖会阻止后续派发。重复决策返回原回执，租约被取代后旧决策被拒绝。SDK 遇到已领取但结论不明的模型调用时要求保留决策或等待新租约。工具提交、会话检查点和预算更新使用同一事务。
 
-Provider 可用 Rust SDK 的 `model_turn_durable`，或运行 `psiosctl model-step SESSION --key KEY --decision-dir DIR`。为每个并发工作进程预建独占的服务账户目录（模式 0700），使用支持目录锁、原子重命名和 fsync 的本机文件系统。SDK 在发出决策前将原节点、主体、会话、键、租约和结构化决策写入私有文件并落盘。文件至多 72 KiB，可能包含私有工具输入。重启后用原目录和参数重发已保存的决策，Core 可返回原 Task 回执。同一目录有未决记录时，其他请求会得到 `Conflict`。
+Provider 可用 Rust SDK 的 `model_turn_durable`，或运行 `psiosctl model-step SESSION --key KEY --decision-dir DIR`。为每个并发工作进程预建独占的服务账户目录（模式 0700），使用支持目录锁、原子重命名和 fsync 的本机文件系统。SDK 在发出决策前将原节点、主体、会话、键、租约和结构化决策写入私有文件并落盘。记录正文至多 72 KiB，可能包含私有工具输入。重启后用原目录和参数重发已保存的决策，Core 可返回原 Task 回执。同一目录有未决记录时，其他请求会得到 `Conflict`。
+
+新写入的暂存文件使用版本 1 封装，保存投递正文原始 JSON 字节的 SHA-256，整个文件上限为 72 KiB 加 256 字节。恢复时先核对摘要，再解析和投递。摘要不符或封装版本无法识别时，SDK 返回 `RecoveryRequired` 并保留原文件。校验可发现存储或复制时的意外损坏，目录仍须由 Provider 服务账户独占。升级后可以继续投递旧版写入的格式 1 至 5 裸记录。降级前应先结算新封装的未决记录，或保留目录，之后用支持该封装的 SDK 恢复。
 
 格式 95 的严格租约公布迟到证据能力及原 Model 引用。已有决策无法再按原租约结算时，SDK 可调用 `Model.ObserveLateDecision` 递交原会话、租约和精确决策。Core 只接受已经持久结算为 `Unknown` 的严格租约与仍获原授权的 Provider，保存一条决策摘要、字节数及可选用量摘要。会话所有者可经 `Session.History` 核对。相同报告可重放，摘要不同会返回冲突。
 

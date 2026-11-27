@@ -1,4 +1,5 @@
 """Process-level coverage of persisted sessions across distinct agent, provider and owner credentials."""
+import hashlib
 import json
 import os
 import signal
@@ -143,7 +144,7 @@ class RuntimeTests(unittest.TestCase):
             with interrupt_delivery(n, token, sid, key, pending, committed=committed):
                 self.assertIn("Conflict", invoke(sid, key).stderr)
                 self.assertEqual(record.stat().st_mode & 0o777, 0o600)
-            stored = json.loads(record.read_text())
+            stored = json.loads(record.read_text())["record"]
             self.assertEqual(stored["request"]["decision"], dict(action="tool", tool=self.tools[i], input={}))
             self.assertNotIn(self.provider_token, record.read_text())
             self.assertNotIn("context", stored)
@@ -180,6 +181,83 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual((len(history["turns"]), len(history["tasks"])), (2, 2))
         budget = n.call("Budget.Get", {"id": self.grant["budget_ref"]["resource_id"]}, self.token)
         self.assertEqual((budget["model_calls_used"], budget["spent"]), (2, 2))
+
+    def journal_worker(self):
+        journal = self.n.base / "provider-outbox"
+        journal.mkdir(mode=0o700)
+        credential = self.n.base / "provider-credential"
+        credential.touch(mode=0o600)
+        credential.write_text(self.provider_token)
+        self.model = self.register_model(60)
+        session = self.open()
+
+        def step(key, binary=None):
+            return subprocess.run([binary or self.n.binaries / "psiosctl", "--socket", self.n.socket,
+                                   "--token-file", credential, "model-step", session,
+                                   "--key", key, "--decision-dir", journal], capture_output=True, text=True, timeout=15)
+
+        return journal, credential, session, step
+
+    def test_corrupted_retained_finish_is_refused_before_delivery(self):
+        journal, credential, session, step = self.journal_worker()
+        for key in ("inventory", "devices"):
+            result = step(key)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.n.wait(json.loads(result.stdout)["task_id"])["lifecycle"], "Succeeded")
+        with interrupt_delivery(self.n, credential, session, "finish", journal, committed=False):
+            pass
+        pending = journal / "psios-model-pending.json"
+        original = pending.read_bytes()
+        envelope = json.loads(original)
+        self.assertEqual(envelope["journal_version"], 1)
+        record = json.dumps(envelope["record"], separators=(",", ":"), ensure_ascii=False).encode()
+        self.assertEqual(envelope["record_sha256"], "sha256:" + hashlib.sha256(record).hexdigest())
+        self.assertEqual(envelope["record"]["request"]["decision"]["action"], "finish")
+        damaged = original.replace(b"Collected node inventory", b"collected node inventory", 1)
+        self.assertEqual(len(damaged), len(original))
+        self.assertNotEqual(json.loads(damaged), envelope)
+        pending.write_bytes(damaged)
+        self.n.stop(signal.SIGKILL)
+        self.n.start()
+        history = self.n.call("Session.History", {"id": session}, self.token)
+        self.assertIsNone(history["turns"][-1]["decision"])
+        budget = self.n.call("Budget.Get", {"id": self.grant["budget_ref"]["resource_id"]}, self.token)
+        refused = step("finish")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("RecoveryRequired", refused.stderr)
+        self.assertEqual(pending.read_bytes(), damaged)
+        self.assertEqual(self.n.call("Session.History", {"id": session}, self.token), history)
+        self.assertEqual(self.n.call("Budget.Get", {"id": self.grant["budget_ref"]["resource_id"]}, self.token), budget)
+        pending.write_bytes(original)
+        result = step("finish")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["lifecycle"], "Succeeded")
+        self.assertFalse(pending.exists())
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_PRIOR_PROVIDER_CTL"), "requires an earlier provider binary")
+    def test_previous_provider_journal_upgrade_and_downgrade_fence(self):
+        old = os.environ["PSIOS_TEST_PRIOR_PROVIDER_CTL"]
+        journal, credential, session, step = self.journal_worker()
+        pending = journal / "psios-model-pending.json"
+        with interrupt_delivery(self.n, credential, session, "old", journal, committed=False, binary=old):
+            legacy = json.loads(pending.read_bytes())
+            self.assertEqual(legacy["request"]["decision"]["tool"], self.tools[0])
+            self.assertNotIn("journal_version", legacy)
+        result = step("old")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.n.wait(json.loads(result.stdout)["task_id"])["lifecycle"], "Succeeded")
+        with interrupt_delivery(self.n, credential, session, "new", journal, committed=False):
+            saved = pending.read_bytes()
+            self.assertEqual(json.loads(saved)["journal_version"], 1)
+        refused = step("new", old)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("RecoveryRequired", refused.stderr)
+        self.assertEqual(pending.read_bytes(), saved)
+        self.assertEqual(len(self.n.call("Session.History", {"id": session}, self.token)["tasks"]), 1)
+        result = step("new")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.n.wait(json.loads(result.stdout)["task_id"])["lifecycle"], "Succeeded")
+        self.assertFalse(pending.exists())
 
     def test_durable_provider_respects_fencing_and_private_storage(self):
         n = self.n

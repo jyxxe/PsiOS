@@ -14,7 +14,7 @@ hyper = { version = "1", features = ["client", "http1"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 tokio = { version = "1", features = ["rt", "net", "time", "io-util"], optional = true }
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 sha2.workspace = true
 uuid.workspace = true
 jsonschema = { version = "0.18.3", default-features = false, features = ["draft202012"] }

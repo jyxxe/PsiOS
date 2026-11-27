@@ -931,6 +931,10 @@ jobs:
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format133" "$RUNNER_TEMP/psios-compatibility-target"
           PSIOS_BACKUP_ENTRIES_PREVIOUS_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
             python3 -B -m unittest discover -s tests -p test_backup_estimate.py -k test_existing_fixed_limit -v
+      - name: Replay a prior provider journal and fence older readers of checksummed decisions
+        run: |
+          PSIOS_TEST_PRIOR_PROVIDER_CTL="$RUNNER_TEMP/psios-compatibility-target/debug/psiosctl" \
+            python3 -B -m unittest discover -s tests -p test_runtime.py -k test_previous_provider_journal -v
       - name: Preserve a genuine format 138 device inventory handle and fence the old writer
         run: |
           mkdir "$RUNNER_TEMP/psios-format138"

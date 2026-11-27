@@ -443,7 +443,7 @@ class ModelQueueTests(unittest.TestCase):
                 args = self.worker("--once")
                 with interrupt_worker_delivery(n, self.token_file, args, committed=committed):
                     n.call("Grant.Revoke", target(grant["grant_ref"]))
-                record = json.loads((self.journal / "psios-model-pending.json").read_text())
+                record = json.loads((self.journal / "psios-model-pending.json").read_text())["record"]
                 details = dict(model_ref=self.model, key=record["claim_key"],
                                lease_id=record["request"]["lease_id"])
                 other, _ = n.agent(["model.serve"])

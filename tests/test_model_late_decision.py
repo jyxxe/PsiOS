@@ -122,7 +122,7 @@ class ModelLateDecisionTests(unittest.TestCase):
         with serve_inference(self.endpoint, decision=STATUS, usage=WIRE_USAGE) as requests:
             with interrupt_worker_delivery(n, self.provider_token, args, committed=False):
                 raw = self.pending.read_bytes()
-                saved = json.loads(raw)
+                saved = json.loads(raw)["record"]
                 self.assertEqual(saved["format"], 4, saved)
                 self.assertEqual(saved["late_decision_model_ref"], self.model, saved)
                 self.assertEqual(saved["claim_key"], claim_request["key"], saved)
@@ -257,7 +257,7 @@ class ModelLateDecisionTests(unittest.TestCase):
                 "--local-model", self.config]
         with serve_inference(self.endpoint, decision=STATUS) as requests:
             with interrupt_worker_delivery(n, self.provider_token, args, committed=False):
-                decision = json.loads(self.pending.read_bytes())["request"]
+                decision = json.loads(self.pending.read_bytes())["record"]["request"]
                 lease = decision["lease_id"]
                 before = self.provider_call("Model.ReportFailure", self.failure_report(session, lease, "Unknown"))
                 self.assertEqual((before["lifecycle"], before["outcome_knowledge"]), ("Paused", "Unknown"))
@@ -290,7 +290,7 @@ class ModelLateDecisionTests(unittest.TestCase):
                 "--local-model", self.config, "--wait-ms", "1000", "--once"]
         with serve_inference(self.endpoint, decision=STATUS, usage=WIRE_USAGE) as requests:
             with interrupt_worker_delivery(n, self.provider_token, args, committed=False):
-                saved = json.loads(self.pending.read_bytes())
+                saved = json.loads(self.pending.read_bytes())["record"]
                 self.assertEqual(saved["format"], 4, saved)
                 self.assertEqual(saved["queue_model"], self.model, saved)
                 self.assertEqual(saved["request"]["session_id"], session)

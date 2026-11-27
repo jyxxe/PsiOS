@@ -31,6 +31,7 @@ jobs:
           PSIOS_TEST_OCI_KERNEL_LIMITS: "1"
           PSIOS_TEST_OCI_EFFECTIVE_MOUNTS: "1"
           PSIOS_TEST_OCI_CATALOG_CUT: "1"
+          PSIOS_TEST_OCI_STARTUP_HEALTH: "1"
         run: |
           if ! command -v strace; then
             sudo timeout 180 apt-get install -y --no-install-recommends strace

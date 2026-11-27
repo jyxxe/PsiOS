@@ -285,7 +285,9 @@ Core 通过已打开的目录和文件描述符流式校验私有普通文件。
 
 重启需独立审批。Core 在调用 OCI 引擎前核对启动身份并持久记录检查点，在回执中保存同一容器和 Linux 启动下的新启动身份。未知结果保留应用与卷的操作约束。用新的观察制品对账，确认后登记在原 Task 与 Operation 下。[真实 OCI 引擎验收](../tests/oci_restart.py)
 
-从格式 74 起，安装或暂存 OCI Release 时，可在直接请求或签名制品的 `install` 段显式加入 `health_check`。字段为 `argv`、`interval_ms`、`timeout_ms` 和 `retries`。按镜像配置摘要核对 Docker 的 exec 形式 `CMD`，要求命令和时间设置与批准输入完全一致。探针最多 16 个参数，首项为容器内的绝对路径。间隔为 1000 至 60000 毫秒，探针进程超时为 100 至 5000 毫秒且不得超过间隔，重试次数为 1 至 5。启动宽限和独立启动间隔暂不可用。省略该字段时 Docker 健康检查保持禁用。[真实健康检查验收](../tests/oci_health.py) · [Docker HEALTHCHECK](https://docs.docker.com/reference/dockerfile/#healthcheck)
+从格式 74 起，安装或暂存 OCI Release 时，可在直接请求或签名制品的 `install` 段显式加入 `health_check`。字段为 `argv`、`interval_ms`、`timeout_ms` 和 `retries`。按镜像配置摘要核对 Docker 的 exec 形式 `CMD`，要求命令和时间设置与批准输入完全一致。探针最多 16 个参数，首项为容器内的绝对路径。间隔为 1000 至 60000 毫秒，探针进程超时为 100 至 5000 毫秒且不得超过间隔，重试次数为 1 至 5。省略 `health_check` 时 Docker 健康检查保持禁用。
+
+格式 129 允许成对指定 `start_period_ms` 和 `start_interval_ms`，由 Docker Engine 25.0 及更新版本执行。启动间隔为 1000 至 60000 毫秒，须至少等于探针超时且严格短于至多 120000 毫秒的宽限期。两项设置在镜像准入和容器实际配置中均须与批准值精确一致。Docker 在启动阶段按指定间隔探测，成功即可进入 `Ready`。 [真实健康检查验收](../tests/oci_health.py) · [Docker HEALTHCHECK](https://docs.docker.com/reference/dockerfile/#healthcheck)
 
 `health_check_ref` 固定经核验的镜像探针。原始批准、固定发布物和镜像摘要共同绑定是否启用及全部参数。容器启动前核对生效配置。探针沿用应用的非 root UID、只读根文件系统、挂载和网络隔离。Docker 单独管理启动探针进程的等待时间。`application.health`、`application.refresh`、`application.inspect_instance` 和启动核实均按当前容器调用的近期样本报告健康和就绪。初始检查未完成时，健康为 `Unknown`，就绪为 `NotReady`。通过历史证据对账后，已启用探针的运行应用保持 `Unknown`，直到下次观测。探针的标准输出和错误输出留在 Docker 引擎内。[Docker 健康监视实现](https://raw.githubusercontent.com/moby/moby/v28.5.2/daemon/health.go)
 

@@ -9,6 +9,7 @@ pub(crate) use admission::migrate;
 pub(super) use admission::record;
 
 pub(crate) const FORMAT: u32 = crate::events::scopes::FORMAT + 1;
+pub(crate) const STARTUP_FORMAT: u32 = host::READ_PUBLICATION_FORMAT + 1;
 const DEFAULT: &str = "oci-health";
 const KIND: &str = "OCIImageHealthCheck";
 const PROFILE: &str = "DockerImageExecV1";
@@ -21,6 +22,10 @@ pub(crate) struct Probe {
     interval_ms: u32,
     timeout_ms: u32,
     retries: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_period_ms: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_interval_ms: Option<u32>,
 }
 
 impl Probe {
@@ -43,6 +48,21 @@ impl Probe {
                 && (1..=5).contains(&self.retries),
             "InvalidArgument",
             "OCI probe requires an absolute executable, bounded argv, interval, timeout and retries",
+        )?;
+        let startup_allowed = match (self.start_period_ms, self.start_interval_ms) {
+            (None, None) => true,
+            (Some(period), Some(interval)) => {
+                period <= 120_000
+                    && (1_000..=60_000).contains(&interval)
+                    && self.timeout_ms <= interval
+                    && interval < period
+            }
+            _ => false,
+        };
+        require(
+            startup_allowed,
+            "InvalidArgument",
+            "OCI startup health requires a grace period and a bounded startup interval shorter than that period",
         )
     }
 
@@ -72,9 +92,15 @@ impl Probe {
             && value["Interval"].as_u64() == Some(u64::from(self.interval_ms) * NS_PER_MS)
             && value["Timeout"].as_u64() == Some(u64::from(self.timeout_ms) * NS_PER_MS)
             && value["Retries"].as_u64() == Some(u64::from(self.retries))
-            && ["StartPeriod", "StartInterval"]
-                .into_iter()
-                .all(|key| value.get(key).is_none_or(|value| value.as_u64() == Some(0)))
+            && [
+                ("StartPeriod", self.start_period_ms),
+                ("StartInterval", self.start_interval_ms),
+            ]
+            .into_iter()
+            .all(|(key, duration)| match duration {
+                Some(ms) => value[key].as_u64() == Some(u64::from(ms) * NS_PER_MS),
+                None => value.get(key).is_none_or(|value| value.as_u64() == Some(0)),
+            })
     }
 
     pub(super) fn require_image(&self, image: &Value) -> Result<()> {
@@ -340,6 +366,8 @@ mod tests {
             interval_ms: 1000,
             timeout_ms: 200,
             retries: 2,
+            start_period_ms: None,
+            start_interval_ms: None,
         }
     }
 
@@ -366,6 +394,41 @@ mod tests {
         let mut unbounded = probe;
         unbounded.timeout_ms = 2000;
         assert_eq!(unbounded.validate().unwrap_err().0.code, "InvalidArgument");
+    }
+
+    #[test]
+    fn startup_health_requires_exact_explicit_engine_timings() {
+        let mut probe = profile();
+        assert!(json!(probe).get("start_period_ms").is_none());
+        assert!(json!(probe).get("start_interval_ms").is_none());
+        probe.start_period_ms = Some(12_000);
+        assert_eq!(probe.validate().unwrap_err().0.code, "InvalidArgument");
+        probe.start_interval_ms = Some(1_000);
+        probe.validate().unwrap();
+        let engine = json!({"Test":["CMD","/probe","--ready"],"Interval":1_000_000_000,
+            "Timeout":200_000_000,"Retries":2,"StartPeriod":12_000_000_000u64,"StartInterval":1_000_000_000});
+        assert!(probe.matches_config(&engine));
+        assert!(!profile().matches_config(&engine));
+        for field in ["StartPeriod", "StartInterval"] {
+            let mut missing = engine.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(!probe.matches_config(&missing), "{field}");
+        }
+        for (period, interval) in [
+            (120_001, 1_000),
+            (2_000, 999),
+            (1_000, 1_000),
+            (65_000, 60_001),
+        ] {
+            probe.start_period_ms = Some(period);
+            probe.start_interval_ms = Some(interval);
+            assert_eq!(probe.validate().unwrap_err().0.code, "InvalidArgument");
+        }
+        probe.start_period_ms = Some(12_000);
+        probe.start_interval_ms = Some(1_000);
+        probe.interval_ms = 2_000;
+        probe.timeout_ms = 1_500;
+        assert_eq!(probe.validate().unwrap_err().0.code, "InvalidArgument");
     }
 
     #[test]

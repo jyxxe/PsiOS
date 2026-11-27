@@ -2,7 +2,7 @@
 """Verify the first managed boot of a staged native PsiOS update."""
 
 import argparse
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import fcntl
 import hashlib
 import json
@@ -13,24 +13,24 @@ import stat
 import struct
 import subprocess
 import sys
-from tempfile import TemporaryDirectory
 import uuid
 
-from activation_guest import boot_candidate
+from activation_guest import artifact_digest, boot_candidate, bound_artifacts, open_file
 from activation_storage import BUILD_RECEIPT, BootStorage
 from create import MIB, boot_media, read_receipt
 from install import (
-    JOURNAL, JOURNAL_LIMIT, checked_digest, digest, lock_directory, require, save_operation,
+    JOURNAL, JOURNAL_LIMIT, checked_digest, digest, encode, lock_directory, require, save_operation,
     timestamp, valid_instant,
 )
 from install_target import filesystem_type
-from stage_update import identity, require_unchanged
+from stage_update import identity, rename_noreplace, require_unchanged
 
 
 DISK = "managed.raw"
 CODE = "managed-ovmf-code.fd"
 VARS = "managed-efi-vars.fd"
 FIRMWARE_LIMIT = 16 * MIB
+PREPARATION = "preparing.json"
 
 
 def bytes_at(path, limit):
@@ -162,8 +162,8 @@ def stage_contract(bundle, stage_sha256):
         raise ValueError("staged update lineage is incomplete") from error
 
 
-def read_operation(directory):
-    path = Path(f"/proc/{os.getpid()}/fd/{directory}") / JOURNAL
+def read_operation(directory, name=JOURNAL):
+    path = Path(f"/proc/{os.getpid()}/fd/{directory}") / name
     with boot_media.regular_file(path) as stream:
         info = os.fstat(stream.fileno())
         require(info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) == 0o600 and info.st_nlink == 1,
@@ -198,41 +198,105 @@ def read_operation(directory):
     return entry
 
 
-def prepare(directory, work, args):
-    require(not os.listdir(directory), "plan requires a new empty managed activation state directory")
+@contextmanager
+def anonymous_file(directory):
+    fd = os.open(".", os.O_TMPFILE | os.O_RDWR | os.O_CLOEXEC, 0o600, dir_fd=directory)
+    with os.fdopen(fd, "w+b") as stream:
+        os.fchmod(fd, 0o600)
+        yield stream
+
+
+def publish_anonymous(stream, directory, name):
+    os.link(f"/proc/self/fd/{stream.fileno()}", name, dst_dir_fd=directory, follow_symlinks=True)
+
+
+def prepare(directory, args):
+    names = set()
+    with os.scandir(directory) as children:
+        for child in children:
+            require(child.name in (JOURNAL, PREPARATION, DISK, CODE, VARS),
+                    "unrecognized contents in managed activation state directory")
+            names.add(child.name)
+    record = JOURNAL if JOURNAL in names else PREPARATION
+    require(not names or (JOURNAL in names) != (PREPARATION in names),
+            "expected one activation record for existing boot material")
+    existing = read_operation(directory, record) if names else None
+    require(existing is None or existing["status"] == "BootPending",
+            "cannot prepare a plan after a boot has been issued")
     bundle = args.stage_dir.absolute()
     original = args.source_disk.absolute()
     accepted = stage_contract(bundle, checked_digest(args.stage_receipt_sha256))
     with stopped_source(original, accepted["source_sha256"], accepted["size_bytes"]) as frozen:
-        return prepare_frozen(directory, work, args, accepted, bundle, original, frozen)
+        facts = {**accepted, "action": "ManagedNativeFirstBoot", "stage_dir": str(bundle),
+                 "source_disk": str(original), "source_identity": frozen}
+        if existing is not None:
+            require(isinstance(existing["plan"].get("id"), str)
+                    and existing["plan"] == {**facts, "id": existing["plan"]["id"]},
+                    "activation preparation belongs to a different plan")
+        else:
+            plan = {**facts, "id": str(uuid.uuid4())}
+            existing = {"format": 1, "status": "BootPending", "rollback_mode": "ManualRecoveryOnly",
+                        "planned_at": timestamp(), "plan_digest": digest(plan), "plan": plan}
+        inputs = ((bundle / "candidate.raw", DISK, accepted["candidate_sha256"], accepted["size_bytes"]),
+                  (args.ovmf_code, CODE, accepted["firmware_code_sha256"], FIRMWARE_LIMIT),
+                  (args.ovmf_vars, VARS, accepted["firmware_vars_sha256"], FIRMWARE_LIMIT))
+        materialize_plan(directory, names, inputs, existing)
+        return existing
 
 
-def prepare_frozen(directory, work, args, accepted, bundle, original, frozen):
-    with TemporaryDirectory(dir=work, prefix=".activation-inputs-") as staging_dir:
-        staging = Path(staging_dir)
-        for source, name, expected, maximum in (
-                (bundle / "candidate.raw", DISK, accepted["candidate_sha256"], accepted["size_bytes"]),
-                (args.ovmf_code, CODE, accepted["firmware_code_sha256"], FIRMWARE_LIMIT),
-                (args.ovmf_vars, VARS, accepted["firmware_vars_sha256"], FIRMWARE_LIMIT)):
-            copy = staging / name
-            boot_media.pinned_copy(source, copy, expected, maximum)
-            copy.chmod(0o600)
-            require(file_sha256(copy, maximum, flush=True) == expected, "staged activation copy changed")
-        for name in (DISK, CODE, VARS):
-            os.link(staging / name, work / name, follow_symlinks=False)
-    plan = {
-        **accepted,
-        "action": "ManagedNativeFirstBoot",
-        "id": str(uuid.uuid4()),
-        "stage_dir": str(bundle),
-        "source_disk": str(original),
-        "source_identity": frozen,
-    }
-    entry = {"format": 1, "status": "BootPending", "rollback_mode": "ManualRecoveryOnly",
-             "planned_at": timestamp(), "plan_digest": digest(plan), "plan": plan}
-    verify_stopped_source(original, frozen)
-    save_operation(directory, entry)
-    return entry
+def materialize_plan(directory, names, inputs, entry):
+    # Anonymous files disappear on process loss. Only fsynced, verified copies
+    # can acquire a name, after the precise recovery record is durable.
+    require(JOURNAL not in names or names == {JOURNAL, DISK, CODE, VARS},
+            "published activation plan is missing private boot material")
+    with ExitStack() as custody:
+        copies = {}
+        held = {}
+        for source, name, expected, limit in inputs:
+            if name in names:
+                require(file_sha256(source, limit) == expected, "activation input differs from the recorded plan")
+                fd, size = custody.enter_context(open_file(directory, name, writable=True))
+                before = bound_artifacts(directory, [name], [fd])
+                require(size <= limit and artifact_digest(fd, size) == expected
+                        and bound_artifacts(directory, [name], [fd]) == before,
+                        "published activation material differs from plan")
+                held[name] = (fd, before)
+            else:
+                stream = custody.enter_context(anonymous_file(directory))
+                with boot_media.regular_file(source) as src:
+                    boot_media.copy_pinned(src, stream, source, expected, limit)
+                stream.flush()
+                fd = stream.fileno()
+                os.fsync(fd)
+                size = os.fstat(fd).st_size
+                require(0 < size <= limit and artifact_digest(fd, size) == expected,
+                        "staged activation copy changed")
+                copies[name] = stream
+        plan = entry["plan"]
+        verify_stopped_source(Path(plan["source_disk"]), plan["source_identity"])
+        if not names:
+            raw = encode(entry) + b"\n"
+            require(len(raw) <= JOURNAL_LIMIT, "activation plan exceeds its size limit")
+            with anonymous_file(directory) as marker:
+                marker.write(raw)
+                marker.flush()
+                os.fsync(marker.fileno())
+                publish_anonymous(marker, directory, PREPARATION)
+        # A previous process may have died just after linking the marker.
+        if JOURNAL not in names:
+            os.fsync(directory)
+        for name, stream in copies.items():
+            publish_anonymous(stream, directory, name)
+        for name, (fd, before) in held.items():
+            require(bound_artifacts(directory, [name], [fd]) == before,
+                    "published activation material changed during preparation")
+        for name, stream in copies.items():
+            bound_artifacts(directory, [name], [stream.fileno()])
+        verify_stopped_source(Path(plan["source_disk"]), plan["source_identity"])
+        os.fsync(directory)
+        if JOURNAL not in names:
+            rename_noreplace(directory, PREPARATION, directory, JOURNAL)
+            os.fsync(directory)
 
 
 def secret_at(path):
@@ -322,7 +386,13 @@ def main():
         with lock_directory(args.state_dir, owner=os.geteuid()) as directory:
             work = Path(f"/proc/{os.getpid()}/fd/{directory}")
             if args.command == "plan":
-                result = prepare(directory, work, args)
+                result = prepare(directory, args)
+            elif os.path.lexists(work / PREPARATION):
+                require(not os.path.lexists(work / JOURNAL), "conflicting activation records")
+                require(args.command == "inspect", "activation preparation is incomplete; retry the original plan")
+                entry = read_operation(directory, PREPARATION)
+                require(entry["status"] == "BootPending", "invalid activation preparation")
+                result = {**entry, "status": "Preparing"}
             elif args.command == "activate":
                 result = activate(directory, work, args)
             else:

@@ -249,9 +249,61 @@ def interrupted_boot(fixture, work):
     shutil.rmtree(state)
 
 
+def interrupted_plan(fixture, state, work):
+    from native_selection_recovery import kill_controller, traced_controller, wait_for
+
+    # Delay return from the second linkat after the kernel has linked the disk.
+    # The firmware still exists only on anonymous descriptors at this boundary.
+    state.mkdir(mode=0o700)
+    trace = work / "activation-plan-cut.strace"
+    command = fixture.plan_command(state)
+    disk = state / "managed.raw"
+    with traced_controller(command, trace, ["-e", "trace=linkat", "-e",
+                           "inject=linkat:delay_exit=2000ms:when=2"]) as process:
+        wait_for(process, "first published activation disk", lambda: True if disk.exists() else None, 130)
+        kill_controller(process)
+    marker = state / "preparing.json"
+    assert {p.name for p in state.iterdir()} == {marker.name, disk.name}
+    assert_private(marker)
+    assert_private(disk)
+    before = disk.stat()
+    pending = json.loads(marker.read_bytes())
+    inspected = json.loads(succeeded(no_qemu(fixture.inspect(state), work / "inspect-preparation.strace")))
+    assert inspected == {**pending, "status": "Preparing"}
+    rejected(no_qemu(fixture.apply(state, pending["plan_digest"]), work / "incomplete-apply.strace"),
+             r"preparation is incomplete")
+    wrong = work / "activation-alternate.raw"
+    succeeded(invoke(["cp", "--sparse=always", "--reflink=auto", fixture.source, wrong], 90))
+    wrong.chmod(0o600)
+    rejected(invoke(fixture.plan_command(state, source=wrong), 90), r"different plan")
+    wrong.unlink()
+    # Refuse unrelated entries and damaged private material without replacing either.
+    foreign = state / "operator-file"
+    foreign.write_bytes(b"retain")
+    rejected(invoke(command, 60), r"unrecognized contents")
+    assert foreign.read_bytes() == b"retain"
+    foreign.unlink()
+    with disk.open("r+b") as changed:
+        original = changed.read(1)
+        changed.seek(0)
+        changed.write(bytes([original[0] ^ 255]))
+        changed.flush()
+        rejected(invoke(command, 90), r"material differs")
+        changed.seek(0)
+        assert changed.read(1) == bytes([original[0] ^ 255])
+        changed.seek(0)
+        changed.write(original)
+    assert json.loads(marker.read_bytes()) == pending
+    resumed = json.loads(succeeded(invoke(command, 130)))
+    assert resumed == pending and json.loads((state / JOURNAL).read_bytes()) == pending
+    assert os.path.samestat(before, disk.stat()) and {p.name for p in state.iterdir()} == MATERIALIZED | {JOURNAL}
+    assert json.loads(succeeded(invoke(command, 130))) == pending
+    return resumed
+
+
 def verified_boot(fixture, work, candidate, frozen, prior, admin):
     state = work / "verified"
-    plan = fixture.planned(state)
+    plan = interrupted_plan(fixture, state, work)
     staged_digest = candidate["initial_image_sha256"]
     assert managed_bytes(state) == {
         state / "managed.raw": staged_digest,

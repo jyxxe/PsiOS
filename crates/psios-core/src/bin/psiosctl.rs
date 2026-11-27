@@ -1,14 +1,14 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use psios_api::{
-    Client, LocalInventoryModel, OciImageCaptureRequest, OciPublisherSignature, ResourceRef,
-    SessionModel, StatusProvider, TaskOutputRequirement, WorkAdmissionMode, WorkItemPriority,
-    parse,
+    Client, LocalInventoryModel, MAX_SECRET_BYTES, OciImageCaptureRequest, OciPublisherSignature,
+    ResourceRef, SessionModel, StatusProvider, TaskOutputRequirement, WorkAdmissionMode,
+    WorkItemPriority, parse,
 };
 use psios_core::{Config, DEFAULT_BACKUP_MAX_BYTES, MAX_BACKUP_BYTES};
 use serde_json::{Value, json};
 use std::{
     fs,
-    io::{Read, Write},
+    io::{IsTerminal, Read, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::Path,
     path::PathBuf,
@@ -18,6 +18,7 @@ use std::{
     },
     time::Duration,
 };
+use zeroize::Zeroizing;
 
 #[path = "shell/mod.rs"]
 mod shell;
@@ -55,6 +56,11 @@ enum Cmd {
         method: String,
         #[arg(default_value = "-")]
         file: String,
+    },
+    /// Import, rotate or revoke an explicitly authorized local Secret.
+    Secret {
+        #[command(subcommand)]
+        command: SecretCommand,
     },
     /// Renew a completed interval schedule using a JSON request from a file or stdin.
     ScheduleRenew {
@@ -531,6 +537,30 @@ enum WorkAdmissionCommandMode {
 }
 
 #[derive(Subcommand)]
+enum SecretCommand {
+    /// Import UTF-8 bytes from a private file or piped standard input.
+    Put {
+        name: String,
+        #[arg(long, default_value = "-")]
+        value_file: PathBuf,
+    },
+    /// Replace one exact active Secret revision.
+    Rotate {
+        id: String,
+        #[arg(long)]
+        revision: String,
+        #[arg(long, default_value = "-")]
+        value_file: PathBuf,
+    },
+    /// Revoke one exact Secret revision.
+    Revoke {
+        id: String,
+        #[arg(long)]
+        revision: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum ProjectCommand {
     /// Create a Project using a JSON declaration from a file or stdin.
     Create {
@@ -732,6 +762,37 @@ fn read_json(reader: impl Read) -> Result<Value, Box<dyn std::error::Error>> {
     Ok(parse(&bytes)?)
 }
 
+fn secret_input(path: &Path) -> Result<Zeroizing<String>, Box<dyn std::error::Error>> {
+    let limit = MAX_SECRET_BYTES as u64 + 1;
+    let mut bytes = Zeroizing::new(Vec::new());
+    if path == Path::new("-") {
+        let input = std::io::stdin();
+        if input.is_terminal() {
+            return Err("secret input requires a pipe or a private value file".into());
+        }
+        input.take(limit).read_to_end(&mut bytes)?;
+    } else {
+        use rustix::fs::OFlags;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags((OFlags::NOFOLLOW | OFlags::NONBLOCK).bits() as i32)
+            .open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file()
+            || metadata.uid() != rustix::process::geteuid().as_raw()
+            || metadata.mode() & 0o077 != 0
+        {
+            return Err("expected a private regular secret value file owned by the caller".into());
+        }
+        file.take(limit).read_to_end(&mut bytes)?;
+    }
+    if !(1..=MAX_SECRET_BYTES).contains(&bytes.len()) {
+        return Err("secret size outside limit".into());
+    }
+    let value = std::str::from_utf8(&bytes).map_err(|_| "secret input must be valid UTF-8")?;
+    Ok(Zeroizing::new(value.to_owned()))
+}
+
 fn detached_signature(path: &Path) -> Result<OciPublisherSignature, Box<dyn std::error::Error>> {
     let file = fs::OpenOptions::new()
         .read(true)
@@ -895,6 +956,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             json!({"tool": "system.status", "input": {}, "delegation_id": delegation}),
         )?,
         Cmd::Call { method, file } => c.call(&method, input(&file)?)?,
+        Cmd::Secret { command } => serde_json::to_value(match command {
+            SecretCommand::Put { name, value_file } => {
+                c.put_secret(&name, &secret_input(&value_file)?)?
+            }
+            SecretCommand::Rotate {
+                id,
+                revision,
+                value_file,
+            } => c.rotate_secret(&id, &revision, &secret_input(&value_file)?)?,
+            SecretCommand::Revoke { id, revision } => c.revoke_secret(&id, &revision)?,
+        })?,
         Cmd::ScheduleRenew { file } => c.renew_schedule(&serde_json::from_value(input(&file)?)?)?,
         Cmd::Get { id } => c.call("Resource.Get", json!({"id": id}))?,
         Cmd::List { kind, id } => {

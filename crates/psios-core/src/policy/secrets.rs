@@ -1,12 +1,11 @@
 use super::*;
+use psios_api::MAX_SECRET_BYTES;
 use ring::{
     aead, hmac,
     rand::{SecureRandom, SystemRandom},
 };
 use rusqlite::{Connection, OptionalExtension};
 use zeroize::Zeroizing;
-
-const MAX_SECRET_BYTES: usize = 8192;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

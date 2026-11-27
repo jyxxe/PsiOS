@@ -7,6 +7,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+use zeroize::Zeroizing;
 
 /// Four-byte big-endian length followed by exactly one UTF-8 JSON document.
 pub fn read_frame(r: &mut impl Read) -> ApiResult<Vec<u8>> {
@@ -374,6 +375,10 @@ impl Client {
         Ok(bytes)
     }
     pub fn call(&self, method: &str, params: Value) -> ApiResult<Value> {
+        self.call_params(method, params)
+    }
+
+    pub(crate) fn call_params<T: Serialize>(&self, method: &str, params: T) -> ApiResult<Value> {
         let req = self.request(method, params);
         let mut stream = self
             .connect()
@@ -390,10 +395,10 @@ impl Client {
             .set_read_timeout(timeout)
             .and_then(|_| stream.set_write_timeout(timeout))
             .map_err(|_| invalid("socket timeout"))?;
-        write_frame(
-            &mut stream,
-            &serde_json::to_vec(&req).map_err(|_| invalid("request encoding"))?,
-        )?;
+        let mut serialized = Zeroizing::new(Vec::new());
+        serde_json::to_writer(&mut *serialized, &req).map_err(|_| invalid("request encoding"))?;
+        write_frame(&mut stream, &serialized)?;
+        drop(serialized);
         let bytes = read_frame(&mut stream).map_err(|_| {
             ApiError::new(
                 "DependencyUnavailable",
@@ -403,7 +408,7 @@ impl Client {
         Self::response(&req, &bytes)
     }
 
-    fn request(&self, method: &str, params: Value) -> Request {
+    fn request<T>(&self, method: &str, params: T) -> Request<T> {
         Request {
             schema_version: VERSION.into(),
             request_id: id("request"),
@@ -413,7 +418,7 @@ impl Client {
         }
     }
 
-    fn response(request: &Request, bytes: &[u8]) -> ApiResult<Value> {
+    fn response<T>(request: &Request<T>, bytes: &[u8]) -> ApiResult<Value> {
         let response = parse(bytes)?;
         if response["request_id"] != request.request_id {
             return Err(invalid("response correlation mismatch"));

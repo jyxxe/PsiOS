@@ -22,6 +22,8 @@ core_sha=$(awk '$2=="psiosd" {print $1}' rescue-core/SHA256SUMS)
 
 停止 `psiosd` 后，以服务账户执行 `checkpoint`。命令在私有暂存目录中重放 SQLite 崩溃日志，核验数据库、见证、所有者凭据和分块制品，然后刷盘并原子发布目录。清单记录节点、恢复代次、数据库格式、提交头以及实际封存的数据库和日志文件。将回执中的 `manifest_digest` 存入与检查点独立的可信记录。在受保护的位置保管检查点，其中包含 Task 结果、审计和数据库中的密文。卷数据、见证文件和密钥材料需独立保管。
 
+带配对见证和密钥的 `verify`、迁移演练、检查点生成及压缩预检会核对活动 Secret 的密文认证，以及撤销记录与密文的对应关系。完整核验成功时报告 `secret_vault: Verified`。检查点保存原密文，继续与见证和密钥分别保管。[实际密文损坏与检查点拒绝验收](../tests/test_offline.py)
+
 ```bash
 mkdir -m 700 checkpoints
 psiosd --config /etc/psios/core.json checkpoint --output checkpoints/authority

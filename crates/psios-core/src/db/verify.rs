@@ -332,6 +332,7 @@ pub(super) fn verified_witness(
         "RecoveryRequired",
         "local owner credential does not match the authority",
     )?;
+    policy::secrets::verify(copy, &checked.keys)?;
     let witness = match checked.witness.get("pending") {
         None => "Confirmed",
         Some(v) if *v == checked.head => "PendingCommitFinalization",
@@ -375,7 +376,7 @@ impl Store {
         drop(copy);
         let mut report = json!({"node_id":identity.node_id, "database_format":identity.database_format, "migration_required":identity.database_format < CURRENT_FORMAT,
             "sqlite_integrity":"Verified","foreign_keys":"Verified","witness":witness,
-            "owner_rotation":rotation,"copied_bytes":bytes});
+            "owner_rotation":rotation,"secret_vault":"Verified","copied_bytes":bytes});
         if rehearse {
             let witness = tmp.path().join("witness");
             private_dir(&witness, true)?;

@@ -54,6 +54,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
         "Model.Retire" => agent::retire(db, actor, p, "Model"),
         "Model.ClaimNext" => agent::claim_next(db, actor, p),
         "Model.ClaimStatus" => agent::claim_status(db, actor, p),
+        "Model.LeaseStatus" => agent::model_lease_status(db, actor, p),
         "Model.Respond" => agent::respond(db, actor, p),
         "Model.ReportFailure" => agent::inference::report(db, actor, p),
         "Model.ObserveLateDecision" => agent::late_decision::observe(db, actor, p),

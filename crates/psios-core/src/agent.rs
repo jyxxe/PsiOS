@@ -24,7 +24,7 @@ use crate::{
     workflow::session_join,
     *,
 };
-pub(crate) use lease::pending_for_grant;
+pub(crate) use lease::{pending_for_grant, status as model_lease_status};
 use psios_api::{ModelTokenUsage, canonical, id, sha256};
 pub use queue::{claim_next, claim_status};
 pub use registry::{model, retire, skill};

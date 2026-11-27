@@ -840,6 +840,8 @@ Rust SDK 的 `SessionModel::accepts_undeclared_tool_rejection` 默认关闭。�
 
 Core 将新租约的时间元数据随使用量预留一并持久化。同一领取键在租约有效时会返回原时间窗口和上下文，重启后也可按原账目重放。
 
+Provider 可使用 `Model.LeaseStatus` 或 SDK 的 `ModelInvocation::status` 查询已签发的确切 Session、Model 修订和租约。响应只有 `Active` 或 `Ended`。Core 复核当前消费者委托、Provider 授权、会话与工作流状态和截止时间。本机适配器等待推理时定期检查租约，取消或撤权后结束本地连接。已经发送的推理仍按 `Unknown` 记录，并继续遵守原来的结果隔离规则。
+
 `Session.History` 返回模型轮次、子任务和尝试关系。`Session.Cancel` 关闭后续派发并取消已链接的任务。`Session.Extend` 通过 CAS 增加本次会话的轮次上限，根授权额度独立生效。对于可安全重试的失败子任务，`Session.RetryTask` 使用会话 ID、会话预期修订、原 `task_id` 和新 `key`，沿用同一模型决策，在原任务和会话历史中追加记录。接受新的重试前复核主体的 32 个活动会话上限。通过 Provider 队列执行的会话同时遵守固定模型的 128 个活动会话上限。已接受的请求在授权仍有效时可用同一键重获原回执。未知写入继续占用原目标，等待核实。
 
 格式 127 统一 `Session.Open` 与 `agent.session.start` 的消费者目标范围。若原委托设置了 `tool_targets`，其中须同时包含固定的 Skill 和主 Model，Provider 仍须具备覆盖该 Model 的 `model.serve`。领取、模型响应、恢复和工具执行均复核会话的原委托。升级后，缺少任一目标的旧队列会话会在被扫描时进入 `ModelAuthorizationDenied`，所有者仍可查询历史或取消。需要继续执行时，可使用完整的委托新建会话。 [Unix API 验收](../tests/test_model_queue.py)

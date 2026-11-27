@@ -1,5 +1,6 @@
 use super::*;
 pub(super) use crate::policy::deadline::Clock;
+use psios_api::{ModelLeaseStatus, ModelLeaseStatusRequest};
 
 impl Clock {
     pub(super) fn current(&self, db: &Db<'_>, session: &Doc) -> Result<bool> {
@@ -18,6 +19,62 @@ impl Clock {
             ],
             |r| r.get(0),
         )?)
+    }
+}
+
+pub(crate) fn status(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value> {
+    let p: ModelLeaseStatusRequest = decode(request)?;
+    label(&p.session_id)?;
+    label(&p.lease_id)?;
+    let model = registry::pinned(db, &json!(p.model_ref), "Model")?;
+    require(
+        model.spec["provider_principal_id"] == actor,
+        "PermissionDenied",
+        "model lease belongs to another provider",
+    )?;
+    policy::can_target(db, actor, "model.serve", &model.id)?;
+    let session = db
+        .find(&p.session_id)?
+        .filter(|session| {
+            session.kind == "Session" && session.spec["model_ref"] == model.reference()
+        })
+        .ok_or_else(|| err("NotFound", "model lease unavailable"))?;
+    let issued: bool = db.c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_turns WHERE session=?1 AND lease=?2)",
+        params![session.id, p.lease_id],
+        |row| row.get(0),
+    )?;
+    require(issued, "NotFound", "model lease unavailable")?;
+    let active = state(&session) == "ModelInFlight"
+        && session.body["current_lease"] == p.lease_id
+        && still_authorized(db, &session, &model, &p.lease_id)?;
+    Ok(json!({"status": if active { ModelLeaseStatus::Active } else { ModelLeaseStatus::Ended }}))
+}
+
+fn still_authorized(db: &Db<'_>, session: &Doc, model: &Doc, lease_id: &str) -> Result<bool> {
+    let clock = Clock::sample()?;
+    let until = session.body["lease_until"]
+        .as_str()
+        .ok_or_else(|| err("RecoveryRequired", "active model lease has no deadline"))?;
+    if !clock.current(db, session)? || expired(until)? {
+        return Ok(false);
+    }
+    let result = deps(db, session).and_then(|_| session_join::execution(db, session, &clock));
+    match result {
+        Ok(_) => provider_authority::current(db, session, model, lease_id),
+        Err(error)
+            if matches!(
+                error.0.code.as_str(),
+                "DeadlineExceeded"
+                    | "PermissionDenied"
+                    | "Fenced"
+                    | "PreconditionFailed"
+                    | "NotFound"
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error),
     }
 }
 

@@ -164,6 +164,63 @@ class StrictModelProvider(unittest.TestCase):
     def test_queued_transport_uses_the_same_shortened_lease(self):
         self.assert_lease_bounded(queued=True)
 
+    def test_active_lease_status_checks_exact_provider_and_current_consumer_scope(self):
+        node = self.node
+        session = self.open_session()
+        claim = node.call("Model.Claim", {"session_id": session, "key": key()}, self.provider["token"])
+        request = {"session_id": session, "lease_id": claim["lease_id"], "model_ref": self.model}
+        self.assertEqual(node.call("Model.LeaseStatus", request, self.provider["token"]), {"status": "Active"})
+        unrelated, _ = node.agent(["model.serve"])
+        with self.assertRaises(Failure) as wrong_provider:
+            node.call("Model.LeaseStatus", request, unrelated["token"])
+        self.assertEqual(wrong_provider.exception.code, "PermissionDenied")
+        with self.assertRaises(Failure) as wrong_lease:
+            node.call("Model.LeaseStatus", {**request, "lease_id": key()}, self.provider["token"])
+        self.assertEqual(wrong_lease.exception.code, "NotFound")
+        node.call("Grant.Revoke", target(self.grant["grant_ref"]))
+        self.assertEqual(node.call("Model.LeaseStatus", request, self.provider["token"]), {"status": "Ended"})
+        node.stop(signal.SIGKILL)
+        node.start()
+        self.assertEqual(node.call("Model.LeaseStatus", request, self.provider["token"]), {"status": "Ended"})
+        with self.assertRaises(Failure) as history_denied:
+            self.history(session)
+        self.assertEqual(history_denied.exception.code, "PermissionDenied")
+        node.call("Grant.Issue", {"principal_id": self.owner["principal_id"], "actions": ["task.read"],
+                                  "units": 2, "ttl_seconds": 60})
+        self.assertEqual(self.history(session)["tasks"], [])
+
+    def test_session_cancel_stops_stream_wait_before_the_remaining_timeout(self):
+        node = self.node
+        session = self.open_session()
+        configuration = json.loads(self.model_config.read_text())
+        self.model_config.write_text(json.dumps({**configuration, "timeout_ms": 8000}))
+        args = self.step(session, "cancel-blocked-model-transport")
+        command = [node.binaries / "psiosctl", "--socket", node.socket, "--token-file", self.provider_token, *args]
+        received, release = threading.Event(), threading.Event()
+        with serve_inference(self.endpoint, drop_reply=True, gate=(received, release)) as calls:
+            with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as worker:
+                try:
+                    self.assertTrue(received.wait(4), "provider did not send the inference request")
+                    current = node.call("Session.Get", {"id": session}, self.owner["token"])["reference"]
+                    started = time.monotonic()
+                    node.call("Session.Cancel", target(current), self.owner["token"])
+                    output, error = worker.communicate(timeout=3)
+                    self.assertLess(time.monotonic() - started, 3)
+                finally:
+                    release.set()
+                    if worker.poll() is None:
+                        worker.kill()
+            if worker.returncode == 0:
+                self.assertEqual(json.loads(output)["outcome"], "Unknown", output)
+            else:
+                self.assertIn("Fenced", error)
+            self.assertEqual(len(calls), 1)
+        state = node.call("Session.Get", {"id": session}, self.owner["token"])["session"]
+        self.assertEqual((state["lifecycle"], state["outcome_knowledge"]), ("Cancelled", "Unknown"), state)
+        self.assertEqual(state["model_inference_failure"]["source"], "SessionCancelled")
+        self.assertEqual(self.history(session)["tasks"], [])
+        self.assertEqual(self.budget()["model_calls_used"], 1)
+
     def test_pre_send_failure_replays_the_report_then_resumes_with_a_fresh_call(self):
         node = self.node
         session = self.open_session()

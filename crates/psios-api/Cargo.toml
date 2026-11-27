@@ -12,7 +12,7 @@ base64 = "0.22"
 http-body-util = { version = "0.1", optional = true }
 hyper = { version = "1", features = ["client", "http1"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio"], optional = true }
-tokio = { version = "1", features = ["rt", "net", "time"], optional = true }
+tokio = { version = "1", features = ["rt", "net", "time", "io-util"], optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

@@ -9,7 +9,14 @@ use hyper::{Request, StatusCode, body::Bytes, client::conn::http1};
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{cell::Cell, path::PathBuf, time::Duration};
+use std::{
+    cell::Cell,
+    future::{Future, poll_fn},
+    path::PathBuf,
+    pin::pin,
+    task::Poll,
+    time::Duration,
+};
 use tokio::net::UnixStream;
 
 const TOOLS: [&str; 3] = ["node.inventory", "node.devices", "system.status"];
@@ -168,6 +175,31 @@ impl LocalInventoryModel {
         parse(&bytes)
     }
 
+    async fn infer_while_authorized(
+        &self,
+        bytes: Vec<u8>,
+        may_have_started: &Cell<bool>,
+        invocation: Option<&ModelInvocation<'_>>,
+    ) -> ApiResult<Value> {
+        let inference = self.infer(bytes, may_have_started, invocation);
+        let Some(invocation) = invocation else {
+            return inference.await;
+        };
+        let mut inference = pin!(inference);
+        let mut ended = pin!(invocation.wait_ended());
+        poll_fn(|context| {
+            if ended.as_mut().poll(context).is_ready() {
+                return Poll::Ready(Err(ApiError::new(
+                    "Fenced",
+                    "model lease ended during local inference",
+                )
+                .into()));
+            }
+            inference.as_mut().poll(context)
+        })
+        .await
+    }
+
     fn request_body<'a>(&self, context: &'a Value) -> ApiResult<(Vec<u8>, &'a [Value])> {
         self.validate()?;
         if context["model_ref"] != json!(self.model_ref) {
@@ -247,9 +279,12 @@ impl LocalInventoryModel {
             if timeout.is_zero() {
                 return Err(deadline_exceeded());
             }
-            tokio::time::timeout(timeout, self.infer(bytes, may_have_started, invocation))
-                .await
-                .map_err(|_| deadline_exceeded())?
+            tokio::time::timeout(
+                timeout,
+                self.infer_while_authorized(bytes, may_have_started, invocation),
+            )
+            .await
+            .map_err(|_| deadline_exceeded())?
         })?;
         Ok(ModelOutput {
             decision: decode_decision(&response, &self.model_alias, tools)?,

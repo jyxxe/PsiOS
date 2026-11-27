@@ -4,7 +4,7 @@ mod lease;
 #[cfg(feature = "local-inference")]
 mod local;
 use crate::{ApiError, ApiResult, Client, ResourceRef};
-pub use lease::{ModelInvocation, ModelLeaseTiming};
+pub use lease::{ModelInvocation, ModelLeaseStatus, ModelLeaseStatusRequest, ModelLeaseTiming};
 #[cfg(feature = "local-inference")]
 pub use local::LocalInventoryModel;
 use serde::{Deserialize, Serialize};
@@ -189,10 +189,11 @@ impl Client {
             "Model.Claim",
             claim_parameters(json!({"session_id":session,"key":key}), provider),
         )?;
-        Self::decide_claim(session, claim, provider, None)
+        self.decide_claim(session, claim, provider, None)
     }
 
     fn decide_claim(
+        &self,
         session: &str,
         claim: Value,
         provider: &(impl SessionModel + ?Sized),
@@ -249,7 +250,7 @@ impl Client {
             && claim["decision_rejection_policy"]
                 == json!(ModelDecisionRejectionPolicy::UndeclaredToolV1))
         .then_some(ModelDecisionRejectionPolicy::UndeclaredToolV1);
-        let invocation = ModelInvocation::from_claim(&lease_id, &claim)?;
+        let invocation = ModelInvocation::from_claim(self, &lease_id, &claim)?;
         let invoke = || {
             if invocation.remaining_time().is_zero() {
                 return Err(ModelInferenceFailure {
@@ -265,9 +266,7 @@ impl Client {
         };
         let (output, late_decision_model_ref) = match claim.get("inference_outcome_policy") {
             Some(policy) if policy == "Strict" => {
-                let model_ref: ResourceRef =
-                    serde_json::from_value(context["model_ref"].clone())
-                        .map_err(|_| crate::invalid("strict model lease has no model reference"))?;
+                let model_ref = invocation.model_ref().clone();
                 if observe_late && claim["model_ref"] != json!(model_ref) {
                     return Err(crate::invalid(
                         "late decision capability model reference differs",
@@ -405,6 +404,15 @@ mod tests {
         (chrono::Utc::now() + chrono::TimeDelta::seconds(5)).to_rfc3339()
     }
 
+    fn decide_claim(
+        session: &str,
+        claim: Value,
+        provider: &impl SessionModel,
+        model: Option<&ResourceRef>,
+    ) -> ApiResult<Turn> {
+        Client::new("/unused", "").decide_claim(session, claim, provider, model)
+    }
+
     #[test]
     fn model_input_receipt_requires_explicit_provider_support() {
         struct InputProvider(Cell<bool>);
@@ -442,19 +450,17 @@ mod tests {
         }});
         for expected_model in [None, Some(&queued)] {
             assert!(
-                matches!(Client::decide_claim("session-fixture", claim.clone(), &NodeSurvey, expected_model),
+                matches!(decide_claim("session-fixture", claim.clone(), &NodeSurvey, expected_model),
                              Err(error) if error.code == "UnsupportedCapability")
             );
         }
         let mut wrong_model = claim.clone();
         wrong_model["context"]["model_ref"]["version"] = json!("r2");
-        assert!(
-            Client::decide_claim("session-fixture", wrong_model, &provider, Some(&queued)).is_err()
-        );
+        assert!(decide_claim("session-fixture", wrong_model, &provider, Some(&queued)).is_err());
         assert!(!provider.0.get());
         for expected_model in [None, Some(&queued)] {
             assert!(matches!(
-                Client::decide_claim("session-fixture", claim.clone(), &provider, expected_model),
+                decide_claim("session-fixture", claim.clone(), &provider, expected_model),
                 Ok(Turn::Deliver {
                     request: Delivery::Decision(_),
                     ..
@@ -466,7 +472,7 @@ mod tests {
         let receipt = json!({"task_id":"existing-task"});
         claim["completed"] = receipt.clone();
         assert!(
-            matches!(Client::decide_claim("session-fixture", claim, &NodeSurvey, Some(&queued)),
+            matches!(decide_claim("session-fixture", claim, &NodeSurvey, Some(&queued)),
                          Ok(Turn::Completed(previous)) if previous == receipt)
         );
     }
@@ -490,13 +496,12 @@ mod tests {
             "context":{"session_id":"session-fixture","model_ref":model},
             "inference_outcome_policy":"Strict"});
         assert!(matches!(
-            Client::decide_claim("session-fixture", claim.clone(), &provider, Some(&model)),
+            decide_claim("session-fixture", claim.clone(), &provider, Some(&model)),
             Err(error) if error.code == "OutcomeUnknown"
         ));
         assert_eq!(provider.0.get(), 0);
         claim["recovered"] = json!(false);
-        let pending =
-            Client::decide_claim("session-fixture", claim.clone(), &provider, Some(&model));
+        let pending = decide_claim("session-fixture", claim.clone(), &provider, Some(&model));
         assert!(
             matches!(pending, Ok(Turn::Deliver { request: Delivery::Failure(report), late_decision_model_ref: None })
             if report.model_ref == model && report.outcome == ModelInferenceOutcome::Unknown)
@@ -506,7 +511,7 @@ mod tests {
             .unwrap()
             .remove("inference_outcome_policy");
         assert!(matches!(
-            Client::decide_claim("session-fixture", claim, &provider, None),
+            decide_claim("session-fixture", claim, &provider, None),
             Err(error) if error.code == "DependencyUnavailable"
         ));
         assert_eq!(provider.0.get(), 2);
@@ -554,7 +559,7 @@ mod tests {
             "lease_timing":ModelLeaseTiming::from_authority_clock("test-boot", "123", 12345, 1500),
         });
         assert!(matches!(
-            Client::decide_claim("session-fixture", claim.clone(), &provider, Some(&model)),
+            decide_claim("session-fixture", claim.clone(), &provider, Some(&model)),
             Ok(Turn::Deliver {
                 request: Delivery::Decision(_),
                 ..
@@ -562,7 +567,7 @@ mod tests {
         ));
         claim["expires_at"] = json!("2000-01-01T00:00:00Z");
         assert!(matches!(
-            Client::decide_claim("session-fixture", claim, &provider, Some(&model)),
+            decide_claim("session-fixture", claim, &provider, Some(&model)),
             Ok(Turn::Deliver { request: Delivery::Failure(report), .. })
               if report.outcome == ModelInferenceOutcome::NotStarted
         ));

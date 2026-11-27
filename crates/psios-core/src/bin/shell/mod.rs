@@ -77,6 +77,7 @@ struct Shell {
 enum Endpoint {
     Pair,
     Logout,
+    ObserveEnd,
     Node,
     Tasks,
     Task,
@@ -362,7 +363,11 @@ impl Shell {
             .is_ok_and(|mut s| s.authorize(token, now()))
     }
 
-    async fn request(self: Arc<Self>, request: Request<Incoming>) -> Result<HttpResponse, Fault> {
+    async fn request(
+        self: Arc<Self>,
+        request: Request<Incoming>,
+        observing: &AtomicBool,
+    ) -> Result<HttpResponse, Fault> {
         let host = single(request.headers(), header::HOST.as_str());
         if host != Some(self.host.as_str())
             || request.uri().authority().is_some()
@@ -404,6 +409,7 @@ impl Shell {
         let endpoint = match request.uri().path() {
             "/api/session" => Endpoint::Pair,
             "/api/logout" => Endpoint::Logout,
+            "/api/session-end" => Endpoint::ObserveEnd,
             "/api/node" => Endpoint::Node,
             "/api/tasks" => Endpoint::Tasks,
             "/api/task" => Endpoint::Task,
@@ -427,9 +433,28 @@ impl Shell {
 
         let token = single(request.headers(), header::AUTHORIZATION.as_str())
             .and_then(|value| value.strip_prefix("Bearer "))
-            .filter(|value| self.authorized(value))
             .ok_or(UNAUTHENTICATED)?
             .to_owned();
+        if endpoint == Endpoint::ObserveEnd {
+            let _: Empty = serde_json::from_value(body(request).await?).map_err(|_| INVALID)?;
+            let end = {
+                let mut session = self.session.lock().map_err(|_| UNAVAILABLE)?;
+                if !session.accepts(&token, now()) {
+                    return Err(UNAUTHENTICATED);
+                }
+                session.observe_end().ok_or(Fault(
+                    StatusCode::CONFLICT,
+                    "Conflict",
+                    "此会话已有结束通知连接",
+                ))?
+            };
+            observing.store(true, Ordering::Release);
+            end.await.map_err(|_| UNAVAILABLE)?;
+            return Ok(json_response(StatusCode::OK, json!({"ended": true})));
+        }
+        if !self.authorized(&token) {
+            return Err(UNAUTHENTICATED);
+        }
         let data = body(request).await?;
         if endpoint == Endpoint::Logout {
             let _: Empty = serde_json::from_value(data).map_err(|_| INVALID)?;
@@ -549,11 +574,17 @@ async fn serve(
         }
         let shell = shell.clone();
         connections.spawn(async move {
+            let observing = Arc::new(AtomicBool::new(false));
+            let request_observing = observing.clone();
             let service = service_fn(move |request| {
+                let observing = request_observing.clone();
                 let shell = shell.clone();
                 async move {
                     Ok::<_, Infallible>(
-                        shell.request(request).await.unwrap_or_else(Fault::response),
+                        shell
+                            .request(request, &observing)
+                            .await
+                            .unwrap_or_else(Fault::response),
                     )
                 }
             });
@@ -564,14 +595,23 @@ async fn serve(
                 .max_headers(32)
                 .timer(TokioTimer::new())
                 .header_read_timeout(HEADER_WAIT);
-            let _ = timeout(
-                Duration::from_secs(24),
-                protocol.serve_connection(TokioIo::new(stream), service),
-            )
-            .await;
+            let connection = protocol.serve_connection(TokioIo::new(stream), service);
+            tokio::pin!(connection);
+            // Only the authenticated, single passive observer may outlive a
+            // normal HTTP request. Session closure wakes it during shutdown.
+            if timeout(Duration::from_secs(24), connection.as_mut())
+                .await
+                .is_err()
+                && observing.load(Ordering::Acquire)
+            {
+                let _ = connection.await;
+            }
         });
     }
     drop(listener);
+    if let Ok(mut session) = shell.session.lock() {
+        session.close();
+    }
     let _ = timeout(Duration::from_secs(1), async {
         while connections.join_next().await.is_some() {}
     })

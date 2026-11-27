@@ -13,6 +13,7 @@ const previous = byId("previous");
 const next = byId("next");
 
 let bearer = null;
+let sessionRequests = new AbortController();
 let canCancelPending = false;
 const apps = new Map(["node", "tasks"].map(id => [id, {
   window: byId("window-" + id), title: byId("title-" + id),
@@ -34,6 +35,8 @@ function message(element, text, error = false) {
 
 function leave(text, error = false) {
   bearer = null;
+  sessionRequests.abort();
+  sessionRequests = new AbortController();
   canCancelPending = false;
   workspace.hidden = true;
   for (const app of apps.values()) app.state = "closed";
@@ -49,6 +52,15 @@ function leave(text, error = false) {
   code.focus();
 }
 
+async function observeSession(token) {
+  try {
+    await post("/api/session-end", {}, token);
+  } catch {
+    // EOF and connection loss also end the local browser's view of this session.
+  }
+  if (bearer === token) leave("本机会话已结束。请在终端重新启动 Shell。");
+}
+
 async function post(path, body, token = bearer) {
   const headers = { "Content-Type": "application/json" };
   if (token) headers.Authorization = "Bearer " + token;
@@ -56,6 +68,7 @@ async function post(path, body, token = bearer) {
   try {
     response = await fetch(path, {
       method: "POST",
+      signal: sessionRequests.signal,
       headers,
       body: JSON.stringify(body),
       cache: "no-store",
@@ -580,11 +593,14 @@ byId("pair-form").addEventListener("submit", async (event) => {
   if (connect.disabled) return;
   connect.disabled = true;
   message(byId("pair-message"), "正在连接…");
+  const pairingSignal = sessionRequests.signal;
   const submitted = code.value.trim();
   code.value = "";
   try {
     const session = await request("/api/session", { code: submitted }, null);
+    if (pairingSignal.aborted) return;
     bearer = session.token;
+    void observeSession(bearer);
     canCancelPending = session.cancel_pending_tasks === true;
     byId("principal").textContent = session.principal_id;
     pairing.hidden = true;
@@ -592,6 +608,7 @@ byId("pair-form").addEventListener("submit", async (event) => {
     updateDesktop();
     apps.get("node").dock.focus();
   } catch (error) {
+    if (pairingSignal.aborted) return;
     message(byId("pair-message"), error.message, true);
     code.focus();
   } finally {
@@ -622,4 +639,8 @@ byId("logout").addEventListener("click", async () => {
   } finally {
     button.disabled = false;
   }
+});
+
+window.addEventListener("pagehide", () => {
+  leave("请在终端重新启动 Shell。");
 });

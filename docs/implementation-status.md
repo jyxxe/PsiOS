@@ -90,4 +90,4 @@
 
 ## 如何复核
 
-每次合入后可在相应提交的 Actions 中查看各项作业。Linux 作业运行契约、进程故障、真实 Docker 和 systemd 测试；host-package 实际安装并升级；guest-boot 使用该次打出的包启动虚机。独立工作流用 Alpine 构建，在断网的非特权用户空间执行系统测试，随后为主线归档签发证明并在禁网环境核验。主线的 package-provenance 在 .deb 对应的检查通过后签发证明，verify-provenance 独立核验并测试被更改的包将被拒绝。单项通过仅覆盖脚本中的平台与故障条件。v1 原始包的校验报告记录文档一致性，保留在其发布目录内。[宿主 CI](../.github/workflows/core.yml) · [独立 Core CI](../.github/workflows/portable.yml) · [主线运行记录](https://github.com/jyxxe/PsiOS/actions?query=branch%3Amain) · [验收规范](v1/docs/15-acceptance-and-evidence.md)
+每次合入后可在相应提交的 Actions 中查看各项作业。`linux-runtime` 和 `linux-migrations` 分别运行近期系统行为和历史状态验收，包含真实 Docker、systemd、进程故障和原地迁移。`linux` 汇总两组结果，两组均通过时才允许依赖该检查的包证明。`host-package` 实际安装并升级，`guest-boot` 使用该次打出的包启动虚机。独立工作流用 Alpine 构建，在断网的非特权用户空间执行系统测试，随后为主线归档签发证明并在禁网环境核验。`verify-provenance` 独立核验托管包并测试被更改的包将被拒绝。单项通过仅覆盖脚本中的平台与故障条件。v1 原始包的校验报告记录文档一致性，保留在其发布目录内。[宿主 CI](../.github/workflows/core.yml) · [独立 Core CI](../.github/workflows/portable.yml) · [主线运行记录](https://github.com/jyxxe/PsiOS/actions?query=branch%3Amain) · [验收规范](v1/docs/15-acceptance-and-evidence.md)

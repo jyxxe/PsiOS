@@ -368,6 +368,11 @@ impl Store {
             "QuotaExceeded",
             "backup exceeds the local import byte limit",
         )?;
+        require(
+            info.entries <= store.config.backup_max_entries,
+            "QuotaExceeded",
+            "backup exceeds the local import entry limit",
+        )?;
         match fs::symlink_metadata(&path) {
             Ok(_) => {
                 return Err(err(

@@ -16,13 +16,7 @@ pub(crate) fn run(work: &Work, check: &mut impl FnMut() -> Result<()>) -> Result
     let root = capture_root(work)?;
     let before = checked_root_metadata(&root, "UnsupportedCapability")?;
     require_managed_root_mode(before.mode() & 0o777)?;
-    let mut scan = Capture {
-        mode: CaptureMode::MetadataOnly,
-        entries: Vec::new(),
-        total: 0,
-        max_bytes: u64::MAX,
-        check,
-    };
+    let mut scan = Capture::new(CaptureMode::MetadataOnly, u64::MAX, MAX_ENTRIES, check);
     scan.walk(&root, Path::new(""), 0)?;
     let current = capture_root(work)?;
     checked_root_metadata(&current, "Conflict")?;
@@ -40,9 +34,11 @@ pub(crate) fn run(work: &Work, check: &mut impl FnMut() -> Result<()>) -> Result
         "files": scan.entries.len() - directories,
         "directories": directories,
         "fits_payload_limit": scan.total <= work.cfg.backup_max_bytes,
+        "fits_entry_limit": scan.entries.len() <= work.cfg.backup_max_entries,
         "profile": {
             "payload_limit_bytes": work.cfg.backup_max_bytes.to_string(),
-            "entry_limit": MAX_ENTRIES,
+            "entry_limit": work.cfg.backup_max_entries,
+            "entry_hard_limit": MAX_ENTRIES,
             "directory_depth_limit": MAX_CAPTURE_DEPTH,
             "capture_timeout_seconds": work.cfg.backup_capture_timeout_seconds,
         },

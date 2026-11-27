@@ -21,7 +21,7 @@ mod staging;
 pub(crate) mod transfer;
 pub(crate) mod usage;
 use crate::{
-    config::{Config, new_file, private_dir, replace},
+    config::{Config, MAX_BACKUP_ENTRIES as MAX_ENTRIES, new_file, private_dir, replace},
     db::{Db, Doc},
     host::{Action, Work},
     policy, *,
@@ -50,11 +50,24 @@ use std::{
 // widened root using a legacy restore proof.
 pub(crate) const ROOT_MODE_FORMAT: u32 = crate::node::block_device::retirement::FORMAT + 1;
 
-const MAX_ENTRIES: usize = 4096;
+// Predecessor readers refuse manifests above their fixed 4096-entry limit.
+pub(crate) const ENTRY_CAPACITY_FORMAT: u32 =
+    crate::apps::restore_archive::MANIFEST_IDENTITY_FORMAT + 1;
+
 const MAX_CAPTURE_DEPTH: u32 = 32;
-// A capture permits 33 components of 240 bytes per path. Quotes and backslashes
-// can double their JSON representation. Keep room for digests and manifest metadata.
 const MAX_MANIFEST: u64 = 72 * 1024 * 1024;
+// Each captured entry also stores its mode, length, digest, and modification time.
+const MANIFEST_ENTRY_ALLOWANCE: u64 = 256;
+const MANIFEST_HEADER_ALLOWANCE: u64 = 8 * 1024;
+
+fn manifest_entry_bound(path: &str) -> u64 {
+    let escapes = path
+        .bytes()
+        .filter(|byte| matches!(byte, b'"' | b'\\'))
+        .count();
+    (path.len() + escapes) as u64 + MANIFEST_ENTRY_ALLOWANCE
+}
+
 pub fn filename(s: &str) -> Result<()> {
     require(
         !s.is_empty()
@@ -454,6 +467,8 @@ struct Capture<'a> {
     entries: Vec<(Entry, fs::Metadata)>,
     total: u64,
     max_bytes: u64,
+    max_entries: usize,
+    manifest_bound: u64,
     check: &'a mut dyn FnMut() -> Result<()>,
 }
 // Reading can advance atime. All identity, content and permission evidence
@@ -469,7 +484,24 @@ fn same_source(a: &fs::Metadata, b: &fs::Metadata) -> bool {
         && (a.mtime(), a.mtime_nsec()) == (b.mtime(), b.mtime_nsec())
         && (a.ctime(), a.ctime_nsec()) == (b.ctime(), b.ctime_nsec())
 }
-impl Capture<'_> {
+impl<'a> Capture<'a> {
+    fn new(
+        mode: CaptureMode<'a>,
+        max_bytes: u64,
+        max_entries: usize,
+        check: &'a mut dyn FnMut() -> Result<()>,
+    ) -> Self {
+        Self {
+            mode,
+            entries: Vec::new(),
+            total: 0,
+            max_bytes,
+            max_entries,
+            manifest_bound: MANIFEST_HEADER_ALLOWANCE,
+            check,
+        }
+    }
+
     fn walk(&mut self, dir: &File, root: &Path, depth: u32) -> Result<()> {
         (self.check)()?;
         require(
@@ -491,7 +523,7 @@ impl Capture<'_> {
             filename(name)?;
             names.push(name.to_owned());
             require(
-                names.len() + self.entries.len() <= MAX_ENTRIES,
+                names.len() + self.entries.len() <= self.max_entries,
                 "QuotaExceeded",
                 "backup entry limit",
             )?;
@@ -500,12 +532,18 @@ impl Capture<'_> {
         for name in names {
             (self.check)()?;
             require(
-                self.entries.len() < MAX_ENTRIES,
+                self.entries.len() < self.max_entries,
                 "QuotaExceeded",
                 "backup entry limit",
             )?;
             let path = root.join(&name);
             let rel = path.to_str().unwrap();
+            self.manifest_bound += manifest_entry_bound(rel);
+            require(
+                self.manifest_bound <= MAX_MANIFEST,
+                "QuotaExceeded",
+                "backup paths exceed the manifest size limit",
+            )?;
             let stat = statat(dir, name.as_str(), AtFlags::SYMLINK_NOFOLLOW)
                 .map_err(std::io::Error::from)?;
             let ty = FileType::from_raw_mode(stat.st_mode);
@@ -741,16 +779,15 @@ pub(crate) fn backup(
         w.cfg.check_managed_space(root, std::iter::empty(), 1)
     })?;
     let started = now();
-    let mut capture = Capture {
-        mode: CaptureMode::Copy(CaptureOutput::Archive(RestoreDestination {
+    let mut capture = Capture::new(
+        CaptureMode::Copy(CaptureOutput::Archive(RestoreDestination {
             directory: stage.directory(),
             authority: Some(&w.cfg),
         })),
-        entries: vec![],
-        total: 0,
-        max_bytes: w.cfg.backup_max_bytes,
+        w.cfg.backup_max_bytes,
+        w.cfg.backup_max_entries,
         check,
-    };
+    );
     capture.walk(&source, Path::new(""), 0)?;
     let manifest = json!({
         "schema_version": VERSION,
@@ -773,6 +810,11 @@ pub(crate) fn backup(
         "total_bytes": capture.total.to_string()
     });
     let bytes = canonical(&manifest);
+    require(
+        bytes.len() as u64 <= MAX_MANIFEST,
+        "QuotaExceeded",
+        "backup manifest exceeds its byte limit",
+    )?;
     (capture.check)()?;
     w.cfg
         .check_managed_space(stage.directory(), std::iter::once(bytes.len() as u64), 1)?;
@@ -976,6 +1018,7 @@ fn validate_members(m: &BackupManifest, max_bytes: u64) -> Result<u64> {
         "backup length mismatch",
     )?;
     let mut kinds = BTreeMap::new();
+    let mut manifest_bound = MANIFEST_HEADER_ALLOWANCE;
     for entry in &m.entries {
         let mut depth = 0;
         for part in entry.path.split('/') {
@@ -984,7 +1027,7 @@ fn validate_members(m: &BackupManifest, max_bytes: u64) -> Result<u64> {
         }
         let directory = entry.digest.is_none();
         require(
-            depth <= 33
+            depth <= MAX_CAPTURE_DEPTH + 1
                 && entry.mode <= 0o777
                 && (!directory || entry.bytes == 0)
                 && entry
@@ -994,6 +1037,12 @@ fn validate_members(m: &BackupManifest, max_bytes: u64) -> Result<u64> {
                 && kinds.insert(entry.path.as_str(), directory).is_none(),
             "PreconditionFailed",
             "invalid backup entry tree",
+        )?;
+        manifest_bound += manifest_entry_bound(&entry.path);
+        require(
+            manifest_bound <= MAX_MANIFEST,
+            "QuotaExceeded",
+            "backup paths exceed the manifest size limit",
         )?;
     }
     Ok(declared)
@@ -1289,6 +1338,7 @@ pub fn pool_status(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "capacity_bytes": stat.f_blocks.saturating_mul(stat.f_frsize).to_string(),
         "available_bytes": stat.f_bavail.saturating_mul(stat.f_frsize).to_string(),
         "backup_max_bytes": db.cfg.backup_max_bytes.to_string(),
+        "backup_max_entries": db.cfg.backup_max_entries,
         "backup_capture_timeout_seconds": db.cfg.backup_capture_timeout_seconds,
         "failure_domain": "local-filesystem",
         "hard_volume_quota": "Unsupported"
@@ -1339,16 +1389,16 @@ mod capture_tests {
             .set_times(FileTimes::new().set_modified(original_time))
             .unwrap();
         let before = root.metadata().unwrap();
-        let mut capture = Capture {
-            mode: CaptureMode::Copy(CaptureOutput::Archive(RestoreDestination {
+        let mut check = || Ok(());
+        let mut capture = Capture::new(
+            CaptureMode::Copy(CaptureOutput::Archive(RestoreDestination {
                 directory: &out,
                 authority: None,
             })),
-            entries: vec![],
-            total: 0,
-            max_bytes: MAX_BACKUP_BYTES,
-            check: &mut || Ok(()),
-        };
+            MAX_BACKUP_BYTES,
+            MAX_ENTRIES,
+            &mut check,
+        );
         capture.walk(&root, Path::new(""), 0).unwrap();
         capture.confirm_source(&root, &before).unwrap();
 
@@ -1385,16 +1435,16 @@ mod capture_tests {
                 .set_modified(UNIX_EPOCH + Duration::from_secs(1_500_000_000))
                 .unwrap();
             let before = root.metadata().unwrap();
-            let mut capture = Capture {
-                mode: CaptureMode::Copy(CaptureOutput::Archive(RestoreDestination {
+            let mut check = || Ok(());
+            let mut capture = Capture::new(
+                CaptureMode::Copy(CaptureOutput::Archive(RestoreDestination {
                     directory: &out,
                     authority: None,
                 })),
-                entries: vec![],
-                total: 0,
-                max_bytes: MAX_BACKUP_BYTES,
-                check: &mut || Ok(()),
-            };
+                MAX_BACKUP_BYTES,
+                MAX_ENTRIES,
+                &mut check,
+            );
             capture.walk(&root, Path::new(""), 0).unwrap();
             capture.confirm_source(&root, &before).unwrap();
             fs::write(changed.join("added"), b"new").unwrap();

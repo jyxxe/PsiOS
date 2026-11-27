@@ -307,7 +307,9 @@ Rust SDK 的 `Client::prepare_oci_stop_continuation` 与 `psiosctl application-p
 
 ### 估算备份容量
 
-格式 130 登记只读工具 `backup.estimate`。使用与 `backup.create` 相同的卷 ID 和预期修订，并为该卷显式授予 `backup.estimate`。结果给出源数据代次、逻辑字节、文件和目录数量、当前备份上限，以及逻辑载荷是否在上限内。测量和备份共享源树的类型、权限、深度和条目检查。测量期间持有卷读取保留，创建备份时仍会重新校验源和目标空间。 [稀疏文件与实际备份验收](../tests/test_backup_estimate.py)
+格式 130 登记只读工具 `backup.estimate`。使用与 `backup.create` 相同的卷 ID 和预期修订，并为该卷显式授予 `backup.estimate`。结果给出源数据代次、逻辑字节、文件和目录数量，以及载荷和条目数量分别是否在配置上限内。测量期间持有卷读取保留，创建备份时仍会重新校验源和目标空间。 [稀疏文件与实际备份验收](../tests/test_backup_estimate.py)
+
+格式 134 支持 `backup_max_entries` 配置，默认 4096，允许设为 1 到 16384。`StoragePool.Get` 显示配置值。创建备份、直接克隆卷和导入新备份都检查该值。估算在实际数量超过配置且仍位于硬上限内时报告数量和 `fits_entry_limit`。配置调低后，原先验收的备份仍可恢复、激活和离线核验。目录深度上限为 32，清单保持 72 MiB 硬上限，过长路径的总量也会触发容量错误。 [大型目录备份与恢复验收](../tests/test_backup_estimate.py)
 
 ### 核实备份发布回执
 

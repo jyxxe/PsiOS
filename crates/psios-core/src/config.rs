@@ -10,11 +10,17 @@ use std::{
 
 pub const DEFAULT_BACKUP_MAX_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_BACKUP_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
+const DEFAULT_BACKUP_MAX_ENTRIES: usize = 4096;
+pub(crate) const MAX_BACKUP_ENTRIES: usize = 16_384;
 pub(crate) const MAX_QUEUE_LIMIT: u32 = 4096;
 const DEFAULT_BACKUP_CAPTURE_TIMEOUT_SECONDS: u32 = 30;
 
 fn default_backup_max_bytes() -> u64 {
     DEFAULT_BACKUP_MAX_BYTES
+}
+
+fn default_backup_max_entries() -> usize {
+    DEFAULT_BACKUP_MAX_ENTRIES
 }
 
 fn default_backup_capture_timeout_seconds() -> u32 {
@@ -63,6 +69,8 @@ pub struct Config {
     pub authority_reserve: AuthorityReserve,
     #[serde(default = "default_backup_max_bytes")]
     pub backup_max_bytes: u64,
+    #[serde(default = "default_backup_max_entries")]
+    pub backup_max_entries: usize,
     #[serde(default = "default_backup_capture_timeout_seconds")]
     pub backup_capture_timeout_seconds: u32,
 }
@@ -259,6 +267,7 @@ impl Config {
             oci_archive_storage: OciArchiveStorage::default(),
             authority_reserve: AuthorityReserve::default(),
             backup_max_bytes: DEFAULT_BACKUP_MAX_BYTES,
+            backup_max_entries: DEFAULT_BACKUP_MAX_ENTRIES,
             backup_capture_timeout_seconds: DEFAULT_BACKUP_CAPTURE_TIMEOUT_SECONDS,
         }
     }
@@ -379,6 +388,11 @@ impl Config {
             (1..=MAX_BACKUP_BYTES).contains(&self.backup_max_bytes),
             "InvalidArgument",
             "backup maximum must be between 1 byte and 1 TiB",
+        )?;
+        require(
+            (1..=MAX_BACKUP_ENTRIES).contains(&self.backup_max_entries),
+            "InvalidArgument",
+            "backup entry maximum must be between 1 and 16384",
         )?;
         require(
             (1..=86_400).contains(&self.backup_capture_timeout_seconds),

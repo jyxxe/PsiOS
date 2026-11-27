@@ -28,6 +28,8 @@ pub use retention::*;
 pub use schedule::ScheduleRenewalRequest;
 mod secret;
 pub use secret::MAX_SECRET_BYTES;
+mod task_list;
+pub use task_list::*;
 pub use work_admission::*;
 pub use work_admission_blockers::*;
 mod json;

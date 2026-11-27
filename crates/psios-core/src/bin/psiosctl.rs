@@ -1,8 +1,8 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use psios_api::{
     Client, LocalInventoryModel, MAX_SECRET_BYTES, OciImageCaptureRequest, OciPublisherSignature,
-    ResourceRef, SessionModel, StatusProvider, TaskOutputRequirement, WorkAdmissionMode,
-    WorkItemPriority, parse,
+    ResourceRef, SessionModel, StatusProvider, TaskListQuery, TaskOutputRequirement,
+    WorkAdmissionMode, WorkItemPriority, parse,
 };
 use psios_core::{Config, DEFAULT_BACKUP_MAX_BYTES, MAX_BACKUP_BYTES};
 use serde_json::{Value, json};
@@ -77,6 +77,20 @@ enum Cmd {
         kind: Option<String>,
         #[arg(long)]
         id: Option<String>,
+    },
+    /// List exact Task revisions with an optional owner, tool and lifecycle filter.
+    TaskList {
+        #[arg(long)]
+        owner: Option<String>,
+        #[arg(long)]
+        tool: Option<String>,
+        /// Use the Task API spelling, for example WaitingApproval.
+        #[arg(long)]
+        lifecycle: Option<String>,
+        #[arg(long)]
+        limit: Option<u32>,
+        #[arg(long)]
+        cursor: Option<String>,
     },
     Watch {
         cursor: String,
@@ -987,6 +1001,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::List { kind, id } => {
             c.resource_snapshot(kind.as_deref(), id.as_deref(), None, None)?
         }
+        Cmd::TaskList {
+            owner,
+            tool,
+            lifecycle,
+            limit,
+            cursor,
+        } => serde_json::to_value(
+            c.task_list(&TaskListQuery {
+                owner_principal_id: owner,
+                task_type: tool,
+                lifecycle: lifecycle
+                    .map(|value| serde_json::from_value(Value::String(value)))
+                    .transpose()?,
+                limit,
+                cursor,
+            })?,
+        )?,
         Cmd::Watch { cursor, wait_ms } => c.watch_resources(&cursor, None, wait_ms)?,
         Cmd::EventOffset { consumer } => c.event_offset(&consumer)?,
         Cmd::EventAck {

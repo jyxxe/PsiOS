@@ -10,6 +10,7 @@ pub(crate) use history::{archive, history, redact_late_receipt};
 mod recovery;
 pub(crate) mod result_access;
 mod submission;
+pub(crate) mod task_list;
 
 use crate::{
     db::{Db, Doc},

@@ -48,7 +48,9 @@ core_limits，停机升级继承这些限额。
       -drive if=virtio,format=raw,file=node.raw -boot order=c,strict=on \
       -display none -serial stdio -monitor none -nic none
 
-登录后可执行 psiosctl whoami。外部只读核验使用同一归档的
+登录后可执行 psiosctl whoami。含 psios-mcp 的独立 Core 归档也将
+/bin/psios-mcp 纳入部署清单。STDIO 客户端凭独立 Agent 凭据和委托
+按需启动该程序。使用早期归档建盘时保留该归档提供的程序。外部只读核验使用同一归档的
 rescue/inspect.py，选择 --partition 2 --state /psios --uid 1000。
 可用 --secure-boot-key、--secure-boot-cert、--efi-stub 和 --efi-stub-sha256 构建由目标 UEFI 已登记证书签名的统一内核镜像。需要 ukify、sbsign、sbverify 和 OpenSSL。密钥文件须为构建者私有文件。签名证据位于回执的 secure_boot 字段，离线升级沿用同一证书。
 

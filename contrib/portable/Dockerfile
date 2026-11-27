@@ -8,7 +8,7 @@ RUN --mount=type=secret,id=cargo_ca \
     if [ -f /run/secrets/cargo_ca ]; then export CARGO_HTTP_CAINFO=/run/secrets/cargo_ca; fi; \
     cargo build --locked --release --workspace --target=x86_64-unknown-linux-musl
 RUN set -eu; mkdir /out; \
-    for name in psiosd psiosctl; do \
+    for name in psiosd psiosctl psios-mcp; do \
         cp "target/x86_64-unknown-linux-musl/release/$name" "/out/$name"; \
         strip "/out/$name"; \
         chmod 0755 "/out/$name"; \

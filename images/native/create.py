@@ -122,6 +122,8 @@ def install_core(work, archive, digest):
     package = work / "core.tar.gz"
     boot_media.pinned_copy(archive, package, digest, 64 * MIB)
     members = {"psiosd": "bin/psiosd", "psiosctl": "bin/psiosctl", "source-commit": "psios-source"}
+    required = set(members)
+    members["psios-mcp"] = "bin/psios-mcp"
     found = set()
     total = 0
     with tarfile.open(package, "r|gz") as bundle:
@@ -138,7 +140,7 @@ def install_core(work, archive, digest):
             with path.open("xb") as dst:
                 shutil.copyfileobj(bundle.extractfile(entry), dst)
             path.chmod(0o755 if entry.name != "source-commit" else 0o644)
-    if found != members.keys() or not re.fullmatch(r"[0-9a-f]{40}\n", (work / "psios-source").read_text()):
+    if not required.issubset(found) or not re.fullmatch(r"[0-9a-f]{40}\n", (work / "psios-source").read_text()):
         raise ValueError("incomplete Core archive")
 
 
@@ -272,6 +274,13 @@ def host_config(seed, args):
     (seed / "etc").chmod(0o755)
 
 
+def core_programs(work):
+    programs = ["bin/psiosd", "bin/psiosctl"]
+    if (work / "bin/psios-mcp").is_file():
+        programs.append("bin/psios-mcp")
+    return programs
+
+
 def prepare_boot_inputs(work, args):
     base = boot_media.prepare_kernel(work, args.kernel_iso)
     (work / "bin").mkdir()
@@ -286,7 +295,7 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
     sectors = [str(mib * 2048) for start, size, _ in layout.partitions[1:] for mib in (start, size)]
     (work / "psios-storage-layout").write_text(" ".join(sectors) + "\n")
     boot_scripts = ["init", "shutdown", "dhcp", "dhcp-event", "ipv4", "ipv6", "static", "storage", "enroll"]
-    files = ["bin/psiosd", "bin/psiosctl", "psios-source", "psios-disk-uuid", "psios-home-uuid", "psios-storage-layout"]
+    files = [*core_programs(work), "psios-source", "psios-disk-uuid", "psios-home-uuid", "psios-storage-layout"]
     if core_limits:
         boot_scripts.append("core-cgroup")
         (work / "psios-core-limits").write_text(core_limits.kernel_values())
@@ -726,7 +735,7 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
     base = prepare_boot_inputs(candidate_work, args)
     (trial_work / "bin").mkdir()
     # Share the pinned input kernel and binaries, but each initrd is extended independently.
-    for name in ("kernel", "initrd", "bin/psiosd", "bin/psiosctl", "psios-source"):
+    for name in ("kernel", "initrd", *core_programs(candidate_work), "psios-source"):
         shutil.copyfile(candidate_work / name, trial_work / name)
     instance, home_id = prior["state_uuid"], prior["home_uuid"]
     network_profile = prior.get("network_profile")

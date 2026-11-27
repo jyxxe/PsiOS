@@ -48,7 +48,8 @@ class SessionInputFixture:
     def authorize(self, artifact=None, model=None, *, omit=(), actions=None, wildcard=False):
         artifact = artifact or self.artifact
         model = model or self.model
-        targets = [self.node_id, "profile-local", model["resource_id"], artifact["resource_id"]]
+        targets = [self.node_id, "profile-local", model["resource_id"], self.skill["resource_id"],
+                   artifact["resource_id"]]
         return self.grant(self.agent, actions or [
             "session.run", "session.context.read", "task.submit", "task.read", "node.inventory", "artifact.read",
         ], None if wildcard else [value for value in targets if value not in omit])
@@ -201,8 +202,8 @@ class AgentSessionInputs(SessionInputFixture, unittest.TestCase):
             "source": "local-test", "tools": ["volume.read"], "instructions": "Read the allowed volume record."})
         scoped = self.grant(self.agent, ["session.run", "session.context.read", "artifact.read", "task.read",
                             "task.submit", "volume.read"],
-                            [self.node_id, self.model["resource_id"], self.artifact["resource_id"],
-                             volume["resource_id"]])
+                            [self.node_id, self.model["resource_id"], skill["resource_id"],
+                             self.artifact["resource_id"], volume["resource_id"]])
         session = self.opened(self.opening(scoped, skill_ref=skill, provider_queue=True))
         first = self.claimed(session, "before-host-failure")
         source = n.state / "volumes" / volume["resource_id"] / "data"

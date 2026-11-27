@@ -5,6 +5,7 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import json
 import os
+from pathlib import Path
 import signal
 import socket
 import sqlite3
@@ -518,3 +519,105 @@ class ModelQueueTests(unittest.TestCase):
             n.call("Skill.Publish", dict(name="recursive", version="1", tools=["agent.session.start"],
                 source="local-test", license="0BSD", instructions="Schedule more sessions."))
         self.assertEqual(recursion.exception.code, "UnsupportedCapability")
+
+    def test_direct_and_task_session_admission_agree_on_consumer_target_scope(self):
+        n = self.n
+        token = self.agent["token"]
+        model = self.model["resource_id"]
+        skill = self.skill["resource_id"]
+        for allowed in ([model], [skill]):
+            scoped = self.grant_for_start("session.run", *self.tools, tool_targets=allowed)
+            delegation = scoped["delegation_ref"]["resource_id"]
+            with self.assertRaises(Failure) as opening:
+                self.open(grant=scoped)
+            self.assertEqual(opening.exception.code, "PermissionDenied", opening.exception)
+            prepared = n.prepare("agent.session.start", self.blueprint(), token=token, delegation=delegation)
+            with self.assertRaises(Failure) as admission:
+                n.call("Task.Submit", prepared, token)
+            self.assertEqual(admission.exception.code, "PermissionDenied", admission.exception)
+            budget = n.call("Budget.Get", {"id": scoped["budget_ref"]["resource_id"]}, token)
+            self.assertEqual((budget["spent"], budget["reserved"], budget["model_calls_used"]), (0, 0, 0))
+        self.assertEqual(n.call("Resource.List", {"kind": "Session"})["items"], [])
+        self.assertEqual(self.next_turn(), {"available": False})
+
+        allowed = self.grant_for_start("session.run", *self.tools, tool_targets=[model, skill])
+        direct = self.open(grant=allowed, provider_queue=False)
+        task = n.prepare("agent.session.start", self.blueprint(), token=token,
+                         delegation=allowed["delegation_ref"]["resource_id"])
+        launched = n.wait(n.call("Task.Submit", task, token)["task_id"])
+        self.assertEqual((launched["lifecycle"], launched["outcome_knowledge"]), ("Succeeded", "Known"), launched)
+        reference, = launched["result"]["artifact_refs"]
+        session = n.call("Artifact.Read", {"reference": reference}, token)["session_ref"]
+        self.assertEqual(self.status(session)["session"]["origin_task_ref"]["resource_id"], launched["task_id"])
+        direct_claim = n.call("Model.Claim", {"session_id": direct["resource_id"], "key": key()}, self.provider["token"])
+        direct_claim["session_id"] = direct["resource_id"]
+        self.assertEqual(self.finish(direct_claim)["lifecycle"], "Succeeded")
+        queued = self.next_turn()
+        self.assertEqual(queued["session_id"], session["resource_id"])
+        self.assertEqual(self.finish(queued)["lifecycle"], "Succeeded")
+
+
+class SessionTargetScopeUpgradeTests(unittest.TestCase):
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SESSION_SCOPE_PREVIOUS_BIN_DIR"), "requires format-126 Core")
+    def test_format_126_pauses_out_of_scope_queue_without_erasing_history(self):
+        previous = Path(os.environ["PSIOS_TEST_SESSION_SCOPE_PREVIOUS_BIN_DIR"]).resolve()
+        current = Path(os.getenv("PSIOS_TEST_BIN_DIR", "target/debug")).resolve()
+        n = Node(previous)
+        self.addCleanup(n.close)
+        provider, _ = n.agent(["model.serve"])
+        model = n.call("Model.Register", {"name": "model-scope-upgrade", "revision": "1",
+            "provider_principal_id": provider["principal_id"], "lease_seconds": 20,
+            "max_in_flight": 1, "max_context_bytes": 32_768, "max_output_bytes": 8192})
+        skill = n.call("Skill.Publish", {"name": "skill-scope-upgrade", "version": "1",
+            "tools": ["system.status"], "source": "local-test", "license": "0BSD",
+            "instructions": "Read system status when authorized."})
+        actor = n.call("Agent.Register", {"name": "session-scope-upgrade"})
+        token = actor["token"]
+        worker = provider["token"]
+        narrow = n.call("Grant.Issue", {"principal_id": actor["principal_id"], "units": 4,
+            "model_calls": 4, "ttl_seconds": 180, "tool_targets": [model["resource_id"]],
+            "actions": ["session.run", "task.submit", "task.read", "system.status"]})
+        valid = n.call("Grant.Issue", {"principal_id": actor["principal_id"], "units": 4,
+            "model_calls": 4, "ttl_seconds": 180,
+            "tool_targets": [model["resource_id"], skill["resource_id"]],
+            "actions": ["session.run", "task.submit", "task.read", "system.status"]})
+        opening = {"key": key(), "goal": "Check scope across upgrade", "model_ref": model,
+                   "skill_ref": skill, "context_policy": "ReferencesOnly", "max_turns": 2,
+                   "delegation_id": narrow["delegation_ref"]["resource_id"], "provider_queue": True}
+        historical = n.call("Session.Open", dict(opening, provider_queue=False), token)["reference"]["resource_id"]
+        lease = n.call("Model.Claim", {"session_id": historical, "key": key()}, worker)
+        settled = n.call("Model.Respond", {"session_id": historical, "lease_id": lease["lease_id"],
+                         "decision": {"action": "finish", "summary": "Historical conclusion"}}, worker)
+        self.assertEqual(settled["lifecycle"], "Succeeded")
+        history = n.call("Session.History", {"id": historical}, token)
+        opening["key"] = key()
+        stale = n.call("Session.Open", opening, token)["reference"]["resource_id"]
+        authorized = n.call("Session.Open", dict(opening, key=key(),
+                            delegation_id=valid["delegation_ref"]["resource_id"]), token)["reference"]["resource_id"]
+        budget = {"id": narrow["budget_ref"]["resource_id"]}
+        usage = n.call("Budget.Get", budget, token)
+
+        n.stop(signal.SIGKILL)
+        n.daemon[0] = str(current / "psiosd")
+        report = json.loads(subprocess.check_output([*n.daemon, "verify", "--scratch-dir", n.base], timeout=20))
+        self.assertEqual((report["database_format"], report["migration_required"]), (126, True))
+        n.start()
+        with self.assertRaises(Failure) as denied:
+            n.call("Model.Claim", {"session_id": stale, "key": key()}, worker)
+        self.assertEqual(denied.exception.code, "PermissionDenied", denied.exception)
+        next_turn = n.call("Model.ClaimNext", {"model_ref": model, "key": key()}, worker)
+        self.assertEqual(next_turn["session_id"], authorized)
+        waiting = n.call("Session.Get", {"id": stale}, token)
+        self.assertEqual((waiting["session"]["lifecycle"], waiting["session"]["pause_reason"]),
+                         ("Paused", "ModelAuthorizationDenied"))
+        self.assertEqual(n.call("Session.Open", opening, token), waiting)
+        self.assertEqual(n.call("Session.History", {"id": stale}, token)["turns"], [])
+        self.assertEqual(n.call("Session.History", {"id": historical}, token), history)
+        self.assertEqual(n.call("Budget.Get", budget, token), usage)
+        cancelled = n.call("Session.Cancel", target(waiting["reference"]), token)
+        self.assertEqual(cancelled["session"]["lifecycle"], "Cancelled")
+        n.stop()
+        old_writer = subprocess.run([previous / "psiosd", "--config", n.config, "check"],
+                                    capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(old_writer.returncode, 0)
+        self.assertIn("SchemaVersionUnsupported", old_writer.stderr)

@@ -1,10 +1,12 @@
 """Run granted probes through psiosd and real IPv4, IPv6 and DNS-over-TCP sockets."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import json
 import os
 from pathlib import Path
 import signal
 import socket
+import sqlite3
 import struct
 import subprocess
 import unittest
@@ -121,7 +123,8 @@ class NetworkProbeTests(unittest.TestCase):
         listener.settimeout(0.15)
         try:
             with self.assertRaises(TimeoutError):
-                listener.accept()
+                connection, _ = listener.accept()
+                connection.close()
         finally:
             listener.settimeout(5)
 
@@ -218,6 +221,47 @@ class NetworkProbeTests(unittest.TestCase):
                     self.assertLess(result["elapsed_ms"], 5000)
         self.no_connection(service)
         self.no_connection(alternate)
+
+    def test_authority_fences_endpoint_and_measurement_after_dns(self):
+        for name, verified, cancelled in (("revoked", True, False),
+                                          ("revoked_without_endpoint", False, False),
+                                          ("cancelled", True, True)):
+            with self.subTest(case=name):
+                service, resolver = self.listener(), self.listener()
+                self.configure(dict(name=name, endpoint=self.endpoint(service), timeout_ms=5000,
+                                    dns=dict(name=QNAME, resolver=self.endpoint(resolver))))
+                reference = self.registered(name)
+                grant = self.grant(reference)
+                task_id = self.submit(reference, grant)
+                connection, _ = resolver.accept()
+                with connection, connection.makefile("rb") as reader:
+                    connection.settimeout(5)
+                    size, = struct.unpack("!H", reader.read(2))
+                    request = reader.read(size)
+                    self.assertEqual(request[12:], wire_name(QNAME) + struct.pack("!HH", 1, 1))
+                    running = self.n.get(task_id)
+                    self.assertEqual(running["value"]["lifecycle"], "Running")
+                    if cancelled:
+                        self.n.call("Task.Cancel", target(running["reference"]))
+                    else:
+                        self.n.call("Grant.Revoke", target(grant["grant_ref"]))
+                    answers = [record(POINTER, 1, socket.inet_aton("127.0.0.1"))] if verified else []
+                    self.write_frame(connection, dns_reply(request, answers))
+
+                status = self.n.wait(task_id)
+                self.no_connection(service)
+                expected = ("Cancelled", ["Fenced"]) if cancelled else ("Failed", ["PermissionDenied"])
+                self.assertEqual((status["lifecycle"], [item["type"] for item in status["conditions"]]),
+                                 expected, status)
+                self.assertEqual(status["result"], {"availability": "Unavailable", "artifact_refs": []})
+                self.n.stop(signal.SIGKILL)
+                self.n.start()
+                self.assertEqual(self.n.wait(task_id), status)
+                with closing(sqlite3.connect(self.n.state / "state.db")) as db:
+                    self.assertIsNone(db.execute(
+                        "SELECT 1 FROM current WHERE kind='Artifact' AND spec->>'task_id'=?",
+                        (task_id,),
+                    ).fetchone())
 
     def test_authority_fences_stale_target_after_configuration_restart(self):
         service, replacement, disallowed = self.listener(), self.listener(), self.listener()

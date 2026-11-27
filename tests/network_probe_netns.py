@@ -55,7 +55,7 @@ def exercise():
             process.stdin.write(b"configure\n")
             port = int(line(process))
             address = f"[fe80::705%{scope}]:{port}"
-            node = Node("target/debug")
+            node = Node()
             try:
                 node.stop()
                 config = json.loads(node.config.read_text())

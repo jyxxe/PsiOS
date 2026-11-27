@@ -346,7 +346,6 @@ pub fn perform(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Resul
         Action::Routes(q) => network::observe_routes(q, w),
         Action::RouteLookup(q) => network::observe_lookup(q),
         Action::RoutingRules(q) => network::observe_rules(q, w),
-        Action::NetworkProbe(_) => network::probe::perform(w),
         Action::Processes(p) => process::page(&w.target.id, p),
         Action::InspectProcess(expected) => process::inspect(&w.target.id, expected),
         Action::Devices {} => devices(),

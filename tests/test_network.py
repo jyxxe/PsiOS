@@ -16,7 +16,7 @@ from support import Failure, Node
 class NetworkTests(unittest.TestCase):
     @unittest.skipUnless(os.getenv("PSIOS_TEST_BULK_NETWORK"), "requires a network namespace with thousands of scoped addresses")
     def test_large_real_interface_result_can_be_exported(self):
-        n = Node("target/debug")
+        n = Node()
         self.addCleanup(n.close)
         self.assertFalse(Path("/usr/sbin/ip").exists())
         node = n.call("Node.Get", {})["reference"]["resource_id"]
@@ -40,7 +40,7 @@ class NetworkTests(unittest.TestCase):
         self.assertEqual(sum(a["local"].startswith("2001:db8:abcd:") for a in loopback["addr_info"]), 8000)
 
     def test_interface_task_matches_kernel_and_does_not_widen_existing_grants(self):
-        n = Node("target/debug")
+        n = Node()
         self.addCleanup(n.close)
         node = n.call("Node.Get", {})["reference"]["resource_id"]
         for token, delegation in [(n.owner, "owner-delegation"),
@@ -98,7 +98,7 @@ class NetworkTests(unittest.TestCase):
         self.assertEqual(page({"after_ifindex": 4294967295})["interfaces"], [])
 
     def test_route_tasks_match_kernel_and_scope_continuations(self):
-        n = Node("target/debug")
+        n = Node()
         self.addCleanup(n.close)
         node = n.call("Node.Get", {})["reference"]["resource_id"]
         actions = ["task.submit", "task.read", "node.routes"]
@@ -215,7 +215,7 @@ class NetworkTests(unittest.TestCase):
                                check=True)
 
     def test_policy_rules_preserve_kernel_order_and_scope_continuations(self):
-        n = Node("target/debug")
+        n = Node()
         self.addCleanup(n.close)
         node = n.call("Node.Get", {})["reference"]["resource_id"]
         tool = "node.routing_rules"
@@ -322,7 +322,7 @@ class NetworkTests(unittest.TestCase):
             self.assertEqual(read(original)["snapshot_digest"], digest)
 
     def test_route_lookup_matches_kernel_with_rule_selectors(self):
-        n = Node("target/debug")
+        n = Node()
         self.addCleanup(n.close)
         node = n.call("Node.Get", {})["reference"]["resource_id"]
         tool = "node.route_lookup"

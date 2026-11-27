@@ -227,7 +227,7 @@ fn worker(s: Shared, changes: Arc<Changes>, stop: Arc<AtomicBool>, tick: Duratio
             }
         };
         // SQLite and the socket remain available while an issued host operation is in flight.
-        let check_each_stage = matches!(work.action, crate::host::Action::ObserveNetworkProbe(_));
+        let check_each_stage = work.action.is_network_probe();
         let mut check_after = Instant::now();
         let receipt = work.perform_checked(
             |checkpoint| {

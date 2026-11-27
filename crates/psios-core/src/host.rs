@@ -223,6 +223,10 @@ pub enum Action {
     Logs(Target),
 }
 impl Action {
+    pub(crate) fn is_network_probe(&self) -> bool {
+        matches!(self, Self::NetworkProbe(_) | Self::ObserveNetworkProbe(_))
+    }
+
     pub fn parse(tool: &str, input: &Value) -> Result<Self> {
         require(
             policy::TOOLS.contains(&tool),
@@ -760,17 +764,17 @@ impl Work {
 
     pub(crate) fn check_streaming(&self, db: &Db<'_>) -> Result<()> {
         require(
-            matches!(
-                self.action,
-                Action::Backup(_)
-                    | Action::CloneVolume(_)
-                    | Action::VerifyVolumeFile(_)
-                    | Action::RenameFile(_)
-                    | Action::InspectFileRename(_)
-                    | Action::CaptureOciImage(_)
-                    | Action::ObserveNetworkProbe(_)
-                    | Action::RebindRestoredVolume(_)
-            ),
+            self.action.is_network_probe()
+                || matches!(
+                    self.action,
+                    Action::Backup(_)
+                        | Action::CloneVolume(_)
+                        | Action::VerifyVolumeFile(_)
+                        | Action::RenameFile(_)
+                        | Action::InspectFileRename(_)
+                        | Action::CaptureOciImage(_)
+                        | Action::RebindRestoredVolume(_)
+                ),
             "Fenced",
             "host data operation is outside its permit",
         )?;
@@ -787,7 +791,8 @@ impl Work {
         if apps::catalog::is_tool(tool) || apps::is_runtime_observation(tool) {
             self.checkpoint_authority(db)?;
         }
-        if storage::read_holds::reader(&self.action)
+        if self.action.is_network_probe()
+            || storage::read_holds::reader(&self.action)
             || matches!(
                 self.action,
                 Action::InspectFileRename(_)
@@ -802,7 +807,6 @@ impl Work {
                     | Action::ServiceLogs(_)
                     | Action::ServiceLogsSince(_)
                     | Action::ServiceResources(_)
-                    | Action::ObserveNetworkProbe(_)
                     | Action::InspectNetworkTrial(_)
                     | Action::ListAssignedWork(_)
                     | Action::ListAppReleases(_)
@@ -971,7 +975,6 @@ impl Work {
             | Action::Routes(_)
             | Action::RouteLookup(_)
             | Action::RoutingRules(_)
-            | Action::NetworkProbe(_)
             | Action::Mounts {}
             | Action::BlockLayout(_)
             | Action::TrackBlockDevice(_)
@@ -1026,8 +1029,8 @@ impl Work {
             Action::RestartApp(request) => apps::restart::run(self, request, |before| {
                 checkpoint(Checkpoint::OciRestart(before))
             }),
-            Action::ObserveNetworkProbe(_) => {
-                node::network::probe::perform_checked(self, &mut check_streaming)
+            Action::NetworkProbe(_) | Action::ObserveNetworkProbe(_) => {
+                node::network::probe::perform(self, &mut check_streaming)
             }
             Action::NetworkTrial(_) => node::network::trial::perform(&self.target, |boundary| {
                 checkpoint(Checkpoint::NetworkTrial(boundary))

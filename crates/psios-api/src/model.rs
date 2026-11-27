@@ -3,12 +3,14 @@ mod journal;
 mod lease;
 #[cfg(feature = "local-inference")]
 mod local;
+mod usage;
 use crate::{ApiError, ApiResult, Client, ResourceRef};
 pub use lease::{ModelInvocation, ModelLeaseStatus, ModelLeaseStatusRequest, ModelLeaseTiming};
 #[cfg(feature = "local-inference")]
 pub use local::LocalInventoryModel;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+pub use usage::*;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]

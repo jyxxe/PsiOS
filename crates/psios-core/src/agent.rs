@@ -13,6 +13,7 @@ mod registry;
 mod rejected_decision;
 pub(crate) mod session_inputs;
 pub(crate) mod tool_context;
+pub(crate) mod usage;
 pub(crate) mod work_admission_status;
 #[cfg(test)]
 mod work_admission_tests;

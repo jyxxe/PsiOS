@@ -47,11 +47,11 @@ pub(crate) fn status(db: &Db<'_>, actor: &str, request: &Value) -> Result<Value>
     require(issued, "NotFound", "model lease unavailable")?;
     let active = state(&session) == "ModelInFlight"
         && session.body["current_lease"] == p.lease_id
-        && still_authorized(db, &session, &model, &p.lease_id)?;
+        && still_authorized(db, &session, &p.lease_id)?;
     Ok(json!({"status": if active { ModelLeaseStatus::Active } else { ModelLeaseStatus::Ended }}))
 }
 
-fn still_authorized(db: &Db<'_>, session: &Doc, model: &Doc, lease_id: &str) -> Result<bool> {
+pub(super) fn still_authorized(db: &Db<'_>, session: &Doc, lease_id: &str) -> Result<bool> {
     let clock = Clock::sample()?;
     let until = session.body["lease_until"]
         .as_str()
@@ -59,9 +59,12 @@ fn still_authorized(db: &Db<'_>, session: &Doc, model: &Doc, lease_id: &str) -> 
     if !clock.current(db, session)? || expired(until)? {
         return Ok(false);
     }
-    let result = deps(db, session).and_then(|_| session_join::execution(db, session, &clock));
+    let result = deps(db, session).and_then(|(_, _, model)| {
+        session_join::execution(db, session, &clock)?;
+        Ok(model)
+    });
     match result {
-        Ok(_) => provider_authority::current(db, session, model, lease_id),
+        Ok(model) => provider_authority::current(db, session, &model, lease_id),
         Err(error)
             if matches!(
                 error.0.code.as_str(),

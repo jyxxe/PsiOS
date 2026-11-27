@@ -164,6 +164,77 @@ class StrictModelProvider(unittest.TestCase):
     def test_queued_transport_uses_the_same_shortened_lease(self):
         self.assert_lease_bounded(queued=True)
 
+    def test_model_usage_separates_active_settled_and_unknown_charges(self):
+        node = self.node
+        session = self.open_session()
+        params = {"id": session}
+        token = self.owner["token"]
+        window = self.lease_seconds * 1000
+
+        def usage():
+            return node.call("Session.ModelUsage", params, token)
+
+        def claim():
+            result = node.call("Model.Claim", {"session_id": session, "key": key()}, self.provider["token"])
+            return {"session_id": session, "lease_id": result["lease_id"]}
+
+        self.assertEqual((usage()["charged_calls"], usage()["calls"]), (0, []))
+        first = claim()
+        active = usage()
+        self.assertEqual(active["lease_time"], {"active_reserved_ms": window, "settled_ms": 0,
+                                                "retained_unknown_ms": 0, "unmetered_calls": 0})
+        self.assertEqual(active["calls"], [{"turn": 1, "lease_id": first["lease_id"], "outcome": "Active",
+                                           "charged_lease_ms": window, "provider_reported_tokens": None}])
+        node.stop(signal.SIGKILL)
+        node.start()
+        self.assertEqual(usage(), active)
+
+        reported = {"input_tokens": 12, "output_tokens": 3}
+        response = dict(first, decision={"action": "tool", "tool": "system.status", "input": {}}, usage=reported)
+        confirmed = node.call("Model.Respond", response, self.provider["token"])
+        self.assertEqual(node.wait(confirmed["task_id"])["lifecycle"], "Succeeded")
+        self.assertEqual(node.call("Model.Respond", response, self.provider["token"]), confirmed)
+        first_ms = node.call("Resource.Resolve", {"reference": confirmed["usage_ref"]})["value"]["authority_elapsed_lease_ms"]
+
+        second = claim()
+        node.call("Model.ReportFailure", dict(second, model_ref=self.model, outcome="NotStarted"), self.provider["token"])
+        status = node.call("Session.Get", params, token)
+        node.call("Session.Resume", target(status["reference"]), token)
+        third = claim()
+        current = node.call("Session.Get", params, token)
+        node.call("Session.Cancel", target(current["reference"]), token)
+        result = usage()
+        self.assertEqual(result["charged_calls"], 3)
+        self.assertEqual(result["budget_ref"], self.grant["budget_ref"])
+        self.assertEqual(result["session_ref"], node.call("Session.Get", params, token)["reference"])
+        self.assertEqual([call["outcome"] for call in result["calls"]], ["Responded", "NotStarted", "Unknown"])
+        self.assertEqual([call["lease_id"] for call in result["calls"]],
+                         [claim["lease_id"] for claim in (first, second, third)])
+        self.assertEqual([call["provider_reported_tokens"] for call in result["calls"]], [reported, None, None])
+        self.assertEqual(result["calls"][0]["charged_lease_ms"], first_ms)
+        second_ms = result["calls"][1]["charged_lease_ms"]
+        self.assertGreaterEqual(second_ms, 1)
+        self.assertLess(second_ms, window)
+        self.assertEqual(result["calls"][2]["charged_lease_ms"], window)
+        self.assertEqual(result["lease_time"], {"active_reserved_ms": 0, "settled_ms": first_ms + second_ms,
+                                                "retained_unknown_ms": window, "unmetered_calls": 0})
+        self.assertEqual(result["provider_reported"], dict(reported, reported_calls=1))
+        self.assertEqual(self.budget()["model_lease_ms_charged"], first_ms + second_ms + window)
+        self.assertEqual(node.cli(self.owner_token, "session-model-usage", session), result)
+        self.assertEqual(usage(), result)
+
+        other, _ = node.agent(["task.read"])
+        with self.assertRaises(Failure) as unrelated:
+            node.call("Session.ModelUsage", params, other["token"])
+        self.assertEqual(unrelated.exception.code, "PermissionDenied")
+        node.call("Grant.Revoke", target(self.grant["grant_ref"]))
+        with self.assertRaises(Failure) as revoked:
+            usage()
+        self.assertEqual(revoked.exception.code, "PermissionDenied")
+        node.call("Grant.Issue", {"principal_id": self.owner["principal_id"], "actions": ["task.read"],
+                                 "units": 1, "ttl_seconds": 120})
+        self.assertEqual(usage(), result)
+
     def test_active_lease_status_checks_exact_provider_and_current_consumer_scope(self):
         node = self.node
         session = self.open_session()

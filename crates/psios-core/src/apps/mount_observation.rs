@@ -3,7 +3,9 @@ use super::cgroup::Process;
 use crate::{
     Result,
     db::{Db, Doc},
-    err, now, require,
+    err,
+    host::VolumeAccess,
+    now, require,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use rustix::{
@@ -19,6 +21,7 @@ use std::{
 };
 
 pub(crate) const FORMAT: u32 = crate::schedule::admission_delay::FORMAT + 1;
+pub(crate) const READ_ONLY_FORMAT: u32 = crate::node::block::PAGED_INVENTORY_FORMAT + 1;
 const PROFILE: &str = "LinuxLocalOciVolumeV1";
 const EPOCH: &str = "oci-effective-mount-epoch";
 pub(super) const REQUIRED: &str = "mount_observation_required";
@@ -96,18 +99,19 @@ fn namespace(process: &Process, deadline: Instant) -> Result<OwnedFd> {
     )
 }
 
-fn inspect(process: &Process, mount: u64, deadline: Instant) -> Result<()> {
+fn inspect(process: &Process, mount: u64, access: VolumeAccess, deadline: Instant) -> Result<()> {
     let table = process_file(
         process,
         "mountinfo",
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         deadline,
     )?;
-    crate::node::mounts::private_writable_data(File::from(table), mount)
+    crate::node::mounts::private_data_mount(File::from(table), mount, access.read_only())
 }
 
 pub(super) fn observe(
     volume: &Doc,
+    access: VolumeAccess,
     engine: &str,
     container: &str,
     state: &Value,
@@ -154,7 +158,7 @@ pub(super) fn observe(
         "effective OCI /data root differs from the approved volume inode",
     )?;
     let mount = mount_id(&data)?;
-    inspect(&process, mount, access_deadline)?;
+    inspect(&process, mount, access, access_deadline)?;
     let latest = confirm()?;
     process.confirm(container)?;
     let current = directory(&process, access_deadline)?;
@@ -171,14 +175,14 @@ pub(super) fn observe(
         "PreconditionFailed",
         "OCI mount or invocation identity changed during observation",
     )?;
-    inspect(&process, mount, access_deadline)?;
+    inspect(&process, mount, access, access_deadline)?;
     process.confirm(container)?;
     Ok(json!({
         "profile":PROFILE,"volume_ref":volume.reference(),"data_incarnation":volume.body["data_incarnation"],
         "boot_id":boot,"engine_id":engine,"container_id":container,"host_pid":process.pid,"started_at":started,
         "mount_namespace_device":held_namespace.device.to_string(),"mount_namespace_inode":held_namespace.inode.to_string(),
         "mount_id":mount.to_string(),"device":device,"inode":inode,
-        "effective_access":"ReadWrite","observed_at":now()
+        "effective_access":access,"observed_at":now()
     }))
 }
 
@@ -193,7 +197,7 @@ fn positive(value: &Value) -> bool {
     })
 }
 
-pub(super) fn matches(volume: &Doc, report: &Value) -> bool {
+pub(super) fn matches(volume: &Doc, report: &Value, access: VolumeAccess) -> bool {
     let proof = &report[FIELD];
     proof.as_object().is_some_and(|map| map.len() == 15)
         && proof["profile"] == PROFILE
@@ -203,7 +207,7 @@ pub(super) fn matches(volume: &Doc, report: &Value) -> bool {
         && proof["container_id"] == report["container_id"]
         && proof["device"] == volume.spec["device"]
         && proof["inode"] == volume.spec["inode"]
-        && proof["effective_access"] == "ReadWrite"
+        && proof["effective_access"] == json!(access)
         && proof["host_pid"] == report["effective_limits"]["host_pid"]
         && report["effective_limits"]["source"] == "LinuxCgroupV2"
         && proof["started_at"].as_str().is_some_and(valid_time)
@@ -266,21 +270,27 @@ fn check_checkpoint(conn: &Connection, checkpoint: &Doc) -> Result<()> {
         "RecoveryRequired",
         "OCI checkpoint lost its effective mount observation requirement",
     )?;
+    let app_ref = if checkpoint.kind == "OCIStartCheckpoint" {
+        &checkpoint.body["application_ref"]
+    } else {
+        &checkpoint.body["before"]["application_ref"]
+    };
+    let application = crate::db::resolve(conn, app_ref)?;
+    let access = super::selected_volume_access(conn, &application)?;
+    require(
+        !access.read_only() || required(checkpoint),
+        "RecoveryRequired",
+        "read-only OCI checkpoint lost its effective mount observation requirement",
+    )?;
     if required(checkpoint) {
         let volume = crate::db::resolve(conn, &checkpoint.body["volume_ref"])?;
-        let app_ref = if checkpoint.kind == "OCIStartCheckpoint" {
-            &checkpoint.body["application_ref"]
-        } else {
-            &checkpoint.body["before"]["application_ref"]
-        };
-        let application = crate::db::resolve(conn, app_ref)?;
         require(
             volume.kind == "Volume"
                 && application.kind == "Application"
                 && application.spec["volume_id"] == volume.id
                 && application.spec["data_incarnation"] == volume.body["data_incarnation"]
                 && (checkpoint.kind != "OCIRestartCheckpoint"
-                    || matches(&volume, &checkpoint.body["before"])),
+                    || matches(&volume, &checkpoint.body["before"], access)),
             "RecoveryRequired",
             "required OCI checkpoint has no matching effective volume mount",
         )?;
@@ -376,9 +386,10 @@ fn check_settlement(conn: &Connection, checkpoint: &Doc) -> Result<()> {
     let volume = crate::db::resolve(conn, &checkpoint.body["volume_ref"])?;
     let instance = crate::db::resolve(conn, &app.body["instance_ref"])?;
     let report = &app.body["last_observation"];
+    let access = super::selected_volume_access(conn, &application)?;
     require(
         (start || app.body["last_restart_checkpoint_ref"] == reference)
-            && matches(&volume, report)
+            && matches(&volume, report, access)
             && instance.kind == "RuntimeInstance"
             && instance.spec["application_id"] == app.id
             && instance.spec["container_id"] == report["container_id"]

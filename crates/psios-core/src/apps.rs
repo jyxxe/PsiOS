@@ -1,7 +1,7 @@
 //! OCI adapter for a trusted local Docker Engine. No registry pulls, shell or client-provided host paths.
 use crate::{
     db::{Db, Doc},
-    host::{Action, Install, Work},
+    host::{Action, Install, VolumeAccess, Work},
     policy, *,
 };
 use psios_api::{VERSION, id};
@@ -203,6 +203,7 @@ fn launch_from_history(
         "release references do not describe this deployment",
     )?;
     verify_source(&release, &spec)?;
+    let access = release_volume_access(&spec, app.spec["volume_id"].is_string())?;
     let r = &spec.body["resources"];
     let count = |k: &str| {
         r[k].as_str()
@@ -220,11 +221,52 @@ fn launch_from_history(
         "memory_max_bytes": count("memory_max_bytes")?,
         "pids_max": count("pids_max")?,
         "ephemeral_max_bytes": count("ephemeral_max_bytes")?,
+        "volume_access": access,
         "health_check": health::release(conn, &release, &spec, &image)?
     }))?;
     validate(&launch)?;
     Ok(launch)
 }
+
+fn release_volume_access(spec: &Doc, has_volume: bool) -> Result<VolumeAccess> {
+    let bindings = spec.body["permission_requests"]["volume_bindings"]
+        .as_array()
+        .map(Vec::as_slice);
+    match (has_volume, bindings) {
+        (false, Some([])) => Ok(VolumeAccess::ReadWrite),
+        (true, Some([binding]))
+            if binding["manifest_volume_name"] == "data" && binding["mount_path"] == "/data" =>
+        {
+            decode(&binding["requested_access"]).map_err(|_| {
+                err(
+                    "RecoveryRequired",
+                    "selected release has invalid volume access",
+                )
+            })
+        }
+        _ => Err(err(
+            "RecoveryRequired",
+            "selected release does not describe its application volume",
+        )),
+    }
+}
+
+pub(super) fn selected_volume_access(
+    conn: &rusqlite::Connection,
+    app: &Doc,
+) -> Result<VolumeAccess> {
+    let release = crate::db::resolve(conn, &app.spec["release_ref"])?;
+    let spec = crate::db::resolve(conn, &release.body["release_spec_ref"])?;
+    require(
+        release.kind == "ApplicationRelease"
+            && release.body["application_id"] == app.id
+            && spec.kind == "ApplicationReleaseSpec",
+        "RecoveryRequired",
+        "application volume access has no matching release",
+    )?;
+    release_volume_access(&spec, app.spec["volume_id"].is_string())
+}
+
 pub(crate) fn check_selected_publisher(db: &Db<'_>, app: &Doc) -> Result<()> {
     let release = db.resolve(&app.spec["release_ref"])?;
     let spec = db.resolve(&release.body["release_spec_ref"])?;
@@ -238,6 +280,7 @@ pub(crate) fn check_release_selection(db: &Db<'_>, app: &Doc, reference: &Value)
     artifact_install::check_release_source(db, &release)?;
     let spec = db.resolve(&release.body["release_spec_ref"])?;
     publisher::check_launch(db, &release, &spec)?;
+    release_volume_access(&spec, app.spec["volume_id"].is_string())?;
     require(
         app.body["lifecycle"] == "Stopped",
         "PreconditionFailed",
@@ -246,6 +289,11 @@ pub(crate) fn check_release_selection(db: &Db<'_>, app: &Doc, reference: &Value)
 }
 
 fn stage_precondition(app: &Doc, release: &Install) -> Result<()> {
+    require(
+        !release.volume_access().read_only() || app.spec["volume_id"].is_string(),
+        "InvalidArgument",
+        "read-only release access requires a bound application volume",
+    )?;
     require(
         app.body["lifecycle"] != "Uninstalled" && app.spec["name"] == release.name,
         "PreconditionFailed",
@@ -333,18 +381,29 @@ impl Engine<'_> {
                 "effective OCI mount has no approved volume",
             )
         })?;
-        let proof = mount_observation::observe(volume, &engine.id, container, state, || {
-            let latest = self.managed(work, container, start_op)?;
-            require(
-                self.identity()? == engine.id,
-                "PreconditionFailed",
-                "OCI engine changed during effective mount observation",
-            )?;
-            Ok(latest["State"].clone())
-        })?;
+        let access = work
+            .launch
+            .as_ref()
+            .ok_or_else(|| {
+                err(
+                    "RecoveryRequired",
+                    "effective OCI mount has no approved release",
+                )
+            })?
+            .volume_access();
+        let proof =
+            mount_observation::observe(volume, access, &engine.id, container, state, || {
+                let latest = self.managed(work, container, start_op)?;
+                require(
+                    self.identity()? == engine.id,
+                    "PreconditionFailed",
+                    "OCI engine changed during effective mount observation",
+                )?;
+                Ok(latest["State"].clone())
+            })?;
         report[mount_observation::FIELD] = proof;
         require(
-            mount_observation::matches(volume, report),
+            mount_observation::matches(volume, report, access),
             "PreconditionFailed",
             "effective OCI mount disagrees with the observed process",
         )
@@ -641,7 +700,12 @@ pub fn start(
             "UnsupportedCapability",
             "volume path unsupported by OCI adapter",
         )?;
-        args.push(format!("--mount=type=bind,src={path},dst=/data,bind-propagation=rprivate,bind-recursive=disabled"));
+        let access = if s.volume_access().read_only() {
+            ",readonly"
+        } else {
+            ""
+        };
+        args.push(format!("--mount=type=bind,src={path},dst=/data,bind-propagation=rprivate,bind-recursive=disabled{access}"));
     }
     for (k, v) in &s.environment {
         args.push(format!("--env={k}={v}"))
@@ -757,7 +821,7 @@ fn no_entries(value: &Value) -> bool {
     value.is_null() || value.as_array().is_some_and(Vec::is_empty)
 }
 
-fn approved_mounts(data: Option<&std::path::Path>, v: &Value) -> bool {
+fn approved_mounts(data: Option<&std::path::Path>, v: &Value, access: VolumeAccess) -> bool {
     let h = &v["HostConfig"];
     let mounts = &v["Mounts"];
     let declarations = &h["Mounts"];
@@ -775,11 +839,13 @@ fn approved_mounts(data: Option<&std::path::Path>, v: &Value) -> bool {
             mounted["Type"] == "bind"
                 && mounted["Destination"] == "/data"
                 && mounted["Source"] == source
-                && mounted["RW"] == true
+                && mounted["RW"] == !access.read_only()
                 && mounted["Propagation"] == "rprivate"
                 && declared["Type"] == "bind"
                 && declared["Target"] == "/data"
                 && declared["Source"] == source
+                && (declared["ReadOnly"] == access.read_only()
+                    || (!access.read_only() && declared["ReadOnly"].is_null()))
                 && declared["BindOptions"]["Propagation"] == "rprivate"
                 && declared["BindOptions"]["NonRecursive"] == true
         }
@@ -814,7 +880,7 @@ fn verify_static_isolation(
             if matches!(option.as_str(), Some("no-new-privileges" | "no-new-privileges:true")))
     });
     require(
-        approved_mounts(data, v)
+        approved_mounts(data, v, s.volume_access())
             && h["Tmpfs"] == json!({"/tmp":tmpfs_options(s.ephemeral_max_bytes)})
             && v["Config"]["User"] == user
             && h["NetworkMode"] == "none"
@@ -960,6 +1026,11 @@ fn record_release(
     s: &Install,
     r: &Value,
 ) -> Result<Doc> {
+    require(
+        has_volume || !s.volume_access().read_only(),
+        "InvalidArgument",
+        "read-only release access requires a bound application volume",
+    )?;
     let owner = if work.target.kind == "Application" {
         &work.target.owner
     } else {
@@ -1031,7 +1102,7 @@ fn record_release(
         )?
         .reference();
     let bindings = if has_volume {
-        json!([{"manifest_volume_name":"data","mount_path":"/data","requested_access":"ReadWrite"}])
+        json!([{"manifest_volume_name":"data","mount_path":"/data","requested_access":s.volume_access()}])
     } else {
         json!([])
     };
@@ -1151,6 +1222,7 @@ fn attachment(db: &Db<'_>, app: &Doc, op_id: &str, v: &Doc, start: bool) -> Resu
     let mut b = v.body.clone();
     if start {
         let aid = id("attachment");
+        let access = selected_volume_access(db.c, app)?;
         let body = json!({
             "schema_version": VERSION,
             "attachment_id": aid,
@@ -1158,8 +1230,8 @@ fn attachment(db: &Db<'_>, app: &Doc, op_id: &str, v: &Doc, start: bool) -> Resu
             "data_incarnation": v.body["data_incarnation"],
             "node_id": db.meta("authority")?,
             "workload_id": app.id,
-            "requested_access": "ReadWrite",
-            "effective_access": "ReadWrite",
+            "requested_access": access,
+            "effective_access": access,
             "lifecycle": "Attached"
         });
         let a = db.create("VolumeAttachment", &aid, &app.owner, json!({}), body)?;
@@ -1231,14 +1303,12 @@ fn artifact_spec(work: &Work) -> Result<&Install> {
 }
 
 fn stage(db: &Db<'_>, work: &Work, release: &Install, inspection: &Value) -> Result<Value> {
-    let staged = record_release(
-        db,
-        work,
-        &work.target.id,
-        work.target.spec["volume_id"].is_string(),
-        release,
-        inspection,
-    )?;
+    let has_volume = work.target.spec["volume_id"].is_string();
+    let mut release = release.clone();
+    if has_volume && release.volume_access.is_none() {
+        release.volume_access = Some(selected_volume_access(db.c, &work.target)?);
+    }
+    let staged = record_release(db, work, &work.target.id, has_volume, &release, inspection)?;
     Ok(
         artifact_install::retain(db, work, &work.target, &staged, None)?
             .unwrap_or_else(|| staged.reference()),
@@ -1313,11 +1383,13 @@ pub fn started(
     recovered: bool,
 ) -> Result<Value> {
     if let Some(v) = volume {
+        let access = selected_volume_access(db.c, app)?;
         let issued = db.find(&format!("oci-start-{op_id}"))?;
         require(
-            !(db.cfg.oci_effective_volume_observation
+            !(access.read_only()
+                || db.cfg.oci_effective_volume_observation
                 || issued.as_ref().is_some_and(mount_observation::required))
-                || mount_observation::matches(v, r),
+                || mount_observation::matches(v, r, access),
             "OutcomeUnknown",
             "OCI start has no verified effective volume mount",
         )?;

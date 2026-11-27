@@ -296,7 +296,11 @@ fn classify_boot_mount(
     Err(outside())
 }
 
-pub(crate) fn private_writable_data(file: fs::File, observed_mount_id: u64) -> Result<()> {
+pub(crate) fn private_data_mount(
+    file: fs::File,
+    observed_mount_id: u64,
+    read_only: bool,
+) -> Result<()> {
     let mut matched = false;
     for entry in table(file)? {
         let point = match entry.mount_point {
@@ -307,14 +311,14 @@ pub(crate) fn private_writable_data(file: fs::File, observed_mount_id: u64) -> R
             require(
                 !matched
                     && u64::from(entry.mount_id) == observed_mount_id
-                    && !entry.read_only
-                    && !entry.superblock_read_only
+                    && entry.read_only == read_only
+                    && (read_only || !entry.superblock_read_only)
                     && entry.propagation.shared_group.is_none()
                     && entry.propagation.master_group.is_none()
                     && entry.propagation.propagate_from_group.is_none()
                     && !entry.propagation.unbindable,
                 "PreconditionFailed",
-                "effective OCI /data mount is not the approved private writable mount",
+                "effective OCI /data mount access or propagation differs from its approval",
             )?;
             matched = true;
         }
@@ -358,7 +362,7 @@ mod tests {
             let mut table = tempfile::tempfile().unwrap();
             table.write_all(line.as_bytes()).unwrap();
             table.rewind().unwrap();
-            private_writable_data(table, id)
+            private_data_mount(table, id, false)
         };
         let data = "77 51 8:5 /owned /data rw,relatime - ext4 local rw\n";
         check(data, 77).unwrap();

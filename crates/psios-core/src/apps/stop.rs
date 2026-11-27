@@ -81,6 +81,7 @@ fn original_app_binding(
     )?;
     let attachment = if let Some(v) = volume {
         let attachment = crate::db::resolve(conn, &v.body["attachment_refs"][0])?;
+        let access = json!(super::selected_volume_access(conn, app)?);
         let held: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM holds WHERE volume=?1 AND holder=?2)",
             params![v.id, app.id],
@@ -95,7 +96,8 @@ fn original_app_binding(
                 && attachment.body["workload_id"] == app.id
                 && attachment.body["data_incarnation"] == v.body["data_incarnation"]
                 && attachment.body["lifecycle"] == "Attached"
-                && attachment.body["effective_access"] == "ReadWrite"
+                && attachment.body["requested_access"] == access
+                && attachment.body["effective_access"] == access
                 && plan.body["preconditions"]
                     .as_array()
                     .is_some_and(|conditions| {

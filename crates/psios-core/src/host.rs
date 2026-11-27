@@ -53,6 +53,19 @@ pub struct FileWrite {
     pub name: String,
     pub content: String,
 }
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) enum VolumeAccess {
+    #[default]
+    ReadWrite,
+    ReadOnly,
+}
+
+impl VolumeAccess {
+    pub(crate) fn read_only(self) -> bool {
+        self == Self::ReadOnly
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Install {
@@ -68,7 +81,14 @@ pub struct Install {
     pub pids_max: u32,
     pub ephemeral_max_bytes: u64,
     pub volume: Option<Target>,
+    pub(crate) volume_access: Option<VolumeAccess>,
     pub(crate) health_check: Option<apps::health::Probe>,
+}
+
+impl Install {
+    pub(crate) fn volume_access(&self) -> VolumeAccess {
+        self.volume_access.unwrap_or_default()
+    }
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "tool", content = "input", deny_unknown_fields)]
@@ -612,6 +632,11 @@ impl Action {
 
 pub(crate) fn install_target(db: &Db<'_>, actor: &str, install: &Install) -> Result<Doc> {
     let Some(target) = &install.volume else {
+        require(
+            !install.volume_access().read_only(),
+            "InvalidArgument",
+            "read-only volume access requires an approved volume",
+        )?;
         return db.get(policy::PROFILE);
     };
     let volume = db.of(&target.id, "Volume")?;
@@ -1167,22 +1192,6 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
         } else {
             None
         };
-    let mount_observation_required = if volume.is_some() {
-        match a {
-            Action::Start(_) | Action::RestartApp(_) => db.cfg.oci_effective_volume_observation,
-            Action::InspectOciInstance(_) => {
-                db.cfg.oci_effective_volume_observation
-                    || apps::restart::pending_mount_requirement(db, &target)?
-            }
-            Action::Health(_) => start_checkpoint.as_ref().is_some_and(|checkpoint| {
-                db.cfg.oci_effective_volume_observation
-                    || apps::mount_observation::required(checkpoint)
-            }),
-            _ => false,
-        }
-    } else {
-        false
-    };
     let publication_checkpoint = match a {
         Action::InspectFileRename(_) => rename_inspection.map(|(_, checkpoint)| checkpoint),
         Action::InspectBackupPublication(_) => Some(storage::publication::pending(db, &target)?),
@@ -1222,6 +1231,24 @@ pub fn work(db: &Db<'_>, task: Doc, run: Doc, op: Doc, effect: Doc) -> Result<Wo
         Action::InspectOciInstance(_) => Some(apps::launch_spec(db, &target, false)?),
         _ if start_checkpoint.is_some() => Some(apps::launch_spec(db, &target, false)?),
         _ => None,
+    };
+    let mount_observation_required = if volume.is_some() {
+        let observe = db.cfg.oci_effective_volume_observation
+            || launch
+                .as_ref()
+                .is_some_and(|release| release.volume_access().read_only());
+        match a {
+            Action::Start(_) | Action::RestartApp(_) => observe,
+            Action::InspectOciInstance(_) => {
+                observe || apps::restart::pending_mount_requirement(db, &target)?
+            }
+            Action::Health(_) => start_checkpoint
+                .as_ref()
+                .is_some_and(|checkpoint| observe || apps::mount_observation::required(checkpoint)),
+            _ => false,
+        }
+    } else {
+        false
     };
     let restore_image = if let Action::RestoreReleaseImage(input) = &a {
         Some(apps::restore_image::prepare(db, &target, input)?)

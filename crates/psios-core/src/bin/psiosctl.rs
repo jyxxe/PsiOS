@@ -374,6 +374,22 @@ enum Cmd {
         #[arg(long)]
         max_bytes: Option<u64>,
     },
+    /// Release a settled read-only Task's verified unavailable results.
+    TaskAbandonResults {
+        id: String,
+        #[arg(long)]
+        revision: String,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Release a damaged upload by its immutable Artifact reference.
+    ArtifactAbandonUpload {
+        #[arg(long)]
+        reason: String,
+        /// JSON Artifact ResourceRef from a file or stdin.
+        #[arg(default_value = "-")]
+        file: String,
+    },
     /// Export a verified backup to a new directory under a private parent.
     BackupExport {
         #[arg(long)]
@@ -1238,6 +1254,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             revision,
             max_bytes,
         } => c.verify_task_results(&id, &revision, max_bytes)?,
+        Cmd::TaskAbandonResults {
+            id,
+            revision,
+            reason,
+        } => c.abandon_task_results(&id, &revision, &reason)?,
+        Cmd::ArtifactAbandonUpload { reason, file } => {
+            c.abandon_uploaded_artifact(&serde_json::from_value(input(&file)?)?, &reason)?
+        }
         Cmd::BackupExport {
             output,
             file,

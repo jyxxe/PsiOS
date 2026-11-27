@@ -447,11 +447,15 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 
 新预约遵循节点的权威存储预留。已有预约仍可查阅、取消或到期处理。批次遇到写入错误会整批回滚，其他到期预约继续处理。报告的释放量为原制品的逻辑字节数。
 
+只读 Task 的分块永久丢失时，先用 `Task.VerifyResults` 确认 `Unavailable`，再由本机所有者用当前任务修订和理由调用 `Task.AbandonResults`。对应 CLI 是 `task-abandon-results ID --revision REV --reason REASON`。Core 在提交时复核原不可变清单、实际损坏及所有现有保留关系。成功后保留原 Run、Operation 和制品引用，原子移除剩余分块并释放配额。独立回执记录原逻辑占用和实际移除的字节数。[损坏、恢复与配额验收](../tests/test_artifact_abandonment.py)
+
 ## 本机制品暂存与发布
 
 `Artifact.UploadProfile` 公布 `OpaqueBytesV1` 的分块、大小、暂存期限及配额。上传主体需要以本机 Node 为目标的 `artifact.upload` Grant。`Artifact.Stage` 固定提交键、预计字节数、SHA-256、声明媒体类型和期限。`Artifact.Stage.PutChunk` 按已提交偏移接收 128 KiB 定长块及末块。中断后通过 `Artifact.Stage.Get` 取得继续位置，用同一键和输入恢复。
 
 `Artifact.Publish` 重新核对全部字节后原子提交不可变引用及来源，发布重试返回原回执。可见内容的媒体类型为 `application/octet-stream`，提交者提供的媒体类型作为独立声明保留。发布前可以丢弃暂存，过期块由后台回收。读取原始字节需要 `artifact.read`。`Artifact.Withdraw` 使用额外的 `artifact.withdraw` Grant 和确切引用，回收字节并保留审计凭据。
+
+本机 SQLite 上传发生已确认的内容丢失时，同一撤回授权可调用 `Artifact.AbandonUpload`。使用固定的 Artifact 引用和非空理由。`psiosctl artifact-abandon-upload --reason REASON` 从标准输入读取引用。安装、发布版本或 Agent 会话仍持有该引用时，Core 拒绝释放。回执保留原清单、损坏证据以及释放的逻辑和剩余字节。[损坏上传与安装保留验收](../tests/test_artifact_abandonment.py)
 
 `psiosctl artifact-upload ./bundle.bin --key build-1` 和 Rust SDK 的 `Client::upload_artifact` 从已提交偏移继续，`psiosctl artifact` 使用返回的引用导出并校验原始字节。安装适配器可以按固定引用读取已发布制品。[中断、权限、配额和损坏验收](../tests/test_artifact_ingress.py) · [格式 53 升级](../tests/artifact_ingress_upgrade.py)
 

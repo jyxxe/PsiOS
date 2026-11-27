@@ -192,7 +192,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = chat::CAPACITY_FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = artifact::abandonment::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,

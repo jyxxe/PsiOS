@@ -9,6 +9,12 @@ pub struct BlockerPage<T> {
     pub truncated: bool,
 }
 
+impl<T> BlockerPage<T> {
+    fn is_clear(&self) -> bool {
+        self.items.is_empty() && !self.truncated
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskBlocker {
@@ -73,6 +79,24 @@ pub struct NodeWorkAdmissionBlockers {
     pub model_outcomes_unknown: BlockerPage<ModelOutcomeBlocker>,
 }
 
+impl NodeWorkAdmissionBlockers {
+    /// True when every group was observed completely and has no blockers.
+    pub fn is_clear(&self) -> bool {
+        self.tasks.is_clear()
+            && self.exclusive_holds.is_clear()
+            && self.volume_read_holds.is_clear()
+            && self.model_leases.is_clear()
+            && self.model_outcomes_unknown.is_clear()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeWorkQuiescence {
+    pub quiescent: bool,
+    pub blockers: NodeWorkAdmissionBlockers,
+}
+
 impl Client {
     /// Inspect bounded exact blocker references at the observed admission revision.
     pub fn node_work_admission_blockers(
@@ -86,5 +110,34 @@ impl Client {
         )?;
         serde_json::from_value(response)
             .map_err(|_| invalid("invalid node work admission blocker snapshot"))
+    }
+
+    /// Observe Core work at an exact draining admission revision.
+    pub fn node_work_quiescence(
+        &self,
+        expected_resource_version: &str,
+        limit: Option<u32>,
+    ) -> ApiResult<NodeWorkQuiescence> {
+        let response = self.call(
+            "Node.WorkAdmission.Quiescence",
+            json!({"expected_resource_version":expected_resource_version,"limit":limit}),
+        )?;
+        serde_json::from_value(response).map_err(|_| invalid("invalid node quiescence snapshot"))
+    }
+
+    /// Wait for Core work to clear at the exact admission revision.
+    /// At timeout the response reports the latest authorized blockers.
+    pub fn wait_node_work_quiescence(
+        &self,
+        expected_resource_version: &str,
+        limit: Option<u32>,
+        timeout_ms: u32,
+    ) -> ApiResult<NodeWorkQuiescence> {
+        let response = self.call(
+            "Node.WorkAdmission.WaitQuiescent",
+            json!({"expected_resource_version":expected_resource_version,"limit":limit,
+                "timeout_ms":timeout_ms}),
+        )?;
+        serde_json::from_value(response).map_err(|_| invalid("invalid node quiescence snapshot"))
     }
 }

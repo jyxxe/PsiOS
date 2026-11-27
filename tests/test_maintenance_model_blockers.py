@@ -119,6 +119,12 @@ class MaintenanceModelBlockersTests(unittest.TestCase):
             self.assertLess(time.monotonic(), deadline, snapshot)
             time.sleep(0.05)
         self.assertEqual(snapshot["model_outcomes_unknown"], expected_outcome)
+        observed = node.call("Node.WorkAdmission.WaitQuiescent", {
+            "expected_resource_version": draining["version"], "timeout_ms": 100,
+        })
+        self.assertIs(observed["quiescent"], False, observed)
+        self.assertEqual(observed["blockers"]["model_leases"], {"items": [], "truncated": False})
+        self.assertEqual(observed["blockers"]["model_outcomes_unknown"], expected_outcome)
 
 
 if __name__ == "__main__":

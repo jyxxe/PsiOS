@@ -26,6 +26,7 @@ type Shared = Arc<Mutex<Store>>;
 enum WaitCondition {
     Items(&'static str),
     Available,
+    Quiescent,
     Task(Option<i64>),
     Session(Option<i64>),
 }
@@ -63,6 +64,9 @@ impl WaitCondition {
         match self {
             Self::Items(key) => Ok(value[key].as_array().is_some_and(|items| !items.is_empty())),
             Self::Available => Ok(value["available"] == true),
+            Self::Quiescent => value["quiescent"]
+                .as_bool()
+                .ok_or_else(|| err("RecoveryRequired", "quiescence status is missing")),
             Self::Task(None) => Ok(psios_api::task_wait_ready(value)),
             Self::Task(Some(after)) => revision_advanced(
                 &value["task_revision"],
@@ -161,6 +165,9 @@ fn connection(s: &Shared, stream: &mut UnixStream, stop: &AtomicBool) -> Result<
             }
             "Mailbox.Wait" => Some(("Mailbox.Read", WaitCondition::Items("items"))),
             "Model.WaitNext" => Some(("Model.ClaimNext", WaitCondition::Available)),
+            "Node.WorkAdmission.WaitQuiescent" => {
+                Some(("Node.WorkAdmission.Quiescence", WaitCondition::Quiescent))
+            }
             "Task.Wait" => Some((
                 "Task.Get",
                 WaitCondition::Task(wait_after(

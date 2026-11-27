@@ -510,6 +510,14 @@ enum Cmd {
         #[arg(long)]
         limit: Option<u32>,
     },
+    /// Observe Core work at a draining revision, optionally waiting for it to clear.
+    NodeWorkAdmissionQuiescence {
+        revision: String,
+        #[arg(long)]
+        limit: Option<u32>,
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=10_000))]
+        wait_ms: Option<u32>,
+    },
     Validate {
         contract: String,
         #[arg(default_value = "-")]
@@ -872,6 +880,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::NodeWorkAdmissionBlockers { revision, limit } => {
             serde_json::to_value(c.node_work_admission_blockers(&revision, limit)?)?
         }
+        Cmd::NodeWorkAdmissionQuiescence {
+            revision,
+            limit,
+            wait_ms,
+        } => serde_json::to_value(match wait_ms {
+            Some(timeout) => c.wait_node_work_quiescence(&revision, limit, timeout)?,
+            None => c.node_work_quiescence(&revision, limit)?,
+        })?,
         Cmd::Whoami => c.call("Principal.WhoAmI", json!({}))?,
         Cmd::Capabilities => c.call("Capability.Discover", json!({}))?,
         Cmd::Status { delegation } => c.call(

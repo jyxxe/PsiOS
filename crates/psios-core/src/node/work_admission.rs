@@ -5,8 +5,8 @@ use crate::{
     decode, err, now, policy, require,
 };
 use psios_api::{
-    ModelWorkCounts, NodeWorkAdmissionBlockers, TaskWorkCounts, WorkAdmissionMode,
-    WorkAdmissionState,
+    ModelWorkCounts, NodeWorkAdmissionBlockers, NodeWorkQuiescence, TaskWorkCounts,
+    WorkAdmissionMode, WorkAdmissionState,
 };
 use rusqlite::{Connection, params};
 use serde::Deserialize;
@@ -144,7 +144,12 @@ pub(crate) fn get(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     view(db, &record, state)
 }
 
-pub(crate) fn observe_blockers(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
+fn observe(
+    db: &Db<'_>,
+    actor: &str,
+    params: &Value,
+    require_draining: bool,
+) -> Result<NodeWorkAdmissionBlockers> {
     policy::admin(actor)?;
     policy::active(db, actor)?;
     let request: ObserveBlockers = decode(params)?;
@@ -154,9 +159,14 @@ pub(crate) fn observe_blockers(db: &Db<'_>, actor: &str, params: &Value) -> Resu
         "InvalidArgument",
         "work admission blocker limit must be 1 to 64 per group",
     )?;
-    let (record, _) = current(db)?;
+    let (record, state) = current(db)?;
     record.cas(&request.expected_resource_version)?;
-    let response = NodeWorkAdmissionBlockers {
+    require(
+        !require_draining || state.mode == WorkAdmissionMode::Draining,
+        "PreconditionFailed",
+        "node work admission must be draining to observe quiescence",
+    )?;
+    Ok(NodeWorkAdmissionBlockers {
         reference: decode(&record.reference())?,
         observed_at: now(),
         tasks: blockers::tasks(db, limit)?,
@@ -164,8 +174,19 @@ pub(crate) fn observe_blockers(db: &Db<'_>, actor: &str, params: &Value) -> Resu
         volume_read_holds: blockers::volume_read_holds(db, limit)?,
         model_leases: crate::agent::work_admission_status::leases(db, limit)?,
         model_outcomes_unknown: crate::agent::work_admission_status::unknown(db, limit)?,
-    };
-    Ok(serde_json::to_value(response)?)
+    })
+}
+
+pub(crate) fn observe_blockers(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
+    Ok(serde_json::to_value(observe(db, actor, params, false)?)?)
+}
+
+pub(crate) fn quiescence(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
+    let blockers = observe(db, actor, params, true)?;
+    Ok(serde_json::to_value(NodeWorkQuiescence {
+        quiescent: blockers.is_clear(),
+        blockers,
+    })?)
 }
 
 pub(crate) fn set(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {

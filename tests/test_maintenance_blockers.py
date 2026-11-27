@@ -119,6 +119,9 @@ class MaintenanceBlockersTests(unittest.TestCase):
         recovery = [self.accepted(tool, target(operation), delegation) for _, _, operation, _, _ in unresolved]
 
         full = self.blockers(gate, limit=64)
+        quiescence = n.call("Node.WorkAdmission.Quiescence", {"expected_resource_version": gate["version"]})
+        self.assertIs(quiescence["quiescent"], False, quiescence)
+        self.assertEqual(quiescence["blockers"]["exclusive_holds"], full["exclusive_holds"])
         task_page = full["tasks"]
         self.assertFalse(task_page["truncated"], task_page)
         rows = task_page["items"]
@@ -173,6 +176,11 @@ class MaintenanceBlockersTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), content)
         self.assertFalse((n.state / "volumes" / volume["resource_id"] / "data" / "not-approved").exists())
         self.assert_empty(self.blockers(gate))
+        ready = n.call("Node.WorkAdmission.WaitQuiescent", {
+            "expected_resource_version": gate["version"], "timeout_ms": 500,
+        })
+        self.assertIs(ready["quiescent"], True, ready)
+        self.assert_empty(ready["blockers"])
         self.verify()
 
     def test_live_scoped_volume_reader_reports_the_same_task_and_operation_cut(self):

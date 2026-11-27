@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline";
 import { resolve } from "node:path";
 
-const [sdk, command, ...args] = process.argv.slice(2);
+const [sdk, tool, input, command, ...args] = process.argv.slice(2);
 const packagePath = (name) => resolve(sdk, "node_modules", "@modelcontextprotocol", name);
 const manifest = async (name) => JSON.parse(await readFile(resolve(packagePath(name), "package.json"), "utf8"));
 assert.equal((await manifest("ext-tasks")).version, "0.2.3");
@@ -72,7 +72,7 @@ try {
         get invalidated() { return closed; },
     });
     try {
-        const execution = await session.callTool("system.status", {});
+        const execution = await session.callTool(tool, JSON.parse(input));
         assert.equal(execution.kind, "task");
         assert.match(execution.handle.taskId, /^mcp-task-/);
         const { outcome } = await execution.settle();

@@ -22,10 +22,12 @@ use std::{
 };
 
 type Shared = Arc<Mutex<Store>>;
+mod notification;
 
 enum WaitCondition {
     Items(&'static str),
     Available,
+    Quiescent,
     Task(Option<i64>),
     Session(Option<i64>),
 }
@@ -63,6 +65,9 @@ impl WaitCondition {
         match self {
             Self::Items(key) => Ok(value[key].as_array().is_some_and(|items| !items.is_empty())),
             Self::Available => Ok(value["available"] == true),
+            Self::Quiescent => value["quiescent"]
+                .as_bool()
+                .ok_or_else(|| err("RecoveryRequired", "quiescence status is missing")),
             Self::Task(None) => Ok(psios_api::task_wait_ready(value)),
             Self::Task(Some(after)) => revision_advanced(
                 &value["task_revision"],
@@ -161,6 +166,9 @@ fn connection(s: &Shared, stream: &mut UnixStream, stop: &AtomicBool) -> Result<
             }
             "Mailbox.Wait" => Some(("Mailbox.Read", WaitCondition::Items("items"))),
             "Model.WaitNext" => Some(("Model.ClaimNext", WaitCondition::Available)),
+            "Node.WorkAdmission.WaitQuiescent" => {
+                Some(("Node.WorkAdmission.Quiescence", WaitCondition::Quiescent))
+            }
             "Task.Wait" => Some((
                 "Task.Get",
                 WaitCondition::Task(wait_after(
@@ -681,6 +689,8 @@ fn resource_pressure(error: &std::io::Error) -> bool {
 }
 
 pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
+    let notification = notification::Notifier::configured()?;
+    let watchdog_interval = notification.watchdog_interval()?;
     let mut db = Store::open(cfg.clone())?;
     db.transaction("storage-reclamation-custody", |db| retirement::verify(db.c))?;
     db.reclaim_oci_archives()?;
@@ -734,8 +744,22 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
             );
         }
         Ok(())
-    })();
-    if startup.is_ok() {
+    })()
+    .map_err(|error| {
+        err(
+            "DependencyUnavailable",
+            format!("could not start Core workers: {error}"),
+        )
+    })
+    .and_then(|_| {
+        let ready = !stop.load(Ordering::Acquire);
+        if ready {
+            notification.ready()?;
+        }
+        Ok(ready)
+    });
+    let announced = matches!(startup, Ok(true));
+    if announced {
         eprintln!("psiosd ready on {}", cfg.socket.display());
     } else {
         stop.store(true, Ordering::Release);
@@ -743,7 +767,19 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     drop(startup_guard);
     let mut clients: Vec<(UnixStream, thread::JoinHandle<()>)> = Vec::new();
     let mut accept_error = None;
+    let mut notify_error = None;
+    let mut last_heartbeat = Instant::now();
     while !stop.load(Ordering::Acquire) && !workers.iter().any(thread::JoinHandle::is_finished) {
+        // A responsive accept loop is insufficient if every request waits for the authority.
+        if watchdog_interval.is_some_and(|interval| last_heartbeat.elapsed() >= interval)
+            && db.try_lock().is_ok_and(|store| store.authority_available())
+        {
+            if let Err(error) = notification.heartbeat() {
+                notify_error = Some(error);
+                break;
+            }
+            last_heartbeat = Instant::now();
+        }
         let mut i = 0;
         while i < clients.len() {
             if clients[i].1.is_finished() {
@@ -798,6 +834,12 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     }
     stop.store(true, Ordering::Release);
     changes.notify_shutdown();
+    if announced && let Err(error) = notification.stopping() {
+        eprintln!(
+            "psiosd service manager shutdown notification: {}",
+            error.0.message
+        );
+    }
     for worker in &workers {
         worker.thread().unpark();
     }
@@ -816,12 +858,10 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
         }
     }
     result?;
-    startup.map_err(|e| {
-        err(
-            "DependencyUnavailable",
-            format!("could not start Core workers: {e}"),
-        )
-    })?;
+    startup?;
+    if let Some(error) = notify_error {
+        return Err(error);
+    }
     if let Some(e) = accept_error {
         return Err(e.into());
     }

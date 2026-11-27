@@ -200,9 +200,13 @@ impl Record {
             "MCP task delegation changed",
         )?;
         let target = &self.spec.target_ref.resource_id;
-        if self.spec.tool.target().is_some()
-            && !local_read_tools::explicitly_scoped(db, &delegation, target)?
-        {
+        let explicit_scope = self.spec.tool.target().is_some()
+            || self
+                .spec
+                .tool
+                .unbound_tool()
+                .is_some_and(psios_api::LocalReadTool::requires_node_scope);
+        if explicit_scope && !local_read_tools::explicitly_scoped(db, &delegation, target)? {
             return Err(unavailable());
         }
         policy::tool_scope(db, &delegation.reference(), target)?;
@@ -268,7 +272,7 @@ pub(crate) fn start(db: &Db<'_>, actor: &str, value: &Value) -> Result<Value> {
         require(
             saved.spec.tool == request.binding,
             "IdempotencyConflict",
-            "MCP invocation key is bound to another tool or target",
+            "MCP invocation key is bound to another tool, target or input",
         )?;
         return snapshot(db, &saved, &current_task(db, &saved)?, false);
     }
@@ -495,7 +499,10 @@ pub(crate) fn access(db: &Db<'_>, actor: &str, method: &str, value: &Value) -> R
     )?;
     let delegation = saved.authorize(db, actor, &request.delegation_id)?;
     require(
-        request.bindings.contains(&saved.spec.tool),
+        request.bindings.iter().any(|configured| {
+            configured.name() == saved.spec.tool.name()
+                && configured.target() == saved.spec.tool.target()
+        }),
         "PermissionDenied",
         "MCP tool is outside this adapter's configuration",
     )?;
@@ -623,6 +630,11 @@ fn verify_binding(conn: &Connection, authority: &str, saved: &Record) -> Result<
                 .tool
                 .target()
                 .is_none_or(|(id, kind)| target.id == id && target.kind == kind)
+            && (!spec
+                .tool
+                .unbound_tool()
+                .is_some_and(psios_api::LocalReadTool::requires_node_scope)
+                || target.kind == "Node" && target.id == authority)
             && delegation.owner == saved.owner
             && delegation.kind == "Delegation"
             && receipt["task_revision"] == spec.task_ref.version

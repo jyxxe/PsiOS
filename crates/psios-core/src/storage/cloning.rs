@@ -2,7 +2,7 @@
 use super::{
     Capture, CaptureMode, CaptureOutput, ModifiedTime, RestoreDestination, capture_root,
     checked_root_metadata, create_volume, require_managed_root_mode, restore_proof,
-    restore_publication,
+    restore_publication, root_attribute_profile,
 };
 use crate::{
     Result,
@@ -54,6 +54,10 @@ pub(crate) fn run(
         work,
         Some(|destination: &File| {
             checked_root_metadata(destination, "UnsupportedCapability")?;
+            let source = capture_root(work)?;
+            let preserve = work.cfg.backup_user_xattrs;
+            let (before, root_attributes) =
+                root_attribute_profile(&source, "UnsupportedCapability", preserve)?;
             let mut capture = Capture::new(
                 CaptureMode::Copy(CaptureOutput::Tree(RestoreDestination {
                     directory: destination,
@@ -62,19 +66,26 @@ pub(crate) fn run(
                 work.cfg.backup_max_bytes,
                 work.cfg.backup_max_entries,
                 check,
-            );
-            let source = capture_root(work)?;
-            let before = checked_root_metadata(&source, "UnsupportedCapability")?;
+            )
+            .with_root_attributes(root_attributes);
             let root_mode = before.mode() & 0o777;
             require_managed_root_mode(root_mode)?;
             let root_time = ModifiedTime::from_metadata(&before);
             capture.walk(&source, Path::new(""), 0)?;
+            if let Some(attributes) = &capture.user_xattrs {
+                attributes.root.install(destination)?;
+            }
             preserve_metadata(destination, root_mode, root_time)?;
-            checked_root_metadata(destination, "PreconditionFailed")?;
+            root_attribute_profile(destination, "PreconditionFailed", preserve)?;
             let current = capture_root(work)?;
-            checked_root_metadata(&current, "PreconditionFailed")?;
+            root_attribute_profile(&current, "PreconditionFailed", preserve)?;
             capture.confirm_source(&current, &before)?;
-            let proof = restore_proof::from_capture(&capture.entries, root_time, root_mode)?;
+            let proof = restore_proof::from_capture(
+                &capture.entries,
+                root_time,
+                root_mode,
+                capture.user_xattrs.as_ref(),
+            )?;
             Ok(json!(proof))
         }),
         checkpoint,

@@ -16,6 +16,8 @@ from test_schedule import after, timestamp
 
 GET = "Node.WorkAdmission.Get"
 SET = "Node.WorkAdmission.Set"
+QUIESCENCE = "Node.WorkAdmission.Quiescence"
+WAIT_QUIESCENT = "Node.WorkAdmission.WaitQuiescent"
 STATUS = {"action": "tool", "tool": "system.status", "input": {}}
 
 
@@ -69,6 +71,79 @@ class NodeWorkAdmissionTests(unittest.TestCase):
         self.assertIs(report["migration_required"], False, report)
         self.assertEqual((report["sqlite_integrity"], report["foreign_keys"], report["witness"]),
                          ("Verified", "Verified", "Confirmed"), report)
+
+    def test_quiescence_wait_uses_the_exact_draining_revision_and_real_task_settlement(self):
+        n = self.node
+        opening = self.admission()
+        initial = {"expected_resource_version": opening["reference"]["version"]}
+        self.rejected("PreconditionFailed", QUIESCENCE, initial)
+        self.rejected("PreconditionFailed", WAIT_QUIESCENT, {**initial, "timeout_ms": 50})
+        self.scheduling("Cordoned")
+        tasks = [n.submit("system.status", {}) for _ in range(2)]
+        draining = self.change(opening, "Draining", "wait for both accepted tasks")
+        revision = draining["reference"]["version"]
+        query = {"expected_resource_version": revision, "limit": 1}
+        observer, _ = n.agent(["task.read", "resource.read"])
+        self.rejected("PermissionDenied", QUIESCENCE, query, observer["token"])
+        self.rejected("PermissionDenied", WAIT_QUIESCENT, {**query, "timeout_ms": 50}, observer["token"])
+        for value in (0, 10001, True, "100"):
+            self.rejected("InvalidArgument", WAIT_QUIESCENT, {**query, "timeout_ms": value})
+        self.rejected("InvalidArgument", QUIESCENCE, {**query, "limit": 65})
+        self.rejected("InvalidArgument", WAIT_QUIESCENT, {**query, "timeout_ms": 50, "extra": True})
+        self.rejected("Conflict", QUIESCENCE, initial)
+
+        observed = n.call(QUIESCENCE, query)
+        self.assertIs(observed["quiescent"], False, observed)
+        self.assertEqual(observed["blockers"]["reference"], draining["reference"])
+        page = observed["blockers"]["tasks"]
+        self.assertTrue(page["truncated"], page)
+        self.assertEqual(len(page["items"]), 1, page)
+        before = monotonic()
+        timed_out = n.call(WAIT_QUIESCENT, {**query, "timeout_ms": 160})
+        self.assertGreaterEqual(monotonic() - before, 0.12)
+        self.assertIs(timed_out["quiescent"], False, timed_out)
+        self.assertEqual(timed_out["blockers"]["tasks"], page)
+
+        self.restart()
+        self.assertEqual(n.call(QUIESCENCE, query)["blockers"]["tasks"], page)
+        with ThreadPoolExecutor(max_workers=1) as waiters:
+            waiting = waiters.submit(n.call, WAIT_QUIESCENT, {**query, "timeout_ms": 5000})
+            with self.assertRaises(TimeoutError):
+                waiting.result(timeout=0.15)
+            n.call("Task.Cancel", target(n.get(tasks[0])["reference"]))
+            with self.assertRaises(TimeoutError):
+                waiting.result(timeout=0.15)
+            n.call("Task.Cancel", target(n.get(tasks[1])["reference"]))
+            ready = waiting.result(timeout=3)
+        self.assertIs(ready["quiescent"], True, ready)
+        self.assertEqual(ready["blockers"]["reference"], draining["reference"])
+        self.assertEqual(n.call("Node.Get", {})["state"]["scheduling"], "Cordoned")
+        for task in tasks:
+            self.assertEqual(n.wait(task)["lifecycle"], "Cancelled")
+        for arguments in ((), ("--wait-ms", "1000")):
+            cli = n.cli(n.witness / "owner.token", "node-work-admission-quiescence", revision, *arguments)
+            self.assertIs(cli["quiescent"], True, cli)
+            self.assertEqual(cli["blockers"]["reference"], draining["reference"])
+        self.verify()
+
+    def test_quiescence_wait_fails_when_admission_reopens(self):
+        n = self.node
+        self.scheduling("Cordoned")
+        queued = n.submit("system.status", {})
+        draining = self.change(self.admission(), "Draining", "hold initial maintenance revision")
+        request = {"expected_resource_version": draining["reference"]["version"], "timeout_ms": 5000}
+        with ThreadPoolExecutor(max_workers=1) as waiters:
+            waiting = waiters.submit(n.call, WAIT_QUIESCENT, request)
+            with self.assertRaises(TimeoutError):
+                waiting.result(timeout=0.15)
+            reopened = self.change(draining, "Open", "abort maintenance")
+            with self.assertRaises(Failure) as conflict:
+                waiting.result(timeout=3)
+        self.assertEqual(conflict.exception.code, "Conflict", conflict.exception)
+        self.assertEqual(n.call("Task.Get", {"id": queued})["lifecycle"], "Queued")
+        revised = {"expected_resource_version": reopened["reference"]["version"]}
+        self.rejected("PreconditionFailed", QUIESCENCE, revised)
+        self.verify()
 
     def test_ordinary_submissions_pause_while_existing_tasks_and_approval_remain_valid(self):
         n = self.node

@@ -1,6 +1,7 @@
 //! Linux observation and the operator's explicit systemd allowlist.
 pub mod block;
 pub(crate) mod block_device;
+mod inventory;
 pub mod journal;
 pub(crate) mod mounts;
 pub mod network;
@@ -18,7 +19,7 @@ use crate::{
 };
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, fs, path::Path};
+use std::collections::BTreeMap;
 
 pub(crate) const RESTART_TOOL: &str = "service.restart";
 
@@ -133,51 +134,6 @@ pub fn get(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
     )
 }
 
-fn scalar(path: impl AsRef<Path>) -> Result<String> {
-    Ok(fs::read_to_string(path)?.trim().to_owned())
-}
-fn inventory() -> Result<Value> {
-    let mut mem = BTreeMap::new();
-    for line in fs::read_to_string("/proc/meminfo")?.lines() {
-        if let Some((k, v)) = line.split_once(':')
-            && matches!(k, "MemTotal" | "MemAvailable" | "SwapTotal" | "SwapFree")
-            && let Some(n) = v
-                .split_whitespace()
-                .next()
-                .and_then(|s| s.parse::<u64>().ok())
-        {
-            mem.insert(k.to_owned(), n * 1024);
-        }
-    }
-    Ok(
-        json!({"boot_id":linux_clock::boot_id()?,"kernel_release":scalar("/proc/sys/kernel/osrelease")?,
-      "architecture":std::env::consts::ARCH,"available_cpus":std::thread::available_parallelism()?.get(),
-      "memory_bytes":mem,"load_average":scalar("/proc/loadavg")?.split_whitespace().take(3).collect::<Vec<_>>(),
-      "observed_at":now()}),
-    )
-}
-fn devices() -> Result<Value> {
-    let mut items = Vec::new();
-    for entry in fs::read_dir("/sys/class/block")? {
-        let entry = entry?;
-        let path = entry.path();
-        let Ok(dev) = scalar(path.join("dev")) else {
-            continue;
-        };
-        items.push(
-            json!({"name":entry.file_name().to_string_lossy(),"major_minor":dev,
-            "read_only":scalar(path.join("ro"))?=="1","sectors_512":scalar(path.join("size"))?,
-            "logical_block_size":scalar(path.join("queue/logical_block_size")).ok()}),
-        );
-        require(
-            items.len() <= 1024,
-            "QuotaExceeded",
-            "block device inventory exceeds profile",
-        )?;
-    }
-    items.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-    Ok(json!({"devices":items,"observed_at":now()}))
-}
 pub(crate) fn service_target(db: &Db<'_>, id: &str, revision: &str) -> Result<Doc> {
     let service = db.of(id, "HostService")?;
     service.cas(revision)?;
@@ -340,7 +296,7 @@ fn service(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Result<Va
 }
 pub fn perform(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Result<Value> {
     match &w.action {
-        Action::Inventory {} => inventory(),
+        Action::Inventory {} => inventory::observe(),
         Action::Pressure {} => pressure::observe(w),
         Action::Interfaces(q) => network::interfaces(q),
         Action::Routes(q) => network::observe_routes(q, w),
@@ -348,7 +304,7 @@ pub fn perform(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Resul
         Action::RoutingRules(q) => network::observe_rules(q, w),
         Action::Processes(p) => process::page(&w.target.id, p),
         Action::InspectProcess(expected) => process::inspect(&w.target.id, expected),
-        Action::Devices {} => devices(),
+        Action::Devices(query) => block::inventory(w, query),
         Action::BlockLayout(query) => block::observe(w, query),
         Action::TrackBlockDevice(query) => block_device::enroll(query),
         Action::ObserveBlockDevice(_) => block_device::observe(w),

@@ -12,6 +12,8 @@ use psios_api::{
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
+pub(crate) const NODE_INVENTORY_FORMAT: u32 = crate::storage::xattrs::FORMAT + 1;
+
 pub(crate) fn agent(db: &Db<'_>, actor: &str) -> Result<()> {
     let principal = db.of(actor, "Principal")?;
     require(
@@ -67,6 +69,11 @@ pub(crate) fn discover(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value
             read_only(db, name)?;
             let action = Action::parse(name, &json!({}))?;
             let target = action.target(db, actor)?;
+            require(
+                !tool.requires_node_scope() || explicitly_scoped(db, &delegation, &target.id)?,
+                "PermissionDenied",
+                "node inventory requires an explicit Node scope",
+            )?;
             action.audience(db, actor, &delegation.reference(), &target)?;
             Ok(())
         })();
@@ -124,6 +131,13 @@ pub(crate) fn resolve_binding(
         .ok_or_else(|| err("RecoveryRequired", "local read tool target is inconsistent"))?;
     let action = Action::parse(name, &input)?;
     let target = action.target(db, actor)?;
+    if binding
+        .unbound_tool()
+        .is_some_and(LocalReadTool::requires_node_scope)
+        && !explicitly_scoped(db, delegation, &target.id)?
+    {
+        return Ok(None);
+    }
     action.audience(db, actor, &delegation.reference(), &target)?;
     let target_ref = decode(&target.reference())?;
     require(

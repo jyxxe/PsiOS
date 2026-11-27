@@ -123,13 +123,15 @@ def main(binaries, previous=None):
         checkpoint_archive(node, receipt["artifact_ref"], body)
         app = install_and_restore(node, tag, image, info["ID"], receipt["artifact_ref"], layers, argv=["/probe"])
         verify_start_and_stop(node, app)
+        checked = "PASS signed gzip-layer OCI restore, exact manifest and DiffID, application start and stop, detached checkpoint"
         if previous is not None:
             upgraded = verify_authority(node)
-            assert (upgraded["node_id"], upgraded["database_format"], upgraded["migration_required"]) == (
-                old["node_id"], 133, False), upgraded
+            assert upgraded["node_id"] == old["node_id"] and upgraded["database_format"] >= 133, upgraded
+            assert not upgraded["migration_required"], upgraded
             refused = subprocess.run([*original, "serve"], capture_output=True, text=True, timeout=15)
             assert refused.returncode != 0 and "SchemaVersionUnsupported" in refused.stderr, refused
-        print("PASS signed gzip-layer OCI restore, exact manifest and DiffID, application start and stop, detached checkpoint and writer fence")
+            checked += " and writer fence"
+        print(checked)
     finally:
         node.close()
         if app is not None:

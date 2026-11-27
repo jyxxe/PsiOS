@@ -1,6 +1,7 @@
 """Recover a staged or published clone using actual filesystem and SQLite evidence."""
 
 from contextlib import closing, contextmanager
+import errno
 import json
 import os
 from pathlib import Path
@@ -95,6 +96,23 @@ class VolumeCloneRecovery(unittest.TestCase):
         return evidence
 
     def test_catalog_receipt_loss_recovers_same_published_clone_without_recopying(self):
+        self.recover_published_clone()
+
+    def test_receipt_recovery_rechecks_user_attributes_without_recopying(self):
+        try:
+            os.setxattr(self.source_file, "user.psios", b"original file metadata")
+        except OSError as error:
+            if error.errno == errno.EOPNOTSUPP:
+                self.skipTest("fixture filesystem lacks Linux user attributes")
+            raise
+        os.setxattr(self.source_file.parent, "user.psios", b"original root metadata")
+        self.n.stop()
+        config = json.loads(self.n.config.read_text())
+        self.n.config.write_text(json.dumps(dict(config, backup_user_xattrs=True)))
+        self.n.start()
+        self.recover_published_clone(check_attributes=True)
+
+    def recover_published_clone(self, check_attributes=False):
         n = self.n
         prepared = self.prepare()
         with self.lose_catalog_receipt():
@@ -121,12 +139,20 @@ class VolumeCloneRecovery(unittest.TestCase):
         first = self.inspect(op, delegation, "Published")
         stamp = contents.stat()
         payload = contents.read_bytes()
-        contents.write_bytes(b"bad" + payload[3:])
-        os.utime(contents, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        if check_attributes:
+            self.assertEqual(os.getxattr(contents.parent, "user.psios"), b"original root metadata")
+            self.assertEqual(os.getxattr(contents, "user.psios"), b"original file metadata")
+            os.setxattr(contents, "user.psios", b"modified file metadata")
+        else:
+            contents.write_bytes(b"bad" + payload[3:])
+            os.utime(contents, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
         self.request_error("OutcomeUnknown", "Operation.Reconcile", {**target(op), "evidence_ref": first})
         self.assertEqual(n.wait(task), paused)
-        contents.write_bytes(payload)
-        os.utime(contents, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        if check_attributes:
+            os.setxattr(contents, "user.psios", b"original file metadata")
+        else:
+            contents.write_bytes(payload)
+            os.utime(contents, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
 
         recovered = n.call("Operation.Reconcile", {
             **target(op), "evidence_ref": self.inspect(op, delegation, "Published"),

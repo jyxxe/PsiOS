@@ -5,7 +5,8 @@ mod modern;
 use clap::{Parser, ValueEnum};
 use psios_api::{
     ApiError, ApiResult, Client, LocalReadBinding, LocalReadTool, LocalReadToolsRequest,
-    ResolveLocalReadToolsRequest, ResolvedLocalReadTool, ResourceRef, id, parse,
+    MAX_BLOCK_INVENTORY_PAGE, ResolveLocalReadToolsRequest, ResolvedLocalReadTool, ResourceRef, id,
+    parse,
 };
 use rustix::{fs::OFlags, process::geteuid};
 use serde_json::{Map, Value, json};
@@ -65,7 +66,8 @@ struct Options {
 }
 
 fn parse_tool(name: &str) -> Result<LocalReadTool, &'static str> {
-    serde_json::from_value(json!(name)).map_err(|_| "expected system.status or node.pressure")
+    serde_json::from_value(json!(name))
+        .map_err(|_| "expected system.status, node.pressure, node.inventory or node.devices")
 }
 
 fn parse_target(id: &str) -> Result<String, &'static str> {
@@ -200,7 +202,12 @@ impl Adapter {
             .collect()
     }
 
-    fn invoke(&mut self, name: &str, cancelled: Option<&AtomicBool>) -> Result<Value, Value> {
+    fn invoke(
+        &mut self,
+        binding: &LocalReadBinding,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<Value, Value> {
+        let name = binding.name();
         let abandoned = || cancelled.is_some_and(|flag| flag.load(Ordering::Acquire));
         let selected = self
             .available()
@@ -208,8 +215,7 @@ impl Adapter {
             .into_iter()
             .find(|tool| tool.binding.name() == name)
             .ok_or_else(|| tool_error("PermissionDenied", None))?;
-        let input = selected
-            .binding
+        let input = binding
             .task_input(selected.target_ref.as_ref())
             .ok_or_else(|| tool_error("PreconditionFailed", None))?;
         if abandoned() {
@@ -286,24 +292,26 @@ impl Adapter {
             .get("name")
             .and_then(Value::as_str)
             .ok_or((-32602, "Invalid tool name"))?;
-        let binding = self
+        let configured = self
             .bindings
             .iter()
             .find(|tool| tool.name() == name)
             .ok_or((-32602, "Unknown tool"))?;
-        if params
-            .get("arguments")
-            .is_some_and(|arguments| !arguments.is_object())
-        {
-            return Err((-32602, "Tool arguments must be an object"));
-        }
-        if params
-            .get("arguments")
-            .and_then(Value::as_object)
-            .is_some_and(|arguments| !arguments.is_empty())
-        {
-            return Ok(tool_error("InvalidArgument", None));
-        }
+        let binding = match params.get("arguments") {
+            Some(args) if !args.is_object() => {
+                return Err((-32602, "Tool arguments must be an object"));
+            }
+            Some(Value::Object(args)) if !args.is_empty() => {
+                if !matches!(configured, LocalReadBinding::NodeDevices(_)) {
+                    return Ok(tool_error("InvalidArgument", None));
+                }
+                let Ok(query) = serde_json::from_value(Value::Object(args.clone())) else {
+                    return Ok(tool_error("InvalidArgument", None));
+                };
+                LocalReadBinding::NodeDevices(query)
+            }
+            _ => configured.clone(),
+        };
         if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
             return Ok(tool_error("Cancelled", None));
         }
@@ -341,7 +349,7 @@ impl Adapter {
                 }));
         }
         Ok(self
-            .invoke(name, cancelled)
+            .invoke(&binding, cancelled)
             .unwrap_or_else(|failure| failure))
     }
 
@@ -460,6 +468,12 @@ fn descriptor(tool: &LocalReadBinding, protocol: Protocol) -> Value {
         LocalReadBinding::NodePressure {} => {
             "Sample Linux kernel and Core cgroup resource pressure on the local node."
         }
+        LocalReadBinding::NodeInventory {} => {
+            "Observe verified Linux kernel, CPU, memory and load data on the local node."
+        }
+        LocalReadBinding::NodeDevices(_) => {
+            "Read verified local Linux block devices. Provide a limit for a bounded page and use the returned cursor to continue."
+        }
         LocalReadBinding::VolumeUsage { .. } => {
             "Measure file and allocation usage of the configured volume root."
         }
@@ -468,6 +482,17 @@ fn descriptor(tool: &LocalReadBinding, protocol: Protocol) -> Value {
     let mut descriptor = json!({"name":tool.name(),"description":description,
         "inputSchema":{"type":"object","additionalProperties":false},
         "annotations":{"readOnlyHint":true}});
+    if matches!(tool, LocalReadBinding::NodeDevices(_)) {
+        descriptor["inputSchema"]["properties"] = json!({
+            "limit":{"type":["integer","null"],"minimum":1,"maximum":MAX_BLOCK_INVENTORY_PAGE},
+            "cursor":{"type":["object","null"],"additionalProperties":false,
+                "required":["snapshot_digest","offset"],"properties":{
+                    "snapshot_digest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+                    "offset":{"type":"integer","minimum":1,"maximum":1023}
+                }
+            }
+        });
+    }
     if matches!(protocol, Protocol::Legacy) {
         descriptor["execution"] = json!({"taskSupport":"forbidden"});
     }

@@ -37,6 +37,7 @@ jobs:
             sudo timeout 180 apt-get install -y --no-install-recommends strace
           fi
           python3 -B tests/oci.py
+          python3 -B tests/oci_xattr_rebind.py
       - name: Verify documentation contracts
         run: |
           python3 -m venv "$RUNNER_TEMP/psios-docs"
@@ -155,6 +156,8 @@ jobs:
           '
           sudo unshare --mount --propagation private env PSIOS_TEST_REPLACE_PRESSURE=1 \
             python3 -B -m unittest discover -s tests -p test_pressure.py -k test_grafted_pressure_sources -v
+          sudo unshare --mount --propagation private env PSIOS_TEST_KERNEL_INVENTORY_MOUNTS=1 \
+            python3 -B -m unittest discover -s tests -p test_kernel_inventory.py -k test_independent_inventory -v
       - name: Verify enrolled block reconciliation, reuse, resize and masked sysfs
         run: |
           if ! command -v sfdisk || ! command -v dmsetup; then
@@ -163,6 +166,9 @@ jobs:
           sudo unshare --mount --propagation private env \
             PSIOS_TEST_BLOCK_LOOP=1 PSIOS_TEST_BLOCK_MAPPER=1 PSIOS_TEST_MASK_BLOCK=1 \
             python3 -B -m unittest discover -s tests -p test_block_layout.py -k test_loop -v
+          sudo unshare --mount --propagation private env \
+            PSIOS_TEST_BLOCK_INVENTORY_MOUNTS=1 PSIOS_TEST_BLOCK_LOOP=1 \
+            python3 -B -m unittest discover -s tests -p test_block_inventory.py -v
       - name: Pair and inspect real Tasks in headless Chrome
         run: PSIOS_TEST_SHELL_BROWSER=1 python3 -B -m unittest discover -s tests -p test_shell.py -k test_browser -v
       - name: Verify scoped IPv6 probes across a real private veth pair
@@ -469,6 +475,11 @@ jobs:
           sudo systemctl start "user@$(id -u).service"
           export XDG_RUNTIME_DIR="/run/user/$(id -u)"
           python3 tests/services.py
+      - name: Wait for authority recovery through the real systemd manager
+        run: |
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          PSIOS_TEST_SYSTEMD_NOTIFY=1 python3 -B -m unittest discover -s tests \
+            -p test_systemd_notify.py -v
       - name: Invoke one explicitly granted systemd service through both MCP profiles
         run: |
           export XDG_RUNTIME_DIR="/run/user/$(id -u)"
@@ -901,6 +912,13 @@ jobs:
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format130" "$RUNNER_TEMP/psios-compatibility-target"
           PSIOS_SCHEDULE_RENEWAL_PRIOR_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
             python3 -B -m unittest discover -s tests -p test_schedule_renewal.py -k test_format_130 -v
+      - name: Preserve a genuine format 138 device inventory handle and fence the old writer
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format138"
+          git archive 2f0f1889c4520ba4bf31fa07b30bdbd1ac284884 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format138"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format138" "$RUNNER_TEMP/psios-compatibility-target"
+          PSIOS_MCP_PAGE_PREVIOUS_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
+            python3 -B -m unittest discover -s tests -p test_mcp_tasks.py -k test_format_138_unpaged_handle -v
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

@@ -192,7 +192,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = apps::restore_archive::ZSTD_FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = crate::node::block::PAGED_INVENTORY_FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -639,6 +639,10 @@ impl Store {
         File::open(&self.config.witness_dir)?.sync_all()?;
         Ok(())
     }
+    pub(crate) fn authority_available(&self) -> bool {
+        !self.sealed
+    }
+
     pub(crate) fn transaction<T>(
         &mut self,
         correlation: &str,

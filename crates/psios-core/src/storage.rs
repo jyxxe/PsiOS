@@ -20,6 +20,7 @@ pub(crate) mod retirement;
 mod staging;
 pub(crate) mod transfer;
 pub(crate) mod usage;
+pub(crate) mod xattrs;
 use crate::{
     config::{Config, MAX_BACKUP_ENTRIES as MAX_ENTRIES, new_file, private_dir, replace},
     db::{Db, Doc},
@@ -97,17 +98,29 @@ fn registered_root(d: &Doc, meta: &fs::Metadata) -> Result<()> {
 }
 
 fn checked_root_metadata(root: &File, failure: &str) -> Result<fs::Metadata> {
+    root_attribute_profile(root, failure, false).map(|(metadata, _)| metadata)
+}
+
+fn root_attribute_profile(
+    root: &File,
+    failure: &str,
+    preserve: bool,
+) -> Result<(fs::Metadata, Option<xattrs::Attributes>)> {
     let metadata = root.metadata()?;
     require(
         metadata.is_dir()
             && metadata.uid() == rustix::process::geteuid().as_raw()
             && metadata.gid() == rustix::process::getegid().as_raw()
             && metadata.mode() & 0o7000 == 0
-            && rustix::fs::flistxattr_query(root.as_fd()).is_ok_and(|length| length == 0),
+            && (preserve
+                || rustix::fs::flistxattr_query(root.as_fd()).is_ok_and(|length| length == 0)),
         failure,
         "volume root requires authority ownership, ordinary mode and no extended attributes",
     )?;
-    Ok(metadata)
+    let attributes = preserve
+        .then(|| xattrs::Attributes::read(root, failure))
+        .transpose()?;
+    Ok((metadata, attributes))
 }
 
 pub fn volume_dir(cfg: &Config, d: &Doc) -> Result<PathBuf> {
@@ -469,6 +482,8 @@ struct Capture<'a> {
     max_bytes: u64,
     max_entries: usize,
     manifest_bound: u64,
+    user_xattrs: Option<xattrs::Tree>,
+    xattr_bytes: u64,
     check: &'a mut dyn FnMut() -> Result<()>,
 }
 // Reading can advance atime. All identity, content and permission evidence
@@ -498,8 +513,41 @@ impl<'a> Capture<'a> {
             max_bytes,
             max_entries,
             manifest_bound: MANIFEST_HEADER_ALLOWANCE,
+            user_xattrs: None,
+            xattr_bytes: 0,
             check,
         }
+    }
+
+    fn with_root_attributes(mut self, root: Option<xattrs::Attributes>) -> Self {
+        self.user_xattrs = root.map(xattrs::Tree::new);
+        self.xattr_bytes = self
+            .user_xattrs
+            .as_ref()
+            .map_or(0, xattrs::Tree::root_bound);
+        self.manifest_bound += self.xattr_bytes;
+        self
+    }
+
+    fn attributes(&mut self, path: &str, source: &File) -> Result<Option<xattrs::Attributes>> {
+        if self.user_xattrs.is_none() {
+            require(
+                rustix::fs::flistxattr_query(source.as_fd()).is_ok_and(|n| n == 0),
+                "UnsupportedCapability",
+                "extended attributes require a richer backup profile",
+            )?;
+            return Ok(None);
+        }
+        let attributes = xattrs::Attributes::read(source, "UnsupportedCapability")?;
+        let bytes = xattrs::Tree::member_bound(path, &attributes);
+        self.xattr_bytes += bytes;
+        self.manifest_bound += bytes;
+        require(
+            self.xattr_bytes <= xattrs::MAX_TREE_BYTES && self.manifest_bound <= MAX_MANIFEST,
+            "QuotaExceeded",
+            "backup user attribute metadata exceeds its limit",
+        )?;
+        Ok(Some(attributes))
     }
 
     fn walk(&mut self, dir: &File, root: &Path, depth: u32) -> Result<()> {
@@ -571,11 +619,7 @@ impl<'a> Capture<'a> {
                 "UnsupportedCapability",
                 "unsupported file identity or mode in backup",
             )?;
-            require(
-                rustix::fs::flistxattr_query(src.as_fd()).is_ok_and(|n| n == 0),
-                "UnsupportedCapability",
-                "extended attributes require a richer backup profile",
-            )?;
+            let attributes = self.attributes(rel, &src)?;
             let mut entry = Entry {
                 path: rel.into(),
                 mode: m.mode() & 0o777,
@@ -591,6 +635,9 @@ impl<'a> Capture<'a> {
                     rustix::fs::mkdirat(&directory, name, Mode::RWXU)
                         .map_err(std::io::Error::from)?;
                     let destination = child(&directory, name, OFlags::RDONLY | OFlags::DIRECTORY)?;
+                    if let Some(attributes) = &attributes {
+                        attributes.install(&destination)?;
+                    }
                     copy = Some((destination, entry.mode, ModifiedTime::from_metadata(&m)));
                 }
                 self.entries.push((entry, m));
@@ -612,6 +659,9 @@ impl<'a> Capture<'a> {
                         let mut dst = out.file(rel, self.entries.len())?;
                         let copied = copy_captured_blob(&mut src, &mut dst, m.len(), self.check)?;
                         if matches!(out, CaptureOutput::Tree(_)) {
+                            if let Some(attributes) = &attributes {
+                                attributes.install(&dst)?;
+                            }
                             cloning::preserve_metadata(
                                 &dst,
                                 entry.mode,
@@ -643,11 +693,26 @@ impl<'a> Capture<'a> {
                 self.total += len;
                 self.entries.push((entry, m));
             }
+            if let (Some(tree), Some(attributes)) = (&mut self.user_xattrs, attributes) {
+                tree.add(rel.to_owned(), attributes);
+            }
+        }
+        if depth == 0
+            && let Some(tree) = &mut self.user_xattrs
+        {
+            tree.sort();
         }
         Ok(())
     }
 
     fn confirm_source(&mut self, root: &File, before: &fs::Metadata) -> Result<()> {
+        if let Some(tree) = &self.user_xattrs {
+            require(
+                tree.root == xattrs::Attributes::read(root, "Conflict")?,
+                "Conflict",
+                "volume root user attributes changed during capture",
+            )?;
+        }
         (self.check)()?;
         require(
             same_source(before, &root.metadata()?),
@@ -737,7 +802,8 @@ pub(crate) fn restored_fingerprint(cfg: &Config, volume: &Doc) -> Result<String>
 fn open_rebind_root(cfg: &Config, volume: &Doc) -> Result<File> {
     let root = open_volume_root(cfg, volume)?;
     if volume.spec.get("cloned_from").is_some() {
-        checked_root_metadata(&root, "PreconditionFailed")?;
+        let preserve = restore_proof::has_user_attributes(&volume.spec["restore_proof"]);
+        root_attribute_profile(&root, "PreconditionFailed", preserve)?;
     }
     Ok(root)
 }
@@ -770,7 +836,8 @@ pub(crate) fn backup(
 ) -> Result<Value> {
     check()?;
     let source = capture_root(w)?;
-    let before = checked_root_metadata(&source, "UnsupportedCapability")?;
+    let (before, root_attributes) =
+        root_attribute_profile(&source, "UnsupportedCapability", w.cfg.backup_user_xattrs)?;
     let root_mode = before.mode() & 0o777;
     require_managed_root_mode(root_mode)?;
     let parent = w.cfg.state_dir.join("backups");
@@ -787,9 +854,10 @@ pub(crate) fn backup(
         w.cfg.backup_max_bytes,
         w.cfg.backup_max_entries,
         check,
-    );
+    )
+    .with_root_attributes(root_attributes);
     capture.walk(&source, Path::new(""), 0)?;
-    let manifest = json!({
+    let mut manifest = json!({
         "schema_version": VERSION,
         "backup_id": bid,
         "source": w.target.reference(),
@@ -806,9 +874,19 @@ pub(crate) fn backup(
             root: ModifiedTime::from_metadata(&before),
             entries: capture.entries.iter().map(|(_, meta)| ModifiedTime::from_metadata(meta)).collect()
         },
-        "entries": capture.entries.iter().map(|(entry, _)| entry).collect::<Vec<_>>(),
         "total_bytes": capture.total.to_string()
     });
+    let entries = capture
+        .entries
+        .iter()
+        .map(|(entry, _)| entry)
+        .collect::<Vec<_>>();
+    if let Some(attributes) = &capture.user_xattrs {
+        manifest["entries_with_user_xattrs"] = json!(entries);
+        manifest["user_xattrs_unix_v1"] = json!(attributes);
+    } else {
+        manifest["entries"] = json!(entries);
+    }
     let bytes = canonical(&manifest);
     require(
         bytes.len() as u64 <= MAX_MANIFEST,
@@ -822,7 +900,7 @@ pub(crate) fn backup(
     w.cfg
         .check_managed_space(stage.directory(), std::iter::empty(), 0)?;
     let current = capture_root(w)?;
-    checked_root_metadata(&current, "Conflict")?;
+    root_attribute_profile(&current, "Conflict", w.cfg.backup_user_xattrs)?;
     capture.confirm_source(&current, &before)?;
     let receipt = json!({
         "id": bid,
@@ -843,14 +921,60 @@ pub(crate) fn backup(
     Ok(receipt)
 }
 #[derive(Deserialize)]
+#[serde(try_from = "BackupManifestWire")]
 struct BackupManifest {
     backup_id: String,
     source: Value,
     entries: Vec<Entry>,
     total_bytes: String,
     mtime_unix_v1: Option<BackupTimes>,
+    user_xattrs_unix_v1: Option<xattrs::Tree>,
+    root_mode_unix_v1: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct BackupManifestWire {
+    backup_id: String,
+    source: Value,
+    entries: Option<Vec<Entry>>,
+    entries_with_user_xattrs: Option<Vec<Entry>>,
+    total_bytes: String,
+    mtime_unix_v1: Option<BackupTimes>,
+    user_xattrs_unix_v1: Option<xattrs::Tree>,
     #[serde(default, deserialize_with = "decode_root_mode")]
     root_mode_unix_v1: Option<u32>,
+}
+
+impl TryFrom<BackupManifestWire> for BackupManifest {
+    type Error = &'static str;
+
+    fn try_from(wire: BackupManifestWire) -> std::result::Result<Self, Self::Error> {
+        let entries = profile_entries(
+            wire.entries,
+            wire.entries_with_user_xattrs,
+            wire.user_xattrs_unix_v1.is_some(),
+        )?;
+        Ok(Self {
+            backup_id: wire.backup_id,
+            source: wire.source,
+            entries,
+            total_bytes: wire.total_bytes,
+            mtime_unix_v1: wire.mtime_unix_v1,
+            user_xattrs_unix_v1: wire.user_xattrs_unix_v1,
+            root_mode_unix_v1: wire.root_mode_unix_v1,
+        })
+    }
+}
+
+fn profile_entries<T>(
+    entries: Option<Vec<T>>,
+    entries_with_user_xattrs: Option<Vec<T>>,
+    has_user_xattrs: bool,
+) -> std::result::Result<Vec<T>, &'static str> {
+    match (entries, entries_with_user_xattrs, has_user_xattrs) {
+        (Some(entries), None, false) | (None, Some(entries), true) => Ok(entries),
+        _ => Err("backup entries do not match the declared user attribute profile"),
+    }
 }
 
 fn decode_root_mode<'de, D>(deserializer: D) -> std::result::Result<Option<u32>, D::Error>
@@ -1045,6 +1169,13 @@ fn validate_members(m: &BackupManifest, max_bytes: u64) -> Result<u64> {
             "backup paths exceed the manifest size limit",
         )?;
     }
+    if let Some(attributes) = &m.user_xattrs_unix_v1 {
+        require(
+            manifest_bound + attributes.validate(&kinds)? <= MAX_MANIFEST,
+            "QuotaExceeded",
+            "backup user attributes exceed the manifest size limit",
+        )?;
+    }
     Ok(declared)
 }
 
@@ -1123,6 +1254,9 @@ fn inspect_members(
             )?;
             total += len;
             if let Some(f) = output {
+                if let Some(attributes) = &m.user_xattrs_unix_v1 {
+                    attributes.install_member(&e.path, &f)?;
+                }
                 f.set_permissions(Permissions::from_mode(e.mode))?;
                 if let Some(time) = mtime {
                     time.restore(&f)?;
@@ -1146,11 +1280,17 @@ fn inspect_members(
         for (path, mode, mtime) in dirs.into_iter().rev() {
             let (parent, name) = entry_parent(root, path)?;
             let dir = child(&parent, name, OFlags::RDONLY | OFlags::DIRECTORY)?;
+            if let Some(attributes) = &m.user_xattrs_unix_v1 {
+                attributes.install_member(path, &dir)?;
+            }
             dir.set_permissions(Permissions::from_mode(mode))?;
             if let Some(time) = mtime {
                 time.restore(&dir)?;
             }
             dir.sync_all()?;
+        }
+        if let Some(attributes) = &m.user_xattrs_unix_v1 {
+            attributes.root.install(root)?;
         }
         if let Some(mode) = m.root_mode_unix_v1 {
             root.set_permissions(Permissions::from_mode(mode))?;
@@ -1163,7 +1303,10 @@ fn inspect_members(
         if let Some(times) = &m.mtime_unix_v1 {
             times.root.restore(root)?;
         }
-        if m.root_mode_unix_v1.is_some() || m.mtime_unix_v1.is_some() {
+        if m.root_mode_unix_v1.is_some()
+            || m.mtime_unix_v1.is_some()
+            || m.user_xattrs_unix_v1.is_some()
+        {
             root.sync_all()?;
         }
         destination.check_space(std::iter::empty(), 0)?;
@@ -1339,6 +1482,7 @@ pub fn pool_status(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
         "available_bytes": stat.f_bavail.saturating_mul(stat.f_frsize).to_string(),
         "backup_max_bytes": db.cfg.backup_max_bytes.to_string(),
         "backup_max_entries": db.cfg.backup_max_entries,
+        "backup_user_xattrs": db.cfg.backup_user_xattrs,
         "backup_capture_timeout_seconds": db.cfg.backup_capture_timeout_seconds,
         "failure_domain": "local-filesystem",
         "hard_volume_quota": "Unsupported"

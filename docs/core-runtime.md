@@ -8,6 +8,8 @@
 
 ## 宿主与调度
 
+`system.status` 使用 Linux `CLOCK_BOOTTIME` 报告经过时间。它和 `node.inventory` 都从已核验 procfs 的有界数据读取内核版本。库存报告独立标记内存与负载的采集状态。对应来源被其他挂载覆盖时，该组显示 `Unsupported`，其余可核验指标继续返回。[真实内核和私有挂载验收](../tests/test_kernel_inventory.py) · [Linux procfs](https://www.kernel.org/doc/html/latest/filesystems/proc.html)
+
 - `psiosctl node` 返回本机权威分配的 Node 身份、Linux boot ID、工作线程数、各阶段队列数量和调度模式。`node.inventory`、`node.processes` 和 `node.devices` 是独立授权的 Task 工具。进程列表支持 `after_pid` 和 `limit`。块设备来自 sysfs，结果和进程页都是调用时的观测。
 - `node.processes` 每项返回由 Node、boot ID、procfs 视图、PID 和 start ticks 组成的 `process_ref`。将这份引用原样用于 `node.process_inspect` 可取得该实例的状态、线程数、CPU ticks、虚拟内存和驻留页。需要单独授予 `node.process_inspect`，并将 `tool_targets` 限定到 Node。退出或不可见的进程返回 `NotFound`，身份或视图变化返回 `PreconditionFailed`。[本机进程验收](../tests/test_process_observation.py) · [Linux procfs](https://docs.kernel.org/filesystems/proc.html)
 - 配置中的 `workers` 取 1 至 16，默认 4。工作线程共享事务权威，在数据库锁外等待宿主调用。调度器在有积压的主体之间轮转。同一卷、应用或服务上的冲突写入继续受持久占用保护。所有者用 `Node.Configure` 提交 Node 的 `expected_resource_version` 和 `scheduling`，取值为 `Cordoned` 或 `Enabled`。暂停领取期间可接受任务，在途工作可结算，超时及撤权仍会释放预留。
@@ -26,6 +28,10 @@
 - 回执丢失后，`Task.Cancel` 可用当前 Task 修订关闭 `Paused / Unknown` 任务的执行流程。`Task.CancelOrigin` 也可用原始提交的来源、键、摘要和取消范围记录此请求。此时 Task 为 `Cancelled / Unknown`，保留原 Run、Operation、效果证据及资源占用。原 Operation 完成对账时，Task 保持 `Cancelled`，同时更新结果知识并保存已核实的效果。待核实时仍无法重试、归档或回收结果。[真实写入故障后的取消验收](../tests/test_volume_write_reconciliation.py)
 
 ### 块设备代次与布局核对
+
+`node.devices` 从已核验的 sysfs 块设备索引读取列表。Core 用主次设备号核对同一内核目录，两次采样一致后才发布。列表带当前 Linux 启动 ID，设备提供 `diskseq` 时也报告该值。设备热插拔、同名替换或属性变化时，冲突会阻止发布不一致的快照。登记和写入继续使用独立的设备代次与授权规则。[真实块设备与挂载隔离验收](../tests/test_block_inventory.py)
+
+`node.devices` 的 `{"limit":16}` 请求返回一页。将 `next_cursor` 原样传给下一次调用，最后一页的游标为 `null`。页大小可设为 1 至 32 行，设备条目加总上限为 12 KiB。继续时 Core 重新观测，设备身份、几何、Node 修订、Linux 启动或授权作用域发生变化会返回 `ResyncRequired`，需要从第一页开始。历史页按 Task 制品的授权和留存规则读取。空输入返回一次完整的有界观测。MCP 的直接调用和持久 Tasks 共用此契约。[实际设备与复用验收](../tests/test_block_inventory.py) · [MCP 任务验收](../tests/test_mcp_tasks.py)
 
 用 `node.devices` 取得当前设备号，向操作者显式授予目标 Node 上的 `node.block_layout`、`task.submit` 和 `task.read`。提交 `{"major_minor":"253:0"}` 观测指定整盘，设备号需替换为目标的当前值。结果随 Task 结算。该工具需要 Linux sysfs 的 `diskseq`。[Linux 块设备 ABI](https://docs.kernel.org/admin-guide/abi-stable.html)
 
@@ -168,6 +174,10 @@ Core 在请求 NetworkManager 回退前持久记录派发，核对原检查点�
 原执行器已收到候选激活对象，但激活状态写入失败时，Core 会尝试独立保存这份回执。只有存在该回执时，原操作才可在检查点到期后通过 `network.inspect_trial` 取得回退证据。Core 复核同一个管理器和网口、检查点已消失、原配置已恢复且没有待激活的候选连接，再通过 `Operation.Reconcile` 结算原操作并释放网口。候选配置仍在运行、缺少精确检查点或无法证明调用已返回时，网口继续由原未决操作占用。[激活回执丢失验收](../tests/network_trial_activation_recovery.py)
 
 ### 受管 systemd 服务
+
+Debian 软件包以 `Type=notify` 启动 Core。主进程在核对权威状态、恢复未决工作、绑定本机接口并创建工作线程之后发送 `READY=1`。因此 `systemctl start psiosd` 成功返回后即可连接 System API。权威不可恢复时启动失败，保留现有状态供离线核查。主进程结束接入时会发送 `STOPPING=1`。[软件包验收](../tests/debian-install.sh) · [systemd 通知接口](https://www.freedesktop.org/software/systemd/man/latest/sd_notify.html)
+
+软件包启用两分钟的 systemd watchdog。主循环继续运行、所有工作线程仍在且权威可以及时取得并且未进入隔离状态时，Core 才发送心跳。权威持续阻塞时由 systemd 终止守护进程，随后按原配置尝试重启。未结算操作沿用既有恢复规则，已发生但无回执的效果继续保留为未知。[真实 SQLite 写锁与 systemd 恢复验收](../tests/test_systemd_notify.py) · [systemd watchdog 接口](https://www.freedesktop.org/software/systemd/man/latest/sd_watchdog_enabled.html)
 
 运维人员在本机配置中显式加入 `services`。先使用观察配置并重启守护进程。
 
@@ -327,7 +337,9 @@ Rust SDK 的 `Client::prepare_oci_stop_continuation` 与 `psiosctl application-p
 
 从数据库格式 112 起，新备份记录卷数据根目录的普通 Unix 权限位。恢复先写入成员，再设置根目录权限和修改时间并刷盘。托管数据根须保留所有者的读取和搜索权限，可以是只读目录。恢复发布核验、`volume.activate` 和 `application.rebind_restored_volume` 会核对新证明中的根目录权限。旧备份没有该字段，仍按 `0700` 恢复并使用原证明算法。旧版 Core 无法打开已升级的权威执行写入。[权限恢复与升级验收](../tests/test_backup_root_mode.py)
 
-备份创建和预检要求数据根归 Core 的服务用户与组所有，并拒绝特殊权限位及扩展属性。新备份在暂存前检查这些条件，发布前复核。恢复校验和激活使用同样的根元数据规则，数据根变更后须重新核验方可激活。 [根元数据验收](../tests/test_backup_root_mode.py)
+备份创建和预检要求数据根归 Core 的服务用户与组所有，拒绝特殊权限位，默认也拒绝扩展属性。新备份在暂存前检查这些条件，发布前复核。恢复校验和激活使用同样的根元数据规则，数据根变更后须重新核验方可激活。 [根元数据验收](../tests/test_backup_root_mode.py)
+
+格式 137 支持在节点配置中启用 `backup_user_xattrs`。启用后，备份与克隆保留卷数据根、目录和常规文件的 Linux `user.*` 扩展属性。每个文件或目录最多 16 项，单项值最多 16 KiB，卷内扩展属性及其索引共计最多 1 MiB。其他命名空间、ACL 和特殊权限位仍会被拒绝。备份清单声明新的元数据格式，旧版离线校验器会拒绝该清单。已有无扩展属性的备份仍可使用，关闭配置后也能恢复和核验已生成的扩展属性备份或克隆。 [扩展属性恢复与激活验收](../tests/test_backup_user_xattrs.py)
 
 授予核验主体 `volume.inspect_publication`、`task.submit` 和 `task.read`，并将目标限于原 Operation。观察任务重新核对实际卷目录和树内容。管理员用其制品作为 `Operation.Reconcile` 的 `evidence_ref`，Core 再检查目录的当前身份和元数据。核实已发布后登记最初的恢复卷，保留原 Task、Operation 与数据世代。卷仍需独立批准激活。[回执丢失、篡改与激活验收](../tests/test_storage_recovery.py) · [原格式升级](../tests/restore_publication_upgrade.py)
 
@@ -345,7 +357,7 @@ Rust SDK 的 `Client::prepare_oci_stop_continuation` 与 `psiosctl application-p
 
 格式 114 支持 `volume.clone`。本机所有者须持有显式限定到源 Volume ID 和本机 StoragePool `local` 的委托，并独立批准操作。输入包含源卷的 `target` 和新卷 `name`。SDK `Client::prepare_volume_clone` 和 `psiosctl volume-prepare-clone --name NAME --key KEY --delegation ID source-ref.json` 返回可提交的 Task 请求。
 
-源卷须已脱离应用且无其他写入、读取或未结算占用。Core 在源卷排他保留期间把文件直接复制到新卷，核对源文件和目录身份、字节摘要、修改时间及普通 Unix 权限。数据根须归服务账户及其组所有，带有扩展属性、ACL 或特殊权限位的根目录会被拒绝。源卷与新卷分别拥有独立 ID 和数据世代，新卷记录准确的 `cloned_from`。复制使用 `backup_max_bytes` 对单次数据量的限制及本机容量保留。此能力提供已脱离的单卷崩溃一致性副本，适用于该本机目录后端。
+源卷须已脱离应用且无其他写入、读取或未结算占用。Core 在源卷排他保留期间把文件直接复制到新卷，核对源文件和目录身份、字节摘要、修改时间及普通 Unix 权限。数据根须归服务账户及其组所有，并遵循备份的扩展属性、ACL 和特殊权限位规则。源卷与新卷分别拥有独立 ID 和数据世代，新卷记录准确的 `cloned_from`。复制使用 `backup_max_bytes` 对单次数据量的限制及本机容量保留。此能力提供已脱离的单卷崩溃一致性副本，适用于该本机目录后端。
 
 新卷创建后进入 `AwaitingActivation`。独立批准 `volume.activate` 会核对树摘要与元数据，核验成功后才允许写入和应用挂载。发布回执丢失时用 `volume.inspect_publication` 核对原 Operation，再用 `Operation.Reconcile` 结算。Core 只核对同一暂存目录或最终目录，在证据缺失时保留源卷占用。已核实未发布的目录由后台回收，原请求重放仍返回原结算。[克隆与容量验收](../tests/test_volume_clone.py) · [发布故障与恢复验收](../tests/test_volume_clone_recovery.py)
 
@@ -355,7 +367,7 @@ Rust SDK 的 `Client::prepare_oci_stop_continuation` 与 `psiosctl application-p
 
 Core 独占两个卷和应用，核对恢复证明、当前文件树和 OCI 容器缺席，然后在同一事务提交新 Deployment 和 Task 回执。原应用 ID、Release 和旧数据卷保留。应用保持停止，可用新的应用修订另行提交 `application.start`。格式 99 增加该能力及离线检查。能力范围是同一节点上经验证的单卷 OCI 恢复。 [真实 OCI 验收](../tests/oci_volume_rebind.py)
 
-格式 116 也接受独立激活后的 `volume.clone` 卷。Core 核对原克隆 Task、已结算的发布检查点和新卷初始修订，并验证捕获的源卷 ID 与数据世代仍与应用数据绑定一致。新的审批仍固定调用时的应用和两个卷修订。重绑定再次验证克隆根目录的所有者、权限与扩展属性。新 Deployment 保留克隆发布和独立激活证据，便于离线检查。 [真实 OCI 克隆重绑定验收](../tests/oci_direct_clone_rebind.py)
+格式 116 也接受独立激活后的 `volume.clone` 卷。Core 核对原克隆 Task、已结算的发布检查点和新卷初始修订，并验证捕获的源卷 ID 与数据世代仍与应用数据绑定一致。新的审批仍固定调用时的应用和两个卷修订。重绑定再次验证克隆根目录的所有者、权限与扩展属性。新 Deployment 保留克隆发布和独立激活证据，便于离线检查。 [真实 OCI 克隆重绑定验收](../tests/oci_direct_clone_rebind.py) · [容器内读取保留的扩展属性](../tests/oci_xattr_rebind.py)
 
 ### 导出备份
 
@@ -424,6 +436,8 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 `Node.Configure` 的 `Cordoned` 继续独立控制派发。格式 93 升级时，独立准入模式初始值为 `Open`，原节点模式和已接受工作沿用原版本。本机准入计数用于观察 Task、恢复队列及模型状态。服务停止、卷释放及外部操作是否达到维护安全点，各自需要观测回执。[运维顺序](v1/docs/13-operations-release-governance.md) · [准入验收](../tests/test_node_work_admission.py) · [格式 92 升级](../tests/node_work_admission_upgrade.py)
 
 以准入修订调用 `Node.WorkAdmission.Blockers` 可读取同一事务内的五组样本。CLI 用 `psiosctl node-work-admission-blockers REVISION --limit 16`。每组默认最多 16 条，上限 64 条。若 `truncated` 为真，该组触及采样上限，可能还有未核对的条目。Task 优先展示未决效果和等待确认的操作。独占锁关联当前资源和持有者，正在使用卷的应用包含精确附件引用，读取锁关联卷及正在读取的 Task。恢复还未登记新卷时显示源备份的锁。
+
+本机所有者可使用 `Node.WorkAdmission.Quiescence` 查询指定 `Draining` 修订，或使用 `Node.WorkAdmission.WaitQuiescent` 等待 1 到 10000 毫秒。CLI 对应 `psiosctl node-work-admission-quiescence REVISION --wait-ms 5000`，省略 `--wait-ms` 时立即返回。只有同一事务内的五组样本均为空且完整，才会返回 `quiescent: true`。超时返回当时的阻塞项，准入修订变化返回版本冲突。观察依照 Core 的任务、占用和模型结算状态。执行停电或升级前，还须按相应流程核对宿主服务、数据持久化和外部系统。[排空、重开与对账验收](../tests/test_node_work_admission.py)
 
 应用换绑期间，独占锁组将应用、原卷和已激活的替换卷关联到同一个 Operation 和 Task。快照核对采样到的换绑 Task 和锁，并按原计划校验三个资源的修订和锁的完整性。证据不齐时返回 `RecoveryRequired`。[真实 OCI 换绑验收](../tests/oci_direct_clone_rebind.py)
 
@@ -755,6 +769,8 @@ psios-mcp --socket /run/psios/api.sock --service-uid PSIOS_UID \
 ```
 
 使用专用 `Agent.Register` 凭据，保存为调用用户拥有的私有普通文件。指定 `psiosd` 的实际数字 UID。通过 `Grant.Issue` 为该主体授予 `task.submit`、`task.read` 和希望使用的工具。`tool_targets` 必须覆盖实际目标：`system.status` 使用 `profile-local`，`node.pressure` 使用 `Node.Get` 返回的 Node ID。省略 `--tool` 时选择 `system.status`。两种工具只接受空参数。`tools/list` 核验配置指定的委托及其目标，不创建 Task 或草稿。
+
+格式 138 也允许显式配置 `--tool node.inventory` 或 `--tool node.devices`。它们采用同一个只读 Task 执行路径。根 Grant 或叶 Delegation 须显式列入当前 Node ID。两种 MCP 协议均可直接调用，现代协议启用 Tasks 后也可通过原句柄管理持续运行、查询和取消。大结果沿用适配器的有界响应和系统制品读取接口。[授权、真实诊断和重启验收](../tests/test_mcp_bound_read_tools.py) · [持久 MCP 任务](../tests/test_mcp_tasks.py)
 
 调用使用正常的 `Task.Prepare`、`Task.Submit`、任务等候和 `Artifact.Read`，并在返回结果前重新核对指定授权。成功结果包含本地 Task ID 和受权结果。提交回执丢失时，SDK 用原始提交键查找已接受的 Task 或核对是否可重试。连接关闭或客户端取消通知不改变已经提交的只读 Task。它可在授权与 30 秒 Task 截止时间内继续，由 Core 保存结果。本地所有者可按原 Task 修订调用 `Task.Cancel`。适配器对结果等待 10 秒，Core Unix 套接字无法立即连接时返回传输错误，连接建立后沿用 SDK 的读写超时。每个 STDIO 连接串行处理，限制单帧 64 KiB，并按秒限制该连接的工具调用次数。
 

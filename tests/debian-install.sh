@@ -2,7 +2,7 @@
 # Acceptance on a fresh systemd VM. A successful run ends with a purged package
 # and the test node's retained data, so removal semantics can be inspected.
 set -euo pipefail
-trap 'echo "Package acceptance failed at line $LINENO" >&2' ERR
+trap 'echo "Package acceptance failed at line $LINENO" >&2; systemctl status psiosd --no-pager >&2 || true' ERR
 if [[ ${1:-} != --disposable-systemd-host || $# != 3 || $EUID != 0 ]]; then
     echo "usage: sudo $0 --disposable-systemd-host previous.deb current.deb" >&2
     exit 2
@@ -59,7 +59,12 @@ cp /var/lib/psios.witness/owner.token "$scratch/token"
 pid=$(systemctl show -p MainPID --value psiosd)
 DEBIAN_FRONTEND=noninteractive apt-get install -y "$package"
 [[ $(dpkg-query -W -f='${Version}' psios-core) == "$new_version" ]]
-ready
+[[ $(systemctl show -p Type --value psiosd) == notify ]]
+[[ $(systemctl show -p NotifyAccess --value psiosd) == main ]]
+[[ $(busctl get-property org.freedesktop.systemd1 /org/freedesktop/systemd1/unit/psiosd_2eservice \
+    org.freedesktop.systemd1.Service WatchdogUSec) == 't 120000000' ]]
+[[ $(systemctl show -p StatusText --value psiosd) == 'Core authority is serving' ]]
+ctl whoami >/dev/null
 [[ $(systemctl show -p MainPID --value psiosd) != "$pid" ]]
 cmp "$scratch/local.json" "$config"
 runuser -u psios -- /usr/bin/psiosctl node | jq -e --arg id "$node" '.reference.resource_id == $id' >/dev/null
@@ -101,11 +106,17 @@ if systemctl is-active --quiet psiosd; then exit 1; fi
 mv /var/lib/psios.witness/head "$scratch/head"
 if systemctl start psios-init; then exit 1; fi
 if runuser -u psios -- psiosd --config "$config" check; then exit 1; fi
+if systemctl start psiosd; then exit 1; fi
+systemctl stop psiosd
+[[ ! -e /run/psios/api.sock ]]
 [[ ! -e /var/lib/psios.witness/head ]]
 cmp "$scratch/token" /var/lib/psios.witness/owner.token
 mv "$scratch/head" /var/lib/psios.witness/head
+# Deliberate refusals and earlier upgrades can consume systemd's start burst.
+# Reset it once the original authority witness is back in place.
+systemctl reset-failed psiosd
 systemctl start psiosd
-ready
+ctl whoami >/dev/null
 dpkg --purge psios-core
 [[ ! -e /usr/bin/psiosd && ! -e /run/psios/api.sock && ! -e $config ]]
 [[ -f /var/lib/psios/state.db ]]
@@ -113,7 +124,7 @@ cmp "$scratch/token" /var/lib/psios.witness/owner.token
 dpkg -i "$package"
 if systemctl is-active --quiet psiosd || systemctl is-enabled --quiet psiosd; then exit 1; fi
 systemctl start psiosd
-ready
+ctl whoami >/dev/null
 [[ $(ctl node | jq -er '.reference.resource_id') == "$node" ]]
 ctl wait "$task" | jq -e '.lifecycle == "Succeeded"' >/dev/null
 dpkg --purge psios-core

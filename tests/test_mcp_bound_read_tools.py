@@ -59,6 +59,64 @@ class McpBoundReadToolsTests(McpFixture, unittest.TestCase):
         with closing(sqlite3.connect(self.node.state / "state.db")) as database:
             return database.execute("SELECT count(*) FROM task_preparations").fetchone()[0]
 
+    def test_verified_node_diagnostics_require_explicit_node_scope_in_both_profiles(self):
+        tools = ["node.inventory", "node.devices"]
+        flags = ["--tool", tools[0], "--tool", tools[1]]
+        bindings = [{"tool": tool} for tool in tools]
+        actions = ["task.submit", "task.read", *tools]
+        exact = self.issue(actions, [self.node_id])
+        wide = self.issue(actions)
+        foreign = self.issue(actions, [self.profile])
+        n = self.node
+        target_ref = n.get(self.node_id)["reference"]
+        self.assertEqual(self.resolve(exact, *bindings), [
+            {"tool": tool, "target_ref": target_ref} for tool in tools
+        ])
+        self.assertEqual(self.resolve(wide, *bindings), [])
+        self.assertEqual(self.resolve(foreign, *bindings), [])
+        for profile, arguments, denied in ((LEGACY, flags, wide),
+                                            (MODERN, [*flags, "--volume-usage", "unavailable-volume"], foreign)):
+            refused = self.bound_wire(denied, profile, *arguments)
+            self.assertEqual(refused("tools/list")["result"]["tools"], [])
+            for tool in tools:
+                reply = refused("tools/call", {"name": tool})["result"]
+                self.assertEqual(reply["structuredContent"], {"code": "PermissionDenied"}, reply)
+        self.assertEqual(self.tasks(), [])
+        self.assertEqual(self.preparations(), 0)
+
+        for profile, arguments in ((LEGACY, flags), (MODERN, [*flags, "--volume-usage", "unavailable-volume"])):
+            client = self.bound_wire(exact, profile, *arguments)
+            listed = client("tools/list")["result"]["tools"]
+            self.assertEqual([tool["name"] for tool in listed], tools)
+            for tool in listed:
+                self.assertTrue(tool["annotations"]["readOnlyHint"])
+                schema = tool["inputSchema"]
+                self.assertEqual((schema["type"], schema["additionalProperties"]), ("object", False))
+                if tool["name"] == "node.devices":
+                    self.assertEqual(set(schema["properties"]), {"limit", "cursor"})
+                else:
+                    self.assertNotIn("properties", schema)
+            inventory = self.check_receipt(client("tools/call", {"name": tools[0]})["result"],
+                                           tools[0], exact)["result"]
+            self.assertEqual(inventory["boot_id"], n.call("Node.Get", {})["state"]["boot_id"])
+            self.assertEqual(inventory["kernel_release"], os.uname().release)
+            devices = self.check_receipt(client("tools/call", {"name": tools[1]})["result"],
+                                         tools[1], exact)["result"]
+            self.assertEqual(devices["boot_id"], inventory["boot_id"])
+            self.assertEqual({row["name"] for row in devices["devices"]},
+                             {device.name for device in Path("/sys/class/block").iterdir()})
+            page = self.check_receipt(client("tools/call", {"name": tools[1], "arguments": {"limit": 1}})["result"],
+                                      tools[1], exact)["result"]
+            self.assertEqual(page["boot_id"], devices["boot_id"])
+            self.assertEqual(page["devices"], devices["devices"][:1])
+            self.assertTrue(page["snapshot_digest"].startswith("sha256:"))
+        self.assertEqual(len(self.tasks()), 6)
+        n.call("Grant.Revoke", target(exact["grant_ref"]))
+        self.assertEqual(client("tools/list")["result"]["tools"], [])
+        self.assertEqual(client("tools/call", {"name": tools[1]})["result"]["structuredContent"],
+                         {"code": "PermissionDenied"})
+        self.assertEqual(len(self.tasks()), 6)
+
     def test_measure_only_the_fixed_owned_volume_and_resolve_its_current_revision(self):
         n = self.node
         volume = self.create_owned_volume()

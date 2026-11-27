@@ -3,7 +3,10 @@ use rustix::{
     fd::OwnedFd,
     fs::{FileType, Mode, OFlags, ResolveFlags, fstat, fstatfs, open, openat2, readlinkat},
 };
-use std::{fs::File, io};
+use std::{
+    fs::File,
+    io::{self, Read},
+};
 
 pub(crate) const PROC_MAGIC: u32 = 0x9fa0;
 pub(crate) const BENEATH: ResolveFlags = ResolveFlags::BENEATH.union(ResolveFlags::NO_SYMLINKS);
@@ -44,6 +47,46 @@ pub(crate) fn file(root: &OwnedFd, path: &str) -> io::Result<File> {
         return Err(io::ErrorKind::Unsupported.into());
     }
     Ok(File::from(fd))
+}
+
+pub(crate) fn bounded_text(file: File, limit: usize) -> io::Result<String> {
+    let mut text = String::new();
+    file.take(limit as u64 + 1).read_to_string(&mut text)?;
+    if text.len() > limit {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    Ok(text)
+}
+
+pub(crate) fn unsupported_mount(error: io::Error) -> io::Error {
+    match error
+        .raw_os_error()
+        .map(rustix::io::Errno::from_raw_os_error)
+    {
+        Some(rustix::io::Errno::XDEV | rustix::io::Errno::LOOP | rustix::io::Errno::NOSYS) => {
+            io::ErrorKind::Unsupported.into()
+        }
+        _ => error,
+    }
+}
+
+pub(crate) fn text(root: &OwnedFd, path: &str, limit: usize) -> io::Result<String> {
+    bounded_text(file(root, path).map_err(unsupported_mount)?, limit)
+}
+
+pub(crate) fn kernel_release(root: &OwnedFd) -> io::Result<String> {
+    // /proc/version lies directly on procfs, including with a protected /proc/sys.
+    let banner = text(root, "version", 4096)?;
+    let release = banner
+        .strip_prefix("Linux version ")
+        .and_then(|value| value.split_once(" ("))
+        .map(|(release, _)| release)
+        .filter(|release| {
+            (1..=64).contains(&release.len())
+                && !release.chars().any(|c| c.is_control() || c.is_whitespace())
+        })
+        .ok_or(io::ErrorKind::InvalidData)?;
+    Ok(release.to_owned())
 }
 
 pub(crate) fn thread(root: &OwnedFd) -> io::Result<OwnedFd> {

@@ -3,8 +3,8 @@ mod integrity;
 
 use super::{
     BackupManifest, MAX_ENTRIES, MAX_MANIFEST, child, copy_hash, detached, file_sizes,
-    inspect_detached_backup_with_limit, open_backup, open_manifest, regular, same_source, staging,
-    validate_members,
+    inspect_detached_backup_with_limit, open_backup, open_manifest, profile_entries, regular,
+    same_source, staging, validate_members,
 };
 use crate::{
     Config, DEFAULT_BACKUP_MAX_BYTES, MAX_BACKUP_BYTES, Result,
@@ -20,7 +20,7 @@ use psios_api::{
     canonical, sha256,
 };
 use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
-use serde::Deserialize;
+use serde::{Deserialize, de::IgnoredAny};
 use serde_json::{Value, json};
 use std::{
     fs::{self, File, Metadata},
@@ -46,7 +46,9 @@ struct Index {
 struct Manifest {
     backup_id: String,
     source: Value,
-    entries: Vec<Entry>,
+    entries: Option<Vec<Entry>>,
+    entries_with_user_xattrs: Option<Vec<Entry>>,
+    user_xattrs_unix_v1: Option<IgnoredAny>,
     total_bytes: String,
 }
 
@@ -89,7 +91,13 @@ fn index(
     manifest.seek(SeekFrom::Start(0))?;
     let parsed: Manifest =
         serde_json::from_reader(BufReader::new((&mut *manifest).take(MAX_MANIFEST + 1)))?;
-    let total = parsed.entries.iter().try_fold(0u64, |sum, entry| {
+    let entries = profile_entries(
+        parsed.entries,
+        parsed.entries_with_user_xattrs,
+        parsed.user_xattrs_unix_v1.is_some(),
+    )
+    .map_err(|message| err("PreconditionFailed", message))?;
+    let total = entries.iter().try_fold(0u64, |sum, entry| {
         sum.checked_add(entry.bytes)
             .filter(|sum| *sum <= MAX_BACKUP_BYTES)
     });
@@ -97,8 +105,8 @@ fn index(
         same_source(metadata, &manifest.metadata()?)
             && parsed.backup_id == backup.id
             && parsed.source == backup.spec["source_ref"]
-            && backup.body["entries"] == parsed.entries.len()
-            && parsed.entries.len() <= MAX_ENTRIES
+            && backup.body["entries"] == entries.len()
+            && entries.len() <= MAX_ENTRIES
             && backup.body["bytes"] == parsed.total_bytes
             && total.is_some_and(|sum| parsed.total_bytes.parse() == Ok(sum)),
         "PreconditionFailed",
@@ -108,7 +116,7 @@ fn index(
         directory: directory.clone(),
         manifest: metadata.clone(),
         digest,
-        entries: parsed.entries,
+        entries,
     })
 }
 

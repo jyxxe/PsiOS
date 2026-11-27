@@ -193,21 +193,26 @@ class ModernMcpStdioTests(McpFixture, unittest.TestCase):
         from mcp.client.stdio import StdioServerParameters, stdio_client
 
         self.assertEqual(importlib.metadata.version("mcp"), "2.0.0")
-        grant = self.grant([self.profile], units=2)
-        command, *args = self.command(grant)
+        tools = ["system.status", "node.devices"]
+        grant = self.grant([self.profile, self.node_id], tools=tools)
+        command, *args = [*self.adapter_command(grant), "--protocol", PROFILE, "--tool", tools[0], "--tool", tools[1]]
 
-        async def invoke(mode):
+        async def invoke(mode, tool):
             transport = stdio_client(StdioServerParameters(command=command, args=args, cwd=self.node.base))
             async with Client(transport, mode=mode, cache=None) as client:
                 self.assertEqual(client.protocol_version, PROFILE)
                 if mode == "auto":
                     self.assertEqual(client.server_info.name, "psios-mcp")
-                self.assertEqual([tool.name for tool in (await client.list_tools()).tools], ["system.status"])
-                result = await client.call_tool("system.status", {})
+                self.assertEqual({item.name for item in (await client.list_tools()).tools}, set(tools))
+                query = {"limit": 1} if tool == "node.devices" else {}
+                result = await client.call_tool(tool, query)
                 return result.model_dump(by_alias=True, exclude_none=True)
 
-        for mode in ("auto", PROFILE):
-            report = asyncio.run(asyncio.wait_for(invoke(mode), timeout=40))
+        for mode, tool in zip(("auto", PROFILE), tools, strict=True):
+            report = asyncio.run(asyncio.wait_for(invoke(mode, tool), timeout=40))
             self.assertEqual(report["resultType"], "complete")
-            self.check_receipt(report, "system.status", grant)
-        self.assertEqual(len(self.tasks()), 2)
+            settled = self.check_receipt(report, tool, grant)
+        self.assertEqual(settled["result"]["boot_id"], self.node.call("Node.Get", {})["state"]["boot_id"])
+        self.assertLessEqual(len(settled["result"]["devices"]), 1)
+        self.assertTrue(settled["result"]["snapshot_digest"].startswith("sha256:"))
+        self.assertEqual(len(self.tasks()), len(tools))

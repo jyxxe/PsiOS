@@ -3,7 +3,8 @@ Description=PsiOS local system authority
 After=local-fs.target
 
 [Service]
-Type=exec
+Type=notify
+NotifyAccess=main
 User=psios
 Group=psios
 StateDirectory=psios psios.witness
@@ -14,6 +15,9 @@ UMask=0077
 ExecStart=/usr/bin/psiosd --config /etc/psios/core.json serve
 Restart=on-failure
 RestartSec=3s
+WatchdogSec=120s
+WatchdogSignal=SIGKILL
+TimeoutStartSec=120s
 TimeoutStopSec=120s
 NoNewPrivileges=yes
 ProtectSystem=strict

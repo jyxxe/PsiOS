@@ -1,5 +1,6 @@
 use super::{
     BackupManifest, Capture, CaptureMode, Entry, ModifiedTime, capture_root, checked_root_metadata,
+    root_attribute_profile, xattrs,
 };
 use crate::{MAX_BACKUP_BYTES, Result, decode, host::Work, now, require};
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,8 @@ pub(super) struct RestoreProof {
         skip_serializing_if = "Option::is_none"
     )]
     root_mode_unix_v1: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    user_xattrs_digest: Option<String>,
 }
 
 fn tree_digest<'a>(
@@ -54,6 +57,11 @@ pub(super) fn from_manifest(manifest: &BackupManifest) -> Result<RestoreProof> {
         tree_digest: tree_digest(entries, times.map(|t| t.root), manifest.root_mode_unix_v1)?,
         includes_mtime: times.is_some(),
         root_mode_unix_v1: manifest.root_mode_unix_v1,
+        user_xattrs_digest: manifest
+            .user_xattrs_unix_v1
+            .as_ref()
+            .map(xattrs::Tree::digest)
+            .transpose()?,
     })
 }
 
@@ -61,6 +69,7 @@ pub(super) fn from_capture(
     entries: &[(Entry, std::fs::Metadata)],
     root_time: ModifiedTime,
     root_mode: u32,
+    user_xattrs: Option<&xattrs::Tree>,
 ) -> Result<RestoreProof> {
     let entries = entries
         .iter()
@@ -69,7 +78,12 @@ pub(super) fn from_capture(
         tree_digest: tree_digest(entries, Some(root_time), Some(root_mode))?,
         includes_mtime: true,
         root_mode_unix_v1: Some(root_mode),
+        user_xattrs_digest: user_xattrs.map(xattrs::Tree::digest).transpose()?,
     })
+}
+
+pub(super) fn has_user_attributes(proof: &Value) -> bool {
+    proof["user_xattrs_digest"].is_string()
 }
 
 pub(super) fn check_clone_proof(proof: &Value) -> Result<()> {
@@ -79,7 +93,11 @@ pub(super) fn check_clone_proof(proof: &Value) -> Result<()> {
             && proof
                 .root_mode_unix_v1
                 .is_some_and(|mode| mode <= 0o777 && mode & 0o500 == 0o500)
-            && super::file_integrity::sha256_format(&proof.tree_digest),
+            && super::file_integrity::sha256_format(&proof.tree_digest)
+            && proof
+                .user_xattrs_digest
+                .as_deref()
+                .is_none_or(super::file_integrity::sha256_format),
         "RecoveryRequired",
         "volume clone has no complete captured tree proof",
     )
@@ -121,7 +139,8 @@ pub(super) fn verify_tree_checked(
     check: &mut impl FnMut() -> Result<()>,
 ) -> Result<()> {
     let expected: RestoreProof = decode(expected)?;
-    let before = checked_root_metadata(root, "PreconditionFailed")?;
+    let preserve = expected.user_xattrs_digest.is_some();
+    let (before, root_attributes) = root_attribute_profile(root, "PreconditionFailed", preserve)?;
     let root_mode = expected.root_mode_unix_v1.map(|_| before.mode() & 0o7777);
     require(
         root_mode == expected.root_mode_unix_v1 && root_mode.is_none_or(|mode| mode <= 0o777),
@@ -133,7 +152,8 @@ pub(super) fn verify_tree_checked(
         MAX_BACKUP_BYTES,
         super::MAX_ENTRIES,
         check,
-    );
+    )
+    .with_root_attributes(root_attributes);
     capture.walk(root, Path::new(""), 0)?;
     let entries = capture.entries.iter().map(|(entry, meta)| {
         (
@@ -151,7 +171,17 @@ pub(super) fn verify_tree_checked(
         "PreconditionFailed",
         "restored volume no longer matches its verified backup tree",
     )?;
+    require(
+        capture
+            .user_xattrs
+            .as_ref()
+            .map(xattrs::Tree::digest)
+            .transpose()?
+            == expected.user_xattrs_digest,
+        "PreconditionFailed",
+        "restored volume user attributes do not match the verified backup tree",
+    )?;
     let current = reopen()?;
-    checked_root_metadata(&current, "PreconditionFailed")?;
+    root_attribute_profile(&current, "PreconditionFailed", preserve)?;
     capture.confirm_source(&current, &before)
 }

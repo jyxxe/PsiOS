@@ -1,7 +1,7 @@
 //! Bounded observations of Linux pressure and configured controls.
 mod proc_source;
 
-use crate::{Result, err, host::Work, linux_cgroup, now, require};
+use crate::{Result, err, host::Work, linux_cgroup, linux_proc, now, require};
 use proc_source::Source;
 use rustix::{
     fd::OwnedFd,
@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     fs::File,
-    io::{self, Read},
+    io,
     path::{Component, Path, PathBuf},
 };
 
@@ -46,21 +46,12 @@ impl<T> From<io::Result<T>> for Reading<T> {
     }
 }
 
-pub(super) fn text(file: File, limit: usize) -> io::Result<String> {
-    let mut value = String::new();
-    file.take(limit as u64 + 1).read_to_string(&mut value)?;
-    if value.len() > limit {
-        return Err(io::ErrorKind::InvalidData.into());
-    }
-    Ok(value)
-}
-
 pub(super) fn read<T>(
     file: io::Result<File>,
     limit: usize,
     parse: impl FnOnce(&str) -> Option<T>,
 ) -> Reading<T> {
-    file.and_then(|file| text(file, limit))
+    file.and_then(|file| linux_proc::bounded_text(file, limit))
         .and_then(|value| parse(&value).ok_or_else(|| io::ErrorKind::InvalidData.into()))
         .into()
 }
@@ -181,7 +172,7 @@ pub(super) fn cpu_limit(text: &str) -> Option<CpuLimit> {
 }
 
 fn membership(source: &Source) -> io::Result<PathBuf> {
-    let contents = text(source.membership()?, CONTROL_LIMIT)?;
+    let contents = linux_proc::bounded_text(source.membership()?, CONTROL_LIMIT)?;
     let mut unified = contents
         .lines()
         .filter_map(|line| line.strip_prefix("0::/"));
@@ -198,7 +189,7 @@ fn membership(source: &Source) -> io::Result<PathBuf> {
 
 pub(super) fn contains_process(group: &OwnedFd, pid: u32) -> io::Result<bool> {
     // A namespace path alone can match the wrong directory on a bind mount.
-    let ids = text(
+    let ids = linux_proc::bounded_text(
         linux_cgroup::control(group, "cgroup.procs")?,
         MEMBERSHIP_LIMIT,
     )?;

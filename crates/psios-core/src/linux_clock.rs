@@ -28,20 +28,25 @@ impl BootClock {
     }
 
     fn sample_boot(boot_id: String) -> Result<Self> {
-        let time = clock_gettime(ClockId::Boottime);
-        let millis = time
-            .tv_sec
-            .checked_mul(1000)
-            .and_then(|seconds| seconds.checked_add(time.tv_nsec / 1_000_000))
-            .filter(|millis| *millis >= 0)
-            .ok_or_else(|| {
-                err(
-                    "StorageUnavailable",
-                    "Linux boottime is outside its supported range",
-                )
-            })?;
-        Ok(Self { boot_id, millis })
+        Ok(Self {
+            boot_id,
+            millis: elapsed_millis()?,
+        })
     }
+}
+
+pub(crate) fn elapsed_millis() -> Result<i64> {
+    let time = clock_gettime(ClockId::Boottime);
+    time.tv_sec
+        .checked_mul(1000)
+        .and_then(|seconds| seconds.checked_add(time.tv_nsec / 1_000_000))
+        .filter(|millis| *millis >= 0)
+        .ok_or_else(|| {
+            err(
+                "StorageUnavailable",
+                "Linux boottime is outside its supported range",
+            )
+        })
 }
 
 pub(crate) fn boot_id() -> Result<String> {

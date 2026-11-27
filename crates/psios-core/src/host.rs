@@ -620,17 +620,15 @@ pub(crate) fn install_target(db: &Db<'_>, actor: &str, install: &Install) -> Res
 }
 
 pub fn status(db: &Db<'_>) -> Result<Value> {
-    let uptime = std::fs::read_to_string("/proc/uptime")?
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_owned();
+    let millis = crate::linux_clock::elapsed_millis()?;
+    let uptime = format!("{}.{:02}", millis / 1000, millis % 1000 / 10);
+    let kernel = crate::linux_proc::kernel_release(&crate::linux_proc::root()?)?;
     Ok(json!({
         "schema_version": VERSION,
         "authority_id": db.meta("authority")?,
         "execution_profile_ref": db.get(policy::RUNTIME_PROFILE)?.reference(),
         "recovery_incarnation": db.incarnation,
-        "kernel_release": std::fs::read_to_string("/proc/sys/kernel/osrelease")?.trim(),
+        "kernel_release": kernel,
         "uptime_seconds": uptime,
         "queue_depth": db.c.query_row("SELECT count(*) FROM queue WHERE phase IN ('Queued','Claimed','Dispatched','WaitingApproval','WaitingResource')",[],|r|r.get::<_,u32>(0))?
     }))

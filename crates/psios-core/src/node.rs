@@ -1,6 +1,7 @@
 //! Linux observation and the operator's explicit systemd allowlist.
 pub mod block;
 pub(crate) mod block_device;
+mod inventory;
 pub mod journal;
 pub(crate) mod mounts;
 pub mod network;
@@ -135,26 +136,6 @@ pub fn get(db: &Db<'_>, actor: &str, p: &Value) -> Result<Value> {
 
 fn scalar(path: impl AsRef<Path>) -> Result<String> {
     Ok(fs::read_to_string(path)?.trim().to_owned())
-}
-fn inventory() -> Result<Value> {
-    let mut mem = BTreeMap::new();
-    for line in fs::read_to_string("/proc/meminfo")?.lines() {
-        if let Some((k, v)) = line.split_once(':')
-            && matches!(k, "MemTotal" | "MemAvailable" | "SwapTotal" | "SwapFree")
-            && let Some(n) = v
-                .split_whitespace()
-                .next()
-                .and_then(|s| s.parse::<u64>().ok())
-        {
-            mem.insert(k.to_owned(), n * 1024);
-        }
-    }
-    Ok(
-        json!({"boot_id":linux_clock::boot_id()?,"kernel_release":scalar("/proc/sys/kernel/osrelease")?,
-      "architecture":std::env::consts::ARCH,"available_cpus":std::thread::available_parallelism()?.get(),
-      "memory_bytes":mem,"load_average":scalar("/proc/loadavg")?.split_whitespace().take(3).collect::<Vec<_>>(),
-      "observed_at":now()}),
-    )
 }
 fn devices() -> Result<Value> {
     let mut items = Vec::new();
@@ -340,7 +321,7 @@ fn service(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Result<Va
 }
 pub fn perform(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Result<Value> {
     match &w.action {
-        Action::Inventory {} => inventory(),
+        Action::Inventory {} => inventory::observe(),
         Action::Pressure {} => pressure::observe(w),
         Action::Interfaces(q) => network::interfaces(q),
         Action::Routes(q) => network::observe_routes(q, w),

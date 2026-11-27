@@ -156,6 +156,8 @@ jobs:
           '
           sudo unshare --mount --propagation private env PSIOS_TEST_REPLACE_PRESSURE=1 \
             python3 -B -m unittest discover -s tests -p test_pressure.py -k test_grafted_pressure_sources -v
+          sudo unshare --mount --propagation private env PSIOS_TEST_KERNEL_INVENTORY_MOUNTS=1 \
+            python3 -B -m unittest discover -s tests -p test_kernel_inventory.py -k test_independent_inventory -v
       - name: Verify enrolled block reconciliation, reuse, resize and masked sysfs
         run: |
           if ! command -v sfdisk || ! command -v dmsetup; then

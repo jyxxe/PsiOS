@@ -8,6 +8,8 @@
 
 ## 宿主与调度
 
+`system.status` 使用 Linux `CLOCK_BOOTTIME` 报告经过时间。它和 `node.inventory` 都从已核验 procfs 的有界数据读取内核版本。库存报告独立标记内存与负载的采集状态。对应来源被其他挂载覆盖时，该组显示 `Unsupported`，其余可核验指标继续返回。[真实内核和私有挂载验收](../tests/test_kernel_inventory.py) · [Linux procfs](https://www.kernel.org/doc/html/latest/filesystems/proc.html)
+
 - `psiosctl node` 返回本机权威分配的 Node 身份、Linux boot ID、工作线程数、各阶段队列数量和调度模式。`node.inventory`、`node.processes` 和 `node.devices` 是独立授权的 Task 工具。进程列表支持 `after_pid` 和 `limit`。块设备来自 sysfs，结果和进程页都是调用时的观测。
 - `node.processes` 每项返回由 Node、boot ID、procfs 视图、PID 和 start ticks 组成的 `process_ref`。将这份引用原样用于 `node.process_inspect` 可取得该实例的状态、线程数、CPU ticks、虚拟内存和驻留页。需要单独授予 `node.process_inspect`，并将 `tool_targets` 限定到 Node。退出或不可见的进程返回 `NotFound`，身份或视图变化返回 `PreconditionFailed`。[本机进程验收](../tests/test_process_observation.py) · [Linux procfs](https://docs.kernel.org/filesystems/proc.html)
 - 配置中的 `workers` 取 1 至 16，默认 4。工作线程共享事务权威，在数据库锁外等待宿主调用。调度器在有积压的主体之间轮转。同一卷、应用或服务上的冲突写入继续受持久占用保护。所有者用 `Node.Configure` 提交 Node 的 `expected_resource_version` 和 `scheduling`，取值为 `Cordoned` 或 `Enabled`。暂停领取期间可接受任务，在途工作可结算，超时及撤权仍会释放预留。

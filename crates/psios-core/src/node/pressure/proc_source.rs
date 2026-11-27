@@ -1,6 +1,6 @@
 //! Bind pressure counters and their namespace labels to the same procfs view.
-use crate::linux_proc;
-use rustix::{fd::OwnedFd, fs::readlinkat, io::Errno};
+use crate::linux_proc::{self, unsupported_mount};
+use rustix::{fd::OwnedFd, fs::readlinkat};
 use std::{fs::File, io};
 
 pub(super) struct Source {
@@ -65,11 +65,4 @@ fn canonical_number(value: &str) -> bool {
     value
         .parse::<u64>()
         .is_ok_and(|number| number > 0 && number.to_string() == value)
-}
-
-fn unsupported_mount(error: io::Error) -> io::Error {
-    match error.raw_os_error().map(Errno::from_raw_os_error) {
-        Some(Errno::XDEV | Errno::LOOP | Errno::NOSYS) => io::ErrorKind::Unsupported.into(),
-        _ => error,
-    }
 }

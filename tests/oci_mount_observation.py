@@ -70,10 +70,10 @@ def inspection(docker, container):
     return json.loads(subprocess.check_output([*docker, "inspect", container], timeout=10))[0]
 
 
-def verify_kernel(docker, report, data, reference):
+def verify_kernel(docker, report, data, reference, *, access="ReadWrite"):
     evidence = report["mount_observation"]
     assert evidence["profile"] == "LinuxLocalOciVolumeV1", evidence
-    assert evidence["effective_access"] == "ReadWrite" and evidence["volume_ref"] == reference, evidence
+    assert evidence["effective_access"] == access and evidence["volume_ref"] == reference, evidence
     live = inspection(docker, evidence["container_id"])
     pid = live["State"]["Pid"]
     assert live["State"]["StartedAt"] == evidence["started_at"], live["State"]
@@ -87,7 +87,10 @@ def verify_kernel(docker, report, data, reference):
         int(evidence["mount_namespace_device"]), int(evidence["mount_namespace_inode"])), evidence
     mounts = [line.split() for line in Path(f"/proc/{pid}/mountinfo").read_text().splitlines()]
     mount, = [fields for fields in mounts if fields[4] == "/data"]
-    assert mount[0] == evidence["mount_id"] and mount[5].split(",")[0] == "rw", mount
+    read_only = access == "ReadOnly"
+    assert mount[0] == evidence["mount_id"] and mount[5].split(",")[0] == ("ro" if read_only else "rw"), mount
+    docker_mount, = [entry for entry in live["Mounts"] if entry["Destination"] == "/data"]
+    assert docker_mount["RW"] is (not read_only) and docker_mount["Source"] == str(data), docker_mount
     return evidence
 
 

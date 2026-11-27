@@ -38,6 +38,7 @@ jobs:
           fi
           python3 -B tests/oci.py
           python3 -B tests/oci_xattr_rebind.py
+          python3 -B tests/oci_read_only_volume.py
       - name: Verify documentation contracts
         run: |
           python3 -m venv "$RUNNER_TEMP/psios-docs"

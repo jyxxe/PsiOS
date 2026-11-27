@@ -357,24 +357,33 @@ mod tests {
     use std::io::{Seek, Write};
 
     #[test]
-    fn checks_the_effective_private_writable_data_mount() {
-        let check = |line: &str, id| {
+    fn checks_effective_private_data_mount_access() {
+        let check = |line: &str, id, read_only| {
             let mut table = tempfile::tempfile().unwrap();
             table.write_all(line.as_bytes()).unwrap();
             table.rewind().unwrap();
-            private_data_mount(table, id, false)
+            private_data_mount(table, id, read_only)
         };
         let data = "77 51 8:5 /owned /data rw,relatime - ext4 local rw\n";
-        check(data, 77).unwrap();
+        check(data, 77, false).unwrap();
+        let read_only = data.replace("rw,relatime", "ro,relatime");
+        check(&read_only, 77, true).unwrap();
+        assert_eq!(
+            check(data, 77, true).unwrap_err().0.code,
+            "PreconditionFailed"
+        );
         let nested = "78 77 8:5 /other /data/extra rw - ext4 local rw\n";
         for (bad, id) in [
             (data.to_owned(), 78),
-            (data.replace("rw,relatime", "ro,relatime"), 77),
+            (read_only, 77),
             (data.replace("local rw", "local ro"), 77),
             (data.replace(" - ", " shared:7 - "), 77),
             (format!("{data}{nested}"), 77),
         ] {
-            assert_eq!(check(&bad, id).unwrap_err().0.code, "PreconditionFailed");
+            assert_eq!(
+                check(&bad, id, false).unwrap_err().0.code,
+                "PreconditionFailed"
+            );
         }
     }
 

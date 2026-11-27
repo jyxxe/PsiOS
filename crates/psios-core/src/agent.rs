@@ -629,6 +629,7 @@ fn allocate_turn(
         .transpose()?;
     let turn = s.body["turn"].as_u64().unwrap() as u32 + 1;
     let lease = id("model-call");
+    let deadline_boot = clock.boot.millis + window.millis;
     let until = (chrono::Utc::now() + chrono::Duration::milliseconds(window.millis))
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     db.c.execute(
@@ -641,7 +642,7 @@ fn allocate_turn(
             key,
             until,
             clock.boot.boot_id,
-            clock.boot.millis + window.millis,
+            deadline_boot,
             queued.then_some(&m.id),
         ],
     )?;
@@ -680,11 +681,17 @@ fn allocate_turn(
         &issued,
         m,
         clock,
-        clock.boot.millis + window.millis,
+        deadline_boot,
         serving_authority.as_ref(),
     )?;
     let public_digest = tool_context::enabled(s).then_some(digest.as_str());
     let mut result = lease_info(&lease, &until, turn, ctx, false, public_digest);
+    result["lease_timing"] = json!(psios_api::ModelLeaseTiming::from_authority_clock(
+        &clock.boot.boot_id,
+        &clock.time_ns,
+        deadline_boot,
+        window.millis,
+    ));
     inference::decorate_claim(db, m, &lease, &mut result)?;
     Ok(Ok(result))
 }

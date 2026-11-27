@@ -8,7 +8,8 @@ use crate::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use psios_api::{
-    ApiError, ArtifactUploadCapacity, ArtifactUploadUsage, ResourceRef, canonical, id, sha256,
+    ApiError, ArtifactStagePreparation, ArtifactUploadCapacity, ArtifactUploadUsage, ResourceRef,
+    canonical, id, sha256,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,7 @@ use sha2::{Digest, Sha256};
 use std::io::Read;
 
 pub(crate) mod authority;
+pub(crate) mod windows;
 
 pub(crate) const FORMAT: u32 = crate::node::process::FORMAT + 1;
 pub(crate) const SCHEMA: &str = include_str!("ingress.sql");
@@ -58,6 +60,22 @@ struct Start {
     ttl_seconds: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     delegation_ref: Option<ResourceRef>,
+}
+
+impl Start {
+    fn preparation(&self) -> ArtifactStagePreparation {
+        ArtifactStagePreparation {
+            size_bytes: self.size_bytes,
+            digest: self.digest.clone(),
+            declared_media_type: self.declared_media_type.clone(),
+            ttl_seconds: self.ttl_seconds,
+            delegation_ref: self.delegation_ref.clone(),
+        }
+    }
+
+    fn request_digest(&self) -> Result<String> {
+        Ok(sha256(&canonical(&serde_json::to_value(self)?)))
+    }
 }
 
 #[derive(Deserialize)]
@@ -168,7 +186,7 @@ pub(crate) fn profile(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value>
         "total_bytes":TOTAL_BYTES,"owner_open_stages":OWNER_STAGES,"total_open_stages":TOTAL_STAGES,
         "owner_receipts":owner_receipts,"total_receipts":total_receipts,
         "min_ttl_seconds":5,"max_ttl_seconds":3600,
-        "exact_delegation":true,
+        "exact_delegation":true,"prepared_stage_keys":true,
     }))
 }
 
@@ -343,21 +361,29 @@ pub(crate) fn stage(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     response(db, &stage)
 }
 
-fn begin_stage(db: &Db<'_>, actor: &str, p: Start, profile: Profile) -> Result<Stage> {
-    label(&p.key)?;
+fn validate_stage(size: u32, digest: &str, media_type: &str, ttl: u32, maximum: u32) -> Result<()> {
     require(
-        valid_digest(&p.digest)
-            && valid_media_type(&p.declared_media_type)
-            && (5..=3600).contains(&p.ttl_seconds),
+        valid_digest(digest) && valid_media_type(media_type) && (5..=3600).contains(&ttl),
         "InvalidArgument",
         "invalid artifact digest, media type or upload lifetime",
     )?;
     require(
-        (1..=profile.maximum(db.cfg)).contains(&p.size_bytes),
+        (1..=maximum).contains(&size),
         "QuotaExceeded",
         "artifact size outside ingress profile",
+    )
+}
+
+fn begin_stage(db: &Db<'_>, actor: &str, p: Start, profile: Profile) -> Result<Stage> {
+    label(&p.key)?;
+    validate_stage(
+        p.size_bytes,
+        &p.digest,
+        &p.declared_media_type,
+        p.ttl_seconds,
+        profile.maximum(db.cfg),
     )?;
-    let request_digest = sha256(&canonical(&serde_json::to_value(&p)?));
+    let request_digest = p.request_digest()?;
     let prior =
         db.c.query_row(
             "SELECT * FROM artifact_uploads WHERE owner=?1 AND request_key=?2",
@@ -376,6 +402,8 @@ fn begin_stage(db: &Db<'_>, actor: &str, p: Start, profile: Profile) -> Result<S
         }
         return Ok(prior);
     }
+    let clock = policy::deadline::Clock::sample()?;
+    let prepared = windows::authorize_new(db, actor, &p, &clock)?;
     if let Some(reference) = &p.delegation_ref {
         authority::authorize(db, actor, reference)?;
     }
@@ -387,7 +415,7 @@ fn begin_stage(db: &Db<'_>, actor: &str, p: Start, profile: Profile) -> Result<S
         "artifact-stage"
     });
     let expires = after(i64::from(p.ttl_seconds));
-    policy::deadline::Clock::sample()?.register_until(db, &id, &expires, None)?;
+    clock.register_until(db, &id, &expires, None)?;
     db.c.execute(
         "INSERT INTO artifact_uploads(id,owner,request_key,request_digest,digest,declared_media_type,size_bytes,expires_at)
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
@@ -395,6 +423,9 @@ fn begin_stage(db: &Db<'_>, actor: &str, p: Start, profile: Profile) -> Result<S
     )?;
     if let Some(reference) = &p.delegation_ref {
         authority::attach(db, &id, reference, p.ttl_seconds)?;
+    }
+    if let Some(prepared) = prepared {
+        prepared.attach(db, &id)?;
     }
     db.audit(actor, "Artifact.Stage", Some(&id), "Accepted")?;
     owned(db, actor, &id)
@@ -724,6 +755,10 @@ fn finish_published(db: &Db<'_>, actor: &str, mut stage: Stage, artifact: &Doc) 
     )?;
     db.c.execute(
         "DELETE FROM authorization_deadlines WHERE resource=?1",
+        [&stage.id],
+    )?;
+    db.c.execute(
+        "DELETE FROM artifact_stage_windows WHERE stage_id=?1",
         [&stage.id],
     )?;
     db.audit(

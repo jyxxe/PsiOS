@@ -160,6 +160,9 @@ pub(super) fn check_artifacts(
     if identity.database_format >= artifact::ingress::FORMAT {
         artifact::ingress::verify(conn)?;
     }
+    if identity.database_format >= artifact::ingress::windows::FORMAT {
+        artifact::ingress::windows::verify(conn)?;
+    }
     if identity.database_format >= crate::apps::artifact_install::FORMAT {
         crate::apps::artifact_install::verify(conn)?;
     }

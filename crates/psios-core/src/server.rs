@@ -438,6 +438,17 @@ fn reclaim_storage(s: Shared, stop: Arc<AtomicBool>, config: Config) -> Result<(
                 error.0.code
             );
         }
+        if !stop.load(Ordering::Acquire)
+            && let Err(error) = state(&s)?.transaction(
+                "artifact-upload-window",
+                crate::artifact::ingress::windows::reclaim,
+            )
+        {
+            eprintln!(
+                "psiosd prepared upload receipt reclamation: {}",
+                error.0.code
+            );
+        }
         let ready = state(&s)?.transaction(&correlation, |db| {
             crate::artifact::ingress::expire(db)?;
             retirement::next(db, &mut retirement_cursor)

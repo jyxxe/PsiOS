@@ -192,7 +192,7 @@ fn witness_bytes(path: &Path, max: u64) -> Result<Zeroizing<Vec<u8>>> {
     )?;
     Ok(bytes)
 }
-pub(super) const CURRENT_FORMAT: u32 = storage::ENTRY_CAPACITY_FORMAT;
+pub(super) const CURRENT_FORMAT: u32 = artifact::ingress::windows::FORMAT;
 struct CheckedHead {
     version: u32,
     head: String,
@@ -581,6 +581,9 @@ impl Store {
                 }
                 if ver < chat::CAPACITY_FORMAT {
                     db.c.execute_batch(chat::CAPACITY_SCHEMA)?;
+                }
+                if ver < artifact::ingress::windows::FORMAT {
+                    db.c.execute_batch(artifact::ingress::windows::SCHEMA)?;
                 }
                 policy::upgrade_tool_catalog(db, CURRENT_FORMAT)
             })?;

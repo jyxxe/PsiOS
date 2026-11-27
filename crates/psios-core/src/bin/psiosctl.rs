@@ -236,6 +236,12 @@ enum Cmd {
         #[arg(long)]
         delegation_ref: Option<String>,
     },
+    /// Prepare a bounded key for the supplied upload metadata.
+    ArtifactPrepareUpload {
+        /// JSON upload metadata from a file or stdin.
+        #[arg(default_value = "-")]
+        file: String,
+    },
     /// Show upload staging, retained bytes and durable receipt capacity.
     ArtifactUploadCapacity,
     /// Register an Ed25519 public key for an existing publisher principal.
@@ -1138,6 +1144,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             serde_json::to_value(receipt)?
         }
         Cmd::ArtifactUploadCapacity => serde_json::to_value(c.artifact_upload_capacity()?)?,
+        Cmd::ArtifactPrepareUpload { file } => serde_json::to_value(
+            c.prepare_artifact_stage(&serde_json::from_value(input(&file)?)?)?,
+        )?,
         Cmd::ArtifactPublisherKeyRegister {
             principal_id,
             public_key_base64,

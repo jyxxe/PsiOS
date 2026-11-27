@@ -465,7 +465,9 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 
 `Artifact.UploadProfile` 公布 `OpaqueBytesV1` 的分块、大小、暂存期限及配额。上传主体需要以本机 Node 为目标的 `artifact.upload` Grant。`Artifact.Stage` 固定提交键、预计字节数、SHA-256、声明媒体类型和期限。`Artifact.Stage.PutChunk` 按已提交偏移接收 128 KiB 定长块及末块。中断后通过 `Artifact.Stage.Get` 取得继续位置，用同一键和输入恢复。
 
-`Artifact.UploadCapacity` 和 `psiosctl artifact-upload-capacity` 显示调用主体的暂存字节、发布保留字节、开放的暂存、历史回执和剩余回执数。本机所有者还可查看节点总量。历史回执默认每主体最多 4096 条、每节点最多 65536 条，可在 Core 配置的 `artifact_upload_history` 中以 `per_principal` 和 `node` 设置更低的上限。上限作用于新建暂存，已受理的阶段可继续结算或按原键重放。丢弃、过期和撤回仍保留历史回执。 [Unix API 与并发验收](../tests/test_artifact_upload_capacity.py)
+`Artifact.UploadCapacity` 和 `psiosctl artifact-upload-capacity` 显示调用主体的暂存字节、发布保留字节、开放的暂存、历史回执和剩余回执数。本机所有者还可查看节点总量。历史回执默认每主体最多 4096 条、每节点最多 65536 条，可在 Core 配置的 `artifact_upload_history` 中以 `per_principal` 和 `node` 设置更低的上限。上限作用于新建暂存，已受理的阶段可继续结算或按原键重放。使用普通提交键的上传在丢弃、过期和撤回后保留历史回执。 [Unix API 与并发验收](../tests/test_artifact_upload_capacity.py)
+
+格式 135 提供 `Artifact.Stage.Prepare`。用 `size_bytes`、`digest`、`declared_media_type`、`ttl_seconds` 和可选 `delegation_ref` 申请一个键。CLI 使用 `psiosctl artifact-prepare-upload metadata.json`，Rust SDK 使用 `Client::prepare_artifact_stage`。在准备窗口内把返回的 `key` 和原始字段提交给 `Artifact.Stage`，或传给既有 `psiosctl artifact-upload --key KEY` 并使用相同的声明参数。准备本身不占用上传或回执名额。键绑定发起主体、内容与原委托，并在同一次 Linux 启动及权威恢复世代内按单调时钟判断能否新建。已打开的暂存继续遵循自己的到期时间。准备窗口结束后，后台回收已丢弃或过期的未发布暂存回执，并保留审计事件。使用原键无法重建已回收的暂存。已发布的内容及其回执继续遵循既有保留规则。 [准备键与回收验证](../tests/test_artifact_stage_windows.py)
 
 `Artifact.Publish` 重新核对全部字节后原子提交不可变引用及来源，发布重试返回原回执。可见内容的媒体类型为 `application/octet-stream`，提交者提供的媒体类型作为独立声明保留。发布前可以丢弃暂存，过期块由后台回收。读取原始字节需要 `artifact.read`。`Artifact.Withdraw` 使用额外的 `artifact.withdraw` Grant 和确切引用，回收字节并保留审计凭据。
 

@@ -19,6 +19,24 @@ pub struct ArtifactUploadReceipt {
     pub size_bytes: u64,
 }
 
+/// Exact properties for a new upload with a bounded preparation window.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactStagePreparation {
+    pub size_bytes: u32,
+    pub digest: String,
+    pub declared_media_type: String,
+    pub ttl_seconds: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delegation_ref: Option<ResourceRef>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct PreparedArtifactStage {
+    pub key: String,
+    pub expires_at: String,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ArtifactUploadCapacity {
     pub principal: ArtifactUploadUsage,
@@ -61,6 +79,21 @@ fn source_error(error: Error) -> Box<ApiError> {
 }
 
 impl Client {
+    /// Issue a key for starting the exact upload within its preparation window.
+    /// Keep the returned key for retries of the same stage request.
+    pub fn prepare_artifact_stage(
+        &self,
+        request: &ArtifactStagePreparation,
+    ) -> ApiResult<PreparedArtifactStage> {
+        serde_json::from_value(self.call("Artifact.Stage.Prepare", json!(request))?).map_err(|_| {
+            ApiError::new(
+                "RecoveryRequired",
+                "invalid prepared artifact stage response",
+            )
+            .into()
+        })
+    }
+
     /// Read the caller's committed upload charges and, for the local owner, the node totals.
     pub fn artifact_upload_capacity(&self) -> ApiResult<ArtifactUploadCapacity> {
         serde_json::from_value(self.call("Artifact.UploadCapacity", json!({}))?).map_err(|_| {

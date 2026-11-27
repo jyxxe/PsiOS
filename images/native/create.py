@@ -5,6 +5,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass
 import fcntl
 from functools import partial
+import gzip
 import hashlib
 import ipaddress
 import json
@@ -340,11 +341,21 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
     files.extend(["psios-deployment.json", "psios-payload.sha256"])
     for name in files:
         (work / name).chmod(0o755 if name.startswith("bin/") or name in ("psios-init", "psios-dhcp-event") else 0o644)
-    with (work / "initrd").open("ab") as out:
+    append_deployment_payload(work, files)
+
+
+def append_deployment_payload(work, files):
+    command = ["cpio", "--quiet", "-o", "-H", "newc", "--reproducible", "--owner=0:0"]
+    # Supply the small name list separately so cpio's potentially large output is streamed.
+    with tempfile.TemporaryFile(dir=work) as names, (work / "initrd").open("ab") as out:
+        names.write(("\n".join(files) + "\n").encode())
+        names.seek(0)
         out.write(b"\0" * (-out.tell() % 4))
-        out.flush()
-        subprocess.run(["cpio", "--quiet", "-o", "-H", "newc", "--reproducible", "--owner=0:0"], cwd=work,
-                       input=("\n".join(files) + "\n").encode(), stdout=out, check=True)
+        with subprocess.Popen(command, cwd=work, stdin=names, stdout=subprocess.PIPE) as archive:
+            with gzip.GzipFile(filename="", mode="wb", fileobj=out, mtime=0, compresslevel=6) as member:
+                shutil.copyfileobj(archive.stdout, member, length=MIB)
+            if status := archive.wait():
+                raise subprocess.CalledProcessError(status, command)
 
 
 def ramfs(work, args, instance, home_id, layout=Layout(), signing=None, network_profile=None, *, core_limits=None,

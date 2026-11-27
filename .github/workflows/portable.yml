@@ -98,6 +98,9 @@ jobs:
           fi
           if [ -c /dev/kvm ]; then sudo setfacl -m "u:$(id -un):rw" /dev/kvm; fi
 
+      - name: Verify the compressed native member and cpio error propagation
+        run: python3 -B -m unittest discover -s tests -p test_native_ramfs.py -v
+
       - name: Inspect real ext4 images from an independent read-only rescue boot
         run: |
           cd "$RUNNER_TEMP/rescue-core"

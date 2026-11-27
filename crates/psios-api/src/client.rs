@@ -335,10 +335,21 @@ impl Client {
 
     /// Retrieve and verify an immutable JSON artifact, with a caller-supplied byte limit.
     pub fn artifact_bytes(&self, reference: &ResourceRef, max_bytes: usize) -> ApiResult<Vec<u8>> {
+        self.artifact_bytes_checked(reference, max_bytes, || Ok(()))
+    }
+
+    /// Check that the consumer still wants the result before requesting each chunk.
+    pub fn artifact_bytes_checked(
+        &self,
+        reference: &ResourceRef,
+        max_bytes: usize,
+        mut check: impl FnMut() -> ApiResult<()>,
+    ) -> ApiResult<Vec<u8>> {
         let mut bytes = Vec::new();
         let mut total = None;
         let invalid_page = || ApiError::new("RecoveryRequired", "invalid artifact chunk sequence");
         loop {
+            check()?;
             let offset = bytes.len();
             let result = self.call(
                 "Artifact.ReadChunk",

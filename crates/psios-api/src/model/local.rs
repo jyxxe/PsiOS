@@ -1,7 +1,7 @@
 //! A local, structured inventory provider over a UID-checked Unix socket.
 use super::{
-    ModelDecision, ModelInferenceFailure, ModelInferenceOutcome, ModelOutput, ModelTokenUsage,
-    SessionModel,
+    ModelDecision, ModelInferenceFailure, ModelInferenceOutcome, ModelInvocation, ModelOutput,
+    ModelTokenUsage, SessionModel,
 };
 use crate::{ApiError, ApiResult, ResourceRef, invalid, parse};
 use http_body_util::{BodyExt, Full};
@@ -15,6 +15,7 @@ use tokio::net::UnixStream;
 const TOOLS: [&str; 3] = ["node.inventory", "node.devices", "system.status"];
 const CONTEXT_LIMIT: usize = 128 * 1024;
 const BODY_LIMIT: usize = 256 * 1024;
+const DELIVERY_MARGIN: Duration = Duration::from_millis(100);
 
 /// Operator configuration for a non-streaming chat-completions endpoint.
 /// The registered PsiOS Model revision and the server's model alias must match.
@@ -35,6 +36,10 @@ fn unavailable() -> Box<ApiError> {
         "local inference service unavailable",
     )
     .into()
+}
+
+fn deadline_exceeded() -> Box<ApiError> {
+    ApiError::new("DeadlineExceeded", "local inference deadline reached").into()
 }
 
 fn decision_schema(tools: &[Value]) -> Value {
@@ -107,7 +112,12 @@ impl LocalInventoryModel {
         Ok(())
     }
 
-    async fn infer(&self, body: Vec<u8>, may_have_started: &Cell<bool>) -> ApiResult<Value> {
+    async fn infer(
+        &self,
+        body: Vec<u8>,
+        may_have_started: &Cell<bool>,
+        invocation: Option<&ModelInvocation<'_>>,
+    ) -> ApiResult<Value> {
         // This transport has no DNS, TCP, proxy, redirect or cloud fallback.
         let socket = UnixStream::connect(&self.socket)
             .await
@@ -130,6 +140,9 @@ impl LocalInventoryModel {
             .header("content-type", "application/json")
             .body(Full::new(Bytes::from(body)))
             .map_err(|_| invalid("invalid model request"))?;
+        if invocation.is_some_and(|lease| lease.remaining_time() <= DELIVERY_MARGIN) {
+            return Err(deadline_exceeded());
+        }
         // From this point the peer may consume the POST even if the HTTP exchange fails.
         may_have_started.set(true);
         let reply = sender
@@ -207,7 +220,12 @@ impl LocalInventoryModel {
         Ok((bytes, tools))
     }
 
-    fn attempt(&self, context: &Value, may_have_started: &Cell<bool>) -> ApiResult<ModelOutput> {
+    fn attempt(
+        &self,
+        context: &Value,
+        may_have_started: &Cell<bool>,
+        invocation: Option<&ModelInvocation<'_>>,
+    ) -> ApiResult<ModelOutput> {
         let (bytes, tools) = self.request_body(context)?;
         if tokio::runtime::Handle::try_current().is_ok() {
             return Err(ApiError::new(
@@ -221,19 +239,39 @@ impl LocalInventoryModel {
             .enable_time()
             .build()
             .map_err(|_| unavailable())?;
-        let response = runtime
-            .block_on(async {
-                tokio::time::timeout(
-                    Duration::from_millis(u64::from(self.timeout_ms)),
-                    self.infer(bytes, may_have_started),
-                )
+        let response = runtime.block_on(async {
+            let mut timeout = Duration::from_millis(u64::from(self.timeout_ms));
+            if let Some(lease) = invocation {
+                timeout = timeout.min(lease.remaining_time().saturating_sub(DELIVERY_MARGIN));
+            }
+            if timeout.is_zero() {
+                return Err(deadline_exceeded());
+            }
+            tokio::time::timeout(timeout, self.infer(bytes, may_have_started, invocation))
                 .await
-            })
-            .map_err(|_| ApiError::new("DeadlineExceeded", "local inference deadline reached"))??;
+                .map_err(|_| deadline_exceeded())?
+        })?;
         Ok(ModelOutput {
             decision: decode_decision(&response, &self.model_alias, tools)?,
             usage: decode_usage(&response["usage"])?,
         })
+    }
+
+    fn inference_outcome(
+        &self,
+        context: &Value,
+        invocation: Option<&ModelInvocation<'_>>,
+    ) -> Result<ModelOutput, ModelInferenceFailure> {
+        let may_have_started = Cell::new(false);
+        self.attempt(context, &may_have_started, invocation)
+            .map_err(|error| ModelInferenceFailure {
+                outcome: if may_have_started.get() {
+                    ModelInferenceOutcome::Unknown
+                } else {
+                    ModelInferenceOutcome::NotStarted
+                },
+                error,
+            })
     }
 }
 
@@ -248,16 +286,15 @@ impl SessionModel for LocalInventoryModel {
     }
 
     fn decide_with_outcome(&self, context: &Value) -> Result<ModelOutput, ModelInferenceFailure> {
-        let may_have_started = Cell::new(false);
-        self.attempt(context, &may_have_started)
-            .map_err(|error| ModelInferenceFailure {
-                outcome: if may_have_started.get() {
-                    ModelInferenceOutcome::Unknown
-                } else {
-                    ModelInferenceOutcome::NotStarted
-                },
-                error,
-            })
+        self.inference_outcome(context, None)
+    }
+
+    fn decide_for_lease(
+        &self,
+        context: &Value,
+        invocation: &ModelInvocation<'_>,
+    ) -> Result<ModelOutput, ModelInferenceFailure> {
+        self.inference_outcome(context, Some(invocation))
     }
 }
 

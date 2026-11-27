@@ -1,8 +1,10 @@
 //! Provider implementations run as authenticated peers. Only the authority can commit a tool step.
 mod journal;
+mod lease;
 #[cfg(feature = "local-inference")]
 mod local;
 use crate::{ApiError, ApiResult, Client, ResourceRef};
+pub use lease::{ModelInvocation, ModelLeaseTiming};
 #[cfg(feature = "local-inference")]
 pub use local::LocalInventoryModel;
 use serde::{Deserialize, Serialize};
@@ -84,6 +86,15 @@ pub trait SessionModel {
                 outcome: ModelInferenceOutcome::Unknown,
                 error,
             })
+    }
+
+    /// Use the claim's available time to bound external work without adding it to model input.
+    fn decide_for_lease(
+        &self,
+        context: &Value,
+        _invocation: &ModelInvocation<'_>,
+    ) -> Result<ModelOutput, ModelInferenceFailure> {
+        self.decide_with_outcome(context)
     }
 }
 #[derive(Serialize, Deserialize)]
@@ -238,6 +249,20 @@ impl Client {
             && claim["decision_rejection_policy"]
                 == json!(ModelDecisionRejectionPolicy::UndeclaredToolV1))
         .then_some(ModelDecisionRejectionPolicy::UndeclaredToolV1);
+        let invocation = ModelInvocation::from_claim(&lease_id, &claim)?;
+        let invoke = || {
+            if invocation.remaining_time().is_zero() {
+                return Err(ModelInferenceFailure {
+                    outcome: ModelInferenceOutcome::NotStarted,
+                    error: ApiError::new(
+                        "DeadlineExceeded",
+                        "model lease expired before inference",
+                    )
+                    .into(),
+                });
+            }
+            provider.decide_for_lease(context, &invocation)
+        };
         let (output, late_decision_model_ref) = match claim.get("inference_outcome_policy") {
             Some(policy) if policy == "Strict" => {
                 let model_ref: ResourceRef =
@@ -248,7 +273,7 @@ impl Client {
                         "late decision capability model reference differs",
                     ));
                 }
-                match provider.decide_with_outcome(context) {
+                match invoke() {
                     Ok(output) => (output, observe_late.then_some(model_ref)),
                     Err(failure) => {
                         return Ok(Turn::Deliver {
@@ -263,7 +288,7 @@ impl Client {
                     }
                 }
             }
-            None => (provider.decide_with_usage(context)?, None),
+            None => (invoke().map_err(|failure| failure.error)?, None),
             Some(_) => {
                 return Err(ApiError::new(
                     "UnsupportedCapability",
@@ -376,6 +401,10 @@ mod tests {
     use super::*;
     use std::cell::Cell;
 
+    fn future_expiration() -> String {
+        (chrono::Utc::now() + chrono::TimeDelta::seconds(5)).to_rfc3339()
+    }
+
     #[test]
     fn model_input_receipt_requires_explicit_provider_support() {
         struct InputProvider(Cell<bool>);
@@ -408,7 +437,7 @@ mod tests {
             opted_in["accepts_session_inputs"] = json!(true);
             assert_eq!(claim_parameters(original, &provider), opted_in);
         }
-        let mut claim = json!({"lease_id":"lease-fixture","context":{
+        let mut claim = json!({"lease_id":"lease-fixture","turn":1,"expires_at":future_expiration(),"context":{
             "session_id":"session-fixture","model_ref":queued,"inputs":[{"value":{"inventory":true}}],
         }});
         for expected_model in [None, Some(&queued)] {
@@ -457,7 +486,7 @@ mod tests {
             version: "r1".into(),
             digest: crate::sha256(b"fixture"),
         };
-        let mut claim = json!({"lease_id":"lease-fixture","recovered":true,
+        let mut claim = json!({"lease_id":"lease-fixture","recovered":true,"turn":1,"expires_at":future_expiration(),
             "context":{"session_id":"session-fixture","model_ref":model},
             "inference_outcome_policy":"Strict"});
         assert!(matches!(
@@ -481,5 +510,62 @@ mod tests {
             Err(error) if error.code == "DependencyUnavailable"
         ));
         assert_eq!(provider.0.get(), 2);
+    }
+
+    #[test]
+    fn fresh_claim_passes_control_metadata_outside_context_and_expired_claim_skips_dispatch() {
+        struct Observe(Cell<u32>);
+        impl SessionModel for Observe {
+            fn decide(&self, _: &Value) -> ApiResult<ModelDecision> {
+                panic!("lease-aware provider must receive its invocation")
+            }
+
+            fn decide_for_lease(
+                &self,
+                context: &Value,
+                invocation: &ModelInvocation<'_>,
+            ) -> Result<ModelOutput, ModelInferenceFailure> {
+                assert!(context.get("lease_timing").is_none());
+                assert!(context.get("lease_id").is_none());
+                assert_eq!((invocation.lease_id, invocation.turn), ("lease-fixture", 2));
+                let remaining = invocation.remaining_time();
+                assert!(
+                    !remaining.is_zero() && remaining <= std::time::Duration::from_millis(1500)
+                );
+                self.0.set(self.0.get() + 1);
+                Ok(ModelOutput {
+                    decision: ModelDecision::Finish {
+                        summary: "Done.".into(),
+                    },
+                    usage: None,
+                })
+            }
+        }
+        let model = ResourceRef {
+            resource_id: "model-fixture".into(),
+            version: "r1".into(),
+            digest: crate::sha256(b"fixture"),
+        };
+        let provider = Observe(Cell::new(0));
+        let mut claim = json!({
+            "lease_id":"lease-fixture", "turn":2, "expires_at":future_expiration(),
+            "context":{"session_id":"session-fixture","model_ref":model},
+            "inference_outcome_policy":"Strict",
+            "lease_timing":ModelLeaseTiming::from_authority_clock("test-boot", "123", 12345, 1500),
+        });
+        assert!(matches!(
+            Client::decide_claim("session-fixture", claim.clone(), &provider, Some(&model)),
+            Ok(Turn::Deliver {
+                request: Delivery::Decision(_),
+                ..
+            })
+        ));
+        claim["expires_at"] = json!("2000-01-01T00:00:00Z");
+        assert!(matches!(
+            Client::decide_claim("session-fixture", claim, &provider, Some(&model)),
+            Ok(Turn::Deliver { request: Delivery::Failure(report), .. })
+              if report.outcome == ModelInferenceOutcome::NotStarted
+        ));
+        assert_eq!(provider.0.get(), 1);
     }
 }

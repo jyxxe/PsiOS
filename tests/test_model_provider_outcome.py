@@ -118,6 +118,52 @@ class StrictModelProvider(unittest.TestCase):
     def budget(self):
         return self.node.call("Budget.Get", {"id": self.grant["budget_ref"]["resource_id"]}, self.owner["token"])
 
+    def assert_lease_bounded(self, *, queued):
+        node = self.node
+        lease_ms = 1200
+        self.grant = node.call("Grant.Issue", {
+            "principal_id": self.owner["principal_id"], "actions": ["session.run", "task.submit", "task.read", "system.status"],
+            "model_calls": 2, "model_lease_ms": lease_ms, "units": 4, "ttl_seconds": 180,
+        })
+        configuration = json.loads(self.model_config.read_text())
+        configuration["timeout_ms"] = 8000
+        self.model_config.write_text(json.dumps(configuration))
+        session = self.open_session(queued=queued)
+        if queued:
+            model_file = node.base / "model-ref.json"
+            model_file.write_text(json.dumps(self.model))
+            args = ["model-worker", model_file, "--decision-dir", self.journal,
+                    "--local-model", self.model_config, "--wait-ms", "3000", "--once"]
+        else:
+            args = self.step(session, "actual-lease-timeout")
+        command = [node.binaries / "psiosctl", "--socket", node.socket, "--token-file", self.provider_token, *args]
+        received, release = threading.Event(), threading.Event()
+        with serve_inference(self.endpoint, drop_reply=True, gate=(received, release)) as calls:
+            started = time.monotonic()
+            worker = subprocess.run(command, capture_output=True, text=True, timeout=4)
+            elapsed = time.monotonic() - started
+            self.assertTrue(received.is_set(), worker.stderr)
+            self.assertEqual(worker.returncode, 0, worker.stderr)
+            receipt = json.loads(worker.stdout)
+            self.assertEqual(receipt["session_ref"]["resource_id"], session)
+            self.assertEqual((receipt["lifecycle"], receipt["outcome_knowledge"]), ("Paused", "Unknown"))
+            self.assertGreater(elapsed, 0.4)
+            self.assertLess(elapsed, 3)
+            self.assertEqual(len(calls), 1)
+            prompt = calls[0]["messages"][1]["content"]
+            self.assertNotIn("lease_timing", prompt)
+            self.assertNotIn(receipt["lease_id"], prompt)
+        self.assertEqual(self.budget()["model_calls_used"], 1)
+        self.assertEqual(self.budget()["model_lease_ms_charged"], lease_ms)
+        self.assertEqual(self.history(session)["tasks"], [])
+        self.assertEqual(list(self.journal.iterdir()), [])
+
+    def test_direct_transport_stops_before_the_configured_timeout_when_core_grants_less(self):
+        self.assert_lease_bounded(queued=False)
+
+    def test_queued_transport_uses_the_same_shortened_lease(self):
+        self.assert_lease_bounded(queued=True)
+
     def test_pre_send_failure_replays_the_report_then_resumes_with_a_fresh_call(self):
         node = self.node
         session = self.open_session()

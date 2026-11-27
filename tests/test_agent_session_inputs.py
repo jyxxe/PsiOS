@@ -141,6 +141,8 @@ class AgentSessionInputs(SessionInputFixture, unittest.TestCase):
                     self.provider["token"])
         replay = self.claimed(session, "first")
         self.assertEqual(replay, {**first, "recovered": True})
+        self.assertGreater(replay["lease_timing"]["window_ms"], 0)
+        self.assertNotIn("lease_timing", replay["context"])
 
         request = {"action": "tool", "tool": replay["context"]["inputs"][0]["value"]["tool"], "input": {}}
         result = self.respond(session, replay, request)

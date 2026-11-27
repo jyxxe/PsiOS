@@ -49,12 +49,21 @@ class BackupEstimateTests(unittest.TestCase):
         marker = directory / 'escaped "name" \\ evidence'
         marker.write_bytes(b"verified payload")
         entries = 4102
+        allowed = grant(n, "local-owner", ["task.submit", "task.read", "volume.clone"],
+                        [self.volume["resource_id"], "local"])
+
+        def submit_clone(name):
+            request = n.prepare("volume.clone", {"target": target(self.volume), "name": name},
+                                delegation=allowed["delegation_ref"]["resource_id"])
+            return n.call("Task.Submit", request)["task_id"]
 
         default = self.estimate()
         self.assertEqual((default["entries"], default["profile"]["entry_limit"]), (entries, 4096))
         self.assertFalse(default["fits_entry_limit"])
         self.require_failed(n.submit("backup.create", target(self.volume)), "QuotaExceeded")
+        self.require_failed(submit_clone("refused-clone"), "QuotaExceeded")
         self.assertEqual(list((n.state / "backups").iterdir()), [])
+        self.assertEqual(list((n.state / "volumes").iterdir()), [self.source.parent])
 
         n.stop()
         original = n.config.read_text()
@@ -76,6 +85,13 @@ class BackupEstimateTests(unittest.TestCase):
                     "--manifest-digest", receipt["manifest_digest"]]
         verified = json.loads(subprocess.check_output(verifier, timeout=30))
         self.assertEqual(verified["entries"], entries)
+        copied = n.wait(submit_clone("large-direct-clone"), autoapprove=True)
+        self.assertEqual(copied["lifecycle"], "Succeeded", copied)
+        copy = n.call("Artifact.Read", {"reference": copied["result"]["artifact_refs"][0]})
+        copy = n.perform("volume.activate", target(copy))
+        tree = n.state / "volumes" / copy["resource_id"] / "data" / "records"
+        self.assertEqual(len(list(tree.iterdir())), entries - 1)
+        self.assertEqual((tree / marker.name).read_bytes(), marker.read_bytes())
 
         n.stop(signal.SIGKILL)
         n.config.write_text(original)

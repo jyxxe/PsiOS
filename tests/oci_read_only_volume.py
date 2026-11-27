@@ -1,9 +1,11 @@
 """Exercise an approved read-only data volume in an actual local Docker container."""
 import argparse
+from contextlib import closing
 from io import BytesIO
 import json
 from pathlib import Path
 import signal
+import sqlite3
 import subprocess
 import tarfile
 import time
@@ -131,6 +133,41 @@ def upgrade_running_read_write_volume(node, image, binaries, app_ids):
     print("PASS format 139 kept its live writable mount and data through migration, and the old writer was fenced")
 
 
+def recover_unsettled_start(node, app, data, volume):
+    app_id = app["resource_id"]
+    database = node.state / "state.db"
+    with closing(sqlite3.connect(database, timeout=10)) as conn, conn:
+        conn.execute(f"""CREATE TRIGGER interrupt_read_only_start BEFORE INSERT ON versions
+            WHEN NEW.id='{app_id}' AND NEW.body->>'lifecycle'='Running'
+            BEGIN SELECT RAISE(ABORT, 'injected read-only start receipt loss'); END""")
+    try:
+        started = node.submit("application.start", target(app))
+        lost = node.wait(started, autoapprove=True)
+        assert (lost["lifecycle"], lost["outcome_knowledge"]) == ("Paused", "Unknown"), lost
+    finally:
+        with closing(sqlite3.connect(database, timeout=10)) as conn, conn:
+            conn.execute("DROP TRIGGER interrupt_read_only_start")
+    container, = subprocess.check_output([*DOCKER, "ps", "-q", "--no-trunc", "--filter",
+        f"label=io.psios.application={app_id}"], timeout=10).decode().split()
+    node.stop(signal.SIGKILL)
+    node.start()
+    observed = node.wait(node.submit("application.health", target(app)))
+    assert (observed["lifecycle"], observed["outcome_knowledge"]) == ("Succeeded", "Known"), observed
+    proof, = observed["result"]["artifact_refs"]
+    report = node.call("Artifact.Read", {"reference": proof})
+    evidence = verify_kernel(DOCKER, report, data, volume, access="ReadOnly")
+    assert evidence["container_id"] == container
+    operation, = lost["operation_refs"]
+    node.call("Operation.Reconcile", {**target(operation), "evidence_ref": proof})
+    settled = node.wait(started)
+    assert (settled["lifecycle"], settled["outcome_knowledge"]) == ("Succeeded", "Known"), settled
+    app = node.get(app_id)["reference"]
+    actual, _ = verify_application(node, app, data, volume)
+    assert actual == evidence
+    print("PASS recovered the original read-only start after an actual lost SQLite receipt")
+    return app
+
+
 def exercise(node, image, app_ids):
     config = json.loads(node.config.read_text())
     assert not config.get("oci_effective_volume_observation"), config
@@ -184,8 +221,7 @@ def exercise(node, image, app_ids):
     assert release_mode(node, staged) == "ReadOnly"
     app = node.perform("application.select_release", {"target": target(app), "release_ref": staged})
     volume = node.get(volume["resource_id"])["reference"]
-    app = node.perform("application.start", target(app))
-    verify_application(node, app, data, volume)
+    app = recover_unsettled_start(node, app, data, volume)
     app = node.perform("application.stop", target(app))
     node.perform("application.uninstall", target(app))
     assert (data / "seed").read_bytes() == b"original" and not (data / "new").exists()

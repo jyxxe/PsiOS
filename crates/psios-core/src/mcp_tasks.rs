@@ -499,7 +499,10 @@ pub(crate) fn access(db: &Db<'_>, actor: &str, method: &str, value: &Value) -> R
     )?;
     let delegation = saved.authorize(db, actor, &request.delegation_id)?;
     require(
-        request.bindings.contains(&saved.spec.tool),
+        request.bindings.iter().any(|configured| {
+            configured.name() == saved.spec.tool.name()
+                && configured.target() == saved.spec.tool.target()
+        }),
         "PermissionDenied",
         "MCP tool is outside this adapter's configuration",
     )?;

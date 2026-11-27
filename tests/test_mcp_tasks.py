@@ -62,6 +62,86 @@ class McpTaskFixture(McpFixture):
 
 
 class McpTaskTests(McpTaskFixture, unittest.TestCase):
+    def test_device_page_input_and_cursor_survive_adapter_and_daemon_restart(self):
+        n = self.node
+        tool = "node.devices"
+        grant = self.grant([self.node_id], units=4, tools=[tool])
+        client = self.task_wire(grant, extra=("--tool", tool))
+        listed, = self.task_call(client, "tools/list")["result"]["tools"]
+        self.assertEqual(listed["name"], tool)
+        self.assertEqual(listed["inputSchema"]["properties"]["limit"]["maximum"], 32)
+        invocation = key()
+
+        def start(wire, query, attempt):
+            return self.task_call(wire, "tools/call", {"name": tool, "arguments": query}, invocation=attempt)["result"]
+
+        first = start(client, {"limit": 1}, invocation)["taskId"]
+        settled = self.wait_status(client, first)
+        first_result = self.check_receipt(settled["result"], tool, grant)["result"]
+        self.assertLessEqual(len(first_result["devices"]), 1)
+        cursor = first_result["next_cursor"]
+        client.close()
+        n.stop(signal.SIGKILL)
+        offline = json.loads(subprocess.check_output([*n.daemon, "verify"], timeout=20))
+        self.assertGreaterEqual(offline["database_format"], 139)
+        self.assertEqual(offline["sqlite_integrity"], "Verified")
+        n.start()
+
+        resumed = self.task_wire(grant, extra=("--tool", tool))
+        self.assertEqual(start(resumed, {"limit": 1}, invocation)["taskId"], first)
+        self.assertEqual(start(resumed, {"limit": 2}, invocation)["structuredContent"], {"code": "IdempotencyConflict"})
+        self.assertEqual(self.wait_status(resumed, first), settled)
+        self.assertEqual(len(self.tasks()), 1)
+        if cursor is not None:
+            following = start(resumed, {"limit": 1, "cursor": cursor}, key())["taskId"]
+            page = self.check_receipt(self.wait_status(resumed, following)["result"], tool, grant)["result"]
+            self.assertEqual(page["snapshot_digest"], first_result["snapshot_digest"])
+            self.assertEqual(len(page["devices"]), 1)
+            self.assertGreater(page["devices"][0]["name"], first_result["devices"][0]["name"])
+            self.assertEqual(len(self.tasks()), 2)
+        without_tool = self.task_wire(grant, extra=("--tool", "node.inventory"))
+        self.assertEqual(self.task_call(without_tool, "tasks/get", {"taskId": first})["error"]["code"], -32602)
+        n.call("Grant.Revoke", target(grant["grant_ref"]))
+        self.assertEqual(self.task_call(resumed, "tasks/get", {"taskId": first})["error"]["code"], -32602)
+
+    @unittest.skipUnless(os.getenv("PSIOS_MCP_PAGE_PREVIOUS_BIN_DIR"), "requires pinned format-138 binaries")
+    def test_format_138_unpaged_handle_is_preserved_and_old_writer_is_fenced(self):
+        node = Node(os.environ["PSIOS_MCP_PAGE_PREVIOUS_BIN_DIR"])
+        self.addCleanup(node.close)
+        actor = node.call("Agent.Register", {"name": "device-page-upgrade"})
+        token = actor["token"]
+        node_id = node.call("Node.Get", {})["reference"]["resource_id"]
+        grant = node.call("Grant.Issue", {"principal_id": actor["principal_id"], "tool_targets": [node_id],
+            "actions": ["task.submit", "task.read", "node.devices"], "units": 2, "ttl_seconds": 120})
+        scope = {"endpoint": "device-inventory", "delegation_id": grant["delegation_ref"]["resource_id"]}
+        binding = {"tool": "node.devices"}
+        start = {**scope, "binding": binding, "invocation_key": key(), "ttl_seconds": 120}
+        handle = node.call("McpTask.Start", start, token)["taskId"]
+        [reference] = node.call("Resource.List", {"kind": "Task"})["items"]
+        self.assertEqual(node.wait(reference["resource_id"])["lifecycle"], "Succeeded")
+        access = {**scope, "handle": handle, "bindings": [binding]}
+        original = node.call("McpTask.Get", access, token)
+        self.assertEqual(original["tool_result"]["task_id"], reference["resource_id"])
+        self.assertNotIn("next_cursor", original["tool_result"]["result"])
+
+        node.stop(signal.SIGKILL)
+        old = node.daemon.copy()
+        node.binaries = self.node.binaries
+        node.daemon[0] = str(node.binaries / "psiosd")
+        pending = json.loads(subprocess.check_output([*node.daemon, "verify"], timeout=20))
+        self.assertEqual((pending["node_id"], pending["database_format"], pending["migration_required"]),
+                         (node_id, 138, True))
+        node.start()
+        self.assertEqual(node.call("McpTask.Start", start, token)["taskId"], handle)
+        self.assertEqual(node.call("McpTask.Get", access, token), original)
+        self.assertEqual(node.call("Resource.List", {"kind": "Task"})["items"], [reference])
+        node.stop()
+        before = (node.witness / "head").read_bytes()
+        blocked = subprocess.run([*old, "serve"], capture_output=True, timeout=10)
+        self.assertNotEqual(blocked.returncode, 0, blocked)
+        self.assertIn(b"SchemaVersionUnsupported", blocked.stderr)
+        self.assertEqual((node.witness / "head").read_bytes(), before)
+
     @unittest.skipUnless(os.getenv("PSIOS_MCP_NODE_PREVIOUS_BIN_DIR"), "requires pinned format-137 binaries")
     def test_format_137_keeps_original_device_receipt_while_enabling_mcp_discovery(self):
         node = Node(os.environ["PSIOS_MCP_NODE_PREVIOUS_BIN_DIR"])

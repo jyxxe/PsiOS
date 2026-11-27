@@ -204,7 +204,8 @@ class ModernMcpStdioTests(McpFixture, unittest.TestCase):
                 if mode == "auto":
                     self.assertEqual(client.server_info.name, "psios-mcp")
                 self.assertEqual({item.name for item in (await client.list_tools()).tools}, set(tools))
-                result = await client.call_tool(tool, {})
+                query = {"limit": 1} if tool == "node.devices" else {}
+                result = await client.call_tool(tool, query)
                 return result.model_dump(by_alias=True, exclude_none=True)
 
         for mode, tool in zip(("auto", PROFILE), tools, strict=True):
@@ -212,4 +213,6 @@ class ModernMcpStdioTests(McpFixture, unittest.TestCase):
             self.assertEqual(report["resultType"], "complete")
             settled = self.check_receipt(report, tool, grant)
         self.assertEqual(settled["result"]["boot_id"], self.node.call("Node.Get", {})["state"]["boot_id"])
+        self.assertLessEqual(len(settled["result"]["devices"]), 1)
+        self.assertTrue(settled["result"]["snapshot_digest"].startswith("sha256:"))
         self.assertEqual(len(self.tasks()), len(tools))

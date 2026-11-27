@@ -3984,6 +3984,57 @@ fn service_observation_keeps_superseded_reads_and_redacts_fenced_evidence() {
 }
 
 #[test]
+fn fenced_read_only_receipts_redact_samples_and_preserve_committed_results() {
+    let folder = tempfile::tempdir().unwrap();
+    let (_, mut store) = initialized(folder.path());
+    let task = submit(&mut store, "node.inventory", json!({}));
+    assert_eq!(claim(&mut store), task);
+    let work = dispatch(&mut store, &task);
+    let committed = json!({"memory_bytes":{"MemTotal":1024}});
+    let obsolete = json!({"memory_bytes":{"MemTotal":2048}});
+    let (late, legacy) = store
+        .transaction("complete-and-redact-inventory", |db| {
+            broker::finish(db, &work, Ok(committed.clone()))?;
+            broker::finish(db, &work, Ok(obsolete.clone()))?;
+            let late = db.c.query_row(
+                "SELECT body FROM current WHERE kind='LateReceipt'
+                 AND body->'operation_ref'->>'resource_id'=?1",
+                [&work.op.id],
+                |row| row.get::<_, Value>(0),
+            )?;
+            let legacy = db.record(
+                "LateReceipt",
+                policy::OWNER,
+                json!({"run_ref":work.run.reference(),"operation_ref":work.op.reference(),
+                    "effect_ref":work.effect.reference(),"evidence":{"receipt":obsolete}}),
+            )?;
+            Ok((late, legacy.reference()))
+        })
+        .unwrap();
+    assert_eq!(late["evidence"], json!({"code":"Fenced"}));
+    for (method, request) in [
+        ("Resource.Get", json!({"id":legacy["resource_id"]})),
+        ("Resource.Resolve", json!({"reference":legacy})),
+    ] {
+        let result = call(&mut store, method, request).unwrap();
+        assert_eq!(result["reference"], legacy);
+        assert_eq!(result["value"]["evidence"], json!({"code":"Fenced"}));
+        assert_eq!(
+            result["resource"]["spec"]["evidence"],
+            json!({"code":"Fenced"})
+        );
+    }
+    let settled = call(&mut store, "Task.Get", json!({"id":task})).unwrap();
+    let result = call(
+        &mut store,
+        "Artifact.Read",
+        json!({"reference":settled["result"]["artifact_refs"][0]}),
+    )
+    .unwrap();
+    assert_eq!(result, committed);
+}
+
+#[test]
 fn revoked_service_resource_grant_fences_the_result_and_late_receipt() {
     let directory = tempfile::tempdir().unwrap();
     let mut cfg = Config::local(&directory.path().join("core"));

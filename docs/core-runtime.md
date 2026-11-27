@@ -373,6 +373,8 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 
 ## 任务输出依赖
 
+格式 128 在只读 Task 发布结果的事务中复核原执行许可、精确资源目标、当前委托和关联的 Agent 会话。取消、撤权或改变目标修订会阻止发布。重复到达的只读样本只保留围栏状态，历史迟到回执的查询同样隐藏样本。 [Linux 读取边界验收](../tests/test_host_read_publication.py)
+
 `Task.Prepare` 可填 `requires`，每项指定已有上游 `task_id` 和结果制品的 `digest`。依赖属于固定输入清单，参与请求摘要和审批计划。最多指定四个不同上游，所有内容校验共用 8 MiB 上限。主体须有权读取各上游。Rust SDK 使用 `Client::submit_with_requirements`，CLI 使用 `psiosctl submit --requires FILE` 读取依赖 JSON 数组。
 
 直接 `Task.Prepare` 将输入按主体暂存在本机，返回现有 v1 提交请求。暂存跟随进程重启，期限最多十分钟，并受请求和授权原期限限制。每主体最多 128 个、单节点最多 1024 个暂存请求，各自的暂存输入上限为 8 MiB 和 64 MiB。主体可用获准的 `Resource.Get` 或 `Resource.Resolve` 预览自己的输入。Task 受理事务才发布持久输入、Task、Operation、预算使用及依赖保留关系。重复使用相同的输入在持久存储中共用内容，提交仍按各自的精确预备请求检查。

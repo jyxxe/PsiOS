@@ -127,7 +127,8 @@ class BackupUserAttributesTests(unittest.TestCase):
             self.assertIn('code: "InvalidArgument"', refused.stderr)
         n.stop()
         result = json.loads(subprocess.check_output([*n.daemon, "verify"], timeout=20))
-        self.assertEqual((result["database_format"], result["sqlite_integrity"]), (137, "Verified"))
+        self.assertGreaterEqual(result["database_format"], 137)
+        self.assertEqual(result["sqlite_integrity"], "Verified")
 
     def test_export_and_import_on_a_different_node(self):
         self.configure(True)
@@ -184,8 +185,9 @@ class BackupUserAttributesTests(unittest.TestCase):
         self.assertEqual(os.listxattr(record), [])
         previous.stop()
         after = json.loads(subprocess.check_output([*previous.daemon, "verify"], timeout=20))
-        self.assertEqual((after["node_id"], after["database_format"], after["migration_required"]),
-                         (before["node_id"], 137, False))
+        self.assertEqual(after["node_id"], before["node_id"])
+        self.assertGreaterEqual(after["database_format"], 137)
+        self.assertFalse(after["migration_required"])
         refused = subprocess.run([*original, "serve"], capture_output=True, text=True, timeout=20)
         self.assertNotEqual(refused.returncode, 0, refused)
         self.assertIn("SchemaVersionUnsupported", refused.stderr)

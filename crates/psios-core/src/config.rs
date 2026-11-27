@@ -33,6 +33,8 @@ pub struct Config {
     pub principal_queue_limit: Option<u32>,
     #[serde(default)]
     pub read_result_bytes_per_principal: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_upload_history: Option<ArtifactUploadHistoryLimit>,
     #[serde(default = "default_recovery_queue")]
     pub recovery_queue_limit: u32,
     #[serde(default = "default_tick")]
@@ -67,6 +69,13 @@ pub struct AuthorityReserve {
     pub witness_bytes: u64,
     pub state_inodes: u64,
     pub witness_inodes: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactUploadHistoryLimit {
+    pub per_principal: u32,
+    pub node: u32,
 }
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -211,6 +220,7 @@ impl Config {
             queue_limit: default_queue(),
             principal_queue_limit: None,
             read_result_bytes_per_principal: None,
+            artifact_upload_history: None,
             recovery_queue_limit: default_recovery_queue(),
             workers: default_workers(),
             services: Vec::new(),
@@ -226,6 +236,17 @@ impl Config {
             backup_capture_timeout_seconds: DEFAULT_BACKUP_CAPTURE_TIMEOUT_SECONDS,
         }
     }
+
+    pub(crate) fn artifact_upload_receipt_limits(&self) -> (u32, u32) {
+        self.artifact_upload_history.as_ref().map_or(
+            (
+                artifact::ingress::OWNER_REQUESTS,
+                artifact::ingress::TOTAL_REQUESTS,
+            ),
+            |limits| (limits.per_principal, limits.node),
+        )
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let mut source = File::open(path)?;
         let mut bytes = Vec::new();
@@ -330,6 +351,13 @@ impl Config {
             }),
             "InvalidArgument",
             "read result quota must be between 4 MiB and 1 TiB",
+        )?;
+        let (principal, node) = self.artifact_upload_receipt_limits();
+        require(
+            (1..=artifact::ingress::OWNER_REQUESTS).contains(&principal)
+                && (principal..=artifact::ingress::TOTAL_REQUESTS).contains(&node),
+            "InvalidArgument",
+            "invalid artifact upload history limits",
         )?;
         require(
             (1..=16).contains(&self.workers)

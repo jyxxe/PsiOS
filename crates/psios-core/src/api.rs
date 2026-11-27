@@ -177,6 +177,7 @@ fn invoke(db: &Db<'_>, actor: &str, method: &str, p: &Value) -> Result<Value> {
             }
         }
         "Artifact.UploadProfile" => artifact::ingress::profile(db, actor, p),
+        "Artifact.UploadCapacity" => artifact::ingress::capacity(db, actor, p),
         "Artifact.Stage" => artifact::ingress::stage(db, actor, p),
         "Artifact.Stage.Get" => artifact::ingress::get(db, actor, p),
         "Artifact.Stage.PutChunk" => artifact::ingress::put(db, actor, p),

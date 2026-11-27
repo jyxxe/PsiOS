@@ -305,6 +305,10 @@ Rust SDK 的 `Client::prepare_oci_stop_continuation` 与 `psiosctl application-p
 
 调用前核对的 `StartedAt` 来自 Docker 的实例观测。Docker 提供按完整容器 ID 的非强制删除，但不支持将该时间戳作为删除条件。对 PsiOS 托管实例的生命周期写入须通过 Core 串行执行。其他可信宿主服务直接写入 Docker 时，须先协调相关实例的操作。
 
+### 估算备份容量
+
+格式 130 登记只读工具 `backup.estimate`。使用与 `backup.create` 相同的卷 ID 和预期修订，并为该卷显式授予 `backup.estimate`。结果给出源数据代次、逻辑字节、文件和目录数量、当前备份上限，以及逻辑载荷是否在上限内。测量和备份共享源树的类型、权限、深度和条目检查。测量期间持有卷读取保留，创建备份时仍会重新校验源和目标空间。 [稀疏文件与实际备份验收](../tests/test_backup_estimate.py)
+
 ### 核实备份发布回执
 
 本地备份在持有原卷期间写入私有暂存目录。发布前重新检查执行许可，将卷引用、Operation 和清单摘要及暂存目录身份一起提交至带见证的权威，然后以原子重命名发布备份。新协议下若在授权发布前崩溃，原 Task 以已知失败结算并释放卷。存在发布检查点而原回执丢失时，原 Task 暂停并保留卷占用。
@@ -456,6 +460,8 @@ Rust SDK 的 `Client::download_backup_member` 可随核验进度继续等待并�
 ## 本机制品暂存与发布
 
 `Artifact.UploadProfile` 公布 `OpaqueBytesV1` 的分块、大小、暂存期限及配额。上传主体需要以本机 Node 为目标的 `artifact.upload` Grant。`Artifact.Stage` 固定提交键、预计字节数、SHA-256、声明媒体类型和期限。`Artifact.Stage.PutChunk` 按已提交偏移接收 128 KiB 定长块及末块。中断后通过 `Artifact.Stage.Get` 取得继续位置，用同一键和输入恢复。
+
+`Artifact.UploadCapacity` 和 `psiosctl artifact-upload-capacity` 显示调用主体的暂存字节、发布保留字节、开放的暂存、历史回执和剩余回执数。本机所有者还可查看节点总量。历史回执默认每主体最多 4096 条、每节点最多 65536 条，可在 Core 配置的 `artifact_upload_history` 中以 `per_principal` 和 `node` 设置更低的上限。上限作用于新建暂存，已受理的阶段可继续结算或按原键重放。丢弃、过期和撤回仍保留历史回执。 [Unix API 与并发验收](../tests/test_artifact_upload_capacity.py)
 
 `Artifact.Publish` 重新核对全部字节后原子提交不可变引用及来源，发布重试返回原回执。可见内容的媒体类型为 `application/octet-stream`，提交者提供的媒体类型作为独立声明保留。发布前可以丢弃暂存，过期块由后台回收。读取原始字节需要 `artifact.read`。`Artifact.Withdraw` 使用额外的 `artifact.withdraw` Grant 和确切引用，回收字节并保留审计凭据。
 

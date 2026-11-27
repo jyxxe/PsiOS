@@ -15,6 +15,39 @@ import unittest
 from support import Failure, Node, key, target
 
 
+def traced_unlinks(trace):
+    partial = {}
+    for line in trace.splitlines():
+        fields = line.split(maxsplit=1)
+        if len(fields) != 2:
+            continue
+        pid, call = fields
+        if call.startswith("unlinkat("):
+            if call.endswith(" <unfinished ...>"):
+                partial[pid] = call.removesuffix(" <unfinished ...>")
+            else:
+                yield call
+        elif call.startswith("<... unlinkat resumed>") and pid in partial:
+            yield partial.pop(pid) + call.removeprefix("<... unlinkat resumed>")
+
+
+class UnlinkTraceTests(unittest.TestCase):
+    def test_split_strace_lines_keep_the_exact_thread_and_target(self):
+        lines = [
+            '18 unlinkat(10</test/quarantine>, "blob-0", 0 <unfinished ...>',
+            '21 unlinkat(17</test/other>, "manifest.json", 0) = 0',
+            '18 <... unlinkat resumed>) = 0',
+            '18 unlinkat(10</test/quarantine>, "manifest.json", 0 <unfinished ...>',
+            '21 <... unlinkat resumed>) = ?',
+            '18 <... unlinkat resumed>) = ?',
+        ]
+        self.assertEqual(list(traced_unlinks("\n".join(lines))), [
+            'unlinkat(17</test/other>, "manifest.json", 0) = 0',
+            'unlinkat(10</test/quarantine>, "blob-0", 0) = 0',
+            'unlinkat(10</test/quarantine>, "manifest.json", 0) = ?',
+        ])
+
+
 class StorageRecoveryTests(unittest.TestCase):
     copy_limit = 8 * 1024 * 1024
     source_size = copy_limit + 1024 * 1024
@@ -637,11 +670,11 @@ class StorageRecoveryTests(unittest.TestCase):
         quarantine.rmdir()
         self.assertEqual(n.process.wait(25), -signal.SIGKILL)
         traced = trace.read_text()
-        self.assertTrue(any("unlinkat(" in line and quarantine.name in line
-                            and '"blob-0"' in line and "= 0" in line for line in traced.splitlines()), traced)
-        self.assertTrue(any("unlinkat(" in line and quarantine.name in line
-                            and '"manifest.json"' in line and ("= ?" in line or "INJECTED" in line)
-                            for line in traced.splitlines()), traced)
+        calls = list(traced_unlinks(traced))
+        self.assertTrue(any(quarantine.name in call and '"blob-0"' in call and "= 0" in call
+                            for call in calls), traced)
+        self.assertTrue(any(quarantine.name in call and '"manifest.json"' in call
+                            and ("= ?" in call or "INJECTED" in call) for call in calls), traced)
         self.assertFalse(stage.exists())
         self.assertEqual(quarantine.stat().st_ino, inode)
         self.assertTrue(manifest.is_file())

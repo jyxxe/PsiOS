@@ -157,11 +157,12 @@ class ModelFallbackTests(unittest.TestCase):
         self.assertEqual(fresh["context"]["last_tool"]["result"]["artifact_refs"], [artifact])
         finished = submit_decision(n, self.alternate, fresh, {"action": "finish", "summary": "Verified local status"})
         self.assertEqual(finished["lifecycle"], "Succeeded")
+        elapsed = n.call("Resource.Resolve", {"reference": finished["usage_ref"]})["value"]["authority_elapsed_lease_ms"]
         successor_usage = n.call("Session.ModelUsage", {"id": successor}, self.owner["token"])
         self.assertEqual(successor_usage["charged_calls"], 1)
-        self.assertEqual(successor_usage["lease_time"]["unmetered_calls"], 1)
+        self.assertEqual(successor_usage["lease_time"]["settled_ms"], elapsed)
         self.assertEqual(successor_usage["calls"], [{"turn": 3, "lease_id": fresh["lease_id"], "outcome": "Responded",
-            "charged_lease_ms": None, "provider_reported_tokens": None}])
+            "charged_lease_ms": elapsed, "provider_reported_tokens": None}])
         self.assertEqual(n.call("Budget.Get", budget_params)["model_calls_used"], before["model_calls_used"] + 1)
         history = n.call("Session.History", {"id": session}, self.owner["token"])
         self.assertEqual(history["turns"][1]["inference_failure"], report)

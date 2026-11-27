@@ -139,6 +139,8 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .artifact-json { max-height: 45vh; overflow: auto; }
 .artifacts .message:empty { display: none; }
 
+.task-cancel { margin-top: 1rem; }
+.task-cancel .message:empty { display: none; }
 .task-history { margin-top: 1.25rem; border-top: 1px solid var(--border); }
 .task-history summary { padding: .75rem 0; cursor: pointer; font-weight: 630; }
 .task-history summary:focus-visible { outline: 2px solid var(--accent); }

@@ -20,9 +20,10 @@ from support import Node, target
 
 
 class Shell:
-    def __init__(self, node, token_file, endpoint=None):
+    def __init__(self, node, token_file, endpoint=None, *, cancel_pending=False):
         self.process = subprocess.Popen(
-            [node.binaries / "psiosctl", "--socket", endpoint or node.socket, "--token-file", token_file, "shell"],
+            [node.binaries / "psiosctl", "--socket", endpoint or node.socket, "--token-file", token_file, "shell",
+             *(["--cancel-pending-tasks"] if cancel_pending else [])],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
         )
         try:
@@ -84,8 +85,8 @@ class ShellTests(unittest.TestCase):
         self.node = Node(os.environ.get("PSIOS_TEST_BIN_DIR", "target/debug"))
         self.addCleanup(self.node.close)
 
-    def shell(self, token_file=None):
-        shell = Shell(self.node, token_file or self.node.witness / "owner.token")
+    def shell(self, token_file=None, *, cancel_pending=False):
+        shell = Shell(self.node, token_file or self.node.witness / "owner.token", cancel_pending=cancel_pending)
         self.addCleanup(shell.close)
         return shell
 
@@ -105,21 +106,25 @@ class ShellTests(unittest.TestCase):
         downloads = self.node.base / "downloads"
         downloads.mkdir(mode=0o700)
         large_task, large_ref, _ = self.large_result()
-        for _ in range(18):
+        for _ in range(17):
             queued = self.node.submit("system.status", {})
             self.assertEqual(self.node.wait(queued)["lifecycle"], "Succeeded")
-        shell = self.shell()
+        node = self.node.call("Node.Get", {})
+        self.node.call("Node.Configure", {"expected_resource_version": node["reference"]["version"], "scheduling": "Cordoned"})
+        pending = self.node.submit("system.status", {})
+        shell = self.shell(cancel_pending=True)
         browser = os.environ.get("PSIOS_TEST_CHROME", "google-chrome")
         subprocess.run(
             ["node", str(Path(__file__).with_name("shell_browser.mjs")), browser],
             input=json.dumps(dict(origin=shell.origin, code=shell.code, task=task, digest=digest,
-                                  history=self.node.call("Task.History", {"id": task})["items"],
+                                  history=self.node.call("Task.History", {"id": task})["items"], pending=pending,
                                   large_task=large_task, large_digest=large_ref["digest"], downloads=str(downloads),
                                   node=self.node.call("Node.Get", {})["reference"]["resource_id"],
                                   profile=str(self.node.base / "browser"))),
             text=True, timeout=110, check=True,
         )
         self.assertEqual(shell.process.wait(timeout=5), 0)
+        self.assertEqual(self.node.call("Task.Get", {"id": pending})["lifecycle"], "Cancelled")
 
     def test_isolates_credentials_and_only_exposes_bounded_read_routes(self):
         shell = self.shell()
@@ -168,6 +173,58 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(shell.process.wait(timeout=5), 0)
         replacement = self.shell()
         self.error(replacement, 401, "AuthenticationRequired", "/api/node", data={}, token=token)
+
+    def test_pending_cancellation_needs_opt_in_current_revision_and_authority(self):
+        node = self.node
+        volume = node.perform("volume.create", {"name": "shell-cancel"})
+        task = node.submit("volume.write", {**target(volume), "name": "pending", "content": "unissued"})
+        pending = node.call("Task.Get", {"id": task})
+        self.assertEqual(pending["lifecycle"], "WaitingApproval")
+        request = {"id": task, "expected_resource_version": pending["task_revision"]}
+        route = "/api/cancel-pending-task"
+        default = self.shell()
+        session = default.pair()
+        self.assertFalse(session["cancel_pending_tasks"])
+        self.error(default, 404, "NotFound", route, data=request, token=session["token"])
+
+        agent, grant = node.agent(["task.submit", "system.status"])
+        read_grant = node.call("Grant.Issue", {"principal_id": agent["principal_id"], "actions": ["task.read"],
+                                              "units": 2, "ttl_seconds": 60})
+        credential = node.base / "cancel-reader.token"
+        credential.touch(mode=0o600)
+        credential.write_text(agent["token"])
+        scoped = self.shell(credential, cancel_pending=True)
+        token = scoped.pair()["token"]
+        self.error(scoped, 403, "PermissionDenied", route, data=request, token=token)
+
+        operator = self.shell(cancel_pending=True)
+        session = operator.pair()
+        self.assertTrue(session["cancel_pending_tasks"])
+        owner = session["token"]
+        self.error(operator, 400, "InvalidArgument", route, data={"id": task}, token=owner)
+        self.error(operator, 409, "Conflict", route, data={**request, "expected_resource_version": "r999"}, token=owner)
+        self.error(operator, 403, "PermissionDenied", route, data=request, token=owner,
+                   headers={"Origin": "https://example.invalid"})
+        self.assertEqual(node.call("Task.Get", {"id": task}), pending)
+        status, _, cancelled = operator.http(route, request, owner)
+        self.assertEqual((status, cancelled["lifecycle"], cancelled["outcome_knowledge"]), (200, "Cancelled", "NotStarted"))
+        self.error(operator, 409, "PreconditionFailed", route,
+                   data={**request, "expected_resource_version": cancelled["task_revision"]}, token=owner)
+        self.assertFalse((node.state / "volumes" / volume["resource_id"] / "data" / "pending").exists())
+
+        configuration = node.call("Node.Get", {})["reference"]
+        node.call("Node.Configure", {"expected_resource_version": configuration["version"], "scheduling": "Cordoned"})
+        work = node.prepare("system.status", {}, token=agent["token"], delegation=grant["delegation_ref"]["resource_id"])
+        own = node.call("Task.Submit", work, agent["token"])["task_id"]
+        fresh = node.call("Task.Get", {"id": own}, agent["token"])
+        self.assertEqual(fresh["lifecycle"], "Queued")
+        node.call("Grant.Revoke", target(read_grant["grant_ref"]))
+        self.error(scoped, 403, "PermissionDenied", route,
+                   data={"id": own, "expected_resource_version": fresh["task_revision"]}, token=token)
+        self.assertEqual(node.call("Task.Get", {"id": own}), fresh)
+        node.stop(signal.SIGKILL)
+        node.start()
+        self.assertEqual(node.call("Task.Get", {"id": task}), cancelled)
 
     def test_reads_paged_tasks_and_recovers_after_core_restart(self):
         shell = self.shell()
@@ -338,6 +395,78 @@ class ShellTests(unittest.TestCase):
         self.node.start()
         self.error(shell, 503, "RecoveryRequired", "/api/task-artifact", data=download, token=token)
 
+    def relay(self, listener, methods, hold=None, waiting=None, release=None, *, drop=None):
+        for method in methods:
+            peer, _ = listener.accept()
+            with peer, socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as upstream:
+                request = frame(peer)
+                self.assertEqual(json.loads(request[4:])["method"], method)
+                upstream.connect(str(self.node.socket))
+                upstream.sendall(request)
+                response = frame(upstream)
+                if method == hold:
+                    waiting.set()
+                    self.assertTrue(release.wait(8))
+                if method != drop:
+                    peer.sendall(response)
+
+    def test_lost_cancellation_reply_is_resolved_by_reading_the_task(self):
+        node = self.node
+        state = node.call("Node.Get", {})["reference"]
+        node.call("Node.Configure", {"expected_resource_version": state["version"], "scheduling": "Cordoned"})
+        task = node.submit("system.status", {})
+        pending = node.call("Task.Get", {"id": task})
+        proxy = node.base / "lost-reply.sock"
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener, ThreadPoolExecutor(1) as pool:
+            listener.bind(str(proxy))
+            listener.listen()
+            listener.settimeout(8)
+            forwarded = pool.submit(self.relay, listener, ("Principal.WhoAmI", "Task.Get", "Task.Cancel", "Task.Get"),
+                                    drop="Task.Cancel")
+            shell = Shell(node, node.witness / "owner.token", proxy, cancel_pending=True)
+            self.addCleanup(shell.close)
+            token = shell.pair()["token"]
+            status, _, fault = shell.http("/api/cancel-pending-task",
+                                          {"id": task, "expected_resource_version": pending["task_revision"]}, token)
+            self.assertEqual(status, 503, fault)
+            status, _, observed = shell.http("/api/task", {"id": task}, token)
+            self.assertEqual((status, observed["lifecycle"], observed["outcome_knowledge"]), (200, "Cancelled", "NotStarted"))
+            forwarded.result(8)
+            self.assertFalse(select.select([listener], [], [], 0)[0])
+
+    def test_task_claimed_between_cancellation_checks_keeps_its_result(self):
+        n = self.node
+        state = n.call("Node.Get", {})["reference"]
+        n.call("Node.Configure", {"expected_resource_version": state["version"], "scheduling": "Cordoned"})
+        task = n.submit("system.status", {})
+        pending = n.call("Task.Get", {"id": task})
+        self.assertEqual(pending["lifecycle"], "Queued")
+        proxy = n.base / "cancel-race.sock"
+        waiting, release = Event(), Event()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener, ThreadPoolExecutor(2) as pool:
+            listener.bind(str(proxy))
+            listener.listen()
+            listener.settimeout(8)
+            forwarded = pool.submit(self.relay, listener, ("Principal.WhoAmI", "Task.Get", "Task.Cancel"),
+                                    "Task.Get", waiting, release)
+            shell = Shell(n, n.witness / "owner.token", proxy, cancel_pending=True)
+            self.addCleanup(shell.close)
+            token = shell.pair()["token"]
+            request = {"id": task, "expected_resource_version": pending["task_revision"]}
+            cancel = pool.submit(shell.http, "/api/cancel-pending-task", request, token)
+            try:
+                self.assertTrue(waiting.wait(8))
+                state = n.call("Node.Get", {})["reference"]
+                n.call("Node.Configure", {"expected_resource_version": state["version"], "scheduling": "Enabled"})
+                done = n.wait(task)
+                self.assertEqual(done["lifecycle"], "Succeeded")
+            finally:
+                release.set()
+            forwarded.result(8)
+            status, _, fault = cancel.result(8)
+            self.assertEqual((status, fault["error"]["code"]), (409, "Conflict"))
+            self.assertEqual(n.call("Task.Get", {"id": task}), done)
+
     def test_logout_during_download_stops_before_the_next_core_chunk(self):
         task, reference, _ = self.large_result()
         proxy = self.node.base / "shell-delivery.sock"
@@ -347,21 +476,8 @@ class ShellTests(unittest.TestCase):
             listener.listen()
             listener.settimeout(8)
 
-            def relay():
-                for method in ("Principal.WhoAmI", "Task.Get", "Artifact.ReadChunk"):
-                    peer, _ = listener.accept()
-                    with peer, socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as upstream:
-                        request = frame(peer)
-                        self.assertEqual(json.loads(request[4:])["method"], method)
-                        upstream.connect(str(self.node.socket))
-                        upstream.sendall(request)
-                        response = frame(upstream)
-                        if method == "Artifact.ReadChunk":
-                            waiting.set()
-                            self.assertTrue(release.wait(8))
-                        peer.sendall(response)
-
-            forwarding = pool.submit(relay)
+            forwarding = pool.submit(self.relay, listener, ("Principal.WhoAmI", "Task.Get", "Artifact.ReadChunk"),
+                                     "Artifact.ReadChunk", waiting, release)
             shell = Shell(self.node, self.node.witness / "owner.token", proxy)
             self.addCleanup(shell.close)
             token = shell.pair()["token"]

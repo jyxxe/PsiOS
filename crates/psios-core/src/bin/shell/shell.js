@@ -15,6 +15,7 @@ const previous = byId("previous");
 const next = byId("next");
 
 let bearer = null;
+let canCancelPending = false;
 let view = "node";
 let update = 0;
 let detailUpdate = 0;
@@ -29,6 +30,7 @@ function message(element, text, error = false) {
 
 function leave(text, error = false) {
   bearer = null;
+  canCancelPending = false;
   update += 1;
   detailUpdate += 1;
   workspace.hidden = true;
@@ -323,6 +325,38 @@ function historyView(task) {
   return panel;
 }
 
+function pendingCancellation(task) {
+  const controls = element("div", undefined, "task-cancel");
+  const button = element("button", "取消待执行任务");
+  button.type = "button";
+  const notice = element("p", "", "message");
+  notice.setAttribute("role", "status");
+  controls.append(button, notice);
+  button.addEventListener("click", async () => {
+    if (button.disabled) return;
+    button.disabled = true;
+    message(notice, "正在提交取消请求…");
+    try {
+      const result = await request("/api/cancel-pending-task", {
+        id: task.task_id, expected_resource_version: task.task_revision,
+      });
+      if (!controls.isConnected) return;
+      renderTask(result);
+      taskDetail.focus();
+    } catch (error) {
+      if (!controls.isConnected) return;
+      if (error.code === "Conflict" || error.code === "PreconditionFailed") {
+        message(notice, "任务状态已改变。请刷新后查看最新修订。", true);
+      } else if (error.code === "PermissionDenied") {
+        message(notice, "当前主体没有取消此任务的权限。", true);
+      } else {
+        message(notice, "取消结果尚未确认。请刷新查看任务状态。", true);
+      }
+    }
+  });
+  return controls;
+}
+
 function renderTask(task) {
   taskContent.replaceChildren(fields([
     ["ID", task.task_id, true],
@@ -337,6 +371,9 @@ function renderTask(task) {
       list.append(element("li", condition.message || condition.code || condition.type));
     }
     taskContent.append(list);
+  }
+  if (canCancelPending && ["Queued", "WaitingApproval"].includes(task.lifecycle)) {
+    taskContent.append(pendingCancellation(task));
   }
   taskContent.append(historyView(task));
   const references = task.result?.artifact_refs;
@@ -445,6 +482,7 @@ byId("pair-form").addEventListener("submit", async (event) => {
   try {
     const session = await request("/api/session", { code: submitted }, null);
     bearer = session.token;
+    canCancelPending = session.cancel_pending_tasks === true;
     byId("principal").textContent = session.principal_id;
     pairing.hidden = true;
     workspace.hidden = false;

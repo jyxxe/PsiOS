@@ -25,15 +25,21 @@ def regular_file(path):
     return os.fdopen(fd, "rb")
 
 
-def pinned_copy(source, target, expected, limit):
+def pinned_copy(source, target, expected, limit, *, sparse=False):
     digest = hashlib.sha256()
+    zero = bytes(MIB) if sparse else None
     with regular_file(source) as src, target.open("xb") as dst:
-        while chunk := src.read(1024 * 1024):
+        while chunk := src.read(MIB):
             limit -= len(chunk)
             if limit < 0:
                 raise ValueError(f"input too large: {source}")
             digest.update(chunk)
-            dst.write(chunk)
+            if zero is not None and chunk == zero[:len(chunk)]:
+                dst.seek(len(chunk), os.SEEK_CUR)
+            else:
+                dst.write(chunk)
+        if sparse:
+            dst.truncate()
     if digest.hexdigest() != expected:
         raise ValueError(f"SHA-256 mismatch: {source}")
 

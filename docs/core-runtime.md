@@ -213,7 +213,7 @@ Core 在请求 NetworkManager 回退前持久记录派发，核对原检查点�
 
 | Task 工具 | 参数与行为 |
 | --- | --- |
-| volume.files | `target` 为卷的 ID 和预期修订。`path` 默认为根，`after` 和 `limit` 用于按名称翻页，最多 128 项。 |
+| volume.files | `target` 为卷的 ID 和预期修订。`path` 默认为根，每页最多 128 项。同一目录续页时将 `next_after` 的值原样传入 `after`，值为 `null` 时已到最后一页。 |
 | volume.mkdir、volume.remove_entry | `target, path`。创建目录，或删除单个普通文件及空目录。 |
 | volume.append | `target, path, offset, data_base64`。偏移为零时排他新建，后续追加要求实际长度等于偏移。每块最多 96 KiB，单文件上限 256 MiB。沿用主体的 Task 输入保留额度。 |
 | volume.read_chunk | `target, path, offset, limit`。取回 Base64 数据、块摘要、下一偏移和 EOF。可以从待激活的恢复卷读取。 |

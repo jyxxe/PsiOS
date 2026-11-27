@@ -74,8 +74,13 @@ pub fn validate(a: &Action) -> Result<()> {
     match a {
         Action::Files(p) => {
             path(&p.path, true)?;
-            if let Some(n) = &p.after {
-                filename(n)?;
+            if let Some(after) = &p.after {
+                // The cursor is a name from readdir and is used only for ordering.
+                require(
+                    !matches!(after.as_str(), "" | "." | "..") && !after.contains(['/', '\0']),
+                    "InvalidArgument",
+                    "invalid directory page cursor",
+                )?;
             }
             require(
                 (1..=128).contains(&p.limit.unwrap_or(32)),

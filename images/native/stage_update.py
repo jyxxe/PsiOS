@@ -15,7 +15,7 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 
-from create import boot_media, build_update_pair, sha256
+from create import boot_media, build_update_pair, copy_budget_mib, sha256
 from update_trial import prove_trial
 
 
@@ -156,6 +156,7 @@ def stage(args):
                     },
                     "inputs": {
                         "core_archive_sha256": args.core_sha256,
+                        "max_copy_mib": args.max_copy_mib,
                         "firmware_code_sha256": args.ovmf_code_sha256,
                         "firmware_vars_sha256": args.ovmf_vars_sha256,
                     },
@@ -190,6 +191,8 @@ def main():
         parser.add_argument("--" + name, type=Path, required=True)
     for name in ("previous-receipt-sha256", "core-sha256", "ovmf-code-sha256", "ovmf-vars-sha256"):
         parser.add_argument("--" + name, type=digest_argument, required=True)
+    parser.add_argument("--max-copy-mib", type=copy_budget_mib, default=128,
+                        help="authority database and journals to copy per verification (default 128 MiB)")
     boot_media.add_signing_arguments(parser)
     args = parser.parse_args()
     boot_media.signing_requested(args, parser)

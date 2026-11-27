@@ -17,7 +17,6 @@ import create
 
 MIB = create.MIB
 OVERLAY_LIMIT = 512 * MIB
-COPY_LIMIT_MIB = 128
 CONSOLE_LIMIT = 128 * 1024
 REPORT_LIMIT = 64 * 1024
 TRIAL_MARKER = b"PSIOS-TRIAL/1"
@@ -88,6 +87,7 @@ def receipt_lineage(prepared):
     target_format = rehearsal.get("target_format")
     require(upgrade["normalized_source_sha256"] == prepared.normalized_source_sha256
             and isinstance(source.get("node_id"), str) and source["node_id"]
+            and source.get("max_copy_mib") == prepared.max_copy_mib
             and rehearsal.get("status") == "Verified" and rehearsal.get("configuration_sha256") == configuration
             and type(source.get("database_format")) is int and type(target_format) is int
             and 0 < source["database_format"] == rehearsal.get("source_format") <= target_format
@@ -260,7 +260,7 @@ def verify_overlay(work, disk, prepared, layout, core_hash, node, target_format)
     inspector = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(inspector)
     inspector.prepare(rescue, SimpleNamespace(iso=prepared.kernel_iso, core=prepared.core, core_sha256=core_hash,
-        state="/psios", witness=None, uid=1000, gid=None, partition=2, max_copy_mib=COPY_LIMIT_MIB,
+        state="/psios", witness=None, uid=1000, gid=None, partition=2, max_copy_mib=prepared.max_copy_mib,
         journal_overlay_mib=None, migration_config=None), False)
     with create.boot_media.regular_file(image) as raw:
         image_fd = raw.fileno()
@@ -280,8 +280,10 @@ def verify_overlay(work, disk, prepared, layout, core_hash, node, target_format)
             and report["database_format"] == target_format and report.get("migration_required") is False
             and report.get("sqlite_integrity") == report.get("foreign_keys") == "Verified"
             and report.get("witness") == "Confirmed" and report.get("owner_rotation") == "None"
-            and type(report.get("copied_bytes")) is int and 0 < report["copied_bytes"] <= COPY_LIMIT_MIB * MIB,
+            and type(report.get("copied_bytes")) is int
+            and 0 < report["copied_bytes"] <= prepared.max_copy_mib * MIB,
             "post-trial authority does not match the expected migrated node and witness")
+    report["max_copy_mib"] = prepared.max_copy_mib
     return report
 
 

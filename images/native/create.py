@@ -110,6 +110,7 @@ class PreparedUpdate:
     configuration: bytes
     normalized_source_sha256: str
     kernel_iso: Path
+    max_copy_mib: int
 
 
 def sha256(path):
@@ -615,7 +616,17 @@ def source_snapshot(work, disk, source_fd, prior, layout, signing):
     return digest, replayed, core_config
 
 
-def verify_authority(work, disk, core_config):
+def copy_budget_mib(value):
+    try:
+        mib = int(value)
+    except ValueError:
+        mib = 0
+    if not 1 <= mib <= 256:
+        raise argparse.ArgumentTypeError("authority copy limit must be 1–256 MiB")
+    return mib
+
+
+def verify_authority(work, disk, core_config, max_copy_mib):
     core = work / "bin" / "psiosd"
     config = work / "persisted-core.json"
     with config.open("xb") as file:
@@ -625,8 +636,12 @@ def verify_authority(work, disk, core_config):
         sys.executable, HERE.parent / "rescue" / "inspect.py", disk,
         "--iso", work / "base.iso", "--core", core, "--core-sha256", sha256(core),
         "--partition", "2", "--state", "/psios", "--uid", "1000",
-        "--migration-config", config,
+        "--migration-config", config, "--max-copy-mib", str(max_copy_mib),
     ], timeout=210))
+    copied = report["copied_bytes"]
+    if type(copied) is not int or not 0 < copied <= max_copy_mib * MIB:
+        raise ValueError("source authority report exceeds its verified copy budget")
+    report["max_copy_mib"] = max_copy_mib
     report["migration_rehearsal"]["configuration_sha256"] = hashlib.sha256(core_config).hexdigest()
     return report
 
@@ -732,14 +747,15 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
     if trial_manifest != candidate_manifest:
         raise ValueError("trial and candidate boot inputs disagree")
 
-    authority = verify_authority(candidate_work, candidate_disk, configuration)
+    authority = verify_authority(candidate_work, candidate_disk, configuration, args.max_copy_mib)
     upgrade = {"previous_image_sha256": source_digest, "previous_source_commit": prior["source_commit"],
                "normalized_source_sha256": normalized, "verified_authority": authority,
                "replayed_ext4_partitions": replayed}
     candidate_receipt = finish_disk(candidate_work, candidate_disk, candidate_disk, signing=signing, upgrade=upgrade)
     trial_receipt = finish_disk(trial_work, trial_disk, trial_disk, signing=signing, upgrade=upgrade)
     return PreparedUpdate(candidate_disk, trial_disk, candidate_receipt, trial_receipt,
-                          candidate_work / "bin/psiosd", configuration, normalized, candidate_work / "base.iso")
+                          candidate_work / "bin/psiosd", configuration, normalized,
+                          candidate_work / "base.iso", args.max_copy_mib)
 
 
 def build(args):
@@ -780,7 +796,7 @@ def build(args):
             upgrade = {
                 "previous_image_sha256": source_digest,
                 "previous_source_commit": prior["source_commit"],
-                "verified_authority": verify_authority(work, disk, core_config),
+                "verified_authority": verify_authority(work, disk, core_config, args.max_copy_mib),
                 "replayed_ext4_partitions": replayed,
             }
         receipt = finish_disk(work, disk, output, signing=signing, upgrade=upgrade)
@@ -805,6 +821,8 @@ def main():
     mode.add_argument("--upgrade-from", type=Path, help="stopped native development disk to copy without changes")
     parser.add_argument("--previous-receipt", type=Path, help="trusted build receipt for the stopped disk")
     parser.add_argument("--trial-boot", action="store_true", help="create an isolated non-activating EFI upgrade candidate")
+    parser.add_argument("--max-copy-mib", type=copy_budget_mib,
+                        help="authority database and journals to copy during upgrade (default 64 MiB)")
     parser.add_argument("--root-console-hash", type=Path, help="optional private hash for local system administration; default locks root")
     boot_media.add_signing_arguments(parser)
     network = parser.add_mutually_exclusive_group()
@@ -840,6 +858,10 @@ def main():
         parser.error("--previous-receipt requires --upgrade-from")
     if args.trial_boot and not args.upgrade_from:
         parser.error("--trial-boot requires --upgrade-from")
+    if args.max_copy_mib is not None and not args.upgrade_from:
+        parser.error("--max-copy-mib requires --upgrade-from")
+    if args.max_copy_mib is None:
+        args.max_copy_mib = 64
     limits = (args.core_cpu_millicores, args.core_memory_mib, args.core_pids_max)
     args.core_limits = None
     if any(value is not None for value in limits):

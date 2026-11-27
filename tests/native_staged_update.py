@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Stage a real native update and independently boot both preserved deployment views."""
 import argparse
+from contextlib import closing
 import json
 import os
 from pathlib import Path
@@ -9,12 +10,17 @@ import secrets
 import shlex
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
 
-from native_disk import REPO, boot, call, check_state, password, sha
-from native_upgrade import shutdown
+from native_disk import REPO, boot, call, check_state, extract_partition, password, replace_partition, sha
+from native_upgrade import STATE_MIB, STATE_OFFSET, shutdown
+
+
+MIB = 1024 * 1024
+LARGE_COPY_MIB = 192
 
 
 def invoke(command, timeout):
@@ -57,6 +63,39 @@ def durable_fact(console):
     content = call(console, "Artifact.Read", {"reference": output})
     assert content["authority_id"] == authority and content["kernel_release"], content
     return authority, task, result, boot_id, content
+
+
+def install_large_wal(work, disk, build):
+    """Preserve a real committed, uncheckpointed SQLite WAL on the test disk."""
+    state_size = build.get("geometry_mib", {}).get("state_mib", STATE_MIB)
+    with tempfile.TemporaryDirectory(dir=work, prefix="budget-fixture-") as directory:
+        scratch = Path(directory)
+        state = scratch / "state.ext4"
+        db = scratch / "authority.db"
+        extract_partition(disk, state, STATE_OFFSET, state_size)
+        succeeded(invoke(["debugfs", "-R", f"dump /psios/state.db {db}", state], 25))
+        data = scratch / "copied.db"
+        wal = scratch / "copied.db-wal"
+        with closing(sqlite3.connect(db)) as connection:
+            assert connection.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+            connection.execute("PRAGMA wal_autocheckpoint=0")
+            with connection:
+                connection.execute("CREATE TABLE upgrade_budget_fixture (payload BLOB NOT NULL)")
+                connection.execute("INSERT INTO upgrade_budget_fixture VALUES(zeroblob(?))", (72 * MIB,))
+            assert connection.execute("PRAGMA quick_check").fetchone() == ("ok",)
+            shutil.copyfile(db, data)
+            shutil.copyfile(db.with_suffix(".db-wal"), wal)
+        assert data.stat().st_size < 64 * MIB < wal.stat().st_size
+        commands = []
+        for path, name in ((data, "state.db"), (wal, "state.db-wal")):
+            target = f"/psios/{name}"
+            commands.extend((f"rm {target}", f"write {path} {target}",
+                             f"set_inode_field {target} mode 0100600",
+                             f"set_inode_field {target} uid 1000", f"set_inode_field {target} gid 1000"))
+        subprocess.run(["debugfs", "-w", "-f", "-", state], input="\n".join(commands) + "\n",
+                       text=True, capture_output=True, check=True, timeout=45)
+        replace_partition(disk, state, STATE_OFFSET)
+        return data.stat().st_size + wal.stat().st_size
 
 
 def boot_view(work, disk, source_vars, receiver, operator, admin, build, baseline, token):
@@ -156,12 +195,13 @@ def exercise(args, work):
     assert sha(old) == old_build["initial_image_sha256"], old_build
     pins = {"receipt": sha(receipt), "archive": sha(args.archive), "code": sha(code)}
 
-    def stage(out, *, receipt_digest=None, code_digest=None):
+    def stage(out, *, receipt_digest=None, code_digest=None, max_copy_mib=128):
         return [sys.executable, "-B", args.controller, out, "--upgrade-from", old,
                 "--previous-receipt", receipt, "--previous-receipt-sha256", receipt_digest or pins["receipt"],
                 "--kernel-iso", args.kernel_iso, "--core-archive", args.archive, "--core-sha256", pins["archive"],
                 "--ovmf-code", code, "--ovmf-code-sha256", code_digest or pins["code"],
-                "--ovmf-vars", vars_file, "--ovmf-vars-sha256", sha(vars_file)]
+                "--ovmf-vars", vars_file, "--ovmf-vars-sha256", sha(vars_file),
+                "--max-copy-mib", str(max_copy_mib)]
 
     token = secrets.token_hex(12)
     live = work / "must-not-publish-running"
@@ -176,6 +216,7 @@ def exercise(args, work):
         assert console.run("cat $HOME/native-staged-update-fact") == token
         shutdown(console, admin)
 
+    large_copy = install_large_wal(work, old, old_build) if args.large_authority else None
     frozen = digest_map((old, receipt, code, vars_file))
     assert frozen[old] != old_build["initial_image_sha256"], "old guest did not persist its new state"
     rejected = work / "must-not-publish-untrusted"
@@ -192,12 +233,39 @@ def exercise(args, work):
     assert sentinel.read_bytes() == b"existing installation data"
     assert digest_map(frozen) == frozen
 
+    if large_copy is not None:
+        small = work / "must-not-publish-under-budget"
+        direct = [sys.executable, "-B", args.controller.with_name("create.py"), small,
+                  "--upgrade-from", old, "--previous-receipt", receipt, "--kernel-iso", args.kernel_iso,
+                  "--core-archive", args.archive, "--core-sha256", pins["archive"]]
+        refused(work, direct, r"authority-QuotaExceeded", timeout=260)
+        refused(work, stage(small, max_copy_mib=64), r"authority-QuotaExceeded", timeout=300)
+        assert not small.exists() and digest_map(frozen) == frozen
+        direct[3] = work / "direct-upgrade.raw"
+        report = json.loads(succeeded(invoke([*direct, "--max-copy-mib", str(LARGE_COPY_MIB)], 330)))
+        observed = report["upgrade"]["verified_authority"]
+        assert observed["max_copy_mib"] == LARGE_COPY_MIB and observed["copied_bytes"] == large_copy, observed
+        assert observed["node_id"] == baseline[0] and observed["witness"] == "Confirmed", observed
+        assert observed["migration_rehearsal"]["status"] == "Verified", observed
+        assert sha(direct[3]) == report["initial_image_sha256"]
+        direct[3].unlink()
+
     output = work / "staged"
     before = {path.name for path in work.iterdir()}
-    stdout = succeeded(invoke(stage(output), 850))
+    chosen_budget = LARGE_COPY_MIB if large_copy is not None else 128
+    stdout = succeeded(invoke(stage(output, max_copy_mib=chosen_budget), 850))
     assert {path.name for path in work.iterdir()} == before | {output.name}, "stage leaked private scratch paths"
     candidate = validate_bundle(args, output, stdout, old_build, frozen, old, receipt, code,
                                 vars_file, baseline[0])
+    if large_copy is not None:
+        staged = json.loads(stdout)
+        source = candidate["upgrade"]["verified_authority"]
+        trial = staged["trial"]["verified_authority"]
+        assert staged["inputs"]["max_copy_mib"] == source["max_copy_mib"] == trial["max_copy_mib"] == chosen_budget
+        assert source["copied_bytes"] == large_copy, source
+        assert 64 * MIB < trial["copied_bytes"] <= chosen_budget * MIB, trial
+        print(f"PASS verified {large_copy} source bytes including WAL and {trial['copied_bytes']} migrated bytes",
+              flush=True)
     assert digest_map(frozen) == frozen
     bundle = digest_map(output.iterdir())
 
@@ -220,6 +288,7 @@ def main():
     parser.add_argument("--ovmf-dir", type=Path, default=Path("/usr/share/OVMF"))
     parser.add_argument("--expected-source-format", type=int)
     parser.add_argument("--expected-target-format", type=int)
+    parser.add_argument("--large-authority", action="store_true", help="prove both build paths with a database and WAL over 64 MiB")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="psios-native-staged-update-") as directory:
         exercise(args, Path(directory).resolve())

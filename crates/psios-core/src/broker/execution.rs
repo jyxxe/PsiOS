@@ -336,6 +336,20 @@ pub fn dispatch(db: &Db<'_>, task: &str) -> Result<Option<Work>> {
         permit["decision_ref"] = db.get(&id)?.reference()
     }
     let permit = db.create("ExecutionPermit", &pid, &t.owner, json!({}), permit)?;
+    let deferred_effect = apps::catalog::is_tool(tool)
+        || node::service_control::is_tool(tool)
+        || apps::stop::is_tool(tool)
+        || matches!(
+            tool,
+            apps::restart::TOOL
+                | node::network::trial::TOOL
+                | apps::volume_rebind::TOOL
+                | apps::create_recovery::CREATE
+                | apps::create_recovery::CLEANUP
+                | storage::entry_retirement::TOOL
+                | storage::restore_publication::CREATE
+                | storage::directory_create::TOOL
+        );
     let effect = db.create(
         "Effect",
         &eid,
@@ -347,7 +361,7 @@ pub fn dispatch(db: &Db<'_>, task: &str) -> Result<Option<Work>> {
             "operation_id": op.id,
             "resource_ref": target,
             "action": tool,
-            "phase": if node::service_control::is_tool(tool) || apps::stop::is_tool(tool) || tool == apps::restart::TOOL || tool == node::network::trial::TOOL || tool == apps::volume_rebind::TOOL || matches!(tool, apps::create_recovery::CREATE | apps::create_recovery::CLEANUP | storage::entry_retirement::TOOL | storage::restore_publication::CREATE | storage::directory_create::TOOL) { "PermitBound" } else { "EffectStarted" },
+            "phase": if deferred_effect { "PermitBound" } else { "EffectStarted" },
             "outcome_knowledge": "InFlight",
             "evidence_refs": []
         }),
@@ -434,13 +448,15 @@ pub fn settlement_failed(db: &Db<'_>, w: &Work) -> Result<()> {
             "StorageUnavailable",
             "systemd control stopped before invocation was checkpointed",
         )
-    } else if matches!(
-        w.action,
-        Action::InstallArtifact(_)
-            | Action::StageArtifactRelease(_)
-            | Action::RetireRelease(_)
-            | Action::RebindRestoredVolume(_)
-    ) {
+    } else if apps::catalog::is_tool(field(&w.task.spec, "task_type"))
+        || matches!(
+            w.action,
+            Action::InstallArtifact(_)
+                | Action::StageArtifactRelease(_)
+                | Action::RetireRelease(_)
+                | Action::RebindRestoredVolume(_)
+        )
+    {
         err(
             "StorageUnavailable",
             "application catalog transaction did not commit",
@@ -475,10 +491,15 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
             | Action::ListAssignedWork(_)
     );
     let t = db.get(&w.task.id)?;
+    let catalog = apps::catalog::is_tool(field(&t.spec, "task_type"));
     if t.body["current_run_id"] != w.run.id
         || t.body["outcome_knowledge"] != "InFlight"
         || w.run.body["recovery_incarnation"] != db.incarnation
     {
+        if catalog {
+            db.audit(&t.owner, "Run.LateReceipt", Some(&w.run.id), "Fenced")?;
+            return Ok(());
+        }
         require(
             !atomic_authority,
             "Fenced",
@@ -530,6 +551,22 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
         return Ok(());
     }
     let cancelled = t.body["lifecycle"] == "Cancelling";
+    if catalog {
+        // This check also runs after an unsuccessful Store transaction. A
+        // sealed or uncertain witness cannot admit that second transaction.
+        let operation = operation(db, &t)?;
+        require(
+            operation.reference() == w.op.reference()
+                && operation.body["effect_refs"] == json!([w.effect.reference()])
+                && apps::catalog::uncommitted(db, &t, &operation)?,
+            "RecoveryRequired",
+            "OCI catalog publication no longer owns its original effect",
+        )?;
+        if cancelled {
+            close(db, &t, "Cancelled", "NotStarted", None, None)?;
+            return Ok(());
+        }
+    }
     let create_undispatched = matches!(w.action, Action::Start(_))
         && apps::create_recovery::not_dispatched(db, &db.of(&w.op.id, "Operation")?)?;
     let cleanup_started = if matches!(w.action, Action::DiscardOciCreate(_)) {
@@ -633,6 +670,14 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
     });
     match result {
         Ok(output) => {
+            let t = if catalog {
+                // The effect and receipt become durable together. None of
+                // these changes are observable if this transaction rolls back.
+                w.start_host_effect(db)?;
+                db.of(&t.id, "Task")?
+            } else {
+                t
+            };
             let body = match output {
                 host::Output::Receipt(receipt) => host::apply(db, w, &receipt)?,
                 host::Output::OciImage(capture) => apps::capture::publish(db, w, *capture)?,
@@ -667,7 +712,8 @@ pub(crate) fn finish_host(db: &Db<'_>, w: &Work, result: Result<host::Output>) -
         // Authority-only tasks publish state and settle in the same transaction.
         Err(e) if atomic_authority => return Err(e),
         Err(e) => {
-            let undispatched = service_started == Some(false)
+            let undispatched = catalog
+                || service_started == Some(false)
                 || stop_started == Some(false)
                 || restart_started == Some(false)
                 || create_undispatched

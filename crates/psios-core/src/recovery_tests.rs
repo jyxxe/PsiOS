@@ -2954,10 +2954,10 @@ fn publisher_verification_persists_after_revocation_and_fences_new_launches() {
         broker::finish(db, &selection_work, selection_receipt)
     })
     .unwrap();
-    for task in [&start, &select_again] {
+    for (task, knowledge) in [(&start, "Known"), (&select_again, "NotStarted")] {
         let failed = call(&mut s, "Task.Get", json!({"id":task})).unwrap();
         assert_eq!(failed["lifecycle"], "Failed", "{failed}");
-        assert_eq!(failed["outcome_knowledge"], "Known");
+        assert_eq!(failed["outcome_knowledge"], knowledge);
         assert_eq!(failed["conditions"][0]["type"], "PermissionDenied");
     }
     assert_eq!(

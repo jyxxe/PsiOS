@@ -226,6 +226,8 @@ Core 在请求 NetworkManager 回退前持久记录派发，核对原检查点�
 
 未挂载卷的文件读取、目录列表、用量和完整性结果在发布前再次核对原 Task 的许可。撤权或取消后的读取不生成新制品，迟到的读取结果仅记录围栏状态。已结算的制品仍按原有读取权限提供。
 
+直接 OCI 安装、暂存、选择和卸载的变更与原 Task 回执在同一权威事务提交。调用 Docker 时仅检查镜像。提交目录变更前，Core 复核原许可、授权、审批及目标修订。格式 124 记录精确的 `PermitBound` 派发边界。重启后仍处于该边界的 Task 以 `NotStarted` 结束并释放应用、卷占用。若 SQLite 已提交而见证尚待确认，重启沿用原成功回执。两种情况都保留审批使用及幂等记录。升级后禁止旧版写入，历史上已标为启动效果的记录继续沿用原恢复边界。[真实 Docker、进程中断与升级验收](../tests/oci_catalog_settlement.py)
+
 新启动的容器会记录 Docker Engine ID。如果停止操作在引擎删除容器后丢失回执，应用和卷仍保留占用。运行新的 `application.health` Task，由同一引擎确认原容器及该应用的受管实例均已消失。把该检查的 ArtifactRef 作为 `evidence_ref` 提交至 `Operation.Reconcile`，服务才会一并结算停止操作、运行实例和卷解绑。引擎不可达、引擎身份变化、容器仍在或使用旧版缺少引擎身份的记录时，都无法用缺失观测释放卷。
 启动流程会在核验容器配置后、请求 Docker 启动前，将引擎 ID、容器 ID、原 Operation 和应用、卷修订存入带见证的检查点。Core 在派发前和收到启动回执后检查 Docker 报告的 CPU、内存、禁用 swap、PID 和临时目录限额，同时核对只读根、独立命名空间、无额外设备与特权，以及获准的卷绑定。原生临时目录 `/tmp` 带有 `noexec`、`nosuid` 和 `nodev`。
 
@@ -808,7 +810,7 @@ Rust SDK 的 `SessionModel::accepts_undeclared_tool_rejection` 默认关闭。�
 
 本机 CPU 模型可通过 UID 绑定的 Unix socket 生成结构化盘点决策，复用同一 Provider 身份、租约和决策暂存目录。[本机推理配置与范围](local-inference.md)
 
-`Session.History` 返回模型轮次、子任务和尝试关系。`Session.Cancel` 关闭后续派发并取消已链接的任务。`Session.Extend` 通过 CAS 增加本次会话的轮次上限，根授权额度独立生效。对于可安全重试的失败子任务，`Session.RetryTask` 使用会话 ID、会话预期修订、原 `task_id` 和新 `key`，沿用同一模型决策，在原任务和会话历史中追加记录。未知写入继续占用原目标，等待核实。
+`Session.History` 返回模型轮次、子任务和尝试关系。`Session.Cancel` 关闭后续派发并取消已链接的任务。`Session.Extend` 通过 CAS 增加本次会话的轮次上限，根授权额度独立生效。对于可安全重试的失败子任务，`Session.RetryTask` 使用会话 ID、会话预期修订、原 `task_id` 和新 `key`，沿用同一模型决策，在原任务和会话历史中追加记录。接受新的重试前复核主体的 32 个活动会话上限。通过 Provider 队列执行的会话同时遵守固定模型的 128 个活动会话上限。已接受的请求在授权仍有效时可用同一键重获原回执。未知写入继续占用原目标，等待核实。
 
 ### 在安全点暂停会话
 

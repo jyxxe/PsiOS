@@ -37,6 +37,9 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                     | apps::release_retirement::TOOL
                     | apps::volume_rebind::TOOL
             );
+        let catalog_not_started = phase == "Dispatched"
+            && apps::catalog::is_tool(tool)
+            && apps::catalog::uncommitted(db, &t, &operation(db, &t)?)?;
         // Export is read-only at Docker; the authority publishes the archive with its receipt.
         let capture_uncommitted = phase == "Dispatched" && tool == apps::capture::TOOL;
         let backup_unpublished = phase == "Dispatched"
@@ -86,6 +89,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             && !read
             && !activation_uncommitted
             && !catalog_uncommitted
+            && !catalog_not_started
             && !capture_uncommitted
             && !backup_unpublished
             && !restore_unpublished
@@ -121,6 +125,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
             || attempt >= 3
             || activation_uncommitted
             || catalog_uncommitted
+            || catalog_not_started
             || capture_uncommitted
             || backup_unpublished
             || restore_unpublished
@@ -143,7 +148,8 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                 } else {
                     "Failed"
                 },
-                if service_undispatched
+                if catalog_not_started
+                    || service_undispatched
                     || stop_undispatched
                     || restart_undispatched
                     || create_undispatched
@@ -178,7 +184,7 @@ pub fn recover(db: &Db<'_>) -> Result<()> {
                         "OCI image restore interrupted before load was checkpointed"
                     } else if activation_uncommitted {
                         "activation had not committed at restart"
-                    } else if catalog_uncommitted {
+                    } else if catalog_uncommitted || catalog_not_started {
                         "application catalog change had not committed at restart"
                     } else if capture_uncommitted {
                         "OCI archive publication had not committed at restart"

@@ -117,11 +117,19 @@ def exercise(args, work):
     for name, destination in [("OVMF_CODE_4M.fd", "code.fd"), ("OVMF_VARS_4M.fd", "vars.fd")]:
         shutil.copyfile(args.ovmf_dir / name, work / destination)
     disk = work / "combined.raw"
-    subprocess.run([*installer(args, disk, args.archive), "--console-hash", operator_hash,
-                    "--root-console-hash", root_hash], check=True, stdout=subprocess.DEVNULL, timeout=140)
+    build = [*installer(args, disk, args.archive), "--console-hash", operator_hash,
+             "--root-console-hash", root_hash]
+    for name in ("-edge", "split\nname", "x" * 64):
+        rejected = subprocess.run([*build, f"--hostname={name}"], capture_output=True, text=True, timeout=15)
+        assert rejected.returncode == 2 and "single DNS label" in rejected.stderr
+        assert not disk.exists()
+    subprocess.run([*build, "--hostname", "psios-native-combined"],
+                   check=True, stdout=subprocess.DEVNULL, timeout=140)
     programs = stage_checks(work, disk)
     with boot(work, disk, pace_commands=True) as console:
         console.login("psios", user)
+        assert console.run("cat /proc/sys/kernel/hostname") == "psios-native-combined"
+        assert console.run("cat /etc/hostname") == "psios-native-combined"
         assert console.run("stat -c '%a' /dev/pts/ptmx") == "666"
         mount = console.run("awk '$5==\"/dev/pts\" {print $6}' /proc/self/mountinfo")
         assert {"nosuid", "noexec"} <= set(mount.split(",")), mount
@@ -139,7 +147,7 @@ def exercise(args, work):
             "POSIX shared memory exchange, permissions, byte and inode limits and recovery passed")
         poweroff(console)
     check_clean_shutdown(disk)
-    print("PASS block layout, pressure, durable Task.Wait, backup export, detached recovery, user PTYs, POSIX shared memory and clean shutdown")
+    print("PASS block layout, pressure, durable Task.Wait, backup export, detached recovery, user PTYs, POSIX shared memory, configured hostname and clean shutdown")
 
 
 if __name__ == "__main__":

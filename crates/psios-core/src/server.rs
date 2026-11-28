@@ -22,6 +22,7 @@ use std::{
 };
 
 type Shared = Arc<Mutex<Store>>;
+mod block_wake;
 mod notification;
 
 enum WaitCondition {
@@ -544,7 +545,12 @@ fn reclaim_one_directory_stage(
     Ok(())
 }
 
-fn reconcile_block_devices(s: Shared, stop: Arc<AtomicBool>, interval: Duration) -> Result<()> {
+fn reconcile_block_devices(
+    s: Shared,
+    stop: Arc<AtomicBool>,
+    interval: Duration,
+    mut wake: Option<block_wake::BlockWake>,
+) -> Result<()> {
     let mut cursor = reconcile::Cursor::default();
     while !stop.load(Ordering::Acquire) {
         let round = (|| {
@@ -567,6 +573,15 @@ fn reconcile_block_devices(s: Shared, stop: Arc<AtomicBool>, interval: Duration)
         })();
         if let Err(error) = round {
             eprintln!("psiosd block device reconciliation: {}", error.0.code);
+        }
+        if let Some(listener) = &wake {
+            if listener.wait(interval).is_ok() {
+                continue;
+            }
+            eprintln!(
+                "psiosd block event notification unavailable; continuing configured reconciliation"
+            );
+            wake = None;
         }
         thread::park_timeout(interval);
     }
@@ -715,6 +730,7 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     let changes = db.changes.clone();
     let db = Arc::new(Mutex::new(db));
     let mut workers = Vec::new();
+    let mut block_shutdown = None;
     // Withhold the authority from workers until every required thread exists.
     let startup_guard = state(&db)?;
     let startup = (|| -> std::io::Result<()> {
@@ -730,9 +746,15 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
         if let Some(ms) = cfg.block_device_reconcile_ms {
             let running = db.clone();
             let shutdown = stop.clone();
-            workers.push(thread::Builder::new().spawn(move || {
-                reconcile_block_devices(running, shutdown, Duration::from_millis(ms))
-            })?);
+            let interval = Duration::from_millis(ms);
+            let wake = (interval > block_wake::MIN_INTERVAL)
+                .then(block_wake::BlockWake::open)
+                .and_then(std::result::Result::ok);
+            block_shutdown = wake.as_ref().map(block_wake::BlockWake::shutdown_fd);
+            workers.push(
+                thread::Builder::new()
+                    .spawn(move || reconcile_block_devices(running, shutdown, interval, wake))?,
+            );
         }
         let tick = Duration::from_millis(cfg.tick_ms);
         for _ in 0..cfg.workers {
@@ -834,6 +856,9 @@ pub fn serve(cfg: Config, stop: Arc<AtomicBool>) -> Result<()> {
     }
     stop.store(true, Ordering::Release);
     changes.notify_shutdown();
+    if let Some(shutdown) = block_shutdown {
+        block_wake::BlockWake::notify_shutdown(&shutdown);
+    }
     if announced && let Err(error) = notification.stopping() {
         eprintln!(
             "psiosd service manager shutdown notification: {}",

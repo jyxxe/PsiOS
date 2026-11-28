@@ -701,6 +701,7 @@ def exercise(args, work):
         payload = ("/bin/psiosd", "/bin/psiosctl", "/psios-source", "/psios-init",
                    "/psios-disk-uuid", "/psios-home-uuid", "/psios-shutdown", "/psios-dhcp", "/psios-dhcp-event",
                    "/psios-ipv4", "/psios-ipv6", "/psios-static", "/psios-storage", "/psios-storage-layout",
+                   "/psios-ca-certificates.crt", "/psios-ca-certificates.LICENSE",
                    "/psios-enroll", "/psios-zoneinfo.tar", "/usr/bin/psios-timezone")
         assert c.run("psios-timezone show") == "UTC"
         with tarfile.open(args.archive, "r:gz") as archive:

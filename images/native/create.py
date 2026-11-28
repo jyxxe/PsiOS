@@ -74,6 +74,11 @@ SSH_PACKAGES = {
     "openssh-keygen-10.2_p1-r1": ("usr/bin/ssh-keygen",),
 }
 SSH_PROGRAMS = tuple(file for files in SSH_PACKAGES.values() for file in files)
+CA_PACKAGE = "ca-certificates-bundle-20261020-r0"
+CA_PACKAGE_SHA256 = "a4c5de1bf37652cd98cbe71aec209512ae0508a964961957a6c9650f795e46c4"
+CA_PEM_SHA256 = "5961c0a3c65459931c023e0075c09733f09aea4ca439cb85bc4a08bb4f3f568b"
+CA_PEM = "psios-ca-certificates.crt"
+CA_LICENSE = "psios-ca-certificates.LICENSE"
 TZDATA = "tzdata-2026f-r0"
 TZDATA_SHA256 = "29b71c02c289e017ad43a96b00ff6bec39e6e07512cb67a647696320c54d0321"
 ZONEINFO = "usr/share/zoneinfo"
@@ -455,7 +460,7 @@ def core_programs(work):
     return programs
 
 
-def prepare_programs(work, packages, *, tools=None):
+def prepare_programs(work, packages, *, package_pins=None, tools=None):
     for package, files in packages.items():
         archive = work / (package + ".apk")
         with archive.open("xb") as output:
@@ -463,6 +468,8 @@ def prepare_programs(work, packages, *, tools=None):
                 ["isoinfo", "-R", "-i", work / "base.iso", "-x", f"/apks/x86_64/{package}.apk"], tools)
             subprocess.run(command,
                            stdout=output, check=True, timeout=30, preexec_fn=file_limit(4 * MIB))
+        if package_pins is not None and sha256(archive) != package_pins[package]:
+            raise ValueError(f"{package} does not match the pinned boot media")
         remaining = set(files)
         with tarfile.open(archive, "r:gz", ignore_zeros=True) as bundle:
             for index, entry in enumerate(bundle):
@@ -548,6 +555,12 @@ def prepare_boot_inputs(work, args, *, wired_driver=None, ssh_enabled=False, net
         modloop.unlink()
     (work / "bin").mkdir()
     install_core(work, args.core_archive, args.core_sha256)
+    bundle = "etc/ssl/certs/ca-certificates.crt"
+    prepare_programs(work, {CA_PACKAGE: (bundle,)}, package_pins={CA_PACKAGE: CA_PACKAGE_SHA256}, tools=tools)
+    if sha256(work / bundle) != CA_PEM_SHA256:
+        raise ValueError("certificate trust bundle differs from the pinned PEM input")
+    (work / bundle).rename(work / CA_PEM)
+    shutil.copyfile(HERE / "ca-certificates.LICENSE", work / CA_LICENSE)
     zones = prepare_timezones(work, tools=tools)
     if getattr(args, "timezone", None) and args.timezone not in zones:
         raise ValueError("unknown time zone in the pinned IANA data")
@@ -566,7 +579,7 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
     (work / "psios-storage-layout").write_text(" ".join(sectors) + "\n")
     boot_scripts = ["init", "shutdown", "dhcp", "dhcp-event", "ipv4", "ipv6", "static", "storage", "enroll"]
     files = [*core_programs(work), "psios-source", "psios-disk-uuid", "psios-home-uuid", "psios-storage-layout",
-             ZONE_ARCHIVE, TIMEZONE_COMMAND]
+             CA_PEM, CA_LICENSE, ZONE_ARCHIVE, TIMEZONE_COMMAND]
     if network_profile == RDNSS:
         boot_scripts.extend(("rdnss-hook", "rdnss.conf", "dhcpcd.LICENSE"))
         files.append(RDNSS_PROGRAM)
@@ -600,6 +613,8 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
         "geometry_mib": layout.receipt(),
         "required_filesystems": {"state": str(instance), "home": str(home_id)},
         "payload_sha256": payload,
+        "tls_trust_bundle": {"package": CA_PACKAGE, "package_sha256": CA_PACKAGE_SHA256,
+                             "pem_sha256": CA_PEM_SHA256},
         "timezone_data": {"package": TZDATA, "package_sha256": TZDATA_SHA256},
     }
     if layout.raw_disk_bytes is not None:
@@ -1120,7 +1135,8 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
                                network_profile=network_profile, tools=tools)
     (trial_work / "bin").mkdir()
     # Share the pinned input kernel and binaries, but each initrd is extended independently.
-    boot_inputs = ("kernel", "initrd", *core_programs(candidate_work), "psios-source", ZONE_ARCHIVE, TIMEZONE_COMMAND)
+    boot_inputs = ("kernel", "initrd", *core_programs(candidate_work), "psios-source",
+                   CA_PEM, CA_LICENSE, ZONE_ARCHIVE, TIMEZONE_COMMAND)
     if wired_driver:
         boot_inputs += (E1000E_MODULE,)
     if ssh_enabled:

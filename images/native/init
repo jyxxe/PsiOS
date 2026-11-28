@@ -140,6 +140,30 @@ install_default_hosts() {
     sync -f /etc
 }
 
+install_default_certificates() {
+    local directory changed=no store=/etc/ssl/certs/ca-certificates.crt alias=/etc/ssl/cert.pem
+    for directory in /etc/ssl /etc/ssl/certs; do
+        if [ ! -e "$directory" ] && [ ! -L "$directory" ]; then
+            mkdir -m 0755 "$directory" || return 1
+            changed=yes
+        fi
+        [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
+        case "$(stat -c '%u:%g:%a' "$directory")" in
+            0:0:700|0:0:750|0:0:755) ;;
+            *) return 1 ;;
+        esac
+    done
+    if [ ! -e "$store" ] && [ ! -L "$store" ]; then
+        ln -s /psios-ca-certificates.crt "$store" || return 1
+        changed=yes
+    fi
+    if [ ! -e "$alias" ] && [ ! -L "$alias" ]; then
+        ln -s certs/ca-certificates.crt "$alias" || return 1
+        changed=yes
+    fi
+    if [ "$changed" = yes ]; then sync -f /etc; fi
+}
+
 run_trial() {
     local config=/var/lib/etc/psios/core.json dir path manifest_digest
     stage=trial-configuration
@@ -289,6 +313,9 @@ stage=host-config
 mount -o bind /var/lib/etc /etc
 stage=host-resolution
 install_default_hosts
+if ! install_default_certificates; then
+    echo 'PsiOS could not register default TLS certificate paths; verified bundle at /psios-ca-certificates.crt' >/dev/console
+fi
 if [ -f /psios-core-limits ]; then
     stage=core-service-config
     [ -f /etc/inittab ] && [ ! -L /etc/inittab ] || exit 1

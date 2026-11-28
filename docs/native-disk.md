@@ -108,6 +108,12 @@ SLAAC 使用格式 10 的构建回执。工厂镜像核验和隔离试启动更�
 
 首次正式引导生成并刷盘保存本部署的 Ed25519 主机密钥。可通过可信串口运行 `ssh-keygen -lf /run/psios-ssh/host-key.pub` 核对首次连接显示的指纹。复制尚未启动的新盘时，每份副本在自己的首次正式引导生成主机密钥。重启和停机升级保留原主机密钥与授权公钥。隔离试启动不运行 SSH。查看 SSH 启动错误可使用本地串口。[真实 SSH 验收](../tests/native_ssh_console.py)
 
+## TLS 信任库
+
+原生部署从固定的 Linux 构建输入取得 Mozilla 根证书包。构建核对包及 PEM 的 SHA-256，清单记录这两个摘要。启动核验后，固定版本的证书和许可可分别从 `/psios-ca-certificates.crt` 与 `/psios-ca-certificates.LICENSE` 读取。[根证书许可及对应源码](../images/native/ca-certificates.LICENSE)
+
+生产启动为受保护的 `/etc/ssl` 目录注册缺少的 `/etc/ssl/certs/ca-certificates.crt` 和 `/etc/ssl/cert.pem`。管理员可将自己的 PEM 文件放在标准位置，后续启动和停机升级保留现有路径。随盘提供的公共根证书通过部署更新交付。无法注册默认路径时，串口会提示固定文件位置，本机登录仍可用。[OpenSSL 证书链、TLS 1.3 握手和停机升级验收](../tests/native_tls_trust.py)
+
 ## 核对安装与运行的制品
 
 构建成功后，将 `node-build.json` 保存在节点外。其中 `initial_image_sha256` 可在首次启动前与 `sha256sum node.raw` 比对。启动会改变数据分区，离线核对引导程序可单独读取 EFI 系统分区。

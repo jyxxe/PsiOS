@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inspect a stopped PsiOS authority on a raw disk image without booting its OS."""
+"""Inspect a stopped PsiOS authority or native boot failure without booting the target OS."""
 import argparse
 from functools import partial
 import json
@@ -73,13 +73,17 @@ def configuration(args):
             "witness_dir": "/source" + (args.witness or args.state + ".witness")}
 
 
-def prepare(work, args, require_secure_boot, *, filesystem_uuid=None, disk_transport="virtio", source_sha256=None):
+def prepare(work, args, require_secure_boot, *, filesystem_uuid=None, disk_transport="virtio",
+            source_sha256=None, boot_failure_only=False):
     scratch = scratch_mib(args)
     boot_media.prepare_kernel(work, args.iso)
-    pinned_copy(args.core, work / "psiosd", args.core_sha256, 64 * 1024 * 1024)
     shutil.copyfile(HERE / "init", work / "psios-rescue")
-    for name in ["psiosd", "psios-rescue"]:
-        (work / name).chmod(0o755)
+    (work / "psios-rescue").chmod(0o755)
+    members = ["psios-rescue"]
+    if not boot_failure_only:
+        pinned_copy(args.core, work / "psiosd", args.core_sha256, 64 * 1024 * 1024)
+        (work / "psiosd").chmod(0o755)
+        members.append("psiosd")
     # Keep input paths in JSON. The shell settings contain only validated literals.
     settings = (f"PARTITION={args.partition}\nSERVICE_UID={args.uid}\n"
                 f"SERVICE_GID={args.gid if args.gid is not None else args.uid}\nCOPY_MIB={args.max_copy_mib}\n"
@@ -88,18 +92,22 @@ def prepare(work, args, require_secure_boot, *, filesystem_uuid=None, disk_trans
                 f"REHEARSE={int(args.migration_config is not None)}\n"
                 f"FILESYSTEM_UUID={filesystem_uuid.hex if filesystem_uuid else ''}\n"
                 f"DISK_TRANSPORT={disk_transport}\n"
-                f"SOURCE_SHA256={source_sha256 or ''}\n")
+                f"SOURCE_SHA256={source_sha256 or ''}\n"
+                f"BOOT_FAILURE_ONLY={int(boot_failure_only)}\n")
     (work / "rescue-settings").write_text(settings)
     (work / "rescue-settings").chmod(0o600)
-    (work / "rescue.json").write_text(json.dumps(configuration(args), allow_nan=False))
-    (work / "rescue.json").chmod(0o644)
-    for name in ("psios-rescue", "psiosd", "rescue-settings", "rescue.json"):
+    members.append("rescue-settings")
+    if not boot_failure_only:
+        (work / "rescue.json").write_text(json.dumps(configuration(args), allow_nan=False))
+        (work / "rescue.json").chmod(0o644)
+        members.append("rescue.json")
+    for name in members:
         os.utime(work / name, (boot_media.EPOCH, boot_media.EPOCH))
     with (work / "initrd").open("ab") as out:
         out.write(b"\0" * (-out.tell() % 4))
         out.flush()
         subprocess.run(["cpio", "--quiet", "-o", "-H", "newc", "--reproducible", "--owner=0:0"], cwd=work,
-                       input=b"psios-rescue\npsiosd\nrescue-settings\nrescue.json\n", stdout=out, check=True)
+                       input=("\n".join(members) + "\n").encode("ascii"), stdout=out, check=True)
 
 
 def capture_report(command, *, cwd, pass_fds=(), preexec_fn=None, timeout=BOOT_TIMEOUT, limit=REPORT_LIMIT):
@@ -145,6 +153,19 @@ def unique_report(serial, firmware, accelerator):
     return output
 
 
+def native_boot_failure(body, filesystem, present):
+    report = {"filesystem_uuid": str(filesystem), "boot_failure": {"status": "Missing"}}
+    if not present and body == b"{}":
+        return report
+    if not present or not re.fullmatch(
+        rb'\{"format":1,"boot_id":"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}",'
+        rb'"stage":"[a-z][a-z0-9-]{0,63}"\}', body,
+    ):
+        raise ValueError("invalid native boot failure record")
+    report["boot_failure"] = {"status": "Found", **json.loads(body)}
+    return report
+
+
 def source_revision(info):
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
@@ -172,7 +193,8 @@ def inspect(args):
             signing = boot_media.prepare_secure_boot(work, args.secure_boot_key, args.secure_boot_cert,
                                                     args.efi_stub, args.efi_stub_sha256)
         prepare(work, args, signing is not None, filesystem_uuid=args.filesystem_uuid,
-                disk_transport=args.disk_transport, source_sha256=args.source_sha256)
+                disk_transport=args.disk_transport, source_sha256=args.source_sha256,
+                boot_failure_only=args.boot_failure_only)
         # Hand QEMU the exact already-open read-only file. Raw format disables
         # backing-file discovery and the guest gets no interface to the network.
         accelerator = "kvm" if signing is None and os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
@@ -227,12 +249,17 @@ def inspect(args):
         status, _, body = output.partition(REPORT_MARKER)[2].strip().partition(b"\n")
         success = {b"OK": None} if args.journal_overlay_mib is None else {
             b"OK clean": "Clean", b"OK replayed": "ReplayedOnTemporaryOverlay"}
+        if args.boot_failure_only:
+            success = {b"OK found": True, b"OK missing": False}
         if status.strip() not in success:
             failure = re.fullmatch(rb"ERROR ([A-Za-z0-9-]+)", status.strip())
             raise ValueError("rescue inspection failed: " + (failure[1].decode() if failure else "no valid report"))
-        report = json.loads(body)
-        if report["sqlite_integrity"] != "Verified" or report["foreign_keys"] != "Verified":
-            raise ValueError("incomplete authority verification")
+        if args.boot_failure_only:
+            report = native_boot_failure(body, args.filesystem_uuid, success[status.strip()])
+        else:
+            report = json.loads(body)
+            if report["sqlite_integrity"] != "Verified" or report["foreign_keys"] != "Verified":
+                raise ValueError("incomplete authority verification")
         if args.migration_config is not None:
             probe = report.get("migration_rehearsal", {})
             source, target = probe.get("source_format"), probe.get("target_format")
@@ -263,10 +290,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("image", type=Path)
     parser.add_argument("--iso", type=Path, required=True, help="pinned Alpine virt rescue ISO")
-    parser.add_argument("--core", type=Path, required=True, help="standalone static psiosd")
-    parser.add_argument("--core-sha256", required=True, help="expected psiosd digest from a trusted build manifest")
+    parser.add_argument("--core", type=Path, help="standalone static psiosd for authority verification")
+    parser.add_argument("--core-sha256", help="expected psiosd digest from a trusted build manifest")
     parser.add_argument("--source-sha256", help="expected SHA-256 of the complete raw source from an independent record")
-    parser.add_argument("--uid", type=int, required=True, help="numeric UID of the original service account")
+    parser.add_argument("--uid", type=int, help="numeric UID of the original service account")
     parser.add_argument("--gid", type=int, help="original service GID, defaults to UID")
     parser.add_argument("--partition", type=int, default=0, help="partition number, or 0 for a raw filesystem")
     parser.add_argument("--filesystem-uuid", type=filesystem_uuid, metavar="UUID",
@@ -275,6 +302,8 @@ def main():
                         help="QEMU attachment for the image (default virtio)")
     parser.add_argument("--state", type=guest_path, default="/var/lib/psios")
     parser.add_argument("--witness", type=guest_path, help="defaults to STATE.witness")
+    parser.add_argument("--boot-failure-only", action="store_true",
+                        help="read the native boot failure from a stopped image without starting Core")
     parser.add_argument("--max-copy-mib", type=int, default=64, help="database and journal copy limit (1–256 MiB)")
     parser.add_argument("--migration-config", type=Path, metavar="CORE_JSON",
                         help="rehearse opening a private authority copy with the staged Core and deployment configuration")
@@ -291,12 +320,22 @@ def main():
     signing = boot_media.signing_requested(args, parser)
     if signing != (args.ovmf_vars is not None) or (signing and args.firmware != "uefi"):
         parser.error("signed rescue requires --firmware uefi and a pre-enrolled --ovmf-vars store")
-    if not re.fullmatch("[0-9a-f]{64}", args.core_sha256):
-        parser.error("invalid expected SHA-256")
+    if args.boot_failure_only:
+        if args.partition != 2 or args.filesystem_uuid is None:
+            parser.error("native boot failure inspection requires --partition 2 and --filesystem-uuid")
+        if (any(option is not None for option in (args.core, args.core_sha256, args.uid, args.gid, args.witness,
+                                                   args.migration_config, args.journal_overlay_mib))
+                or args.state != "/var/lib/psios" or args.max_copy_mib != 64):
+            parser.error("native boot failure inspection reads a clean source using its fixed state layout")
+    else:
+        if args.core is None or args.core_sha256 is None or args.uid is None:
+            parser.error("authority verification requires --core, --core-sha256 and --uid")
+        if not re.fullmatch("[0-9a-f]{64}", args.core_sha256):
+            parser.error("invalid expected SHA-256")
+        if not 1 <= args.uid < 2**32 - 1 or args.gid is not None and not 0 <= args.gid < 2**32 - 1:
+            parser.error("expected a non-root service UID and a valid GID")
     if args.source_sha256 is not None and not re.fullmatch("[0-9a-f]{64}", args.source_sha256):
         parser.error("invalid expected source image SHA-256")
-    if not 1 <= args.uid < 2**32 - 1 or args.gid is not None and not 0 <= args.gid < 2**32 - 1:
-        parser.error("expected a non-root service UID and a valid GID")
     if not 0 <= args.partition <= 128 or not 1 <= args.max_copy_mib <= 256:
         parser.error("invalid partition or copy limit")
     if args.journal_overlay_mib is not None and not 16 <= args.journal_overlay_mib <= 512:

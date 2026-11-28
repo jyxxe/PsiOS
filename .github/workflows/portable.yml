@@ -120,6 +120,9 @@ jobs:
             --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py" --firmware-media
           python3 -B tests/rescue_storage.py --bin-dir "$RUNNER_TEMP/rescue-core" --iso "$RUNNER_TEMP/rescue.iso" \
             --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py"
+          python3 -B tests/rescue_native_boot_failure.py --builder "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py" --kernel-iso "$RUNNER_TEMP/rescue.iso" \
+            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
 
       - name: Trial-boot an isolated UEFI upgrade and boot both production generations
         run: |
@@ -253,6 +256,16 @@ jobs:
             --efi-stub "$secure_tools/root/usr/lib/systemd/boot/efi/linuxx64.efi.stub" \
             --kernel-iso "$RUNNER_TEMP/rescue.iso" --bin-dir "$RUNNER_TEMP/rescue-core" \
             --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py"
+
+      - name: Export and independently boot signed native boot-failure diagnostics without Core
+        run: |
+          secure_tools="$RUNNER_TEMP/psios-secure-boot-tools"
+          export PATH="$secure_tools/root/usr/bin:$PATH"
+          export PYTHONPATH="$secure_tools/root/usr/lib/python3/dist-packages"
+          /usr/bin/python3 -B tests/rescue_native_boot_failure.py \
+            --builder "$RUNNER_TEMP/rescue-core/native/create.py" --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
+            --efi-stub "$secure_tools/root/usr/lib/systemd/boot/efi/linuxx64.efi.stub"
 
   native-boot-network:
     needs: portable-core

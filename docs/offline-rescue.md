@@ -173,6 +173,19 @@ qemu-img convert -f qcow2 -O raw ./node-a/system.qcow2 "$export_dir/node.raw"
 
 发布报告或救援光盘前，宿主端还会复核本次打开的镜像及其原路径。源文件在检查期间被写入、移动或换成另一个同字节文件时，检查器会拒绝发布。[实际源盘变化验收](../tests/rescue_disk.py)
 
+## 读取上一次原生启动失败
+
+使用停机节点磁盘的受信 raw 副本，以及该节点构建回执中的 `state_uuid`。救援内核核对状态卷和部署标记后以只读方式挂载。该检查可以在节点尚未创建 Core 数据库时运行。
+
+```sh
+python3 rescue/inspect.py "$STOPPED_RAW" --iso "$VERIFIED_KERNEL_ISO" \
+  --boot-failure-only --partition 2 --filesystem-uuid "$NATIVE_STATE_UUID"
+```
+
+`boot_failure.status` 为 `Found` 时，报告包含启动 ID 与失败阶段。`Missing` 表示已核对状态卷但未找到记录。损坏记录和需要日志恢复的文件系统会明确报错。已有独立记录的全盘摘要可用 `--source-sha256` 在来宾中复核。[真实启动及离线读取验收](../tests/rescue_native_boot_failure.py)
+
+该检查也支持按下节方式导出独立诊断光盘。光盘携带指定的分区、文件系统 UUID 和可选源盘摘要，通过第二串口报告结果。使用已登记证书签名时，固件未启用 Secure Boot 或来宾看见源盘可写，光盘都会先停止检查。[签名独立启动验收](../tests/rescue_native_boot_failure.py)
+
 ## 从固件启动并导出救援光盘
 
 在前面的检查命令末尾加上 `--firmware bios` 或 `--firmware uefi`，可以从 El Torito 光盘启动同一套检查。再加 `--save-rescue-iso node-rescue.iso`，核验成功后才会发布完整 ISO。输出路径必须尚不存在。光盘同时包含 SeaBIOS 和 amd64 UEFI 的启动入口，带有本次指定的 UID、GID、分区及目录。节点数据库、所有者凭据和 EFI 变量保留在各自设备上。

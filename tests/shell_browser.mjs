@@ -645,7 +645,8 @@ async function test() {
     const application = '#application-rows button[data-application-id="' + input.application + '"]';
     await waitFor("scoped application", 'document.querySelector(' + JSON.stringify(application) + ') !== null');
     await keyboardActivate(application);
-    await waitFor("application start request", 'document.querySelector(".application-actions button")?.textContent === "申请启动"');
+    const action = input.applicationAction === "Stop" ? "申请停止" : "申请启动";
+    await waitFor("application lifecycle request", 'document.querySelector(".application-actions button")?.textContent === ' + JSON.stringify(action));
     await keyboardActivate(".application-actions button");
     await waitFor("the accepted application request", 'document.querySelector(".application-actions button")?.textContent === "查看任务"');
     await keyboardActivate(".application-actions button");

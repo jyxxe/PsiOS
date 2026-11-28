@@ -37,13 +37,16 @@ EFI_PATH = "::/EFI/BOOT/BOOTX64.EFI"
 STATIC_IPV4 = "virtio-static-ipv4"
 STATIC_IPV6 = "virtio-static-ipv6"
 STATIC_DUAL = "virtio-static-dual-stack"
-STATIC_MODES = {STATIC_IPV4: "static", STATIC_IPV6: "static6", STATIC_DUAL: "dual"}
+VIRTIO_STATIC_MODES = {STATIC_IPV4: "static", STATIC_IPV6: "static6", STATIC_DUAL: "dual"}
+E1000E_STATIC_MODES = {profile.replace("virtio-", "e1000e-", 1): mode for profile, mode in VIRTIO_STATIC_MODES.items()}
+STATIC_MODES = VIRTIO_STATIC_MODES | E1000E_STATIC_MODES
 LIMITED_SERVICE = "::respawn:/bin/sh /psios-core-cgroup serve"
 TRIAL_BOOT_MODE = "IsolatedTrial"
 TRIAL_RECEIPT_FORMAT = 7
 E1000E_RECEIPT_FORMAT = 8
 E1000E_MODULE = "psios-e1000e.ko"
 DHCP_SERVICE = "::respawn:/bin/sh /psios-dhcp"
+STATIC_SERVICE = "::once:/bin/sh /psios-dhcp "
 
 
 @dataclass(frozen=True)
@@ -254,6 +257,24 @@ def validate_persisted_e1000e(work, state):
         raise ValueError("invalid persisted e1000e DHCP configuration or launcher")
 
 
+def validate_persisted_network(work, state, receipt):
+    mode = STATIC_MODES.get(receipt.get("network_profile"))
+    if mode in ("static", "dual"):
+        mac4, dns4 = validate_persisted_static(work, state, 4)
+    if mode in ("static6", "dual"):
+        mac6, dns6 = validate_persisted_static(work, state, 6)
+    if mode == "dual" and (mac4 != mac6 or dns4 + dns6 > 3):
+        raise ValueError("inconsistent persisted dual-stack profile")
+    if "wired_driver" not in receipt:
+        return
+    if mode is None:
+        validate_persisted_e1000e(work, state)
+        return
+    inittab = read_root_file(work, state, "/etc/inittab", 16 * 1024, "0(?:600|644)")
+    if inittab.splitlines().count((STATIC_SERVICE + mode).encode()) != 1:
+        raise ValueError("invalid persisted e1000e static launcher")
+
+
 def host_config(seed, args):
     (seed / "etc/psios").mkdir(parents=True)
     operator = password_hash(args.console_hash)
@@ -276,7 +297,7 @@ def host_config(seed, args):
         for name, config in (("static-ipv4", args.static_network), ("static-ipv6", args.static_ipv6_network)):
             if config:
                 (seed / "etc/psios" / name).write_text(config)
-        inittab += f"::once:/bin/sh /psios-dhcp {STATIC_MODES[args.network_profile]}\n"
+        inittab += STATIC_SERVICE + STATIC_MODES[args.network_profile] + "\n"
     elif args.dhcp_mac:
         (seed / "etc/psios/dhcp-mac").write_text(args.dhcp_mac + "\n")
         inittab += DHCP_SERVICE + "\n"
@@ -514,8 +535,11 @@ def parse_receipt(raw):
     if prior["format"] in profiles:
         if prior.get("network_profile") not in profiles[prior["format"]]:
             raise ValueError("invalid network profile in previous build receipt")
-    elif "network_profile" in prior and (prior["format"] != 6 or prior["network_profile"] not in tuple(STATIC_MODES)):
-        raise ValueError("invalid network profile in previous build receipt")
+    elif "network_profile" in prior:
+        supported = {6: VIRTIO_STATIC_MODES, E1000E_RECEIPT_FORMAT: E1000E_STATIC_MODES}
+        profile = prior["network_profile"]
+        if not isinstance(profile, str) or profile not in supported.get(prior["format"], {}):
+            raise ValueError("invalid network profile in previous build receipt")
     if prior["format"] == E1000E_RECEIPT_FORMAT:
         if prior.get("wired_driver") != "e1000e":
             raise ValueError("invalid wired driver in previous e1000e build receipt")
@@ -659,18 +683,7 @@ def source_snapshot(work, disk, source_fd, prior, layout, signing):
         raise ValueError("state partition deployment marker does not match the prior receipt")
     core_config = read_root_file(work, state, "/etc/psios/core.json", 64 * 1024, "0(?:444|644)")
     cfg = json.loads(core_config)
-    network = prior.get("network_profile")
-    if network == STATIC_IPV4:
-        validate_persisted_static(work, state, 4)
-    if network == STATIC_IPV6:
-        validate_persisted_static(work, state, 6)
-    if network == STATIC_DUAL:
-        mac4, dns4 = validate_persisted_static(work, state, 4)
-        mac6, dns6 = validate_persisted_static(work, state, 6)
-        if mac4 != mac6 or dns4 + dns6 > 3:
-            raise ValueError("inconsistent persisted dual-stack profile")
-    if "wired_driver" in prior:
-        validate_persisted_e1000e(work, state)
+    validate_persisted_network(work, state, prior)
     if "core_limits" in prior:
         inittab = read_root_file(work, state, "/etc/inittab", 16 * 1024, "0(?:600|644)").split(b"\n")
         if inittab.count(LIMITED_SERVICE.encode()) != 1:
@@ -906,9 +919,11 @@ def main():
     boot_media.add_signing_arguments(parser)
     network = parser.add_mutually_exclusive_group()
     network.add_argument("--dhcp-mac", type=unicast_mac, help="enable IPv4 DHCP on the matching NIC of a new disk")
-    network.add_argument("--static-mac", type=unicast_mac, help="enable static networking on the matching virtio NIC of a new disk")
-    parser.add_argument("--dhcp-driver", dest="wired_driver", choices=("virtio", "e1000e"),
+    network.add_argument("--static-mac", type=unicast_mac, help="enable static networking on the matching NIC of a new disk")
+    parser.add_argument("--dhcp-driver", choices=("virtio", "e1000e"),
                         help="kernel driver for the DHCP NIC (default virtio)")
+    parser.add_argument("--static-driver", choices=("virtio", "e1000e"),
+                        help="kernel driver for the static NIC (default virtio)")
     parser.add_argument("--static-address", type=ipaddress.IPv4Interface, help="static IPv4 address and prefix")
     parser.add_argument("--static-gateway", type=ipaddress.IPv4Address, help="optional IPv4 gateway on the static subnet")
     parser.add_argument("--static-dns", type=ipaddress.IPv4Address, action="append", default=[], help="optional IPv4 DNS server, repeat up to three times")
@@ -929,10 +944,11 @@ def main():
             parser.error("upgrade preserves /etc/hostname from the source")
         if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", args.hostname):
             parser.error("hostname must be a single DNS label of 1 to 63 ASCII letters, digits or hyphens")
-    if args.wired_driver and not args.dhcp_mac:
+    if args.dhcp_driver and not args.dhcp_mac:
         parser.error("--dhcp-driver requires --dhcp-mac on a new disk")
-    if args.wired_driver == "virtio":
-        args.wired_driver = None
+    if args.static_driver and not args.static_mac:
+        parser.error("--static-driver requires --static-mac on a new disk")
+    args.wired_driver = "e1000e" if "e1000e" in (args.dhcp_driver, args.static_driver) else None
     boot_media.signing_requested(args, parser)
     args.static_network, args.static_ipv6_network = static_config(args, parser)
     args.network_profile = None
@@ -940,6 +956,8 @@ def main():
         args.network_profile = STATIC_DUAL if args.static_ipv6_network else STATIC_IPV4
     elif args.static_ipv6_network:
         args.network_profile = STATIC_IPV6
+    if args.network_profile and args.wired_driver:
+        args.network_profile = args.network_profile.replace("virtio-", "e1000e-", 1)
     if args.upgrade_from and (not args.previous_receipt or args.root_console_hash or args.dhcp_mac or args.network_profile):
         parser.error("upgrade requires --previous-receipt and preserves console credentials and network configuration")
     if args.upgrade_from and (args.state_mib is not None or args.home_mib is not None):

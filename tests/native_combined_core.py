@@ -131,6 +131,10 @@ def exercise(args, work):
         recover_backup(console)
         console.send("exit")
         console.login("root", root)
+        assert console.run("stat -c '%u:%g:%a' /etc/hosts") == "0:0:644"
+        for family, address in ((4, "127.0.0.1"), (6, "::1")):
+            reply = console.run(f"busybox ping -{family} -q -c 1 -W 2 localhost")
+            assert f"PING localhost ({address})" in reply, reply
         for filename, digest in programs.items():
             assert console.run(f"stat -c '%u:%g:%a' /root/{filename}") == "0:0:700"
             assert console.run(f"sha256sum /root/{filename}").split()[0] == digest
@@ -139,7 +143,7 @@ def exercise(args, work):
             "POSIX shared memory exchange, permissions, byte and inode limits and recovery passed")
         poweroff(console)
     check_clean_shutdown(disk)
-    print("PASS block layout, pressure, durable Task.Wait, backup export, detached recovery, user PTYs, POSIX shared memory and clean shutdown")
+    print("PASS block layout, pressure, durable Task.Wait, backup export, detached recovery, offline localhost, user PTYs, POSIX shared memory and clean shutdown")
 
 
 if __name__ == "__main__":

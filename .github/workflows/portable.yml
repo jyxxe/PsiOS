@@ -113,6 +113,9 @@ jobs:
             --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py" --firmware-media
           python3 -B tests/rescue_storage.py --bin-dir "$RUNNER_TEMP/rescue-core" --iso "$RUNNER_TEMP/rescue.iso" \
             --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py"
+          python3 -B tests/rescue_native_boot_failure.py --builder "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py" --kernel-iso "$RUNNER_TEMP/rescue.iso" \
+            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
 
       - name: Boot an installed PsiOS UEFI disk, power-cut the node and verify its recovery
         run: |

@@ -1,6 +1,6 @@
 # 在 Ubuntu 测试宿主上安装 PsiOS Core 的 .deb 包
 
-`psios-core` 包含本机权威服务、CLI、默认配置和两个 systemd 单元。此包为可选的宿主集成，CI 在 Ubuntu 24.04 amd64 上执行打包与服务生命周期验收。PsiOS 是独立的 Linux 操作系统项目。Core 同时提供可直接运行的静态 Linux 二进制。三个发行版的启动介质、磁盘安装器、签名更新通道和系统部署回退仍待实现。[独立二进制](core-local.md#portable-amd64-core) · [宿主基底决策](v1/adr/ADR-001.md)
+`psios-core` 包含本机权威服务、CLI、默认配置和两个 systemd 单元。此包为可选的宿主集成，CI 在 Ubuntu 24.04 amd64 上执行打包与服务生命周期验收。PsiOS 是独立的 Linux 操作系统项目，提供静态 Core 和可安装的原生 UEFI 开发盘。原生安装器已验证空白盘安装、停机更新、签名候选核验及保留前代部署。Helium、Neon 和 Argon 的正式介质与线上更新通道仍待开发。[原生开发盘](native-disk.md) · [独立二进制](core-local.md#portable-amd64-core) · [宿主基底决策](v1/adr/ADR-001.md)
 
 通过验收的 Actions 运行保存 `psios-core-ubuntu-24.04-amd64` 开发制品 14 天。归档含实际测试的 deb、dpkg buildinfo、源码提交、Rust 版本、Cargo.lock 和 SHA-256 清单。从对应的成功运行下载并解压后，在包目录执行 `sha256sum -c SHA256SUMS`。主线开发包的来源核验见下文。正式发行通道及其独立信任策略仍待建立。
 
@@ -12,7 +12,7 @@
 tools/verify-host-package ./host-build "$EXPECTED_MAIN_SHA" ./provenance.jsonl
 ```
 
-核验器检查 GitHub 托管 runner 的构建身份证明，限定仓库、工作流、主线引用和提交。deb 和 SHA256SUMS 均为签名对象，buildinfo、源码版本、工具链和依赖锁文件由该清单覆盖。省略 bundle 参数会从 GitHub 取得证明；完全断网核验时，在受信联网机器上运行 `gh attestation trusted-root > trusted_root.jsonl`，经独立可信途径将验证根交给安装人员。将该文件作为脚本的第四个参数，同时提供本地 bundle。主线仅在 Linux、包安装升级和虚机启动全部通过后签发。PR 构建可用于测试。正式发行密钥、更新准入和版本回退由后续发布流程管理。[构建证明机制](https://docs.github.com/en/actions/concepts/security/artifact-attestations)
+核验器用 Python 3 创建私有副本，在同一份文件上检查 GitHub 托管 runner 的构建身份证明、仓库、工作流、主线引用和提交。deb 和 SHA256SUMS 均为签名对象，buildinfo、源码版本、工具链和依赖锁文件由该清单覆盖。输出的 `SHA-256` 对应已经核验的 deb 字节。省略 bundle 参数会从 GitHub 取得证明。完全断网核验时，在受信联网机器上运行 `gh attestation trusted-root > trusted_root.jsonl`，经独立可信途径将验证根交给安装人员。将该文件作为脚本的第四个参数，同时提供本地 bundle。主线仅在 Linux、包安装升级和虚机启动全部通过后签发。PR 构建可用于测试。正式发行密钥和在线更新准入由后续发布流程管理。[构建证明机制](https://docs.github.com/en/actions/concepts/security/artifact-attestations)
 
 ## 构建与首次安装
 

@@ -1154,9 +1154,12 @@ jobs:
           bundle="$RUNNER_TEMP/bundle/provenance.jsonl"
           tools/verify-host-package "$package" "$GITHUB_SHA" "$bundle"
           gh attestation trusted-root > "$RUNNER_TEMP/trusted_root.jsonl"
-          sudo unshare --net runuser -u "$(id -un)" -- env GH_TOKEN=offline \
-            tools/verify-host-package "$package" "$GITHUB_SHA" "$bundle" "$RUNNER_TEMP/trusted_root.jsonl"
+          verified=$(sudo unshare --net runuser -u "$(id -un)" -- env GH_TOKEN=offline \
+            tools/verify-host-package "$package" "$GITHUB_SHA" "$bundle" "$RUNNER_TEMP/trusted_root.jsonl")
+          printf '%s\n' "$verified"
           deb=("$package"/psios-core_*.deb)
+          checksum=$(sha256sum < "${deb[0]}")
+          grep -Fxq "SHA-256 ${checksum%% *}" <<< "$verified"
           printf '\037' >> "${deb[0]}"
           if tools/verify-host-package "$package" "$GITHUB_SHA" "$bundle"; then
             echo 'Modified package unexpectedly verified' >&2

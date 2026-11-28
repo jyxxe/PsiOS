@@ -57,6 +57,8 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 
 ## 可选有线接入
 
+生产引导在持久配置缺少 `/etc/hosts` 时创建 IPv4 和 IPv6 的 `localhost` 回环记录，断网时同样可解析。管理员维护的现有内容会沿用。文件必须为 root 所有的普通文件，权限为 0444 或 0644，且只有一个硬链接。无效文件在 `host-resolution` 阶段触发救援。[原生联网与回环验收](../tests/native_combined_core.py)
+
 新盘可用 `--dhcp-mac 52:54:00:51:6f:20` 启用单个 virtio 网口的 IPv4 DHCP。为虚机配置同一个 MAC。下面的 QEMU 参数可用于只验证租约的隔离网络。
 
 ```sh

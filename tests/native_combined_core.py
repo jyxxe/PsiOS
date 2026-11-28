@@ -139,6 +139,11 @@ def exercise(args, work):
         recover_backup(console)
         console.send("exit")
         console.login("root", root)
+        assert console.run("stat -c '%u:%g:%a' /etc/hosts") == "0:0:644"
+        for family, address in ((4, "127.0.0.1"), (6, "::1")):
+            reply = console.run(f"busybox ping -{family} -q -c 1 -W 2 localhost")
+            assert f"PING localhost ({address})" in reply, reply
+        print("PASS offline IPv4 and IPv6 localhost resolution and communication")
         for filename, digest in programs.items():
             assert console.run(f"stat -c '%u:%g:%a' /root/{filename}") == "0:0:700"
             assert console.run(f"sha256sum /root/{filename}").split()[0] == digest

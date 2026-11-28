@@ -181,7 +181,13 @@ python3 native/create.py next.raw --upgrade-from node.raw --previous-receipt nod
 
 发布前，救援环境用目标版本的 Core 和保留的配置，在容量受限的内存文件系统中演练实际数据库迁移及见证结算。副本通过完整性、外键、制品、凭据、同一节点身份及目标格式检查后，`upgrade.verified_authority.migration_rehearsal` 记录来源格式、目标格式、原配置字节的 SHA-256 和核验结果。迁移演练失败会阻止候选盘发布。演练只打开私有副本，不启动守护进程、调度任务或运行外部效果。[停机升级与失败验收](../tests/native_upgrade.py)
 
-回执版本 2 的 `geometry_mib` 用来逐项核对原 GPT 与镜像总长。升级盘沿用核对后的容量和分区位置。回执版本 1 按原始 323 MiB 布局检查。可在来宾用 `df -h /var/lib /home/psios` 查看两个文件系统的可用空间。[独立容量和断电升级验收](../tests/native_capacity.py)
+回执版本 2 的 `geometry_mib` 用来逐项核对原 GPT 与镜像总长。默认升级沿用核对后的容量和分区位置。回执版本 1 按原始 323 MiB 布局检查。可在来宾用 `df -h /var/lib /home/psios` 查看两个文件系统的可用空间。[独立容量和断电升级验收](../tests/native_capacity.py)
+
+### 停机扩展主目录
+
+给上述 `native/create.py --upgrade-from` 命令加 `--expand-home-mib 192`，可将最后一个 ext4 分区扩展到 192 MiB。所选容量必须大于当前主目录分区，且满足原生几何上限。构建机需要 e2fsprogs 的 `resize2fs`。候选沿用原状态分区和主目录起点、文件系统 UUID、磁盘 GUID 与分区 GUID。如果原 raw 盘存在足够的未分配空间，候选沿用原盘总容量。否则会生成更大的 raw 候选盘。
+
+确认将分配的源区域为空后，安装器在私有副本重放日志、扩容并检查 ext4，重新核对双 GPT 与新容量，再使用同一套启动和权威核验流程生成候选。失败时没有候选输出。`upgrade.home_expansion` 保存原容量和目标容量。原盘可继续单独启动。扩容使用 `create.py` 的停机复制入口，受管候选发布流程沿用原分区容量。[原分区核验及两份磁盘启动](../tests/native_expand_home.py)
 
 ### 隔离试启动
 

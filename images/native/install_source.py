@@ -78,23 +78,8 @@ def fit_image(work, image, source, target_size):
         raise ValueError("larger targets require whole 512-byte sectors and at most 2 TiB")
     layout = create.Layout(source["geometry_mib"]["state_mib"], source["geometry_mib"]["home_mib"])
     old = create.validate_layout(work, image, layout)
-    old_backup = (old["lastlba"] + 1) * SECTOR_BYTES
-    tail_bytes = original_size - old_backup
-    if not 2 * SECTOR_BYTES <= tail_bytes <= MIB:
-        raise ValueError("unsupported GPT backup area on the factory image")
     image.chmod(0o600)
-    with image.open("r+b") as disk:
-        disk.truncate(target_size)
-    relocate = ["sfdisk", "--quiet", "--no-reread", "--no-tell-kernel", "--relocate", "gpt-bak-std", image]
-    try:
-        create.boot_media.run(work, relocate)
-    except subprocess.SubprocessError as error:
-        raise ValueError("sfdisk could not relocate the verified GPT to the target capacity") from error
-    new_backup = target_size - tail_bytes
-    # libfdisk retains its old backup bytes. Clear only those outside the new table.
-    with image.open("r+b") as disk:
-        disk.seek(old_backup)
-        disk.write(bytes(min(original_size, new_backup) - old_backup))
+    new_backup = create.relocate_backup_gpt(work, image, old, original_size, target_size)
     ready = create.validate_layout(work, image, layout)
     if ((ready["lastlba"] + 1) * SECTOR_BYTES != new_backup or ready["firstlba"] != old["firstlba"]
             or gpt_identity(ready) != {field: source[field] for field in ("disk_uuid", "partitions")}):

@@ -284,7 +284,7 @@ def exercise(args, work):
         c.send("exit")
         c.login("root", admin)
         c.run(f"printf '%s\\n' {shlex.quote(SITE_RELEASE)} > /etc/os-release; sync -f /etc")
-        c.send("poweroff")
+        c.send("cd /; exec poweroff")
         assert c.vm.wait(35) == 0
 
     clean_disk = work / "clean-copy.raw"

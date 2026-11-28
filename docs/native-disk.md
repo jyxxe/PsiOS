@@ -88,6 +88,12 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 
 静态 IPv4 的网络配置对应格式 4 回执，静态 IPv6 和双栈对应格式 5。配有 Core 资源限额的盘在格式 6 中记录同一个 `network_profile`。停机升级会检查保存的配置内容和权限。双栈还会核对两个配置的 MAC 和合计 DNS 数量。配置损坏时保留源盘并拒绝发布候选盘。
 
+## 可选 SSH 控制台
+
+制作新盘时可在已有的 DHCP 或静态网络配置上加入 `--ssh-authorized-key operator.pub`。文件使用标准 OpenSSH Ed25519 公钥格式。控制台在 TCP 22 监听，只允许 `psios` 用户用该公钥登录。root、密码认证和转发均关闭。串口账户仍使用各自的本机配置。
+
+首次正式引导生成并刷盘保存本部署的 Ed25519 主机密钥。可通过可信串口运行 `ssh-keygen -lf /run/psios-ssh/host-key.pub` 核对首次连接显示的指纹。复制尚未启动的新盘时，每份副本在自己的首次正式引导生成主机密钥。重启和停机升级保留原主机密钥与授权公钥。隔离试启动不运行 SSH。查看 SSH 启动错误可使用本地串口。[真实 SSH 验收](../tests/native_ssh_console.py)
+
 ## 核对安装与运行的制品
 
 构建成功后，将 `node-build.json` 保存在节点外。其中 `initial_image_sha256` 可在首次启动前与 `sha256sum node.raw` 比对。启动会改变数据分区，离线核对引导程序可单独读取 EFI 系统分区。

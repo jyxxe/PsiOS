@@ -1,12 +1,32 @@
 """Rebuild the real native boot payload and unsigned EFI with matched deployment inputs."""
 import argparse
 from importlib.util import module_from_spec, spec_from_file_location
+import hashlib
+import io
+import json
 import os
 from pathlib import Path
+import subprocess
+import tarfile
 import tempfile
 import uuid
 
 from native_disk import REPO, sha
+
+
+def check_embedded_apks(work, manifest, expected):
+    packages = manifest["embedded_apks"]
+    assert set(packages) == set(expected), packages
+    for name, record in packages.items():
+        raw = subprocess.check_output(["isoinfo", "-R", "-i", work / "base.iso", "-x",
+                                       f"/apks/x86_64/{name}.apk"], timeout=30)
+        assert hashlib.sha256(raw).hexdigest() == record["sha256"], name
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz", ignore_zeros=True) as archive:
+            with archive.extractfile(".PKGINFO") as entry:
+                metadata = dict(line.split(" = ", 1) for line in entry.read().decode().splitlines() if " = " in line)
+        assert metadata["pkgname"] + "-" + metadata["pkgver"] == name, name
+        assert (metadata["license"], metadata["commit"], metadata["url"]) == (
+            record["declared_license"], record["aports_commit"], record["upstream"]), name
 
 
 def build(args, installer, build_time, mask):
@@ -30,6 +50,12 @@ def build(args, installer, build_time, mask):
             home = uuid.UUID("eda44a53-e2cb-4932-b9b0-cd0ec15c5ab6")
             installer.assemble_ramfs(work, args, base, state, home, installer.Layout(), None, network,
                                      core_limits=None, trial=None, **options)
+            packages = [installer.TZDATA]
+            if args.ssh_e1000e:
+                packages.extend(installer.SSH_PACKAGES)
+            if args.rdnss:
+                packages.extend(installer.RDNSS_PACKAGES)
+            check_embedded_apks(work, json.loads((work / "psios-deployment.json").read_bytes()), packages)
             return {"deployment manifest": sha(work / "psios-deployment.json"),
                     "initramfs": sha(work / "initrd"),
                     "unsigned EFI": sha(installer.boot_media.efi_application(work, installer.CMDLINE))}

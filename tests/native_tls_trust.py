@@ -34,14 +34,15 @@ def generate_certificates(work):
 def install_probes(work, disk):
     generate_certificates(work)
     crypto_flags = shlex.split(subprocess.check_output(
-        ["pkg-config", "--static", "--cflags", "--libs", "libcrypto"], text=True, timeout=15))
+        ["pkg-config", "--static", "--cflags", "--libs", "openssl"], text=True, timeout=15))
     subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-static", "-s",
                     REPO / "tests/native_tls_probe.c", *crypto_flags, "-o", work / "tls-probe"],
                    cwd=work, check=True, timeout=90)
     home = work / "fixture-home.ext4"
     extract_partition(disk, home, 257, 64)
     edits = []
-    for name, mode in (("tls-probe", "0100700"), ("local-ca.pem", "0100444"), ("leaf.pem", "0100444")):
+    for name, mode in (("tls-probe", "0100700"), ("local-ca.pem", "0100444"),
+                       ("leaf.pem", "0100444"), ("leaf.key", "0100600")):
         target = f"/psios/{name}"
         edits.extend((f"write {name} {target}", f"set_inode_field {target} uid 1000",
                       f"set_inode_field {target} gid 1000", f"set_inode_field {target} mode {mode}"))
@@ -76,6 +77,8 @@ def exercise(args, work):
         assert console.run("./tls-probe") == "loaded 118 TLS roots"
         rejected = console.run("./tls-probe leaf.pem node.test; test $? -eq 2")
         assert "unable to get local issuer certificate" in rejected, rejected
+        rejected = console.run("./tls-probe --handshake leaf.pem leaf.key node.test; test $? -eq 2")
+        assert "unable to get local issuer certificate" in rejected, rejected
         baseline = check_state(console)
         console.send("exit")
         console.login("root", admin)
@@ -102,13 +105,15 @@ def exercise(args, work):
         assert console.run("sha256sum /psios-ca-certificates.crt").split()[0] == PUBLIC_PEM_SHA256
         assert console.run("./tls-probe leaf.pem node.test") == "verified HTTPS certificate"
         assert console.run("./tls-probe leaf.pem other.test; test $? -eq 2") == "hostname mismatch"
+        assert console.run("./tls-probe --handshake leaf.pem leaf.key node.test") == "verified TLS 1.3 and HTTP response"
+        assert console.run("./tls-probe --handshake leaf.pem leaf.key other.test; test $? -eq 2") == "hostname mismatch"
         node, task, result, boot_id = check_state(console)
         assert node == baseline[0] and task["task_id"] == baseline[1]["task_id"] and result == baseline[2]
         assert task["deduplicated"] and boot_id != baseline[3]
         shutdown(console, admin)
     check_clean_shutdown(candidate)
     assert {path: sha(path) for path in frozen} == frozen
-    print("PASS OpenSSL native public trust, private issuer refusal, hostname validation and stopped-upgrade retention")
+    print("PASS native public trust, live TLS 1.3 and HTTP, hostname refusal and stopped-upgrade retention")
 
 
 if __name__ == "__main__":

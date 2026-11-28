@@ -112,7 +112,7 @@ SLAAC 使用格式 10 的构建回执。工厂镜像核验和隔离试启动更�
 
 原生部署从固定的 Linux 构建输入取得 Mozilla 根证书包。构建核对包及 PEM 的 SHA-256，清单记录这两个摘要。启动核验后，固定版本的证书和许可可分别从 `/psios-ca-certificates.crt` 与 `/psios-ca-certificates.LICENSE` 读取。[根证书许可及对应源码](../images/native/ca-certificates.LICENSE)
 
-生产启动为受保护的 `/etc/ssl` 目录注册缺少的 `/etc/ssl/certs/ca-certificates.crt` 和 `/etc/ssl/cert.pem`。管理员可将自己的 PEM 文件放在标准位置，后续启动和停机升级保留现有路径。随盘提供的公共根证书通过部署更新交付。无法注册默认路径时，串口会提示固定文件位置，本机登录仍可用。[真实 OpenSSL 证书链验收](../tests/native_tls_trust.py)
+生产启动为受保护的 `/etc/ssl` 目录注册缺少的 `/etc/ssl/certs/ca-certificates.crt` 和 `/etc/ssl/cert.pem`。管理员可将自己的 PEM 文件放在标准位置，后续启动和停机升级保留现有路径。随盘提供的公共根证书通过部署更新交付。无法注册默认路径时，串口会提示固定文件位置，本机登录仍可用。[OpenSSL 证书链、TLS 1.3 握手和停机升级验收](../tests/native_tls_trust.py)
 
 ## 核对安装与运行的制品
 

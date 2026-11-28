@@ -14,7 +14,7 @@ slaac_dns=
 
 retry() {
     printf '%s\n' "$1" > "$run/status"
-    [ "$profile" != dhcp ] || sleep 15
+    case "$profile" in dhcp|slaac-rdnss) sleep 15 ;; esac
     exit 1
 }
 
@@ -40,9 +40,10 @@ case "$profile" in
             [ "$#" -le 3 ] || retry 'too many static DNS servers'
         fi
         ;;
-    slaac)
+    slaac|slaac-rdnss)
         . /psios-ipv6
         load_slaac /etc/psios/slaac || retry 'invalid SLAAC profile'
+        [ "$profile" = slaac ] || [ -z "$slaac_dns" ] || retry 'unexpected explicit DNS in router discovery profile'
         ;;
     *) retry 'unsupported wired profile' ;;
 esac
@@ -74,7 +75,20 @@ done
 case "$link" in *[!a-zA-Z0-9_.-]*) retry 'unsupported interface name' ;; esac
 
 ipv6_sysctls=/proc/sys/net/ipv6/conf/$link
-if [ "$profile" = slaac ]; then
+if [ "$profile" = slaac-rdnss ]; then
+    for option in accept_ra autoconf accept_redirects disable_ipv6; do
+        printf '0\n' > "$ipv6_sysctls/$option" || retry 'could not apply the IPv6 discovery policy'
+    done
+    for option in accept_dad dad_transmits; do
+        printf '1\n' > "$ipv6_sysctls/$option" || retry 'could not enable IPv6 duplicate address detection'
+    done
+    rm -f -- "$run/resolv.conf" || retry 'could not reset the router resolver state'
+    [ "$(id -u dhcpcd)" = 76 ] && [ "$(id -g dhcpcd)" = 76 ] || retry 'router discovery service account is unavailable'
+    [ ! -L /var/lib/dhcpcd ] && mkdir -p -m 0700 /var/lib/dhcpcd &&
+        [ "$(stat -c '%u:%g:%a' /var/lib/dhcpcd)" = 0:0:700 ] || retry 'could not protect router discovery state'
+    printf 'IPv6 router discovery with RDNSS on %s\n' "$link" > "$run/status"
+    exec /sbin/dhcpcd -6 -B -f /psios-rdnss.conf --env "PSIOS_RDNSS_INTERFACE=$link" "$link"
+elif [ "$profile" = slaac ]; then
     for option in accept_ra autoconf accept_ra_defrtr accept_ra_pinfo accept_dad dad_transmits; do
         printf '1\n' > "$ipv6_sysctls/$option" || retry 'could not enable IPv6 router discovery'
     done

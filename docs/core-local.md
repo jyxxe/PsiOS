@@ -97,7 +97,7 @@ Shell 可以查看节点状态、调度开关、执行队列和权威存储余�
 
 “应用管理”分页显示当前主体获准查看的本机应用名称和状态。选中应用后，使用独立的 `application.releases` 授权读取其固定版本快照。版本列表显示选用、暂存、未选用和退役状态。刷新可取得新快照。窗口被最小化或遮挡后，再次打开会按当前授权取得列表和详情。
 
-以 `ctl shell --application-actions-delegation "$DELEGATION_ID"` 启动时，可以为所见应用修订提交启动或停止申请。所选委托须覆盖相应应用的 `application.start` 或 `application.stop`，以及 `task.submit`。Core 按原有审批和执行流程处理。任务中心用当前主体的 `task.read` 权限查看原申请。回执丢失时，在同一详情视图重试会使用原请求键。应用安装、版本切换和退役继续使用现有 Core 入口。
+以 `ctl shell --application-actions-delegation "$DELEGATION_ID"` 启动时，可以为所见应用修订提交启动或停止申请。所选委托须覆盖相应应用的 `application.start` 或 `application.stop`，以及 `task.submit`。启动申请进入 Core 审批，停止申请按已有委托与策略调度。任务中心用当前主体的 `task.read` 权限查看原申请。回执丢失时，在同一详情视图重试会使用原请求键。应用安装、版本切换和退役继续使用现有 Core 入口。
 
 以 `ctl shell --files-volume "$volume_id" --files-delegation "$delegation_id"` 启动可打开“文件”窗口。当前主体需要对所选卷拥有资源读取权限，委托须允许 `volume.files`、`task.submit` 和 `task.read`。窗口提供目录导航、分页及普通文件大小。每次读取都使用 Core Task，翻页同时核对卷修订和目录修订。目录变动后从第一页重新读取。最小化和会话结束时清除已显示的内容，恢复时按当前委托重新读取。[卷读取规则](core-runtime.md) · [Shell 进程与浏览器验收](../tests/test_shell.py)
 

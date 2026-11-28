@@ -1192,16 +1192,13 @@ class ShellTests(unittest.TestCase):
             shell = self.shell(application_actions_delegation=delegation)
             args = dict(origin=shell.origin, code=shell.code, applicationAction=action, application=aid,
                         profile=str(node.base / ("browser-" + action.lower())))
-            subprocess.run(["node", str(Path(__file__).with_name("shell_browser.mjs")),
-                            os.environ.get("PSIOS_TEST_CHROME", "google-chrome")], input=json.dumps(args).encode(),
-                           check=True, timeout=35)
-            refs = node.call("Resource.List", {"kind": "Task", "limit": 10})["items"]
-            tasks = [node.call("Task.Get", {"id": ref["resource_id"]}) for ref in refs]
-            pending, = [task for task in tasks if task["lifecycle"] == "WaitingApproval"]
-            self.assertEqual(pending["outcome_knowledge"], "NotStarted")
-            return pending["task_id"]
+            return subprocess.check_output(["node", str(Path(__file__).with_name("shell_browser.mjs")),
+                os.environ.get("PSIOS_TEST_CHROME", "google-chrome")], input=json.dumps(args),
+                text=True, timeout=35).strip()
 
         start = submit_from_browser("Start")
+        pending = node.call("Task.Get", {"id": start})
+        self.assertEqual((pending["lifecycle"], pending["outcome_knowledge"]), ("WaitingApproval", "NotStarted"))
         self.assertEqual(node.get(aid)["reference"], application)
         info = json.loads(subprocess.check_output([*docker, "info", "--format", "{{json .}}"], timeout=15))
         if all(info.get(flag) for flag in ("MemoryLimit", "SwapLimit", "CpuCfsQuota", "PidsLimit")) and any(
@@ -1213,8 +1210,7 @@ class ShellTests(unittest.TestCase):
                 running = node.get(aid)["reference"]
                 self.assertTrue(node.perform("application.health", target(running))["process_running"])
                 stop = submit_from_browser("Stop")
-                self.assertTrue(node.perform("application.health", target(running))["process_running"])
-                node.approve(stop)
+                self.assertNotEqual(start, stop)
                 outcome = node.wait(stop)
                 self.assertEqual(outcome["lifecycle"], "Succeeded", outcome)
                 self.assertEqual(node.get(aid)["resource"]["status"]["lifecycle"], "Stopped")

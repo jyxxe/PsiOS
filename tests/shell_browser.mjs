@@ -18,6 +18,7 @@ const [, , , commands, replies] = chrome.stdio;
 const pending = new Map();
 const requests = [];
 const exceptions = [];
+let applicationActionResponse;
 let nextId = 0;
 let sessionId;
 let buffer = "";
@@ -45,6 +46,9 @@ replies.setEncoding("utf8").on("data", (chunk) => {
     }
     if (message.method === "Network.requestWillBeSent") {
       requests.push(message.params.request.url);
+    } else if (message.method === "Network.responseReceived" && input.applicationAction &&
+               new URL(message.params.response.url).pathname === "/api/application-action") {
+      applicationActionResponse = message.params;
     } else if (message.method === "Runtime.exceptionThrown") {
       exceptions.push(message.params.exceptionDetails.text);
     }
@@ -649,12 +653,20 @@ async function test() {
     await waitFor("application lifecycle request", 'document.querySelector(".application-actions button")?.textContent === ' + JSON.stringify(action));
     await keyboardActivate(".application-actions button");
     await waitFor("the accepted application request", 'document.querySelector(".application-actions button")?.textContent === "查看任务"');
+    assert.equal(applicationActionResponse?.response.status, 202);
+    const response = await send("Network.getResponseBody", { requestId: applicationActionResponse.requestId });
+    const { task_id: taskId } = JSON.parse(response.body);
+    assert.match(taskId, /^task-/);
     await keyboardActivate(".application-actions button");
-    await waitFor("the original application task", '!document.querySelector("#task-detail").hidden && document.querySelector("#task-content").textContent.includes("等待审批")');
+    const content = 'document.querySelector("#task-content").textContent';
+    await waitFor("the original application task", '!document.querySelector("#task-detail").hidden && ' +
+      content + '.includes(' + JSON.stringify(taskId) + ')');
+    if (input.applicationAction === "Start") assert.ok(await evaluate(content + '.includes("等待审批")'));
     assert.equal(requests.filter(url => new URL(url).pathname === "/api/application-action").length, 1);
     await click("#logout");
     await waitFor("cleared application controls", 'document.querySelector("#workspace").hidden && document.querySelector(".application-actions") === null');
     assert.deepEqual(exceptions, []);
+    console.log(taskId);
     return;
   }
   if (input.applicationCatalog) {

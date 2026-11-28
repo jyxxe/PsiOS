@@ -27,6 +27,12 @@
 - `Task.Wait` 接受 Task 的 `id`、1 至 10000 毫秒的 `timeout_ms` 和可选 `after_version`。传入此前读到的 `task_revision` 可等待新修订。省略时等待 `Succeeded`、`Failed`、`Cancelled`、`Paused`、`WaitingApproval` 或 `WaitingInput`。到期返回最新快照。每次唤醒均复核 `Task.Get` 的同一读取权限，连接关闭会释放名额。CLI 和 Rust SDK 的完成等待使用此接口，等待名额用完时按退避间隔读取任务。
 - 回执丢失后，`Task.Cancel` 可用当前 Task 修订关闭 `Paused / Unknown` 任务的执行流程。`Task.CancelOrigin` 也可用原始提交的来源、键、摘要和取消范围记录此请求。此时 Task 为 `Cancelled / Unknown`，保留原 Run、Operation、效果证据及资源占用。原 Operation 完成对账时，Task 保持 `Cancelled`，同时更新结果知识并保存已核实的效果。待核实时仍无法重试、归档或回收结果。[真实写入故障后的取消验收](../tests/test_volume_write_reconciliation.py)
 
+### PCI 设备与驱动观测
+
+`node.pci` 是显式授权的只读 Task。向目标 Node 授予 `node.pci`、`task.submit` 和 `task.read`，再提交空参数 `{}`。结果按 PCI 地址排序，记录厂商、设备与子系统标识、类别、修订、上游 PCI 地址及当前绑定的驱动。未绑定驱动的条目中 `driver` 为 `null`。制品记录 Linux 启动 ID 和 Core 的挂载命名空间。
+
+Core 核对本机 sysfs，并比较两次采样中的内核设备目录、设备属性和驱动绑定。最多观测 256 个设备，采样冲突或超限时拒绝发布部分结果。PCI 地址可随设备替换复用。修改设备、驱动生命周期和设备租用需要各自的身份校验和授权。[进程验收](../tests/test_pci_observation.py) · [原生引导验收](../tests/native_disk.py)
+
 ### 块设备代次与布局核对
 
 `node.devices` 从已核验的 sysfs 块设备索引读取列表。Core 用主次设备号核对同一内核目录，两次采样一致后才发布。列表带当前 Linux 启动 ID，设备提供 `diskseq` 时也报告该值。设备热插拔、同名替换或属性变化时，冲突会阻止发布不一致的快照。登记和写入继续使用独立的设备代次与授权规则。[真实块设备与挂载隔离验收](../tests/test_block_inventory.py)

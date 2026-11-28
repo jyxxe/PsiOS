@@ -1,24 +1,21 @@
 //! Observe Linux block devices and seal their kernel identity for later comparison.
 mod attachment;
 
+use super::sysfs::{BELOW, DIRECTORY, attribute};
 use crate::{Result, err, host::Work, now, require};
 use psios_api::{
     BlockInventoryCursor, BlockInventoryQuery, MAX_BLOCK_INVENTORY_PAGE, canonical, sha256,
 };
 use rustix::{
     fd::OwnedFd,
-    fs::{
-        Dir, FileType, Mode, OFlags, ResolveFlags, fstat, fstatfs, open, openat, openat2,
-        readlinkat,
-    },
+    fs::{Dir, FileType, Mode, OFlags, fstat, open, openat, openat2, readlinkat},
     io::Errno,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     ffi::{CStr, OsStr},
-    fs::{self, File},
-    io::{self, Read},
+    fs, io,
     os::unix::{ffi::OsStrExt, fs::MetadataExt},
     path::{Component, Path, PathBuf},
 };
@@ -26,17 +23,9 @@ use std::{
 pub const TOOL: &str = "node.block_layout";
 pub(crate) const PAGED_INVENTORY_FORMAT: u32 = crate::local_read_tools::NODE_INVENTORY_FORMAT + 1;
 const SYSFS: &str = "/sys";
-const SYSFS_MAGIC: u32 = 0x6265_6572;
-const ATTRIBUTE_BYTES: u64 = 4096;
 const LAYOUT_ROWS: usize = 512;
 const INVENTORY_ROWS: usize = 1024;
 const INVENTORY_PAGE_BYTES: usize = 12 * 1024;
-const DIRECTORY: OFlags = OFlags::RDONLY
-    .union(OFlags::DIRECTORY)
-    .union(OFlags::CLOEXEC);
-const BELOW: ResolveFlags = ResolveFlags::BENEATH
-    .union(ResolveFlags::NO_SYMLINKS)
-    .union(ResolveFlags::NO_XDEV);
 
 fn decimal<T: std::str::FromStr + ToString>(value: &str) -> Option<T> {
     let number = value.parse::<T>().ok()?;
@@ -114,7 +103,7 @@ impl Query {
 
 fn sysfs(dir: &OwnedFd) -> Result<()> {
     require(
-        fstatfs(dir).map_err(io::Error::from)?.f_type as u32 == SYSFS_MAGIC,
+        super::sysfs::is_sysfs(dir)?,
         "UnsupportedCapability",
         "block layout requires Linux sysfs",
     )
@@ -349,25 +338,6 @@ fn lookup(device: &str) -> Result<(PathBuf, OwnedFd)> {
     BlockTree::open()?
         .lookup(device)?
         .ok_or_else(|| err("NotFound", "block device is absent"))
-}
-
-fn attribute(dir: &OwnedFd, name: &str) -> io::Result<String> {
-    let file = openat2(
-        dir,
-        name,
-        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty(),
-        BELOW,
-    )
-    .map_err(io::Error::from)?;
-    let mut result = String::new();
-    File::from(file)
-        .take(ATTRIBUTE_BYTES + 1)
-        .read_to_string(&mut result)?;
-    if result.len() as u64 > ATTRIBUTE_BYTES {
-        return Err(io::ErrorKind::InvalidData.into());
-    }
-    Ok(result.trim().to_owned())
 }
 
 fn optional(dir: &OwnedFd, name: &str) -> Result<Option<String>> {

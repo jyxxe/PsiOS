@@ -115,6 +115,8 @@ pub enum Action {
     RouteLookup(node::network::LookupQuery),
     #[serde(rename = "node.resolver")]
     Resolver {},
+    #[serde(rename = "node.pci")]
+    Pci {},
     #[serde(rename = "node.routing_rules")]
     RoutingRules(node::network::RuleQuery),
     #[serde(rename = "node.network_probe")]
@@ -476,6 +478,7 @@ impl Action {
             | Self::Routes(_)
             | Self::RouteLookup(_)
             | Self::Resolver {}
+            | Self::Pci {}
             | Self::RoutingRules(_)
             | Self::Inventory {}
             | Self::Pressure {}
@@ -993,6 +996,7 @@ impl Work {
             | Action::Routes(_)
             | Action::RouteLookup(_)
             | Action::Resolver {}
+            | Action::Pci {}
             | Action::RoutingRules(_)
             | Action::Mounts {}
             | Action::BlockLayout(_)

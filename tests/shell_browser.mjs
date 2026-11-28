@@ -135,6 +135,75 @@ async function verifyNodeResolver() {
   assert.ok(requests.every(url => new URL(url).origin === input.origin));
 }
 
+async function createWorkspace(name) {
+  await keyboardActivate("#open-workspaces");
+  await evaluate('document.getElementById("workspace-name").focus()');
+  await send("Input.insertText", { text: name });
+  await keyboardActivate("#workspace-name");
+}
+
+async function verifyNamedWorkspaces() {
+  await keyboardActivate("#nav-tasks");
+  await waitFor("first workspace task", 'document.querySelector("#task-rows button") !== null');
+  await keyboardActivate('#window-tasks [data-tile-side="left"]');
+  await createWorkspace("运维");
+  assert.ok(await evaluate(`document.querySelector("#window-tasks").hidden &&
+    document.querySelector("#task-rows").children.length === 0 &&
+    document.querySelector("#open-workspaces").textContent.includes("运维")`));
+  await keyboardActivate("#nav-node");
+  await waitFor("second workspace node", 'document.getElementById("node-view").textContent.includes(' +
+    JSON.stringify(input.node) + ')');
+  await keyboardActivate('#window-node [data-tile-side="left"]');
+  await keyboardActivate('#window-node [data-action="maximize"]');
+
+  await keyboardActivate("#open-workspaces");
+  assert.equal(await evaluate('document.activeElement.getAttribute("aria-current")'), "true");
+  assert.equal(await evaluate('document.querySelectorAll("#workspace-list [aria-label]").length'), 0);
+  await keyboardActivate('#workspace-list [data-workspace-id="0"]');
+  assert.ok(await evaluate(`document.activeElement.id === "title-tasks" &&
+    document.querySelector("#window-tasks").dataset.tile === "left" &&
+    document.querySelector("#window-node").hidden && document.querySelector("#node-view").textContent === ""`));
+  await keyboardActivate("#nav-node");
+  assert.ok(await evaluate(`document.activeElement.id === "title-node" &&
+    document.querySelector("#window-node").classList.contains("maximized") &&
+    document.querySelector("#open-workspaces").textContent.includes("运维")`));
+
+  await keyboardActivate("#open-workspaces");
+  const move = '#workspace-windows [data-move-window="node"]';
+  await evaluate(`document.querySelector(${JSON.stringify(move)}).focus()`);
+  await send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Home", code: "Home", windowsVirtualKeyCode: 36 });
+  await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Home", code: "Home", windowsVirtualKeyCode: 36 });
+  await waitFor("moved node window", `document.querySelector(${JSON.stringify(move)}).value === "0" &&
+    document.querySelector("#window-node").hidden && !document.querySelector("#desktop").classList.contains("has-maximized")`);
+  await keyboardActivate('#workspace-list [data-workspace-id="0"]');
+  assert.ok(await evaluate(`!document.querySelector("#window-node").hidden &&
+    !document.querySelector("#window-node").hasAttribute("data-tile") &&
+    document.querySelector("#window-tasks").dataset.tile === "left"`));
+  await keyboardActivate('#window-node [data-action="minimize"]');
+  await createWorkspace("运维");
+  assert.ok(await evaluate('document.getElementById("workspaces").open && document.getElementById("workspace-message").classList.contains("error")'));
+  await keyboardActivate('#workspace-list button[aria-label="删除空工作区 运维"]');
+  assert.equal(await evaluate('document.querySelectorAll("#workspace-list [data-workspace-id]").length'), 1);
+  await keyboardActivate('#workspace-windows li:has([data-move-window="node"]) button');
+  await waitFor("restored node window", 'document.activeElement.id === "title-node" && document.querySelector("#node-view").textContent.includes(' +
+    JSON.stringify(input.node) + ')');
+
+  await send("Emulation.setDeviceMetricsOverride", {
+    width: 360, height: 800, screenWidth: 360, screenHeight: 800, deviceScaleFactor: 1, mobile: true,
+  });
+  await keyboardActivate("#open-workspaces");
+  assert.equal(await evaluate("document.documentElement.scrollWidth"), 360);
+  await send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+  await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+  await waitFor("workspace dialog focus restored", '!document.getElementById("workspaces").open && document.activeElement.id === "open-workspaces"');
+  await keyboardActivate("#logout");
+  await waitFor("workspace data cleared", 'document.getElementById("workspace").hidden && ' +
+    'document.getElementById("workspace-list").childElementCount === 0 && ' +
+    'document.getElementById("workspace-windows").childElementCount === 0 && !document.getElementById("workspace-name").value');
+  assert.deepEqual(exceptions, []);
+  assert.ok(requests.every(url => new URL(url).origin === input.origin));
+}
+
 async function verifyRevokedWindow() {
   await click("#nav-node");
   await waitFor("permitted node inventory", 'document.querySelector("#node-view").textContent.includes(' + JSON.stringify(input.node) + ')');
@@ -143,13 +212,14 @@ async function verifyRevokedWindow() {
   await selectTask(input.task);
   await waitFor("completed Task", 'document.querySelector("#task-content").textContent.includes("成功")');
   const cover = '#window-tasks [data-action="maximize"]';
-  await keyboardActivate(input.covered ? cover : '#window-node [data-action="minimize"]');
+  if (input.windowTransition === "workspace") await createWorkspace("隔离观测");
+  else await keyboardActivate(input.windowTransition === "cover" ? cover : '#window-node [data-action="minimize"]');
   assert.ok(await evaluate('document.querySelector("#node-view").textContent === ""'));
   writeSync(input.control_fd, Buffer.from("R"));
   const reply = Buffer.alloc(1);
   assert.equal(readSync(input.control_fd, reply), 1);
   assert.equal(reply.toString(), "K");
-  await keyboardActivate(input.covered ? cover : "#nav-node");
+  await keyboardActivate(input.windowTransition === "cover" ? cover : "#nav-node");
   await waitFor("refused inventory after restoration", 'document.querySelector("#status-node").classList.contains("error")');
   assert.ok(await evaluate('document.querySelector("#node-view").textContent === "" && !document.querySelector("#window-tasks").hidden && ' +
     'document.querySelector("#task-content").textContent.includes(' + JSON.stringify(input.task) + ')'));
@@ -379,6 +449,7 @@ async function test() {
   if (input.fileBrowser) return verifyFiles();
   if (input.filePreview) return verifyFilePreview();
   if (input.nodeResolver) return verifyNodeResolver();
+  if (input.namedWorkspaces) return verifyNamedWorkspaces();
   if (input.windowTiling) return verifyWindowTiling();
   if (input.applicationLauncher) return verifyApplicationLauncher();
   assert.ok(await evaluate('document.activeElement.id === "nav-node" && document.querySelectorAll(".app-window:not([hidden])").length === 0'));

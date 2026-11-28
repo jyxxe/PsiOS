@@ -19,7 +19,12 @@ use std::{
 };
 use tokio::net::UnixStream;
 
-const TOOLS: [&str; 3] = ["node.inventory", "node.devices", "system.status"];
+const TOOLS: [&str; 4] = [
+    "node.inventory",
+    "node.devices",
+    "node.pci",
+    "system.status",
+];
 const CONTEXT_LIMIT: usize = 128 * 1024;
 const BODY_LIMIT: usize = 256 * 1024;
 const DELIVERY_MARGIN: Duration = Duration::from_millis(100);

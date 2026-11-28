@@ -12,6 +12,7 @@ import time
 
 from model_delivery import interrupt_delivery
 from support import Node, key, target
+from test_pci_observation import linux_devices
 
 PINS = json.loads((Path(__file__).resolve().parent / "fixtures/local-inference.json").read_text())
 GENERATION_TOKENS = 192
@@ -47,18 +48,28 @@ def ready(server, path):
     raise AssertionError("inference server readiness timeout")
 
 
-def exercise(node, endpoint, work, *, metered):
+def exercise(node, endpoint, work, *, metered, tool):
     provider = node.call("Agent.Register", {"name": "local-cpu-inference"})
     agent = node.call("Agent.Register", {"name": "local-inventory"})
     node.call("Grant.Issue", dict(principal_id=provider["principal_id"], actions=["model.serve"], units=1, ttl_seconds=300))
-    grant = node.call("Grant.Issue", dict(principal_id=agent["principal_id"], units=8, model_calls=8,
-                      actions=["session.run", "task.submit", "task.read", "node.inventory"], ttl_seconds=300))
     model = node.call("Model.Register", dict(name="SmolLM2-135M-Instruct", revision="Q4_K_M",
                       provider_principal_id=provider["principal_id"], lease_seconds=60, max_context_bytes=16384,
                       max_output_bytes=4096, max_in_flight=8))
-    skill = node.call("Skill.Publish", dict(name="read-local-inventory", version="1", tools=["node.inventory"],
-                     instructions="Call node.inventory with an empty input to obtain the local hardware inventory.",
+    goal = f"Call {tool} now with an empty input object."
+    instructions = f"Call {tool} with an empty input to obtain the local hardware inventory."
+    if tool == "node.pci":
+        goal = "Inspect local PCI devices and their Linux drivers before finishing."
+        example = json.dumps({"action": "tool", "tool": tool, "input": {}}, separators=(",", ":"))
+        instructions = f"Read the Linux PCI inventory first. Your first decision must be {example}"
+    skill = node.call("Skill.Publish", dict(name="read-local-inventory", version="1", tools=[tool],
+                     instructions=instructions,
                      license="MIT", source="operator"))
+    scope = {}
+    if tool == "node.pci":
+        local = node.call("Node.Get", {})["reference"]["resource_id"]
+        scope["tool_targets"] = [local, model["resource_id"], skill["resource_id"]]
+    grant = node.call("Grant.Issue", dict(principal_id=agent["principal_id"], units=8, model_calls=8,
+                      actions=["session.run", "task.submit", "task.read", tool], ttl_seconds=300, **scope))
     config = dict(socket=str(endpoint), server_uid=os.geteuid(), model_ref=model, model_alias="psios-small",
                   max_tokens=GENERATION_TOKENS, timeout_ms=30000)
     cfg = work / "local-model.json"
@@ -69,7 +80,7 @@ def exercise(node, endpoint, work, *, metered):
     journal.mkdir(mode=0o700)
 
     def start(queued=False):
-        result = node.call("Session.Open", dict(key=key(), goal="Call node.inventory now with an empty input object.",
+        result = node.call("Session.Open", dict(key=key(), goal=goal,
                            skill_ref=skill, model_ref=model, delegation_id=grant["delegation_ref"]["resource_id"],
                            context_policy="ReferencesOnly", max_turns=2, **({"provider_queue": True} if queued else {})),
                            agent["token"])
@@ -80,6 +91,19 @@ def exercise(node, endpoint, work, *, metered):
         return subprocess.run([node.binaries / "psiosctl", "--socket", node.socket, "--token-file", credential,
                                "model-step", sid, "--key", "first", "--decision-dir", journal, "--local-model", cfg],
                               capture_output=True, text=True, timeout=45)
+
+    def check_observation(task_id):
+        task = node.wait(task_id)
+        assert task["lifecycle"] == "Succeeded", task
+        run = node.call("Run.Get", {"id": task["current_run_id"]})
+        snapshot = node.call("Resource.Resolve", {"reference": run["execution_snapshot_ref"]})["value"]
+        assert snapshot["tool_refs"][0]["resource_id"] == "tool-" + tool and snapshot["model_ref"] == model
+        output = node.call("Artifact.Read", {"reference": task["result"]["artifact_refs"][0]}, agent["token"])
+        assert output["boot_id"] == Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        if tool == "node.pci":
+            assert output["devices"] == linux_devices(), output
+        else:
+            assert output["memory_bytes"]["MemTotal"] > 0
 
     # A real listening Unix socket withholds its response. The deadline applies
     # even when connection establishment has already succeeded.
@@ -116,14 +140,7 @@ def exercise(node, endpoint, work, *, metered):
     assert result.returncode == 0, result.stderr
     receipt = json.loads(result.stdout)
     assert "task_id" in receipt, receipt
-    task = node.wait(receipt["task_id"])
-    assert task["lifecycle"] == "Succeeded", task
-    run = node.call("Run.Get", {"id": task["current_run_id"]})
-    snapshot = node.call("Resource.Resolve", {"reference": run["execution_snapshot_ref"]})["value"]
-    assert snapshot["tool_refs"][0]["resource_id"] == "tool-node.inventory" and snapshot["model_ref"] == model
-    output = node.call("Artifact.Read", {"reference": task["result"]["artifact_refs"][0]}, agent["token"])
-    assert output["boot_id"] == Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-    assert output["memory_bytes"]["MemTotal"] > 0
+    check_observation(receipt["task_id"])
     if metered:
         usage = node.call("Resource.Resolve", {"reference": receipt["usage_ref"]})["value"]
         assert usage["reported_tokens"] == retained_usage
@@ -143,7 +160,7 @@ def exercise(node, endpoint, work, *, metered):
     budget = node.call("Budget.Get", {"id": grant["budget_ref"]["resource_id"]}, agent["token"])
     assert (budget["model_calls_used"], budget["spent"]) == (6, 1), budget
     print("Verified real SmolLM2 CPU inference, UID and model binding, offline failure, one authorized"
-          f" node.inventory Task {receipt['task_id']} and deduplicated receipt replay.")
+          f" {tool} Task {receipt['task_id']} and deduplicated receipt replay.")
 
     if metered:
         queued = start(queued=True)
@@ -156,19 +173,20 @@ def exercise(node, endpoint, work, *, metered):
         assert dispatched.returncode == 0, dispatched.stderr
         receipt = json.loads(dispatched.stdout)
         assert receipt["session_ref"]["resource_id"] == queued, receipt
-        assert node.wait(receipt["task_id"])["lifecycle"] == "Succeeded"
+        check_observation(receipt["task_id"])
         usage = node.call("Resource.Resolve", {"reference": receipt["usage_ref"]})["value"]
         tokens = usage["reported_tokens"]
         assert tokens["input_tokens"] > 0 and 0 < tokens["output_tokens"] <= GENERATION_TOKENS
         budget = node.call("Budget.Get", {"id": grant["budget_ref"]["resource_id"]}, agent["token"])
         assert (budget["model_calls_used"], budget["spent"]) == (7, 2), budget
-        print(f"Verified autonomous provider discovery and real CPU inference for Session {queued}.")
+        print(f"Verified autonomous provider discovery and real CPU inference for {tool} Session {queued}.")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     for flag in ("--bin-dir", "--server", "--weights"):
         parser.add_argument(flag, type=Path, required=True)
+    parser.add_argument("--tool", choices=("node.inventory", "node.pci"), default="node.inventory")
     parser.add_argument("--legacy-unmetered", action="store_true", help="expect a pre-metering authority with the current CLI")
     args = parser.parse_args()
     with args.weights.open("rb") as f:
@@ -184,7 +202,7 @@ if __name__ == "__main__":
                 ready(server, endpoint)
                 n = Node(args.bin_dir)
                 try:
-                    exercise(n, endpoint, work, metered=not args.legacy_unmetered)
+                    exercise(n, endpoint, work, metered=not args.legacy_unmetered, tool=args.tool)
                 finally:
                     n.close()
             finally:

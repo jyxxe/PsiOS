@@ -228,6 +228,29 @@ async function test() {
     assert.ok(requests.every(url => new URL(url).origin === input.origin));
     return;
   }
+  if (input.agentControl) {
+    const opener = '#agent-session-rows [data-session-id="' + input.session + '"]';
+    const pause = '[data-session-action="pause"]';
+    const resume = '[data-session-action="resume"]';
+    const exists = selector => 'document.querySelector(' + JSON.stringify(selector) + ') !== null';
+    const content = 'document.querySelector("#agent-session-content").textContent';
+    await keyboardActivate("#nav-agent-runtime");
+    await waitFor("controlled session", exists(opener));
+    await keyboardActivate(opener);
+    await waitFor("pause control", exists(pause));
+    await keyboardActivate(pause);
+    await waitFor("original pause after the missing acknowledgement", exists(resume) + ' && ' +
+      content + '.includes("已暂停") && document.querySelector("#status-agent-runtime").textContent.includes("已重新读取会话")');
+    await keyboardActivate(resume);
+    await waitFor("confirmed resume", exists(pause) + ' && ' + content + '.includes("等待模型") && ' +
+      'document.querySelector("#status-agent-runtime").textContent.includes("已提交恢复")');
+    assert.equal(requests.filter(url => new URL(url).pathname === "/api/control-agent-session").length, 2);
+    await click("#logout");
+    await waitFor("clear paused session controls", 'document.querySelector("#workspace").hidden && ' + content + ' === ""');
+    assert.deepEqual(exceptions, []);
+    assert.ok(requests.every(url => new URL(url).origin === input.origin));
+    return;
+  }
   if (input.agentRuntime) {
     const selector = '#agent-session-rows [data-session-id="' + input.session + '"]';
     const opener = 'document.querySelector(' + JSON.stringify(selector) + ')';
@@ -250,6 +273,7 @@ async function test() {
     assert.equal(usage["报告输入 Token"], "12");
     assert.equal(usage["已签发调用"], "1");
     assert.equal(usage["状态"], "成功");
+    assert.ok(!await evaluate('document.querySelector("[data-session-action]")'));
     assert.ok(!await evaluate(content + '.textContent.includes("private")'));
     await send("Emulation.setDeviceMetricsOverride", { width: 360, height: 750, deviceScaleFactor: 1, mobile: true });
     assert.ok(await evaluate('document.documentElement.scrollWidth <= 360 && !' + detail + '.hidden'));

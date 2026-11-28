@@ -95,3 +95,38 @@ wait_ipv6_dad() {
     echo "IPv6 address did not complete duplicate address detection on $link" >&2
     return 1
 }
+
+load_slaac() {
+    local config="$1" server hex count=0
+    [ -f "$config" ] && [ ! -L "$config" ] || return 1
+    [ "$(stat -c '%u:%g:%a:%h' "$config")" = 0:0:600:1 ] && [ "$(stat -c '%s' "$config")" -le 160 ] || return 1
+    {
+        IFS= read -r mac || return 1
+        while IFS= read -r server; do
+            count=$((count + 1))
+            hex=$(ipv6_hex "$server") && [ "$count" -le 3 ] &&
+                unicast_ipv6 "$hex" && ! link_local_ipv6 "$hex" || return 1
+            slaac_dns="$slaac_dns $server"
+        done
+        [ -z "$server" ] || return 1
+    } < "$config"
+}
+
+apply_slaac_profile() (
+    resolver=$(mktemp "$run/.slaac-resolver.XXXXXXXX") || exit 1
+    link_up=no
+    rollback_slaac() {
+        if [ "$link_up" = yes ]; then ip link set dev "$link" down || :; fi
+        unlink "$resolver" || :
+    }
+    trap rollback_slaac EXIT
+    trap 'exit 1' HUP INT TERM
+    chmod 0644 "$resolver" || exit 1
+    for server in $slaac_dns; do
+        printf 'nameserver %s\n' "$server" >> "$resolver" || exit 1
+    done
+    ip link set dev "$link" up || exit 1
+    link_up=yes
+    mv -fT "$resolver" "$run/resolv.conf" || exit 1
+    trap - EXIT HUP INT TERM
+)

@@ -86,13 +86,48 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 --static-ipv6-gateway fe80::2 --static-ipv6-dns 2001:db8:70::53
 ```
 
-启动时读入 root 私有的 `/etc/psios/static-ipv4` 或 `/etc/psios/static-ipv6`，按 MAC 和指定驱动匹配唯一网口。静态 IPv6 网口关闭路由器通告、自动配置和重定向，等待 Linux 重复地址检测通过后才发布 IPv6 默认路由。静态路由使用 metric 30320。地址或路由配置失败时清理本次添加的地址和路由，保留已有条目与解析器配置。两种地址族都配置成功后一次性更新双栈 DNS。可查看 `/run/psios-network/status` 和 `busybox ip -6 route show`。多网口、无线、DHCPv6、SLAAC 和远程确认回退事务仍待开发。[静态 IPv4 验收](../tests/native_static_ipv4.py) · [静态 IPv6 和双栈验收](../tests/native_static_ipv6.py) · [e1000e 双栈验收](../tests/native_static_e1000e.py)
+启动时读入 root 私有的 `/etc/psios/static-ipv4` 或 `/etc/psios/static-ipv6`，按 MAC 和指定驱动匹配唯一网口。静态 IPv6 网口关闭路由器通告、自动配置和重定向，等待 Linux 重复地址检测通过后才发布 IPv6 默认路由。静态路由使用 metric 30320。地址或路由配置失败时清理本次添加的地址和路由，保留已有条目与解析器配置。两种地址族都配置成功后一次性更新双栈 DNS。可查看 `/run/psios-network/status` 和 `busybox ip -6 route show`。多网口、无线、DHCPv6 和远程确认回退事务仍待开发。[静态 IPv4 验收](../tests/native_static_ipv4.py) · [静态 IPv6 和双栈验收](../tests/native_static_ipv6.py) · [e1000e 双栈验收](../tests/native_static_e1000e.py)
 
 virtio 静态 IPv4 对应格式 4 回执，静态 IPv6 和双栈对应格式 5。配有 Core 资源限额的 virtio 盘在格式 6 中记录同一个 `network_profile`。e1000e 的格式 8 回执同时记录驱动和静态模式。停机升级会检查保存的配置内容和权限，并核对 e1000e 的启动方式。双栈还会核对两个配置的 MAC 和合计 DNS 数量。配置损坏时保留源盘并拒绝发布候选盘。
 
+新盘可用 `--dhcp-mac 52:54:00:51:6f:20` 启用单个 virtio 网口的 IPv4 DHCP。为虚机配置同一个 MAC。下面的 QEMU 参数可用于只验证租约的隔离网络。
+
+```sh
+-netdev user,id=lan,restrict=on \
+-device virtio-net-pci,netdev=lan,mac=52:54:00:51:6f:20,romfile=
+```
+
+用于 Intel e1000e 网口时，另加 `--dhcp-driver e1000e`。构建机需要 `unsquashfs`，安装器从已核验的固定内核介质提取并核对模块，将它和其他引导内容一起纳入启动校验。该 IPv4 DHCP 配置仍按单一 MAC 绑定。格式 8 的构建回执固定驱动，停机升级对试启动及正式候选沿用原配置。QEMU 用 `-device e1000e,netdev=lan,mac=52:54:00:51:6f:20,romfile=`，已验收登记证书的 OVMF Secure Boot 联网。实际网卡与固件待验收。[有线 DHCP 验收](../tests/native_dhcp.py)
+
+该配置管理匹配网口的 IPv4 地址、租约路由和 `/etc/resolv.conf`。收到选项 121 时，最多安装 32 个不同前缀，支持直连、经网关和默认路由。同一租约中的选项 3 仅在缺少选项 121 时提供默认网关。续租与释放按已记录的前缀、网关、接口、协议和 metric 逐条替换或删除租约路由。应用租约失败时清理已配置部分并报告失败。
+
+最多三个 DNS 服务器按租约配置。普通账户可用 `busybox ip -4 addr show`、`busybox ip -4 route show` 和 `cat /etc/resolv.conf` 检查。最新租约或故障信息在 `/run/psios-network/status`。配置的网口缺失时，串口账户与 Core 可照常使用。[RFC 3442](https://datatracker.ietf.org/doc/html/rfc3442) · [租约续租和释放验收](../tests/native_dhcp.py) · [无类别路由验收](../tests/native_dhcp_routes.py)
+
+对于无 DHCP 的局域网，构建新盘时可使用以下参数绑定一个有线网口。默认选择 virtio，添加 `--static-driver e1000e` 使用 Intel e1000e，需要构建工具 `unsquashfs`。可省略网关和 DNS。IPv4 网关必须是同子网的另一个主机地址。DNS 参数最多提供三次。
+
+```sh
+--static-mac 52:54:00:51:6f:20 --static-address 192.0.2.20/24 \
+--static-gateway 192.0.2.2 --static-dns 192.0.2.53
+```
+
+静态 IPv6 可以独立启用，也可以与同一 MAC 的静态 IPv4 同时启用。IPv6 默认网关可用链路本地地址或同子网的另一个主机地址，由系统绑定到该网口。两种地址族合计最多三个 DNS 服务器，IPv4 服务器排在 IPv6 服务器之前。
+
+```sh
+--static-mac 52:54:00:51:6f:20 --static-ipv6-address 2001:db8:70::20/64 \
+--static-ipv6-gateway fe80::2 --static-ipv6-dns 2001:db8:70::53
+```
+
+启动时读入 root 私有的 `/etc/psios/static-ipv4` 或 `/etc/psios/static-ipv6`，按 MAC 和指定驱动匹配唯一网口。静态 IPv6 网口关闭路由器通告、自动配置和重定向，等待 Linux 重复地址检测通过后才发布 IPv6 默认路由。静态路由使用 metric 30320。地址或路由配置失败时清理本次添加的地址和路由，保留已有条目与解析器配置。两种地址族都配置成功后一次性更新双栈 DNS。可查看 `/run/psios-network/status` 和 `busybox ip -6 route show`。多网口、无线、DHCPv6 和远程确认回退事务仍待开发。[静态 IPv4 验收](../tests/native_static_ipv4.py) · [静态 IPv6 和双栈验收](../tests/native_static_ipv6.py) · [e1000e 双栈验收](../tests/native_static_e1000e.py)
+
+virtio 静态 IPv4 对应格式 4 回执，静态 IPv6 和双栈对应格式 5。配有 Core 资源限额的 virtio 盘在格式 6 中记录同一个 `network_profile`。e1000e 的格式 8 回执同时记录驱动和静态模式。停机升级会检查保存的配置内容和权限，并核对 e1000e 的启动方式。双栈还会核对两个配置的 MAC 和合计 DNS 数量。配置损坏时保留源盘并拒绝发布候选盘。
+
+新盘可用 `--slaac-mac 52:54:00:51:6f:20` 为指定 Virtio 网口启用 IPv6 路由器发现。Linux 接收路由器通告，按通告形成 IPv6 地址、执行重复地址检测并管理地址与默认路由的有效期。此配置关闭 IPv6 重定向。可用 `--slaac-dns` 指定至多三个不带区标识的 IPv6 DNS 地址。解析器读取显式设置，路由器通告中的 DNS 选项仍待接入。`/run/psios-network/status` 显示发现功能是否启动。地址与路由可用 `busybox ip -6 addr` 和 `busybox ip -6 route` 核对。
+
+SLAAC 使用格式 10 的构建回执。工厂镜像核验和隔离试启动更新都检查 `/etc/psios/slaac` 及服务定义。正常更新保留 MAC 与显式 DNS。该模式使用 IPv6 单栈。DHCPv6、其他网卡驱动和物理硬件的 SLAAC 验证仍待开展。[真实 IPv6 发现验收](../tests/native_slaac.py)
+
 ## 可选 SSH 控制台
 
-制作新盘时可在已有的 DHCP 或静态网络配置上加入 `--ssh-authorized-key operator.pub`。文件使用标准 OpenSSH Ed25519 公钥格式。控制台在 TCP 22 监听，只允许 `psios` 用户用该公钥登录。root、密码认证和转发均关闭。串口账户仍使用各自的本机配置。
+制作新盘时可在已有的 DHCP、静态网络或 SLAAC 配置上加入 `--ssh-authorized-key operator.pub`。文件使用标准 OpenSSH Ed25519 公钥格式。控制台在 TCP 22 监听，只允许 `psios` 用户用该公钥登录。root、密码认证和转发均关闭。SLAAC 的格式 10 回执可同时记录 SSH 配置。串口账户仍使用各自的本机配置。
 
 首次正式引导生成并刷盘保存本部署的 Ed25519 主机密钥。可通过可信串口运行 `ssh-keygen -lf /run/psios-ssh/host-key.pub` 核对首次连接显示的指纹。复制尚未启动的新盘时，每份副本在自己的首次正式引导生成主机密钥。重启和停机升级保留原主机密钥与授权公钥。隔离试启动不运行 SSH。查看 SSH 启动错误可使用本地串口。[真实 SSH 验收](../tests/native_ssh_console.py)
 

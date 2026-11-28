@@ -10,6 +10,7 @@ static_address=
 static_dns=
 static6_address=
 static6_dns=
+slaac_dns=
 
 retry() {
     printf '%s\n' "$1" > "$run/status"
@@ -38,6 +39,10 @@ case "$profile" in
             set -- $static_dns $static6_dns
             [ "$#" -le 3 ] || retry 'too many static DNS servers'
         fi
+        ;;
+    slaac)
+        . /psios-ipv6
+        load_slaac /etc/psios/slaac || retry 'invalid SLAAC profile'
         ;;
     *) retry 'unsupported wired profile' ;;
 esac
@@ -69,7 +74,17 @@ done
 case "$link" in *[!a-zA-Z0-9_.-]*) retry 'unsupported interface name' ;; esac
 
 ipv6_sysctls=/proc/sys/net/ipv6/conf/$link
-if [ -z "$static6_address" ]; then
+if [ "$profile" = slaac ]; then
+    for option in accept_ra autoconf accept_ra_defrtr accept_ra_pinfo accept_dad dad_transmits; do
+        printf '1\n' > "$ipv6_sysctls/$option" || retry 'could not enable IPv6 router discovery'
+    done
+    for option in accept_redirects disable_ipv6; do
+        printf '0\n' > "$ipv6_sysctls/$option" || retry 'could not apply the IPv6 discovery policy'
+    done
+    apply_slaac_profile || retry 'could not start IPv6 router discovery'
+    printf 'IPv6 router discovery enabled on %s\n' "$link" > "$run/status"
+    exit 0
+elif [ -z "$static6_address" ]; then
     printf '1\n' > "$ipv6_sysctls/disable_ipv6" || retry 'could not apply the IPv4-only profile'
 else
     for option in accept_ra autoconf accept_redirects; do

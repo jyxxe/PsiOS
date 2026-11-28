@@ -784,6 +784,8 @@ psios-mcp --socket /run/psios/api.sock --service-uid PSIOS_UID \
 
 格式 138 也允许显式配置 `--tool node.inventory` 或 `--tool node.devices`。它们采用同一个只读 Task 执行路径。根 Grant 或叶 Delegation 须显式列入当前 Node ID。两种 MCP 协议均可直接调用，现代协议启用 Tasks 后也可通过原句柄管理持续运行、查询和取消。大结果沿用适配器的有界响应和系统制品读取接口。[授权、真实诊断和重启验收](../tests/test_mcp_bound_read_tools.py) · [持久 MCP 任务](../tests/test_mcp_tasks.py)
 
+格式 149 可显式配置 `--tool node.resolver`。在当前 Node 的精确授权下，两种协议都可读取 Core 挂载命名空间的解析器配置。工具接受空参数。现代 Tasks 句柄在适配器和 Core 重启后可核对原观测，配置变化后提交新任务即可读取当前值。[MCP 授权与持久结果验收](../tests/test_mcp_tasks.py)
+
 调用使用正常的 `Task.Prepare`、`Task.Submit`、任务等候和 `Artifact.Read`，并在返回结果前重新核对指定授权。成功结果包含本地 Task ID 和受权结果。提交回执丢失时，SDK 用原始提交键查找已接受的 Task 或核对是否可重试。连接关闭或客户端取消通知不改变已经提交的只读 Task。它可在授权与 30 秒 Task 截止时间内继续，由 Core 保存结果。本地所有者可按原 Task 修订调用 `Task.Cancel`。适配器对结果等待 10 秒，Core Unix 套接字无法立即连接时返回传输错误，连接建立后沿用 SDK 的读写超时。每个 STDIO 连接串行处理，限制单帧 64 KiB，并按秒限制该连接的工具调用次数。
 
 这个接入面提供同步工具调用。MCP Tasks、跨连接调用映射和 HTTP 沿用各自的独立协议要求。[独立 STDIO 客户端、官方 Python 客户端和原 Task 验收](../tests/test_mcp_stdio.py)

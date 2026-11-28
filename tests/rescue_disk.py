@@ -60,7 +60,7 @@ def exercise(iso, binaries, inspector, root, firmware_media):
     scratch = root / "private rescue, scratch"
     scratch.mkdir(mode=0o700)
 
-    def inspect(image, extra=(), rejection=None, journal=None):
+    def inspect(image, extra=(), rejection=None, journal=None, source_digest=None):
         before = digest(image)
         result = subprocess.run([sys.executable, inspector, image, *options, *extra],
                                 capture_output=True, text=True, timeout=210, env={**os.environ, "TMPDIR": str(scratch)})
@@ -71,12 +71,18 @@ def exercise(iso, binaries, inspector, root, firmware_media):
             report = json.loads(result.stdout)
             if journal is not None:
                 assert report.pop("ext4_journal") == journal
+            if source_digest is not None:
+                assert report.pop("source_sha256") == source_digest
             assert report == expected
         else:
             errors = (rejection,) if isinstance(rejection, str) else rejection
             assert result.returncode != 0 and not result.stdout and any(e in result.stderr for e in errors), result
 
     inspect(volume)
+    source_digest = digest(volume)
+    inspect(volume, ["--source-sha256", source_digest], source_digest=source_digest)
+    inspect(volume, ["--source-sha256", "0" * 64], "source-digest-mismatch")
+    inspect(volume, ["--source-sha256", "invalid"], "invalid expected source image SHA-256")
     if firmware_media:
         bios = root / "BIOS rescue.iso"
         uefi = root / "UEFI rescue.iso"
@@ -92,16 +98,31 @@ def exercise(iso, binaries, inspector, root, firmware_media):
         inspect(volume, ["--firmware", "bios", "--uid", str(wrong_uid), "--save-rescue-iso", rejected],
                 "authority-PermissionDenied")
         assert not rejected.exists()
-        # Reboot the exported CD without the build tree or launcher. A writable
-        # subject attached directly by another VMM must be rejected before mount.
-        before = digest(volume)
-        boot = subprocess.run(["qemu-system-x86_64", "-nodefaults", "-no-user-config", "-no-reboot",
-                               "-machine", "pc", "-m", "768", "-display", "none", "-monitor", "none", "-nic", "none",
-                               "-serial", "null", "-serial", "stdio", "-boot", "order=d,strict=on", "-cdrom", bios,
-                               "-drive", f"file={volume},format=raw,if=virtio"], stdin=subprocess.DEVNULL,
-                              capture_output=True, timeout=180, check=True)
-        assert boot.stdout.replace(b"\r\n", b"\n").endswith(b"PSIOS-RESCUE/1\nERROR block-device\n"), boot.stdout
-        assert digest(volume) == before
+        def boot_cd(cd, image, readonly):
+            command = ["qemu-system-x86_64", "-nodefaults", "-no-user-config", "-no-reboot",
+                       "-machine", "pc", "-m", "768", "-display", "none", "-monitor", "none", "-nic", "none",
+                       "-serial", "null", "-serial", "stdio", "-boot", "order=d,strict=on", "-cdrom", cd,
+                       "-drive", f"file={image},format=raw,if=virtio,readonly={readonly}"]
+            return subprocess.check_output(command, stdin=subprocess.DEVNULL, timeout=180).replace(b"\r\n", b"\n")
+
+        # Reboot the exported CDs without the build tree or launcher.
+        assert boot_cd(bios, volume, "off").endswith(b"PSIOS-RESCUE/1\nERROR block-device\n")
+        pinned = root / "pinned-source.iso"
+        inspect(volume, ["--source-sha256", source_digest, "--firmware", "bios", "--save-rescue-iso", pinned],
+                source_digest=source_digest)
+        accepted = boot_cd(pinned, volume, "on")
+        assert f"\nPSIOS-SOURCE/1\n{source_digest}\n".encode() in accepted, accepted
+        assert json.loads(accepted.split(b"\nPSIOS-RESCUE/1\nOK\n", 1)[1]) == expected
+        changed = root / "changed.raw"
+        shutil.copyfile(volume, changed)
+        subprocess.run(["debugfs", "-w", "-R", "mkdir /unrecorded", changed], check=True, capture_output=True)
+        inspect(changed)
+        modified = digest(changed)
+        assert modified != source_digest
+        refused = boot_cd(pinned, changed, "on")
+        assert b"\nPSIOS-SOURCE/1\n" not in refused, refused
+        assert refused.endswith(b"PSIOS-RESCUE/1\nERROR source-digest-mismatch\n"), refused
+        assert digest(volume) == source_digest and digest(changed) == modified
         print(f"Verified SeaBIOS, OVMF and standalone read-only enforcement; identical ISO SHA-256 {original}",
               flush=True)
     other_uid = 65532 if os.getuid() != 65532 else 65531
@@ -126,7 +147,9 @@ def exercise(iso, binaries, inspector, root, firmware_media):
     with disk.open("r+b") as dst, volume.open("rb") as src:
         dst.seek(MIB)
         shutil.copyfileobj(src, dst)
-    inspect(disk, ["--partition", "1"])
+    full_disk_digest = digest(disk)
+    inspect(disk, ["--partition", "1", "--source-sha256", full_disk_digest], source_digest=full_disk_digest)
+    inspect(disk, ["--partition", "1", "--source-sha256", source_digest], "source-digest-mismatch")
     inspect(disk, ["--partition", "1", "--journal-overlay-mib", "16"], journal="Clean")
     inspect(disk, ["--partition", "2"], "block-device")
 
@@ -135,7 +158,9 @@ def exercise(iso, binaries, inspector, root, firmware_media):
     shutil.copyfile(volume, dirty)
     subprocess.run(["debugfs", "-w", "-R", "feature needs_recovery", dirty], check=True, capture_output=True)
     inspect(dirty, rejection="filesystem-recovery-required")
-    inspect(dirty, ["--journal-overlay-mib", "16"], journal="ReplayedOnTemporaryOverlay")
+    dirty_digest = digest(dirty)
+    inspect(dirty, ["--journal-overlay-mib", "16", "--source-sha256", dirty_digest],
+            journal="ReplayedOnTemporaryOverlay", source_digest=dirty_digest)
     subprocess.run(["debugfs", "-w", "-R", "set_super_value state 3", dirty], check=True, capture_output=True)
     inspect(dirty, ["--journal-overlay-mib", "16"], "filesystem-recovery-required")
 
@@ -220,7 +245,7 @@ def exercise(iso, binaries, inspector, root, firmware_media):
             owner.terminate()
     print("Verified raw and GPT images, crash WAL, service identity, trust pins, corrupt witness, "
           "committed and uncommitted ext4 journal recovery, filesystem errors, copy and overlay limits, "
-          "active writer rejection, scratch cleanup and byte-for-byte source preservation.")
+          "active writer rejection, external source digest enforcement, scratch cleanup and byte-for-byte preservation.")
 
 
 if __name__ == "__main__":

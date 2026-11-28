@@ -74,14 +74,17 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 50
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - &native_checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - &native_archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: psios-core-linux-amd64
           path: ${{ runner.temp }}/rescue-core
-      - name: Download and configure rescue VM prerequisites
+      - &native_prerequisites
+        name: Download and configure native VM prerequisites
         run: |
           packages=(qemu-system-x86 qemu-utils genisoimage cpio e2fsprogs fdisk acl dnsmasq-base radvd gcc libc6-dev squashfs-tools
                     xorriso grub-common grub-efi-amd64-bin dosfstools mtools ovmf seabios openssl openssh-client strace)
@@ -99,20 +102,174 @@ jobs:
           fi
           if [ -c /dev/kvm ]; then sudo setfacl -m "u:$(id -un):rw" /dev/kvm; fi
 
-      - name: Verify the compressed native member and cpio error propagation
-        run: python3 -B -m unittest discover -s tests -p test_native_ramfs.py -v
-
-      - name: Inspect real ext4 images from an independent read-only rescue boot
+      - &native_verified_media
+        name: Verify the Core archive and fetch the pinned kernel media
         run: |
           cd "$RUNNER_TEMP/rescue-core"
           tar -xzf psios-core-linux-amd64.tar.gz
           sha256sum --strict --check SHA256SUMS
           cd "$GITHUB_WORKSPACE"
           curl --fail --location --retry 3 "$(jq -r .url "$RUNNER_TEMP/rescue-core/rescue/base.json")" -o "$RUNNER_TEMP/rescue.iso"
+
+      - name: Verify the compressed native member and cpio error propagation
+        run: python3 -B -m unittest discover -s tests -p test_native_ramfs.py -v
+
+      - name: Inspect real ext4 images from an independent read-only rescue boot
+        run: |
           python3 tests/rescue_disk.py --bin-dir "$RUNNER_TEMP/rescue-core" --iso "$RUNNER_TEMP/rescue.iso" \
             --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py" --firmware-media
           python3 -B tests/rescue_storage.py --bin-dir "$RUNNER_TEMP/rescue-core" --iso "$RUNNER_TEMP/rescue.iso" \
             --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py"
+
+      - name: Trial-boot an isolated UEFI upgrade and boot both production generations
+        run: |
+          mkdir "$RUNNER_TEMP/native-format5"
+          prior="$RUNNER_TEMP/native-format5/core.tar.gz"
+          tools/build-portable-core "$prior" f9a74d4a1175eaa7eb95349320fe845cde918d99
+          tar -xzf "$prior" -C "$RUNNER_TEMP/native-format5"
+          (cd "$RUNNER_TEMP/native-format5" && sha256sum --strict --check SHA256SUMS)
+          python3 tests/native_upgrade.py --kernel-iso "$RUNNER_TEMP/rescue.iso" \
+            --previous-archive "$prior" --previous-installer "$RUNNER_TEMP/native-format5/native/create.py" \
+            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
+            --installer "$RUNNER_TEMP/rescue-core/native/create.py"
+
+      - name: Freeze one native source and publish a candidate after an isolated health proof
+        run: |
+          for mode in --large-authority --larger-source; do
+            python3 -B tests/native_staged_update.py "$mode" \
+              --controller "$RUNNER_TEMP/rescue-core/native/stage_update.py" \
+              --previous-installer "$RUNNER_TEMP/native-format5/native/create.py" \
+              --kernel-iso "$RUNNER_TEMP/rescue.iso" \
+              --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
+              --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+          done
+
+      - name: Change the native time zone offline and preserve it through a verified upgrade
+        run: |
+          python3 -B tests/native_timezone.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --controller "$RUNNER_TEMP/rescue-core/native/stage_update.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
+            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+
+      - name: Verify managed native activation, deployment selection and boot crash fencing
+        run: |
+          prior_activation="$RUNNER_TEMP/native-prior-activation"
+          mkdir -m 0700 "$prior_activation"
+          git archive d38f0bbba1c5714c36e79d36c4e8115875dfe986 images/native images/rescue | tar -x -C "$prior_activation"
+          python3 -B tests/native_activation.py \
+            --controller "$RUNNER_TEMP/rescue-core/native/stage_update.py" \
+            --activator "$RUNNER_TEMP/rescue-core/native/activate_update.py" \
+            --selector "$RUNNER_TEMP/rescue-core/native/select_update.py" \
+            --previous-installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" \
+            --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
+            --prior-activator "$prior_activation/images/native/activate_update.py" \
+            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
+            --expected-source-format 5 --check-unclean-shutdown
+
+      - name: Keep larger native state and home partitions through a crash and upgrade
+        run: |
+          python3 tests/native_capacity.py --kernel-iso "$RUNNER_TEMP/rescue.iso" \
+            --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
+            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
+            --installer "$RUNNER_TEMP/rescue-core/native/create.py"
+
+      - name: Configure static IPv4, preserve healthy settings and refuse an invalid offline upgrade
+        run: |
+          previous="$RUNNER_TEMP/native-pre-static-installer"
+          mkdir "$previous"
+          git archive a7e20f07b9b59a7d0f745248ac65749dfb50a39a images/native images/rescue | tar -x -C "$previous"
+          sudo unshare --net --propagation private \
+            python3 -B tests/native_static_ipv4.py --kernel-iso "$RUNNER_TEMP/rescue.iso" \
+            --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
+            --previous-installer "$previous/images/native/create.py" \
+            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
+            --installer "$RUNNER_TEMP/rescue-core/native/create.py"
+
+      - name: Verify static IPv6 and dual stack, duplicate detection and offline upgrade
+        run: |
+          sudo unshare --net --propagation private \
+            python3 -B tests/native_static_ipv6.py --kernel-iso "$RUNNER_TEMP/rescue.iso" \
+            --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
+            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
+            --installer "$RUNNER_TEMP/rescue-core/native/create.py"
+
+      - name: Verify native Secure Boot, signed trial, firmware rejection and offline upgrade
+        run: |
+          secure_tools="$RUNNER_TEMP/psios-secure-boot-tools"
+          mkdir "$secure_tools"
+          (
+            cd "$secure_tools"
+            packages=(systemd-boot-efi systemd-ukify python3-pefile python3-virt-firmware python3-cryptography python3-pkg-resources sbsigntool)
+            archive_apt="$GITHUB_WORKSPACE/tools/ci-ubuntu-apt"
+            if ! timeout 180 "$archive_apt" download "${packages[@]}"; then
+              sudo timeout 180 "$archive_apt" update -q
+              timeout 180 "$archive_apt" download "${packages[@]}"
+            fi
+            for package in ./*.deb; do dpkg-deb -x "$package" "$secure_tools/root"; done
+          )
+          export PATH="$secure_tools/root/usr/bin:$PATH"
+          export PYTHONPATH="$secure_tools/root/usr/lib/python3/dist-packages"
+          mkdir "$secure_tools/previous-installer"
+          git archive def4f2a5551274b37dc5807bf081b666be26d3b5 images/native images/rescue \
+            | tar -x -C "$secure_tools/previous-installer"
+          /usr/bin/python3 -B tests/native_secure_boot.py \
+            --efi-stub "$secure_tools/root/usr/lib/systemd/boot/efi/linuxx64.efi.stub" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" \
+            --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
+            --previous-installer "$secure_tools/previous-installer/images/native/create.py" \
+            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
+            --installer "$RUNNER_TEMP/rescue-core/native/create.py"
+
+      - name: Verify enrolled firmware enforcement before publishing signed native updates
+        run: |
+          secure_tools="$RUNNER_TEMP/psios-secure-boot-tools"
+          export PATH="$secure_tools/root/usr/bin:$PATH"
+          export PYTHONPATH="$secure_tools/root/usr/lib/python3/dist-packages"
+          /usr/bin/python3 -B tests/native_signed_staged_update.py \
+            --controller "$RUNNER_TEMP/rescue-core/native/stage_update.py" \
+            --previous-installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" \
+            --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
+            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
+            --efi-stub "$secure_tools/root/usr/lib/systemd/boot/efi/linuxx64.efi.stub" \
+            --expected-source-format 5
+
+      - name: Activate and boot the selected signed disk and refuse setup-mode firmware
+        run: |
+          secure_tools="$RUNNER_TEMP/psios-secure-boot-tools"
+          export PATH="$secure_tools/root/usr/bin:$PATH"
+          export PYTHONPATH="$secure_tools/root/usr/lib/python3/dist-packages"
+          /usr/bin/python3 -B tests/native_signed_activation.py \
+            --controller "$RUNNER_TEMP/rescue-core/native/stage_update.py" \
+            --activator "$RUNNER_TEMP/rescue-core/native/activate_update.py" \
+            --selector "$RUNNER_TEMP/rescue-core/native/select_update.py" \
+            --previous-installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" \
+            --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
+            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
+            --efi-stub "$secure_tools/root/usr/lib/systemd/boot/efi/linuxx64.efi.stub" \
+            --expected-source-format 5
+
+      - name: Boot independently exported signed rescue media and enforce read-only inspection
+        run: |
+          secure_tools="$RUNNER_TEMP/psios-secure-boot-tools"
+          export PATH="$secure_tools/root/usr/bin:$PATH"
+          export PYTHONPATH="$secure_tools/root/usr/lib/python3/dist-packages"
+          /usr/bin/python3 -B tests/rescue_secure_boot.py \
+            --efi-stub "$secure_tools/root/usr/lib/systemd/boot/efi/linuxx64.efi.stub" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --bin-dir "$RUNNER_TEMP/rescue-core" \
+            --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py"
+
+  native-boot-network:
+    needs: portable-core
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - *native_checkout
+      - *native_archive
+      - *native_prerequisites
+      - *native_verified_media
 
       - name: Boot an installed PsiOS UEFI disk, power-cut the node and verify its recovery
         run: |
@@ -124,6 +281,8 @@ jobs:
       - name: Rebuild native boot artifacts from matching inputs with independent build metadata
         run: |
           python3 -B tests/native_boot_reproducibility.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+          python3 -B tests/native_boot_tools.py --builder "$RUNNER_TEMP/rescue-core/native/create.py" \
             --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
           python3 -B tests/native_boot_reproducibility.py --rdnss --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
             --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
@@ -201,72 +360,6 @@ jobs:
           python3 -B tests/native_grant_deadline.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
             --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
 
-      - name: Trial-boot an isolated UEFI upgrade and boot both production generations
-        run: |
-          mkdir "$RUNNER_TEMP/native-format5"
-          prior="$RUNNER_TEMP/native-format5/core.tar.gz"
-          tools/build-portable-core "$prior" f9a74d4a1175eaa7eb95349320fe845cde918d99
-          tar -xzf "$prior" -C "$RUNNER_TEMP/native-format5"
-          (cd "$RUNNER_TEMP/native-format5" && sha256sum --strict --check SHA256SUMS)
-          python3 tests/native_upgrade.py --kernel-iso "$RUNNER_TEMP/rescue.iso" \
-            --previous-archive "$prior" --previous-installer "$RUNNER_TEMP/native-format5/native/create.py" \
-            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
-            --installer "$RUNNER_TEMP/rescue-core/native/create.py"
-
-      - name: Freeze one native source and publish a candidate after an isolated health proof
-        run: |
-          for mode in --large-authority --larger-source; do
-            python3 -B tests/native_staged_update.py "$mode" \
-              --controller "$RUNNER_TEMP/rescue-core/native/stage_update.py" \
-              --previous-installer "$RUNNER_TEMP/native-format5/native/create.py" \
-              --kernel-iso "$RUNNER_TEMP/rescue.iso" \
-              --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
-              --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
-          done
-
-      - name: Verify managed native activation, deployment selection and boot crash fencing
-        run: |
-          prior_activation="$RUNNER_TEMP/native-prior-activation"
-          mkdir -m 0700 "$prior_activation"
-          git archive d38f0bbba1c5714c36e79d36c4e8115875dfe986 images/native images/rescue | tar -x -C "$prior_activation"
-          python3 -B tests/native_activation.py \
-            --controller "$RUNNER_TEMP/rescue-core/native/stage_update.py" \
-            --activator "$RUNNER_TEMP/rescue-core/native/activate_update.py" \
-            --selector "$RUNNER_TEMP/rescue-core/native/select_update.py" \
-            --previous-installer "$RUNNER_TEMP/rescue-core/native/create.py" \
-            --kernel-iso "$RUNNER_TEMP/rescue.iso" \
-            --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
-            --prior-activator "$prior_activation/images/native/activate_update.py" \
-            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
-            --expected-source-format 5 --check-unclean-shutdown
-
-      - name: Keep larger native state and home partitions through a crash and upgrade
-        run: |
-          python3 tests/native_capacity.py --kernel-iso "$RUNNER_TEMP/rescue.iso" \
-            --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
-            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
-            --installer "$RUNNER_TEMP/rescue-core/native/create.py"
-
-      - name: Configure static IPv4, preserve healthy settings and refuse an invalid offline upgrade
-        run: |
-          previous="$RUNNER_TEMP/native-pre-static-installer"
-          mkdir "$previous"
-          git archive a7e20f07b9b59a7d0f745248ac65749dfb50a39a images/native images/rescue | tar -x -C "$previous"
-          sudo unshare --net --propagation private \
-            python3 -B tests/native_static_ipv4.py --kernel-iso "$RUNNER_TEMP/rescue.iso" \
-            --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
-            --previous-installer "$previous/images/native/create.py" \
-            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
-            --installer "$RUNNER_TEMP/rescue-core/native/create.py"
-
-      - name: Verify static IPv6 and dual stack, duplicate detection and offline upgrade
-        run: |
-          sudo unshare --net --propagation private \
-            python3 -B tests/native_static_ipv6.py --kernel-iso "$RUNNER_TEMP/rescue.iso" \
-            --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
-            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
-            --installer "$RUNNER_TEMP/rescue-core/native/create.py"
-
       - name: Discover IPv6 routers and retain the native profile through a staged update
         run: |
           python3 -B tests/native_slaac.py --kernel-iso "$RUNNER_TEMP/rescue.iso" \
@@ -320,73 +413,6 @@ jobs:
             --installer "$1/rescue-core/native/create.py"
           SH
 
-      - name: Verify native Secure Boot, signed trial, firmware rejection and offline upgrade
-        run: |
-          secure_tools="$RUNNER_TEMP/psios-secure-boot-tools"
-          mkdir "$secure_tools"
-          (
-            cd "$secure_tools"
-            packages=(systemd-boot-efi systemd-ukify python3-pefile python3-virt-firmware python3-cryptography python3-pkg-resources sbsigntool)
-            archive_apt="$GITHUB_WORKSPACE/tools/ci-ubuntu-apt"
-            if ! timeout 180 "$archive_apt" download "${packages[@]}"; then
-              sudo timeout 180 "$archive_apt" update -q
-              timeout 180 "$archive_apt" download "${packages[@]}"
-            fi
-            for package in ./*.deb; do dpkg-deb -x "$package" "$secure_tools/root"; done
-          )
-          export PATH="$secure_tools/root/usr/bin:$PATH"
-          export PYTHONPATH="$secure_tools/root/usr/lib/python3/dist-packages"
-          mkdir "$secure_tools/previous-installer"
-          git archive def4f2a5551274b37dc5807bf081b666be26d3b5 images/native images/rescue \
-            | tar -x -C "$secure_tools/previous-installer"
-          /usr/bin/python3 -B tests/native_secure_boot.py \
-            --efi-stub "$secure_tools/root/usr/lib/systemd/boot/efi/linuxx64.efi.stub" \
-            --kernel-iso "$RUNNER_TEMP/rescue.iso" \
-            --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
-            --previous-installer "$secure_tools/previous-installer/images/native/create.py" \
-            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
-            --installer "$RUNNER_TEMP/rescue-core/native/create.py"
-
-      - name: Verify enrolled firmware enforcement before publishing signed native updates
-        run: |
-          secure_tools="$RUNNER_TEMP/psios-secure-boot-tools"
-          export PATH="$secure_tools/root/usr/bin:$PATH"
-          export PYTHONPATH="$secure_tools/root/usr/lib/python3/dist-packages"
-          /usr/bin/python3 -B tests/native_signed_staged_update.py \
-            --controller "$RUNNER_TEMP/rescue-core/native/stage_update.py" \
-            --previous-installer "$RUNNER_TEMP/rescue-core/native/create.py" \
-            --kernel-iso "$RUNNER_TEMP/rescue.iso" \
-            --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
-            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
-            --efi-stub "$secure_tools/root/usr/lib/systemd/boot/efi/linuxx64.efi.stub" \
-            --expected-source-format 5
-
-      - name: Activate and boot the selected signed disk and refuse setup-mode firmware
-        run: |
-          secure_tools="$RUNNER_TEMP/psios-secure-boot-tools"
-          export PATH="$secure_tools/root/usr/bin:$PATH"
-          export PYTHONPATH="$secure_tools/root/usr/lib/python3/dist-packages"
-          /usr/bin/python3 -B tests/native_signed_activation.py \
-            --controller "$RUNNER_TEMP/rescue-core/native/stage_update.py" \
-            --activator "$RUNNER_TEMP/rescue-core/native/activate_update.py" \
-            --selector "$RUNNER_TEMP/rescue-core/native/select_update.py" \
-            --previous-installer "$RUNNER_TEMP/rescue-core/native/create.py" \
-            --kernel-iso "$RUNNER_TEMP/rescue.iso" \
-            --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
-            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
-            --efi-stub "$secure_tools/root/usr/lib/systemd/boot/efi/linuxx64.efi.stub" \
-            --expected-source-format 5
-
-      - name: Boot independently exported signed rescue media and enforce read-only inspection
-        run: |
-          secure_tools="$RUNNER_TEMP/psios-secure-boot-tools"
-          export PATH="$secure_tools/root/usr/bin:$PATH"
-          export PYTHONPATH="$secure_tools/root/usr/lib/python3/dist-packages"
-          /usr/bin/python3 -B tests/rescue_secure_boot.py \
-            --efi-stub "$secure_tools/root/usr/lib/systemd/boot/efi/linuxx64.efi.stub" \
-            --kernel-iso "$RUNNER_TEMP/rescue.iso" --bin-dir "$RUNNER_TEMP/rescue-core" \
-            --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py"
-
   local-inference:
     needs: portable-core
     runs-on: ubuntu-24.04
@@ -421,7 +447,7 @@ jobs:
 
   attest:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'jyxxe/PsiOS'
-    needs: [portable-core, rescue-disk, local-inference]
+    needs: [portable-core, rescue-disk, native-boot-network, local-inference]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

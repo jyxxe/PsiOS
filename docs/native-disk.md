@@ -35,6 +35,10 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 
 正常部署挂载并核验状态卷以后，如早期启动检查失败，会在 `/var/lib/.psios-boot-failure` 保存最近一次失败的启动 ID 和阶段。文件为 root 专用，修复后成功启动仍保留记录。停机时，持有可信磁盘副本的操作者也可只读查看状态分区根目录下的 `/.psios-boot-failure`。状态卷核验前的故障和隔离试启动故障由串口报告。
 
+生成新盘时可用 `--timezone Asia/Shanghai` 选择本地显示时区，默认 UTC。普通账户可用 `psios-timezone show` 查询，或用 `psios-timezone list` 查看随盘提供的 IANA 名称。在本机 root 控制台执行 `psios-timezone set Europe/Berlin` 会原子更新 `/etc/localtime`，重启和停机升级保留该设置。系统 UTC 时钟由原有内核与固件管理。需要 UTC 输出时可用 `date -u`。
+
+当前镜像从固定 Linux 输入取用公有领域的 IANA tzdata 2026f。启动清单记录数据包摘要，启动时校验随盘的时区文件及管理命令。停机升级以新部署内置数据解释已保留的 IANA 名称。[断网与停机升级验收](../tests/native_timezone.py)
+
 生产模式在 `/dev/pts` 挂载独立的 Linux devpts 实例。普通账户可通过 `/dev/ptmx` 为本机终端程序分配伪终端，每个从设备仅向创建者开放读写（0600）。同一挂载最多同时分配 64 对。耗尽时已有终端仍可用，关闭一对后可继续分配。重新开机后分配从空实例开始。[真实终端验收](../tests/native_pty.c)
 
 生产模式为 POSIX 共享内存在 `/dev/shm` 单独挂载 tmpfs。程序可以用 `shm_open` 打开命名对象，通过 `mmap(MAP_SHARED)` 交换数据。`shm_unlink` 移除名称后，已取得的映射仍可用。此挂载上限为 16 MiB 和 1024 个 inode，与 `/tmp` 各自计量。根目录为 1777，启用 `nodev,nosuid,noexec`。需要私有数据的程序应创建 0600 对象。对象在重启后消失。[跨进程与容量验收](../tests/native_shm.c)
@@ -117,6 +121,8 @@ sha256sum boot.efi
 
 构建器固定追加成员的修改时间。使用相同 Core、内核介质、文件系统 UUID、部署配置和工具版本，在不同目录及初始 umask 下可比对部署清单、完整 initramfs 和未签名 EFI 的 SHA-256。为每次新安装生成的磁盘身份随该次回执记录。[重复构建验收](../tests/native_boot_reproducibility.py)
 
+构建回执的 `boot_assembly_tools` 记录提取内核输入、组装 initramfs、生成或签名 EFI、写入 EFI 分区时实际调用的工具摘要。同一次构建按解析到的可执行路径调用，发布前复核其中的 SHA-256。签名或额外驱动配置会记录各自使用的组装工具。已保存的旧回执仍可用于停机升级。[真实构建及变更拒绝验收](../tests/native_boot_tools.py)
+
 将结果与回执的 `efi_application_sha256` 比对。启动后普通账户可运行 `sha256sum /psios-deployment.json` 与回执的 `deployment_manifest_sha256` 比对。该清单列出 Core 源码修订及归档摘要、内核 ISO 及其内核与初始内存盘的输入摘要、两个文件系统 UUID 和 PsiOS 加入启动环境的文件摘要。回执另含组装后的完整 initramfs 摘要。PID 1 在挂载可写分区前核对清单和这些文件，发现不一致时给出 `deployment-payload` 停机阶段。外部回执供操作者比对。
 
 ## 安装到空白块设备
@@ -136,6 +142,8 @@ sudo python3 native/install.py inspect --state-dir "$INSTALL_STATE"
 默认按工厂镜像的精确容量安装。为较大的空白目标规划时可加 `--allow-larger-target`，上限为 2 TiB，要求 `sfdisk` 支持 `--relocate gpt-bak-std`。安装器保留分区大小、内容与身份，把备份 GPT 移到目标盘末尾，并将余量留为未分配空间。主表和备份表各自通过校验和核验后才可批准安装。批准内容包含 `deployment_image`，记录实际容量、备份表偏移和安装后整盘 SHA-256。空白检查与回读覆盖目标盘的全部字节。[较大 NVMe 来宾验收](../tests/native_install_virtio.py)
 
 操作者从 Plan 核对目标序列号、设备代次、分区和来源摘要，再将该份计划的 `plan_digest` 用于批准。执行会排他打开同一整盘，重新核对身份和空白字节，在首次写入前刷盘保存 `WriteIssued`。各分区内容刷盘后才写入两份 GPT。设备完成刷盘并全盘回读匹配后，回执进入 `Verified`。成功回执可重复读取。执行中断后，同次宿主启动内可用 `inspect` 对原目标核实完全写入的结果。部分写入或目标身份变化保持 `RecoveryRequired`，原计划停止派发。开发验收可通过 `--allow-loop` 选用专用 loop 测试盘。[Linux 块设备排他打开](https://man7.org/linux/man-pages/man2/open.2.html)
+
+在 QEMU 的 PCIe NVMe 热插拔验收中，替换盘复用相同设备路径及 PCI 拓扑，内核代次与 WWID 则改变。执行原批准会在写入前拒绝，保留原 `Planned` 回执及替换盘的全盘摘要。安装替换盘要为其新身份另行生成并批准计划。[NVMe 热插拔验收](../tests/native_install_virtio.py)
 
 ## 使用已登记证书构建 Secure Boot 盘
 

@@ -414,7 +414,16 @@ def recover_install(run, approval, target, **options):
 
 
 def install_journal(run):
-    return remote(run, "sudo", "-n", "cat", OPERATION / "operation.json").stdout
+    for _ in range(5):
+        receipt = remote(run, "sudo", "-n", "cat", OPERATION / "operation.json", check=False)
+        if receipt.returncode == 0:
+            return receipt.stdout
+        if receipt.returncode != 255:
+            break
+        # Reconnect for the read alone. The original installer process may have
+        # issued its writes even if the SSH transport then becomes unavailable.
+        time.sleep(.5)
+    raise AssertionError(f"could not read the installation journal: {receipt.stderr.strip()}")
 
 
 def recognize_nvme_fixture(run, *, moved=False):

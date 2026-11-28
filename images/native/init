@@ -140,6 +140,8 @@ if [ "$trial_boot" = no ]; then
 fi
 stage=state-device
 /usr/sbin/modprobe virtio_blk
+/usr/sbin/modprobe nvme_core multipath=0
+/usr/sbin/modprobe nvme async_probe=0
 /usr/sbin/modprobe ext4
 id=$(cat /psios-disk-uuid)
 home_id=$(cat /psios-home-uuid)
@@ -149,7 +151,7 @@ if [ "$trial_boot" = yes ]; then
     stage=trial-disk
     # The primary GPT header starts in sector 1 and stores the disk GUID at
     # byte 56. Compare the on-disk byte order against the EFI payload.
-    disk_id=$(od -An -v -tx1 -j 568 -N 16 "${state_device%2}" | tr -d '[:space:]')
+    disk_id=$(od -An -v -tx1 -j 568 -N 16 "$deployment_disk" | tr -d '[:space:]')
     [ "$disk_id" = "$(cat /psios-trial-disk-id)" ]
 fi
 mkdir -p /var/lib /run/psios /home /root /mnt/psios-homes

@@ -27,6 +27,8 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 
 生成新盘时，用 `--state-mib` 和 `--home-mib` 分别指定两个 ext4 分区的容量。默认值和最小值分别为 192 MiB 和 64 MiB。完整 raw 镜像最多 8192 MiB，含 EFI 分区和 GPT 空间。安装回执和来宾的 `/psios-deployment.json` 均记录 `geometry_mib`。
 
+同一原生 GPT 镜像可在 OVMF 的 virtio-blk 磁盘和 512 字节逻辑扇区的 PCIe NVMe 命名空间上引导。启动会核对初始枚举中这两类设备的持久分区身份与布局。发现重复身份或状态与主目录分属两个盘时，在挂载前停机。NVMe 已在 QEMU 验证，实机固件和控制器仍待验收。[混合磁盘验收](../tests/native_storage.py)
+
 串口账户 `psios` 和服务使用 UID 1000。登录后可运行 `psiosctl whoami`、`psiosctl node`，或用 `printf '{}' | psiosctl submit system.status --key first-status` 提交任务。需要传统系统管理时，可在生成新盘时传入 `--root-console-hash root.hash` 设置独立的本机 root 密码。默认锁定 root。启用后可用 root 在串口执行 `poweroff`。关机钩子先允许 Core 结算，随后关闭其余会话与进程，刷盘并卸载状态和主目录。运行时生成的所有者令牌位于服务账户的私有见证目录。[关机验收](../tests/native_disk.py)
 
 生产模式在 `/dev/pts` 挂载独立的 Linux devpts 实例。普通账户可通过 `/dev/ptmx` 为本机终端程序分配伪终端，每个从设备仅向创建者开放读写（0600）。同一挂载最多同时分配 64 对。耗尽时已有终端仍可用，关闭一对后可继续分配。重新开机后分配从空实例开始。[真实终端验收](../tests/native_pty.c)

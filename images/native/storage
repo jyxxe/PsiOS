@@ -24,18 +24,35 @@ uuid_in_extent() {
 }
 
 choose_boot_storage() {
-    local bus disk sectors state_uuid home_uuid state_disk= home_disk= found=no
+    local bus controller entry disk sectors state_uuid home_uuid state_disk= home_disk= separator=
     stage=state-device
-    # Wait for all initially visible virtio block devices to expose a disk.
-    # Probing whole disks lets us check for duplicate UUIDs before their partitions appear.
+    # Collect the whole disks exposed by the supported boot-time drivers.
+    set --
     for bus in /sys/bus/virtio/devices/virtio*; do
         [ -r "$bus/device" ] && [ "$(cat "$bus/device")" = 0x0002 ] || continue
-        found=yes
-        set -- "$bus"/block/vd*
-        [ "$#" -eq 1 ] && [ -e "$1" ] || return 1
-        disk=/dev/${1##*/}
+        for entry in "$bus"/block/vd*; do
+            [ -e "$entry" ] || return 1
+            set -- "$@" "$entry"
+        done
+    done
+    for bus in /sys/bus/pci/devices/*; do
+        [ -r "$bus/class" ] && [ "$(cat "$bus/class")" = 0x010802 ] || continue
+        # The pinned PCI NVMe driver completes its initial namespace scan
+        # before binding finishes, and init loads it synchronously.
+        for controller in "$bus"/nvme/nvme*; do
+            [ -r "$controller/state" ] && [ "$(cat "$controller/state")" = live ] || return 1
+            for entry in "$controller"/nvme*n*; do
+                [ -e "$entry" ] || continue
+                set -- "$@" "$entry"
+            done
+        done
+    done
+    [ "$#" -gt 0 ] || return 1
+    # Probe whole disks before relying on their partition device nodes.
+    for entry do
+        disk=/dev/${entry##*/}
         [ -b "$disk" ] || return 1
-        sectors=$(cat "$1/size") || return 1
+        sectors=$(cat "$entry/size") || return 1
         state_uuid=$(uuid_in_extent "$disk" "$sectors" "$state_start" "$state_size") || return 2
         home_uuid=$(uuid_in_extent "$disk" "$sectors" "$home_start" "$home_size") || return 2
         if [ "$state_uuid" = "$expected_state" ]; then
@@ -53,14 +70,15 @@ choose_boot_storage() {
             home_disk=$disk
         fi
     done
-    [ "$found" = yes ] || return 1
     [ -n "$state_disk" ] || return 2
-    state_device=${state_disk}2
+    case "$state_disk" in /dev/nvme*) separator=p ;; esac
+    deployment_disk=$state_disk
+    state_device=${state_disk}${separator}2
     match_partition "$state_device" "$state_start" "$state_size" "$expected_state" || return "$?"
     stage=home-device
     [ -n "$home_disk" ] || return 2
     [ "$home_disk" = "$state_disk" ] || return 2
-    home_device=${home_disk}3
+    home_device=${home_disk}${separator}3
     match_partition "$home_device" "$home_start" "$home_size" "$expected_home"
 }
 

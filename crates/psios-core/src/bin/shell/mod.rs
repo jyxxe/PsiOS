@@ -71,6 +71,7 @@ struct Shell {
     principal: String,
     cancel_pending_tasks: bool,
     send_chat: bool,
+    review_work_items: bool,
     client: Client,
     session: Mutex<Session>,
     rpc_slots: Arc<Semaphore>,
@@ -93,6 +94,7 @@ enum Endpoint {
     ProjectWorkItems,
     WorkItemRevision,
     WorkItemEvidence,
+    ReviewWorkItem,
     PrepareChatMessage,
     SendChatMessage,
     Task,
@@ -141,6 +143,13 @@ struct ProjectWorkItems {
 #[serde(deny_unknown_fields)]
 struct WorkItemRevision {
     reference: ResourceRef,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewWorkItem {
+    reference: ResourceRef,
+    accept: bool,
 }
 
 #[derive(Deserialize)]
@@ -237,6 +246,7 @@ enum CoreRequest {
     ProjectWorkItems(ProjectWorkItems),
     WorkItemRevision(WorkItemRevision),
     WorkItemEvidence(WorkItemRevision),
+    ReviewWorkItem(ReviewWorkItem),
     PrepareChatMessage(ChatDraft),
     SendChatMessage(PreparedChatMessage),
     Artifact(TaskArtifact),
@@ -514,6 +524,33 @@ impl CoreRequest {
                     }
                     Ok(())
                 })
+            }
+            Self::ReviewWorkItem(request) => {
+                let item = exact_work_item(client, &request.reference)?;
+                if item["lifecycle"] != "InReview" {
+                    return Err(ApiError::new(
+                        "PreconditionFailed",
+                        "work item has no pending review",
+                    )
+                    .into());
+                }
+                if !item["evidence"].is_object() {
+                    return Err(ApiError::new(
+                        "PermissionDenied",
+                        "work item evidence is unavailable",
+                    )
+                    .into());
+                }
+                check()?;
+                let reviewed = client.review_work_item(
+                    &request.reference.resource_id,
+                    &request.reference.version,
+                    request.accept,
+                )?;
+                Ok(json_response(
+                    StatusCode::OK,
+                    json!({"reference":reviewed.reference}),
+                ))
             }
             Self::PrepareChatMessage(draft) => {
                 if draft.text.is_empty() || draft.text.len() > CHAT_TEXT_BYTES {
@@ -810,6 +847,9 @@ fn rpc(endpoint: Endpoint, data: Value) -> Result<CoreRequest, Fault> {
         Endpoint::AgentSession => Ok(CoreRequest::AgentSession(
             serde_json::from_value(data).map_err(|_| INVALID)?,
         )),
+        Endpoint::ReviewWorkItem => Ok(CoreRequest::ReviewWorkItem(
+            serde_json::from_value(data).map_err(|_| INVALID)?,
+        )),
         Endpoint::PrepareChatMessage => Ok(CoreRequest::PrepareChatMessage(
             serde_json::from_value(data).map_err(|_| INVALID)?,
         )),
@@ -917,6 +957,7 @@ impl Shell {
             "/api/project-work-items" => Endpoint::ProjectWorkItems,
             "/api/work-item-revision" => Endpoint::WorkItemRevision,
             "/api/work-item-evidence" => Endpoint::WorkItemEvidence,
+            "/api/review-work-item" if self.review_work_items => Endpoint::ReviewWorkItem,
             "/api/chat-prepare" if self.send_chat => Endpoint::PrepareChatMessage,
             "/api/chat-send" if self.send_chat => Endpoint::SendChatMessage,
             "/api/task" => Endpoint::Task,
@@ -935,7 +976,8 @@ impl Shell {
             }
             return Ok(json_response(
                 StatusCode::OK,
-                json!({"token":token,"principal_id":self.principal,"cancel_pending_tasks":self.cancel_pending_tasks,"send_chat":self.send_chat}),
+                json!({"token":token,"principal_id":self.principal,"cancel_pending_tasks":self.cancel_pending_tasks,"send_chat":self.send_chat,
+                       "review_work_items":self.review_work_items}),
             ));
         }
 
@@ -1034,6 +1076,7 @@ pub(super) fn run(
     client: Client,
     cancel_pending_tasks: bool,
     send_chat: bool,
+    review_work_items: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = client.call("Principal.WhoAmI", json!({}))?;
     let principal = identity["principal_id"]
@@ -1052,6 +1095,7 @@ pub(super) fn run(
         principal,
         cancel_pending_tasks,
         send_chat,
+        review_work_items,
         stop,
     ));
     runtime.shutdown_timeout(Duration::from_secs(1));
@@ -1063,6 +1107,7 @@ async fn serve(
     principal: String,
     cancel_pending_tasks: bool,
     send_chat: bool,
+    review_work_items: bool,
     stop: Arc<AtomicBool>,
 ) -> io::Result<()> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
@@ -1075,6 +1120,7 @@ async fn serve(
         principal,
         cancel_pending_tasks,
         send_chat,
+        review_work_items,
         client,
         session: Mutex::new(Session::new(&code, now())?),
         rpc_slots: Arc::new(Semaphore::new(CORE_CALLS)),

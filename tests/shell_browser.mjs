@@ -156,6 +156,37 @@ async function test() {
   await waitFor("paired desktop", '!document.querySelector("#workspace").hidden && !document.querySelector("#empty-desktop").hidden');
   assert.ok(await evaluate('document.activeElement.id === "nav-node" && document.querySelectorAll(".app-window:not([hidden])").length === 0'));
   assert.ok(!requests.some(url => ["/api/node", "/api/tasks"].includes(new URL(url).pathname)));
+  if (input.projectReview) {
+    const project = '#project-rows button[data-project-id="' + input.project + '"]';
+    const opener = '#project-content [data-work-item-id="' + input.work_item.resource_id + '"] button';
+    const present = selector => 'document.querySelector(' + JSON.stringify(selector) + ') !== null';
+    const submit = '.work-item-review button[type="submit"]';
+    const reviews = () => requests.filter(url => new URL(url).pathname === "/api/review-work-item").length;
+    await keyboardActivate("#nav-projects");
+    await waitFor("reviewer's project", present(project));
+    await keyboardActivate(project);
+    await waitFor("pending review", present(opener));
+    await keyboardActivate(opener);
+    await waitFor("review controls", present(submit));
+    assert.ok(await evaluate('document.querySelector(' + JSON.stringify(submit) + ').disabled'));
+    await evaluate('(() => { const select = document.querySelector("#work-item-decision"); select.value = "accept"; ' +
+      'select.dispatchEvent(new Event("change")); })()');
+    assert.equal(reviews(), 0);
+    await keyboardActivate(submit);
+    await waitFor("unknown review reply", 'document.querySelector(".work-item-review p").textContent.includes("审核回执未收到")');
+    assert.ok(await evaluate('document.querySelector(' + JSON.stringify(submit) + ').disabled'));
+    await keyboardActivate('.work-item-review button[type="button"]');
+    const details = 'document.querySelector("#work-item-content").textContent';
+    await waitFor("durable review from Core", details + '.includes("已验证") && ' +
+      details + '.includes(' + JSON.stringify(input.reviewer) + ')');
+    assert.ok(!await evaluate(present(submit)));
+    assert.equal(reviews(), 1);
+    await click("#logout");
+    await waitFor("closed review session", 'document.querySelector("#workspace").hidden');
+    assert.deepEqual(exceptions, []);
+    assert.ok(requests.every(url => new URL(url).origin === input.origin));
+    return;
+  }
   if (input.projectEvidence) {
     const project = '#project-rows button[data-project-id="' + input.project + '"]';
     const opener = '#project-content [data-work-item-id="' + input.work_item.resource_id + '"] button';

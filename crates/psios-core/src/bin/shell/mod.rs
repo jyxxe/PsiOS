@@ -18,6 +18,7 @@ use psios_api::{ApiError, ApiResult, Client, ResourceRef, parse};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use session::{Session, now};
+use sha2::{Digest, Sha256};
 use std::{
     convert::Infallible,
     io::{self, Write},
@@ -72,6 +73,7 @@ struct Shell {
     host: String,
     origin: String,
     principal: String,
+    layout_scope: Option<String>,
     options: Options,
     client: Client,
     session: Mutex<Session>,
@@ -852,6 +854,10 @@ fn file(path: &str) -> Option<HttpResponse> {
             "text/javascript; charset=utf-8",
             include_bytes!("shell-files.js").as_slice(),
         ),
+        "/shell-layout.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("shell-layout.js").as_slice(),
+        ),
         "/shell.js" => (
             "text/javascript; charset=utf-8",
             include_bytes!("shell.js").as_slice(),
@@ -1105,6 +1111,9 @@ impl Shell {
                 "manage_agent_sessions":self.options.manage_agent_sessions,
                 "observe_resolver":self.options.resolver_delegation.is_some(),
             });
+            if let Some(scope) = &self.layout_scope {
+                reply["layout_scope"] = json!(scope);
+            }
             if let Some(files) = &self.options.files {
                 reply["browse_files"] = json!(true);
                 if files.preview {
@@ -1211,6 +1220,13 @@ pub(super) fn run(client: Client, options: Options) -> Result<(), Box<dyn std::e
         .as_str()
         .ok_or("Core did not report a principal")?
         .to_owned();
+    let layout_scope = identity["authority_id"]
+        .as_str()
+        .filter(|authority| !authority.is_empty())
+        .map(|authority| {
+            let binding = json!(["psios-shell-layout-v1", authority, principal.as_str()]);
+            format!("{:x}", Sha256::digest(binding.to_string()))
+        });
     let stop = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGTERM, stop.clone())?;
     signal_hook::flag::register(signal_hook::consts::SIGINT, stop.clone())?;
@@ -1218,7 +1234,7 @@ pub(super) fn run(client: Client, options: Options) -> Result<(), Box<dyn std::e
         .enable_all()
         .max_blocking_threads(CORE_CALLS)
         .build()?;
-    let result = runtime.block_on(serve(client, principal, options, stop));
+    let result = runtime.block_on(serve(client, principal, layout_scope, options, stop));
     runtime.shutdown_timeout(Duration::from_secs(1));
     result.map_err(Into::into)
 }
@@ -1226,6 +1242,7 @@ pub(super) fn run(client: Client, options: Options) -> Result<(), Box<dyn std::e
 async fn serve(
     client: Client,
     principal: String,
+    layout_scope: Option<String>,
     options: Options,
     stop: Arc<AtomicBool>,
 ) -> io::Result<()> {
@@ -1237,6 +1254,7 @@ async fn serve(
         host,
         origin: origin.clone(),
         principal,
+        layout_scope,
         options,
         client,
         session: Mutex::new(Session::new(&code, now())?),

@@ -2,6 +2,9 @@ import { chatView } from "./shell-chat.js";
 import { projectView } from "./shell-projects.js";
 import { sessionsView } from "./shell-sessions.js";
 import { filesView } from "./shell-files.js";
+import {
+  decodeLayout, LAYOUT_FILE_NAME, MAX_LAYOUT_BYTES, MAX_WORKSPACES, workspaceName as normalizeWorkspaceName,
+} from "./shell-layout.js";
 
 const byId = (id) => document.getElementById(id);
 const chat = chatView(request, byId, element, message);
@@ -20,6 +23,8 @@ const workspaceList = byId("workspace-list");
 const workspaceWindows = byId("workspace-windows");
 const workspaceName = byId("workspace-name");
 const workspaceMessage = byId("workspace-message");
+const workspaceLayout = byId("workspace-layout");
+const layoutFile = byId("layout-file");
 const code = byId("code");
 const status = byId("status");
 const nodeView = byId("node-view");
@@ -37,6 +42,8 @@ const applicationDetail = byId("application-detail");
 const applicationContent = byId("application-content");
 
 let bearer = null;
+let layoutScope = null;
+let layoutRead = 0;
 let sessionRequests = new AbortController();
 let canCancelPending = false;
 const apps = new Map(["node", "tasks", "files", "applications", "chat", "projects", "agent-runtime"].map(id => [id, {
@@ -70,6 +77,9 @@ function message(element, text, error = false) {
 
 function leave(text, error = false) {
   bearer = null;
+  layoutScope = null;
+  workspaceLayout.hidden = true;
+  layoutFile.value = "";
   sessionRequests.abort();
   sessionRequests = new AbortController();
   canCancelPending = false;
@@ -260,10 +270,15 @@ async function saveVerifiedArtifact(response, reference, host) {
   const hex = Array.from(hash, (byte) => byte.toString(16).padStart(2, "0")).join("");
   if ("sha256:" + hex !== reference.digest) throw new Error("下载内容与所选制品的 SHA-256 不符。");
   if (!host.isConnected) return false;
-  const url = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
+  downloadFile(new Blob([bytes], { type: "application/octet-stream" }), "psios-" + hex + ".bin", host);
+  return true;
+}
+
+function downloadFile(blob, filename, host) {
+  const url = URL.createObjectURL(blob);
   const link = element("a");
   link.href = url;
-  link.download = "psios-" + hex + ".bin";
+  link.download = filename;
   host.append(link);
   try {
     link.click();
@@ -271,7 +286,6 @@ async function saveVerifiedArtifact(response, reference, host) {
     link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 0);
   }
-  return true;
 }
 
 async function downloadEvidence(reference, artifact, host) {
@@ -975,6 +989,68 @@ function moveWindow(id, destination) {
   updateDesktop();
 }
 
+function exportLayout() {
+  if (!layoutScope || !workspaceDialog.open) return;
+  const ids = new Map(Array.from(workspaces.keys(), (id, index) => [id, index]));
+  const windows = [];
+  for (const [id, app] of apps) {
+    if (app.state === "closed") continue;
+    windows.push({ id, workspace: ids.get(app.workspace), state: app.state,
+      tile: app.tile, geometry: app.geometry });
+  }
+  const layout = {
+    version: 1, scope: layoutScope, current: ids.get(currentWorkspace),
+    workspaces: Array.from(workspaces.values()), windows,
+  };
+  downloadFile(new Blob([JSON.stringify(layout)], { type: "application/json" }), LAYOUT_FILE_NAME, workspaceLayout);
+}
+
+function restoreLayout(layout) {
+  for (const [id, app] of apps) {
+    showWindow(id, app, false);
+    app.state = "closed";
+    app.workspace = app.tile = app.geometry = null;
+  }
+  cursors = [null];
+  nextCursor = selectedTask = null;
+  resetApplications();
+  workspaces.clear();
+  for (const [id, saved] of layout.workspaces.entries()) workspaces.set(id, saved);
+  const unavailable = [];
+  for (const saved of layout.windows) {
+    const app = apps.get(saved.id);
+    if (app.dock.hidden || app.dock.disabled) {
+      unavailable.push(saved);
+      continue;
+    }
+    app.state = saved.state;
+    app.workspace = saved.workspace;
+    app.tile = saved.tile;
+    app.geometry = saved.geometry;
+  }
+  for (const saved of unavailable) leaveWindowScope(saved.id, saved.workspace);
+  nextWorkspace = workspaces.size;
+  switchWorkspace(layout.current);
+  message(status, unavailable.length ? "已恢复布局。部分应用在此会话中不可用。" : "已恢复布局。");
+}
+
+async function importLayout() {
+  const [file] = layoutFile.files;
+  layoutFile.value = "";
+  if (!file || !layoutScope || !workspaceDialog.open) return;
+  const signal = sessionRequests.signal;
+  const read = ++layoutRead;
+  try {
+    if (file.size > MAX_LAYOUT_BYTES) throw new Error("布局文件超过 8 KiB。");
+    const text = await file.text();
+    if (signal.aborted || read !== layoutRead || !workspaceDialog.open) return;
+    const layout = decodeLayout(text, layoutScope, new Set(apps.keys()));
+    restoreLayout(layout);
+  } catch (error) {
+    if (!signal.aborted && read === layoutRead && workspaceDialog.open) message(workspaceMessage, error.message, true);
+  }
+}
+
 function renderWorkspaces() {
   const assigned = Array.from(apps.values(), app => app.workspace);
   workspaceList.replaceChildren();
@@ -1144,15 +1220,20 @@ byId("open-workspaces").addEventListener("click", () => {
   workspaceList.querySelector('[aria-current="true"]').focus();
 });
 byId("close-workspaces").addEventListener("click", () => workspaceDialog.close());
+byId("export-layout").addEventListener("click", exportLayout);
+byId("import-layout").addEventListener("click", () => {
+  if (layoutScope && workspaceDialog.open) layoutFile.click();
+});
+layoutFile.addEventListener("change", importLayout);
 byId("workspace-form").addEventListener("submit", event => {
   event.preventDefault();
-  const name = workspaceName.value.normalize("NFKC").trim();
-  if (!name || name.length > 32 || Array.from(workspaces.values()).some(scope => scope.name === name)) {
+  const name = normalizeWorkspaceName(workspaceName.value);
+  if (!name || Array.from(workspaces.values()).some(scope => scope.name === name)) {
     message(workspaceMessage, "请输入 1–32 个字符且未使用的名称。", true);
     workspaceName.focus();
     return;
   }
-  if (workspaces.size >= 8) {
+  if (workspaces.size >= MAX_WORKSPACES) {
     message(workspaceMessage, "本次会话最多可打开 8 个工作区。", true);
     return;
   }
@@ -1175,6 +1256,8 @@ byId("pair-form").addEventListener("submit", async (event) => {
     const session = await request("/api/session", { code: submitted }, null);
     if (pairingSignal.aborted) return;
     bearer = session.token;
+    layoutScope = /^[0-9a-f]{64}$/.test(session.layout_scope) ? session.layout_scope : null;
+    workspaceLayout.hidden = !layoutScope;
     void observeSession(bearer);
     canCancelPending = session.cancel_pending_tasks === true;
     files.capability(session.browse_files === true, session.preview_files === true);

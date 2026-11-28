@@ -132,7 +132,7 @@ sudo python3 native/install.py inspect --state-dir "$INSTALL_STATE"
 
 ## 持久性与救援
 
-同一原生 GPT 镜像可在 OVMF 的 virtio-blk 磁盘和 512 字节逻辑扇区的 PCIe NVMe 命名空间上引导。启动会核对初始枚举中这两类设备的文件系统 UUID 及分区布局。发现重复身份或状态与主目录分属两个盘时，在挂载前停机。NVMe 已在 QEMU 验证，实机固件和控制器仍待验收。[混合磁盘验收](../tests/native_storage.py)
+同一原生 GPT 镜像可在 OVMF 的 virtio-blk、PCIe NVMe 和 SATA AHCI 磁盘上引导，验收使用 512 字节逻辑扇区。启动核对初始枚举中这些设备的文件系统 UUID 及分区布局。发现重复身份或状态与主目录分属两个盘时，在挂载前停机。实机固件和控制器仍待验收。[混合磁盘验收](../tests/native_storage.py)
 
 首次启动核对部署记录，在私有暂存目录创建并核验 Core 状态与见证，再逐个发布两个目录。在准备期间断电，可重新准备未发布的权威。发布开始后断电，启动会核验并继续安装原节点的状态与见证。初始化完成标记持久落盘后才开启本机管理。已有节点丢失状态时，启动检查会报错并保留原见证供救援。启动检查失败时，串口会指明失败阶段，系统关闭已经挂载的持久分区后停机。保留原盘，使用同版本救援归档检查 `--partition 2 --state /psios --uid 1000`。强制断电产生的待重放日志可用有容量限制的临时覆盖层检查。[首次启动断电验收](../tests/native_enrollment.py) · [离线救援](offline-rescue.md)
 

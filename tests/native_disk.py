@@ -159,7 +159,8 @@ def boot(work, image, network_mac=None, extra_disk=None, tap=None, *, rtc_base=N
 
 
 def disk_device(bus, name):
-    return {"virtio": f"virtio-blk-pci,drive={name}", "nvme": f"nvme,drive={name},serial=psios-{name}"}[bus]
+    return {"virtio": f"virtio-blk-pci,drive={name}", "nvme": f"nvme,drive={name},serial=psios-{name}",
+            "ahci": f"ide-hd,bus=ide.{0 if name == 'installed' else 1},drive={name}"}[bus]
 
 
 def password(work, name):

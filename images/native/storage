@@ -24,7 +24,7 @@ uuid_in_extent() {
 }
 
 choose_boot_storage() {
-    local bus controller entry disk sectors state_uuid home_uuid state_disk= home_disk= separator=
+    local bus controller target entry disk sectors state_uuid home_uuid state_disk= home_disk= separator=
     stage=state-device
     # Collect the whole disks exposed by the supported boot-time drivers.
     set --
@@ -43,6 +43,18 @@ choose_boot_storage() {
             [ -r "$controller/state" ] && [ "$(cat "$controller/state")" = live ] || return 1
             for entry in "$controller"/nvme*n*; do
                 [ -e "$entry" ] || continue
+                set -- "$@" "$entry"
+            done
+        done
+    done
+    for bus in /sys/bus/pci/drivers/ahci/*:*:*.*; do
+        [ -r "$bus/class" ] && [ "$(cat "$bus/class")" = 0x010601 ] || continue
+        for target in "$bus"/ata*/host*/target*/*:*:*:*; do
+            # AHCI represents ATA disks as SCSI direct-access devices. Wait
+            # for sd_mod to bind every present disk before checking UUIDs.
+            [ -r "$target/type" ] && [ "$(cat "$target/type")" = 0 ] || continue
+            for entry in "$target"/block/sd*; do
+                [ -e "$entry" ] || return 1
                 set -- "$@" "$entry"
             done
         done

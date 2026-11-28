@@ -27,8 +27,6 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 
 生成新盘时，用 `--state-mib` 和 `--home-mib` 分别指定两个 ext4 分区的容量。默认值和最小值分别为 192 MiB 和 64 MiB。完整 raw 镜像最多 8192 MiB，含 EFI 分区和 GPT 空间。安装回执和来宾的 `/psios-deployment.json` 均记录 `geometry_mib`。
 
-同一原生 GPT 镜像可在 OVMF 的 virtio-blk 磁盘和 512 字节逻辑扇区的 PCIe NVMe 命名空间上引导。启动会核对初始枚举中这两类设备的持久分区身份与布局。发现重复身份或状态与主目录分属两个盘时，在挂载前停机。NVMe 已在 QEMU 验证，实机固件和控制器仍待验收。[混合磁盘验收](../tests/native_storage.py)
-
 串口账户 `psios` 和服务使用 UID 1000。登录后可运行 `psiosctl whoami`、`psiosctl node`，或用 `printf '{}' | psiosctl submit system.status --key first-status` 提交任务。需要传统系统管理时，可在生成新盘时传入 `--root-console-hash root.hash` 设置独立的本机 root 密码。默认锁定 root。启用后可用 root 在串口执行 `poweroff`。关机钩子先允许 Core 结算，随后关闭其余会话与进程，刷盘并卸载状态和主目录。运行时生成的所有者令牌位于服务账户的私有见证目录。[关机验收](../tests/native_disk.py)
 
 生产模式在 `/dev/pts` 挂载独立的 Linux devpts 实例。普通账户可通过 `/dev/ptmx` 为本机终端程序分配伪终端，每个从设备仅向创建者开放读写（0600）。同一挂载最多同时分配 64 对。耗尽时已有终端仍可用，关闭一对后可继续分配。重新开机后分配从空实例开始。[真实终端验收](../tests/native_pty.c)
@@ -126,13 +124,13 @@ sudo python3 native/install.py inspect --state-dir "$INSTALL_STATE"
 
 ## 持久性与救援
 
-每次启动在挂载前核对状态和主目录的文件系统 UUID 及分区布局，要求匹配的两个分区在同一块 virtio 磁盘上。额外的 virtio 数据盘可随系统一起连接。发现部署 UUID 重复或匹配分区分属两块磁盘时，启动在挂载前停止。[双盘验收](../tests/native_storage.py)
+同一原生 GPT 镜像可在 OVMF 的 virtio-blk 磁盘和 512 字节逻辑扇区的 PCIe NVMe 命名空间上引导。启动会核对初始枚举中这两类设备的文件系统 UUID 及分区布局。发现重复身份或状态与主目录分属两个盘时，在挂载前停机。NVMe 已在 QEMU 验证，实机固件和控制器仍待验收。[混合磁盘验收](../tests/native_storage.py)
 
 首次启动核对部署记录，在私有暂存目录创建并核验 Core 状态与见证，再逐个发布两个目录。在准备期间断电，可重新准备未发布的权威。发布开始后断电，启动会核验并继续安装原节点的状态与见证。初始化完成标记持久落盘后才开启本机管理。已有节点丢失状态时，启动检查会报错并保留原见证供救援。启动检查失败时，串口会指明失败阶段，系统关闭已经挂载的持久分区后停机。保留原盘，使用同版本救援归档检查 `--partition 2 --state /psios --uid 1000`。强制断电产生的待重放日志可用有容量限制的临时覆盖层检查。[首次启动断电验收](../tests/native_enrollment.py) · [离线救援](offline-rescue.md)
 
 本版生成的 323 MiB 新盘给主目录分配独立的 64 MiB ext4。普通账户可以在 `/home/psios` 保存文件并执行脚本，root 的 `/root` 独立设为私有，两者共享这 64 MiB。主目录写满时仍可向 Core 提交任务。第三分区丢失或 UUID 不符时，启动在挂载前停止。早期两分区开发盘的主目录在 RAM，已有磁盘继续使用它们原有的引导程序。
 
-此开发盘使用 virtio 存储、4 MiB amd64 OVMF 和本机串口。本机账户及密码摘要保存在状态分区的 /etc 配置中。root 可运行 passwd psios 更换密码，重启后生效。磁盘数据为明文。状态与见证位于同一物理故障域。新节点应重新生成磁盘。物理安装、加密、自动系统更新与回退，以及三个发行版的 EditionReady 验收尚待实现或验证。[虚机故障验收](../tests/native_disk.py)
+此开发盘使用 4 MiB amd64 OVMF 和本机串口。本机账户及密码摘要保存在状态分区的 /etc 配置中。root 可运行 passwd psios 更换密码，重启后生效。磁盘数据为明文。状态与见证位于同一物理故障域。新节点应重新生成磁盘。物理安装、加密、自动系统更新与回退，以及三个发行版的 EditionReady 验收尚待实现或验证。[虚机故障验收](../tests/native_disk.py)
 
 ## 停机升级到另一份原生磁盘
 

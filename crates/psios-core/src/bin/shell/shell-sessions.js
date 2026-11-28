@@ -17,6 +17,7 @@ export function sessionsView(request, byId, element, message, fields) {
   let pages = [null];
   let nextCursor = null;
   let selected = null;
+  let canManage = false;
 
   function clearDetail() {
     detailRevision += 1;
@@ -34,15 +35,21 @@ export function sessionsView(request, byId, element, message, fields) {
     message(status, "");
   }
 
-  function render(record) {
+  function render(record, opener) {
     const { reference, session: item } = record.status;
     const info = [["会话", reference.resource_id, true], ["修订", reference.version, true],
       ["状态", lifecycles[item.lifecycle] ?? item.lifecycle], ["轮次", `${item.turn} / ${item.max_turns}`],
       ["模型", item.model_ref.resource_id, true], ["Skill", item.skill_ref.resource_id, true]];
     if (item.last_task) info.push(["最近任务", item.last_task, true]);
-    if (item.pause_reason) info.push(["暂停原因", item.pause_reason]);
+    if (item.pause_reason) info.push(["暂停原因", item.pause_reason === "OperatorPaused" ? "操作者暂停" : item.pause_reason]);
     if (item.outcome_knowledge) info.push(["执行结局", outcomes[item.outcome_knowledge] ?? item.outcome_knowledge]);
-    body.replaceChildren(fields(info), element("h3", "模型用量"));
+    body.replaceChildren(fields(info));
+    opener.closest("tr").lastElementChild.textContent = lifecycles[item.lifecycle] ?? item.lifecycle;
+    if (canManage && item.lifecycle === "AwaitingModel") renderAction("pause", "暂停会话", reference, opener);
+    if (canManage && item.lifecycle === "Paused" && item.pause_reason === "OperatorPaused" && item.outcome_knowledge !== "Unknown") {
+      renderAction("resume", "恢复会话", reference, opener);
+    }
+    body.append(element("h3", "模型用量"));
     const meter = record.lease_time;
     const reports = record.provider_reported;
     const usage = [["已签发调用", record.charged_calls], ["执行中预扣（毫秒）", meter.active_reserved_ms],
@@ -52,8 +59,27 @@ export function sessionsView(request, byId, element, message, fields) {
     body.append(fields(usage));
   }
 
-  async function inspect(id, opener, focus = true) {
+  function renderAction(action, label, reference, opener) {
+    const button = element("button", label);
+    button.type = "button";
+    button.dataset.sessionAction = action;
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      const revision = detailRevision;
+      let notice = { text: action === "pause" ? "已提交暂停。" : "已提交恢复。", error: false };
+      try {
+        await request("/api/control-agent-session", { reference, action });
+      } catch (error) {
+        notice = { text: error.message + "。已重新读取会话。", error: true };
+      }
+      if (revision === detailRevision) await inspect(reference.resource_id, opener, true, notice);
+    });
+    body.append(button);
+  }
+
+  async function inspect(id, opener, focus = true, notice = null) {
     clearDetail();
+    message(status, "");
     const revision = detailRevision;
     selected = id;
     opener.setAttribute("aria-pressed", "true");
@@ -62,7 +88,10 @@ export function sessionsView(request, byId, element, message, fields) {
     if (focus) detail.focus();
     try {
       const record = await request("/api/agent-session", { id });
-      if (revision === detailRevision) render(record);
+      if (revision === detailRevision) {
+        render(record, opener);
+        if (notice) message(status, notice.text, notice.error);
+      }
     } catch (error) {
       if (revision !== detailRevision) return;
       if (error.code === "PermissionDenied") await show([null], null);
@@ -121,6 +150,7 @@ export function sessionsView(request, byId, element, message, fields) {
   });
   return {
     show, hide, refresh: () => show([null]),
+    capability(enabled) { canManage = enabled; },
     reset() { pages = [null]; nextCursor = selected = null; hide(); },
   };
 }

@@ -24,11 +24,13 @@ from support import Node, key, target
 
 
 class Shell:
-    def __init__(self, node, token_file, endpoint=None, *, cancel_pending=False, send_chat=False, review_work_items=False):
+    def __init__(self, node, token_file, endpoint=None, *, cancel_pending=False, send_chat=False,
+                 review_work_items=False, manage_agent_sessions=False):
         self.process = subprocess.Popen(
             [node.binaries / "psiosctl", "--socket", endpoint or node.socket, "--token-file", token_file, "shell",
              *(["--cancel-pending-tasks"] if cancel_pending else []), *(["--send-chat"] if send_chat else []),
-             *(["--review-work-items"] if review_work_items else [])],
+             *(["--review-work-items"] if review_work_items else []),
+             *(["--manage-agent-sessions"] if manage_agent_sessions else [])],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
         )
         try:
@@ -90,9 +92,11 @@ class ShellTests(unittest.TestCase):
         self.node = Node(os.environ.get("PSIOS_TEST_BIN_DIR", "target/debug"))
         self.addCleanup(self.node.close)
 
-    def shell(self, token_file=None, *, cancel_pending=False, send_chat=False, review_work_items=False):
+    def shell(self, token_file=None, *, cancel_pending=False, send_chat=False,
+              review_work_items=False, manage_agent_sessions=False):
         shell = Shell(self.node, token_file or self.node.witness / "owner.token",
-                      cancel_pending=cancel_pending, send_chat=send_chat, review_work_items=review_work_items)
+                      cancel_pending=cancel_pending, send_chat=send_chat, review_work_items=review_work_items,
+                      manage_agent_sessions=manage_agent_sessions)
         self.addCleanup(shell.close)
         return shell
 
@@ -135,6 +139,105 @@ class ShellTests(unittest.TestCase):
                                          "decision": {"action": "finish", "summary": "private model summary"},
                                          "usage": {"input_tokens": 12, "output_tokens": 3}}, provider["token"])
         return lease["lease_id"]
+
+    def test_agent_runtime_controls_require_opt_in_current_revision_and_authority(self):
+        identity, grant, actor, sessions, hidden, provider = self.agent_sessions(1)
+        node = self.node
+        session = sessions[0]
+        params = {"id": session}
+        before = node.call("Session.Get", params, actor["token"])["reference"]
+        request = {"action": "pause", "reference": before}
+        endpoint = "/api/control-agent-session"
+        readonly = self.shell(identity)
+        paired = readonly.pair()
+        self.assertFalse(paired["manage_agent_sessions"])
+        self.error(readonly, 404, "NotFound", endpoint, data=request, token=paired["token"])
+
+        shell = self.shell(identity, manage_agent_sessions=True)
+        paired = shell.pair()
+        self.assertTrue(paired["manage_agent_sessions"])
+        token = paired["token"]
+        self.error(shell, 401, "AuthenticationRequired", endpoint, data=request)
+        self.error(shell, 400, "InvalidArgument", endpoint, data=dict(request, action="cancel"), token=token)
+        other = node.call("Session.Get", {"id": hidden})["reference"]
+        self.error(shell, 403, "PermissionDenied", endpoint, data=dict(request, reference=other), token=token)
+        self.error(shell, 409, "Conflict", endpoint, data=dict(request, reference=dict(before, digest="sha256:" + "a" * 64)),
+                   token=token)
+        code, _, receipt = shell.http(endpoint, request, token)
+        self.assertEqual(code, 200)
+        paused = node.call("Session.Get", params, actor["token"])
+        self.assertEqual(receipt, {"reference": paused["reference"]})
+        self.assertEqual(paused["session"]["pause_reason"], "OperatorPaused")
+        self.error(shell, 409, "Conflict", endpoint, data=request, token=token)
+        code, _, receipt = shell.http(endpoint, {"action": "resume", "reference": paused["reference"]}, token)
+        self.assertEqual(code, 200)
+        resumed = node.call("Session.Get", params, actor["token"])
+        self.assertEqual(receipt, {"reference": resumed["reference"]})
+        self.assertEqual(resumed["session"]["lifecycle"], "AwaitingModel")
+        lease = node.call("Model.Claim", {"session_id": session, "key": key()}, provider["token"])
+        unknown = node.call("Model.ReportFailure", {"session_id": session, "lease_id": lease["lease_id"],
+                                                   "model_ref": lease["context"]["model_ref"], "outcome": "Unknown"},
+                            provider["token"])
+        resume = {"action": "resume", "reference": unknown["session_ref"]}
+        self.error(shell, 409, "PreconditionFailed", endpoint, data=resume, token=token)
+        node.call("Grant.Revoke", target(grant))
+        self.error(shell, 403, "PermissionDenied", endpoint, data=resume, token=token)
+        self.assertEqual(node.call("Session.Get", params)["reference"], unknown["session_ref"])
+
+    def test_agent_runtime_pause_does_not_interrupt_a_concurrently_claimed_model(self):
+        identity, _, actor, sessions, _, provider = self.agent_sessions(1)
+        node = self.node
+        session = sessions[0]
+        params = {"id": session}
+        reference = node.call("Session.Get", params, actor["token"])["reference"]
+        endpoint = node.base / "session-control.sock"
+        waiting, release = Event(), Event()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener, ThreadPoolExecutor(2) as pool:
+            listener.bind(str(endpoint))
+            listener.settimeout(8)
+            listener.listen()
+            relay = pool.submit(self.relay, listener, ("Principal.WhoAmI", "Session.Get", "Session.Pause"),
+                                "Session.Get", waiting, release)
+            shell = Shell(node, identity, endpoint, manage_agent_sessions=True)
+            self.addCleanup(shell.close)
+            token = shell.pair()["token"]
+            pause = pool.submit(shell.http, "/api/control-agent-session", {"reference": reference, "action": "pause"}, token)
+            try:
+                self.assertTrue(waiting.wait(8))
+                lease = node.call("Model.Claim", {"session_id": session, "key": key()}, provider["token"])
+            finally:
+                release.set()
+            relay.result(8)
+            code, _, result = pause.result(8)
+            self.assertEqual((code, result["error"]["code"]), (409, "Conflict"))
+        state = node.call("Session.Get", params, actor["token"])["session"]
+        self.assertEqual((state["lifecycle"], state["current_lease"]), ("ModelInFlight", lease["lease_id"]))
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
+    def test_browser_observes_paused_agent_session_when_the_control_receipt_is_lost(self):
+        identity, _, actor, sessions, _, _ = self.agent_sessions(1)
+        node = self.node
+        session = sessions[0]
+        path = node.base / "session-control.sock"
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener, ThreadPoolExecutor() as pool:
+            listener.bind(str(path))
+            listener.settimeout(12)
+            listener.listen()
+            methods = ("Principal.WhoAmI", "Resource.List", "Session.Get", "Session.Get", "Session.ModelUsage",
+                       "Session.Get", "Session.Pause", "Session.Get", "Session.ModelUsage",
+                       "Session.Get", "Session.Resume", "Session.Get", "Session.ModelUsage")
+            relaying = pool.submit(self.relay, listener, methods, drop="Session.Pause")
+            shell = Shell(node, identity, path, manage_agent_sessions=True)
+            self.addCleanup(shell.close)
+            args = dict(origin=shell.origin, code=shell.code, agentControl=True, session=session,
+                        profile=str(node.base / "browser"))
+            subprocess.run(["node", str(Path(__file__).with_name("shell_browser.mjs")),
+                            os.environ.get("PSIOS_TEST_CHROME", "google-chrome")],
+                           input=json.dumps(args), text=True, check=True, timeout=35)
+            relaying.result(5)
+        state = node.call("Session.Get", {"id": session}, actor["token"])
+        self.assertEqual(state["session"]["lifecycle"], "AwaitingModel")
+        self.assertNotIn("operator_pause", state["session"])
 
     def test_agent_runtime_paginates_owned_sessions_and_projects_model_usage(self):
         identity, read, actor, visible, hidden, provider = self.agent_sessions(9)

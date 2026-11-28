@@ -56,6 +56,9 @@ enum Cmd {
         /// Allow the paired browser to accept or return pending PsiFlow evidence.
         #[arg(long)]
         review_work_items: bool,
+        /// Allow the paired browser to pause and resume Agent sessions at a model boundary.
+        #[arg(long)]
+        manage_agent_sessions: bool,
     },
     Status {
         #[arg(long, default_value = "owner-delegation")]
@@ -909,7 +912,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             cancel_pending_tasks,
             send_chat,
             review_work_items,
-        } => return shell::run(c, cancel_pending_tasks, send_chat, review_work_items),
+            manage_agent_sessions,
+        } => {
+            return shell::run(
+                c,
+                cancel_pending_tasks,
+                send_chat,
+                review_work_items,
+                manage_agent_sessions,
+            );
+        }
         Cmd::ModelStep {
             session,
             key,

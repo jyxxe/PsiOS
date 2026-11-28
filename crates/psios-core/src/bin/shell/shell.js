@@ -11,6 +11,7 @@ const files = filesView(request, byId, element, message);
 const pairing = byId("pairing");
 const workspace = byId("workspace");
 const desktop = byId("desktop");
+const wideDesktop = matchMedia("(min-width: 761px)");
 const launcher = byId("launcher");
 const launcherQuery = byId("launcher-query");
 const launcherApps = byId("launcher-apps");
@@ -41,6 +42,7 @@ let canCancelPending = false;
 const apps = new Map(["node", "tasks", "files", "applications", "chat", "projects", "agent-runtime"].map(id => [id, {
   window: byId("window-" + id), title: byId("title-" + id),
   dock: byId("nav-" + id), status: byId("status-" + id), state: "closed", tile: null, workspace: null,
+  geometry: null, gesture: null,
 }]));
 const workspaces = new Map([[0, { name: "桌面", active: null, maximized: null }]]);
 let currentWorkspace = 0;
@@ -93,6 +95,7 @@ function leave(text, error = false) {
     app.state = "closed";
     app.tile = null;
     app.workspace = null;
+    app.geometry = null;
   }
   cursors = [null];
   nextCursor = selectedTask = null;
@@ -762,6 +765,118 @@ function arrangeWindows() {
   if (focused !== document.activeElement && desktop.contains(focused)) focused.focus({ preventScroll: true });
 }
 
+const directions = new Map([
+  ["ArrowLeft", [-1, 0]], ["ArrowRight", [1, 0]],
+  ["ArrowUp", [0, -1]], ["ArrowDown", [0, 1]],
+]);
+const clamp = (value, min, max) => Math.max(min, Math.min(value, max));
+
+function canPlaceWindow(app) {
+  return wideDesktop.matches && !workspace.hidden && !app.window.hidden
+    && !app.tile && !app.window.classList.contains("maximized");
+}
+
+function desktopBounds() {
+  const width = desktop.clientWidth;
+  const height = desktop.clientHeight;
+  return { width, height, minWidth: Math.min(width, 320), minHeight: Math.min(height, 200) };
+}
+
+function constrainWindow(rect, bounds) {
+  const width = clamp(rect.width, bounds.minWidth, bounds.width);
+  const height = clamp(rect.height, bounds.minHeight, bounds.height);
+  return {
+    x: clamp(rect.x, 0, bounds.width - width), y: clamp(rect.y, 0, bounds.height - height),
+    width, height,
+  };
+}
+
+function endWindowGesture(app) {
+  const gesture = app.gesture;
+  app.gesture = null;
+  if (gesture?.handle.hasPointerCapture(gesture.pointer)) gesture.handle.releasePointerCapture(gesture.pointer);
+}
+
+function placeWindow(app) {
+  const available = canPlaceWindow(app);
+  app.moveHandle.hidden = app.resizeHandle.hidden = !available;
+  if (!available) endWindowGesture(app);
+  const floating = available && app.geometry !== null;
+  app.window.classList.toggle("floating", floating);
+  if (floating) {
+    app.geometry = constrainWindow(app.geometry, desktopBounds());
+    const { x, y, width, height } = app.geometry;
+    app.window.style.setProperty("--window-x", x + desktop.scrollLeft + "px");
+    app.window.style.setProperty("--window-y", y + desktop.scrollTop + "px");
+    app.window.style.setProperty("--window-width", width + "px");
+    app.window.style.setProperty("--window-height", height + "px");
+  } else {
+    for (const property of ["x", "y", "width", "height"]) app.window.style.removeProperty("--window-" + property);
+  }
+}
+
+function measureWindow(app) {
+  const area = desktop.getBoundingClientRect();
+  const rect = app.window.getBoundingClientRect();
+  return constrainWindow({
+    x: rect.left - area.left, y: rect.top - area.top, width: rect.width, height: rect.height,
+  }, desktopBounds());
+}
+
+function adjustWindow(app, original, dx, dy, resize) {
+  const bounds = desktopBounds();
+  const rect = constrainWindow(original, bounds);
+  if (resize) {
+    rect.width = clamp(rect.width + dx, bounds.minWidth, bounds.width - rect.x);
+    rect.height = clamp(rect.height + dy, bounds.minHeight, bounds.height - rect.y);
+  } else {
+    rect.x += dx;
+    rect.y += dy;
+  }
+  app.geometry = rect;
+  placeWindow(app);
+}
+
+function bindWindowGeometry(app, handle, resize) {
+  handle.addEventListener("pointerdown", event => {
+    if (!event.isPrimary || event.button !== 0 || app.gesture || !canPlaceWindow(app)) return;
+    event.preventDefault();
+    handle.focus({ preventScroll: true });
+    app.gesture = { handle, pointer: event.pointerId, x: event.clientX, y: event.clientY, rect: measureWindow(app) };
+    handle.setPointerCapture(event.pointerId);
+  });
+  handle.addEventListener("pointermove", event => {
+    const gesture = app.gesture;
+    if (gesture?.handle !== handle || gesture.pointer !== event.pointerId || !canPlaceWindow(app)) return;
+    const dx = event.clientX - gesture.x;
+    const dy = event.clientY - gesture.y;
+    if (dx || dy || app.geometry) adjustWindow(app, gesture.rect, dx, dy, resize);
+  });
+  for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) {
+    handle.addEventListener(type, event => {
+      if (app.gesture?.handle === handle && app.gesture.pointer === event.pointerId) endWindowGesture(app);
+    });
+  }
+  handle.addEventListener("keydown", event => {
+    if (!canPlaceWindow(app) || event.altKey || event.ctrlKey || event.metaKey) return;
+    if (event.key === "Home") {
+      event.preventDefault();
+      app.geometry = null;
+      placeWindow(app);
+      return;
+    }
+    const direction = directions.get(event.key);
+    if (!direction) return;
+    event.preventDefault();
+    const step = event.shiftKey ? 48 : 16;
+    adjustWindow(app, measureWindow(app), direction[0] * step, direction[1] * step, resize);
+  });
+}
+
+function placeWindows() {
+  for (const app of apps.values()) placeWindow(app);
+}
+
 function updateDesktop() {
   const { name, active, maximized } = workspaces.get(currentWorkspace);
   let visible = 0;
@@ -789,6 +904,7 @@ function updateDesktop() {
   desktop.classList.toggle("has-maximized", maximized !== null);
   desktop.classList.toggle("has-tiles", tiled);
   arrangeWindows();
+  placeWindows();
   byId("empty-desktop").hidden = visible !== 0;
   byId("active-app").textContent = active ? apps.get(active).title.textContent : "桌面";
   byId("open-workspaces").textContent = "工作区 · " + name;
@@ -949,6 +1065,7 @@ function hideWindow(id, state) {
   if (state === "closed") {
     app.tile = null;
     app.workspace = null;
+    app.geometry = null;
   }
   if (id === "tasks" && state === "closed") {
     cursors = [null];
@@ -970,6 +1087,12 @@ function hideWindow(id, state) {
 
 for (const [id, app] of apps) {
   const controls = byId("window-tools").content.cloneNode(true);
+  app.moveHandle = controls.querySelector('[data-geometry="move"]');
+  app.resizeHandle = controls.querySelector('[data-geometry="resize"]');
+  app.resizeHandle.remove();
+  app.window.append(app.resizeHandle);
+  bindWindowGeometry(app, app.moveHandle, false);
+  bindWindowGeometry(app, app.resizeHandle, true);
   for (const button of controls.querySelectorAll("[data-tile-side]")) {
     button.addEventListener("click", () => tileWindow(id, button.dataset.tileSide));
   }
@@ -995,6 +1118,9 @@ for (const [id, app] of apps) {
   app.window.addEventListener("pointerdown", () => focusApp(id));
   app.dock.addEventListener("click", () => openWindow(id));
 }
+new ResizeObserver(placeWindows).observe(desktop);
+wideDesktop.addEventListener("change", placeWindows);
+desktop.addEventListener("scroll", placeWindows, { passive: true });
 
 byId("open-launcher").addEventListener("click", () => {
   if (!bearer || launcher.open) return;

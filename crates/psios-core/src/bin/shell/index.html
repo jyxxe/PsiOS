@@ -293,12 +293,17 @@
   <template id="window-tools">
     <div class="window-tools">
       <button type="button" data-action="refresh">刷新</button>
+      <button type="button" data-geometry="move" aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp ArrowDown Home"
+              title="拖动或用方向键移动，Home 恢复默认布局" hidden>移动</button>
       <button type="button" data-tile-side="left" aria-pressed="false">贴靠左侧</button>
       <button type="button" data-tile-side="right" aria-pressed="false">贴靠右侧</button>
       <button type="button" data-action="minimize">最小化</button>
       <button type="button" data-action="maximize">最大化</button>
       <button type="button" data-action="close">关闭</button>
     </div>
+    <button type="button" class="window-resize" data-geometry="resize"
+            aria-label="调整窗口大小" aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp ArrowDown Home"
+            title="拖动或用方向键调整大小，Home 恢复默认布局" hidden><span aria-hidden="true">↘</span></button>
   </template>
 </body>
 </html>

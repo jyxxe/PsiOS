@@ -802,6 +802,8 @@ psios-mcp --socket /run/psios/api.sock --service-uid PSIOS_UID \
 
 使用 `--tool node.pci` 可在两种 MCP 协议中读取当前 Node 的 PCI 设备页。部署者须指定该 Node 的委托。MCP 空参数返回有界的第一页，`limit` 和 `next_cursor` 沿用 `node.pci` 的系统接口。现代持久句柄可重连读取原页。撤销委托后停止列出工具，并拒绝读取该委托下的 MCP 句柄。[授权、分页及进程恢复验收](../tests/test_mcp_tasks.py)
 
+用 `--tool node.usb` 可在两种 MCP 协议中以同一 Node 委托读取 USB 设备页。使用返回的 `next_cursor` 继续读取。换设备后需从首页重新枚举，已完成的现代 Tasks 句柄可以重新读取原制品。[真实 USB 热插拔与 MCP 验收](../tests/native_usb_inventory.py)
+
 调用使用正常的 `Task.Prepare`、`Task.Submit`、任务等候和 `Artifact.Read`，并在返回结果前重新核对指定授权。成功结果包含本地 Task ID 和受权结果。提交回执丢失时，SDK 用原始提交键查找已接受的 Task 或核对是否可重试。连接关闭或客户端取消通知不改变已经提交的只读 Task。它可在授权与 30 秒 Task 截止时间内继续，由 Core 保存结果。本地所有者可按原 Task 修订调用 `Task.Cancel`。适配器对结果等待 10 秒，Core Unix 套接字无法立即连接时返回传输错误，连接建立后沿用 SDK 的读写超时。每个 STDIO 连接串行处理，限制单帧 64 KiB，并按秒限制该连接的工具调用次数。
 
 这个接入面提供同步工具调用。MCP Tasks、跨连接调用映射和 HTTP 沿用各自的独立协议要求。[独立 STDIO 客户端、官方 Python 客户端和原 Task 验收](../tests/test_mcp_stdio.py)

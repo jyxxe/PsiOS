@@ -1,7 +1,7 @@
 //! Bounded observation of physical USB functions and root hubs from Linux sysfs.
 use super::sysfs::{BELOW, DIRECTORY, attribute, inventory_page, is_sysfs};
 use crate::{Result, err, host::Work, linux_clock, now, require};
-use psios_api::{DeviceInventoryQuery, sha256};
+use psios_api::{DeviceInventoryQuery, MAX_USB_INVENTORY_ROWS, sha256};
 use rustix::{
     fd::OwnedFd,
     fs::{Dir, FileType, Mode, OFlags, fstat, open, openat2, readlinkat},
@@ -17,7 +17,7 @@ use std::{
 
 pub(crate) const TOOL: &str = "node.usb";
 pub(crate) const FORMAT: u32 = super::pci::FORMAT + 1;
-const MAX_DEVICES: usize = 256;
+const MAX_DEVICES: usize = MAX_USB_INVENTORY_ROWS as usize;
 const MAX_ENTRIES: usize = 4096;
 
 fn number(value: &str) -> Option<u16> {

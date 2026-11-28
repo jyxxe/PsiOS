@@ -23,10 +23,11 @@ from support import Node, key, target
 
 
 class Shell:
-    def __init__(self, node, token_file, endpoint=None, *, cancel_pending=False, send_chat=False):
+    def __init__(self, node, token_file, endpoint=None, *, cancel_pending=False, send_chat=False, review_work_items=False):
         self.process = subprocess.Popen(
             [node.binaries / "psiosctl", "--socket", endpoint or node.socket, "--token-file", token_file, "shell",
-             *(["--cancel-pending-tasks"] if cancel_pending else []), *(["--send-chat"] if send_chat else [])],
+             *(["--cancel-pending-tasks"] if cancel_pending else []), *(["--send-chat"] if send_chat else []),
+             *(["--review-work-items"] if review_work_items else [])],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
         )
         try:
@@ -88,9 +89,9 @@ class ShellTests(unittest.TestCase):
         self.node = Node(os.environ.get("PSIOS_TEST_BIN_DIR", "target/debug"))
         self.addCleanup(self.node.close)
 
-    def shell(self, token_file=None, *, cancel_pending=False, send_chat=False):
+    def shell(self, token_file=None, *, cancel_pending=False, send_chat=False, review_work_items=False):
         shell = Shell(self.node, token_file or self.node.witness / "owner.token",
-                      cancel_pending=cancel_pending, send_chat=send_chat)
+                      cancel_pending=cancel_pending, send_chat=send_chat, review_work_items=review_work_items)
         self.addCleanup(shell.close)
         return shell
 
@@ -168,6 +169,151 @@ class ShellTests(unittest.TestCase):
         serialized = json.dumps(redacted)
         self.assertNotIn(task["resource_id"], serialized)
         self.assertNotIn(artifact["resource_id"], serialized)
+        self.error(viewer_shell, 404, "NotFound", "/api/work-item-evidence", token=viewer_token,
+                   data={"reference": submitted})
+
+    def test_work_item_evidence_download_uses_the_exact_revision(self):
+        _, grant, ready, submitted, task, artifact = self.work_item_evidence()
+        shell = self.shell()
+        path = "/api/work-item-evidence"
+        request = {"reference": submitted}
+        self.error(shell, 401, "AuthenticationRequired", path, data=request)
+        token = shell.pair()["token"]
+        self.error(shell, 404, "NotFound", path, token=token, data={"reference": ready})
+        self.error(shell, 409, "PreconditionFailed", path, token=token,
+                   data={"reference": dict(submitted, digest="sha256:" + "0" * 64)})
+        self.error(shell, 400, "InvalidArgument", path, token=token, data=dict(request, artifact_ref=artifact))
+        status, headers, raw = shell.http(path, request, token)
+        self.assertEqual((status, headers["Content-Type"], headers["Cache-Control"]),
+                         (200, "application/octet-stream", "no-store"))
+        self.assertIn("attachment", headers["Content-Disposition"])
+        self.assertEqual("sha256:" + hashlib.sha256(raw).hexdigest(), artifact["digest"])
+        self.node.call("Grant.Revoke", target(grant))
+        self.error(shell, 403, "PermissionDenied", path, token=token, data=request)
+        status, _, direct = shell.http("/api/task-artifact", {"task_id": task["resource_id"],
+                                       "reference": artifact, "download": True}, token)
+        self.assertEqual((status, direct), (200, raw))
+
+    def test_work_item_evidence_download_rechecks_project_after_reading(self):
+        node = self.node
+        _, grant, _, submitted, _, _ = self.work_item_evidence()
+        proxy = node.base / "project-evidence.sock"
+        waiting, release = Event(), Event()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener, ThreadPoolExecutor(2) as pool:
+            listener.bind(str(proxy))
+            listener.listen()
+            listener.settimeout(8)
+            forwarded = pool.submit(self.relay, listener,
+                                    ("Principal.WhoAmI", "WorkItem.RevisionGet", "Artifact.ReadChunk", "WorkItem.RevisionGet"),
+                                    "Artifact.ReadChunk", waiting, release)
+            shell = Shell(node, node.witness / "owner.token", proxy)
+            self.addCleanup(shell.close)
+            token = shell.pair()["token"]
+            download = pool.submit(shell.http, "/api/work-item-evidence", {"reference": submitted}, token)
+            try:
+                self.assertTrue(waiting.wait(8))
+                node.call("Grant.Revoke", target(grant))
+            finally:
+                release.set()
+            forwarded.result(8)
+            status, headers, fault = download.result(8)
+            self.assertEqual((status, fault["error"]["code"]), (403, "PermissionDenied"))
+            self.assertIsNone(headers["Content-Disposition"])
+            self.assertEqual(headers["Cache-Control"], "no-store")
+
+    def work_item_reviewer(self, project, task):
+        node = self.node
+        reviewer = node.call("Agent.Register", {"name": "shell-work-item-reviewer"})
+        principal = reviewer["principal_id"]
+        node.call("Project.SetMember", {**target(project), "principal_id": principal, "role": "Reviewer"})
+        node.call("Grant.Issue", {"principal_id": principal, "actions": ["project.read", "project.review"],
+                                 "tool_targets": [project["resource_id"]], "units": 2, "ttl_seconds": 160})
+        result = node.call("Grant.Issue", {"principal_id": principal, "actions": ["task.results.read"],
+                                         "tool_targets": [task["resource_id"]], "units": 1, "ttl_seconds": 160})
+        identity = node.base / "reviewer.token"
+        identity.touch(mode=0o600)
+        identity.write_text(reviewer["token"])
+        return reviewer, identity, result["grant_ref"]
+
+    def test_work_item_review_is_opt_in_and_binds_the_exact_pending_revision(self):
+        project, _, _, submitted, task, _ = self.work_item_evidence()
+        reviewer, identity, _ = self.work_item_reviewer(project, task)
+        path = "/api/review-work-item"
+        request = {"reference": submitted, "accept": False}
+        default = self.shell(identity)
+        paired = default.pair()
+        self.assertFalse(paired["review_work_items"])
+        self.error(default, 404, "NotFound", path, token=paired["token"], data=request)
+        owner = self.shell(review_work_items=True)
+        self.error(owner, 403, "PermissionDenied", path, token=owner.pair()["token"], data=request)
+        shell = self.shell(identity, review_work_items=True)
+        self.error(shell, 401, "AuthenticationRequired", path, data=request)
+        paired = shell.pair()
+        self.assertTrue(paired["review_work_items"])
+        token = paired["token"]
+        self.error(shell, 400, "InvalidArgument", path, token=token, data=dict(request, project_id=project["resource_id"]))
+        self.error(shell, 409, "PreconditionFailed", path, token=token,
+                   data=dict(request, reference=dict(submitted, digest="sha256:" + "0" * 64)))
+        status, _, receipt = shell.http(path, request, token)
+        current = self.node.call("WorkItem.Get", {"id": submitted["resource_id"]})
+        self.assertEqual((status, receipt), (200, {"reference": current["reference"]}))
+        self.assertEqual(current["value"]["lifecycle"], "Ready")
+        self.assertEqual((current["value"]["review"]["reviewer_principal_id"], current["value"]["review"]["accepted"]),
+                         (reviewer["principal_id"], False))
+        self.error(shell, 409, "Conflict", path, token=token, data=dict(request, accept=True))
+        self.assertEqual(self.node.call("WorkItem.Get", {"id": submitted["resource_id"]}), current)
+
+    def test_work_item_review_rechecks_result_grant_before_commit(self):
+        project, _, _, submitted, task, _ = self.work_item_evidence()
+        _, identity, grant = self.work_item_reviewer(project, task)
+        proxy = self.node.base / "review-race.sock"
+        waiting, release = Event(), Event()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener, ThreadPoolExecutor(2) as pool:
+            listener.bind(str(proxy))
+            listener.listen()
+            listener.settimeout(8)
+            methods = ("Principal.WhoAmI", "WorkItem.RevisionGet", "WorkItem.Review")
+            forwarded = pool.submit(self.relay, listener, methods, "WorkItem.RevisionGet", waiting, release)
+            shell = Shell(self.node, identity, proxy, review_work_items=True)
+            self.addCleanup(shell.close)
+            request = {"reference": submitted, "accept": True}
+            review = pool.submit(shell.http, "/api/review-work-item", request, shell.pair()["token"])
+            try:
+                self.assertTrue(waiting.wait(8))
+                self.node.call("Grant.Revoke", target(grant))
+            finally:
+                release.set()
+            forwarded.result(8)
+            status, _, fault = review.result(8)
+            self.assertEqual((status, fault["error"]["code"]), (403, "PermissionDenied"))
+            self.assertEqual(self.node.call("WorkItem.Get", {"id": submitted["resource_id"]})["reference"], submitted)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
+    def test_browser_can_recover_a_lost_work_item_review_reply(self):
+        node = self.node
+        project, _, _, submitted, task, _ = self.work_item_evidence()
+        reviewer, identity, _ = self.work_item_reviewer(project, task)
+        proxy = node.base / "review-response.sock"
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener, ThreadPoolExecutor(1) as pool:
+            listener.bind(str(proxy))
+            listener.listen()
+            listener.settimeout(34)
+            methods = ("Principal.WhoAmI", "Project.List", "WorkItem.List", "Project.Get", "WorkItem.RevisionGet",
+                       "WorkItem.RevisionGet", "WorkItem.Review", "WorkItem.List", "Project.Get", "WorkItem.RevisionGet")
+            forwarded = pool.submit(self.relay, listener, methods, drop="WorkItem.Review")
+            shell = Shell(node, identity, proxy, review_work_items=True)
+            self.addCleanup(shell.close)
+            args = dict(origin=shell.origin, code=shell.code, projectReview=True, project=project["resource_id"],
+                        work_item=submitted, reviewer=reviewer["principal_id"], profile=str(node.base / "browser"))
+            subprocess.run(["node", str(Path(__file__).with_name("shell_browser.mjs")),
+                            os.environ.get("PSIOS_TEST_CHROME", "google-chrome")], input=json.dumps(args).encode(),
+                           check=True, timeout=35)
+            forwarded.result(8)
+        current = node.call("WorkItem.Get", {"id": submitted["resource_id"]})
+        self.assertEqual(current["value"]["lifecycle"], "Verified")
+        self.assertEqual(current["value"]["review"]["reviewer_principal_id"], reviewer["principal_id"])
+        history = node.call("WorkItem.History", {"id": submitted["resource_id"]})["items"]
+        self.assertEqual([record["reference"] for record in history[-2:]], [submitted, current["reference"]])
 
     @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
     def test_browser_reads_fixed_work_item_evidence_and_clears_revoked_project(self):
@@ -176,9 +322,11 @@ class ShellTests(unittest.TestCase):
         parent, child = socket.socketpair()
         with parent, child:
             parent.settimeout(35)
+            downloads = self.node.base / "downloads"
+            downloads.mkdir()
             args = dict(origin=shell.origin, code=shell.code, projectEvidence=True, project=project["resource_id"],
                         work_item=submitted, evidence_task=task, evidence_artifact=artifact,
-                        profile=str(self.node.base / "browser"), control_fd=child.fileno())
+                        profile=str(self.node.base / "browser"), downloads=str(downloads), control_fd=child.fileno())
             with subprocess.Popen(["node", str(Path(__file__).with_name("shell_browser.mjs")),
                                    os.environ.get("PSIOS_TEST_CHROME", "google-chrome")],
                                   stdin=subprocess.PIPE, pass_fds=(child.fileno(),)) as browser:

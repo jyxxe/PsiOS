@@ -2,7 +2,7 @@ const roles = { Owner: "所有者", Manager: "管理员", Reviewer: "审核者",
 const lifecycles = { Ready: "待处理", InReview: "审核中", Verified: "已验证", Closed: "已关闭", Abandoned: "已终止" };
 const priorities = { Low: "低", Normal: "普通", High: "高", Urgent: "紧急" };
 
-export function projectView(request, byId, element, message, fields) {
+export function projectView(request, byId, element, message, fields, downloadEvidence) {
   const rows = byId("project-rows");
   const empty = byId("projects-empty");
   const notice = byId("status-projects");
@@ -24,6 +24,7 @@ export function projectView(request, byId, element, message, fields) {
   let nextProject = null;
   let nextItem = null;
   let selection = null;
+  let reviewer = null;
 
   function clearItemDetail() {
     detailRevision += 1;
@@ -72,10 +73,77 @@ export function projectView(request, byId, element, message, fields) {
         ["任务", task.resource_id, true], ["任务修订", task.version, true],
         ["制品", artifact.resource_id, true], ["制品修订", artifact.version, true],
         ["制品引用摘要", artifact.digest, true], ["提交时间", submitted],
-      ]));
+      ]), evidenceDownload(item.reference, artifact));
+      const projectRole = rows.querySelector('button[aria-pressed="true"]')?.dataset.role;
+      if (reviewer && reviewer !== item.assignee && item.lifecycle === "InReview" &&
+          (projectRole === "Owner" || projectRole === "Reviewer")) {
+        itemContent.append(workItemReview(item.reference));
+      }
     } else if (item.has_evidence) {
       itemContent.append(element("p", "当前授权下无法查看任务证据。", "message"));
     }
+  }
+
+  function workItemReview(reference) {
+    const form = element("form", undefined, "work-item-review");
+    const label = element("label", "审核结论");
+    label.htmlFor = "work-item-decision";
+    const decision = element("select");
+    decision.id = label.htmlFor;
+    for (const [value, text] of [["", "选择结论"], ["accept", "接受证据"], ["return", "退回工作项"]]) {
+      const option = element("option", text);
+      option.value = value;
+      decision.append(option);
+    }
+    const submit = element("button", "确认审核");
+    submit.type = "submit";
+    submit.disabled = true;
+    const notice = element("p", "", "message");
+    notice.setAttribute("role", "status");
+    form.append(label, decision, submit, notice);
+    decision.addEventListener("change", () => { submit.disabled = !decision.value; });
+    form.addEventListener("submit", async event => {
+      event.preventDefault();
+      if (submit.disabled || !decision.value) return;
+      submit.disabled = decision.disabled = true;
+      message(notice, "正在提交审核…");
+      try {
+        const receipt = await request("/api/review-work-item", { reference, accept: decision.value === "accept" });
+        if (form.isConnected) await loadItems(selection, items, false, receipt.reference.resource_id);
+      } catch (error) {
+        if (!form.isConnected) return;
+        const refresh = element("button", "重新读取工作项");
+        refresh.type = "button";
+        refresh.addEventListener("click", () => loadItems(selection, items, false, reference.resource_id));
+        message(notice, error.code === "DependencyUnavailable" || !error.code
+          ? "审核回执未收到。请重新读取工作项查看结论。" : error.message, true);
+        form.append(refresh);
+        refresh.focus();
+      }
+    });
+    return form;
+  }
+
+  function evidenceDownload(reference, artifact) {
+    const controls = element("div", undefined, "evidence-download");
+    const download = element("button", "下载证据");
+    download.id = "download-work-item-evidence";
+    download.type = "button";
+    const notice = element("p", "", "message");
+    notice.setAttribute("role", "status");
+    controls.append(download, notice);
+    download.addEventListener("click", async () => {
+      download.disabled = true;
+      message(notice, "正在核对证据…");
+      try {
+        if (await downloadEvidence(reference, artifact, controls)) message(notice, "摘要已核验，已提交浏览器下载。");
+      } catch (error) {
+        if (controls.isConnected) message(notice, error.code === "QuotaExceeded" ? "证据超过 8 MiB。" : error.message, true);
+      } finally {
+        download.disabled = false;
+      }
+    });
+    return controls;
   }
 
   async function inspectItem(reference, button) {
@@ -116,7 +184,7 @@ export function projectView(request, byId, element, message, fields) {
     return list;
   }
 
-  async function loadItems(id, pages = [null], focus = false) {
+  async function loadItems(id, pages = [null], focus = false, reopen = null) {
     clearDetail();
     const revision = itemRevision;
     selection = id;
@@ -135,6 +203,11 @@ export function projectView(request, byId, element, message, fields) {
       content.replaceChildren(renderItems(page.items));
       previousItems.disabled = items.length === 1;
       nextItems.disabled = !nextItem;
+      if (reopen) {
+        const current = page.items.find(item => item.id === reopen);
+        const opener = content.querySelector(`[data-work-item-id="${CSS.escape(reopen)}"] button`);
+        if (current && opener) await inspectItem(current.reference, opener);
+      }
     } catch (error) {
       if (revision === itemRevision) {
         if (error.code === "PermissionDenied") {
@@ -163,6 +236,7 @@ export function projectView(request, byId, element, message, fields) {
         const button = element("button", project.title);
         button.type = "button";
         button.dataset.projectId = project.id;
+        button.dataset.role = project.role;
         button.setAttribute("aria-pressed", "false");
         button.addEventListener("click", () => loadItems(project.id, [null], true));
         const cell = element("td");
@@ -205,6 +279,7 @@ export function projectView(request, byId, element, message, fields) {
       nextProject = nextItem = selection = null;
       hide();
     },
+    setReviewer(principal) { reviewer = principal; },
     refresh: () => loadProjects(directory, selection, [null]),
   };
 }

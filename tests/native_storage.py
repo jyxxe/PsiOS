@@ -1,4 +1,4 @@
-"""Verify native disk identity on virtio and PCIe NVMe storage."""
+"""Verify native disk identity on virtio, PCIe NVMe, and SATA AHCI storage."""
 import argparse
 import json
 from pathlib import Path
@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 
-from native_disk import REPO, boot, check_clean_shutdown, password, replace_partition, sha
+from native_disk import REPO, boot, call, check_clean_shutdown, password, replace_partition, sha
 
 
 def replace_with_unrelated_partition(work, image, name, start, size):
@@ -40,6 +40,11 @@ def exercise(args, work):
         except AssertionError as failure:
             raise AssertionError(c.buf[-2048:].decode(errors="replace")) from failure
         assert json.loads(c.run("psiosctl whoami"))["principal_id"] == "local-owner"
+        node = call(c, "Node.Get", {})["reference"]["resource_id"]
+        task = json.loads(c.run("printf '{}' | psiosctl submit system.status --key native-storage-layout"))["task_id"]
+        result = call(c, "Task.Wait", {"id": task, "timeout_ms": 5000})
+        assert result["lifecycle"] == "Succeeded", result
+        c.run("printf 'native storage round trip\\n' > ~/layout-evidence")
         c.run('test "$(ls -d /sys/class/block/vd? | wc -l)" -eq 2')
         state = c.run("awk '$2 == \"/var/lib\" { print $1 }' /proc/mounts")
         homes = c.run("awk '$2 == \"/mnt/psios-homes\" { print $1 }' /proc/mounts")
@@ -51,22 +56,27 @@ def exercise(args, work):
     check_clean_shutdown(installed)
     assert sha(extra) == extra_digest
 
-    with boot(work, installed, extra_disk=extra, disk_bus="nvme", pace_commands=True) as c:
-        c.login("psios", operator)
-        assert json.loads(c.run("psiosctl whoami"))["principal_id"] == "local-owner"
-        assert c.run("awk '$2 == \"/var/lib\" { print $1 }' /proc/mounts") == "/dev/nvme0n1p2"
-        assert c.run("awk '$2 == \"/mnt/psios-homes\" { print $1 }' /proc/mounts") == "/dev/nvme0n1p3"
-        c.send("exit")
-        c.login("root", admin)
-        c.send("poweroff")
-        assert c.vm.wait(35) == 0
-    check_clean_shutdown(installed)
-    assert sha(extra) == extra_digest
+    for bus, disk, additional in (("nvme", "/dev/nvme0n1p", "virtio"), ("ahci", "/dev/sda", "nvme")):
+        with boot(work, installed, extra_disk=extra, disk_bus=bus, extra_bus=additional, pace_commands=True) as c:
+            c.login("psios", operator)
+            assert json.loads(c.run("psiosctl whoami"))["principal_id"] == "local-owner"
+            assert c.run("awk '$2 == \"/var/lib\" { print $1 }' /proc/mounts") == disk + "2"
+            assert c.run("awk '$2 == \"/mnt/psios-homes\" { print $1 }' /proc/mounts") == disk + "3"
+            assert call(c, "Node.Get", {})["reference"]["resource_id"] == node
+            assert call(c, "Task.Wait", {"id": task, "timeout_ms": 5000})["result"] == result["result"]
+            assert c.run("cat ~/layout-evidence") == "native storage round trip"
+            c.send("exit")
+            c.login("root", admin)
+            c.send("poweroff")
+            assert c.vm.wait(35) == 0
+        check_clean_shutdown(installed)
+        assert sha(extra) == extra_digest
 
     duplicate = work / "duplicate.raw"
-    shutil.copyfile(installed, duplicate)
+    subprocess.run(["cp", "--sparse=always", installed, duplicate], check=True)
     original = sha(installed)
-    for first, second in (("virtio", "virtio"), ("nvme", "virtio"), ("nvme", "nvme")):
+    for first, second in (("virtio", "virtio"), ("nvme", "virtio"), ("nvme", "nvme"),
+                          ("virtio", "ahci"), ("ahci", "nvme"), ("ahci", "ahci")):
         with boot(work, installed, extra_disk=duplicate, disk_bus=first, extra_bus=second) as c:
             c.until(b"PsiOS boot stopped at deployment-ambiguity", reject=b" login: ")
             assert c.vm.wait(25) == 0
@@ -75,11 +85,11 @@ def exercise(args, work):
     replace_with_unrelated_partition(work, installed, "first-home.ext4", 257, 64)
     replace_with_unrelated_partition(work, duplicate, "second-state.ext4", 65, 192)
     before = (sha(installed), sha(duplicate))
-    with boot(work, installed, extra_disk=duplicate) as c:
+    with boot(work, installed, extra_disk=duplicate, disk_bus="ahci") as c:
         c.until(b"PsiOS boot stopped at home-device")
         assert c.vm.wait(25) == 0
     assert (sha(installed), sha(duplicate)) == before
-    print("Verified virtio and NVMe boot beside unrelated storage, reject duplicate identities and preserve both disks with split identities.")
+    print("Verified virtio, NVMe and SATA AHCI boot, duplicate refusal and unchanged disks with split identities.")
 
 
 if __name__ == "__main__":

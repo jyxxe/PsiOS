@@ -82,7 +82,7 @@ jobs:
           path: ${{ runner.temp }}/rescue-core
       - name: Download and configure rescue VM prerequisites
         run: |
-          packages=(qemu-system-x86 qemu-utils genisoimage cpio e2fsprogs fdisk acl dnsmasq-base gcc libc6-dev
+          packages=(qemu-system-x86 qemu-utils genisoimage cpio e2fsprogs fdisk acl dnsmasq-base gcc libc6-dev squashfs-tools
                     xorriso grub-common grub-efi-amd64-bin dosfstools mtools ovmf seabios openssl openssh-client strace)
           missing=()
           for pkg in "${packages[@]}"; do
@@ -141,11 +141,14 @@ jobs:
           python3 -B tests/native_combined_core.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
             --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
 
-      - name: Acquire and release a real DHCP lease on the configured virtio NIC
+      - name: Acquire and release DHCP leases on configured virtio and e1000e NICs
         run: |
-          sudo unshare --net --propagation private runuser -u "$(id -un)" -- \
-            python3 tests/native_dhcp.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
-            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+          for driver in virtio e1000e; do
+            sudo unshare --net --propagation private runuser -u "$(id -un)" -- \
+              python3 tests/native_dhcp.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+              --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
+              --dhcp-driver "$driver"
+          done
 
       - name: Install and renew DHCPv4 classless routes over an isolated TAP
         run: |

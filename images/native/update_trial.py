@@ -69,7 +69,8 @@ def receipt_lineage(prepared):
                 "unsigned candidate has incompatible trial trust")
     require(all(trial[name] == candidate[name] for name in
                 ("geometry_mib", "state_uuid", "home_uuid", "source_commit", "upgrade"))
-            and all(trial.get(name) == candidate.get(name) for name in ("network_profile", "core_limits", "ssh_console"))
+            and all(trial.get(name) == candidate.get(name) for name in
+                    ("network_profile", "wired_driver", "core_limits", "ssh_console"))
             and trial["deployment_manifest_sha256"] != candidate["deployment_manifest_sha256"],
             "trial and candidate deployment lineage differs")
     geometry = trial["geometry_mib"]

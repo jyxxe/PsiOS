@@ -141,6 +141,8 @@ def check_state(work, state, receipt):
         mac6, dns6 = create.validate_persisted_static(work, state, 6)
     if network == create.STATIC_DUAL and (mac4 != mac6 or dns4 + dns6 > 3):
         raise ValueError("inconsistent factory dual-stack profile")
+    if "wired_driver" in receipt:
+        create.validate_persisted_e1000e(work, state)
     if "ssh_console" in receipt:
         create.validate_persisted_ssh(work, state)
         ssh_state = directory_entries(work, state, "/etc/psios")
@@ -176,7 +178,7 @@ def stage_image(work: Path, image: Path, receipt: Path, receipt_sha256: str) -> 
         create.boot_media.pinned_copy(receipt, staged_receipt, receipt_sha256, RECEIPT_LIMIT)
         manifest, layout, _ = create.read_receipt(staged_receipt)
         if manifest["format"] < 2 or "upgrade" in manifest or "trial_disk_uuid" in manifest:
-            raise ValueError("blank installation requires a first-install receipt in formats 2 through 6")
+            raise ValueError("blank installation requires a supported first-install receipt")
         image_sha256 = digest_field(manifest.get("initial_image_sha256"), "factory image")
         deployment_sha256 = digest_field(manifest.get("deployment_manifest_sha256"), "deployment manifest")
         initramfs_sha256 = digest_field(manifest.get("installed_initramfs_sha256"), "installed initramfs")
@@ -208,7 +210,7 @@ def stage_image(work: Path, image: Path, receipt: Path, receipt_sha256: str) -> 
             "core_configuration_sha256": config_sha256,
             "state_initialization": "Fresh",
         }
-        for name in ("secure_boot", "network_profile", "core_limits", "ssh_console"):
+        for name in ("secure_boot", "network_profile", "wired_driver", "core_limits", "ssh_console"):
             if name in manifest:
                 facts[name] = manifest[name]
         staged_image.chmod(0o400)

@@ -120,7 +120,7 @@ class Console:
 @contextmanager
 def boot(work, image, network_mac=None, extra_disk=None, tap=None, *, rtc_base=None,
          disk_format="raw", vars_file="vars.fd", vcpus=2, pace_commands=False,
-         disk_bus="virtio", extra_bus="virtio", ssh_port=None):
+         disk_bus="virtio", extra_bus="virtio", network_model="virtio-net-pci", ssh_port=None):
     # The privileged TAP fixture has a reproducible serial stall on hosted KVM.
     # Use a portable CPU emulator for that fixture; keep its real virtio and TAP.
     accel = "kvm" if tap is None and os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
@@ -146,7 +146,7 @@ def boot(work, image, network_mac=None, extra_disk=None, tap=None, *, rtc_base=N
         if ssh_port is not None:
             network += f",hostfwd=tcp:127.0.0.1:{ssh_port}-192.0.2.20:22"
         cmd += ["-netdev", network,
-                "-device", f"virtio-net-pci,netdev=network,mac={network_mac},romfile="]
+                "-device", f"{network_model},netdev=network,mac={network_mac},romfile="]
     else:
         cmd += ["-nic", "none"]
     with subprocess.Popen(cmd, cwd=work, stdin=subprocess.PIPE, stdout=subprocess.PIPE) as vm:
@@ -161,7 +161,8 @@ def boot(work, image, network_mac=None, extra_disk=None, tap=None, *, rtc_base=N
 
 
 def disk_device(bus, name):
-    return {"virtio": f"virtio-blk-pci,drive={name}", "nvme": f"nvme,drive={name},serial=psios-{name}"}[bus]
+    return {"virtio": f"virtio-blk-pci,drive={name}", "nvme": f"nvme,drive={name},serial=psios-{name}",
+            "ahci": f"ide-hd,bus=ide.{0 if name == 'installed' else 1},drive={name}"}[bus]
 
 
 def password(work, name):

@@ -28,7 +28,7 @@ def check_lease(c):
         raise AssertionError(observed) from failure
 
 
-def prepare(args, work):
+def prepare(args, work, *, dhcp_driver="virtio"):
     for name, source in (("code.fd", "OVMF_CODE_4M.fd"), ("vars.fd", "OVMF_VARS_4M.fd")):
         shutil.copyfile(args.ovmf_dir / source, work / name)
     user_secret, user_hash = password(work, "operator.hash")
@@ -39,16 +39,22 @@ def prepare(args, work):
              "--console-hash", user_hash, "--root-console-hash", root_hash, "--dhcp-mac"]
     refused = subprocess.run(build + ["ff:ff:ff:ff:ff:ff"], capture_output=True, text=True, timeout=10)
     assert refused.returncode and "unicast MAC" in refused.stderr and not image.exists(), refused.stderr
-    subprocess.run(build + [MAC], check=True, stdout=subprocess.DEVNULL, timeout=150)
+    receipt = json.loads(subprocess.check_output([*build, MAC, "--dhcp-driver", dhcp_driver], timeout=150))
+    if dhcp_driver == "e1000e":
+        assert (receipt["format"], receipt["wired_driver"]) == (8, "e1000e"), receipt
+    else:
+        assert (receipt["format"], receipt.get("wired_driver")) == (2, None), receipt
     return image, user_secret, root_secret
 
 
 def exercise(args, work):
-    image, user_secret, root_secret = prepare(args, work)
-    with boot(work, image, network_mac=MAC) as c:
+    image, user_secret, root_secret = prepare(args, work, dhcp_driver=args.dhcp_driver)
+    model, driver = ("e1000e", "e1000e") if args.dhcp_driver == "e1000e" else ("virtio-net-pci", "virtio_net")
+    with boot(work, image, network_mac=MAC, network_model=model, pace_commands=True) as c:
         c.login("psios", user_secret)
         identity = json.loads(c.run("psiosctl whoami"))["authority_id"]
         check_lease(c)
+        assert c.run("basename $(readlink /sys/class/net/eth0/device/driver)") == driver
         c.run("test \"$(cat /sys/class/net/eth0/address)\" = " + MAC)
         c.run("test \"$(cat /proc/sys/net/ipv6/conf/eth0/disable_ipv6)\" = 1")
         c.send("exit")
@@ -67,11 +73,11 @@ def exercise(args, work):
         assert c.vm.wait(30) == 0
     check_clean_shutdown(image)
 
-    with boot(work, image, network_mac=OTHER) as c:
+    with boot(work, image, network_mac=OTHER, network_model=model, pace_commands=True) as c:
         c.login("psios", user_secret)
         assert json.loads(c.run("psiosctl whoami"))["authority_id"] == identity
         wait_for(c, f"test \"$(cat /sys/class/net/eth0/address 2>/dev/null)\" = {OTHER}")
-        wait_for(c, "grep -Fxq 'configured virtio interface is absent' /run/psios-network/status")
+        wait_for(c, f"grep -Fxq 'configured {args.dhcp_driver} interface is absent' /run/psios-network/status")
         c.run("test ! -s /etc/resolv.conf && ! busybox ip -4 addr show dev eth0 | grep -q 'inet '")
         c.run("test -z \"$(busybox ip -4 route show default)\"")
         c.send("exit")
@@ -79,13 +85,14 @@ def exercise(args, work):
         c.send("poweroff")
         assert c.vm.wait(30) == 0
     check_clean_shutdown(image)
-    print("Verified DHCP address, scoped default route and DNS through renewal, release, rebind and wrong-MAC boot with the same local authority.")
+    print(f"Verified {driver} DHCP address, scoped default route and DNS through renewal, release, rebind and wrong-MAC boot.")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kernel-iso", type=Path, required=True)
     parser.add_argument("--archive", type=Path, required=True)
+    parser.add_argument("--dhcp-driver", choices=("virtio", "e1000e"), default="virtio")
     parser.add_argument("--installer", type=Path, default=REPO / "images/native/create.py")
     parser.add_argument("--ovmf-dir", type=Path, default=Path("/usr/share/OVMF"))
     args = parser.parse_args()

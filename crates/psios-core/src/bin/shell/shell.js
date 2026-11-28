@@ -8,6 +8,7 @@ const projects = projectView(request, byId, element, message, fields, downloadEv
 const agentRuntime = sessionsView(request, byId, element, message, fields);
 const pairing = byId("pairing");
 const workspace = byId("workspace");
+const desktop = byId("desktop");
 const code = byId("code");
 const status = byId("status");
 const nodeView = byId("node-view");
@@ -25,7 +26,7 @@ let sessionRequests = new AbortController();
 let canCancelPending = false;
 const apps = new Map(["node", "tasks", "applications", "chat", "projects", "agent-runtime"].map(id => [id, {
   window: byId("window-" + id), title: byId("title-" + id),
-  dock: byId("nav-" + id), status: byId("status-" + id), state: "closed",
+  dock: byId("nav-" + id), status: byId("status-" + id), state: "closed", tile: null,
 }]));
 let active = null;
 let maximized = null;
@@ -54,7 +55,10 @@ function leave(text, error = false) {
   sessionRequests = new AbortController();
   canCancelPending = false;
   workspace.hidden = true;
-  for (const app of apps.values()) app.state = "closed";
+  for (const app of apps.values()) {
+    app.state = "closed";
+    app.tile = null;
+  }
   active = maximized = null;
   cursors = [null];
   nextCursor = selectedTask = null;
@@ -669,12 +673,34 @@ function showWindow(id, app, shown) {
   message(app.status, "");
 }
 
+function arrangeWindows() {
+  const focused = document.activeElement;
+  const order = { left: 0, right: 1 };
+  const sorted = Array.from(apps.values()).sort((a, b) => (order[a.tile] ?? 2) - (order[b.tile] ?? 2));
+  let next = byId("empty-desktop").nextElementSibling;
+  for (const { window } of sorted) {
+    if (window !== next) {
+      if (typeof desktop.moveBefore === "function") desktop.moveBefore(window, next);
+      else desktop.insertBefore(window, next);
+    }
+    next = window.nextElementSibling;
+  }
+  if (focused !== document.activeElement && desktop.contains(focused)) focused.focus({ preventScroll: true });
+}
+
 function updateDesktop() {
   let visible = 0;
+  let tiled = false;
   for (const [id, app] of apps) {
     const shown = app.state === "open" && (!maximized || maximized === id);
     showWindow(id, app, shown);
     if (shown) visible += 1;
+    if (app.tile) app.window.dataset.tile = app.tile;
+    else delete app.window.dataset.tile;
+    if (shown && app.tile && !maximized) tiled = true;
+    for (const button of app.window.querySelectorAll("[data-tile-side]")) {
+      button.setAttribute("aria-pressed", String(button.dataset.tileSide === app.tile));
+    }
     app.window.classList.toggle("focused", id === active);
     app.window.classList.toggle("maximized", id === maximized);
     app.dock.dataset.state = app.state;
@@ -685,13 +711,29 @@ function updateDesktop() {
     maximize.textContent = maximized === id ? "还原" : "最大化";
     maximize.setAttribute("aria-pressed", String(maximized === id));
   }
-  byId("desktop").classList.toggle("has-maximized", maximized !== null);
+  desktop.classList.toggle("has-maximized", maximized !== null);
+  desktop.classList.toggle("has-tiles", tiled);
+  arrangeWindows();
   byId("empty-desktop").hidden = visible !== 0;
   byId("active-app").textContent = active ? apps.get(active).title.textContent : "桌面";
 }
 
 function focusApp(id) {
   if (active === id) return;
+  active = id;
+  updateDesktop();
+}
+
+function tileWindow(id, side) {
+  const app = apps.get(id);
+  if (app.tile === side) {
+    app.tile = null;
+  } else {
+    const occupant = Array.from(apps.values()).find(other => other.tile === side);
+    if (occupant) occupant.tile = app.tile;
+    app.tile = side;
+  }
+  maximized = null;
   active = id;
   updateDesktop();
 }
@@ -708,6 +750,7 @@ function openWindow(id) {
 function hideWindow(id, state) {
   const app = apps.get(id);
   app.state = state;
+  if (state === "closed") app.tile = null;
   if (maximized === id) maximized = null;
   if (id === "tasks" && state === "closed") {
     cursors = [null];
@@ -727,6 +770,9 @@ function hideWindow(id, state) {
 
 for (const [id, app] of apps) {
   const controls = byId("window-tools").content.cloneNode(true);
+  for (const button of controls.querySelectorAll("[data-tile-side]")) {
+    button.addEventListener("click", () => tileWindow(id, button.dataset.tileSide));
+  }
   controls.querySelector('[data-action="refresh"]').addEventListener("click", () => {
     if (id === "node") loadNode();
     else if (id === "tasks") loadTasks();

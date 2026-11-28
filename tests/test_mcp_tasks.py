@@ -10,8 +10,9 @@ import time
 import unittest
 
 from support import Failure, Node, key, target
+from network_resolver import RESOLVER
 from test_mcp_modern_stdio import CAPABILITIES_KEY, PROFILE, params, request, send
-from test_mcp_stdio import McpFixture, Wire
+from test_mcp_stdio import McpFixture, PROFILE as LEGACY, Wire
 
 
 EXTENSION = "io.modelcontextprotocol/tasks"
@@ -62,6 +63,73 @@ class McpTaskFixture(McpFixture):
 
 
 class McpTaskTests(McpTaskFixture, unittest.TestCase):
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_RESOLVER_FIXTURE"), "requires a resolver file in a private mount namespace")
+    def test_resolver_diagnostic_requires_scoped_mcp_and_recovers_modern_task(self):
+        fixture = Path(os.environ["PSIOS_TEST_RESOLVER_FIXTURE"])
+        assert fixture.resolve() != RESOLVER.resolve() and fixture.samefile(RESOLVER), fixture
+        fixture.write_text("search hidden.invalid\nnameserver 192.0.2.53\nnameserver fe80::53%eth0\n")
+        n = self.node
+        tool = "node.resolver"
+        exact = self.grant([self.node_id], units=4, tools=[tool])
+        foreign = self.grant([self.profile], tools=[tool])
+        flags = ("--tool", tool)
+
+        def legacy(grant):
+            wire = Wire([*self.adapter_command(grant), "--protocol", LEGACY, *flags])
+            self.addCleanup(wire.close)
+            wire.initialize()
+            return wire
+
+        def sample(wire, invocation):
+            return self.task_call(wire, "tools/call", {"name": tool}, invocation=invocation)["result"]
+
+        blocked = legacy(foreign)
+        self.assertEqual(blocked.request("tools/list")["result"]["tools"], [])
+        refused = blocked.request("tools/call", {"name": tool})["result"]
+        self.assertEqual(refused["structuredContent"], {"code": "PermissionDenied"})
+        direct = legacy(exact)
+        [listed] = direct.request("tools/list")["result"]["tools"]
+        self.assertEqual(listed["name"], tool)
+        self.assertEqual(listed["inputSchema"], {"type": "object", "additionalProperties": False})
+        self.assertTrue(listed["annotations"]["readOnlyHint"])
+        rejected = direct.request("tools/call", {"name": tool, "arguments": {"path": "/etc/passwd"}})["result"]
+        self.assertEqual(rejected["structuredContent"], {"code": "InvalidArgument"})
+        self.assertEqual(self.tasks(), [])
+        reply = direct.request("tools/call", {"name": tool})["result"]
+        observation = self.check_receipt(reply, tool, exact)["result"]
+        self.assertEqual(observation["nameservers"], [{"address": "192.0.2.53"},
+                                                     {"address": "fe80::53", "zone": "eth0"}])
+        self.assertNotIn("hidden.invalid", json.dumps(observation))
+        default = Wire(self.adapter_command(exact))
+        self.addCleanup(default.close)
+        default.initialize()
+        self.assertEqual(default.request("tools/list")["result"]["tools"], [])
+
+        modern = self.task_wire(exact, extra=flags)
+        [listed] = self.task_call(modern, "tools/list")["result"]["tools"]
+        self.assertEqual(listed["name"], tool)
+        invocation = key()
+        first = sample(modern, invocation)["taskId"]
+        settled = self.wait_status(modern, first)
+        prior = self.check_receipt(settled["result"], tool, exact)["result"]
+        self.assertEqual(prior["nameservers"], observation["nameservers"])
+        self.assertEqual(len(self.tasks()), 2)
+        modern.close()
+        n.stop(signal.SIGKILL)
+        fixture.write_text("nameserver 2001:db8::9\n")
+        n.start()
+        resumed = self.task_wire(exact, extra=flags)
+        self.assertEqual(sample(resumed, invocation)["taskId"], first)
+        self.assertEqual(self.wait_status(resumed, first), settled)
+        self.assertEqual(len(self.tasks()), 2)
+        current = sample(resumed, key())["taskId"]
+        received = self.check_receipt(self.wait_status(resumed, current)["result"], tool, exact)["result"]
+        self.assertEqual(received["nameservers"], [{"address": "2001:db8::9"}])
+        n.call("Grant.Revoke", target(exact["grant_ref"]))
+        self.assertEqual(self.task_call(resumed, "tools/list")["result"]["tools"], [])
+        self.assertEqual(self.task_call(resumed, "tasks/get", {"taskId": first})["error"]["code"], -32602)
+        self.assertEqual(len(self.tasks()), 3)
+
     def test_device_page_input_and_cursor_survive_adapter_and_daemon_restart(self):
         n = self.node
         tool = "node.devices"

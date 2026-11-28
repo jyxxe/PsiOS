@@ -52,6 +52,9 @@ E1000E_RECEIPT_FORMAT = 8
 E1000E_MODULE = "psios-e1000e.ko"
 DHCP_SERVICE = "::respawn:/bin/sh /psios-dhcp"
 STATIC_SERVICE = "::once:/bin/sh /psios-dhcp "
+SLAAC_RECEIPT_FORMAT = 10
+SLAAC = "slaac"
+SLAAC_SERVICE = STATIC_SERVICE + SLAAC
 SSH_RECEIPT_FORMAT = 9
 SSH_PROFILE = "Ed25519Operator"
 SSH_SERVICE = "::respawn:/bin/sh /psios-ssh"
@@ -242,26 +245,36 @@ def static_profile(mac, address, gateway, dns):
     return "\n".join([mac, str(address), str(gateway) if gateway else "-", *map(str, dns)]) + "\n"
 
 
+def ipv6_unicast(ip):
+    return ip.scope_id is None and ip.ipv4_mapped is None and not (ip.is_unspecified or ip.is_multicast)
+
+
+def ipv6_nameservers(dns):
+    return len(dns) <= 3 and all(ipv6_unicast(ip) and not ip.is_link_local for ip in dns)
+
+
 def static_ipv6_profile(mac, address, gateway, dns):
     subnet = address.network
-
-    def unicast(ip):
-        return (ip.scope_id is None and ip.ipv4_mapped is None
-                and not (ip.is_unspecified or ip.is_multicast))
 
     def on_link_host(ip):
         return (ip in subnet and not (ip.is_loopback or ip.is_link_local)
                 and (subnet.prefixlen >= 127 or ip != subnet.network_address))
 
-    if not (address.scope_id is None and subnet.prefixlen > 0 and unicast(address.ip) and on_link_host(address.ip)):
+    if not (address.scope_id is None and subnet.prefixlen > 0 and ipv6_unicast(address.ip) and on_link_host(address.ip)):
         raise ValueError("static IPv6 address must be an unscoped host address with a nonzero prefix")
-    if gateway is not None and (not unicast(gateway) or gateway == address.ip
+    if gateway is not None and (not ipv6_unicast(gateway) or gateway == address.ip
                                 or not (gateway.is_link_local or on_link_host(gateway))):
         raise ValueError("static IPv6 gateway must be a different on-link or link-local address")
-    if len(dns) > 3 or any(not unicast(ip) or ip.is_link_local for ip in dns):
+    if not ipv6_nameservers(dns):
         raise ValueError("static DNS accepts at most three unicast IPv6 addresses without a zone")
     host = f"{address.ip.exploded}/{subnet.prefixlen}"
     return "\n".join([mac, host, gateway.exploded if gateway else "-", *(ip.exploded for ip in dns)]) + "\n"
+
+
+def slaac_profile(mac, dns):
+    if not ipv6_nameservers(dns):
+        raise ValueError("SLAAC DNS accepts at most three unicast IPv6 addresses without a zone")
+    return "\n".join([mac, *(ip.exploded for ip in dns)]) + "\n"
 
 
 def static_config(args, parser):
@@ -315,8 +328,25 @@ def validate_persisted_e1000e(work, state):
         raise ValueError("invalid persisted e1000e DHCP configuration or launcher")
 
 
+def validate_persisted_slaac(work, state):
+    try:
+        profile = read_root_file(work, state, "/etc/psios/slaac", 160, "0600").decode("ascii")
+        mac, *dns = profile.splitlines()
+        if profile != slaac_profile(unicast_mac(mac), [ipaddress.IPv6Address(ip) for ip in dns]):
+            raise ValueError("expected canonical saved IPv6 discovery settings")
+    except (OSError, ValueError, argparse.ArgumentTypeError, subprocess.SubprocessError) as error:
+        raise ValueError("invalid persisted SLAAC profile") from error
+    inittab = read_root_file(work, state, "/etc/inittab", 16 * 1024, "0(?:600|644)")
+    if inittab.splitlines().count(SLAAC_SERVICE.encode()) != 1:
+        raise ValueError("invalid persisted SLAAC service launcher")
+
+
 def validate_persisted_network(work, state, receipt):
-    mode = STATIC_MODES.get(receipt.get("network_profile"))
+    profile = receipt.get("network_profile")
+    if profile == SLAAC:
+        validate_persisted_slaac(work, state)
+        return
+    mode = STATIC_MODES.get(profile)
     if mode in ("static", "dual"):
         mac4, dns4 = validate_persisted_static(work, state, 4)
     if mode in ("static6", "dual"):
@@ -358,7 +388,10 @@ def host_config(seed, args):
     daemon = LIMITED_SERVICE if args.core_limits else "::respawn:/bin/su -s /bin/sh psios -c 'exec /bin/psiosd serve'"
     inittab = (f"{daemon}\nttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100\n"
                "::shutdown:/bin/sh /psios-shutdown\n")
-    if args.network_profile:
+    if args.network_profile == SLAAC:
+        (seed / "etc/psios/slaac").write_text(args.slaac_network)
+        inittab += SLAAC_SERVICE + "\n"
+    elif args.network_profile:
         for name, config in (("static-ipv4", args.static_network), ("static-ipv6", args.static_ipv6_network)):
             if config:
                 (seed / "etc/psios" / name).write_text(config)
@@ -382,7 +415,7 @@ def host_config(seed, args):
     for path in (seed / "etc").rglob("*"):
         if not path.is_symlink():
             path.chmod(0o755 if path.is_dir() else (0o600 if path.name in
-                       ("shadow", "dhcp-mac", "static-ipv4", "static-ipv6") else 0o644))
+                       ("shadow", "dhcp-mac", "static-ipv4", "static-ipv6", "slaac") else 0o644))
     (seed / "etc").chmod(0o755)
 
 
@@ -630,7 +663,7 @@ def parse_receipt(raw):
     if isinstance(prior, dict) and (prior.get("format") == TRIAL_RECEIPT_FORMAT or "boot_mode" in prior):
         raise ValueError("isolated trial disks cannot be upgrade sources; use the original stopped deployment")
     if (not isinstance(prior, dict) or type(prior.get("format")) is not int
-            or prior["format"] not in (*range(1, 7), E1000E_RECEIPT_FORMAT, SSH_RECEIPT_FORMAT)):
+            or prior["format"] not in (*range(1, 7), E1000E_RECEIPT_FORMAT, SSH_RECEIPT_FORMAT, SLAAC_RECEIPT_FORMAT)):
         raise ValueError("unsupported previous build receipt format")
     for name, pattern in (("source_commit", r"[0-9a-f]{40}"), ("efi_application_sha256", r"[0-9a-f]{64}")):
         if not isinstance(prior.get(name), str) or not re.fullmatch(pattern, prior[name]):
@@ -644,7 +677,7 @@ def parse_receipt(raw):
     if prior["format"] == 1 and "raw_disk_bytes" in prior:
         raise ValueError("larger raw capacity requires a geometry-bearing build receipt")
     layout = Layout.from_receipt(prior) if prior["format"] >= 2 else Layout()
-    profiles = {4: (STATIC_IPV4,), 5: (STATIC_IPV6, STATIC_DUAL)}
+    profiles = {4: (STATIC_IPV4,), 5: (STATIC_IPV6, STATIC_DUAL), SLAAC_RECEIPT_FORMAT: (SLAAC,)}
     if prior["format"] in profiles:
         if prior.get("network_profile") not in profiles[prior["format"]]:
             raise ValueError("invalid network profile in previous build receipt")
@@ -661,17 +694,17 @@ def parse_receipt(raw):
             raise ValueError("invalid wired driver in previous native build receipt")
     elif "wired_driver" in prior:
         raise ValueError("wired driver evidence requires build receipt format 8 or 9")
-    if prior["format"] == SSH_RECEIPT_FORMAT:
+    if prior["format"] == SSH_RECEIPT_FORMAT or (prior["format"] == SLAAC_RECEIPT_FORMAT and "ssh_console" in prior):
         if prior.get("ssh_console") != SSH_PROFILE:
             raise ValueError("invalid SSH console in previous build receipt")
     elif "ssh_console" in prior:
-        raise ValueError("SSH console evidence requires build receipt format 9")
+        raise ValueError("SSH console evidence requires build receipt format 9 or 10")
     limits = None
     if prior["format"] == 6 or (
-            prior["format"] in (E1000E_RECEIPT_FORMAT, SSH_RECEIPT_FORMAT) and "core_limits" in prior):
+            prior["format"] in (E1000E_RECEIPT_FORMAT, SSH_RECEIPT_FORMAT, SLAAC_RECEIPT_FORMAT) and "core_limits" in prior):
         limits = CoreLimits.from_receipt(prior.get("core_limits"))
     elif "core_limits" in prior:
-        raise ValueError("Core resource limits require build receipt format 6, 8 or 9")
+        raise ValueError("Core resource limits require build receipt format 6, 8, 9 or 10")
     if prior["format"] == 3 or (prior["format"] >= 4 and "secure_boot" in prior):
         trust = prior.get("secure_boot")
         if (not isinstance(trust, dict) or set(trust) != {"scheme", "certificate_sha256", "efi_stub_sha256"}
@@ -900,6 +933,8 @@ def prepare_trial_disk(work, disk, layout, configuration, *, secure_boot_require
 
 
 def production_receipt_format(properties):
+    if properties.get("network_profile") == SLAAC:
+        return SLAAC_RECEIPT_FORMAT
     if "ssh_console" in properties:
         return SSH_RECEIPT_FORMAT
     if "wired_driver" in properties:
@@ -1101,6 +1136,7 @@ def main():
     network = parser.add_mutually_exclusive_group()
     network.add_argument("--dhcp-mac", type=unicast_mac, help="enable IPv4 DHCP on the matching NIC of a new disk")
     network.add_argument("--static-mac", type=unicast_mac, help="enable static networking on the matching NIC of a new disk")
+    network.add_argument("--slaac-mac", type=unicast_mac, help="enable IPv6 router discovery on the matching virtio NIC of a new disk")
     parser.add_argument("--dhcp-driver", choices=("virtio", "e1000e"),
                         help="kernel driver for the DHCP NIC (default virtio)")
     parser.add_argument("--static-driver", choices=("virtio", "e1000e"),
@@ -1111,6 +1147,7 @@ def main():
     parser.add_argument("--static-ipv6-address", type=ipaddress.IPv6Interface, help="static IPv6 address and prefix")
     parser.add_argument("--static-ipv6-gateway", type=ipaddress.IPv6Address, help="optional IPv6 on-link or link-local gateway")
     parser.add_argument("--static-ipv6-dns", type=ipaddress.IPv6Address, action="append", default=[], help="optional unscoped IPv6 DNS server")
+    parser.add_argument("--slaac-dns", type=ipaddress.IPv6Address, action="append", default=[], help="explicit IPv6 DNS server for SLAAC")
     parser.add_argument("--state-mib", type=int, help=f"state partition size of a new disk (default {MIN_STATE_MIB} MiB)")
     parser.add_argument("--home-mib", type=int, help=f"home partition size of a new disk (default {MIN_HOME_MIB} MiB)")
     core_options = parser.add_argument_group("new disk Core cgroup limits (provide all three to enable)")
@@ -1141,6 +1178,14 @@ def main():
         args.network_profile = STATIC_IPV6
     if args.network_profile and args.wired_driver:
         args.network_profile = args.network_profile.replace("virtio-", "e1000e-", 1)
+    if args.slaac_dns and args.slaac_mac is None:
+        parser.error("--slaac-dns requires --slaac-mac on a new disk")
+    if args.slaac_mac is not None:
+        args.network_profile = SLAAC
+        try:
+            args.slaac_network = slaac_profile(args.slaac_mac, args.slaac_dns)
+        except ValueError as error:
+            parser.error(str(error))
     if args.ssh_authorized_key:
         if args.upgrade_from or not (args.dhcp_mac or args.network_profile):
             parser.error("--ssh-authorized-key requires an explicit network profile on a new disk")

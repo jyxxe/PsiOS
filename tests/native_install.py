@@ -23,6 +23,7 @@ from native_disk import REPO, boot, check_state, password, sha
 LOOP_GET_STATUS64 = 0x4C05
 LOOP_CLR_FD = 0x4C01
 LOOP_INFO64_SIZE = 232
+MIB = 1024 * 1024
 FIXTURE_TIMEOUT = 150
 OUTER_MOUNT_NS = "PSIOS_NATIVE_INSTALL_FIXTURE_OUTER_MOUNT_NAMESPACE"
 MANAGED_SYSCALLS = "pwrite64,pwritev,pwritev2,write,fsync"

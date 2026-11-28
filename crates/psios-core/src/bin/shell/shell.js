@@ -1,9 +1,11 @@
 import { chatView } from "./shell-chat.js";
 import { projectView } from "./shell-projects.js";
+import { sessionsView } from "./shell-sessions.js";
 
 const byId = (id) => document.getElementById(id);
 const chat = chatView(request, byId, element, message);
 const projects = projectView(request, byId, element, message, fields, downloadEvidence);
+const agentRuntime = sessionsView(request, byId, element, message, fields);
 const pairing = byId("pairing");
 const workspace = byId("workspace");
 const code = byId("code");
@@ -21,7 +23,7 @@ const applicationContent = byId("application-content");
 let bearer = null;
 let sessionRequests = new AbortController();
 let canCancelPending = false;
-const apps = new Map(["node", "tasks", "applications", "chat", "projects"].map(id => [id, {
+const apps = new Map(["node", "tasks", "applications", "chat", "projects", "agent-runtime"].map(id => [id, {
   window: byId("window-" + id), title: byId("title-" + id),
   dock: byId("nav-" + id), status: byId("status-" + id), state: "closed",
 }]));
@@ -60,6 +62,7 @@ function leave(text, error = false) {
   chat.capability(false);
   chat.reset();
   projects.reset();
+  agentRuntime.reset();
   updateDesktop();
   byId("principal").textContent = "";
   message(status, "");
@@ -641,7 +644,8 @@ function showWindow(id, app, shown) {
     else if (id === "tasks") loadTasks();
     else if (id === "applications") loadApplications();
     else if (id === "chat") chat.show();
-    else projects.show();
+    else if (id === "projects") projects.show();
+    else agentRuntime.show();
     return;
   }
   if (id === "node") {
@@ -655,8 +659,10 @@ function showWindow(id, app, shown) {
     clearApplicationsView();
   } else if (id === "chat") {
     chat.hide();
-  } else {
+  } else if (id === "projects") {
     projects.hide();
+  } else {
+    agentRuntime.hide();
   }
   message(app.status, "");
 }
@@ -708,6 +714,7 @@ function hideWindow(id, state) {
   if (id === "applications" && state === "closed") resetApplications();
   if (id === "chat" && state === "closed") chat.reset();
   if (id === "projects" && state === "closed") projects.reset();
+  if (id === "agent-runtime" && state === "closed") agentRuntime.reset();
   if (active === id) active = Array.from(apps.keys()).find(key => apps.get(key).state === "open") ?? null;
   updateDesktop();
   if (!workspace.hidden) {
@@ -723,7 +730,8 @@ for (const [id, app] of apps) {
     else if (id === "tasks") loadTasks();
     else if (id === "applications") loadApplications([null], selectedApplication, [null]);
     else if (id === "chat") chat.refresh();
-    else projects.refresh();
+    else if (id === "projects") projects.refresh();
+    else agentRuntime.refresh();
   });
   controls.querySelector('[data-action="close"]').addEventListener("click", () => hideWindow(id, "closed"));
   controls.querySelector('[data-action="minimize"]').addEventListener("click", () => hideWindow(id, "minimized"));

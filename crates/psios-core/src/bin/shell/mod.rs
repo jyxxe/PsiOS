@@ -12,7 +12,7 @@ use hyper::{
 };
 use hyper_util::rt::{TokioIo, TokioTimer};
 use psios_api::{ApiError, ApiResult, Client, ResourceRef, parse};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use session::{Session, now};
 use std::{
@@ -87,6 +87,8 @@ enum Endpoint {
     ApplicationReleases,
     Conversations,
     ConversationMessages,
+    AgentSessions,
+    AgentSession,
     Projects,
     ProjectWorkItems,
     WorkItemRevision,
@@ -163,8 +165,26 @@ struct PreparedChatMessage {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Task {
+struct ById {
     id: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct AgentSessionStatus {
+    reference: ResourceRef,
+    session: AgentSessionState,
+}
+
+#[derive(Deserialize, Serialize)]
+struct AgentSessionState {
+    lifecycle: String,
+    turn: u64,
+    max_turns: u64,
+    model_ref: ResourceRef,
+    skill_ref: ResourceRef,
+    last_task: Option<String>,
+    pause_reason: Option<String>,
+    outcome_knowledge: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -211,6 +231,8 @@ enum CoreRequest {
     ApplicationReleases(ApplicationReleases),
     Conversations(DirectoryPage),
     ConversationMessages(ConversationMessages),
+    AgentSessions(Page),
+    AgentSession(ById),
     Projects(DirectoryPage),
     ProjectWorkItems(ProjectWorkItems),
     WorkItemRevision(WorkItemRevision),
@@ -264,6 +286,46 @@ impl CoreRequest {
                     json!({
                         "items": items,
                         "next_cursor": snapshot["next_cursor"],
+                    }),
+                ))
+            }
+            Self::AgentSessions(page) => {
+                let snapshot = client.call(
+                    "Resource.List",
+                    json!({"kind":"Session","limit":8,"cursor":page.cursor}),
+                )?;
+                let references = snapshot["items"].as_array().ok_or_else(|| {
+                    ApiError::new("RecoveryRequired", "agent session snapshot is malformed")
+                })?;
+                let mut items = Vec::with_capacity(references.len());
+                for reference in references {
+                    check()?;
+                    let id = reference["resource_id"].as_str().ok_or_else(|| {
+                        ApiError::new("RecoveryRequired", "agent session reference is malformed")
+                    })?;
+                    items.push(session_status(client, id)?);
+                }
+                Ok(json_response(
+                    StatusCode::OK,
+                    json!({"items":items,"next_cursor":snapshot["next_cursor"]}),
+                ))
+            }
+            Self::AgentSession(request) => {
+                let status = session_status(client, &request.id)?;
+                check()?;
+                let usage = client.session_model_usage(&request.id)?;
+                if status.reference != usage.session_ref {
+                    return Err(ApiError::new(
+                        "Conflict",
+                        "agent session changed while reading model usage",
+                    )
+                    .into());
+                }
+                Ok(json_response(
+                    StatusCode::OK,
+                    json!({
+                        "status":status,"charged_calls":usage.charged_calls,
+                        "lease_time":usage.lease_time,"provider_reported":usage.provider_reported,
                     }),
                 ))
             }
@@ -526,6 +588,21 @@ impl CoreRequest {
     }
 }
 
+fn session_status(client: &Client, id: &str) -> ApiResult<AgentSessionStatus> {
+    let record = client.call("Session.Get", json!({"id":id}))?;
+    let invalid = || {
+        ApiError::new(
+            "RecoveryRequired",
+            "agent session returned an invalid record",
+        )
+    };
+    let status: AgentSessionStatus = serde_json::from_value(record).map_err(|_| invalid())?;
+    if status.reference.resource_id != id {
+        return Err(invalid().into());
+    }
+    Ok(status)
+}
+
 fn exact_work_item(client: &Client, reference: &ResourceRef) -> ApiResult<Value> {
     let reference = json!(reference);
     let mut record = client.call("WorkItem.RevisionGet", json!({"reference":reference}))?;
@@ -644,6 +721,10 @@ fn file(path: &str) -> Option<HttpResponse> {
             "text/javascript; charset=utf-8",
             include_bytes!("shell-projects.js").as_slice(),
         ),
+        "/shell-sessions.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("shell-sessions.js").as_slice(),
+        ),
         "/shell.js" => (
             "text/javascript; charset=utf-8",
             include_bytes!("shell.js").as_slice(),
@@ -723,6 +804,12 @@ fn rpc(endpoint: Endpoint, data: Value) -> Result<CoreRequest, Fault> {
         Endpoint::WorkItemEvidence => Ok(CoreRequest::WorkItemEvidence(
             serde_json::from_value(data).map_err(|_| INVALID)?,
         )),
+        Endpoint::AgentSessions => Ok(CoreRequest::AgentSessions(
+            serde_json::from_value(data).map_err(|_| INVALID)?,
+        )),
+        Endpoint::AgentSession => Ok(CoreRequest::AgentSession(
+            serde_json::from_value(data).map_err(|_| INVALID)?,
+        )),
         Endpoint::PrepareChatMessage => Ok(CoreRequest::PrepareChatMessage(
             serde_json::from_value(data).map_err(|_| INVALID)?,
         )),
@@ -730,7 +817,7 @@ fn rpc(endpoint: Endpoint, data: Value) -> Result<CoreRequest, Fault> {
             serde_json::from_value(data).map_err(|_| INVALID)?,
         )),
         Endpoint::Task => {
-            let task: Task = serde_json::from_value(data).map_err(|_| INVALID)?;
+            let task: ById = serde_json::from_value(data).map_err(|_| INVALID)?;
             Ok(CoreRequest::Call("Task.Get", json!({"id":task.id})))
         }
         Endpoint::TaskHistory => {
@@ -824,6 +911,8 @@ impl Shell {
             "/api/application-releases" => Endpoint::ApplicationReleases,
             "/api/conversations" => Endpoint::Conversations,
             "/api/conversation-messages" => Endpoint::ConversationMessages,
+            "/api/agent-sessions" => Endpoint::AgentSessions,
+            "/api/agent-session" => Endpoint::AgentSession,
             "/api/projects" => Endpoint::Projects,
             "/api/project-work-items" => Endpoint::ProjectWorkItems,
             "/api/work-item-revision" => Endpoint::WorkItemRevision,

@@ -156,6 +156,10 @@ python3 rescue-core/rescue/inspect.py node.raw --partition 1 --uid "$SERVICE_UID
 
 返回码为零时，标准输出包含节点 ID、磁盘格式、迁移需求、SQLite 与外键检查、见证状态和所有者凭据轮换状态。数据库与 SQLite 日志在客户机的临时内存盘上核验。默认复制上限为 64 MiB，可用 `--max-copy-mib` 指定 1 至 256 MiB。核验失败时标准错误给出失败阶段；例如 `filesystem-recovery-required` 表示应先对独立副本处理文件系统恢复，`authority-PermissionDenied` 可用于排查 UID、目录权限或路径。
 
+有可信记录的 ext4 UUID 时，可使用 `--filesystem-uuid UUID` 固定目标。救援内核在 Virtio、NVMe 与 SATA 设备上检查指定分区号的 ext4 UUID。找不到目标或发现多个匹配时，在挂载前退出。原生开发盘的构建回执记录了第 2 分区的 `state_uuid`。[设备选择验收](../tests/rescue_storage.py)
+
+受管 QEMU 直接检查已清洁的文件系统时，可加 `--disk-transport nvme` 或 `--disk-transport ahci`。启动器以只读方式打开原始镜像，来宾在探测 UUID 前先将指定整盘设为只读。AHCI 控制器需要可写的顶层视图。启动器为它提供至多 16 MiB 的临时 QCOW2，原始镜像作为只读后备。检查结束后丢弃临时视图。需要 ext4 日志重放时沿用默认 Virtio 和显式重放选项。物理设备仍需单独验收。
+
 对于本仓库创建的 QEMU 开发实例，可在关机后将可信的系统盘导出到新目录，再按分区检查。
 
 ```bash
@@ -179,6 +183,8 @@ qemu-system-x86_64 -nodefaults -no-user-config -no-reboot -machine pc -m 768 \
   -boot order=d,strict=on -cdrom node-rescue.iso \
   -drive file=node.raw,format=raw,if=virtio,readonly=on
 ```
+
+制作光盘时提供 `--filesystem-uuid`，可在块设备顺序变化时仍选择记录中的文件系统。独立光盘继续要求目标设备由来宾内核报告为只读，并拒绝重复的文件系统身份。
 
 客户机从第二个串口输出 `PSIOS-RESCUE/1`、状态和核验结果，随后关机。固件可能先在同一串口输出启动消息。检查器会在 180 秒内收集最多 2 MiB 串口数据并等待 QEMU 退出，要求报告标记恰好出现一次。标记缺失或重复时，诊断只给出固件模式、加速模式、标记数量和串口字节数。光盘只允许检查只读块设备，遇到可写设备或需要文件系统日志重放的盘会停止。临时日志重放仍通过受控的直接内核启动模式执行。默认光盘已在 QEMU 的 SeaBIOS 和 OVMF 上验证。归档构建证明覆盖制盘程序，本地生成的 ISO 摘要随工具链、Core 和站点设置而定。
 

@@ -113,6 +113,8 @@ pub enum Action {
     Routes(node::network::RouteQuery),
     #[serde(rename = "node.route_lookup")]
     RouteLookup(node::network::LookupQuery),
+    #[serde(rename = "node.resolver")]
+    Resolver {},
     #[serde(rename = "node.routing_rules")]
     RoutingRules(node::network::RuleQuery),
     #[serde(rename = "node.network_probe")]
@@ -473,6 +475,7 @@ impl Action {
             | Self::Interfaces(_)
             | Self::Routes(_)
             | Self::RouteLookup(_)
+            | Self::Resolver {}
             | Self::RoutingRules(_)
             | Self::Inventory {}
             | Self::Pressure {}
@@ -989,6 +992,7 @@ impl Work {
             | Action::Interfaces(_)
             | Action::Routes(_)
             | Action::RouteLookup(_)
+            | Action::Resolver {}
             | Action::RoutingRules(_)
             | Action::Mounts {}
             | Action::BlockLayout(_)

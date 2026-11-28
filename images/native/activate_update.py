@@ -16,7 +16,7 @@ import sys
 import uuid
 
 from activation_guest import artifact_digest, boot_candidate, bound_artifacts, open_file
-from activation_storage import BUILD_RECEIPT, BootStorage
+from activation_storage import BUILD_RECEIPT, F_OFD_SETLK, BootStorage
 from create import MIB, Layout, boot_media, read_receipt, verified_home_expansion_target
 from install import (
     JOURNAL, JOURNAL_LIMIT, checked_digest, digest, encode, lock_directory, require, save_operation,
@@ -76,7 +76,7 @@ def stopped_source(path, expected, size, previous_identity=None):
         # Linux amd64 struct flock with whence=SEEK_SET, start=0 and len=0
         # locks the entire file, including any future extension.
         try:
-            fcntl.fcntl(fd, fcntl.F_OFD_SETLK, struct.pack("@hhqqi4x", fcntl.F_WRLCK, os.SEEK_SET, 0, 0, 0))
+            fcntl.fcntl(fd, F_OFD_SETLK, struct.pack("@hhqqi4x", fcntl.F_WRLCK, os.SEEK_SET, 0, 0, 0))
         except OSError as error:
             raise ValueError("source disk is busy or the local filesystem refused its exclusive lock") from error
         require_unchanged(path, source, observed, expected, "original disk")

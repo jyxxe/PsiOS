@@ -121,7 +121,7 @@ class Console:
 def boot(work, image, network_mac=None, extra_disk=None, tap=None, *, rtc_base=None,
          disk_format="raw", vars_file="vars.fd", vcpus=2, pace_commands=False,
          disk_bus="virtio", extra_bus="virtio", network_model="virtio-net-pci",
-         ipv6_network=None, ssh_port=None, usb_control=False):
+         ipv6_network=None, ssh_port=None, usb_control=False, extra_qemu_args=()):
     # The privileged TAP fixture has a reproducible serial stall on hosted KVM.
     # Use a portable CPU emulator for that fixture; keep its real virtio and TAP.
     accel = "kvm" if tap is None and os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
@@ -154,6 +154,7 @@ def boot(work, image, network_mac=None, extra_disk=None, tap=None, *, rtc_base=N
                 "-device", f"{network_model},netdev=network,mac={network_mac},romfile="]
     else:
         cmd += ["-nic", "none"]
+    cmd.extend(extra_qemu_args)
     with subprocess.Popen(cmd, cwd=work, stdin=subprocess.PIPE, stdout=subprocess.PIPE) as vm:
         try:
             # TAP tests use TCG and may run under loaded CI hosts. Pace complete

@@ -12,7 +12,7 @@ from typing import NamedTuple
 
 
 EPOCH = 946684800  # 2000-01-01 UTC, also representable by FAT and ISO 9660.
-CMDLINE = "console=ttyS0,115200 quiet panic=1 rdinit=/psios-rescue"
+CMDLINE = "console=ttyS0,115200 quiet panic=1 scsi_mod.scan=sync rdinit=/psios-rescue"
 MIB = 1024 * 1024
 SECURE_BOOT_SCHEME = "uefi-uki-authenticode"
 

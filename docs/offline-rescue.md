@@ -156,7 +156,9 @@ python3 rescue-core/rescue/inspect.py node.raw --partition 1 --uid "$SERVICE_UID
 
 返回码为零时，标准输出包含节点 ID、磁盘格式、迁移需求、SQLite 与外键检查、见证状态和所有者凭据轮换状态。数据库与 SQLite 日志在客户机的临时内存盘上核验。默认复制上限为 64 MiB，可用 `--max-copy-mib` 指定 1 至 256 MiB。核验失败时标准错误给出失败阶段；例如 `filesystem-recovery-required` 表示应先对独立副本处理文件系统恢复，`authority-PermissionDenied` 可用于排查 UID、目录权限或路径。
 
-有可信记录的 ext4 UUID 时，可使用 `--filesystem-uuid UUID` 固定目标。救援内核在 Virtio 和 NVMe 设备上检查指定分区号的 ext4 UUID。找不到目标或发现多个匹配时，在挂载前退出。原生开发盘的构建回执记录了第 2 分区的 `state_uuid`。受管 QEMU 直接检查可同时使用 `--disk-transport nvme`。启动器以只读方式打开原始镜像，来宾再锁定 NVMe 设备为只读。该方式支持已清洁的文件系统，其余手段可沿用默认 Virtio 源进行检查。物理设备仍需单独验收。[设备选择验收](../tests/rescue_storage.py)
+有可信记录的 ext4 UUID 时，可使用 `--filesystem-uuid UUID` 固定目标。救援内核在 Virtio、NVMe 与 SATA 设备上检查指定分区号的 ext4 UUID。找不到目标或发现多个匹配时，在挂载前退出。原生开发盘的构建回执记录了第 2 分区的 `state_uuid`。[设备选择验收](../tests/rescue_storage.py)
+
+受管 QEMU 直接检查已清洁的文件系统时，可加 `--disk-transport nvme` 或 `--disk-transport ahci`。启动器以只读方式打开原始镜像，来宾在探测 UUID 前先将指定整盘设为只读。AHCI 控制器需要可写的顶层视图。启动器为它提供至多 16 MiB 的临时 QCOW2，原始镜像作为只读后备。检查结束后丢弃临时视图。需要 ext4 日志重放时沿用默认 Virtio 和显式重放选项。物理设备仍需单独验收。
 
 对于本仓库创建的 QEMU 开发实例，可在关机后将可信的系统盘导出到新目录，再按分区检查。
 

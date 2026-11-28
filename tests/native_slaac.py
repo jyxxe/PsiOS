@@ -10,24 +10,40 @@ import tempfile
 
 from native_dhcp import MAC, OTHER, wait_for
 from native_disk import REPO, boot, call, check_clean_shutdown, password, sha
+from native_ssh_console import client_key, serial_host_key
 from native_static_ipv4 import installer, poweroff
 
 
 ADDRESS = IPv6Address("fec0::5054:ff:fe51:6f20")
+TAP_ADDRESS = IPv6Address("2001:db8:70::5054:ff:fe51:6f20")
 DNS = IPv6Address("fec0::3")
+TAP_DNS = IPv6Address("2001:db8:70::53")
 CONFIG = "/etc/psios/slaac"
 
 
-def check_discovery(console):
+def check_discovery(console, address=ADDRESS, dns=DNS):
     wait_for(console, "grep -Fxq 'IPv6 router discovery enabled on eth0' /run/psios-network/status")
-    expected = ADDRESS.exploded.replace(":", "")
+    expected = address.exploded.replace(":", "")
     wait_for(console, f"flags=$(awk '$1 == \"{expected}\" && $6 == \"eth0\" {{print $5}}' /proc/net/if_inet6); "
                       'test -n "$flags" && test "$((0x$flags & 72))" -eq 0')
-    assert f"{ADDRESS}/64" in console.run("busybox ip -6 addr show dev eth0")
+    assert f"{address}/64" in console.run("busybox ip -6 addr show dev eth0")
     assert "default via fe80::2 dev eth0" in console.run("busybox ip -6 route show default")
     console.run("! busybox ip -4 addr show dev eth0 | grep -q 'inet ' && ! pidof udhcpc")
-    assert console.run("cat /etc/resolv.conf") == f"nameserver {DNS.exploded}"
+    assert console.run("cat /etc/resolv.conf") == f"nameserver {dns.exploded}"
     assert console.run("cat /proc/sys/net/ipv6/conf/eth0/accept_redirects") == "0"
+
+
+def ipv6_login(key, trusted):
+    return subprocess.run(["ssh", "-6", "-F", "/dev/null", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+                           "-o", "IdentityAgent=none", "-o", "StrictHostKeyChecking=yes",
+                           "-o", f"UserKnownHostsFile={trusted}", "-o", "HostKeyAlias=psios-slaac-test",
+                           "-o", "ConnectTimeout=5", "-i", key, f"psios@{TAP_ADDRESS}", "psiosctl node"],
+                          capture_output=True, text=True, timeout=15)
+
+
+def check_dns(console):
+    result = console.run("busybox timeout 8 busybox nslookup -type=AAAA node.test; printf 'dns exit %s\\n' \"$?\"")
+    assert "2001:db8:70::77" in result and result.endswith("dns exit 0"), result
 
 
 def load_receipt(path):
@@ -43,6 +59,9 @@ def exercise(args, work):
     root, root_hash = password(work, "root.hash")
     image = work / "slaac.raw"
     install = [*installer(args, image, args.archive), "--console-hash", operator_hash, "--root-console-hash", root_hash]
+    address = TAP_ADDRESS if args.ssh_tap else ADDRESS
+    dns = TAP_DNS if args.ssh_tap else DNS
+    guest = dict(network_mac=MAC, pace_commands=True, tap=args.ssh_tap)
     for flags, message in [
         (["--slaac-dns", str(DNS)], "requires --slaac-mac"),
         (["--slaac-mac", MAC, "--slaac-dns", "fe80::53%eth0"], "without a zone"),
@@ -51,8 +70,15 @@ def exercise(args, work):
         failed = subprocess.run([*install, *flags], capture_output=True, text=True, timeout=10)
         assert failed.returncode and message in failed.stderr and not image.exists(), failed.stderr
     previous = work / "factory.json"
-    previous.write_bytes(subprocess.check_output([*install, "--slaac-mac", MAC, "--slaac-dns", str(DNS)], timeout=150))
+    profile = ["--slaac-mac", MAC, "--slaac-dns", str(dns)]
+    if args.ssh_tap:
+        key = client_key(work, "operator")
+        denied_key = client_key(work, "untrusted")
+        trusted = work / "known_hosts"
+        profile.extend(("--ssh-authorized-key", key.with_suffix(".pub")))
+    previous.write_bytes(subprocess.check_output([*install, *profile], timeout=150))
     receipt = load_receipt(previous)
+    assert receipt.get("ssh_console") == ("Ed25519Operator" if args.ssh_tap else None), receipt
     assert sha(image) == receipt["initial_image_sha256"]
 
     staging = work / "factory-inspection"
@@ -65,10 +91,19 @@ def exercise(args, work):
                    cwd=args.installer.resolve().parent, check=True, timeout=90)
     shutil.rmtree(staging)
 
-    with boot(work, image, network_mac=MAC, pace_commands=True) as console:
+    with boot(work, image, **guest) as console:
         console.login("psios", operator)
-        check_discovery(console)
+        check_discovery(console, address, dns)
         identity = call(console, "Node.Get", {})["reference"]
+        if args.ssh_tap:
+            check_dns(console)
+            host_key = serial_host_key(console)
+            trusted.write_text(f"psios-slaac-test {host_key}\n")
+            remote = ipv6_login(key, trusted)
+            assert remote.returncode == 0, remote.stderr
+            assert json.loads(remote.stdout)["reference"]["resource_id"] == identity["resource_id"]
+            denied = ipv6_login(denied_key, trusted)
+            assert denied.returncode == 255 and "Permission denied (publickey)" in denied.stderr, denied.stderr
         task = json.loads(console.run("printf '{}' | psiosctl submit system.status --key slaac-persist"))["task_id"]
         result = call(console, "Task.Wait", {"id": task, "timeout_ms": 5000})
         assert result["lifecycle"] == "Succeeded"
@@ -89,20 +124,26 @@ def exercise(args, work):
         "--ovmf-vars", variables, "--ovmf-vars-sha256", saved_variables], timeout=480))
     assert report["status"] == "Staged" and sha(variables) == saved_variables and sha(image) == source
     updated_receipt = staged / "candidate-build.json"
-    load_receipt(updated_receipt)
+    assert load_receipt(updated_receipt).get("ssh_console") == receipt.get("ssh_console")
     candidate = staged / "candidate.raw"
-    with boot(work, candidate, network_mac=MAC, pace_commands=True) as console:
+    with boot(work, candidate, **guest) as console:
         console.login("psios", operator)
-        check_discovery(console)
+        check_discovery(console, address, dns)
         assert call(console, "Node.Get", {})["reference"]["resource_id"] == identity["resource_id"]
         assert call(console, "Task.Wait", {"id": task, "timeout_ms": 5000})["result"] == result["result"]
+        if args.ssh_tap:
+            check_dns(console)
+            assert serial_host_key(console) == host_key
+            remote = ipv6_login(key, trusted)
+            assert remote.returncode == 0, remote.stderr
+            assert json.loads(remote.stdout)["reference"]["resource_id"] == identity["resource_id"]
         console.send("exit")
         console.login("root", root)
         console.run("busybox ping6 -c 1 -W 3 -I eth0 fe80::2")
         poweroff(console)
     check_clean_shutdown(candidate)
 
-    with boot(work, candidate, network_mac=OTHER, pace_commands=True) as console:
+    with boot(work, candidate, **{**guest, "network_mac": OTHER}) as console:
         console.login("psios", operator)
         wait_for(console, "grep -Fxq 'configured virtio interface is absent' /run/psios-network/status")
         console.run("! busybox ip -6 addr show dev eth0 | grep -q 'inet6 ' && "
@@ -118,6 +159,8 @@ def exercise(args, work):
     assert failed.returncode and "invalid persisted SLAAC profile" in failed.stderr, failed.stderr
     assert not refused.exists() and sha(candidate) == invalid and sha(image) == source
     print("Verified native IPv6 router discovery, DAD, gateway traffic, resolver, staged update, wrong MAC and source protection.")
+    if args.ssh_tap:
+        print("Verified IPv6 DNS queries and SSH authentication over TAP before and after staged update.")
 
 
 if __name__ == "__main__":
@@ -126,6 +169,8 @@ if __name__ == "__main__":
     parser.add_argument("--archive", type=Path, required=True)
     parser.add_argument("--installer", type=Path, default=REPO / "images/native/create.py")
     parser.add_argument("--ovmf-dir", type=Path, default=Path("/usr/share/OVMF"))
+    parser.add_argument("--ssh-tap", metavar="IFNAME",
+                        help="use isolated TAP with 2001:db8:70::/64 advertised from fe80::2 and test IPv6 DNS and SSH")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="psios-slaac-test-") as root:
         exercise(args, Path(root))

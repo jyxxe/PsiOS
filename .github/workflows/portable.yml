@@ -82,8 +82,8 @@ jobs:
           path: ${{ runner.temp }}/rescue-core
       - name: Download and configure rescue VM prerequisites
         run: |
-          packages=(qemu-system-x86 qemu-utils genisoimage cpio e2fsprogs fdisk acl dnsmasq-base gcc libc6-dev squashfs-tools
-                    xorriso grub-common grub-efi-amd64-bin dosfstools mtools ovmf seabios openssl strace)
+          packages=(qemu-system-x86 qemu-utils genisoimage cpio e2fsprogs fdisk acl dnsmasq-base radvd gcc libc6-dev squashfs-tools
+                    xorriso grub-common grub-efi-amd64-bin dosfstools mtools ovmf seabios openssl openssh-client strace)
           missing=()
           for pkg in "${packages[@]}"; do
             if [[ $(dpkg-query -W -f='${db:Status-Status}' "$pkg" 2>/dev/null) != installed ]]; then missing+=("$pkg"); fi
@@ -172,6 +172,15 @@ jobs:
           python3 tests/native_storage.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
             --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
 
+      - name: Authenticate the native SSH console and preserve its host key across recovery and upgrade
+        run: |
+          python3 -B tests/native_boot_reproducibility.py --ssh-e1000e \
+            --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+          python3 -B tests/native_ssh_console.py --staged --dhcp-driver e1000e --disk-bus ahci \
+            --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+
       - name: Recover native authority enrollment across power cuts
         run: |
           python3 tests/native_enrollment.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
@@ -251,6 +260,47 @@ jobs:
           python3 -B tests/native_slaac.py --kernel-iso "$RUNNER_TEMP/rescue.iso" \
             --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
             --installer "$RUNNER_TEMP/rescue-core/native/create.py"
+
+      - name: Resolve names and authenticate native SSH over SLAAC in an isolated IPv6 network
+        run: |
+          sudo unshare --net --propagation private bash -se -- "$RUNNER_TEMP" <<'SH'
+          scratch=$(mktemp -d)
+          router=
+          resolver=
+          cleanup() {
+            for child in $router $resolver; do
+              kill "$child" 2>/dev/null || true
+              wait "$child" 2>/dev/null || true
+            done
+            rm -rf "$scratch"
+          }
+          trap cleanup EXIT
+          ip link set lo up
+          ip tuntap add dev psios6 mode tap
+          ip link set dev psios6 addrgenmode none
+          ip link set dev psios6 up
+          ip -6 address add fe80::2/64 dev psios6 nodad
+          ip -6 address add 2001:db8:70::1/64 dev psios6 nodad
+          ip -6 address add 2001:db8:70::53/64 dev psios6 nodad
+          printf '1\n' > /proc/sys/net/ipv6/conf/all/forwarding
+          cat > "$scratch/radvd.conf" <<'RA'
+          interface psios6 {
+            AdvSendAdvert on;
+            MaxRtrAdvInterval 4;
+            MinRtrAdvInterval 3;
+            prefix 2001:db8:70::/64 { AdvOnLink on; AdvAutonomous on; };
+          };
+          RA
+          radvd -n -m stderr -C "$scratch/radvd.conf" -p "$scratch/radvd.pid" &
+          router=$!
+          dnsmasq --conf-file=/dev/null --pid-file="$scratch/dnsmasq.pid" \
+            --no-daemon --no-resolv --no-hosts --bind-interfaces \
+            --listen-address=2001:db8:70::53 --address=/node.test/2001:db8:70::77 &
+          resolver=$!
+          python3 -B tests/native_slaac.py --ssh-tap psios6 --kernel-iso "$1/rescue.iso" \
+            --archive "$1/rescue-core/psios-core-linux-amd64.tar.gz" \
+            --installer "$1/rescue-core/native/create.py"
+          SH
 
       - name: Verify native Secure Boot, signed trial, firmware rejection and offline upgrade
         run: |

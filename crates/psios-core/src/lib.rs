@@ -14,6 +14,7 @@ mod linux_clock;
 mod linux_proc;
 mod local_read_tools;
 mod mcp_tasks;
+mod native_status;
 mod node;
 mod policy;
 mod project;
@@ -25,6 +26,7 @@ mod workflow;
 
 pub use config::{AuthorityReserve, Config, DEFAULT_BACKUP_MAX_BYTES, MAX_BACKUP_BYTES};
 pub use db::Store;
+pub use native_status::native_status;
 use psios_api::ApiError;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;

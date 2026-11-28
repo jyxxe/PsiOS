@@ -351,6 +351,40 @@ pub(super) fn observe() -> Result<Value> {
     }))
 }
 
+pub(crate) fn native_storage(root: &rustix::fd::OwnedFd) -> Result<Value> {
+    let thread = crate::linux_proc::thread(root)?;
+    let mounts = table(crate::linux_proc::file(&thread, "mountinfo")?)?;
+    let mut storage = serde_json::Map::new();
+    for (key, path) in [
+        ("state", "/var/lib"),
+        ("home", "/mnt/psios-homes"),
+        ("operator_home", "/home/psios"),
+    ] {
+        let mut matches = mounts
+            .iter()
+            .filter(|mount| matches!(&mount.mount_point, LinuxPath::Text(point) if point == path));
+        let mount = matches.next();
+        require(
+            matches.next().is_none(),
+            "Conflict",
+            "native storage mount is covered by another mount",
+        )?;
+        storage.insert(
+            key.into(),
+            mount.map_or(Value::Null, |mount| {
+                json!({
+                    "mount_id": mount.mount_id,
+                    "device": mount.device,
+                    "filesystem": mount.filesystem_type,
+                    "read_only": mount.read_only || mount.superblock_read_only,
+                    "flags": mount.flags,
+                })
+            }),
+        );
+    }
+    Ok(Value::Object(storage))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

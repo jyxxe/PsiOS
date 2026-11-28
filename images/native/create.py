@@ -455,6 +455,9 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
         ssh_directory = "usr/lib/ssh"
         (work / ssh_directory).chmod(0o755)
         files.insert(0, ssh_directory)
+    # GNU cpio's reproducible mode still includes each member's modification time.
+    for name in files:
+        os.utime(work / name, (boot_media.EPOCH, boot_media.EPOCH))
     append_deployment_payload(work, files)
 
 

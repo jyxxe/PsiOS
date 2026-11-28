@@ -25,6 +25,31 @@ abort_boot() {
     "$bb" poweroff -f
 }
 
+configured_hostname() {
+    local path=/var/lib/etc/hostname name bytes
+    if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+        return 0
+    fi
+    [ -f "$path" ] && [ ! -L "$path" ] || return 1
+    case "$(stat -c '%u:%g:%a:%h' "$path")" in
+        0:0:444:1|0:0:644:1) ;;
+        *) return 1 ;;
+    esac
+    bytes=$(stat -c '%s' "$path")
+    [ "$bytes" -ge 1 ] && [ "$bytes" -le 64 ] || return 1
+    name=$(cat "$path")
+    case "$name" in
+        ""|-*|*-|*[!A-Za-z0-9-]*) return 1 ;;
+    esac
+    [ "${#name}" -le 63 ] || return 1
+    # Compare the raw file so embedded control bytes cannot disappear during
+    # command substitution. Accept the label with or without a final newline.
+    if ! printf '%s\n' "$name" | cmp -s - "$path"; then
+        printf '%s' "$name" | cmp -s - "$path" || return 1
+    fi
+    "$bb" hostname "$name"
+}
+
 machine_identity() {
     local identity=/var/lib/etc/machine-id pending=/var/lib/etc/.psios-machine-id.pending generated
     if [ -e "$identity" ] || [ -L "$identity" ]; then
@@ -200,6 +225,8 @@ stage=host-config
 [ -d /var/lib/etc ] && [ ! -L /var/lib/etc ] || exit 1
 [ "$(stat -c '%u:%g:%a' /var/lib/etc)" = 0:0:755 ]
 [ "$(stat -c '%u:%g:%a' /var/lib/etc/shadow)" = 0:0:600 ]
+stage=host-name
+configured_hostname
 stage=machine-identity
 machine_identity
 stage=host-config

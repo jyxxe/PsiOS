@@ -249,6 +249,8 @@ def host_config(seed, args):
     (seed / "etc/shadow").write_bytes(b"root:" + root + b":0:0:99999:7:::\npsios:" + operator + b":0:0:99999:7:::\n")
     (seed / "etc/shadow").chmod(0o600)
     (seed / "etc/os-release").write_text('NAME=PsiOS\nID=psios\nPRETTY_NAME="PsiOS amd64 development image"\n')
+    if args.hostname:
+        (seed / "etc/hostname").write_text(args.hostname + "\n")
     (seed / "etc/securetty").write_text("ttyS0\n")
     (seed / "etc/issue").write_text("PsiOS amd64 development console\n")
     (seed / "etc/psios/core.json").write_text(json.dumps({
@@ -840,6 +842,7 @@ def main():
     mode.add_argument("--console-hash", type=Path, help="private file containing an operator SHA-512 crypt hash")
     mode.add_argument("--upgrade-from", type=Path, help="stopped native development disk to copy without changes")
     parser.add_argument("--previous-receipt", type=Path, help="trusted build receipt for the stopped disk")
+    parser.add_argument("--hostname", help="single DNS-label hostname for a new disk")
     parser.add_argument("--trial-boot", action="store_true", help="create an isolated non-activating EFI upgrade candidate")
     parser.add_argument("--max-copy-mib", type=copy_budget_mib,
                         help="authority database and journals to copy during upgrade (default 64 MiB)")
@@ -863,6 +866,11 @@ def main():
     args = parser.parse_args()
     if not re.fullmatch(r"[0-9a-f]{64}", args.core_sha256):
         parser.error("invalid Core archive SHA-256")
+    if args.hostname is not None:
+        if args.upgrade_from:
+            parser.error("upgrade preserves /etc/hostname from the source")
+        if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", args.hostname):
+            parser.error("hostname must be a single DNS label of 1 to 63 ASCII letters, digits or hyphens")
     boot_media.signing_requested(args, parser)
     args.static_network, args.static_ipv6_network = static_config(args, parser)
     args.network_profile = None

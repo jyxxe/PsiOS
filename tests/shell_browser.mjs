@@ -143,16 +143,18 @@ async function createWorkspace(name) {
 }
 
 async function verifyWindowGeometry() {
+  const viewport = { width: 1280, height: 860, deviceScaleFactor: 1, mobile: false };
+  await send("Emulation.setDeviceMetricsOverride", viewport);
   const window = "#window-node";
   const move = window + ' [data-geometry="move"]';
   const resize = window + ' [data-geometry="resize"]';
   const rectangle = selector => evaluate(
     "document.querySelector(" + JSON.stringify(selector) + ").getBoundingClientRect().toJSON()"
   );
-  async function key(selector, key, windowsVirtualKeyCode) {
+  async function key(selector, key, windowsVirtualKeyCode, modifiers = 0) {
     await evaluate("document.querySelector(" + JSON.stringify(selector) + ").focus()");
-    await send("Input.dispatchKeyEvent", { type: "rawKeyDown", key, code: key, windowsVirtualKeyCode });
-    await send("Input.dispatchKeyEvent", { type: "keyUp", key, code: key, windowsVirtualKeyCode });
+    await send("Input.dispatchKeyEvent", { type: "rawKeyDown", key, code: key, windowsVirtualKeyCode, modifiers });
+    await send("Input.dispatchKeyEvent", { type: "keyUp", key, code: key, windowsVirtualKeyCode, modifiers });
   }
   async function drag(selector, dx, dy) {
     const rect = await rectangle(selector);
@@ -187,8 +189,25 @@ async function verifyWindowGeometry() {
   const placed = await rectangle(window);
   near(placed.y, dragged.y + 16);
   near(placed.width, smaller.width);
+  await key(move, "ArrowLeft", 37, 8);
+  near((await rectangle(window)).x, placed.x - 48);
+  await key(move, "ArrowRight", 39, 8);
+  near((await rectangle(window)).x, placed.x);
 
+  const frontWindow = `(() => {
+    const node = document.getElementById("window-node").getBoundingClientRect();
+    const tasks = document.getElementById("window-tasks").getBoundingClientRect();
+    const left = Math.max(node.left, tasks.left);
+    const right = Math.min(node.right, tasks.right);
+    const top = Math.max(node.top, tasks.top);
+    const bottom = Math.min(node.bottom, tasks.bottom);
+    if (right <= left || bottom <= top) return null;
+    return document.elementFromPoint((left + right) / 2, (top + bottom) / 2)?.closest(".app-window")?.id;
+  })()`;
   await keyboardActivate("#nav-tasks");
+  assert.equal(await evaluate(frontWindow), "window-tasks");
+  await keyboardActivate("#nav-node");
+  assert.equal(await evaluate(frontWindow), "window-node");
   await keyboardActivate('#window-tasks [data-tile-side="right"]');
   near((await rectangle(window)).x, placed.x);
   await keyboardActivate('#window-tasks [data-tile-side="right"]');
@@ -213,6 +232,14 @@ async function verifyWindowGeometry() {
   await keyboardActivate("#open-workspaces");
   await keyboardActivate('#workspace-list [data-workspace-id="0"]');
   near((await rectangle(window)).x, placed.x);
+  await keyboardActivate("#open-workspaces");
+  const destination = '#workspace-windows [data-move-window="node"]';
+  await key(destination, "End", 35);
+  await waitFor("floating window moved to the second workspace",
+    'document.querySelector("#window-node").hidden && document.querySelector(' + JSON.stringify(destination) + ').value === "1"');
+  await keyboardActivate('#workspace-list [data-workspace-id="1"]');
+  near((await rectangle(window)).x, placed.x);
+  near((await rectangle(window)).width, placed.width);
 
   await send("Emulation.setDeviceMetricsOverride", {
     width: 820, height: 490, deviceScaleFactor: 1, mobile: false,
@@ -229,7 +256,7 @@ async function verifyWindowGeometry() {
   await waitFor("normal stacked layout on narrow screens", 'document.documentElement.scrollWidth === 360 && ' +
     '!document.querySelector("#window-node").classList.contains("floating") && ' +
     'document.querySelector("#window-node [data-geometry=resize]").hidden');
-  await send("Emulation.clearDeviceMetricsOverride");
+  await send("Emulation.setDeviceMetricsOverride", viewport);
   await waitFor("geometry restored on wide screens", 'document.querySelector("#window-node").classList.contains("floating")');
   await key(resize, "Home", 36);
   assert.ok(await evaluate('!document.querySelector("#window-node").classList.contains("floating")'));

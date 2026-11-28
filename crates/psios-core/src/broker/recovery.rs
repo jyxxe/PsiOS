@@ -760,7 +760,7 @@ pub(crate) fn reconcile(
                 apps::create_recovery::reconcile_original(db, &op, req.evidence_ref.as_ref())?;
             reason = Some(err(
                 "LeaseLost",
-                "original unstarted OCI create was removed",
+                "original never-started OCI container was removed",
             ));
             recovered
         }

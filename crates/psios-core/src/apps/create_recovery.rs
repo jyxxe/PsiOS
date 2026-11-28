@@ -1,4 +1,4 @@
-//! Recover the exact never-started container of a mutating Docker CREATE with no receipt.
+//! Recover the exact never-started container left by an interrupted Docker CREATE.
 mod disposal;
 mod journal;
 
@@ -134,9 +134,11 @@ pub(crate) fn not_dispatched(db: &Db<'_>, op: &Doc) -> Result<bool> {
 }
 
 pub(crate) fn eligible_original(db: &Db<'_>, op: &Doc) -> Result<bool> {
-    Ok(journal::load(db.c, op)?.is_some_and(|journal| {
-        journal.intent.body["phase"] == "CreateIssued" && journal.start.is_none()
-    }))
+    Ok(journal::load(db.c, op)?.is_some_and(|journal| sent_without_start(&journal)))
+}
+
+fn sent_without_start(journal: &journal::Journal) -> bool {
+    journal.issue.is_some() && journal.start.is_none()
 }
 
 pub(crate) fn verify_active(conn: &Connection) -> Result<()> {
@@ -155,6 +157,7 @@ pub(crate) struct Inspection {
     app: Doc,
     volume: Option<Doc>,
     issue: Doc,
+    acknowledged_container: Option<String>,
     launch: Install,
     path: Option<PathBuf>,
     removal: Option<Doc>,
@@ -235,10 +238,11 @@ impl Inspection {
     }
     async fn observe(&self, config: &Config, connection: &mut engine::Connection) -> Result<Value> {
         self.confirm_profile(config)?;
-        let known = self
+        let removed = self
             .removal
             .as_ref()
             .and_then(|removal| removal.body["candidate"]["container_id"].as_str());
+        let known = self.acknowledged_container.as_deref().or(removed);
         let ids = self.matching(connection, known).await?;
         let Some(cid) = ids.first() else {
             return Ok(match &self.removal {
@@ -300,9 +304,9 @@ fn recoverable(db: &Db<'_>, original: &Doc) -> Result<journal::Journal> {
     )?;
     let journal = journal::required(db.c, original)?;
     require(
-        journal.intent.body["phase"] == "CreateIssued" && journal.start.is_none(),
+        sent_without_start(&journal),
         "PreconditionFailed",
-        "original OCI create is outside the lost-acknowledgement boundary",
+        "original OCI create was not sent or already has a Start checkpoint",
     )?;
     let task = original.spec["task_id"].as_str().ok_or_else(|| {
         err(
@@ -326,6 +330,15 @@ fn recoverable(db: &Db<'_>, original: &Doc) -> Result<journal::Journal> {
 
 pub(crate) fn inspection(db: &Db<'_>, original: &Doc) -> Result<Inspection> {
     let journal = recoverable(db, original)?;
+    let acknowledged_container = journal.intent.body["container_id"].as_str();
+    let removal = disposal::removal(db.c, &original.id)?;
+    if let (Some(cid), Some(removal)) = (acknowledged_container, &removal) {
+        require(
+            removal.body["candidate"]["container_id"] == cid,
+            "RecoveryRequired",
+            "OCI removal witness differs from the acknowledged container",
+        )?;
+    }
     let path = journal
         .volume
         .as_ref()
@@ -337,9 +350,10 @@ pub(crate) fn inspection(db: &Db<'_>, original: &Doc) -> Result<Inspection> {
         app: journal.app,
         volume: journal.volume,
         issue: journal.issue.unwrap(),
+        acknowledged_container: acknowledged_container.map(str::to_owned),
         launch,
         path,
-        removal: disposal::removal(db.c, &original.id)?,
+        removal,
     })
 }
 

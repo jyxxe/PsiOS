@@ -176,6 +176,41 @@ async function verifyFiles() {
   assert.ok(requests.every(url => new URL(url).origin === input.origin));
 }
 
+async function verifyFilePreview() {
+  await send("Emulation.setDeviceMetricsOverride", {
+    width: 360, height: 800, screenWidth: 360, screenHeight: 800, deviceScaleFactor: 1, mobile: true,
+  });
+  await keyboardActivate("#nav-files");
+  await waitFor("root directory", 'document.querySelector("#files-rows button")?.textContent === "documents"');
+  await keyboardActivate("#files-rows button");
+  await waitFor("three previewable files", 'document.querySelectorAll("#files-rows button").length === 3');
+  const file = index => "#files-rows tr:nth-child(" + index + ") button";
+  await keyboardActivate(file(1));
+  await waitFor("invalid UTF-8 feedback", 'document.getElementById("files-preview-status").classList.contains("error")');
+  assert.ok(await evaluate('document.getElementById("files-preview-text").hidden'));
+  await keyboardActivate(file(2));
+  await waitFor("bounded first chunk", 'document.getElementById("files-preview-text").textContent.length === 6143');
+  assert.ok(await evaluate('document.getElementById("files-preview-status").textContent.includes("6 KiB")'));
+  assert.equal(await evaluate("document.documentElement.scrollWidth"), 360);
+  await keyboardActivate(file(3));
+  const literal = 'document.getElementById("files-preview-text").textContent === ' + JSON.stringify(input.sample);
+  await waitFor("literal text preview", literal);
+  assert.ok(await evaluate('!document.getElementById("preview-fixture") && document.activeElement.id === "files-preview-title"'));
+  await keyboardActivate("#files-preview-close");
+  assert.ok(await evaluate('document.getElementById("files-preview").hidden && document.activeElement.textContent === "会议记录.txt"'));
+  await keyboardActivate(file(3));
+  await waitFor("reopened preview", literal);
+  await keyboardActivate('#window-files [data-action="minimize"]');
+  assert.ok(await evaluate('document.getElementById("files-preview-text").textContent === "" && document.getElementById("files-preview").hidden'));
+  await keyboardActivate("#nav-files");
+  await waitFor("reloaded folder", 'document.querySelectorAll("#files-rows button").length === 3');
+  assert.ok(await evaluate('document.getElementById("files-preview-text").textContent === ""'));
+  await click("#logout");
+  await waitFor("unpaired desktop", 'document.getElementById("workspace").hidden');
+  assert.deepEqual(exceptions, []);
+  assert.ok(requests.every(url => new URL(url).origin === input.origin));
+}
+
 async function verifyWindowTiling() {
   const viewport = { width: 1280, height: 860, screenWidth: 1280, screenHeight: 860, deviceScaleFactor: 1, mobile: false };
   await send("Emulation.setDeviceMetricsOverride", viewport);
@@ -274,6 +309,7 @@ async function test() {
   await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
   await waitFor("paired desktop", '!document.querySelector("#workspace").hidden && !document.querySelector("#empty-desktop").hidden');
   if (input.fileBrowser) return verifyFiles();
+  if (input.filePreview) return verifyFilePreview();
   if (input.windowTiling) return verifyWindowTiling();
   assert.ok(await evaluate('document.activeElement.id === "nav-node" && document.querySelectorAll(".app-window:not([hidden])").length === 0'));
   assert.ok(!requests.some(url => ["/api/node", "/api/tasks"].includes(new URL(url).pathname)));

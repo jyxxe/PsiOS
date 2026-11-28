@@ -92,6 +92,14 @@
             <button id="files-previous" type="button" disabled>上一页</button>
             <button id="files-next" type="button" disabled>下一页</button>
           </div>
+          <section id="files-preview" class="card" aria-labelledby="files-preview-title" hidden>
+            <div class="pagination">
+              <h3 id="files-preview-title" tabindex="-1"></h3>
+              <button id="files-preview-close" type="button">关闭预览</button>
+            </div>
+            <p id="files-preview-status" class="message" role="status"></p>
+            <pre id="files-preview-text" aria-labelledby="files-preview-title" tabindex="0" hidden></pre>
+          </section>
         </div>
       </section>
       <section id="window-applications" class="app-window" aria-labelledby="title-applications" hidden>

@@ -182,6 +182,7 @@ td:first-child { width: 72%; }
 td button { display: block; text-align: start; width: 100%; border-color: transparent; padding: .4rem .65rem; overflow-wrap: anywhere; }
 td button[aria-pressed="true"] { background: var(--selected); color: var(--accent); }
 .pagination { display: flex; justify-content: space-between; gap: .6rem; padding: .75rem 1rem; }
+#files-preview-text { max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .empty { color: var(--muted); padding: 1rem; }
 
 dl { margin: 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .45rem 1rem; }

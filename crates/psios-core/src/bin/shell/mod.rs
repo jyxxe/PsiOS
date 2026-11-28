@@ -95,6 +95,7 @@ enum Endpoint {
     Applications,
     ApplicationReleases,
     VolumeDirectory,
+    VolumePreview,
     Conversations,
     ConversationMessages,
     AgentSessions,
@@ -263,6 +264,7 @@ enum CoreRequest {
     Applications(Page),
     ApplicationReleases(ApplicationReleases),
     VolumeDirectory(files::Directory, VolumeAccess),
+    VolumePreview(files::Preview, VolumeAccess),
     Conversations(DirectoryPage),
     ConversationMessages(ConversationMessages),
     AgentSessions(Page),
@@ -293,6 +295,10 @@ impl CoreRequest {
             Self::VolumeDirectory(directory, access) => Ok(json_response(
                 StatusCode::OK,
                 directory.read(access, client, &check)?,
+            )),
+            Self::VolumePreview(preview, access) => Ok(json_response(
+                StatusCode::OK,
+                preview.read(access, client, &check)?,
             )),
             Self::Applications(page) => {
                 let snapshot = client.call(
@@ -907,6 +913,10 @@ fn rpc(
             serde_json::from_value(data).map_err(|_| INVALID)?,
             files.cloned().ok_or(INVALID)?,
         )),
+        Endpoint::VolumePreview => Ok(CoreRequest::VolumePreview(
+            serde_json::from_value(data).map_err(|_| INVALID)?,
+            files.cloned().ok_or(INVALID)?,
+        )),
         Endpoint::Conversations => Ok(CoreRequest::Conversations(
             serde_json::from_value(data).map_err(|_| INVALID)?,
         )),
@@ -1037,6 +1047,15 @@ impl Shell {
             "/api/applications" => Endpoint::Applications,
             "/api/application-releases" => Endpoint::ApplicationReleases,
             "/api/volume-directory" if self.options.files.is_some() => Endpoint::VolumeDirectory,
+            "/api/volume-preview"
+                if self
+                    .options
+                    .files
+                    .as_ref()
+                    .is_some_and(|files| files.preview) =>
+            {
+                Endpoint::VolumePreview
+            }
             "/api/conversations" => Endpoint::Conversations,
             "/api/conversation-messages" => Endpoint::ConversationMessages,
             "/api/agent-sessions" => Endpoint::AgentSessions,
@@ -1072,8 +1091,11 @@ impl Shell {
                 "send_chat":self.options.send_chat,"review_work_items":self.options.review_work_items,
                 "manage_agent_sessions":self.options.manage_agent_sessions,
             });
-            if self.options.files.is_some() {
+            if let Some(files) = &self.options.files {
                 reply["browse_files"] = json!(true);
+                if files.preview {
+                    reply["preview_files"] = json!(true);
+                }
             }
             return Ok(json_response(StatusCode::OK, reply));
         }

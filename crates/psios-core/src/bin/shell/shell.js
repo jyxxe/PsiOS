@@ -772,7 +772,7 @@ byId("pair-form").addEventListener("submit", async (event) => {
     bearer = session.token;
     void observeSession(bearer);
     canCancelPending = session.cancel_pending_tasks === true;
-    files.capability(session.browse_files === true);
+    files.capability(session.browse_files === true, session.preview_files === true);
     chat.capability(session.send_chat === true);
     projects.setReviewer(session.review_work_items === true ? session.principal_id : null);
     agentRuntime.capability(session.manage_agent_sessions === true);

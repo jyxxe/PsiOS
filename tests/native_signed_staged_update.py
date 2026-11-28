@@ -17,6 +17,7 @@ import pefile
 from native_disk import REPO, password, sha
 from native_secure_boot import EFI_FILE, check_firmware, create_signer, secure_vm, signing_args
 from native_staged_update import digest_map, durable_fact, invoke, refused, succeeded, validate_bundle
+from native_uefi_boot import read_firmware
 from native_upgrade import shutdown
 
 
@@ -42,7 +43,15 @@ def verify_uki(work, disk, build, cert, other_cert):
 
 def boot_operator(console, operator, admin, build):
     console.login("root", admin)
-    check_firmware(console)
+    entries = None
+    if build.get("uefi_boot_entries"):
+        kernel = console.run("dmesg | grep -Ei 'secure.boot|lockdown' || true").lower()
+        assert "secure boot enabled" in kernel or "locked down from efi secure boot" in kernel, kernel
+        entries = read_firmware(console)
+        record = json.loads(console.run("cat /run/psios-boot.json"))
+        assert record["uefi_boot_entries"] == entries, (record, entries)
+    else:
+        check_firmware(console)
     console.send("exit")
     console.login("psios", operator)
     manifest = json.loads(console.run("cat /psios-deployment.json"))
@@ -52,6 +61,8 @@ def boot_operator(console, operator, admin, build):
     if build.get("secure_boot_enforcement_required"):
         status = json.loads(console.run("psiosctl native-status"))
         assert status["secure_boot_required"] is True and status["secure_boot_observation"] == "Enforced", status
+        if entries is not None:
+            assert status["uefi_boot_entries"] == entries, status
         assert status["boot_id"] == console.run("cat /proc/sys/kernel/random/boot_id")
         assert status["deployment_manifest_sha256"] == "sha256:" + build["deployment_manifest_sha256"]
         assert console.run("stat -c '%u:%g:%a:%h' /run/psios-boot.json") == "0:0:444:1"
@@ -101,10 +112,11 @@ def exercise(args, work):
 
     old = work / "signed-before.raw"
     previous = work / "signed-before.json"
+    profile = ("--uefi-boot-entries",) if args.uefi_boot_entries else ()
     built = succeeded(invoke([sys.executable, "-B", args.previous_installer, old,
         "--kernel-iso", args.kernel_iso, "--core-archive", args.previous_archive,
         "--core-sha256", sha(args.previous_archive), "--console-hash", operator_hash,
-        "--root-console-hash", admin_hash, *signer], 330))
+        "--root-console-hash", admin_hash, *profile, *signer], 330))
     previous.write_text(built)
     previous.chmod(0o600)
     original_build = json.loads(built)
@@ -146,6 +158,8 @@ def exercise(args, work):
     stdout = succeeded(invoke(stage(output), 850))
     assert {entry.name for entry in work.iterdir()} == before | {output.name}, "stage leaked private scratch paths"
     build = validate_bundle(args, output, stdout, original_build, frozen, old, previous, code, original_vars, baseline[0])
+    if args.uefi_boot_entries:
+        assert build["uefi_boot_entries"] is True, build
     receipt = json.loads((output / "staged-update.json").read_bytes())
     assert build["secure_boot"] == signed and receipt["candidate"]["secure_boot"] == signed, receipt
     assert receipt["trial"]["secure_boot"] == {**signed, "status": "Enforced"}, receipt["trial"]
@@ -169,6 +183,8 @@ def main():
     for flag in ("--efi-stub", "--kernel-iso", "--previous-archive", "--archive"):
         parser.add_argument(flag, type=Path, required=True)
     parser.add_argument("--ovmf-dir", type=Path, default=Path("/usr/share/OVMF"))
+    parser.add_argument("--uefi-boot-entries", action="store_true",
+                        help="verify the UEFI boot entry profile using a previous installer that supports it")
     parser.add_argument("--expected-source-format", type=int)
     parser.add_argument("--expected-target-format", type=int)
     args = parser.parse_args()

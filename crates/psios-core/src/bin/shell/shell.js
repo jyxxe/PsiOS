@@ -14,6 +14,11 @@ const desktop = byId("desktop");
 const launcher = byId("launcher");
 const launcherQuery = byId("launcher-query");
 const launcherApps = byId("launcher-apps");
+const workspaceDialog = byId("workspaces");
+const workspaceList = byId("workspace-list");
+const workspaceWindows = byId("workspace-windows");
+const workspaceName = byId("workspace-name");
+const workspaceMessage = byId("workspace-message");
 const code = byId("code");
 const status = byId("status");
 const nodeView = byId("node-view");
@@ -35,10 +40,11 @@ let sessionRequests = new AbortController();
 let canCancelPending = false;
 const apps = new Map(["node", "tasks", "files", "applications", "chat", "projects", "agent-runtime"].map(id => [id, {
   window: byId("window-" + id), title: byId("title-" + id),
-  dock: byId("nav-" + id), status: byId("status-" + id), state: "closed", tile: null,
+  dock: byId("nav-" + id), status: byId("status-" + id), state: "closed", tile: null, workspace: null,
 }]));
-let active = null;
-let maximized = null;
+const workspaces = new Map([[0, { name: "桌面", active: null, maximized: null }]]);
+let currentWorkspace = 0;
+let nextWorkspace = 1;
 let recentApps = [];
 let nodeUpdate = 0;
 let resolverUpdate = 0;
@@ -71,13 +77,23 @@ function leave(text, error = false) {
   launcherQuery.value = "";
   launcherApps.replaceChildren();
   byId("launcher-empty").hidden = true;
+  workspaceDialog.close();
+  workspaceList.replaceChildren();
+  workspaceWindows.replaceChildren();
+  byId("workspace-open-windows").hidden = true;
+  workspaceName.value = "";
+  message(workspaceMessage, "");
+  workspaces.clear();
+  workspaces.set(0, { name: "桌面", active: null, maximized: null });
+  currentWorkspace = 0;
+  nextWorkspace = 1;
   recentApps = [];
   workspace.hidden = true;
   for (const app of apps.values()) {
     app.state = "closed";
     app.tile = null;
+    app.workspace = null;
   }
-  active = maximized = null;
   cursors = [null];
   nextCursor = selectedTask = null;
   resetApplications();
@@ -312,7 +328,7 @@ function artifactView(taskId, references) {
         content.textContent = result.content_json;
         content.hidden = false;
         message(notice, "已核对固定版本的 SHA-256 摘要。");
-        if (active === "tasks") content.focus();
+        if (workspaces.get(currentWorkspace).active === "tasks") content.focus();
       }
     } catch (error) {
       if (!section.isConnected) return;
@@ -386,7 +402,7 @@ function historyView(task) {
       back.disabled = pages.length === 1;
       forward.disabled = !nextAfter;
       controls.hidden = back.disabled && forward.disabled;
-      if (focus && active === "tasks") list.focus();
+      if (focus && workspaces.get(currentWorkspace).active === "tasks") list.focus();
     } catch (error) {
       if (!panel.isConnected || generationAtRequest !== generation) return;
       message(notice, error.message, true);
@@ -425,7 +441,7 @@ function pendingCancellation(task) {
       });
       if (!controls.isConnected) return;
       renderTask(result);
-      if (active === "tasks") taskDetail.focus();
+      if (workspaces.get(currentWorkspace).active === "tasks") taskDetail.focus();
     } catch (error) {
       if (!controls.isConnected) return;
       if (error.code === "Conflict" || error.code === "PreconditionFailed") {
@@ -747,10 +763,11 @@ function arrangeWindows() {
 }
 
 function updateDesktop() {
+  const { name, active, maximized } = workspaces.get(currentWorkspace);
   let visible = 0;
   let tiled = false;
   for (const [id, app] of apps) {
-    const shown = app.state === "open" && (!maximized || maximized === id);
+    const shown = app.workspace === currentWorkspace && app.state === "open" && (!maximized || maximized === id);
     showWindow(id, app, shown);
     if (shown) visible += 1;
     if (app.tile) app.window.dataset.tile = app.tile;
@@ -774,36 +791,131 @@ function updateDesktop() {
   arrangeWindows();
   byId("empty-desktop").hidden = visible !== 0;
   byId("active-app").textContent = active ? apps.get(active).title.textContent : "桌面";
+  byId("open-workspaces").textContent = "工作区 · " + name;
 }
 
 function focusApp(id) {
-  if (active === id) return;
-  active = id;
+  const scope = workspaces.get(currentWorkspace);
+  if (apps.get(id).window.hidden || scope.active === id) return;
+  scope.active = id;
   updateDesktop();
 }
 
 function tileWindow(id, side) {
   const app = apps.get(id);
+  const scope = workspaces.get(currentWorkspace);
   if (app.tile === side) {
     app.tile = null;
   } else {
-    const occupant = Array.from(apps.values()).find(other => other.tile === side);
+    const occupant = Array.from(apps.values()).find(other => other.workspace === currentWorkspace && other.tile === side);
     if (occupant) occupant.tile = app.tile;
     app.tile = side;
   }
-  maximized = null;
-  active = id;
+  scope.maximized = null;
+  scope.active = id;
   updateDesktop();
 }
 
 function openWindow(id) {
   const app = apps.get(id);
-  if (maximized !== id) maximized = null;
+  app.workspace ??= currentWorkspace;
+  currentWorkspace = app.workspace;
+  const scope = workspaces.get(currentWorkspace);
+  if (scope.maximized !== id) scope.maximized = null;
   app.state = "open";
-  active = id;
+  scope.active = id;
   recentApps = [id, ...recentApps.filter(previous => previous !== id)].slice(0, 4);
   updateDesktop();
   app.title.focus();
+}
+
+function leaveWindowScope(id, scopeId) {
+  const scope = workspaces.get(scopeId);
+  if (scope.maximized === id) scope.maximized = null;
+  if (scope.active === id) {
+    scope.active = Array.from(apps).find(([, app]) => app.workspace === scopeId && app.state === "open")?.[0] ?? null;
+  }
+}
+
+function switchWorkspace(id) {
+  currentWorkspace = id;
+  workspaceDialog.close();
+  updateDesktop();
+  const active = workspaces.get(id).active;
+  (active ? apps.get(active).title : byId("open-workspaces")).focus();
+}
+
+function moveWindow(id, destination) {
+  const app = apps.get(id);
+  const source = app.workspace;
+  if (source === destination || !workspaces.has(destination)) return;
+  app.workspace = destination;
+  if (app.tile && Array.from(apps.values()).some(other => other !== app && other.workspace === destination && other.tile === app.tile)) {
+    app.tile = null;
+  }
+  leaveWindowScope(id, source);
+  const scope = workspaces.get(destination);
+  if (app.state === "open" && scope.active === null) scope.active = id;
+  updateDesktop();
+}
+
+function renderWorkspaces() {
+  const assigned = Array.from(apps.values(), app => app.workspace);
+  workspaceList.replaceChildren();
+  for (const [id, { name }] of workspaces) {
+    const row = element("li");
+    const select = element("button", name);
+    select.type = "button";
+    select.dataset.workspaceId = id;
+    if (id === currentWorkspace) select.setAttribute("aria-current", "true");
+    select.addEventListener("click", () => switchWorkspace(id));
+    row.append(select);
+    if (id !== 0 && !assigned.includes(id)) {
+      const remove = element("button", "删除空工作区");
+      remove.type = "button";
+      remove.setAttribute("aria-label", "删除空工作区 " + name);
+      remove.addEventListener("click", () => {
+        workspaces.delete(id);
+        if (id === currentWorkspace) currentWorkspace = 0;
+        updateDesktop();
+        renderWorkspaces();
+        workspaceName.focus();
+      });
+      row.append(remove);
+    }
+    workspaceList.append(row);
+  }
+  workspaceWindows.replaceChildren();
+  for (const [id, app] of apps) {
+    if (app.workspace === null) continue;
+    const title = app.title.textContent;
+    const row = element("li");
+    const activate = element("button", title + (app.state === "minimized" ? " · 已最小化" : ""));
+    activate.type = "button";
+    activate.addEventListener("click", () => {
+      workspaceDialog.close();
+      openWindow(id);
+    });
+    const destination = element("select");
+    destination.setAttribute("aria-label", "移动 " + title + " 到工作区");
+    destination.dataset.moveWindow = id;
+    for (const [key, { name }] of workspaces) {
+      const option = element("option", name);
+      option.value = key;
+      option.selected = key === app.workspace;
+      destination.append(option);
+    }
+    destination.addEventListener("change", () => {
+      moveWindow(id, Number(destination.value));
+      renderWorkspaces();
+      workspaceWindows.querySelector(`[data-move-window="${id}"]`)?.focus();
+    });
+    const move = element("label", "移动到");
+    move.append(destination);
+    row.append(activate, move);
+    workspaceWindows.append(row);
+  }
+  byId("workspace-open-windows").hidden = workspaceWindows.childElementCount === 0;
 }
 
 function renderLauncher() {
@@ -831,9 +943,13 @@ function renderLauncher() {
 
 function hideWindow(id, state) {
   const app = apps.get(id);
+  const scopeId = app.workspace;
+  if (scopeId === null) return;
   app.state = state;
-  if (state === "closed") app.tile = null;
-  if (maximized === id) maximized = null;
+  if (state === "closed") {
+    app.tile = null;
+    app.workspace = null;
+  }
   if (id === "tasks" && state === "closed") {
     cursors = [null];
     nextCursor = selectedTask = null;
@@ -843,9 +959,10 @@ function hideWindow(id, state) {
   if (id === "chat" && state === "closed") chat.reset();
   if (id === "projects" && state === "closed") projects.reset();
   if (id === "agent-runtime" && state === "closed") agentRuntime.reset();
-  if (active === id) active = Array.from(apps.keys()).find(key => apps.get(key).state === "open") ?? null;
+  leaveWindowScope(id, scopeId);
   updateDesktop();
   if (!workspace.hidden) {
+    const { active } = workspaces.get(scopeId);
     if (active) apps.get(active).title.focus();
     else app.dock.focus();
   }
@@ -868,8 +985,9 @@ for (const [id, app] of apps) {
   controls.querySelector('[data-action="close"]').addEventListener("click", () => hideWindow(id, "closed"));
   controls.querySelector('[data-action="minimize"]').addEventListener("click", () => hideWindow(id, "minimized"));
   controls.querySelector('[data-action="maximize"]').addEventListener("click", () => {
-    active = id;
-    maximized = maximized === id ? null : id;
+    const scope = workspaces.get(currentWorkspace);
+    scope.active = id;
+    scope.maximized = scope.maximized === id ? null : id;
     updateDesktop();
   });
   app.window.querySelector("header").append(controls);
@@ -890,6 +1008,32 @@ launcherQuery.addEventListener("input", renderLauncher);
 byId("launcher-form").addEventListener("submit", event => {
   event.preventDefault();
   launcherApps.querySelector("button")?.click();
+});
+
+byId("open-workspaces").addEventListener("click", () => {
+  if (!bearer || workspaceDialog.open) return;
+  message(workspaceMessage, "");
+  renderWorkspaces();
+  workspaceDialog.showModal();
+  workspaceList.querySelector('[aria-current="true"]').focus();
+});
+byId("close-workspaces").addEventListener("click", () => workspaceDialog.close());
+byId("workspace-form").addEventListener("submit", event => {
+  event.preventDefault();
+  const name = workspaceName.value.normalize("NFKC").trim();
+  if (!name || name.length > 32 || Array.from(workspaces.values()).some(scope => scope.name === name)) {
+    message(workspaceMessage, "请输入 1–32 个字符且未使用的名称。", true);
+    workspaceName.focus();
+    return;
+  }
+  if (workspaces.size >= 8) {
+    message(workspaceMessage, "本次会话最多可打开 8 个工作区。", true);
+    return;
+  }
+  const id = nextWorkspace++;
+  workspaces.set(id, { name, active: null, maximized: null });
+  workspaceName.value = "";
+  switchWorkspace(id);
 });
 
 byId("pair-form").addEventListener("submit", async (event) => {

@@ -25,6 +25,7 @@
     <header class="desktop-bar">
       <p class="brand"><span aria-hidden="true">Ψ</span> PsiOS Shell</p>
       <button id="open-launcher" type="button" aria-haspopup="dialog" aria-controls="launcher">应用</button>
+      <button id="open-workspaces" type="button" aria-haspopup="dialog" aria-controls="workspaces">工作区 · 桌面</button>
       <span id="active-app">桌面</span>
       <div class="identity">
         <strong id="principal" aria-label="已连接的主体"></strong>
@@ -42,6 +43,23 @@
       </form>
       <ul id="launcher-apps"></ul>
       <p id="launcher-empty" class="message" role="status" hidden>没有匹配的应用。</p>
+    </dialog>
+    <dialog id="workspaces" aria-labelledby="workspaces-title">
+      <header>
+        <h1 id="workspaces-title">工作区</h1>
+        <button id="close-workspaces" type="button">关闭</button>
+      </header>
+      <ul id="workspace-list"></ul>
+      <form id="workspace-form">
+        <label for="workspace-name">新工作区名称</label>
+        <input id="workspace-name" type="text" maxlength="32" required autocomplete="off">
+        <button type="submit">创建</button>
+      </form>
+      <p id="workspace-message" class="message" role="status"></p>
+      <section id="workspace-open-windows" aria-labelledby="workspace-open-title" hidden>
+        <h2 id="workspace-open-title">已打开的窗口</h2>
+        <ul id="workspace-windows"></ul>
+      </section>
     </dialog>
     <p id="status" class="desktop-status message" role="status"></p>
     <main id="desktop" class="desktop" aria-label="桌面">

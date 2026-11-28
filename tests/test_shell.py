@@ -1209,6 +1209,21 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(self.node.call("Task.Get", {"id": task}), before)
 
     @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
+    def test_browser_manages_named_workspaces_without_changing_tasks(self):
+        task = self.node.submit("system.status", {})
+        before = self.node.wait(task)
+        self.assertEqual(before["lifecycle"], "Succeeded")
+        shell = self.shell()
+        args = dict(origin=shell.origin, code=shell.code, namedWorkspaces=True,
+                    node=self.node.call("Node.Get", {})["reference"]["resource_id"],
+                    profile=str(self.node.base / "browser"))
+        subprocess.run(["node", str(Path(__file__).with_name("shell_browser.mjs")),
+                        os.environ.get("PSIOS_TEST_CHROME", "google-chrome")],
+                       input=json.dumps(args), text=True, check=True, timeout=60)
+        self.assertEqual(shell.process.wait(timeout=5), 0)
+        self.assertEqual(self.node.call("Task.Get", {"id": task}), before)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
     def test_browser_pairs_reads_tasks_and_restores_selection_focus(self):
         task = self.node.submit("system.status", {})
         result = self.node.wait(task)
@@ -1251,11 +1266,15 @@ class ShellTests(unittest.TestCase):
 
     @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
     def test_browser_restoring_an_app_rechecks_its_grant_without_losing_the_other_window(self):
-        self.check_window_restoration(covered=False)
+        self.check_window_restoration(transition="minimize")
 
     @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
     def test_browser_revealing_a_covered_app_rechecks_its_grant_without_losing_the_maximized_task(self):
-        self.check_window_restoration(covered=True)
+        self.check_window_restoration(transition="cover")
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
+    def test_browser_returning_to_a_workspace_rechecks_its_grants(self):
+        self.check_window_restoration(transition="workspace")
 
     @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
     def test_browser_scrubs_both_live_windows_on_cli_exit(self):
@@ -1301,7 +1320,7 @@ class ShellTests(unittest.TestCase):
                     if browser.poll() is None:
                         browser.kill()
 
-    def check_window_restoration(self, *, covered):
+    def check_window_restoration(self, *, transition):
         node = self.node
         agent, work = node.agent(["task.submit", "system.status", "task.read", "resource.read"])
         inventory = node.call("Grant.Issue", {"principal_id": agent["principal_id"],
@@ -1319,7 +1338,7 @@ class ShellTests(unittest.TestCase):
             parent.settimeout(45)
             args = dict(origin=shell.origin, code=shell.code, task=task,
                         node=node.call("Node.Get", {})["reference"]["resource_id"],
-                        profile=str(node.base / "browser"), control_fd=child.fileno(), covered=covered)
+                        profile=str(node.base / "browser"), control_fd=child.fileno(), windowTransition=transition)
             with subprocess.Popen(["node", str(Path(__file__).with_name("shell_browser.mjs")),
                                    os.environ.get("PSIOS_TEST_CHROME", "google-chrome")],
                                   stdin=subprocess.PIPE, pass_fds=(child.fileno(),)) as browser:

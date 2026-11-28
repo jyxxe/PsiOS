@@ -10,11 +10,16 @@ import subprocess
 import sys
 import tempfile
 
-from native_disk import boot, call, check_native_network, check_state, extract_partition, password, replace_partition, sha
+from native_disk import (
+    boot, call, check_clean_shutdown, check_deployment_os_release, check_native_network, check_state,
+    extract_partition, password, replace_partition, sha,
+)
 
 
 TRIAL = b"PSIOS-TRIAL/1 "
 SERVICE_MARKER = "PSIOS-PERSISTED-SERVICE-RAN"
+STOCK_RELEASE = 'NAME=PsiOS\nID=psios\nPRETTY_NAME="PsiOS amd64 development image"'
+SITE_RELEASE = 'NAME=PsiOS\nID=psios\nPRETTY_NAME="PsiOS site configuration"'
 STATE_OFFSET = 65
 STATE_MIB = 192
 
@@ -193,6 +198,7 @@ def exercise(args, work):
 
     with boot(work, previous) as c:
         c.login("psios", operator)
+        assert c.run("test ! -L /etc/os-release && cat /etc/os-release") == STOCK_RELEASE
         first = check_state(c)
         submitted = json.loads(c.run("printf '{\"name\":\"native-upgrade\"}' | psiosctl submit volume.create --key native-upgrade-volume"))
         task = json.loads(c.run("psiosctl wait " + shlex.quote(submitted["task_id"])))
@@ -248,6 +254,7 @@ def exercise(args, work):
         c.login("psios", operator)
         assert c.run("sha256sum /psios-deployment.json").split()[0] == upgrade["deployment_manifest_sha256"]
         assert c.run("cat /psios-source") == upgrade["source_commit"]
+        check_deployment_os_release(c, json.loads(c.run("cat /psios-deployment.json")))
         after = check_state(c)
         assert after[0] == first[0] and after[1]["task_id"] == first[1]["task_id"] and after[2] == first[2]
         assert after[1]["deduplicated"] and after[3] != first[3]
@@ -268,12 +275,17 @@ def exercise(args, work):
     with boot(work, previous) as c:
         c.login("psios", operator)
         assert c.run("cat /psios-source") == old["source_commit"]
+        assert c.run("test ! -L /etc/os-release && cat /etc/os-release") == STOCK_RELEASE
         assert c.run("cat before-upgrade") == "retained-home"
         fallback = check_state(c)
         assert fallback[0] == first[0] and fallback[1]["task_id"] == first[1]["task_id"] and fallback[2] == first[2]
         assert call(c, "Resource.Get", {"id": volume["resource_id"]})["reference"] == volume
         assert c.run(f"cat {volume_file}") == "retained-volume"
-        shutdown(c, admin)
+        c.send("exit")
+        c.login("root", admin)
+        c.run(f"printf '%s\\n' {shlex.quote(SITE_RELEASE)} > /etc/os-release; sync -f /etc")
+        c.send("cd /; exec poweroff")
+        assert c.vm.wait(35) == 0
 
     clean_disk = work / "clean-copy.raw"
     prepare[2] = clean_disk
@@ -285,6 +297,21 @@ def exercise(args, work):
         for _ in range(258):
             assert source.read(1024 * 1024) == candidate.read(1024 * 1024)
     assert clean["upgrade"]["verified_authority"]["migration_rehearsal"] == rehearsal
+    # A private boot view tests the administrator's override and retains the
+    # stopped baseline for the independent migration refusal below.
+    override = work / "site-override.qcow2"
+    subprocess.run(["qemu-img", "create", "-q", "-f", "qcow2", "-F", "raw", "-b", clean_disk, override],
+                   check=True, timeout=30)
+    override_vars = work / "site-override.fd"
+    shutil.copyfile(original_vars, override_vars)
+    with boot(work, override, vars_file=override_vars.name, disk_format="qcow2", pace_commands=True) as c:
+        c.login("psios", operator)
+        assert c.run("test ! -L /etc/os-release && cat /etc/os-release") == SITE_RELEASE
+        check_deployment_os_release(c, json.loads(c.run("cat /psios-deployment.json")), linked=False)
+        shutdown(c, admin)
+    assert sha(clean_disk) == clean["initial_image_sha256"]
+    check_clean_shutdown(previous)
+    print("PASS native os-release follows the verified deployment and preserves a site override", flush=True)
 
     # Use the disposable, stopped second copy to inject an otherwise valid old schema.
     add_migration_conflict(work, clean_disk)

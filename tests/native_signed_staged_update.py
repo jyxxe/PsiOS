@@ -14,7 +14,7 @@ import uuid
 
 import pefile
 
-from native_disk import REPO, password, sha
+from native_disk import REPO, check_deployment_os_release, password, sha
 from native_secure_boot import EFI_FILE, check_firmware, create_signer, secure_vm, signing_args
 from native_staged_update import digest_map, durable_fact, invoke, refused, succeeded, validate_bundle
 from native_upgrade import shutdown
@@ -52,7 +52,8 @@ def boot_operator(console, operator, admin, build):
     return durable_fact(console)
 
 
-def isolated_boot(work, disk, code, original_vars, credentials, build, baseline, token, *, pace_commands=False):
+def isolated_boot(work, disk, code, original_vars, credentials, build, baseline, token, *, pace_commands=False,
+                  verify_os_release=False):
     operator, admin = credentials
     with tempfile.TemporaryDirectory(dir=work, prefix="secure-boot-view-") as directory:
         view = Path(directory)
@@ -64,6 +65,8 @@ def isolated_boot(work, disk, code, original_vars, credentials, build, baseline,
                           "-b", str(disk), overlay], 30))
         with secure_vm(view, overlay, disk_format="qcow2", pace_commands=pace_commands) as console:
             observed = boot_operator(console, operator, admin, build)
+            if verify_os_release:
+                check_deployment_os_release(console, json.loads(console.run("cat /psios-deployment.json")))
             assert observed[0] == baseline[0], observed
             assert observed[1]["task_id"] == baseline[1]["task_id"] and observed[1]["deduplicated"] is True
             assert observed[2] == baseline[2] and observed[4] == baseline[4], observed
@@ -148,7 +151,8 @@ def exercise(args, work):
     bundle = digest_map(output.iterdir())
     verify_uki(work, candidate, build, cert, other_cert)
     credentials = (operator, admin)
-    active_boot = isolated_boot(work, candidate, code, original_vars, credentials, build, baseline, token)
+    active_boot = isolated_boot(work, candidate, code, original_vars, credentials, build, baseline, token,
+                                verify_os_release=True)
     old_boot = isolated_boot(work, old, code, original_vars, credentials, original_build, baseline, token)
     assert active_boot != old_boot
     assert digest_map(frozen) == frozen and digest_map(bundle) == bundle

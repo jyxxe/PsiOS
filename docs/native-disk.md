@@ -35,6 +35,8 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 
 正常部署挂载并核验状态卷以后，如早期启动检查失败，会在 `/var/lib/.psios-boot-failure` 保存最近一次失败的启动 ID 和阶段。文件为 root 专用，修复后成功启动仍保留记录。停机时，持有可信磁盘副本的操作者也可只读查看状态分区根目录下的 `/.psios-boot-failure`。状态卷核验前的故障和隔离试启动故障由串口报告。
 
+原生部署的 `/usr/lib/os-release` 由引导载荷校验，提供 `ID=psios`、`IMAGE_ID=psios-native` 及 `BUILD_ID`。构建 ID 由部署清单在加入 `build_id` 与 `/usr/lib/os-release` 文件摘要前按排序的紧凑 JSON 字节计算 SHA-256。新盘的 `/etc/os-release` 链接到该文件，停机升级后的生产启动会将旧版原样的出厂文件迁移为同一链接。管理员提供的 `/etc/os-release` 继续作为本地覆盖。分阶段升级分别核对试启动和正式候选的构建 ID 及发行标识文件，再比较两份镜像的共同输入。[原生启动验收](../tests/native_disk.py) · [分阶段升级验收](../tests/native_staged_update.py)
+
 生成新盘时可用 `--timezone Asia/Shanghai` 选择本地显示时区，默认 UTC。普通账户可用 `psios-timezone show` 查询，或用 `psios-timezone list` 查看随盘提供的 IANA 名称。在本机 root 控制台执行 `psios-timezone set Europe/Berlin` 会原子更新 `/etc/localtime`，重启和停机升级保留该设置。系统 UTC 时钟由原有内核与固件管理。需要 UTC 输出时可用 `date -u`。
 
 当前镜像从固定 Linux 输入取用公有领域的 IANA tzdata 2026f。启动清单记录数据包摘要，启动时校验随盘的时区文件及管理命令。停机升级以新部署内置数据解释已保留的 IANA 名称。[断网与停机升级验收](../tests/native_timezone.py)

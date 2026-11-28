@@ -179,6 +179,23 @@ def password(work, name):
     return secret, path
 
 
+def check_deployment_os_release(c, manifest, *, linked=True):
+    release_path = "/usr/lib/os-release"
+    release_digest = manifest["payload_sha256"][release_path]
+    inputs = {key: value for key, value in manifest.items() if key != "build_id"}
+    inputs["payload_sha256"] = {path: digest for path, digest in manifest["payload_sha256"].items()
+                                if path != release_path}
+    canonical = json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()
+    expected = hashlib.sha256(canonical).hexdigest()
+    assert manifest["build_id"] == expected
+    assert c.run("sha256sum /usr/lib/os-release").split()[0] == release_digest
+    assert c.run(". /usr/lib/os-release; printf '%s %s %s' \"$ID\" \"$IMAGE_ID\" \"$BUILD_ID\"") == (
+        "psios psios-native " + expected)
+    if linked:
+        assert c.run("readlink /etc/os-release") == "../usr/lib/os-release"
+        assert c.run("sha256sum /etc/os-release").split()[0] == release_digest
+
+
 def check_state(c):
     uid = c.run("id -u")
     assert uid == "1000", uid
@@ -698,10 +715,11 @@ def exercise(args, work):
         assert manifest["kernel_input"]["sha256"] == sha(args.kernel_iso)
         assert manifest["required_filesystems"] == {"state": deployment["state_uuid"], "home": deployment["home_uuid"]}
         assert c.run("sha256sum /psios-deployment.json").split()[0] == deployment["deployment_manifest_sha256"]
+        check_deployment_os_release(c, manifest)
         payload = ("/bin/psiosd", "/bin/psiosctl", "/psios-source", "/psios-init",
                    "/psios-disk-uuid", "/psios-home-uuid", "/psios-shutdown", "/psios-dhcp", "/psios-dhcp-event",
                    "/psios-ipv4", "/psios-ipv6", "/psios-static", "/psios-storage", "/psios-storage-layout",
-                   "/psios-enroll", "/psios-zoneinfo.tar", "/usr/bin/psios-timezone")
+                   "/psios-enroll", "/psios-zoneinfo.tar", "/usr/bin/psios-timezone", "/usr/lib/os-release")
         assert c.run("psios-timezone show") == "UTC"
         with tarfile.open(args.archive, "r:gz") as archive:
             has_mcp = "psios-mcp" in archive.getnames()

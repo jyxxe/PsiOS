@@ -58,6 +58,9 @@ rescue/inspect.py，选择 --partition 2 --state /psios --uid 1000。
 救援参数见 rescue/README.txt。本开发盘的验收范围是 amd64 UEFI 虚机。
 每次开机从空的 /tmp 开始，供普通账户写入，容量为 32 MiB 和 4096 个
 inode。持久用户文件可放在主目录。
+在启用网络的未启动新盘上，可通过 --ssh-authorized-key operator.pub
+启用 Ed25519 公钥控制台。连接前从串口核对 /run/psios-ssh/host-key.pub
+的指纹。重启和停机升级保留主机密钥。详情见 docs/native-disk.md。
 启动检查失败时，串口报告失败阶段，系统关闭已挂载的持久分区后停机。
 可从 virtio-blk、PCIe NVMe 或 SATA AHCI 磁盘引导并附加数据盘。启动阶段
 按部署 UUID 选择同一系统盘上的状态与主目录分区。部署身份重复或分区

@@ -1,0 +1,68 @@
+#!/bin/sh
+set -eu
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+umask 022
+
+fail() {
+    trap - EXIT
+    echo "PsiOS SSH console could not start" >&2
+    exec sleep 30
+}
+trap fail EXIT
+
+authorized=/etc/psios/ssh-authorized-key
+key=/etc/psios/ssh_host_ed25519_key
+pending=/etc/psios/.ssh-host-key.pending
+runtime=/run/psios-ssh
+
+[ -f "$authorized" ] && [ ! -L "$authorized" ]
+[ "$(stat -c '%u:%g:%a:%h' "$authorized")" = 0:0:644:1 ]
+[ "$(wc -c < "$authorized")" -eq 81 ]
+grep -Eq '^ssh-ed25519 [A-Za-z0-9+/]{68}$' "$authorized"
+ssh-keygen -lf "$authorized" >/dev/null
+
+if [ -e "$pending" ] || [ -L "$pending" ]; then
+    [ -d "$pending" ] && [ ! -L "$pending" ]
+    [ "$(stat -c '%u:%g:%a' "$pending")" = 0:0:700 ]
+    rm -f -- "$pending/key" "$pending/key.pub"
+    rmdir "$pending"
+fi
+if [ ! -e "$key" ] && [ ! -L "$key" ]; then
+    mkdir -m 0700 "$pending"
+    ssh-keygen -q -t ed25519 -N '' -C '' -f "$pending/key"
+    sync -f /etc/psios
+    mv -T "$pending/key" "$key"
+    sync -f /etc/psios
+    rm -f "$pending/key.pub"
+    rmdir "$pending"
+fi
+[ -f "$key" ] && [ ! -L "$key" ]
+[ "$(stat -c '%u:%g:%a:%h' "$key")" = 0:0:600:1 ]
+[ "$(wc -c < "$key")" -le 2048 ]
+
+mkdir -m 0755 -p /var/empty "$runtime"
+[ -d /var/empty ] && [ ! -L /var/empty ] && [ "$(stat -c '%u:%g:%a' /var/empty)" = 0:0:755 ]
+[ -d "$runtime" ] && [ ! -L "$runtime" ] && [ "$(stat -c '%u:%g:%a' "$runtime")" = 0:0:755 ]
+public=$(ssh-keygen -y -P '' -f "$key" </dev/null)
+case "$public" in 'ssh-ed25519 '*) ;; *) exit 1 ;; esac
+printf '%s\n' "$public" > "$runtime/host-key.pub"
+(umask 077; cat > "$runtime/sshd_config" <<'EOF'
+Port 22
+HostKey /etc/psios/ssh_host_ed25519_key
+PidFile /run/psios-ssh/sshd.pid
+AuthorizedKeysFile /etc/psios/ssh-authorized-key
+AllowUsers psios
+PermitRootLogin no
+AuthenticationMethods publickey
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitUserEnvironment no
+DisableForwarding yes
+PermitUserRC no
+LoginGraceTime 20
+MaxStartups 4:50:8
+MaxSessions 4
+EOF
+)
+/usr/sbin/sshd -t -f "$runtime/sshd_config"
+exec /usr/sbin/sshd -D -e -f "$runtime/sshd_config"

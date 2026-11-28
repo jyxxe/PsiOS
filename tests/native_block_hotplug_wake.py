@@ -67,6 +67,10 @@ def exercise(args, work):
                                    {"major_minor": devnum, "expected": layout["fence"]})
             reference = enrolled["device_ref"]
             assert enrolled["lifecycle"] == "Present", enrolled
+            call(console, "Grant.Issue", {"principal_id": "local-owner", "tool_targets": [reference["resource_id"]],
+                          "units": 1, "ttl_seconds": 120, "actions": ["device.block_layout"]})
+            before = call(console, "BlockDevice.Get", {"id": reference["resource_id"]})
+            assert before["reference"] == reference and before["state"]["lifecycle"] == "Present", before
             identifier = shlex.quote(reference["resource_id"])
             snapshot = json.loads(console.run(f"psiosctl list BlockDevice --id {identifier}"))
             assert snapshot["items"] == [reference], snapshot

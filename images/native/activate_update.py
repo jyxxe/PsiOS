@@ -17,7 +17,7 @@ import uuid
 
 from activation_guest import artifact_digest, boot_candidate, bound_artifacts, open_file
 from activation_storage import BUILD_RECEIPT, BootStorage
-from create import MIB, boot_media, read_receipt
+from create import MIB, boot_media, read_receipt, verified_home_expansion_target
 from install import (
     JOURNAL, JOURNAL_LIMIT, checked_digest, digest, encode, lock_directory, require, save_operation,
     timestamp, valid_instant,
@@ -105,6 +105,11 @@ def stage_contract(bundle, stage_sha256):
         receipt = digest_json(receipt_path, receipt_sha256)
         parsed, layout, _ = read_receipt(receipt_path)
         upgrade = receipt["upgrade"]
+        expanded_home = verified_home_expansion_target(upgrade, layout)
+        requested_home = inputs.get("expand_home_mib")
+        require((expanded_home is None and "expand_home_mib" not in inputs)
+                or (type(requested_home) is int and requested_home == expanded_home),
+                "staged home expansion does not match the candidate geometry")
         source_authority = upgrade["verified_authority"]
         require(receipt == parsed
                 and receipt["initial_image_sha256"] == candidate["image_sha256"]

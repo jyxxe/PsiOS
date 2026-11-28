@@ -1062,6 +1062,17 @@ def production_receipt_format(properties):
     return static_formats.get(properties.get("network_profile"), 3 if "secure_boot" in properties else 2)
 
 
+def verified_home_expansion_target(upgrade, layout):
+    if "home_expansion" not in upgrade:
+        return None
+    change = upgrade["home_expansion"]
+    if (not isinstance(change, dict) or set(change) != {"previous_mib", "target_mib"}
+            or type(change["previous_mib"]) is not int or type(change["target_mib"]) is not int
+            or not MIN_HOME_MIB <= change["previous_mib"] < change["target_mib"] == layout.home_mib):
+        raise ValueError("invalid home expansion in the verified update receipt")
+    return change["target_mib"]
+
+
 def finish_disk(work, disk, output, *, signing, upgrade, tools):
     manifest_path = work / "psios-deployment.json"
     manifest = json.loads(manifest_path.read_bytes())
@@ -1104,6 +1115,9 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
     """Prepare two private EFI variants of one stopped source; publish neither."""
     prior, layout, core_limits = read_receipt(args.previous_receipt)
     layout = layout.for_source(getattr(args, "source_size_bytes", None))
+    previous_layout = layout
+    requested_home = getattr(args, "expand_home_mib", None)
+    expanded_layout = None if requested_home is None else layout.with_expanded_home(requested_home)
     work = work.absolute()
     requested = tuple(getattr(args, name, None) for name in (
         "secure_boot_key", "secure_boot_cert", "efi_stub", "efi_stub_sha256"))
@@ -1123,7 +1137,9 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
         directory.mkdir(mode=0o700)
     candidate_disk, trial_disk = candidate_work / "installed.raw", trial_work / "installed.raw"
     source_digest, replayed, configuration = source_snapshot(
-        candidate_work, candidate_disk, source_fd, prior, layout, signing)
+        candidate_work, candidate_disk, source_fd, prior, layout, signing, expanded_layout=expanded_layout)
+    if expanded_layout is not None:
+        layout = expanded_layout
     normalized = sha256(candidate_disk)
     with candidate_disk.open("rb") as frozen, trial_disk.open("xb") as clone:
         copy_sparse(frozen, clone, layout.disk_bytes, replace=False)
@@ -1174,6 +1190,8 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
     upgrade = {"previous_image_sha256": source_digest, "previous_source_commit": prior["source_commit"],
                "normalized_source_sha256": normalized, "verified_authority": authority,
                "replayed_ext4_partitions": replayed}
+    if expanded_layout is not None:
+        upgrade["home_expansion"] = {"previous_mib": previous_layout.home_mib, "target_mib": layout.home_mib}
     candidate_receipt = finish_disk(candidate_work, candidate_disk, candidate_disk,
                                     signing=signing, upgrade=upgrade, tools=tools)
     trial_receipt = finish_disk(trial_work, trial_disk, trial_disk, signing=signing, upgrade=upgrade, tools=tools)

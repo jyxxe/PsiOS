@@ -187,7 +187,9 @@ python3 native/create.py next.raw --upgrade-from node.raw --previous-receipt nod
 
 给上述 `native/create.py --upgrade-from` 命令加 `--expand-home-mib 192`，可将最后一个 ext4 分区扩展到 192 MiB。所选容量必须大于当前主目录分区，且满足原生几何上限。构建机需要 e2fsprogs 的 `resize2fs`。候选沿用原状态分区和主目录起点、文件系统 UUID、磁盘 GUID 与分区 GUID。如果原 raw 盘存在足够的未分配空间，候选沿用原盘总容量。否则会生成更大的 raw 候选盘。
 
-确认将分配的源区域为空后，安装器在私有副本重放日志、扩容并检查 ext4，重新核对双 GPT 与新容量，再使用同一套启动和权威核验流程生成候选。失败时没有候选输出。`upgrade.home_expansion` 保存原容量和目标容量。原盘可继续单独启动。扩容使用 `create.py` 的停机复制入口，受管候选发布流程沿用原分区容量。[原分区核验及两份磁盘启动](../tests/native_expand_home.py)
+确认将分配的源区域为空后，安装器在私有副本重放日志、扩容并检查 ext4，重新核对双 GPT 与新容量，再使用同一套启动和权威核验流程生成候选。失败时没有候选输出。`upgrade.home_expansion` 保存原容量和目标容量。原盘可继续单独启动。[原分区核验及两份磁盘启动](../tests/native_expand_home.py)
+
+`native/stage_update.py` 也可指定 `--expand-home-mib 192`。扩容完成后才克隆试启动盘，试启动与正式候选的状态和主目录从相同的扩容副本开始。暂存记录固定所请求的容量，激活前将其与候选回执和来宾布局核对。受管发布与原盘回退仍遵循原审批流程。[实际试启动和激活](../tests/native_activation.py)
 
 ### 隔离试启动
 

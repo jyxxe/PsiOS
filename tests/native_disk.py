@@ -686,6 +686,13 @@ def exercise(args, work):
         c.credentials("psios", "wrong-" + secrets.token_hex(10))
         c.until(b"Login incorrect")
         c.login("root", admin)
+        c.run("awk '$5 == \"/\" && / - tmpfs psios-system / { found = 1 } END { exit !found }' /proc/self/mountinfo")
+        pivot = ("mount --make-rprivate /; mkdir /tmp/psios-pivot; "
+                 "mount -t tmpfs -o size=1m pivot-proof /tmp/psios-pivot; "
+                 "cd /tmp/psios-pivot; mkdir previous; pivot_root . previous; cd /; "
+                 "test -f /previous/psios-source && test ! -e /psios-source")
+        c.run("unshare -m -- sh -ec " + shlex.quote(pivot))
+        c.run("test -f /psios-source")
         c.run("touch /tmp/psios-root-scratch")
         c.send("exit")
         c.login("psios", operator)

@@ -27,6 +27,8 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 
 生成新盘时，用 `--state-mib` 和 `--home-mib` 分别指定两个 ext4 分区的容量。默认值和最小值分别为 192 MiB 和 64 MiB。完整 raw 镜像最多 8192 MiB，含 EFI 分区和 GPT 空间。安装回执和来宾的 `/psios-deployment.json` 均记录 `geometry_mib`。
 
+生产和隔离试启动均先核验 EFI 载荷，再由 PID 1 切换到独立的 `psios-system` tmpfs 根。该根限制为 128 MiB 和 16384 个 inode，启用 `nodev` 与 `nosuid`。引导随后重新核对载荷并按原 UUID 挂载状态和主目录。独立挂载的根允许受控运行时在自己的挂载命名空间内执行 Linux `pivot_root`。[原生引导验收](../tests/native_disk.py)
+
 串口账户 `psios` 和服务使用 UID 1000。登录后可运行 `psiosctl whoami`、`psiosctl node`，或用 `printf '{}' | psiosctl submit system.status --key first-status` 提交任务。需要传统系统管理时，可在生成新盘时传入 `--root-console-hash root.hash` 设置独立的本机 root 密码。默认锁定 root。启用后可用 root 在串口执行 `poweroff`。关机钩子先允许 Core 结算，随后关闭其余会话与进程，刷盘并卸载状态和主目录。运行时生成的所有者令牌位于服务账户的私有见证目录。[关机验收](../tests/native_disk.py)
 
 制作新盘时可用 `--hostname psi-edge-17` 设置本机名。生产引导在启动服务前从 root 所有的 `/etc/hostname` 读取一个 DNS 标签，缺省名称为 `psios`。root 可更新该文件，并在重启后应用。停机升级沿用源盘配置。无效文件会在 `host-name` 阶段进入救援流程。

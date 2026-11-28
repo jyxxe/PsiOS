@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from urllib.parse import urlsplit
 
 from native_disk import REPO, boot, call, check_clean_shutdown, password, sha, stage_guest_token
 from native_upgrade import shutdown
@@ -132,6 +133,82 @@ def mcp_observation(console, node, expected):
     return verify_after_hotplug
 
 
+def shell_observation(console, node, attached):
+    def grant(action):
+        return call(console, "Grant.Issue", {"principal_id": "local-owner", "tool_targets": [node],
+                    "actions": [action, "task.submit", "task.read"], "units": 8, "ttl_seconds": 300})
+
+    usb = grant("node.usb")
+    pci = grant("node.pci")
+    usb_id = usb["delegation_ref"]["resource_id"]
+    pci_id = pci["delegation_ref"]["resource_id"]
+    launch = shlex.join(["psiosctl", "shell", "--usb-delegation", usb_id, "--pci-delegation", pci_id])
+    info = console.run(
+        'work=$(mktemp -d /tmp/psios-usb-shell.XXXXXX) || exit 1; '
+        f'{launch} </dev/null > "$work/session" 2> "$work/error" & pid=$!; '
+        'for i in $(seq 1 100); do '
+        'if [ "$(wc -l < "$work/session")" -ge 2 ]; then '
+        'printf "%s\\n" "$work" "$pid"; head -n 2 "$work/session"; exit 0; fi; '
+        'kill -0 "$pid" || exit 1; sleep 0.1; done; exit 1'
+    ).splitlines()
+    workdir, pid, address, pairing = info
+    origin = urlsplit(address)
+    assert origin.scheme == "http" and origin.hostname == "127.0.0.1" and origin.port
+    assert pairing.startswith("Pairing code: ") and pid.isascii() and pid.isdecimal()
+    assert workdir.startswith("/tmp/psios-usb-shell.")
+
+    def request(path, payload, bearer=None):
+        data = json.dumps(payload, separators=(",", ":"))
+        headers = [f"POST {path} HTTP/1.1", f"Host: {origin.netloc}", f"Origin: {address}",
+                   "Content-Type: application/json", f"Content-Length: {len(data)}", "Connection: close"]
+        if bearer is not None:
+            headers.append(f"Authorization: Bearer {bearer}")
+        arguments = " ".join(shlex.quote(header) for header in (*headers, ""))
+        fifo = shlex.quote(workdir + "/request")
+        # Keep the write side open until the Shell finishes its Core Task.
+        response = console.run(
+            f"mkfifo {fifo} || exit 1; busybox nc -w 8 127.0.0.1 {origin.port} < {fifo} & network=$!; "
+            f"exec 3>{fifo}; printf '%s\\r\\n' {arguments} >&3; printf '%s' {shlex.quote(data)} >&3; "
+            f'wait "$network" || exit 1; exec 3>&-; rm {fifo}'
+        )
+        head, _, body = response.partition("\n\n")
+        assert head.startswith("HTTP/1.1 ") and body, "native Shell did not return a complete HTTP response"
+        return int(head.splitlines()[0].split()[1]), json.loads(body)
+
+    status, paired = request("/api/session", {"code": pairing.removeprefix("Pairing code: ")})
+    assert status == 200 and paired["observe_usb"] and paired["observe_pci"]
+    token = paired["token"]
+    route = "/api/node-usb"
+    status, page = request(route, {}, token)
+    assert status == 200, page
+    first = next(device for device in page["devices"] if device["location"] == attached["location"])
+    for key in ("vendor_id", "product_id", "bus_number", "device_address", "authorized"):
+        assert first[key] == attached[key], (key, first, attached)
+    assert "serial" not in first and "mount_namespace_inode" not in page
+    _, previous = observe(console, "native-shell-usb-anchor", usb_id, {"limit": 1})
+    cursor = previous["next_cursor"]
+    status, remaining = request(route, {"cursor": cursor}, token)
+    assert status == 200 and remaining["devices"] and first not in remaining["devices"], remaining
+    assert request("/api/node-pci", {}, token)[0] == 200
+
+    def verify_after_hotplug(current):
+        status, stale = request(route, {"cursor": cursor}, token)
+        assert status == 409 and stale["error"]["code"] == "ResyncRequired", stale
+        status, refreshed = request(route, {}, token)
+        assert status == 200, refreshed
+        fresh = next(device for device in refreshed["devices"] if device["location"] == first["location"])
+        assert fresh["device_address"] == current["device_address"] != first["device_address"], fresh
+        ref = usb["grant_ref"]
+        call(console, "Grant.Revoke", {"id": ref["resource_id"], "expected_resource_version": ref["version"]})
+        status, denied = request(route, {}, token)
+        assert status == 403 and denied["error"]["code"] == "PermissionDenied", denied
+        assert request("/api/node-pci", {}, token)[0] == 200
+        assert request("/api/logout", {}, token)[0] == 200
+        console.run(f"rm -r -- {shlex.quote(workdir)}")
+
+    return verify_after_hotplug
+
+
 def exercise(args, work):
     operator, operator_hash = password(work, "operator.hash")
     admin, admin_hash = password(work, "root.hash")
@@ -174,6 +251,7 @@ def exercise(args, work):
             assert attached["location"] == location and attached["vendor_id"] == "0627" and attached["authorized"], inserted
             assert inserted["boot_id"] == before["boot_id"] and inserted["next_cursor"], inserted
             verify_mcp = mcp_observation(console, node, attached)
+            verify_shell = shell_observation(console, node, attached)
             qmp("device_del", id="tablet-first")
             console.run(f"for i in $(seq 1 100); do test ! -e /sys/bus/usb/devices/{location} && exit 0; "
                         "sleep 0.1; done; exit 1")
@@ -188,11 +266,13 @@ def exercise(args, work):
             assert current["device_address"] != attached["device_address"], (attached, current)
             assert "serial" not in current and "sysfs_identity" not in current
             verify_mcp()
+            verify_shell(current)
         assert call(console, "Artifact.Read", {"reference": fixture}) == before
         assert call(console, "Artifact.Read", {"reference": retained}) == inserted
         shutdown(console, admin)
     check_clean_shutdown(disk)
     print("PASS observed real USB root hubs, USB attachment, unchanged slot replacement, cursor invalidation and durable artifacts")
+    print("PASS Shell USB pages track the same device, invalidate stale cursors and retain separate PCI authority")
 
 
 if __name__ == "__main__":

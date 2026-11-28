@@ -7,8 +7,14 @@ use serde_json::{Value, json};
 use std::{net::IpAddr, time::Duration};
 
 const RESOLVER_RESULT_BYTES: usize = 8 * 1024;
-const PCI_RESULT_BYTES: usize = 16 * 1024;
-const PCI_PAGE_SIZE: u16 = 6;
+const INVENTORY_RESULT_BYTES: usize = 16 * 1024;
+const INVENTORY_PAGE_SIZE: u16 = 6;
+
+#[derive(Clone, Copy)]
+pub(super) enum DeviceBus {
+    Pci,
+    Usb,
+}
 
 #[derive(Deserialize, Serialize)]
 struct NameServer {
@@ -37,8 +43,21 @@ struct PciDevice {
 }
 
 #[derive(Deserialize, Serialize)]
-struct PciPage {
-    devices: Vec<PciDevice>,
+struct UsbDevice {
+    location: String,
+    parent_location: Option<String>,
+    bus_number: u16,
+    device_address: u16,
+    vendor_id: String,
+    product_id: String,
+    class_code: String,
+    speed_mbps: Option<String>,
+    authorized: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+struct InventoryPage<Device> {
+    devices: Vec<Device>,
     next_cursor: Option<DeviceInventoryCursor>,
     boot_id: String,
     observed_at: String,
@@ -127,23 +146,40 @@ pub(super) fn resolver(
     Ok(json!(report))
 }
 
-pub(super) fn pci(
+pub(super) fn inventory(
     client: &Client,
     delegation: &str,
+    bus: DeviceBus,
     cursor: Option<DeviceInventoryCursor>,
     check: &impl Fn() -> ApiResult<()>,
 ) -> ApiResult<Value> {
     let query = DeviceInventoryQuery {
-        limit: Some(PCI_PAGE_SIZE),
+        limit: Some(INVENTORY_PAGE_SIZE),
         cursor,
     };
-    let report: PciPage = read(
-        client,
-        delegation,
-        LocalReadTool::NodePci,
-        json!(query),
-        PCI_RESULT_BYTES,
-        check,
-    )?;
-    Ok(json!(report))
+    let query = json!(query);
+    match bus {
+        DeviceBus::Pci => {
+            let report: InventoryPage<PciDevice> = read(
+                client,
+                delegation,
+                LocalReadTool::NodePci,
+                query,
+                INVENTORY_RESULT_BYTES,
+                check,
+            )?;
+            Ok(json!(report))
+        }
+        DeviceBus::Usb => {
+            let report: InventoryPage<UsbDevice> = read(
+                client,
+                delegation,
+                LocalReadTool::NodeUsb,
+                query,
+                INVENTORY_RESULT_BYTES,
+                check,
+            )?;
+            Ok(json!(report))
+        }
+    }
 }

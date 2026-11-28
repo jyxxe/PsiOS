@@ -1468,6 +1468,8 @@ class ShellTests(unittest.TestCase):
         token = session["token"]
         self.assertTrue(token != shell.code and token != self.node.owner.strip())
         self.error(shell, 401, "AuthenticationRequired", "/api/node", data={}, token=shell.code)
+        self.assertFalse(session["observe_usb"])
+        self.error(shell, 404, "NotFound", "/api/node-usb", data={}, token=token)
         self.error(shell, 404, "NotFound", "/api/call", data={"method": "Task.Submit"}, token=token)
         self.error(shell, 404, "NotFound", "/api/node", method="GET", token=token)
         self.error(shell, 405, "InvalidArgument", "/api/node", method="OPTIONS", token=token)

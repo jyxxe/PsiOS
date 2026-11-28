@@ -208,12 +208,14 @@ def firmware_args(mode, work, ovmf, secure_vars=None):
             "-drive", "if=pflash,format=raw,unit=1,file=vars.fd"]
 
 
-def publish(source, output):
+def publish(source, output, *, before_publish=None):
     with tempfile.NamedTemporaryFile(dir=output.parent, prefix=".psios-media-") as stage:
         with source.open("rb") as src:
             shutil.copyfileobj(src, stage)
         stage.flush()
         os.fsync(stage.fileno())
+        if before_publish is not None:
+            before_publish()
         os.link(stage.name, output)
         parent = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:

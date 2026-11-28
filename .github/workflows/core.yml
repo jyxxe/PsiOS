@@ -1086,6 +1086,17 @@ jobs:
               --archive "$archive" --archive-sha256 "$(sha256sum "$archive" | cut -d ' ' -f1)" \
               --kernel-iso "$RUNNER_TEMP/kernel.iso" --target-bus "$bus" "${capacity[@]}" "${tool_args[@]}"
           done
+      - name: Expand the home filesystem on stopped native upgrade copies
+        timeout-minutes: 8
+        run: |
+          archive="$RUNNER_TEMP/native-core.tar.gz"
+          unpacked="$RUNNER_TEMP/native-home-archive"
+          mkdir "$unpacked"
+          tar -xzf "$archive" -C "$unpacked"
+          (cd "$unpacked" && sha256sum --strict --check SHA256SUMS)
+          inputs=(--kernel-iso "$RUNNER_TEMP/kernel.iso" --archive "$archive" --installer "$unpacked/native/create.py")
+          python3 -B tests/native_expand_home.py "${inputs[@]}"
+          python3 -B tests/native_expand_home.py "${inputs[@]}" --preallocated
 
   package-provenance:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'jyxxe/PsiOS'

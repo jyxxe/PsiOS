@@ -107,6 +107,12 @@ class Layout:
             raise ValueError("source capacity does not match the previously recorded raw disk size")
         return replace(self, raw_disk_bytes=size)
 
+    def with_expanded_home(self, home_mib):
+        if home_mib <= self.home_mib:
+            raise ValueError("expanded home capacity must exceed the previous home size")
+        layout = Layout(self.state_mib, home_mib)
+        return layout.for_source(max(layout.disk_bytes, self.disk_bytes))
+
     @property
     def partitions(self):
         state_start = ESP[0] + ESP[1]
@@ -809,6 +815,26 @@ def validate_layout(work, disk, layout, *, pass_fds=()):
     return gpt
 
 
+def relocate_backup_gpt(work, disk, previous, source_bytes, target_bytes):
+    previous_backup = (previous["lastlba"] + 1) * SECTOR_BYTES
+    tail_bytes = source_bytes - previous_backup
+    if not 2 * SECTOR_BYTES <= tail_bytes <= MIB:
+        raise ValueError("unsupported GPT backup area on the source image")
+    with disk.open("r+b") as out:
+        out.truncate(target_bytes)
+    command = ["sfdisk", "--quiet", "--no-reread", "--no-tell-kernel", "--relocate", "gpt-bak-std", disk]
+    try:
+        boot_media.run(work, command)
+    except subprocess.SubprocessError as error:
+        raise ValueError("sfdisk could not relocate the verified GPT to the target capacity") from error
+    target_backup = target_bytes - tail_bytes
+    # libfdisk leaves the prior backup bytes on the disk.
+    with disk.open("r+b") as out:
+        out.seek(previous_backup)
+        out.write(bytes(min(source_bytes, target_backup) - previous_backup))
+    return target_backup
+
+
 def file_limit(max_bytes):
     soft, _ = resource.getrlimit(resource.RLIMIT_FSIZE)
     limit = max_bytes if soft == resource.RLIM_INFINITY else min(max_bytes, soft)
@@ -860,6 +886,58 @@ def check_filesystem(work, disk, index, expected_uuid, layout):
     return fs, pending
 
 
+def expand_home(work, disk, homes, previous_gpt, previous_layout, layout, home_uuid):
+    target_bytes = layout.home_mib * MIB
+    previous_backup = (previous_gpt["lastlba"] + 1) * SECTOR_BYTES
+    verify_relocated_gpt(disk, previous_layout.disk_bytes, previous_gpt)
+    home_start = layout.partitions[2][0] * MIB
+    unused_start = home_start + previous_layout.home_mib * MIB
+    unused_end = min(home_start + target_bytes, previous_backup)
+    zero = bytes(MIB)
+    with disk.open("rb") as source:
+        source.seek(unused_start)
+        for offset in range(unused_start, unused_end, MIB):
+            length = min(MIB, unused_end - offset)
+            if source.read(length) != zero[:length]:
+                raise ValueError("requested home expansion contains data outside its original partition")
+
+    # resize2fs requires an actual check after journal replay. The earlier
+    # read-only check rejects a source that needs filesystem repair.
+    checked = subprocess.run(["e2fsck", "-f", "-p", homes], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, timeout=90, preexec_fn=file_limit(previous_layout.home_mib * MIB))
+    if checked.returncode not in (0, 1):
+        raise ValueError("could not prepare the verified home filesystem for resizing")
+    with homes.open("r+b") as image:
+        image.truncate(target_bytes)
+    subprocess.run(["resize2fs", homes], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                   check=True, timeout=120, preexec_fn=file_limit(target_bytes))
+    with homes.open("rb") as image:
+        image.seek(1024)
+        superblock = image.read(1024)
+    state, pending = filesystem_superblock(superblock, home_uuid)
+    blocks = struct.unpack_from("<I", superblock, 4)[0]
+    if superblock[96] & 0x80:
+        blocks |= struct.unpack_from("<I", superblock, 336)[0] << 32
+    log_block_size = struct.unpack_from("<I", superblock, 24)[0]
+    if state != 1 or pending or log_block_size > 6 or blocks * (1024 << log_block_size) != target_bytes:
+        raise ValueError("expanded home filesystem does not match its verified UUID and capacity")
+    boot_media.run(work, ["e2fsck", "-f", "-n", homes])
+
+    backup = previous_backup
+    if layout.disk_bytes > previous_layout.disk_bytes:
+        backup = relocate_backup_gpt(work, disk, previous_gpt, previous_layout.disk_bytes, layout.disk_bytes)
+    command = ["sfdisk", "--quiet", "--no-reread", "--no-tell-kernel", "-N", "3", disk]
+    subprocess.run(command, input=f"size={target_bytes // SECTOR_BYTES}\n", text=True, check=True, timeout=30)
+    gpt = validate_layout(work, disk, layout)
+    partitions = previous_gpt["partitions"]
+    expected = [*partitions[:2], dict(partitions[2], size=target_bytes // SECTOR_BYTES)]
+    if (gpt["id"] != previous_gpt["id"] or gpt["partitions"] != expected
+            or gpt["firstlba"] != previous_gpt["firstlba"] or (gpt["lastlba"] + 1) * SECTOR_BYTES != backup):
+        raise ValueError("home expansion changed the verified disk or partition identities")
+    verify_relocated_gpt(disk, layout.disk_bytes, gpt)
+    write_partition(disk, layout.partitions[2], homes, replace=True)
+
+
 def read_partition_file(work, fs, member, limit):
     name = Path(member).name
     subprocess.run(["debugfs", "-R", f"dump {member} {name}", fs], cwd=work,
@@ -882,7 +960,7 @@ def read_root_file(work, fs, member, limit, modes):
     return read_partition_file(work, fs, member, limit)
 
 
-def source_snapshot(work, disk, source_fd, prior, layout, signing):
+def source_snapshot(work, disk, source_fd, prior, layout, signing, *, expanded_layout=None):
     disk_size = layout.disk_bytes
     before = os.fstat(source_fd)
     flags = fcntl.fcntl(source_fd, fcntl.F_GETFL)
@@ -900,7 +978,7 @@ def source_snapshot(work, disk, source_fd, prior, layout, signing):
     if disk.stat().st_size != disk_size:
         raise ValueError("incomplete previous disk capture")
     digest = sha256(disk)
-    validate_layout(work, disk, layout)
+    gpt = validate_layout(work, disk, layout)
     old_efi = work / "previous.efi"
     boot_media.run(work, ["mcopy", "-i", f"{disk.name}@@{ESP[0] * MIB}", EFI_PATH, old_efi])
     if sha256(old_efi) != prior["efi_application_sha256"]:
@@ -909,7 +987,6 @@ def source_snapshot(work, disk, source_fd, prior, layout, signing):
         signing.verify(work, old_efi)
     state, replayed_state = check_filesystem(work, disk, 1, prior["state_uuid"], layout)
     homes, replayed_home = check_filesystem(work, disk, 2, prior["home_uuid"], layout)
-    homes.unlink()
     marker = read_partition_file(work, state, "/deployment-uuid", 64)
     if marker != (prior["state_uuid"] + "\n").encode():
         raise ValueError("state partition deployment marker does not match the prior receipt")
@@ -925,6 +1002,9 @@ def source_snapshot(work, disk, source_fd, prior, layout, signing):
     state.unlink()
     if not isinstance(cfg, dict) or (cfg.get("state_dir"), cfg.get("witness_dir")) != ("/var/lib/psios", "/var/lib/psios.witness"):
         raise ValueError("offline upgrade requires the native state and witness locations")
+    if expanded_layout is not None:
+        expand_home(work, disk, homes, gpt, layout, expanded_layout, prior["home_uuid"])
+    homes.unlink()
     replayed = [part for part, replay in ((2, replayed_state), (3, replayed_home)) if replay]
     return digest, replayed, core_config
 
@@ -1112,6 +1192,7 @@ def build(args):
         disk = work / "installed.raw"
         prior = None
         trial = None
+        expanded_layout = None
         network_profile = args.network_profile
         wired_driver = args.wired_driver
         ssh_enabled = args.ssh_authorized_key is not None
@@ -1124,6 +1205,9 @@ def build(args):
         if args.upgrade_from:
             prior, layout, core_limits = read_receipt(args.previous_receipt)
             layout = layout.for_source(args.source_size_bytes)
+            previous_layout = layout
+            if args.expand_home_mib is not None:
+                expanded_layout = layout.with_expanded_home(args.expand_home_mib)
             network_profile = prior.get("network_profile")
             wired_driver = prior.get("wired_driver")
             ssh_enabled = "ssh_console" in prior
@@ -1132,7 +1216,10 @@ def build(args):
                 raise ValueError("a Secure Boot upgrade requires the existing signing certificate")
             instance, home_id = prior["state_uuid"], prior["home_uuid"]
             with boot_media.regular_file(args.upgrade_from) as source:
-                source_digest, replayed, core_config = source_snapshot(work, disk, source.fileno(), prior, layout, signing)
+                source_digest, replayed, core_config = source_snapshot(
+                    work, disk, source.fileno(), prior, layout, signing, expanded_layout=expanded_layout)
+            if expanded_layout is not None:
+                layout = expanded_layout
             if args.trial_boot:
                 trial = prepare_trial_disk(work, disk, layout, core_config)
         else:
@@ -1151,6 +1238,8 @@ def build(args):
                 "verified_authority": verify_authority(work, disk, core_config, args.max_copy_mib),
                 "replayed_ext4_partitions": replayed,
             }
+            if expanded_layout is not None:
+                upgrade["home_expansion"] = {"previous_mib": previous_layout.home_mib, "target_mib": layout.home_mib}
         receipt = finish_disk(work, disk, output, signing=signing, upgrade=upgrade, tools=tools)
         receipt["boot_assembly_tools"] = tools.receipt()
         # No existing image or block device is ever an install target.
@@ -1199,6 +1288,7 @@ def main():
     parser.add_argument("--slaac-rdnss", action="store_true", help="accept DNS servers advertised by the IPv6 router")
     parser.add_argument("--state-mib", type=int, help=f"state partition size of a new disk (default {MIN_STATE_MIB} MiB)")
     parser.add_argument("--home-mib", type=int, help=f"home partition size of a new disk (default {MIN_HOME_MIB} MiB)")
+    parser.add_argument("--expand-home-mib", type=int, help="grow the home partition to this size in a stopped upgrade copy")
     core_options = parser.add_argument_group("new disk Core cgroup limits (provide all three to enable)")
     core_options.add_argument("--core-cpu-millicores", type=int, help="CPU quota of the Core daemon in millicores")
     core_options.add_argument("--core-memory-mib", type=int, help="hard memory limit in MiB with swap disabled for Core")
@@ -1208,6 +1298,8 @@ def main():
         parser.error("invalid Core archive SHA-256")
     if args.source_size_bytes is not None and not args.upgrade_from:
         parser.error("--source-size-bytes requires --upgrade-from")
+    if args.expand_home_mib is not None and not args.upgrade_from:
+        parser.error("--expand-home-mib requires --upgrade-from")
     if args.hostname is not None:
         if args.upgrade_from:
             parser.error("upgrade preserves /etc/hostname from the source")

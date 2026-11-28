@@ -1184,6 +1184,17 @@ class ShellTests(unittest.TestCase):
         self.error(shell, 401, "AuthenticationRequired", "/api/session", data={"code": shell.code})
 
     @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
+    def test_browser_application_launcher_filters_opens_and_restores_windows(self):
+        shell = self.shell()
+        args = dict(origin=shell.origin, code=shell.code, applicationLauncher=True,
+                    node=self.node.call("Node.Get", {})["reference"]["resource_id"],
+                    profile=str(self.node.base / "browser"))
+        subprocess.run(["node", str(Path(__file__).with_name("shell_browser.mjs")),
+                        os.environ.get("PSIOS_TEST_CHROME", "google-chrome")],
+                       input=json.dumps(args), text=True, check=True, timeout=60)
+        self.assertEqual(shell.process.wait(timeout=5), 0)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
     def test_browser_tiles_windows_with_keyboard_and_restores_them_across_viewport_changes(self):
         task = self.node.submit("system.status", {})
         before = self.node.wait(task)

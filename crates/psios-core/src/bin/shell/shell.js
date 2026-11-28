@@ -11,6 +11,9 @@ const files = filesView(request, byId, element, message);
 const pairing = byId("pairing");
 const workspace = byId("workspace");
 const desktop = byId("desktop");
+const launcher = byId("launcher");
+const launcherQuery = byId("launcher-query");
+const launcherApps = byId("launcher-apps");
 const code = byId("code");
 const status = byId("status");
 const nodeView = byId("node-view");
@@ -36,6 +39,7 @@ const apps = new Map(["node", "tasks", "files", "applications", "chat", "project
 }]));
 let active = null;
 let maximized = null;
+let recentApps = [];
 let nodeUpdate = 0;
 let resolverUpdate = 0;
 let taskUpdate = 0;
@@ -63,6 +67,11 @@ function leave(text, error = false) {
   canCancelPending = false;
   resolver.hidden = true;
   clearResolver();
+  launcher.close();
+  launcherQuery.value = "";
+  launcherApps.replaceChildren();
+  byId("launcher-empty").hidden = true;
+  recentApps = [];
   workspace.hidden = true;
   for (const app of apps.values()) {
     app.state = "closed";
@@ -792,8 +801,32 @@ function openWindow(id) {
   if (maximized !== id) maximized = null;
   app.state = "open";
   active = id;
+  recentApps = [id, ...recentApps.filter(previous => previous !== id)].slice(0, 4);
   updateDesktop();
   app.title.focus();
+}
+
+function renderLauncher() {
+  const query = launcherQuery.value.normalize("NFKC").trim().toLowerCase();
+  const entries = [];
+  for (const id of new Set([...recentApps, ...apps.keys()])) {
+    const app = apps.get(id);
+    if (app.dock.hidden || app.dock.disabled) continue;
+    const name = app.title.textContent;
+    if (!name.toLowerCase().includes(query) && !id.includes(query)) continue;
+    const button = element("button", name);
+    button.type = "button";
+    button.addEventListener("click", () => {
+      if (!bearer || app.dock.hidden || app.dock.disabled) return;
+      launcher.close();
+      openWindow(id);
+    });
+    const item = element("li");
+    item.append(button);
+    entries.push(item);
+  }
+  launcherApps.replaceChildren(...entries);
+  byId("launcher-empty").hidden = entries.length !== 0;
 }
 
 function hideWindow(id, state) {
@@ -844,6 +877,20 @@ for (const [id, app] of apps) {
   app.window.addEventListener("pointerdown", () => focusApp(id));
   app.dock.addEventListener("click", () => openWindow(id));
 }
+
+byId("open-launcher").addEventListener("click", () => {
+  if (!bearer || launcher.open) return;
+  launcherQuery.value = "";
+  renderLauncher();
+  launcher.showModal();
+  launcherQuery.focus();
+});
+byId("close-launcher").addEventListener("click", () => launcher.close());
+launcherQuery.addEventListener("input", renderLauncher);
+byId("launcher-form").addEventListener("submit", event => {
+  event.preventDefault();
+  launcherApps.querySelector("button")?.click();
+});
 
 byId("pair-form").addEventListener("submit", async (event) => {
   event.preventDefault();

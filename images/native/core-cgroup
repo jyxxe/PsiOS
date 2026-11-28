@@ -16,6 +16,34 @@ verify_limits() {
         [ "$(cat "$group/pids.max")" = "$pids" ]
 }
 
+group_oom_kills() {
+    awk '$1 == "oom_group_kill" && $2 ~ /^(0|[1-9][0-9]*)$/ { print $2; found++ }
+         END { if (found != 1) exit 1 }' "$group/memory.events.local"
+}
+
+record_exit() (
+    record=/var/lib/.psios-core-last-exit
+    pending=/var/lib/.psios-core-last-exit.pending
+    [ "$(stat -c '%u:%g:%a' /var/lib)" = 0:0:755 ] || return 1
+    for path in "$record" "$pending"; do
+        if [ -e "$path" ] || [ -L "$path" ]; then
+            [ -f "$path" ] && [ ! -L "$path" ] || return 1
+            [ "$(stat -c '%u:%g:%a:%h' "$path")" = 0:0:600:1 ] || return 1
+        fi
+    done
+    boot_id=$(cat /proc/sys/kernel/random/boot_id) || return 1
+    printf '%s\n' "$boot_id" | grep -Eq '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' || return 1
+    body=$(printf '{"format":1,"boot_id":"%s","wait_status":%s,"oom_group_kill_before":%s,"oom_group_kill_after":%s}' \
+        "$boot_id" "$1" "$2" "$3") || return 1
+    # An identical crash loop should leave the last complete record in place.
+    if [ -f "$record" ] && printf '%s\n' "$body" | cmp -s - "$record"; then return 0; fi
+    umask 077
+    rm -f "$pending" || return 1
+    set -C
+    printf '%s\n' "$body" > "$pending" || return 1
+    sync -f /var/lib && mv -T "$pending" "$record" && sync -f /var/lib
+)
+
 case "${1-}" in
     setup)
         mkdir -p "$root"
@@ -43,13 +71,23 @@ case "${1-}" in
             tries=$((tries + 1))
         done
         verify_limits
+        oom_before=$(group_oom_kills 2>/dev/null) || oom_before=null
         (
             printf '0\n' > "$group/cgroup.procs"
             IFS= read -r membership < /proc/self/cgroup
             [ "$membership" = 0::/psios-core ] || exit 1
             exec /bin/su -s /bin/sh psios -c 'exec /bin/psiosd serve'
         ) &
-        wait "$!"
+        if wait "$!"; then
+            exit 0
+        else
+            status=$?
+        fi
+        oom_after=$(group_oom_kills 2>/dev/null) || oom_after=null
+        if ! record_exit "$status" "$oom_before" "$oom_after"; then
+            printf 'PsiOS could not persist the Core process exit record\n' >/dev/console || :
+        fi
+        exit "$status"
         ;;
     *) exit 1 ;;
 esac

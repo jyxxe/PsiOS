@@ -144,16 +144,41 @@ class StrictModelProvider(unittest.TestCase):
             worker = subprocess.run(command, capture_output=True, text=True, timeout=4)
             elapsed = time.monotonic() - started
             self.assertTrue(received.is_set(), worker.stderr)
-            self.assertEqual(worker.returncode, 0, worker.stderr)
-            receipt = json.loads(worker.stdout)
-            self.assertEqual(receipt["session_ref"]["resource_id"], session)
-            self.assertEqual((receipt["lifecycle"], receipt["outcome_knowledge"]), ("Paused", "Unknown"))
+            # The provider timeout and Core watchdog use the same lease deadline.
+            # A report that reaches Core after expiry is fenced. The queued CLI
+            # returns that disposition while the direct CLI reports it as an error.
+            if worker.returncode == 0:
+                receipt = json.loads(worker.stdout)
+                fenced = queued and receipt == {"status": "Fenced"}
+            else:
+                self.assertFalse(queued, worker.stderr)
+                self.assertEqual(worker.returncode, 1, worker.stderr)
+                self.assertTrue(worker.stderr.startswith("Fenced:"), worker.stderr)
+                receipt, fenced = None, True
             self.assertGreater(elapsed, 0.4)
             self.assertLess(elapsed, 3)
             self.assertEqual(len(calls), 1)
             prompt = calls[0]["messages"][1]["content"]
             self.assertNotIn("lease_timing", prompt)
-            self.assertNotIn(receipt["lease_id"], prompt)
+
+        token = self.owner["token"]
+        observed = node.call("Session.Get", {"id": session}, token)
+        if observed["session"]["lifecycle"] == "ModelInFlight":
+            observed = node.call("Session.Wait", {"id": session, "after_version": observed["reference"]["version"],
+                                                  "timeout_ms": 1500}, token)
+        status = observed["session"]
+        self.assertEqual((status["lifecycle"], status["outcome_knowledge"]), ("Paused", "Unknown"))
+        outcome = status["model_inference_failure"]
+        self.assertEqual(outcome["source"], "LeaseExpired" if fenced else "Provider")
+        usage = node.call("Session.ModelUsage", {"id": session}, token)
+        self.assertEqual(usage["session_ref"], observed["reference"])
+        self.assertEqual(usage["calls"], [{"turn": 1, "lease_id": outcome["lease_id"], "outcome": "Unknown",
+                                           "charged_lease_ms": lease_ms, "provider_reported_tokens": None}])
+        self.assertNotIn(outcome["lease_id"], prompt)
+        if not fenced:
+            self.assertEqual(receipt["session_ref"], observed["reference"])
+            self.assertEqual(receipt["lease_id"], outcome["lease_id"])
+            self.assertEqual((receipt["lifecycle"], receipt["outcome_knowledge"]), ("Paused", "Unknown"))
         self.assertEqual(self.budget()["model_calls_used"], 1)
         self.assertEqual(self.budget()["model_lease_ms_charged"], lease_ms)
         self.assertEqual(self.history(session)["tasks"], [])

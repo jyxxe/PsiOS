@@ -110,6 +110,8 @@ jobs:
           curl --fail --location --retry 3 "$(jq -r .url "$RUNNER_TEMP/rescue-core/rescue/base.json")" -o "$RUNNER_TEMP/rescue.iso"
           python3 tests/rescue_disk.py --bin-dir "$RUNNER_TEMP/rescue-core" --iso "$RUNNER_TEMP/rescue.iso" \
             --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py" --firmware-media
+          python3 -B tests/rescue_storage.py --bin-dir "$RUNNER_TEMP/rescue-core" --iso "$RUNNER_TEMP/rescue.iso" \
+            --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py"
 
       - name: Boot an installed PsiOS UEFI disk, power-cut the node and verify its recovery
         run: |

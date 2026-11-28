@@ -88,6 +88,8 @@ Shell 执行历史按当前任务修订分页读取，显示 Core 的 Run、Oper
 
 ## Agent 会话与模型结算
 
+- 原生 amd64 盘已验证独立构建的静态 CPU 推理引擎。真实无网卡 OVMF 来宾通过 Unix socket 执行直接与队列盘点 Task，结果与来宾的启动 ID 和内存一致。引擎停止后可重放原回执并继续传统管理，正常重启后保留权重和 Task。[构建及部署](local-inference.md#在原生-amd64-磁盘中运行-cpu-推理) · [联合验收](../tests/native_local_inference.py)
+
 - 本机 Shell 的 Agent Runtime 使用当前主体权限分页读取会话状态、轮次、模型、Skill 和最近任务。详情将同一会话修订的调用次数、模型租约时长和提供者报告的 Token 汇总展示。真实 Core 与 Chromium 验收覆盖跨主体读取拒绝、分页、修订变化、授权撤销和窗口清空。[运行会话界面](core-local.md#本机-psios-shell) · [浏览器验收](../tests/test_shell.py)
 - `psios-mcp` 支持 2025-11-25 和 2026-07-28 两版 STDIO。工具使用当前 Agent 授权执行原生 Task，可读取系统状态、资源压力、明确绑定的卷及已登记的 systemd 服务。现代轮询式 Tasks 使用持久调用键恢复原 Task，并保留句柄有效期间的结果。验收覆盖两版官方 Python 客户端及官方 TypeScript Tasks 扩展、守护进程强杀后的重连、取消、撤权、格式升级和结果回收。MCP HTTP OAuth、任务推送和远端接管仍待开发。[运行说明](core-runtime.md#现代-mcp-tasks) · [任务验收](../tests/test_mcp_tasks.py) · [真实卷与服务](../tests/test_mcp_bound_read_tools.py)
 - 会话可按配置将最近的有界工具结果纳入模型上下文。Core 在原模型租约上固定会话修订、上下文摘要与实际制品引用。已验证升级保留旧租约、内容过期后的授权修复、截断和引用模式。[模型上下文](../tests/agent_context_upgrade.py) · [结果材料验收](../tests/test_agent_tool_context.py)

@@ -32,3 +32,31 @@ install -d -m 0700 ./worker-decisions
 psiosctl --token-file ./provider.token model-worker ./model-ref.json \
   --local-model ./local-model.json --decision-dir ./worker-decisions
 ```
+
+## 在原生 amd64 磁盘中运行 CPU 推理
+
+原生盘可选用独立的静态 llama.cpp 引擎。引擎、权重与 Core 分开保管，首次启动仍按原生盘流程进行。生成新盘时可用 `--home-mib 192` 为以下模型预留空间。已经部署的磁盘应核对实际可用空间。[原生磁盘容量](native-disk.md#生成新盘)
+
+在可信的 amd64 Linux musl 构建环境中准备 GCC、G++、Linux 内核头文件、CMake、Ninja、GNU tar 及 binutils。提前取得锁定源码后，构建器可完全离线运行。它核对源归档，构建通用 amd64 CPU 引擎，检查 ELF 没有动态加载器和动态依赖，并输出校验清单和实际工具链版本。可用 `CMAKE_BUILD_PARALLEL_LEVEL` 控制并行编译数。
+
+```sh
+curl -fL -o llama-source.tar.gz \
+  https://codeload.github.com/ggml-org/llama.cpp/tar.gz/f5e6915c28f10330885fcb9243a93ae98d3115ab
+tools/build-local-inference llama-source.tar.gz psios-llama-server-amd64.tar.gz
+mkdir engine
+tar -xzf psios-llama-server-amd64.tar.gz -C engine
+(cd engine && sha256sum -c SHA256SUMS)
+```
+
+从固定来源获取 SmolLM2 权重，在转入 PsiOS 前按 SHA-256 核验。把引擎和权重复制到普通操作账户拥有的私有目录。以该账户执行下面的命令，将打印的路径和账户 UID 用于 `--local-model` 配置。前台进程提供模型推理，普通 Core 管理命令可在另一会话执行。[模型修订、许可证和摘要](../tests/fixtures/local-inference.json)
+
+```sh
+umask 077
+endpoint_dir=$(mktemp -d /tmp/psios-inference.XXXXXX)
+printf 'socket=%s/inference.sock\nserver_uid=%s\n' "$endpoint_dir" "$(id -u)"
+./llama-server -m ./SmolLM2-135M-Instruct-Q4_K_M.gguf \
+  --host "$endpoint_dir/inference.sock" --alias psios-small \
+  -t 2 -c 2048 -np 1 -ngl 0 --no-webui
+```
+
+当前原生验证覆盖 CPU、本机 Unix socket 及手动启停。自动服务部署、GPU 后端和远端模型分发仍待实现。验收脚本使用独立 OVMF 来宾和原生 Core 制品，两项输入通过只读磁盘转入，随后检查直接调用、队列调用和重启后的持久化结果。[原生推理验收](../tests/native_local_inference.py)

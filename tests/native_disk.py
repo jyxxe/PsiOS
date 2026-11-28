@@ -102,12 +102,12 @@ class Console:
         if user == "psios":
             self.run("for i in $(seq 1 100); do psiosctl whoami >/dev/null 2>&1 && exit 0; sleep 0.1; done; exit 1")
 
-    def run(self, command):
+    def run(self, command, *, timeout=75):
         marker = "PSIOSCMD" + secrets.token_hex(6)
         self.send(f"printf '\\n{marker}\\n'; ( {command} ); r=$?; printf '\\n{marker}:%s\\n' \"$r\"",
                   paced=self.pace_commands)
         self.until(("\n" + marker + "\n").encode(), phase="shell command start nonce")
-        output = self.until(("\n" + marker + ":").encode(), phase="shell command result nonce")
+        output = self.until(("\n" + marker + ":").encode(), timeout=timeout, phase="shell command result nonce")
         status = self.until(b"\n", phase="shell command exit status")
         if status != b"0":
             if self.pace_commands:

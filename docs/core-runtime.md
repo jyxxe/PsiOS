@@ -35,6 +35,12 @@ Core 核对本机 sysfs，并比较两次采样中的内核设备目录、设备
 
 提交 `{"limit":16}` 可读取一页，范围为 1 至 32 行，条目编码总量最多 12 KiB。使用返回的 `next_cursor` 继续读取，最后一页返回 `null`。继续时重新核对设备、驱动、启动与挂载命名空间，以及 Node 和委托范围。任一条件变化时返回 `ResyncRequired`，可重新读取第一页。空参数仍返回完整的有界观测。[分页与持久结果验收](../tests/test_mcp_tasks.py)
 
+### USB 总线与端口观测
+
+`node.usb` 读取当前 Linux 节点的 USB 根集线器和物理设备。主体需要指定 Node 的 `node.usb`、`task.submit` 和 `task.read` 授权。结果给出总线、内核分配的设备地址、包含父级的端口位置、厂商和产品 ID、协议类别、协商速率以及内核授权状态。报告省略设备序列号和接口程序。
+
+空输入返回首个有界页面。每页最多 32 行和 12 KiB，整次观测最多 256 个设备。`next_cursor` 绑定具体启动、挂载命名空间、Node、主体及委托。Core 比较两次 sysfs 观测和内核对象身份。同端口换设备或其他观测变化后，旧游标返回 `ResyncRequired`，已结算的原制品仍可按原权限读取。Linux 设备控制和租用适用独立能力。[原生 USB 热插拔验收](../tests/native_usb_inventory.py)
+
 ### 块设备代次与布局核对
 
 `node.devices` 从已核验的 sysfs 块设备索引读取列表。Core 用主次设备号核对同一内核目录，两次采样一致后才发布。列表带当前 Linux 启动 ID，设备提供 `diskseq` 时也报告该值。设备热插拔、同名替换或属性变化时，冲突会阻止发布不一致的快照。登记和写入继续使用独立的设备代次与授权规则。[真实块设备与挂载隔离验收](../tests/test_block_inventory.py)
@@ -102,6 +108,8 @@ ctl wait "$task" | jq '{reference:.result.artifact_refs[0]}' | ctl call Artifact
 ### 本机 DNS 配置观测
 
 `node.resolver` 通过只读 Task 观测 Core 挂载命名空间中可见的 `/etc/resolv.conf`。向目标 Node 显式授予 `node.resolver`、`task.submit` 和 `task.read` 后提交 `{}`。结果按文件顺序保留所配置的 IPv4 和 IPv6 nameserver，并记录 IPv6 区标识、无效地址数量、boot ID 及挂载和网络命名空间。文件可由本机网络服务通过标准符号链接提供。
+
+`Capability.CheckLocalReadTool` 接受 `delegation_id` 和工具名 `tool`，返回当前主体在既有委托下的 `allowed`。它核对任务权限、工具登记及实际资源作用域，无需提交任务或消耗执行预算。Shell 用这个查询在交付 DNS 观测前复核委托。
 
 此能力报告配置文件的 nameserver 项，实际 DNS 可达性由独立的网络探针观测。Core 读取至多 64 KiB 的普通文件和 32 个有效地址。组或其他用户可写的文件、读取期间的替换及超限都会使 Task 失败。已发布的结果随 Task 保存，配置更新后提交新任务可读取当前值。[真实挂载与格式升级验收](../tests/network_resolver.py)
 

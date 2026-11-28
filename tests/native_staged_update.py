@@ -15,7 +15,9 @@ import subprocess
 import sys
 import tempfile
 
-from native_disk import REPO, boot, call, check_state, extract_partition, password, replace_partition, sha
+from native_disk import (
+    REPO, boot, call, check_deployment_os_release, check_state, extract_partition, password, replace_partition, sha,
+)
 from native_boot_tools import TOOLS
 from native_upgrade import STATE_MIB, STATE_OFFSET, shutdown
 
@@ -101,7 +103,7 @@ def install_large_wal(work, disk, build):
         return data.stat().st_size + wal.stat().st_size
 
 
-def boot_view(work, disk, source_vars, receiver, operator, admin, build, baseline, token):
+def boot_view(work, disk, source_vars, receiver, operator, admin, build, baseline, token, *, verify_os_release=False):
     # Preserve both the sealed raw bytes and the original private EFI variables
     # while still booting the actual disk through the normal native path.
     image = work / f"{receiver}.qcow2"
@@ -123,6 +125,8 @@ def boot_view(work, disk, source_vars, receiver, operator, admin, build, baselin
         assert console.run("cat /psios-source") == build["source_commit"]
         deployment = console.run("sha256sum /psios-deployment.json").split()[0]
         assert deployment == build["deployment_manifest_sha256"], (receiver, deployment)
+        if verify_os_release:
+            check_deployment_os_release(console, json.loads(console.run("cat /psios-deployment.json")))
         shutdown(console, admin)
     image.unlink()
     vars_file.unlink()
@@ -352,7 +356,7 @@ def exercise(args, work):
     bundle = digest_map(output.iterdir())
 
     updated_boot = boot_view(work, output / "candidate.raw", vars_file, "candidate-boot",
-                                 operator, admin, candidate, baseline, token)
+                             operator, admin, candidate, baseline, token, verify_os_release=True)
     prior_boot = boot_view(work, old, vars_file, "previous-boot",
                                operator, admin, old_build, baseline, token)
     assert updated_boot != prior_boot

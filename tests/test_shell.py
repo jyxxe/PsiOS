@@ -19,7 +19,7 @@ from threading import Event
 from urllib.parse import urlsplit
 
 from model_delivery import frame
-from support import Node, target
+from support import Node, key, target
 
 
 class Shell:
@@ -99,6 +99,78 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(body["error"]["code"], code)
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertIsNone(headers["Access-Control-Allow-Origin"])
+
+    def test_chat_directory_requires_the_paired_principal_scope(self):
+        shell = self.shell()
+        self.error(shell, 401, "AuthenticationRequired", "/api/conversations", data={})
+        token = shell.pair()["token"]
+        self.error(shell, 403, "PermissionDenied", "/api/conversations", data={}, token=token)
+        self.error(shell, 400, "InvalidArgument", "/api/conversation-messages",
+                   data={"id": "room-test", "limit": 32}, token=token)
+        self.error(shell, 404, "NotFound", "/api/conversation-send", data={}, token=token)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
+    def test_browser_reads_agent_chat_and_removes_an_ended_membership(self):
+        node = self.node
+        owner, _ = node.agent(["chat.invite", "chat.read", "chat.send"])
+        viewer, _ = node.agent(["chat.read", "resource.read", "task.read", "task.submit", "system.status"])
+        room = node.call("Conversation.OpenRoom",
+                         {"key": key(), "name": "现场排查", "capacity": 3, "ttl_seconds": 240}, owner["token"])
+        def version(chat):
+            return {"id": chat["id"], "expected_resource_version": chat["resource_version"]}
+
+        namespace = node.call("Message.OpenSendWindow",
+                              {"id": room["id"], "ttl_seconds": 180}, owner["token"])["namespace"]
+
+        def send(body):
+            prepared = node.call("Message.Prepare", {"conversation_id": room["id"],
+                                 "client_send_id": namespace + ":" + key(), "text": body}, owner["token"])
+            node.call("Message.Send", prepared, owner["token"])
+
+        send("before membership, private")
+        invitation = node.call("Conversation.Invite", dict(version(room), principal_id=viewer["principal_id"],
+                                                           ttl_seconds=120), owner["token"])
+        member = invitation["membership_id"]
+        joined = node.call("Conversation.Respond", dict(version(invitation["conversation"]), membership_id=member,
+                                                       accept=True), viewer["token"])
+        for number in range(1, 19):
+            send(f"现场记录 {number}\n<em>以文字显示</em>")
+        for number in range(12):
+            node.call("Conversation.OpenDirect", {"key": key(), "name": f"对话 {number}",
+                      "recipient_principal_id": viewer["principal_id"], "ttl_seconds": 120}, owner["token"])
+
+        current = node.call("Message.List", {"id": room["id"]}, viewer["token"])
+        baseline_read = current["read_sequence"]
+        self.assertEqual(len(current["items"]), 16)
+        self.assertEqual(current["items"][0]["content"]["parts"][0]["text"].splitlines()[0], "现场记录 1")
+
+        identity = node.base / "chat-viewer.token"
+        identity.touch(mode=0o600)
+        identity.write_text(viewer["token"])
+        shell = self.shell(identity)
+        parent, child = socket.socketpair()
+        with parent, child:
+            parent.settimeout(45)
+            args = dict(origin=shell.origin, code=shell.code, chat=True, conversation=room["id"],
+                        profile=str(node.base / "browser"), control_fd=child.fileno())
+            with subprocess.Popen(["node", str(Path(__file__).with_name("shell_browser.mjs")),
+                                   os.environ.get("PSIOS_TEST_CHROME", "google-chrome")],
+                                  stdin=subprocess.PIPE, pass_fds=(child.fileno(),)) as browser:
+                child.close()
+                try:
+                    browser.stdin.write(json.dumps(args).encode())
+                    browser.stdin.close()
+                    self.assertEqual(parent.recv(1), b"R")
+                    self.assertEqual(node.call("Message.List", {"id": room["id"]}, viewer["token"])["read_sequence"],
+                                     baseline_read)
+                    current_room = node.call("Conversation.Get", {"id": joined["id"]}, owner["token"])
+                    node.call("Conversation.RemoveMember", dict(version(current_room), membership_id=member),
+                              owner["token"])
+                    parent.sendall(b"K")
+                    self.assertEqual(browser.wait(timeout=45), 0)
+                finally:
+                    if browser.poll() is None:
+                        browser.kill()
 
     def test_application_catalog_only_exposes_its_fixed_queries(self):
         shell = self.shell()

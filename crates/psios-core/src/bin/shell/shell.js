@@ -1,6 +1,7 @@
-"use strict";
+import { chatView } from "./shell-chat.js";
 
 const byId = (id) => document.getElementById(id);
+const chat = chatView(request, byId, element, message);
 const pairing = byId("pairing");
 const workspace = byId("workspace");
 const code = byId("code");
@@ -18,7 +19,7 @@ const applicationContent = byId("application-content");
 let bearer = null;
 let sessionRequests = new AbortController();
 let canCancelPending = false;
-const apps = new Map(["node", "tasks", "applications"].map(id => [id, {
+const apps = new Map(["node", "tasks", "applications", "chat"].map(id => [id, {
   window: byId("window-" + id), title: byId("title-" + id),
   dock: byId("nav-" + id), status: byId("status-" + id), state: "closed",
 }]));
@@ -54,6 +55,7 @@ function leave(text, error = false) {
   cursors = [null];
   nextCursor = selectedTask = null;
   resetApplications();
+  chat.reset();
   updateDesktop();
   byId("principal").textContent = "";
   message(status, "");
@@ -625,7 +627,8 @@ function showWindow(id, app, shown) {
   if (shown) {
     if (id === "node") loadNode();
     else if (id === "tasks") loadTasks();
-    else loadApplications();
+    else if (id === "applications") loadApplications();
+    else chat.show();
     return;
   }
   if (id === "node") {
@@ -634,9 +637,11 @@ function showWindow(id, app, shown) {
   } else if (id === "tasks") {
     taskUpdate += 1;
     clearTaskView();
-  } else {
+  } else if (id === "applications") {
     applicationUpdate += 1;
     clearApplicationsView();
+  } else {
+    chat.hide();
   }
   message(app.status, "");
 }
@@ -686,6 +691,7 @@ function hideWindow(id, state) {
     nextCursor = selectedTask = null;
   }
   if (id === "applications" && state === "closed") resetApplications();
+  if (id === "chat" && state === "closed") chat.reset();
   if (active === id) active = Array.from(apps.keys()).find(key => apps.get(key).state === "open") ?? null;
   updateDesktop();
   if (!workspace.hidden) {
@@ -699,7 +705,8 @@ for (const [id, app] of apps) {
   controls.querySelector('[data-action="refresh"]').addEventListener("click", () => {
     if (id === "node") loadNode();
     else if (id === "tasks") loadTasks();
-    else loadApplications([null], selectedApplication, [null]);
+    else if (id === "applications") loadApplications([null], selectedApplication, [null]);
+    else chat.refresh();
   });
   controls.querySelector('[data-action="close"]').addEventListener("click", () => hideWindow(id, "closed"));
   controls.querySelector('[data-action="minimize"]').addEventListener("click", () => hideWindow(id, "minimized"));

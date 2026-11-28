@@ -458,7 +458,8 @@ def source_fixture(args, work):
 def check_factory_staging(work, installer, source, receipt, approval):
     # Exercise the source validator shipped alongside the installer under test.
     sys.path.insert(0, str(installer.resolve(strict=True).parent))
-    from install_source import fit_image, stage_image, verify_relocated_gpt
+    from create import verify_relocated_gpt
+    from install_source import fit_image, stage_image
 
     with tempfile.TemporaryDirectory(dir=work) as staging:
         image, facts = stage_image(Path(staging), source, receipt, approval)

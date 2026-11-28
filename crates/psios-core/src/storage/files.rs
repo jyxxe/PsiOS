@@ -110,7 +110,7 @@ pub fn validate(a: &Action) -> Result<()> {
         Action::Chunk(p) => {
             path(&p.path, false)?;
             require(
-                (1..=CHUNK).contains(&p.limit),
+                (1..=psios_api::MAX_VOLUME_FILE_READ_CHUNK_BYTES).contains(&p.limit),
                 "InvalidArgument",
                 "invalid read chunk size",
             )?;

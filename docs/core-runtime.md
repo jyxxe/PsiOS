@@ -260,6 +260,13 @@ Debian 软件包以 `Type=notify` 启动 Core。主进程在核对权威状态�
 
 未挂载卷的文件读取、目录列表、用量和完整性结果在发布前再次核对原 Task 的许可。撤权或取消后的读取不生成新制品，迟到的读取结果仅记录围栏状态。已结算的制品仍按原有读取权限提供。
 
+`psiosctl volume-read` 从具有明确修订的卷读取普通文件。使用允许 `volume.read_chunk`、`task.submit` 和 `task.read` 且明确包含该卷的委托。默认最多读取 96 KiB，可用 `--max-bytes` 设置至 384 KiB。命令逐块核对已结算的原制品和块摘要，所有块须来自同一文件修订。读完并核对长度后才向标准输出写入二进制字节。块之间替换文件、撤销续读授权或超过限额会使命令失败。[实际 CLI 与并发替换验收](../tests/test_volume_read_cli.py)
+
+```bash
+ctl volume-read --volume "$VOLUME_ID" --revision "$VOLUME_REVISION" \
+  --delegation "$DELEGATION_ID" notes/import.json
+```
+
 直接 OCI 安装、暂存、选择和卸载的变更与原 Task 回执在同一权威事务提交。调用 Docker 时仅检查镜像。提交目录变更前，Core 复核原许可、授权、审批及目标修订。格式 124 记录精确的 `PermitBound` 派发边界。重启后仍处于该边界的 Task 以 `NotStarted` 结束并释放应用、卷占用。若 SQLite 已提交而见证尚待确认，重启沿用原成功回执。两种情况都保留审批使用及幂等记录。升级后禁止旧版写入，历史上已标为启动效果的记录继续沿用原恢复边界。[真实 Docker、进程中断与升级验收](../tests/oci_catalog_settlement.py)
 
 新启动的容器会记录 Docker Engine ID。如果停止操作在引擎删除容器后丢失回执，应用和卷仍保留占用。运行新的 `application.health` Task，由同一引擎确认原容器及该应用的受管实例均已消失。把该检查的 ArtifactRef 作为 `evidence_ref` 提交至 `Operation.Reconcile`，服务才会一并结算停止操作、运行实例和卷解绑。引擎不可达、引擎身份变化、容器仍在或使用旧版缺少引擎身份的记录时，都无法用缺失观测释放卷。

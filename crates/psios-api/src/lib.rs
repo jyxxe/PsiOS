@@ -8,6 +8,7 @@ mod model;
 mod project;
 mod retention;
 mod schedule;
+mod volume_file;
 mod work_admission;
 mod work_admission_blockers;
 pub use artifact::{
@@ -29,6 +30,7 @@ pub use model::*;
 pub use project::*;
 pub use retention::*;
 pub use schedule::ScheduleRenewalRequest;
+pub use volume_file::{MAX_VOLUME_FILE_READ_BYTES, MAX_VOLUME_FILE_READ_CHUNK_BYTES};
 mod secret;
 pub use secret::MAX_SECRET_BYTES;
 pub use work_admission::*;

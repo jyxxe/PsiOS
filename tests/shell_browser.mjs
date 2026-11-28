@@ -156,6 +156,44 @@ async function test() {
   await waitFor("paired desktop", '!document.querySelector("#workspace").hidden && !document.querySelector("#empty-desktop").hidden');
   assert.ok(await evaluate('document.activeElement.id === "nav-node" && document.querySelectorAll(".app-window:not([hidden])").length === 0'));
   assert.ok(!requests.some(url => ["/api/node", "/api/tasks"].includes(new URL(url).pathname)));
+  if (input.navigateBack) {
+    await click("#nav-node");
+    await waitFor("populated inventory", 'document.querySelector("#node-view").textContent.includes(' + JSON.stringify(input.node) + ')');
+    const history = await send("Page.getNavigationHistory");
+    const prior = history.entries[history.currentIndex];
+    await send("Page.navigate", { url: "about:blank" });
+    await waitFor("navigation away", 'location.href === "about:blank"');
+    await send("Page.navigateToHistoryEntry", { entryId: prior.id });
+    await waitFor("unpaired page after Back", 'document.querySelector("#workspace")?.hidden && !document.querySelector("#pairing").hidden');
+    assert.ok(await evaluate('document.querySelector("#principal").textContent === "" && document.querySelector("#node-view").textContent === ""'));
+    assert.equal(await evaluate("location.origin"), input.origin);
+    assert.deepEqual(exceptions, []);
+    return;
+  }
+  if (input.endSession) {
+    await click("#nav-node");
+    await waitFor("populated inventory", 'document.querySelector("#node-view").textContent.includes(' + JSON.stringify(input.node) + ')');
+    await click("#nav-tasks");
+    await waitFor("visible task", 'document.querySelector("#task-rows button") !== null');
+    await selectTask(input.task);
+    await waitFor("authorized result", 'document.querySelector("#task-content").textContent.includes("成功")');
+    const reads = requests.filter(url => new URL(url).pathname.startsWith("/api/")).length;
+    writeSync(input.control_fd, Buffer.from("R"));
+    if (input.realIdle) {
+      await delay(270_000);
+      assert.ok(await evaluate('!document.querySelector("#workspace").hidden && document.querySelector("#task-content").textContent.includes("成功")'));
+      assert.equal(requests.filter(url => new URL(url).pathname.startsWith("/api/")).length, reads);
+    }
+    const signal = Buffer.alloc(1);
+    assert.equal(readSync(input.control_fd, signal), 1);
+    assert.equal(signal.toString(), "K");
+    await waitFor("redaction after the native Shell session ends", 'document.querySelector("#workspace").hidden');
+    assert.ok(await evaluate('document.querySelector("#node-view").textContent === "" && ' +
+      'document.querySelector("#task-content").textContent === "" && document.querySelector("#task-rows").textContent === "" && ' +
+      'document.querySelector("#principal").textContent === "" && !document.querySelector("#pairing").hidden'));
+    assert.deepEqual(exceptions, []);
+    return;
+  }
   if (input.control_fd !== undefined) return verifyRevokedWindow();
   await send("Emulation.setDeviceMetricsOverride", {
     width: 1280, height: 860, screenWidth: 1280, screenHeight: 860, deviceScaleFactor: 1, mobile: false,

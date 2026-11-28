@@ -118,7 +118,7 @@ class Console:
 
 
 @contextmanager
-def boot(work, image, network_mac=None, extra_disk=None, tap=None, *, rtc_base=None,
+def boot(work, image, network_mac=None, extra_disk=None, tap=None, *, network_model="virtio-net-pci", rtc_base=None,
          disk_format="raw", vars_file="vars.fd", vcpus=2, pace_commands=False):
     # The privileged TAP fixture has a reproducible serial stall on hosted KVM.
     # Use a portable CPU emulator for that fixture; keep its real virtio and TAP.
@@ -142,7 +142,7 @@ def boot(work, image, network_mac=None, extra_disk=None, tap=None, *, rtc_base=N
         network = (f"tap,id=network,ifname={tap},script=no,downscript=no" if tap
                    else "user,id=network,net=192.0.2.0/24,dhcpstart=192.0.2.20")
         cmd += ["-netdev", network,
-                "-device", f"virtio-net-pci,netdev=network,mac={network_mac},romfile="]
+                "-device", f"{network_model},netdev=network,mac={network_mac},romfile="]
     else:
         cmd += ["-nic", "none"]
     with subprocess.Popen(cmd, cwd=work, stdin=subprocess.PIPE, stdout=subprocess.PIPE) as vm:

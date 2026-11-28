@@ -66,6 +66,8 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 -device virtio-net-pci,netdev=lan,mac=52:54:00:51:6f:20,romfile=
 ```
 
+用于 Intel e1000e 网口时，另加 `--dhcp-driver e1000e`。构建机需要 `unsquashfs`，安装器从已核验的固定内核介质提取并核对模块，将它和其他引导内容一起纳入启动校验。该 IPv4 DHCP 配置仍按单一 MAC 绑定。格式 8 的构建回执固定驱动，停机升级对试启动及正式候选沿用原配置。QEMU 用 `-device e1000e,netdev=lan,mac=52:54:00:51:6f:20,romfile=`，已验收登记证书的 OVMF Secure Boot 联网。实际网卡与固件待验收。[有线 DHCP 验收](../tests/native_dhcp.py)
+
 该配置管理匹配网口的 IPv4 地址、租约路由和 `/etc/resolv.conf`。收到选项 121 时，最多安装 32 个不同前缀，支持直连、经网关和默认路由。同一租约中的选项 3 仅在缺少选项 121 时提供默认网关。续租与释放按已记录的前缀、网关、接口、协议和 metric 逐条替换或删除租约路由。应用租约失败时清理已配置部分并报告失败。
 
 最多三个 DNS 服务器按租约配置。普通账户可用 `busybox ip -4 addr show`、`busybox ip -4 route show` 和 `cat /etc/resolv.conf` 检查。最新租约或故障信息在 `/run/psios-network/status`。配置的网口缺失时，串口账户与 Core 可照常使用。[RFC 3442](https://datatracker.ietf.org/doc/html/rfc3442) · [租约续租和释放验收](../tests/native_dhcp.py) · [无类别路由验收](../tests/native_dhcp_routes.py)

@@ -368,6 +368,7 @@ fn criterion_target(conn: &Connection, criterion: &Criterion) -> Result<()> {
         | "node.interfaces"
         | "node.routes"
         | "node.route_lookup"
+        | crate::node::network::resolver::TOOL
         | "node.routing_rules"
         | "node.devices"
         | "node.block_layout"

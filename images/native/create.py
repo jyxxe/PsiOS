@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Build a new PsiOS UEFI disk or prepare an offline upgrade of a stopped node."""
 import argparse
+import base64
+import binascii
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 import fcntl
@@ -37,13 +39,24 @@ EFI_PATH = "::/EFI/BOOT/BOOTX64.EFI"
 STATIC_IPV4 = "virtio-static-ipv4"
 STATIC_IPV6 = "virtio-static-ipv6"
 STATIC_DUAL = "virtio-static-dual-stack"
-STATIC_MODES = {STATIC_IPV4: "static", STATIC_IPV6: "static6", STATIC_DUAL: "dual"}
+VIRTIO_STATIC_MODES = {STATIC_IPV4: "static", STATIC_IPV6: "static6", STATIC_DUAL: "dual"}
+E1000E_STATIC_MODES = {profile.replace("virtio-", "e1000e-", 1): mode for profile, mode in VIRTIO_STATIC_MODES.items()}
+STATIC_MODES = VIRTIO_STATIC_MODES | E1000E_STATIC_MODES
 LIMITED_SERVICE = "::respawn:/bin/sh /psios-core-cgroup serve"
 TRIAL_BOOT_MODE = "IsolatedTrial"
 TRIAL_RECEIPT_FORMAT = 7
 E1000E_RECEIPT_FORMAT = 8
 E1000E_MODULE = "psios-e1000e.ko"
 DHCP_SERVICE = "::respawn:/bin/sh /psios-dhcp"
+STATIC_SERVICE = "::once:/bin/sh /psios-dhcp "
+SSH_RECEIPT_FORMAT = 9
+SSH_PROFILE = "Ed25519Operator"
+SSH_SERVICE = "::respawn:/bin/sh /psios-ssh"
+SSH_PACKAGES = {
+    "openssh-server-10.2_p1-r1": ("usr/sbin/sshd", "usr/lib/ssh/sshd-auth", "usr/lib/ssh/sshd-session"),
+    "openssh-keygen-10.2_p1-r1": ("usr/bin/ssh-keygen",),
+}
+SSH_PROGRAMS = tuple(file for files in SSH_PACKAGES.values() for file in files)
 
 
 @dataclass(frozen=True)
@@ -158,6 +171,22 @@ def password_hash(path):
     return password.strip()
 
 
+def ssh_public_key(raw):
+    line = raw.removesuffix(b"\n")
+    words = line.split(None, 2)
+    if (len(raw) > 512 or any(byte != 9 and not 32 <= byte <= 126 for byte in line)
+            or len(words) < 2 or words[0] != b"ssh-ed25519"):
+        raise ValueError("expected one OpenSSH Ed25519 public key")
+    try:
+        value = base64.b64decode(words[1], validate=True)
+    except binascii.Error as error:
+        raise ValueError("invalid OpenSSH Ed25519 public key encoding") from error
+    header = struct.pack(">I", len(words[0])) + words[0] + struct.pack(">I", 32)
+    if len(value) != len(header) + 32 or not value.startswith(header) or base64.b64encode(value) != words[1]:
+        raise ValueError("invalid OpenSSH Ed25519 public key data")
+    return b"ssh-ed25519 " + words[1] + b"\n"
+
+
 def unicast_mac(value):
     value = value.lower()
     if not re.fullmatch(r"[0-9a-f][02468ace](?::[0-9a-f]{2}){5}", value) or value == "00:00:00:00:00:00":
@@ -254,6 +283,31 @@ def validate_persisted_e1000e(work, state):
         raise ValueError("invalid persisted e1000e DHCP configuration or launcher")
 
 
+def validate_persisted_network(work, state, receipt):
+    mode = STATIC_MODES.get(receipt.get("network_profile"))
+    if mode in ("static", "dual"):
+        mac4, dns4 = validate_persisted_static(work, state, 4)
+    if mode in ("static6", "dual"):
+        mac6, dns6 = validate_persisted_static(work, state, 6)
+    if mode == "dual" and (mac4 != mac6 or dns4 + dns6 > 3):
+        raise ValueError("inconsistent persisted dual-stack profile")
+    if "wired_driver" not in receipt:
+        return
+    if mode is None:
+        validate_persisted_e1000e(work, state)
+        return
+    inittab = read_root_file(work, state, "/etc/inittab", 16 * 1024, "0(?:600|644)")
+    if inittab.splitlines().count((STATIC_SERVICE + mode).encode()) != 1:
+        raise ValueError("invalid persisted e1000e static launcher")
+
+
+def validate_persisted_ssh(work, state):
+    key = read_root_file(work, state, "/etc/psios/ssh-authorized-key", 512, "0644")
+    inittab = read_root_file(work, state, "/etc/inittab", 16 * 1024, "0(?:600|644)")
+    if ssh_public_key(key) != key or inittab.splitlines().count(SSH_SERVICE.encode()) != 1:
+        raise ValueError("invalid persisted SSH console key or launcher")
+
+
 def host_config(seed, args):
     (seed / "etc/psios").mkdir(parents=True)
     operator = password_hash(args.console_hash)
@@ -276,12 +330,21 @@ def host_config(seed, args):
         for name, config in (("static-ipv4", args.static_network), ("static-ipv6", args.static_ipv6_network)):
             if config:
                 (seed / "etc/psios" / name).write_text(config)
-        inittab += f"::once:/bin/sh /psios-dhcp {STATIC_MODES[args.network_profile]}\n"
+        inittab += STATIC_SERVICE + STATIC_MODES[args.network_profile] + "\n"
     elif args.dhcp_mac:
         (seed / "etc/psios/dhcp-mac").write_text(args.dhcp_mac + "\n")
         inittab += DHCP_SERVICE + "\n"
     if args.dhcp_mac or args.network_profile:
         (seed / "etc/resolv.conf").symlink_to("/run/psios-network/resolv.conf")
+    if args.ssh_authorized_key:
+        with (seed / "etc/passwd").open("a") as accounts:
+            accounts.write("sshd:x:74:74:OpenSSH privilege separation:/var/empty:/bin/false\n")
+        with (seed / "etc/group").open("a") as groups:
+            groups.write("sshd:x:74:\n")
+        with (seed / "etc/shadow").open("ab") as shadows:
+            shadows.write(b"sshd:!:0:0:99999:7:::\n")
+        (seed / "etc/psios/ssh-authorized-key").write_bytes(args.ssh_authorized_key)
+        inittab += SSH_SERVICE + "\n"
     (seed / "etc/inittab").write_text(inittab)
     # Target permissions are independent of the builder's umask.
     for path in (seed / "etc").rglob("*"):
@@ -298,7 +361,32 @@ def core_programs(work):
     return programs
 
 
-def prepare_boot_inputs(work, args, *, wired_driver=None):
+def prepare_ssh_programs(work):
+    for package, files in SSH_PACKAGES.items():
+        archive = work / (package + ".apk")
+        with archive.open("xb") as output:
+            subprocess.run(["isoinfo", "-R", "-i", work / "base.iso", "-x", f"/apks/x86_64/{package}.apk"],
+                           stdout=output, check=True, timeout=30, preexec_fn=file_limit(4 * MIB))
+        remaining = set(files)
+        with tarfile.open(archive, "r:gz", ignore_zeros=True) as bundle:
+            for index, entry in enumerate(bundle):
+                if index >= 128 or entry.size > 4 * MIB:
+                    raise ValueError("OpenSSH package member limit exceeded")
+                if entry.name not in files:
+                    continue
+                if entry.name not in remaining or not entry.isfile() or not 0 < entry.size <= 2 * MIB:
+                    raise ValueError("invalid native OpenSSH program member")
+                path = work / entry.name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("xb") as destination:
+                    shutil.copyfileobj(bundle.extractfile(entry), destination)
+                remaining.remove(entry.name)
+        if remaining:
+            raise ValueError("native OpenSSH package is missing required programs")
+        archive.unlink()
+
+
+def prepare_boot_inputs(work, args, *, wired_driver=None, ssh_enabled=False):
     base = boot_media.prepare_kernel(work, args.kernel_iso)
     if wired_driver == "e1000e":
         if shutil.which("unsquashfs") is None:
@@ -317,11 +405,13 @@ def prepare_boot_inputs(work, args, *, wired_driver=None):
         modloop.unlink()
     (work / "bin").mkdir()
     install_core(work, args.core_archive, args.core_sha256)
+    if ssh_enabled:
+        prepare_ssh_programs(work)
     return base
 
 
 def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network_profile, *, core_limits, trial,
-                   require_secure_boot=False, wired_driver=None):
+                   require_secure_boot=False, wired_driver=None, ssh_enabled=False):
     (work / "psios-disk-uuid").write_text(str(instance) + "\n")
     (work / "psios-home-uuid").write_text(str(home_id) + "\n")
     sectors = [str(mib * 2048) for start, size, _ in layout.partitions[1:] for mib in (start, size)]
@@ -330,6 +420,9 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
     files = [*core_programs(work), "psios-source", "psios-disk-uuid", "psios-home-uuid", "psios-storage-layout"]
     if wired_driver:
         files.append(E1000E_MODULE)
+    if ssh_enabled:
+        boot_scripts.append("ssh")
+        files.extend(SSH_PROGRAMS)
     if core_limits:
         boot_scripts.append("core-cgroup")
         (work / "psios-core-limits").write_text(core_limits.kernel_values())
@@ -362,6 +455,8 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
         inputs["network_profile"] = network_profile
     if wired_driver:
         inputs["wired_driver"] = wired_driver
+    if ssh_enabled:
+        inputs["ssh_console"] = SSH_PROFILE
     if core_limits:
         inputs["core_limits"] = asdict(core_limits)
     if trial:
@@ -374,11 +469,16 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
     checks = {**payload, "/psios-deployment.json": sha256(manifest)}
     (work / "psios-payload.sha256").write_text("".join(f"{digest}  {name}\n" for name, digest in checks.items()))
     files.extend(["psios-deployment.json", "psios-payload.sha256"])
+    for name in files:
+        executable = name.startswith("bin/") or name in ("psios-init", "psios-dhcp-event", *SSH_PROGRAMS)
+        (work / name).chmod(0o755 if executable else 0o644)
+    if ssh_enabled:
+        ssh_directory = "usr/lib/ssh"
+        (work / ssh_directory).chmod(0o755)
+        files.insert(0, ssh_directory)
     # GNU cpio's reproducible mode still includes each member's modification time.
     for name in files:
-        path = work / name
-        path.chmod(0o755 if name.startswith("bin/") or name in ("psios-init", "psios-dhcp-event") else 0o644)
-        os.utime(path, (boot_media.EPOCH, boot_media.EPOCH))
+        os.utime(work / name, (boot_media.EPOCH, boot_media.EPOCH))
     append_deployment_payload(work, files)
 
 
@@ -397,10 +497,10 @@ def append_deployment_payload(work, files):
 
 
 def ramfs(work, args, instance, home_id, layout=Layout(), signing=None, network_profile=None, *, core_limits=None,
-          trial=None, wired_driver=None):
-    base = prepare_boot_inputs(work, args, wired_driver=wired_driver)
+          trial=None, wired_driver=None, ssh_enabled=False):
+    base = prepare_boot_inputs(work, args, wired_driver=wired_driver, ssh_enabled=ssh_enabled)
     assemble_ramfs(work, args, base, instance, home_id, layout, signing, network_profile,
-                   core_limits=core_limits, trial=trial, wired_driver=wired_driver)
+                   core_limits=core_limits, trial=trial, wired_driver=wired_driver, ssh_enabled=ssh_enabled)
 
 
 def seeded_ext4(work, name, label, identity, size_mib, seed, owners):
@@ -491,7 +591,7 @@ def parse_receipt(raw):
     if isinstance(prior, dict) and (prior.get("format") == TRIAL_RECEIPT_FORMAT or "boot_mode" in prior):
         raise ValueError("isolated trial disks cannot be upgrade sources; use the original stopped deployment")
     if (not isinstance(prior, dict) or type(prior.get("format")) is not int
-            or prior["format"] not in (1, 2, 3, 4, 5, 6, E1000E_RECEIPT_FORMAT)):
+            or prior["format"] not in (*range(1, 7), E1000E_RECEIPT_FORMAT, SSH_RECEIPT_FORMAT)):
         raise ValueError("unsupported previous build receipt format")
     for name, pattern in (("source_commit", r"[0-9a-f]{40}"), ("efi_application_sha256", r"[0-9a-f]{64}")):
         if not isinstance(prior.get(name), str) or not re.fullmatch(pattern, prior[name]):
@@ -514,18 +614,30 @@ def parse_receipt(raw):
     if prior["format"] in profiles:
         if prior.get("network_profile") not in profiles[prior["format"]]:
             raise ValueError("invalid network profile in previous build receipt")
-    elif "network_profile" in prior and (prior["format"] != 6 or prior["network_profile"] not in tuple(STATIC_MODES)):
-        raise ValueError("invalid network profile in previous build receipt")
-    if prior["format"] == E1000E_RECEIPT_FORMAT:
+    elif "network_profile" in prior:
+        ssh_profiles = E1000E_STATIC_MODES if "wired_driver" in prior else VIRTIO_STATIC_MODES
+        supported = {6: VIRTIO_STATIC_MODES, E1000E_RECEIPT_FORMAT: E1000E_STATIC_MODES,
+                     SSH_RECEIPT_FORMAT: ssh_profiles}
+        profile = prior["network_profile"]
+        if not isinstance(profile, str) or profile not in supported.get(prior["format"], {}):
+            raise ValueError("invalid network profile in previous build receipt")
+    if prior["format"] == E1000E_RECEIPT_FORMAT or (
+            prior["format"] == SSH_RECEIPT_FORMAT and "wired_driver" in prior):
         if prior.get("wired_driver") != "e1000e":
-            raise ValueError("invalid wired driver in previous e1000e build receipt")
+            raise ValueError("invalid wired driver in previous native build receipt")
     elif "wired_driver" in prior:
-        raise ValueError("wired driver evidence requires the e1000e build receipt format")
+        raise ValueError("wired driver evidence requires build receipt format 8 or 9")
+    if prior["format"] == SSH_RECEIPT_FORMAT:
+        if prior.get("ssh_console") != SSH_PROFILE:
+            raise ValueError("invalid SSH console in previous build receipt")
+    elif "ssh_console" in prior:
+        raise ValueError("SSH console evidence requires build receipt format 9")
     limits = None
-    if prior["format"] == 6 or (prior["format"] == E1000E_RECEIPT_FORMAT and "core_limits" in prior):
+    if prior["format"] == 6 or (
+            prior["format"] in (E1000E_RECEIPT_FORMAT, SSH_RECEIPT_FORMAT) and "core_limits" in prior):
         limits = CoreLimits.from_receipt(prior.get("core_limits"))
     elif "core_limits" in prior:
-        raise ValueError("Core resource limits require build receipt format 6 or 8")
+        raise ValueError("Core resource limits require build receipt format 6, 8 or 9")
     if prior["format"] == 3 or (prior["format"] >= 4 and "secure_boot" in prior):
         trust = prior.get("secure_boot")
         if (not isinstance(trust, dict) or set(trust) != {"scheme", "certificate_sha256", "efi_stub_sha256"}
@@ -659,18 +771,9 @@ def source_snapshot(work, disk, source_fd, prior, layout, signing):
         raise ValueError("state partition deployment marker does not match the prior receipt")
     core_config = read_root_file(work, state, "/etc/psios/core.json", 64 * 1024, "0(?:444|644)")
     cfg = json.loads(core_config)
-    network = prior.get("network_profile")
-    if network == STATIC_IPV4:
-        validate_persisted_static(work, state, 4)
-    if network == STATIC_IPV6:
-        validate_persisted_static(work, state, 6)
-    if network == STATIC_DUAL:
-        mac4, dns4 = validate_persisted_static(work, state, 4)
-        mac6, dns6 = validate_persisted_static(work, state, 6)
-        if mac4 != mac6 or dns4 + dns6 > 3:
-            raise ValueError("inconsistent persisted dual-stack profile")
-    if "wired_driver" in prior:
-        validate_persisted_e1000e(work, state)
+    validate_persisted_network(work, state, prior)
+    if "ssh_console" in prior:
+        validate_persisted_ssh(work, state)
     if "core_limits" in prior:
         inittab = read_root_file(work, state, "/etc/inittab", 16 * 1024, "0(?:600|644)").split(b"\n")
         if inittab.count(LIMITED_SERVICE.encode()) != 1:
@@ -720,6 +823,17 @@ def prepare_trial_disk(work, disk, layout, configuration, *, secure_boot_require
     return trial
 
 
+def production_receipt_format(properties):
+    if "ssh_console" in properties:
+        return SSH_RECEIPT_FORMAT
+    if "wired_driver" in properties:
+        return E1000E_RECEIPT_FORMAT
+    if "core_limits" in properties:
+        return 6
+    static_formats = {STATIC_IPV4: 4, STATIC_IPV6: 5, STATIC_DUAL: 5}
+    return static_formats.get(properties.get("network_profile"), 3 if "secure_boot" in properties else 2)
+
+
 def finish_disk(work, disk, output, *, signing, upgrade):
     manifest_path = work / "psios-deployment.json"
     manifest = json.loads(manifest_path.read_bytes())
@@ -733,14 +847,8 @@ def finish_disk(work, disk, output, *, signing, upgrade):
     write_partition(disk, ESP, esp, replace=upgrade is not None)
     with disk.open("rb") as completed:
         os.fsync(completed.fileno())
-    receipt_format = {STATIC_IPV4: 4, STATIC_IPV6: 5, STATIC_DUAL: 5}
-    format_version = receipt_format.get(manifest.get("network_profile"), 3 if signing else 2)
-    if "core_limits" in manifest:
-        format_version = 6
-    if "wired_driver" in manifest:
-        format_version = E1000E_RECEIPT_FORMAT
     receipt = {
-        "format": format_version,
+        "format": production_receipt_format(manifest),
         "image": str(output), "source_commit": manifest["core_source_commit"],
         "geometry_mib": manifest["geometry_mib"], "state_uuid": manifest["required_filesystems"]["state"],
         "home_uuid": manifest["required_filesystems"]["home"],
@@ -748,7 +856,7 @@ def finish_disk(work, disk, output, *, signing, upgrade):
         "efi_application_sha256": sha256(efi), "installed_initramfs_sha256": sha256(work / "initrd"),
         "initial_image_sha256": sha256(disk),
     }
-    for name in ("secure_boot", "network_profile", "wired_driver", "core_limits"):
+    for name in ("secure_boot", "network_profile", "wired_driver", "core_limits", "ssh_console"):
         if name in manifest:
             receipt[name] = manifest[name]
     if "boot_mode" in manifest:
@@ -795,19 +903,23 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
                                secure_boot_required=signing is not None)
 
     wired_driver = prior.get("wired_driver")
-    base = prepare_boot_inputs(candidate_work, args, wired_driver=wired_driver)
+    ssh_enabled = "ssh_console" in prior
+    base = prepare_boot_inputs(candidate_work, args, wired_driver=wired_driver, ssh_enabled=ssh_enabled)
     (trial_work / "bin").mkdir()
     # Share the pinned input kernel and binaries, but each initrd is extended independently.
-    boot_inputs = ["kernel", "initrd", *core_programs(candidate_work), "psios-source"]
+    boot_inputs = ("kernel", "initrd", *core_programs(candidate_work), "psios-source")
     if wired_driver:
-        boot_inputs.append(E1000E_MODULE)
+        boot_inputs += (E1000E_MODULE,)
+    if ssh_enabled:
+        boot_inputs += SSH_PROGRAMS
     for name in boot_inputs:
+        (trial_work / name).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(candidate_work / name, trial_work / name)
     instance, home_id = prior["state_uuid"], prior["home_uuid"]
     network_profile = prior.get("network_profile")
     for directory, mode in ((candidate_work, None), (trial_work, trial)):
         assemble_ramfs(directory, args, base, instance, home_id, layout, signing, network_profile,
-                       core_limits=core_limits, trial=mode, wired_driver=wired_driver,
+                       core_limits=core_limits, trial=mode, wired_driver=wired_driver, ssh_enabled=ssh_enabled,
                        require_secure_boot=signing is not None and mode is None)
     candidate_manifest = json.loads((candidate_work / "psios-deployment.json").read_bytes())
     trial_manifest = json.loads((trial_work / "psios-deployment.json").read_bytes())
@@ -844,6 +956,7 @@ def build(args):
         trial = None
         network_profile = args.network_profile
         wired_driver = args.wired_driver
+        ssh_enabled = args.ssh_authorized_key is not None
         core_limits = args.core_limits
         signing = None
         if args.secure_boot_key:
@@ -853,6 +966,7 @@ def build(args):
             prior, layout, core_limits = read_receipt(args.previous_receipt)
             network_profile = prior.get("network_profile")
             wired_driver = prior.get("wired_driver")
+            ssh_enabled = "ssh_console" in prior
             if prior.get("secure_boot") and (signing is None or
                     signing.certificate_sha256 != prior["secure_boot"]["certificate_sha256"]):
                 raise ValueError("a Secure Boot upgrade requires the existing signing certificate")
@@ -868,7 +982,7 @@ def build(args):
             new_disk(work, disk, args, instance, home_id, layout)
         disk.chmod(0o600)
         ramfs(work, args, instance, home_id, layout, signing, network_profile, core_limits=core_limits,
-              trial=trial, wired_driver=wired_driver)
+              trial=trial, wired_driver=wired_driver, ssh_enabled=ssh_enabled)
         upgrade = None
         if prior:
             upgrade = {
@@ -903,12 +1017,15 @@ def main():
     parser.add_argument("--max-copy-mib", type=copy_budget_mib,
                         help="authority database and journals to copy during upgrade (default 64 MiB)")
     parser.add_argument("--root-console-hash", type=Path, help="optional private hash for local system administration; default locks root")
+    parser.add_argument("--ssh-authorized-key", type=Path, help="authorize an Ed25519 public key for the psios SSH console")
     boot_media.add_signing_arguments(parser)
     network = parser.add_mutually_exclusive_group()
     network.add_argument("--dhcp-mac", type=unicast_mac, help="enable IPv4 DHCP on the matching NIC of a new disk")
-    network.add_argument("--static-mac", type=unicast_mac, help="enable static networking on the matching virtio NIC of a new disk")
-    parser.add_argument("--dhcp-driver", dest="wired_driver", choices=("virtio", "e1000e"),
+    network.add_argument("--static-mac", type=unicast_mac, help="enable static networking on the matching NIC of a new disk")
+    parser.add_argument("--dhcp-driver", choices=("virtio", "e1000e"),
                         help="kernel driver for the DHCP NIC (default virtio)")
+    parser.add_argument("--static-driver", choices=("virtio", "e1000e"),
+                        help="kernel driver for the static NIC (default virtio)")
     parser.add_argument("--static-address", type=ipaddress.IPv4Interface, help="static IPv4 address and prefix")
     parser.add_argument("--static-gateway", type=ipaddress.IPv4Address, help="optional IPv4 gateway on the static subnet")
     parser.add_argument("--static-dns", type=ipaddress.IPv4Address, action="append", default=[], help="optional IPv4 DNS server, repeat up to three times")
@@ -929,10 +1046,11 @@ def main():
             parser.error("upgrade preserves /etc/hostname from the source")
         if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", args.hostname):
             parser.error("hostname must be a single DNS label of 1 to 63 ASCII letters, digits or hyphens")
-    if args.wired_driver and not args.dhcp_mac:
+    if args.dhcp_driver and not args.dhcp_mac:
         parser.error("--dhcp-driver requires --dhcp-mac on a new disk")
-    if args.wired_driver == "virtio":
-        args.wired_driver = None
+    if args.static_driver and not args.static_mac:
+        parser.error("--static-driver requires --static-mac on a new disk")
+    args.wired_driver = "e1000e" if "e1000e" in (args.dhcp_driver, args.static_driver) else None
     boot_media.signing_requested(args, parser)
     args.static_network, args.static_ipv6_network = static_config(args, parser)
     args.network_profile = None
@@ -940,6 +1058,13 @@ def main():
         args.network_profile = STATIC_DUAL if args.static_ipv6_network else STATIC_IPV4
     elif args.static_ipv6_network:
         args.network_profile = STATIC_IPV6
+    if args.network_profile and args.wired_driver:
+        args.network_profile = args.network_profile.replace("virtio-", "e1000e-", 1)
+    if args.ssh_authorized_key:
+        if args.upgrade_from or not (args.dhcp_mac or args.network_profile):
+            parser.error("--ssh-authorized-key requires an explicit network profile on a new disk")
+        with boot_media.regular_file(args.ssh_authorized_key) as key:
+            args.ssh_authorized_key = ssh_public_key(key.read(513))
     if args.upgrade_from and (not args.previous_receipt or args.root_console_hash or args.dhcp_mac or args.network_profile):
         parser.error("upgrade requires --previous-receipt and preserves console credentials and network configuration")
     if args.upgrade_from and (args.state_mib is not None or args.home_mib is not None):

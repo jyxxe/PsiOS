@@ -83,7 +83,7 @@ jobs:
       - name: Download and configure rescue VM prerequisites
         run: |
           packages=(qemu-system-x86 qemu-utils genisoimage cpio e2fsprogs fdisk acl dnsmasq-base gcc libc6-dev squashfs-tools
-                    xorriso grub-common grub-efi-amd64-bin dosfstools mtools ovmf seabios openssl strace)
+                    xorriso grub-common grub-efi-amd64-bin dosfstools mtools ovmf seabios openssl openssh-client strace)
           missing=()
           for pkg in "${packages[@]}"; do
             if [[ $(dpkg-query -W -f='${db:Status-Status}' "$pkg" 2>/dev/null) != installed ]]; then missing+=("$pkg"); fi
@@ -110,6 +110,8 @@ jobs:
           curl --fail --location --retry 3 "$(jq -r .url "$RUNNER_TEMP/rescue-core/rescue/base.json")" -o "$RUNNER_TEMP/rescue.iso"
           python3 tests/rescue_disk.py --bin-dir "$RUNNER_TEMP/rescue-core" --iso "$RUNNER_TEMP/rescue.iso" \
             --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py" --firmware-media
+          python3 -B tests/rescue_storage.py --bin-dir "$RUNNER_TEMP/rescue-core" --iso "$RUNNER_TEMP/rescue.iso" \
+            --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py"
 
       - name: Boot an installed PsiOS UEFI disk, power-cut the node and verify its recovery
         run: |
@@ -161,9 +163,24 @@ jobs:
             python3 tests/native_dhcp_routes.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
             --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
 
+      - name: Configure an e1000e static dual-stack link and preserve it through an offline upgrade
+        run: |
+          sudo unshare --net --propagation private runuser -u "$(id -un)" -- \
+            python3 -B tests/native_static_e1000e.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+
       - name: Bind one native system disk and refuse duplicate or split filesystems
         run: |
           python3 tests/native_storage.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+
+      - name: Authenticate the native SSH console and preserve its host key across recovery and upgrade
+        run: |
+          python3 -B tests/native_boot_reproducibility.py --ssh-e1000e \
+            --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+          python3 -B tests/native_ssh_console.py --staged --dhcp-driver e1000e --disk-bus ahci \
+            --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
             --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
 
       - name: Recover native authority enrollment across power cuts

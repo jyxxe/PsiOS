@@ -1,6 +1,6 @@
 # 实现与验证进度
 
-截至 2026-11-27，PsiOS 单节点 Core 提供独立的 Linux amd64 静态二进制，以及供 Ubuntu 24.04 宿主使用的可选 .deb 包。Alpine 用户空间用于验证 Core 独立运行。Ubuntu Minimal QEMU 开发环境用于验证 systemd 和虚拟机引导。独立的 UEFI 开发盘可直接从 GPT 启动，断网使用本机账户与 CLI，将节点状态保存在 ext4，并用第三分区持久保存用户主目录。可用构建回执核对运行清单与 EFI 制品，启动时先检查 Core 及引导脚本摘要。CLI 和本机 Agent 都通过同一权威执行任务。PsiOS 原生镜像基底仍由 ADR-01 跟踪，Helium、Neon、Argon 的 EditionReady 验收尚待完成。[独立运行](core-local.md#portable-amd64-core) · [基底决策](v1/adr/ADR-001.md) · [启动验收](../tests/qemu_boot.py) · [独立开发盘](native-disk.md)
+截至 2026-11-28，PsiOS 单节点 Core 提供独立的 Linux amd64 静态二进制，以及供 Ubuntu 24.04 宿主使用的可选 .deb 包。Alpine 用户空间用于验证 Core 独立运行。Ubuntu Minimal QEMU 开发环境用于验证 systemd 和虚拟机引导。独立的 UEFI 开发盘可直接从 GPT 启动，断网使用本机账户与 CLI，将节点状态保存在 ext4，并用第三分区持久保存用户主目录。可用构建回执核对运行清单与 EFI 制品，启动时先检查 Core 及引导脚本摘要。CLI 和本机 Agent 都通过同一权威执行任务。PsiOS 原生镜像基底仍由 ADR-01 跟踪，Helium、Neon、Argon 的 EditionReady 验收尚待完成。[独立运行](core-local.md#portable-amd64-core) · [基底决策](v1/adr/ADR-001.md) · [启动验收](../tests/qemu_boot.py) · [独立开发盘](native-disk.md)
 
 | 领域 | 已实现并验证的范围 | 部分支持、待开发或待取得的证据 |
 | --- | --- | --- |
@@ -51,6 +51,8 @@ Shell 执行历史按当前任务修订分页读取，显示 Core 的 Run、Oper
 
 - 原生 Agent 可查询自己在获准项目内负责的工作项，并根据当前最低优先级选择执行。派发复核项目版本及授权。管理者仅能修改符合条件的就绪工作项，原优先级与审核决定保留在历史中。已验证撤权、并发修改、排队重启和真实格式 88→89 升级。[Agent 验收](../tests/test_agent_assigned_work.py) · [优先级验收](../tests/test_work_item_priority.py)
 - 配对 Shell 已支持分页查看应用目录与上架版本、Agent Chat 会话与历史、PsiFlow 项目和工作项。Chromium 验收覆盖跨页、窗口隐藏后的状态清除、撤销当前授权，以及 Chat 在显式启用发送后丢失回执的原消息去重。桌面与 WebUI 的 EditionReady 验收仍待完成。[本地 Shell](core-local.md) · [浏览器验收](../tests/test_shell.py)
+- 工作项详情可读取固定修订及对应 Task 制品。下载前复核当前权限与制品摘要。显式启用审核后，获准的独立主体可通过或退回所见修订。真实 Core 和 Chromium 已验证授权撤销，以及审核回执丢失后按原修订核实已落盘的决定。[工作项界面与审核](core-local.md#本机-psios-shell) · [进程验收](../tests/test_shell.py)
+- 原生盘已支持按 MAC 绑定 Intel e1000e。真实来宾验收覆盖 IPv4 DHCP 和静态 IPv4、IPv6、双栈，核对经网关的流量、错误 MAC 无地址、损坏配置拒绝升级，以及停机更新保留网络配置和原 Task。物理网卡仍需独立验收。[有线配置](native-disk.md) · [DHCP 验收](../tests/native_dhcp.py) · [双栈验收](../tests/native_static_e1000e.py)
 - 本机所有者可对同一个操作主动回退备用网口。已用独立 Linux 网络命名空间验证原地址及真实 TCP 流量在超时前恢复。回执入库故障和守护进程强杀后，D-Bus 只有一次回退调用，网口保留占用直至授权对账。管理链路远程确认与 DNS 变更仍待验收。[NetworkManager 验收](../tests/network_trial_abort.py)
 
 ## 本机维护准入
@@ -63,6 +65,8 @@ Shell 执行历史按当前任务修订分页读取，显示 Core 的 Run、Oper
 - 原生盘在生产引导启动服务前应用 `/etc/hostname`，制作新盘时可设置，停机升级保留。真实 OVMF 联合验收核对持久文件及内核主机名。旧官方盘升级后应用原配置，管理员修改后重启生效，含 NUL 的配置在登录前触发救援。[主机配置](native-disk.md) · [联合验收](../tests/native_combined_core.py)
 - 生产引导持久化标准 Linux `/etc/machine-id`。真实来宾验证了同源克隆区分、准备中断恢复、断电后保留和无效 ID 的救援拒绝。正式旧盘升级补建 ID，下一代升级沿用该值。[原生机器标识](native-disk.md) · [来宾验收](../tests/native_disk.py)
 - 便携归档中的安装器核验新盘构建回执和镜像，按强制身份与精确审批写入空白整盘。实际 Linux loop 块设备已验证分区先于 GPT 发布、中断对账和禁止重复写入。隔离 Linux 来宾已验证 Virtio 与 PCIe NVMe 的设备身份、拒绝不匹配的批准、全盘回读和两次 OVMF 启动后保留同一 Task。引导时也验证了混接情况下对重复部署和分属两盘的文件系统拒绝挂载。物理安装和跨宿主启动对账仍待验收。[原生安装说明](native-disk.md#安装到空白块设备) · [隔离来宾验收](../tests/native_install_virtio.py) · [混盘验收](../tests/native_storage.py)
+- 按构建回执匹配的原生盘已在 Virtio、NVMe、SATA AHCI 上完成 OVMF 引导，核对同一 Node、Task 和主目录。混接控制器时拒绝重复数据或状态、主目录分属两盘的部署。隔离试启动与正式启动使用明确的固件引导优先级。[原生存储验收](../tests/native_storage.py) · [隔离更新验收](../tests/native_staged_update.py)
+- 独立构建在目录、文件 mtime 和 umask 不同时生成相同的 initramfs 与未签名 EFI。验收固定部署标识、内核、Core 和配置，逐项比较清单及输出摘要。[重建验收](../tests/native_boot_reproducibility.py)
 - OVMF 停机更新从同一源盘快照生成试启动与正式候选，目标 Core 独立核验实际迁移后的状态和见证，通过后发布完整候选目录。真实格式 89→90 验收覆盖运行中源盘拒绝、候选与原盘各自启动、既有 Task 和用户数据，以及原盘和 EFI 变量摘要。签名更新要求原登记证书及试启动固件强制执行。已核验缺少签名、错证书、未启用 Secure Boot 的拒绝，以及候选 UKI 签名与实际引导。自动引导接管和证书轮换仍待开发。[停机更新说明](native-disk.md#试启动后发布停机更新候选) · [OVMF 验收](../tests/native_staged_update.py) · [签名验收](../tests/native_signed_staged_update.py)
 - 本机操作者可在私有持久目录批准 OVMF 候选盘的首次正式引导。已验证启动前持久记录、来宾本地认证、正常关机、磁盘回读和原数据。控制器强杀后的真实验收确认子进程退出，同一计划保持待核实且停止再次启动。签名候选已验证正式引导的 Secure Boot 证据及关闭时的挂载前拒绝。物理固件切换仍待开发。[首次引导说明](native-disk.md#核验受管候选盘的首次正式引导) · [强杀验收](../tests/native_activation.py) · [签名首次引导验收](../tests/native_signed_activation.py)
 - 私有选择记录可接管已验证的 OVMF 部署，保留原候选和前代。真实普通来宾验收完成格式 89→90→95 两代更新、旧代隔离、指针提交前强杀及精确计划恢复，并读回原 Task 和主目录。真实签名来宾核验已选盘 Secure Boot 与新启动标识。控制器持有 Linux 源映像锁时，另一 QEMU 进程无法获取该映像。启动结果不明时需人工核查。[受管选择](native-disk.md#选择并启动已验证的受管部署) · [两代验收](../tests/native_selection_successor.py)
@@ -81,6 +85,7 @@ Shell 执行历史按当前任务修订分页读取，显示 Core 的 Run、Oper
 
 ## Agent 会话与模型结算
 
+- 本机 Shell 的 Agent Runtime 使用当前主体权限分页读取会话状态、轮次、模型、Skill 和最近任务。详情将同一会话修订的调用次数、模型租约时长和提供者报告的 Token 汇总展示。真实 Core 与 Chromium 验收覆盖跨主体读取拒绝、分页、修订变化、授权撤销和窗口清空。[运行会话界面](core-local.md#本机-psios-shell) · [浏览器验收](../tests/test_shell.py)
 - `psios-mcp` 支持 2025-11-25 和 2026-07-28 两版 STDIO。工具使用当前 Agent 授权执行原生 Task，可读取系统状态、资源压力、明确绑定的卷及已登记的 systemd 服务。现代轮询式 Tasks 使用持久调用键恢复原 Task，并保留句柄有效期间的结果。验收覆盖两版官方 Python 客户端及官方 TypeScript Tasks 扩展、守护进程强杀后的重连、取消、撤权、格式升级和结果回收。MCP HTTP OAuth、任务推送和远端接管仍待开发。[运行说明](core-runtime.md#现代-mcp-tasks) · [任务验收](../tests/test_mcp_tasks.py) · [真实卷与服务](../tests/test_mcp_bound_read_tools.py)
 - 会话可按配置将最近的有界工具结果纳入模型上下文。Core 在原模型租约上固定会话修订、上下文摘要与实际制品引用。已验证升级保留旧租约、内容过期后的授权修复、截断和引用模式。[模型上下文](../tests/agent_context_upgrade.py) · [结果材料验收](../tests/test_agent_tool_context.py)
 - 本机推理请求只传入目标、固定 Skill 指令、获准工具和有序观察。独立会话的等价首轮产生相同请求，Core 的原引用和摘要继续用于授权及恢复。禁网环境连续两次使用固定 SmolLM2 权重完成直接和队列推理。Unix HTTP 故障验收覆盖输出达到上限、进程重启及原失败回执重放。[实际模型验收](../tests/local_inference.py) · [严格结算验收](../tests/test_model_provider_outcome.py)

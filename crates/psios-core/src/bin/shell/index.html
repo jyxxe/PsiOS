@@ -182,6 +182,34 @@
           </div>
         </div>
       </section>
+      <section id="window-agent-runtime" class="app-window" aria-labelledby="title-agent-runtime" hidden>
+        <header class="window-bar">
+          <h1 id="title-agent-runtime" tabindex="-1">Agent Runtime</h1>
+        </header>
+        <div class="window-body">
+          <p id="status-agent-runtime" class="message" role="status"></p>
+          <div class="columns">
+            <div class="table-panel">
+              <table>
+                <thead><tr><th scope="col">运行会话</th><th scope="col">状态</th></tr></thead>
+                <tbody id="agent-session-rows"></tbody>
+              </table>
+              <p id="agent-sessions-empty" class="empty" hidden>当前没有可见的运行会话。</p>
+              <div class="pagination" aria-label="Agent 运行会话分页">
+                <button id="agent-sessions-previous" type="button" disabled>上一页</button>
+                <button id="agent-sessions-next" type="button" disabled>下一页</button>
+              </div>
+            </div>
+            <section id="agent-session-detail" class="card" aria-labelledby="agent-session-title" tabindex="-1" hidden>
+              <header class="detail-header">
+                <h2 id="agent-session-title">运行会话详情</h2>
+                <button id="close-agent-session" type="button">返回列表</button>
+              </header>
+              <div id="agent-session-content" aria-live="polite"></div>
+            </section>
+          </div>
+        </div>
+      </section>
     </main>
     <nav class="dock" aria-label="应用 Dock">
       <button id="nav-node" type="button" aria-controls="window-node" aria-expanded="false">节点管理</button>
@@ -189,6 +217,7 @@
       <button id="nav-applications" type="button" aria-controls="window-applications" aria-expanded="false">应用管理</button>
       <button id="nav-chat" type="button" aria-controls="window-chat" aria-expanded="false">Agent Chat</button>
       <button id="nav-projects" type="button" aria-controls="window-projects" aria-expanded="false">PsiFlow 项目</button>
+      <button id="nav-agent-runtime" type="button" aria-controls="window-agent-runtime" aria-expanded="false">Agent Runtime</button>
     </nav>
   </div>
   <template id="window-tools">

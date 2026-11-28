@@ -949,6 +949,17 @@ jobs:
           tools/build-compatibility-core "$RUNNER_TEMP/psios-format147" "$RUNNER_TEMP/psios-compatibility-target"
           PSIOS_DIRECTORY_PREVIOUS_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
             python3 -B -m unittest discover -s tests -p test_mcp_tasks.py -k test_format_147_directory_handle -v
+      - name: Discover the resolver capability after upgrading and observe a real resolver file in private namespaces
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format148"
+          git archive 294e0b4dd84f8e0f5be0393fea88afc460745435 Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format148"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format148" "$RUNNER_TEMP/psios-compatibility-target"
+          sudo unshare --net --mount --propagation private sh -ec '
+            fixture=$(mktemp)
+            trap "rm -f \"$fixture\"" EXIT
+            mount --bind "$fixture" /etc/resolv.conf
+            python3 -B tests/network_resolver.py --fixture "$fixture" --previous-bin-dir "$1"
+          ' psios-resolver "$RUNNER_TEMP/psios-compatibility-target/debug"
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -1046,12 +1057,12 @@ jobs:
           mkdir "$RUNNER_TEMP/installer-tools"
           (cd "$RUNNER_TEMP/installer-tools" && timeout 180 "$GITHUB_WORKSPACE/tools/ci-ubuntu-apt" download fdisk mtools)
           tools/build-portable-core "$RUNNER_TEMP/native-core.tar.gz"
-      - name: Install onto virtio and PCIe NVMe devices and reboot each installed disk
+      - name: Install onto Virtio, PCIe NVMe and SATA AHCI devices and reboot each installed disk
         run: |
           archive="$RUNNER_TEMP/native-core.tar.gz"
           tool_args=()
           for tool in "$RUNNER_TEMP"/installer-tools/*.deb; do tool_args+=(--tool-deb "$tool"); done
-          for bus in virtio nvme; do
+          for bus in virtio nvme ahci; do
             python3 -B tests/native_install_virtio.py --base "$RUNNER_TEMP/base.img" \
               --package "$RUNNER_TEMP"/psios-package/psios-core_*.deb \
               --archive "$archive" --archive-sha256 "$(sha256sum "$archive" | cut -d ' ' -f1)" \

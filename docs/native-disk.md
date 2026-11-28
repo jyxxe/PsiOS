@@ -29,6 +29,8 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 
 串口账户 `psios` 和服务使用 UID 1000。登录后可运行 `psiosctl whoami`、`psiosctl node`，或用 `printf '{}' | psiosctl submit system.status --key first-status` 提交任务。需要传统系统管理时，可在生成新盘时传入 `--root-console-hash root.hash` 设置独立的本机 root 密码。默认锁定 root。启用后可用 root 在串口执行 `poweroff`。关机钩子先允许 Core 结算，随后关闭其余会话与进程，刷盘并卸载状态和主目录。运行时生成的所有者令牌位于服务账户的私有见证目录。[关机验收](../tests/native_disk.py)
 
+第一次生产启动生成标准的 `/etc/machine-id`，由系统分区中的 root 只读文件提供。每台从同一未启动盘部署的节点在各自启动时生成 ID。之后重启沿用原值，停机升级保留它。早期镜像首次运行新引导时会补建文件。已存在的 ID 必须是非全零的 32 个小写十六进制字符。启动遇到格式、类型或所有者不符时，记录 `machine-identity` 阶段并进入原有救援流程。
+
 生产模式在 `/dev/pts` 挂载独立的 Linux devpts 实例。普通账户可通过 `/dev/ptmx` 为本机终端程序分配伪终端，每个从设备仅向创建者开放读写（0600）。同一挂载最多同时分配 64 对。耗尽时已有终端仍可用，关闭一对后可继续分配。重新开机后分配从空实例开始。[真实终端验收](../tests/native_pty.c)
 
 生产模式为 POSIX 共享内存在 `/dev/shm` 单独挂载 tmpfs。程序可以用 `shm_open` 打开命名对象，通过 `mmap(MAP_SHARED)` 交换数据。`shm_unlink` 移除名称后，已取得的映射仍可用。此挂载上限为 16 MiB 和 1024 个 inode，与 `/tmp` 各自计量。根目录为 1777，启用 `nodev,nosuid,noexec`。需要私有数据的程序应创建 0600 对象。对象在重启后消失。[跨进程与容量验收](../tests/native_shm.c)

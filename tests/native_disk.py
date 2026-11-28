@@ -8,6 +8,7 @@ import hmac
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import select
@@ -334,6 +335,14 @@ def hold_terminal(console):
     assert console.run("stat -c '%u:%a' /dev/pts/0") == console.run("id -u") + ":600"
 
 
+def check_machine_identity(c):
+    identity = c.run("cat /etc/machine-id")
+    assert re.fullmatch(r"[0-9a-f]{32}", identity) and identity != "0" * 32
+    assert c.run("stat -c '%u:%g:%a:%h' /etc/machine-id") == "0:0:444:1"
+    c.run("test ! -e /etc/.psios-machine-id.pending")
+    return identity
+
+
 def check_temporary_storage(c):
     assert c.run("stat -c '%u:%g:%a' /tmp") == "0:0:1777"
     mount = c.run("awk '$5 == \"/tmp\" {for (i=7; i<NF; i++) "
@@ -551,6 +560,47 @@ def reject_damaged_payload(args, work, image, deployment, intact_efi):
     subprocess.run([*destination, intact_efi, "::/EFI/BOOT/BOOTX64.EFI"], check=True)
 
 
+def set_machine_id_fixture(work, image, destination, text, mode, *, replace=False):
+    partition = work / "machine-identity.ext4"
+    payload = work / "machine-id-test-input"
+    extract_partition(image, partition, 65, 192)
+    payload.write_text(text)
+    commands = [f"rm {destination}"] if replace else []
+    commands += [f"write {payload.name} {destination}", f"set_inode_field {destination} uid 0",
+                 f"set_inode_field {destination} gid 0", f"set_inode_field {destination} mode {mode}"]
+    subprocess.run(["debugfs", "-w", "-f", "-", partition], cwd=work,
+                   input="\n".join(commands) + "\n", text=True, check=True, stdout=subprocess.DEVNULL)
+    replace_partition(image, partition, 65)
+    partition.unlink()
+    payload.unlink()
+
+
+def check_machine_id_clone(work, image, operator, admin):
+    clone = work / "machine-identity-clone.raw"
+    subprocess.run(["qemu-img", "convert", "-q", "-f", "raw", "-O", "raw", image, clone], check=True, timeout=90)
+    assert sha(image) == sha(clone)
+    shutil.copyfile(work / "vars.fd", work / "machine-identity-vars.fd")
+    set_machine_id_fixture(work, clone, "/etc/.psios-machine-id.pending", "partial pending identity", "0100600")
+    with boot(work, clone, vars_file="machine-identity-vars.fd", pace_commands=True) as c:
+        c.login("psios", operator)
+        observed = check_machine_identity(c)
+        node = call(c, "Principal.WhoAmI", {})["authority_id"]
+        c.send("exit")
+        c.login("root", admin)
+        c.send("poweroff")
+        assert c.vm.wait(35) == 0
+    check_clean_shutdown(clone)
+
+    set_machine_id_fixture(work, clone, "/etc/machine-id", "0" * 32 + "\n", "0100444", replace=True)
+    with boot(work, clone, vars_file="machine-identity-vars.fd", pace_commands=True) as c:
+        c.until(b"PsiOS boot stopped at machine-identity", reject=b"psios login:")
+        assert c.vm.wait(25) == 0
+    check_clean_shutdown(clone)
+    clone.unlink()
+    print("PASS stale machine ID preparation recovered and an invalid stored ID refused boot", flush=True)
+    return observed, node
+
+
 def exercise(args, work):
     operator, op_hash = password(work, "operator.hash")
     admin, root_hash = password(work, "root.hash")
@@ -568,6 +618,7 @@ def exercise(args, work):
     assert image.stat().st_mode & 0o077 == 0
     for source, target in [("OVMF_CODE_4M.fd", "code.fd"), ("OVMF_VARS_4M.fd", "vars.fd")]:
         shutil.copyfile(args.ovmf_dir / source, work / target)
+    clone_id, clone_node = check_machine_id_clone(work, image, operator, admin)
     with boot(work, image) as c:
         c.credentials("psios", "wrong-" + secrets.token_hex(10))
         c.until(b"Login incorrect")
@@ -575,6 +626,9 @@ def exercise(args, work):
         c.run("touch /tmp/psios-root-scratch")
         c.send("exit")
         c.login("psios", operator)
+        machine_id = check_machine_identity(c)
+        assert machine_id != clone_id
+        assert call(c, "Principal.WhoAmI", {})["authority_id"] != clone_node
         manifest = json.loads(c.run("cat /psios-deployment.json"))
         assert manifest["core_archive_sha256"] == sha(args.archive)
         assert manifest["core_source_commit"] == deployment["source_commit"]
@@ -625,6 +679,7 @@ def exercise(args, work):
         # SIGKILL the VM with the OS and Core still running.
     with boot(work, image) as c:
         c.login("psios", operator)
+        assert check_machine_identity(c) == machine_id
         assert c.run("./observe") == "persisted"
         c.run("test ! -e /run/psios/psios-run-cut && touch /run/psios/psios-run-shutdown")
         c.run("test ! -e /dev/shm/psios-cut && touch /dev/shm/psios-shutdown")
@@ -674,6 +729,7 @@ def exercise(args, work):
         c.credentials("psios", operator)
         c.until(b"Login incorrect")
         c.login("psios", rotated)
+        assert check_machine_identity(c) == machine_id
         assert c.run("./observe") == "persisted"
         c.run("test ! -e /tmp/psios-scratch-marker && test ! -e /dev/shm/psios-shutdown")
         c.run("test ! -e /run/psios/psios-run-shutdown && test -S /run/psios/api.sock")
@@ -741,6 +797,7 @@ def exercise(args, work):
         c.until(b"PsiOS boot stopped at state-device")
         assert c.vm.wait(25) == 0
     assert sha(image) == pre_reject
+    print("PASS Linux machine identity differs for clones and survives power loss and orderly shutdown")
     print(f"Verified source {deployment['source_commit']}, node {first[0]}, task {first[1]['task_id']}, "
           "matched deployment receipt, authenticated UEFI console, private persistent homes, full-home isolation, "
           "bounded volatile /tmp, /dev/shm and /run, offline management, Task, schedule, workflow and chat recovery after power loss, "

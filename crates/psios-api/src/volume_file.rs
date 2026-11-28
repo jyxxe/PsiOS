@@ -34,6 +34,19 @@ impl Client {
         delegation: &str,
         max_bytes: usize,
     ) -> ApiResult<Vec<u8>> {
+        self.volume_file_bytes_checked(volume, version, path, delegation, max_bytes, || Ok(()))
+    }
+
+    /// Check the consumer before issuing chunk Tasks and retrieving their results.
+    pub fn volume_file_bytes_checked(
+        &self,
+        volume: &str,
+        version: &str,
+        path: &str,
+        delegation: &str,
+        max_bytes: usize,
+        active: impl Fn() -> ApiResult<()>,
+    ) -> ApiResult<Vec<u8>> {
         let query = VolumeFileChunkQuery {
             path: path.to_owned(),
             offset: 0,
@@ -49,6 +62,7 @@ impl Client {
         let transfer = id("volume-read");
         let deadline = Instant::now() + Duration::from_secs(45);
         let check = || -> ApiResult<()> {
+            active()?;
             if Instant::now() >= deadline {
                 Err(ApiError::new("DeadlineExceeded", "volume file read timed out").into())
             } else {
@@ -63,13 +77,16 @@ impl Client {
         loop {
             check()?;
             let offset = bytes.len();
-            let receipt = self.submit(
-                "volume.read_chunk",
-                json!({"target":{"id":volume,"expected_resource_version":version},
-                    "path":path,"offset":offset,"limit":limit,"expected_file_revision":revision}),
-                &format!("{transfer}-{offset}"),
-                delegation,
+            let prepared = self.call(
+                "Task.Prepare",
+                json!({"tool":"volume.read_chunk","key":format!("{transfer}-{offset}"),
+                "delegation_id":delegation,"input":{
+                    "target":{"id":volume,"expected_resource_version":version},
+                    "path":path,"offset":offset,"limit":limit,"expected_file_revision":revision,
+                }}),
             )?;
+            check()?;
+            let receipt = self.submit_prepared_while(prepared, || check().is_ok())?;
             let task_id = receipt["task_id"].as_str().ok_or_else(invalid)?;
             let task = self.wait(task_id, deadline.saturating_duration_since(Instant::now()))?;
             if task["lifecycle"] != "Succeeded" {

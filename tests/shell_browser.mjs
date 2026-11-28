@@ -204,6 +204,21 @@ async function verifyFiles() {
   assert.ok(requests.every(url => new URL(url).origin === input.origin));
 }
 
+async function verifyFileDownload() {
+  await keyboardActivate("#nav-files");
+  await waitFor("volume directory", 'document.querySelector("#files-rows tr:first-child button")?.textContent === "documents"');
+  await keyboardActivate("#files-rows tr:first-child button");
+  const selector = '#files-rows button[aria-label="下载 binary.bin"]';
+  await waitFor("binary file download action", 'document.querySelector(' + JSON.stringify(selector) + ') !== null');
+  assert.equal((await verifyDownload(input.digest, selector)).length, 128 * 1024);
+  assert.ok(await evaluate('document.getElementById("files-preview").hidden'));
+  assert.ok(!requests.some(url => new URL(url).pathname === "/api/volume-preview"));
+  await keyboardActivate("#logout");
+  await waitFor("cleared file downloads", 'document.getElementById("workspace").hidden && document.getElementById("files-rows").children.length === 0');
+  assert.deepEqual(exceptions, []);
+  assert.ok(requests.every(url => new URL(url).origin === input.origin));
+}
+
 async function verifyFilePreview() {
   await send("Emulation.setDeviceMetricsOverride", {
     width: 360, height: 800, screenWidth: 360, screenHeight: 800, deviceScaleFactor: 1, mobile: true,
@@ -377,6 +392,7 @@ async function test() {
   await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
   await waitFor("paired desktop", '!document.querySelector("#workspace").hidden && !document.querySelector("#empty-desktop").hidden');
   if (input.fileBrowser) return verifyFiles();
+  if (input.fileDownload) return verifyFileDownload();
   if (input.filePreview) return verifyFilePreview();
   if (input.nodeResolver) return verifyNodeResolver();
   if (input.windowTiling) return verifyWindowTiling();

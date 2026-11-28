@@ -7,7 +7,7 @@ const byId = (id) => document.getElementById(id);
 const chat = chatView(request, byId, element, message);
 const projects = projectView(request, byId, element, message, fields, downloadEvidence);
 const agentRuntime = sessionsView(request, byId, element, message, fields);
-const files = filesView(request, byId, element, message);
+const files = filesView(request, byId, element, message, downloadVolumeFile);
 const pairing = byId("pairing");
 const workspace = byId("workspace");
 const desktop = byId("desktop");
@@ -107,14 +107,14 @@ async function observeSession(token) {
   if (bearer === token) leave("本机会话已结束。请在终端重新启动 Shell。");
 }
 
-async function post(path, body, token = bearer) {
+async function post(path, body, token = bearer, signal) {
   const headers = { "Content-Type": "application/json" };
   if (token) headers.Authorization = "Bearer " + token;
   let response;
   try {
     response = await fetch(path, {
       method: "POST",
-      signal: sessionRequests.signal,
+      signal: signal ? AbortSignal.any([sessionRequests.signal, signal]) : sessionRequests.signal,
       headers,
       body: JSON.stringify(body),
       cache: "no-store",
@@ -235,12 +235,12 @@ const lifecycles = {
   Succeeded: "成功", Failed: "失败", Cancelling: "正在取消", Cancelled: "已取消", Paused: "已暂停",
 };
 
-async function saveVerifiedArtifact(response, reference, host) {
+async function saveVerifiedArtifact(response, reference, host, signal) {
   const bytes = await response.arrayBuffer();
   const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
   const hex = Array.from(hash, (byte) => byte.toString(16).padStart(2, "0")).join("");
-  if ("sha256:" + hex !== reference.digest) throw new Error("下载内容与所选制品的 SHA-256 不符。");
-  if (!host.isConnected) return false;
+  if ("sha256:" + hex !== reference.digest) throw new Error("下载内容的 SHA-256 核对失败。");
+  if (!host.isConnected || signal?.aborted) return false;
   const url = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
   const link = element("a");
   link.href = url;
@@ -257,6 +257,11 @@ async function saveVerifiedArtifact(response, reference, host) {
 
 async function downloadEvidence(reference, artifact, host) {
   return saveVerifiedArtifact(await post("/api/work-item-evidence", { reference }), artifact, host);
+}
+
+async function downloadVolumeFile(path, volumeVersion, host, signal) {
+  const response = await post("/api/volume-download", { path, volume_version: volumeVersion }, bearer, signal);
+  return saveVerifiedArtifact(response, { digest: response.headers.get("x-psios-digest") }, host, signal);
 }
 
 function artifactView(taskId, references) {
@@ -907,7 +912,7 @@ byId("pair-form").addEventListener("submit", async (event) => {
     bearer = session.token;
     void observeSession(bearer);
     canCancelPending = session.cancel_pending_tasks === true;
-    files.capability(session.browse_files === true, session.preview_files === true);
+    files.capability(session.browse_files === true, session.preview_files === true, session.download_files === true);
     resolver.hidden = session.observe_resolver !== true;
     chat.capability(session.send_chat === true);
     projects.setReviewer(session.review_work_items === true ? session.principal_id : null);

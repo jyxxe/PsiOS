@@ -1,4 +1,4 @@
-export function filesView(request, byId, element, message) {
+export function filesView(request, byId, element, message, downloadFile) {
   const rows = byId("files-rows");
   const location = byId("files-path");
   const status = byId("status-files");
@@ -18,6 +18,8 @@ export function filesView(request, byId, element, message) {
   let pending = null;
   let revision = 0;
   let previewAllowed = false;
+  let downloadAllowed = false;
+  let download = null;
   let previewRevision = 0;
   let selectedFile = null;
 
@@ -62,7 +64,27 @@ export function filesView(request, byId, element, message) {
     }
   }
 
+  async function saveFile(relative, volumeVersion, button, host) {
+    download?.abort();
+    const request = new AbortController();
+    download = request;
+    button.disabled = true;
+    message(status, "正在读取并核对文件…");
+    try {
+      if (await downloadFile(relative, volumeVersion, host, request.signal)) {
+        message(status, "文件已核对并交给浏览器下载。");
+      }
+    } catch (error) {
+      if (download === request) message(status, error.message, true);
+    } finally {
+      if (download === request) download = null;
+      button.disabled = false;
+    }
+  }
+
   function clear() {
+    download?.abort();
+    download = null;
     clearPreview();
     rows.replaceChildren();
     location.textContent = "";
@@ -106,6 +128,14 @@ export function filesView(request, byId, element, message) {
         } else {
           name.textContent = entry.name;
         }
+        if (entry.kind === "file" && downloadAllowed) {
+          const save = element("button", "下载", "file-download");
+          save.type = "button";
+          save.setAttribute("aria-label", "下载 " + entry.name);
+          const relative = [path, entry.name].filter(Boolean).join("/");
+          save.addEventListener("click", () => saveFile(relative, page.volume_version, save, name));
+          name.append(save);
+        }
         row.append(name, element("td", kinds[entry.kind] ?? "未知"),
           element("td", entry.kind === "file" ? entry.bytes + " B" : "—", "mono"));
         content.append(row);
@@ -143,9 +173,10 @@ export function filesView(request, byId, element, message) {
   });
 
   return {
-    capability(enabled, previewEnabled = false) {
+    capability(enabled, previewEnabled = false, downloadEnabled = false) {
       byId("nav-files").hidden = !enabled;
       previewAllowed = enabled && previewEnabled;
+      downloadAllowed = enabled && downloadEnabled;
     },
     show() { start(path, [null], false); },
     refresh() { start(pending?.path ?? path); },

@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 import boot_media
 from boot_media import pinned_copy, regular_file
 
@@ -38,6 +39,16 @@ def guest_path(value):
             or value != str(path) or ".." in path.parts or "\0" in value):
         raise argparse.ArgumentTypeError("expected a normalized absolute path inside the mounted filesystem")
     return value
+
+
+def filesystem_uuid(value):
+    try:
+        identity = uuid.UUID(value)
+        if identity.int == 0 or str(identity) != value.lower():
+            raise ValueError()
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("expected a nonzero ext4 UUID in standard form") from error
+    return identity
 
 
 def configuration(args):
@@ -67,12 +78,14 @@ def prepare(work, args, require_secure_boot):
     shutil.copyfile(HERE / "init", work / "psios-rescue")
     for name in ["psiosd", "psios-rescue"]:
         (work / name).chmod(0o755)
-    # Keep input paths in JSON. The init script sources only these numeric settings.
+    # Keep input paths in JSON. The shell settings contain only validated numbers and hexadecimal.
     settings = (f"PARTITION={args.partition}\nSERVICE_UID={args.uid}\n"
                 f"SERVICE_GID={args.gid if args.gid is not None else args.uid}\nCOPY_MIB={args.max_copy_mib}\n"
                 f"SCRATCH_MIB={scratch}\nOVERLAY={int(args.journal_overlay_mib is not None)}\n"
                 f"SECURE_BOOT={int(require_secure_boot)}\n"
-                f"REHEARSE={int(args.migration_config is not None)}\n")
+                f"REHEARSE={int(args.migration_config is not None)}\n"
+                f"FILESYSTEM_UUID={args.filesystem_uuid.hex if args.filesystem_uuid else ''}\n"
+                f"MANAGED_NVME={int(args.disk_transport == 'nvme')}\n")
     (work / "rescue-settings").write_text(settings)
     (work / "rescue-settings").chmod(0o600)
     (work / "rescue.json").write_text(json.dumps(configuration(args), allow_nan=False))
@@ -170,7 +183,11 @@ def inspect(args):
             command += ["-blockdev", json.dumps({"driver": "file", "node-name": "changes", "filename": scratch}),
                         "-blockdev", "driver=qcow2,node-name=view,file=changes,backing=source"]
             drive = "view"
-        command += ["-device", f"virtio-blk-pci,drive={drive},werror=report,rerror=report"]
+        if args.disk_transport == "nvme":
+            command += ["-device", "nvme,id=controller,serial=PSIOS-RESCUE",
+                        "-device", f"nvme-ns,drive={drive},bus=controller,nsid=1"]
+        else:
+            command += ["-device", f"virtio-blk-pci,drive={drive},werror=report,rerror=report"]
         result = capture_report(command, cwd=work, pass_fds=(fd,), preexec_fn=limit_child)
         if limit_child is not None and result.returncode == -signal.SIGXFSZ:
             raise ValueError("journal overlay file size limit reached")
@@ -212,6 +229,10 @@ def main():
     parser.add_argument("--uid", type=int, required=True, help="numeric UID of the original service account")
     parser.add_argument("--gid", type=int, help="original service GID, defaults to UID")
     parser.add_argument("--partition", type=int, default=0, help="partition number, or 0 for a raw filesystem")
+    parser.add_argument("--filesystem-uuid", type=filesystem_uuid, metavar="UUID",
+                        help="require a unique ext4 UUID at the given partition number")
+    parser.add_argument("--disk-transport", choices=("virtio", "nvme"), default="virtio",
+                        help="QEMU attachment for the image (default virtio)")
     parser.add_argument("--state", type=guest_path, default="/var/lib/psios")
     parser.add_argument("--witness", type=guest_path, help="defaults to STATE.witness")
     parser.add_argument("--max-copy-mib", type=int, default=64, help="database and journal copy limit (1–256 MiB)")
@@ -240,6 +261,9 @@ def main():
         parser.error("journal overlay limit must be 16–512 MiB")
     if args.firmware != "direct" and args.journal_overlay_mib is not None:
         parser.error("firmware media require a read-only block device")
+    if args.disk_transport == "nvme" and (args.firmware != "direct" or args.journal_overlay_mib is not None
+                                         or args.filesystem_uuid is None):
+        parser.error("NVMe requires direct read-only inspection and --filesystem-uuid")
     if args.migration_config is not None and (args.firmware != "direct" or args.journal_overlay_mib is not None):
         parser.error("migration rehearsal requires direct boot and a clean read-only disk")
     if args.save_rescue_iso is not None:

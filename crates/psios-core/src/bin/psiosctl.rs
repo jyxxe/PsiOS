@@ -256,6 +256,20 @@ enum Cmd {
         #[arg(long, default_value_t = 8 * 1024 * 1024)]
         max_bytes: usize,
     },
+    /// Write a verified file from an exact Volume revision to stdout.
+    VolumeRead {
+        /// Relative path within the authorized Volume.
+        path: String,
+        #[arg(long)]
+        volume: String,
+        #[arg(long)]
+        revision: String,
+        #[arg(long)]
+        delegation: String,
+        /// Maximum file size in bytes. Supports up to 393216 bytes.
+        #[arg(long, default_value_t = 96 * 1024)]
+        max_bytes: usize,
+    },
     /// Stage, verify and publish a local file as an opaque Artifact.
     ArtifactUpload {
         source: PathBuf,
@@ -1292,6 +1306,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::Artifact { file, max_bytes } => {
             let reference = serde_json::from_value(input(&file)?)?;
             std::io::stdout().write_all(&c.artifact_bytes(&reference, max_bytes)?)?;
+            return Ok(());
+        }
+        Cmd::VolumeRead {
+            path,
+            volume,
+            revision,
+            delegation,
+            max_bytes,
+        } => {
+            let bytes = c.volume_file_bytes(&volume, &revision, &path, &delegation, max_bytes)?;
+            std::io::stdout().write_all(&bytes)?;
             return Ok(());
         }
         Cmd::ArtifactUpload {

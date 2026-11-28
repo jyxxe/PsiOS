@@ -47,6 +47,15 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 
 每次开机在 `/tmp` 创建独立的 tmpfs，最多使用 32 MiB 数据空间和 4096 个 inode。普通账户可以创建临时文件，目录的 sticky bit 保护其他账户的条目，挂载启用 `nodev` 与 `nosuid`。达到任一上限时，内核拒绝继续分配。重启后临时文件消失。可将需要保留的用户文件放在持久主目录。
 
+## 测量开发盘资源开销
+
+从仓库根目录运行 `tests/native_footprint.py`，用已核验的归档在离线 OVMF 来宾安装并复用同一份磁盘。每次通过串口登录，核对运行清单并提交真实的 `system.status` 任务。输出 JSON 保存首次启动和若干次正常重启的样本，包括认证可用时间、Core 的 RSS 和高水位、来宾可用内存、镜像的逻辑大小和宿主实际分配量。计时包含虚拟机启动和自动化串口往返。比较候选时使用同一台测量主机、CPU 加速模式、固件和存储，保留原始样本。发行预算和硬件验收由 ADR-01 单独登记。[测量程序](../tests/native_footprint.py) · [基底实验要求](v1/adr/ADR-001.md#5-选择证据与实验)
+
+```sh
+python3 -B tests/native_footprint.py --archive "$PORTABLE_CORE" \
+  --archive-sha256 "$VERIFIED_CORE_SHA256" --kernel-iso "$KERNEL_ISO" > native-footprint.json
+```
+
 ## Core 资源限额
 
 生成新盘时，可同时传入以下三个参数，让内核强制限制守护进程及其子进程。

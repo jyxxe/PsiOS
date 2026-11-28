@@ -687,6 +687,7 @@ def exercise(args, work):
         c.until(b"Login incorrect")
         c.login("root", admin)
         c.run("awk '$5 == \"/\" && / - tmpfs psios-system / { found = 1 } END { exit !found }' /proc/self/mountinfo")
+        assert c.run("df -k / | tail -n 1").split()[1] == "262144"
         pivot = ("mount --make-rprivate /; mkdir /tmp/psios-pivot; "
                  "mount -t tmpfs -o size=1m pivot-proof /tmp/psios-pivot; "
                  "cd /tmp/psios-pivot; mkdir previous; pivot_root . previous; cd /; "

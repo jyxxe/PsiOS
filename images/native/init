@@ -238,7 +238,9 @@ if [ "${1-}" != --mounted-root ]; then
     stage=mounted-system-root
     system_root=/psios-system-root
     mkdir -m 0755 "$system_root"
-    mount -t tmpfs -o nodev,nosuid,size=128m,nr_inodes=16384,mode=0755 psios-system "$system_root"
+    # The factory accepts 128 MiB of Core archive members. Allow room for the
+    # pinned kernel's boot tree and the additional verified runtime payloads.
+    mount -t tmpfs -o nodev,nosuid,size=256m,nr_inodes=16384,mode=0755 psios-system "$system_root"
     for entry in /* /.[!.]* /..?*; do
         case "$entry" in
             "$system_root") continue ;;

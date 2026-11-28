@@ -385,6 +385,26 @@ def check_temporary_storage(c):
     c.run("rm -rf /tmp/psios-inodes && printf 'volatile\\n' > /tmp/psios-scratch-marker")
 
 
+def check_native_status(c, deployment, manifest):
+    status = json.loads(c.run("psiosctl native-status"))
+    assert status["boot_id"] == c.run("cat /proc/sys/kernel/random/boot_id")
+    assert status["kernel_release"] == c.run("uname -r")
+    assert status["boottime_ms"] > 0 and status["firmware"] == "UEFI", status
+    assert status["secure_boot_required"] is False and status["core_socket"] == "Present", status
+    assert status["deployment_manifest_sha256"] == "sha256:" + deployment["deployment_manifest_sha256"]
+    assert status["core_source_commit"] == deployment["source_commit"]
+    assert status["expected_filesystems"] == manifest["required_filesystems"]
+    for key, target in (("state", "/var/lib"), ("home", "/mnt/psios-homes"), ("operator_home", "/home/psios")):
+        mount = status["storage"][key]
+        row, = [row.split() for row in c.run("cat /proc/self/mountinfo").splitlines() if row.split()[4] == target]
+        major, minor = map(int, row[2].split(":"))
+        assert mount["mount_id"] == int(row[0]) and mount["device"] == {"major": major, "minor": minor}, mount
+        assert mount["filesystem"] == "ext4" and mount["read_only"] is False, mount
+    assert status["storage"]["home"]["device"] == status["storage"]["operator_home"]["device"]
+    assert status["storage"]["state"]["device"] != status["storage"]["home"]["device"]
+    return status
+
+
 def check_runtime_directory(c):
     assert c.run("stat -c '%u:%g:%a' /run") == "0:0:755"
     assert c.run("stat -c '%u:%g:%a' /run/psios") == "1000:1000:700"
@@ -687,6 +707,9 @@ def exercise(args, work):
         c.until(b"Login incorrect")
         c.login("root", admin)
         c.run("touch /tmp/psios-root-scratch")
+        hidden = c.run("unshare -m sh -c 'set -e; mount --make-rprivate /; "
+                       "mount -o bind /tmp /var; set +e; psiosctl native-status 2>&1; test $? -eq 1'")
+        assert "Conflict: native storage mount is no longer visible" in hidden, hidden
         c.send("exit")
         c.login("psios", operator)
         machine_id = check_machine_identity(c)
@@ -698,6 +721,16 @@ def exercise(args, work):
         assert manifest["kernel_input"]["sha256"] == sha(args.kernel_iso)
         assert manifest["required_filesystems"] == {"state": deployment["state_uuid"], "home": deployment["home_uuid"]}
         assert c.run("sha256sum /psios-deployment.json").split()[0] == deployment["deployment_manifest_sha256"]
+        native = check_native_status(c, deployment, manifest)
+        offline = json.loads(c.run(
+            "set -eu; socket=/run/psios/api.sock; mv \"$socket\" \"$socket.held\"; "
+            "trap 'mv \"$socket.held\" \"$socket\"' EXIT; "
+            "psiosctl --token-file /run/missing-credential native-status"))
+        assert offline.pop("core_socket") == "Absent", offline
+        assert offline.pop("boottime_ms") >= native["boottime_ms"], offline
+        assert offline == {key: value for key, value in native.items() if key not in ("core_socket", "boottime_ms")}
+        assert c.run("test -S /run/psios/api.sock && psiosctl whoami >/dev/null") == ""
+        print("PASS native diagnostics match Linux mounts and remain available without Core access", flush=True)
         payload = ("/bin/psiosd", "/bin/psiosctl", "/psios-source", "/psios-init",
                    "/psios-disk-uuid", "/psios-home-uuid", "/psios-shutdown", "/psios-dhcp", "/psios-dhcp-event",
                    "/psios-ipv4", "/psios-ipv6", "/psios-static", "/psios-storage", "/psios-storage-layout",
@@ -745,6 +778,7 @@ def exercise(args, work):
     with boot(work, image) as c:
         c.login("psios", operator)
         assert check_machine_identity(c) == machine_id
+        assert check_native_status(c, deployment, manifest)["boot_id"] != native["boot_id"]
         assert c.run("./observe") == "persisted"
         c.run("test ! -e /run/psios/psios-run-cut && touch /run/psios/psios-run-shutdown")
         c.run("test ! -e /dev/shm/psios-cut && touch /dev/shm/psios-shutdown")

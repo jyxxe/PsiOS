@@ -45,6 +45,8 @@ struct Opts {
 enum Cmd {
     Whoami,
     Capabilities,
+    /// Report native boot and mount evidence without contacting the Core daemon.
+    NativeStatus,
     /// Serve a paired PsiOS Shell on this machine.
     Shell {
         /// Allow the paired browser to cancel queued or approval-pending Tasks.
@@ -890,10 +892,20 @@ fn model_worker(
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let o = Opts::parse();
-    if let Cmd::Validate { contract, file } = &o.cmd {
-        psios_api::contract(contract, &input(file)?)?;
-        println!("valid");
-        return Ok(());
+    match &o.cmd {
+        Cmd::Validate { contract, file } => {
+            psios_api::contract(contract, &input(file)?)?;
+            println!("valid");
+            return Ok(());
+        }
+        Cmd::NativeStatus => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&psios_core::native_status()?)?
+            );
+            return Ok(());
+        }
+        _ => {}
     }
     // A caller that supplies a standalone socket is independent of the installed site.
     let cfg = if o.socket.is_some() && o.config.is_none() && o.state.is_none() {
@@ -1467,7 +1479,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Cmd::Agent { key, delegation } => c.execute_agent(&StatusProvider, &key, &delegation)?,
-        Cmd::Validate { .. } => unreachable!(),
+        Cmd::Validate { .. } | Cmd::NativeStatus => unreachable!(),
     };
     println!("{}", serde_json::to_string_pretty(&v)?);
     Ok(())

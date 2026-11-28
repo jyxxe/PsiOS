@@ -351,6 +351,61 @@ pub(super) fn observe() -> Result<Value> {
     }))
 }
 
+pub(crate) fn native_storage(root: &rustix::fd::OwnedFd) -> Result<Value> {
+    use rustix::fs::{AtFlags, CWD, StatxFlags, statx};
+
+    let thread = crate::linux_proc::thread(root)?;
+    let mounts = table(crate::linux_proc::file(&thread, "mountinfo")?)?;
+    let mut storage = serde_json::Map::new();
+    for (key, path) in [
+        ("state", "/var/lib"),
+        ("home", "/mnt/psios-homes"),
+        ("operator_home", "/home/psios"),
+    ] {
+        let mut matches = mounts
+            .iter()
+            .filter(|mount| matches!(&mount.mount_point, LinuxPath::Text(point) if point == path));
+        let mount = matches.next();
+        require(
+            matches.next().is_none(),
+            "Conflict",
+            "native storage mount is covered by another mount",
+        )?;
+        if let Some(mount) = mount {
+            let effective = statx(
+                CWD,
+                path,
+                AtFlags::SYMLINK_NOFOLLOW | AtFlags::NO_AUTOMOUNT,
+                StatxFlags::MNT_ID,
+            )
+            .map_err(|_| err("Conflict", "native storage mount is no longer visible"))?;
+            require(
+                effective.stx_mask & StatxFlags::MNT_ID.bits() != 0,
+                "UnsupportedCapability",
+                "kernel mount identity is unavailable",
+            )?;
+            require(
+                effective.stx_mnt_id == u64::from(mount.mount_id),
+                "Conflict",
+                "native storage mount is no longer visible",
+            )?;
+        }
+        storage.insert(
+            key.into(),
+            mount.map_or(Value::Null, |mount| {
+                json!({
+                    "mount_id": mount.mount_id,
+                    "device": mount.device,
+                    "filesystem": mount.filesystem_type,
+                    "read_only": mount.read_only || mount.superblock_read_only,
+                    "flags": mount.flags,
+                })
+            }),
+        );
+    }
+    Ok(Value::Object(storage))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

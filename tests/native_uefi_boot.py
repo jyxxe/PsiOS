@@ -28,7 +28,7 @@ def build(args, work, name, *options):
 
 
 def status(console):
-    return json.loads(console.run("psiosctl native status"))
+    return json.loads(console.run("psiosctl native-status"))
 
 
 def read_firmware(console):

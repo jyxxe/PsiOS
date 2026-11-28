@@ -33,7 +33,7 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 
 `secure_boot_required` 表示部署清单是否要求在启动时强制检查 Secure Boot。PID 1 在受保护的 `/run` 发布与本次 Linux 启动 ID 和部署清单绑定的本地记录。`secure_boot_observation` 仅在通过早期强制检查且记录匹配时返回 `Enforced`。未执行这项检查的镜像报告 `Unmeasured`，包括仅签名的开发盘。记录缺失报告 `Unavailable`，记录损坏或不匹配报告 `Invalid`。该字段供本机诊断使用。[签名分阶段升级验收](../tests/native_signed_staged_update.py)
 
-生成新盘时可加入 `--uefi-boot-entries`。构建机需安装 `unsquashfs`，用于从固定内核介质提取并核对 `efivarfs` 模块。启动时，PID 1 在私有只读挂载中采集固件的 `BootCurrent` 和最多 64 个 `BootOrder` 项，采集后卸载。普通账户可在 `psiosctl native status` 的 `uefi_boot_entries` 中查看十进制启动项编号。状态区分未启用、不可读、数据无效和已观察。停机升级沿用此配置。该功能读取固件在本次启动中的选择，固件变量保持原样。[真实 OVMF 读数与升级验收](../tests/native_uefi_boot.py)
+生成新盘时可加入 `--uefi-boot-entries`。构建机需安装 `unsquashfs`，用于从固定内核介质提取并核对 `efivarfs` 模块。启动时，PID 1 在私有只读挂载中采集固件的 `BootCurrent` 和最多 64 个 `BootOrder` 项，采集后卸载。普通账户可在 `psiosctl native-status` 的 `uefi_boot_entries` 中查看十进制启动项编号。状态区分未启用、不可读、数据无效和已观察。停机升级沿用此配置。该功能读取固件在本次启动中的选择，固件变量保持原样。[真实 OVMF 读数与升级验收](../tests/native_uefi_boot.py)
 
 制作新盘时可用 `--hostname psi-edge-17` 设置本机名。生产引导在启动服务前从 root 所有的 `/etc/hostname` 读取一个 DNS 标签，缺省名称为 `psios`。root 可更新该文件，并在重启后应用。停机升级沿用源盘配置。无效文件会在 `host-name` 阶段进入救援流程。
 

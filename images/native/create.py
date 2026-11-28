@@ -79,6 +79,7 @@ TZDATA_SHA256 = "29b71c02c289e017ad43a96b00ff6bec39e6e07512cb67a647696320c54d032
 ZONEINFO = "usr/share/zoneinfo"
 ZONE_ARCHIVE = "psios-zoneinfo.tar"
 TIMEZONE_COMMAND = "usr/bin/psios-timezone"
+HOSTNAME_COMMAND = "usr/bin/psios-hostname"
 
 
 @dataclass(frozen=True)
@@ -549,6 +550,7 @@ def prepare_boot_inputs(work, args, *, wired_driver=None, ssh_enabled=False, net
     (work / "bin").mkdir()
     install_core(work, args.core_archive, args.core_sha256)
     zones = prepare_timezones(work, tools=tools)
+    shutil.copyfile(HERE / "hostname", work / HOSTNAME_COMMAND)
     if getattr(args, "timezone", None) and args.timezone not in zones:
         raise ValueError("unknown time zone in the pinned IANA data")
     if ssh_enabled:
@@ -566,7 +568,7 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
     (work / "psios-storage-layout").write_text(" ".join(sectors) + "\n")
     boot_scripts = ["init", "shutdown", "dhcp", "dhcp-event", "ipv4", "ipv6", "static", "storage", "enroll"]
     files = [*core_programs(work), "psios-source", "psios-disk-uuid", "psios-home-uuid", "psios-storage-layout",
-             ZONE_ARCHIVE, TIMEZONE_COMMAND]
+             ZONE_ARCHIVE, TIMEZONE_COMMAND, HOSTNAME_COMMAND]
     if network_profile == RDNSS:
         boot_scripts.extend(("rdnss-hook", "rdnss.conf", "dhcpcd.LICENSE"))
         files.append(RDNSS_PROGRAM)
@@ -626,7 +628,8 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
     files.extend(["psios-deployment.json", "psios-payload.sha256"])
     for name in files:
         executable = name.startswith("bin/") or name in (
-            "psios-init", "psios-dhcp-event", "psios-rdnss-hook", RDNSS_PROGRAM, TIMEZONE_COMMAND, *SSH_PROGRAMS)
+            "psios-init", "psios-dhcp-event", "psios-rdnss-hook", RDNSS_PROGRAM, TIMEZONE_COMMAND,
+            HOSTNAME_COMMAND, *SSH_PROGRAMS)
         (work / name).chmod(0o755 if executable else 0o644)
     if ssh_enabled:
         ssh_directory = "usr/lib/ssh"
@@ -1120,7 +1123,8 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
                                network_profile=network_profile, tools=tools)
     (trial_work / "bin").mkdir()
     # Share the pinned input kernel and binaries, but each initrd is extended independently.
-    boot_inputs = ("kernel", "initrd", *core_programs(candidate_work), "psios-source", ZONE_ARCHIVE, TIMEZONE_COMMAND)
+    boot_inputs = ("kernel", "initrd", *core_programs(candidate_work), "psios-source", ZONE_ARCHIVE,
+                   TIMEZONE_COMMAND, HOSTNAME_COMMAND)
     if wired_driver:
         boot_inputs += (E1000E_MODULE,)
     if ssh_enabled:

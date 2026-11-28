@@ -25,6 +25,40 @@ abort_boot() {
     "$bb" poweroff -f
 }
 
+machine_identity() {
+    local identity=/var/lib/etc/machine-id pending=/var/lib/etc/.psios-machine-id.pending generated
+    if [ -e "$identity" ] || [ -L "$identity" ]; then
+        [ -f "$identity" ] && [ ! -L "$identity" ] || return 1
+        case "$(stat -c '%u:%g:%a:%h' "$identity")" in
+            0:0:444:1|0:0:644:1) ;;
+            *) return 1 ;;
+        esac
+        [ "$(wc -c < "$identity")" -eq 33 ] || return 1
+        grep -Eq '^[0-9a-f]{32}$' "$identity" || return 1
+        [ "$(cat "$identity")" != 00000000000000000000000000000000 ]
+        return
+    fi
+
+    # Only PID 1 can write this root-owned directory during early boot. A cut
+    # before rename can leave this private file. No consumer could have read it.
+    if [ -e "$pending" ] || [ -L "$pending" ]; then
+        [ -f "$pending" ] && [ ! -L "$pending" ] || return 1
+        case "$(stat -c '%u:%g:%a:%h' "$pending")" in
+            0:0:600:1|0:0:444:1) ;;
+            *) return 1 ;;
+        esac
+        rm "$pending"
+    fi
+    generated=$(tr -d '-' < /proc/sys/kernel/random/uuid)
+    printf '%s\n' "$generated" | grep -Eq '^[0-9a-f]{32}$'
+    [ "$generated" != 00000000000000000000000000000000 ]
+    (umask 077; set -C; printf '%s\n' "$generated" > "$pending")
+    chmod 0444 "$pending"
+    sync -f /var/lib
+    mv -T "$pending" "$identity"
+    sync -f /var/lib
+}
+
 check_home_directories() {
     local dir name
     [ "$(stat -c '%u:%g:%a' /mnt/psios-homes)" = 0:0:755 ]
@@ -163,8 +197,12 @@ if [ "$trial_boot" = yes ]; then
     exit 1
 fi
 stage=host-config
+[ -d /var/lib/etc ] && [ ! -L /var/lib/etc ] || exit 1
 [ "$(stat -c '%u:%g:%a' /var/lib/etc)" = 0:0:755 ]
 [ "$(stat -c '%u:%g:%a' /var/lib/etc/shadow)" = 0:0:600 ]
+stage=machine-identity
+machine_identity
+stage=host-config
 mount -o bind /var/lib/etc /etc
 if [ -f /psios-core-limits ]; then
     stage=core-service-config

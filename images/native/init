@@ -225,6 +225,7 @@ stage=state-device
 /usr/sbin/modprobe virtio_blk
 /usr/sbin/modprobe nvme_core multipath=0
 /usr/sbin/modprobe nvme async_probe=0
+/usr/sbin/modprobe sd_mod
 /usr/sbin/modprobe ext4
 id=$(cat /psios-disk-uuid)
 home_id=$(cat /psios-home-uuid)

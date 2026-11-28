@@ -41,16 +41,70 @@ record_boot_failure() (
     sync -f /var/lib && mv -T "$pending" "$record" && sync -f /var/lib
 )
 
+efi_words() (
+    file=$1
+    kind=$2
+    [ -f "$file" ] && [ ! -L "$file" ] || return 1
+    bytes=$("$bb" od -An -v -tu1 -N133 "$file") || return 1
+    printf '%s\n' "$bytes" | "$bb" awk -v kind="$kind" '
+        { for (i = 1; i <= NF; i++) word[++n] = $i }
+        END {
+            if (n < 6 || n > 132 || n % 2 || word[2] || word[3] || word[4]) exit 1
+            if (kind == "current") {
+                if (n != 6 || word[1] != 6) exit 1
+                printf "%d", word[5] + 256 * word[6]
+                exit
+            }
+            if (word[1] != 7) exit 1
+            for (i = 5; i <= n; i += 2) {
+                value = word[i] + 256 * word[i + 1]
+                if (seen[value]++) exit 1
+                printf "%s%d", (i == 5 ? "" : ","), value
+            }
+        }'
+)
+
+read_uefi_boot_entries() (
+    suffix=8be4df61-93ca-11d2-aa0d-00e098032b8c
+    efivars=$(mktemp -d /run/.psios-efivars.XXXXXX) || return 1
+    mounted=no
+    trap 'if [ "$mounted" = yes ]; then "$bb" umount "$efivars" || "$bb" umount -l "$efivars" || :; fi;
+        "$bb" rmdir "$efivars" || :' EXIT
+    if ! "$bb" grep -wq efivarfs /proc/filesystems; then
+        "$bb" insmod /psios-efivarfs.ko || return 1
+    fi
+    "$bb" mount -t efivarfs -o ro,nosuid,nodev,noexec efivarfs "$efivars" || return 1
+    mounted=yes
+    current_file=$efivars/BootCurrent-$suffix
+    order_file=$efivars/BootOrder-$suffix
+    if [ ! -e "$current_file" ] || [ ! -e "$order_file" ]; then
+        entries='{"status":"Unavailable"}'
+    elif current=$(efi_words "$current_file" current) && order=$(efi_words "$order_file" order) &&
+            [ "$(efi_words "$current_file" current)" = "$current" ] &&
+            [ "$(efi_words "$order_file" order)" = "$order" ]; then
+        entries=$(printf '{"status":"Observed","current":%s,"order":[%s]}' "$current" "$order")
+    else
+        entries='{"status":"Invalid"}'
+    fi
+    "$bb" umount "$efivars" || return 1
+    mounted=no
+    printf '%s' "$entries"
+)
+
 record_boot_evidence() (
     boot_id=$(kernel_boot_id) || return 1
     digest=$(sha256sum /psios-deployment.json) || return 1
     observed=Unmeasured
     if [ "$secure_boot_enforced" = yes ]; then observed=Enforced; fi
+    entries='{"status":"Unavailable"}'
+    if [ -f /psios-efivarfs.ko ] && [ ! -L /psios-efivarfs.ko ]; then
+        entries=$(read_uefi_boot_entries) || entries='{"status":"Unavailable"}'
+    fi
     umask 077
     pending=$(mktemp /run/.psios-boot.XXXXXX) || return 1
     trap 'rm -f -- "$pending"' EXIT
-    printf '{"format":1,"boot_id":"%s","deployment_manifest_sha256":"sha256:%s","secure_boot":"%s"}\n' \
-        "$boot_id" "${digest%% *}" "$observed" > "$pending" &&
+    printf '{"format":1,"boot_id":"%s","deployment_manifest_sha256":"sha256:%s","secure_boot":"%s","uefi_boot_entries":%s}\n' \
+        "$boot_id" "${digest%% *}" "$observed" "$entries" > "$pending" &&
         chmod 0444 "$pending" && mv -T "$pending" /run/psios-boot.json
 )
 

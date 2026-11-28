@@ -242,7 +242,7 @@ def stage_image(work: Path, image: Path, receipt: Path, receipt_sha256: str) -> 
             "core_configuration_sha256": config_sha256,
             "state_initialization": "Fresh",
         }
-        for name in ("secure_boot", "network_profile", "wired_driver", "core_limits", "ssh_console"):
+        for name in ("secure_boot", "network_profile", "wired_driver", "core_limits", "ssh_console", "uefi_boot_entries"):
             if name in manifest:
                 facts[name] = manifest[name]
         staged_image.chmod(0o400)

@@ -253,9 +253,11 @@ async function verifyWindowGeometry() {
   await send("Emulation.setDeviceMetricsOverride", {
     width: 360, height: 800, deviceScaleFactor: 1, mobile: false,
   });
-  await waitFor("normal stacked layout on narrow screens", 'document.documentElement.scrollWidth === 360 && ' +
+  await waitFor("normal stacked layout on narrow screens", 'innerWidth === 360 && ' +
     '!document.querySelector("#window-node").classList.contains("floating") && ' +
     'document.querySelector("#window-node [data-geometry=resize]").hidden');
+  const narrow = await evaluate("({client: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth})");
+  assert.equal(narrow.scroll, narrow.client, "stacked layout must fit without horizontal scrolling");
   await send("Emulation.setDeviceMetricsOverride", viewport);
   await waitFor("geometry restored on wide screens", 'document.querySelector("#window-node").classList.contains("floating")');
   await key(resize, "Home", 36);

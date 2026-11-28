@@ -28,6 +28,9 @@ pub(crate) mod restore_image;
 pub(crate) mod stop;
 pub(crate) mod volume_rebind;
 
+pub(crate) const RUN_TMPFS_FORMAT: u32 = crate::node::usb::FORMAT + 1;
+const MAX_EPHEMERAL_BYTES: u64 = 64 * 1024 * 1024;
+
 fn environment(env: &BTreeMap<String, String>) -> Result<()> {
     require(
         env.len() <= 32
@@ -71,7 +74,13 @@ pub fn validate(s: &Install) -> Result<()> {
         (10..=4000).contains(&s.cpu_millicores)
             && (16 * 1024 * 1024..=2 * 1024 * 1024 * 1024).contains(&s.memory_max_bytes)
             && (4..=256).contains(&s.pids_max)
-            && (4096..=64 * 1024 * 1024).contains(&s.ephemeral_max_bytes),
+            && (4096..=MAX_EPHEMERAL_BYTES).contains(&s.ephemeral_max_bytes)
+            && s.run_max_bytes.is_none_or(|run| {
+                let page = rustix::param::page_size() as u64;
+                (4096..=MAX_EPHEMERAL_BYTES).contains(&run)
+                    && run.is_multiple_of(page)
+                    && run + s.ephemeral_max_bytes.next_multiple_of(page) <= MAX_EPHEMERAL_BYTES
+            }),
         "InvalidArgument",
         "resource limits outside local profile",
     )?;
@@ -211,6 +220,10 @@ fn launch_from_history(
             .and_then(|s| s.parse::<u64>().ok())
             .ok_or_else(|| err("InvalidArgument", "invalid release resource limit"))
     };
+    let run_max_bytes = r
+        .get("run_max_bytes")
+        .map(|_| count("run_max_bytes"))
+        .transpose()?;
     let launch = decode(&json!({
         "name": app.spec["name"],
         "release_version": release.body["release_version"],
@@ -222,6 +235,7 @@ fn launch_from_history(
         "memory_max_bytes": count("memory_max_bytes")?,
         "pids_max": count("pids_max")?,
         "ephemeral_max_bytes": count("ephemeral_max_bytes")?,
+        "run_max_bytes": run_max_bytes,
         "volume_access": access,
         "health_check": health::release(conn, &release, &spec, &image)?
     }))?;
@@ -704,8 +718,12 @@ pub fn start(
             s.cpu_millicores / 1000,
             s.cpu_millicores % 1000
         ),
-        format!("--tmpfs=/tmp:{}", tmpfs_options(s.ephemeral_max_bytes)),
     ]);
+    args.extend(
+        tmpfs_mounts(s)
+            .into_iter()
+            .map(|(path, options)| format!("--tmpfs={path}:{options}")),
+    );
     if let Some(data) = &w.data {
         let path = data
             .to_str()
@@ -833,6 +851,17 @@ fn tmpfs_options(bytes: u64) -> String {
     format!("rw,noexec,nosuid,nodev,size={bytes}")
 }
 
+fn tmpfs_mounts(install: &Install) -> BTreeMap<&'static str, String> {
+    let mut mounts = BTreeMap::from([("/tmp", tmpfs_options(install.ephemeral_max_bytes))]);
+    if let Some(limit) = install.run_max_bytes {
+        let uid = rustix::process::geteuid().as_raw();
+        let gid = rustix::process::getegid().as_raw();
+        let options = tmpfs_options(limit);
+        mounts.insert("/run", format!("{options},mode=0700,uid={uid},gid={gid}"));
+    }
+    mounts
+}
+
 fn no_entries(value: &Value) -> bool {
     value.is_null() || value.as_array().is_some_and(Vec::is_empty)
 }
@@ -897,7 +926,7 @@ fn verify_static_isolation(
     });
     require(
         approved_mounts(data, v, s.volume_access())
-            && h["Tmpfs"] == json!({"/tmp":tmpfs_options(s.ephemeral_max_bytes)})
+            && h["Tmpfs"] == json!(tmpfs_mounts(s))
             && v["Config"]["User"] == user
             && h["NetworkMode"] == "none"
             && h["IpcMode"] == "none"
@@ -1123,7 +1152,7 @@ fn record_release(
     } else {
         json!([])
     };
-    let spec = json!({
+    let mut spec = json!({
         "schema_version": VERSION,
         "release_spec_id": specid,
         "execution": {"argv": s.argv, "working_directory": "/", "environment": s.environment},
@@ -1163,6 +1192,9 @@ fn record_release(
         "dependency_release_refs": [],
         "backup_scope_ref": db.get("local-backup")?.reference()
     });
+    if let Some(limit) = s.run_max_bytes {
+        spec["resources"]["run_max_bytes"] = json!(limit.to_string());
+    }
     let spec = db.create("ApplicationReleaseSpec", &specid, owner, json!({}), spec)?;
     let health_check_ref = health::pin(db, &spec, &image, s.health_check.as_ref())?;
     let volumes = if has_volume {

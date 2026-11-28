@@ -80,6 +80,7 @@ pub struct Install {
     pub memory_max_bytes: u64,
     pub pids_max: u32,
     pub ephemeral_max_bytes: u64,
+    pub run_max_bytes: Option<u64>,
     pub volume: Option<Target>,
     pub(crate) volume_access: Option<VolumeAccess>,
     pub(crate) health_check: Option<apps::health::Probe>,

@@ -309,6 +309,10 @@ Core 通过已打开的目录和文件描述符流式校验私有普通文件。
 
 ### 重启正在运行的 OCI 实例
 
+安装或暂存 OCI Release 时，可以用 `run_max_bytes` 给 `/run` 分配独立的临时空间。此字段以字节表示，需至少 4096 字节并与宿主页大小对齐。`ephemeral_max_bytes` 继续限制 `/tmp`。两个容量按内核页计量，合计最多 64 MiB。`/run` 属于应用的 Linux UID 和 GID，权限为 0700，挂载启用 `nodev`、`nosuid` 和 `noexec`。容器停止后丢弃目录内容。
+
+资源规格和制品安装预览记录该限额。Docker 启动参数与后续启动、重启和核验的预期配置从同一份 Release 读取。回退到原 Release 时沿用原来的临时空间。数据库格式 152 保留既有 Release，并要求支持此字段的 Core 处理之后的部署。[实测 OCI 安装与回退](../tests/oci.py)
+
 配置 `oci_effective_volume_observation: true` 可为带卷的 OCI 启动、重启与检查启用 Linux 实际挂载核验。此配置默认关闭。启用需要本机 cgroup v2 和服务 UID 对容器进程的 `/proc` 观测权限。Core 在启动后固定进程身份，对照卷已登记的设备与 inode，核实独立挂载命名空间中的 `/data` 具有批准的访问模式、采用私有传播且没有嵌套挂载。运行实例的 `mount_observation` 保存卷引用、挂载 ID、启动标识和采样时间。
 
 从格式 140 起，安装时可对批准的卷声明 `"volume_access":"ReadOnly"`，签名安装制品也可携带这一字段。选定 Release 保存请求的访问模式。暂存新版本时省略该字段会继承当前选定版本的模式。只读模式下必须同时通过 Docker 配置和实际 Linux 挂载核验，卷继续由该应用独占绑定，停止后释放占用。启动回执丢失后，原检查点仍要求观察原容器的只读挂载，再对账原 Operation。[容器实际写入拒绝、重启、签名版本与回执恢复验收](../tests/oci_read_only_volume.py)

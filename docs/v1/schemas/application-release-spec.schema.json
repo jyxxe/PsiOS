@@ -199,6 +199,9 @@
         "ephemeral_max_bytes": {
           "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/UInt64"
         },
+        "run_max_bytes": {
+          "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/PositiveUInt64"
+        },
         "io_profile_ref": {
           "$ref": "https://schemas.psios.example/v1/common.schema.json#/$defs/ResourceRef"
         },

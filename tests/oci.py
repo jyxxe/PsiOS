@@ -195,6 +195,7 @@ def stage_from_artifact(node, app, specification):
                        "--delegation", allow["delegation_ref"]["resource_id"], "--key", key(),
                        "--signature", signature_file, source_file)
     assert preview["resource_refs"] == [app, source, signer, archive], preview
+    assert preview["release"].get("run_max_bytes") == specification.get("run_max_bytes"), preview
     accepted = node.call("Task.Submit", preview["request"])["task_id"]
     assert node.wait(accepted)["lifecycle"] == "WaitingApproval"
     assert_retained(node, source, archive, "pending version update")
@@ -207,8 +208,10 @@ def stage_from_artifact(node, app, specification):
     assert evidence["image_archive_ref"] == archive and evidence["image_capture_ref"] == capture, evidence
     release = node.call("Resource.Resolve", {"reference": receipt["release_ref"]})["value"]
     assert release["publisher_identity_ref"]["resource_id"] == publisher["principal_id"]
-    specification = node.call("Resource.Resolve", {"reference": release["release_spec_ref"]})["value"]
-    trust = specification["provenance"]
+    pinned = node.call("Resource.Resolve", {"reference": release["release_spec_ref"]})["value"]
+    if "run_max_bytes" in specification:
+        assert pinned["resources"]["run_max_bytes"] == str(specification["run_max_bytes"]), pinned
+    trust = pinned["provenance"]
     assert trust["source_trust"] == "PublisherVerified" and all(ref in trust["source_refs"] for ref in (source, archive, capture))
     evidence = node.call("Resource.Resolve", {"reference": trust["trust_evidence_or_admission_policy_ref"]})["value"]
     assert evidence["signature"] == signature and evidence["artifact_ref"] == source
@@ -336,10 +339,40 @@ def main(binaries, previous_binaries=None, create_recovery_only=False, direct_cl
     docker = ["docker", "--host", "unix:///var/run/docker.sock"]
     try:
         c = node.base / "probe.c"
-        c.write_text('''#include <stdio.h>
+        c.write_text('''#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
+static int check_private_run(void) {
+    struct stat directory;
+    struct statvfs fs, root;
+    const unsigned long restricted = ST_NOEXEC | ST_NOSUID | ST_NODEV;
+    if (stat("/run", &directory) || (directory.st_mode & 0777) != 0700 ||
+        directory.st_uid != geteuid() || directory.st_gid != getegid()) return 10;
+    if (statvfs("/run", &fs) || fs.f_blocks * fs.f_frsize != 65536 ||
+        (fs.f_flag & restricted) != restricted) return 11;
+    if (statvfs("/", &root) || !(root.f_flag & ST_RDONLY)) return 12;
+    int session = open("/run/private-session", O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (session < 0) return 13;
+    char page[4096] = {0};
+    for (int i=0; i<16; i++) {
+        if (write(session, page, sizeof(page)) != sizeof(page)) return 14;
+    }
+    if (write(session, page, 1) != -1 || errno != ENOSPC || close(session)) return 15;
+    int tmp = open("/tmp/after-run-full", O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (tmp < 0 || write(tmp, page, 1) != 1 || close(tmp)) return 16;
+    puts("private /run reached ENOSPC while /tmp remained writable");
+    return 0;
+}
 int main(void) {
+    if (getenv("TEST_PRIVATE_RUN")) {
+        int status = check_private_run();
+        if (status) return status;
+    }
     const char *path=getenv("EPHEMERAL_ONLY") ? "/tmp/starts" : "/data/starts";
     FILE *f=fopen(path, "a");
     if (!f) return 2;
@@ -411,6 +444,7 @@ int main(void) {
         inspected = json.loads(subprocess.check_output(docker + ["inspect", cid]))[0]
         assert inspected["HostConfig"]["NetworkMode"] == "none"
         assert inspected["HostConfig"]["ReadonlyRootfs"]
+        assert set(inspected["HostConfig"]["Tmpfs"]) == {"/tmp"}
         assert inspected["HostConfig"]["Memory"] == spec["memory_max_bytes"]
         assert inspected["HostConfig"]["MemorySwap"] == spec["memory_max_bytes"]
         assert inspected["HostConfig"]["PidsLimit"] == 16
@@ -461,8 +495,16 @@ int main(void) {
         upgraded_image = subprocess.check_output(docker + ["import", "--change", "LABEL test.release=2", "-", upgraded_tag],
             input=archive.getvalue()).decode().strip()
         assert upgraded_image != spec["image_id"]
-        release = dict(spec, image_id=upgraded_image, release_version="2.0.0", environment={"TEST_NAME": "upgraded"})
+        release = dict(spec, image_id=upgraded_image, release_version="2.0.0", run_max_bytes=65536,
+                       environment={"TEST_NAME": "upgraded", "TEST_PRIVATE_RUN": "1"})
         del release["volume"]
+        for invalid_size in (0, 65535, 64 * 1024 * 1024):
+            try:
+                node.prepare("application.install", dict(release, run_max_bytes=invalid_size))
+            except Failure as error:
+                assert error.code == "InvalidArgument", error
+            else:
+                raise AssertionError("invalid /run tmpfs capacity was accepted")
         staged, staged_artifact, signing_key, staged_archive = stage_from_artifact(node, app, release)
         assert node.get(app_id)["resource"]["spec"]["release_ref"] == previous_release
         with corrupted_archive(node, staged_archive):
@@ -513,7 +555,10 @@ int main(void) {
             rollback_node.close()
         app = node.perform("application.start", target(app))
         changed_cid = node.perform("application.health", target(app))["container_id"]
-        assert json.loads(subprocess.check_output(docker + ["inspect", changed_cid]))[0]["Image"] == upgraded_image
+        updated = json.loads(subprocess.check_output(docker + ["inspect", changed_cid]))[0]
+        assert updated["Image"] == upgraded_image
+        assert set(updated["HostConfig"]["Tmpfs"]) == {"/run", "/tmp"}
+        assert "private /run reached ENOSPC while /tmp remained writable" in node.perform("application.logs", target(app))["stdout"]
         node.call("Artifact.PublisherKey.Revoke", {**target(signing_key), "reason": "end of publisher trust"})
         subprocess.run(docker + ["kill", changed_cid], check=True, stdout=subprocess.DEVNULL)
         app = node.perform("application.refresh", target(app))
@@ -530,7 +575,8 @@ int main(void) {
         app = node.perform("application.select_release", dict(target=target(app), release_ref=previous_release))
         app = lose_start_receipt(node, app, volume, previous_binaries)
         reverted = node.perform("application.health", target(app))["container_id"]
-        assert json.loads(subprocess.check_output(docker + ["inspect", reverted]))[0]["Image"] == image_id
+        rolled_back = json.loads(subprocess.check_output(docker + ["inspect", reverted]))[0]
+        assert rolled_back["Image"] == image_id and set(rolled_back["HostConfig"]["Tmpfs"]) == {"/tmp"}
         app = lose_stop_receipt(node, app, reverted, volume)
         unavailable = node.perform("application.logs", target(app))
         assert unavailable["availability"] == "Unavailable" and not unavailable["stdout"], unavailable

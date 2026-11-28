@@ -184,6 +184,7 @@ def stage(args):
                 require_unchanged(args.upgrade_from, old, old_identity, original, "source disk")
                 require_unchanged(args.ovmf_vars, old_vars, vars_identity, args.ovmf_vars_sha256, "source firmware variables")
                 open_cold_raw(old)
+                prepared.boot_tools.receipt()
                 publish_bundle(bundle, parent_fd, output.name)
                 return record
 

@@ -79,6 +79,7 @@ TZDATA_SHA256 = "29b71c02c289e017ad43a96b00ff6bec39e6e07512cb67a647696320c54d032
 ZONEINFO = "usr/share/zoneinfo"
 ZONE_ARCHIVE = "psios-zoneinfo.tar"
 TIMEZONE_COMMAND = "usr/bin/psios-timezone"
+OS_RELEASE = "usr/lib/os-release"
 
 
 @dataclass(frozen=True)
@@ -401,7 +402,7 @@ def host_config(seed, args):
     (seed / "etc/group").write_text("root:x:0:\npsios:x:1000:\n")
     (seed / "etc/shadow").write_bytes(b"root:" + root + b":0:0:99999:7:::\npsios:" + operator + b":0:0:99999:7:::\n")
     (seed / "etc/shadow").chmod(0o600)
-    (seed / "etc/os-release").write_text('NAME=PsiOS\nID=psios\nPRETTY_NAME="PsiOS amd64 development image"\n')
+    (seed / "etc/os-release").symlink_to("../" + OS_RELEASE)
     if args.hostname:
         (seed / "etc/hostname").write_text(args.hostname + "\n")
     if args.timezone:
@@ -618,6 +619,17 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
         inputs.update(boot_mode=TRIAL_BOOT_MODE, trial_disk_uuid=str(trial.disk_uuid))
     if require_secure_boot or (trial and trial.secure_boot_required):
         inputs["secure_boot_enforcement_required"] = True
+    # The identity describes the assembled deployment including its boot profile
+    # and inputs. Hash the manifest before adding the identity's own file hash.
+    build_id = hashlib.sha256(json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    release = work / OS_RELEASE
+    release.parent.mkdir(parents=True, exist_ok=True)
+    release.parent.chmod(0o755)
+    release.write_text('NAME=PsiOS\nID=psios\nPRETTY_NAME="PsiOS amd64 development image"\n'
+                       f'IMAGE_ID=psios-native\nBUILD_ID={build_id}\n', encoding="ascii")
+    inputs["build_id"] = build_id
+    payload["/" + OS_RELEASE] = sha256(release)
+    files.append(OS_RELEASE)
     manifest = work / "psios-deployment.json"
     manifest.write_text(json.dumps(inputs, sort_keys=True, separators=(",", ":")) + "\n")
     # BusyBox can verify the exact extracted bytes without a JSON interpreter.
@@ -632,6 +644,7 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
         ssh_directory = "usr/lib/ssh"
         (work / ssh_directory).chmod(0o755)
         files.insert(0, ssh_directory)
+    files.insert(0, "usr/lib")
     # GNU cpio's reproducible mode still includes each member's modification time.
     for name in files:
         os.utime(work / name, (boot_media.EPOCH, boot_media.EPOCH))

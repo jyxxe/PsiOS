@@ -140,6 +140,21 @@ install_default_hosts() {
     sync -f /etc
 }
 
+install_os_release_link() (
+    path=/etc/os-release
+    [ ! -L "$path" ] || return 0
+    if [ -e "$path" ]; then
+        [ -f "$path" ] && [ "$(stat -c '%u:%g:%a:%h' "$path")" = 0:0:644:1 ] || return 0
+        printf '%s\n' 'NAME=PsiOS' 'ID=psios' 'PRETTY_NAME="PsiOS amd64 development image"' |
+            cmp -s - "$path" || return 0
+    fi
+    umask 077
+    pending=$(mktemp -d /etc/.psios-os-release.XXXXXX) || return 1
+    trap 'rm -f "$pending/os-release"; rmdir "$pending"' EXIT
+    ln -s ../usr/lib/os-release "$pending/os-release" && sync -f /etc &&
+        mv -T "$pending/os-release" "$path" && sync -f /etc
+)
+
 run_trial() {
     local config=/var/lib/etc/psios/core.json dir path manifest_digest
     stage=trial-configuration
@@ -223,6 +238,8 @@ for requires_secure_boot in /psios-secure-boot-required /psios-trial-secure-boot
     secure_boot_enforced=yes
 done
 payload_verified=yes
+stage=deployment-identity
+ln -sfn ../usr/lib/os-release /etc/os-release
 stage=timezone-data
 mkdir -p /usr/share/zoneinfo
 tar -xf /psios-zoneinfo.tar -C /usr/share/zoneinfo
@@ -287,6 +304,9 @@ stage=machine-identity
 machine_identity
 stage=host-config
 mount -o bind /var/lib/etc /etc
+if ! install_os_release_link; then
+    echo 'PsiOS deployment identity remains available at /usr/lib/os-release' >/dev/console
+fi
 stage=host-resolution
 install_default_hosts
 if [ -f /psios-core-limits ]; then

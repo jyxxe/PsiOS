@@ -16,7 +16,7 @@ import sys
 from tempfile import TemporaryDirectory
 import uuid
 
-from install_source import stage_image
+from install_source import MAX_TARGET_BYTES, SECTOR_BYTES, fit_image, stage_image
 from install_target import filesystem_type, open_target, read_target, require_unallocated
 
 
@@ -87,6 +87,10 @@ def valid_instant(value):
         r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z", value)
 
 
+def expected_image(plan):
+    return plan.get("deployment_image", plan["source"])
+
+
 def read_operation(directory):
     fd = os.open(JOURNAL, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
                  dir_fd=directory)
@@ -112,15 +116,27 @@ def read_operation(directory):
             and all(isinstance(item, str) and Path(item).is_absolute()
                     for item in (plan.get("source_image"), plan.get("receipt"), target.get("path")))
             and type(source.get("size_bytes")) is int and 0 < source["size_bytes"] <= 8 * 1024 ** 3
-            and type(target.get("size_bytes")) is int and target["size_bytes"] == source["size_bytes"],
+            and type(target.get("size_bytes")) is int,
             "installation journal has an invalid plan")
+    size = target["size_bytes"]
+    if "deployment_image" in plan:
+        image = plan["deployment_image"]
+        require(isinstance(image, dict) and set(image) == {"size_bytes", "image_sha256", "backup_gpt_offset"}
+                and type(image["size_bytes"]) is int and image["size_bytes"] == size
+                and source["size_bytes"] < size <= MAX_TARGET_BYTES and size % SECTOR_BYTES == 0
+                and type(image["backup_gpt_offset"]) is int and image["backup_gpt_offset"] % SECTOR_BYTES == 0
+                and 2 * SECTOR_BYTES <= size - image["backup_gpt_offset"] <= BLOCK_SIZE,
+                "installation journal has an invalid relocated image")
+        checked_digest(image["image_sha256"])
+    else:
+        require(size == source["size_bytes"], "installation journal has an invalid target size")
     for value in (source.get("image_sha256"), source.get("receipt_sha256"), plan.get("blank_sha256")):
         checked_digest(value)
     if entry["status"] in ("WriteIssued", "Verified"):
         require(valid_instant(entry.get("write_issued_at")), "installation journal lacks a write witness")
     if entry["status"] == "Verified":
         require(valid_instant(entry.get("verified_at"))
-                and entry.get("image_readback_sha256") == source["image_sha256"]
+                and entry.get("image_readback_sha256") == expected_image(plan)["image_sha256"]
                 and type(entry.get("reconciled")) is bool,
                 "installation journal lacks a verified receipt")
     return entry
@@ -148,21 +164,26 @@ def save_operation(directory, entry):
 
 
 @contextmanager
-def staged_source(directory, image, receipt, receipt_sha256):
+def staged_source(directory, image, receipt, receipt_sha256, *, fit_size=None):
     # Keep the scratch path bound to the locked directory even if its name moves.
     anchor = Path(f"/proc/{os.getpid()}/fd/{directory}")
     fd = None
     try:
         with TemporaryDirectory(dir=anchor, prefix=".install-source-") as work:
             path, facts = stage_image(Path(work), Path(image), Path(receipt), receipt_sha256)
+            if fit_size is not None:
+                require(fit_size >= facts["size_bytes"], "target must fit all factory image partitions")
+            fitted = None
+            if fit_size is not None and fit_size != facts["size_bytes"]:
+                fitted = fit_image(Path(work), path, facts, fit_size)
             fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
             info = os.fstat(fd)
             require(stat.S_ISREG(info.st_mode) and info.st_uid == 0
-                    and not info.st_mode & 0o022 and info.st_size == facts["size_bytes"],
+                    and not info.st_mode & 0o022 and info.st_size == (fitted or facts)["size_bytes"],
                     "staged image changed during source validation")
         # The validated image is still readable during apply and leaves no staging path
         # after WriteIssued, including if the installer is killed in the write loop.
-        yield fd, facts
+        yield fd, facts, fitted
     finally:
         if fd is not None:
             os.close(fd)
@@ -207,10 +228,12 @@ def plan(directory, args):
     receipt_sha256 = checked_digest(args.receipt_sha256)
     image = args.source_image.absolute()
     receipt = args.receipt.absolute()
-    with staged_source(directory, image, receipt, receipt_sha256) as (_, source):
-        with open_target(args.target, write=False) as fd:
-            target = read_target(fd, args.target, allow_loop=args.allow_loop)
-            require(target["size_bytes"] == source["size_bytes"],
+    with open_target(args.target, write=False) as fd:
+        target = read_target(fd, args.target, allow_loop=args.allow_loop)
+        require_unallocated(fd, args.target)
+        fit_size = target["size_bytes"] if args.allow_larger_target else None
+        with staged_source(directory, image, receipt, receipt_sha256, fit_size=fit_size) as (_, source, fitted):
+            require(target["size_bytes"] == (fitted or source)["size_bytes"],
                     "block device and native image must have the same exact size")
             require_unallocated(fd, args.target)
             original = blank_digest(fd, target["size_bytes"])
@@ -229,6 +252,8 @@ def plan(directory, args):
         "encryption": "None",
         "retained_target_data": "None",
     }
+    if fitted is not None:
+        request["deployment_image"] = fitted
     entry = {
         "format": 1,
         "status": "Planned",
@@ -252,7 +277,7 @@ def verified(directory, entry, *, reconciled):
         **entry,
         "status": "Verified",
         "verified_at": timestamp(),
-        "image_readback_sha256": entry["plan"]["source"]["image_sha256"],
+        "image_readback_sha256": expected_image(entry["plan"])["image_sha256"],
         "reconciled": reconciled,
     }
     save_operation(directory, settled)
@@ -269,10 +294,13 @@ def apply(directory, args):
     request = entry["plan"]
     source = request["source"]
     target = Path(request["target"]["path"])
-    size = source["size_bytes"]
+    deployment = request.get("deployment_image")
+    installed = expected_image(request)
+    size = installed["size_bytes"]
     with staged_source(directory, request["source_image"], request["receipt"],
-                       source["receipt_sha256"]) as (image, facts):
+                       source["receipt_sha256"], fit_size=deployment["size_bytes"] if deployment else None) as (image, facts, fitted):
         require(facts == source, "source image receipt and contents differ from plan")
+        require(fitted == deployment, "target-sized installation image differs from plan")
         partitions = facts["partitions"]
         first_partition = min(part["start_sector"] for part in partitions) * 512
         last_partition_end = max(part["start_sector"] + part["sector_count"] for part in partitions) * 512
@@ -293,12 +321,17 @@ def apply(directory, args):
             os.fsync(fd)
             exact_target(fd, request)
             require_unallocated(fd, target)
-            write_blocks(image, fd, last_partition_end, size)
+            # The unused tail was verified blank. Only write the relocated backup GPT there.
+            factory_size = source["size_bytes"]
+            write_blocks(image, fd, last_partition_end, factory_size)
+            if deployment is not None:
+                write_blocks(image, fd, max(factory_size, deployment["backup_gpt_offset"]), size)
+                os.fsync(fd)
             write_blocks(image, fd, 0, first_partition)
             os.fsync(fd)
             observed = block_digest(fd, size)
             exact_target(fd, request)
-            require(observed == source["image_sha256"], "installed disk does not match the verified image")
+            require(observed == installed["image_sha256"], "installed disk does not match the verified image")
             return verified(directory, issued, reconciled=False)
 
 
@@ -308,12 +341,13 @@ def inspect(directory):
         return entry
     request = entry["plan"]
     target = Path(request["target"]["path"])
+    installed = expected_image(request)
     try:
         with open_target(target, write=False) as fd:
             exact_target(fd, request)
-            observed = block_digest(fd, request["source"]["size_bytes"])
+            observed = block_digest(fd, installed["size_bytes"])
             exact_target(fd, request)
-            require(observed == request["source"]["image_sha256"],
+            require(observed == installed["image_sha256"],
                     "device bytes do not match the verified image")
             os.fsync(fd)
             exact_target(fd, request)
@@ -330,6 +364,8 @@ def main():
     prepare.add_argument("--receipt", type=Path, required=True)
     prepare.add_argument("--receipt-sha256", required=True)
     prepare.add_argument("--target", type=Path, required=True)
+    prepare.add_argument("--allow-larger-target", action="store_true",
+                         help="relocate GPT backup metadata and leave additional capacity unallocated")
     prepare.add_argument("--allow-loop", action="store_true", help="allow an isolated loop test disk")
     execute = commands.add_parser("apply", help="approve and install an exact saved plan")
     execute.add_argument("--plan-digest", required=True)

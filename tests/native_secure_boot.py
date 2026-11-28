@@ -183,6 +183,8 @@ def exercise(args, work):
         c.login("psios", operator)
         assert json.loads(c.run("psiosctl whoami"))["authority_id"] == identity
         assert json.loads(c.run("cat /psios-deployment.json"))["core_source_commit"] == new["source_commit"]
+        status = json.loads(c.run("psiosctl native-status"))
+        assert status["secure_boot_required"] is False and status["secure_boot_observation"] == "Unmeasured", status
     print(f"PASS enforced UEFI Secure Boot and signed upgrade of authority {identity}")
 
 

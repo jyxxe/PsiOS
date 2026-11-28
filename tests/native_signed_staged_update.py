@@ -49,6 +49,13 @@ def boot_operator(console, operator, admin, build):
     assert manifest["secure_boot"] == build["secure_boot"], manifest
     assert console.run("cat /psios-source") == build["source_commit"]
     assert console.run("sha256sum /psios-deployment.json").split()[0] == build["deployment_manifest_sha256"]
+    if build.get("secure_boot_enforcement_required"):
+        status = json.loads(console.run("psiosctl native-status"))
+        assert status["secure_boot_required"] is True and status["secure_boot_observation"] == "Enforced", status
+        assert status["boot_id"] == console.run("cat /proc/sys/kernel/random/boot_id")
+        assert status["deployment_manifest_sha256"] == "sha256:" + build["deployment_manifest_sha256"]
+        assert console.run("stat -c '%u:%g:%a:%h' /run/psios-boot.json") == "0:0:444:1"
+        console.run("test ! -w /run/psios-boot.json")
     return durable_fact(console)
 
 

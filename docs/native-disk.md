@@ -29,7 +29,9 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 
 串口账户 `psios` 和服务使用 UID 1000。登录后可运行 `psiosctl whoami`、`psiosctl node`，或用 `printf '{}' | psiosctl submit system.status --key first-status` 提交任务。需要传统系统管理时，可在生成新盘时传入 `--root-console-hash root.hash` 设置独立的本机 root 密码。默认锁定 root。启用后可用 root 在串口执行 `poweroff`。关机钩子先允许 Core 结算，随后关闭其余会话与进程，刷盘并卸载状态和主目录。运行时生成的所有者令牌位于服务账户的私有见证目录。[关机验收](../tests/native_disk.py)
 
-`psiosctl native-status` 在本机控制台从当前 Linux 启动读取诊断，无需 Core 套接字或令牌。输出包含启动 ID、内核版本、单调经过时间、部署清单摘要、清单中预期的卷 UUID，以及当前命名空间中实际挂载的状态分区和主目录。可将 `deployment_manifest_sha256` 的十六进制部分与安装回执比对。`core_socket` 记录套接字路径的观测结果。需核验 Core 是否响应时，再运行 `psiosctl whoami`。`secure_boot_required` 表示部署清单要求的固件策略。固件签名执行情况由独立的启动验收核验。[原生诊断与重启验收](../tests/native_disk.py)
+`psiosctl native-status` 在本机控制台从当前 Linux 启动读取诊断，无需 Core 套接字或令牌。输出包含启动 ID、内核版本、单调经过时间、部署清单摘要、清单中预期的卷 UUID，以及当前命名空间中实际挂载的状态分区和主目录。可将 `deployment_manifest_sha256` 的十六进制部分与安装回执比对。`core_socket` 记录套接字路径的观测结果。需核验 Core 是否响应时，再运行 `psiosctl whoami`。[原生诊断与重启验收](../tests/native_disk.py)
+
+`secure_boot_required` 表示部署清单是否要求在启动时强制检查 Secure Boot。PID 1 在受保护的 `/run` 发布与本次 Linux 启动 ID 和部署清单绑定的本地记录。`secure_boot_observation` 仅在通过早期强制检查且记录匹配时返回 `Enforced`。未执行这项检查的镜像报告 `Unmeasured`，包括仅签名的开发盘。记录缺失报告 `Unavailable`，记录损坏或不匹配报告 `Invalid`。该字段供本机诊断使用。[签名分阶段升级验收](../tests/native_signed_staged_update.py)
 
 制作新盘时可用 `--hostname psi-edge-17` 设置本机名。生产引导在启动服务前从 root 所有的 `/etc/hostname` 读取一个 DNS 标签，缺省名称为 `psios`。root 可更新该文件，并在重启后应用。停机升级沿用源盘配置。无效文件会在 `host-name` 阶段进入救援流程。
 

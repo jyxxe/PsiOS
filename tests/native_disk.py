@@ -391,6 +391,9 @@ def check_native_status(c, deployment, manifest):
     assert status["kernel_release"] == c.run("uname -r")
     assert status["boottime_ms"] > 0 and status["firmware"] == "UEFI", status
     assert status["secure_boot_required"] is False and status["core_socket"] == "Present", status
+    assert status["secure_boot_observation"] == "Unmeasured", status
+    assert c.run("stat -c '%u:%g:%a:%h' /run/psios-boot.json") == "0:0:444:1"
+    c.run("test ! -w /run/psios-boot.json")
     assert status["deployment_manifest_sha256"] == "sha256:" + deployment["deployment_manifest_sha256"]
     assert status["core_source_commit"] == deployment["source_commit"]
     assert status["expected_filesystems"] == manifest["required_filesystems"]
@@ -710,6 +713,16 @@ def exercise(args, work):
         hidden = c.run("unshare -m sh -c 'set -e; mount --make-rprivate /; "
                        "mount -o bind /tmp /var; set +e; psiosctl native-status 2>&1; test $? -eq 1'")
         assert "Conflict: native storage mount is no longer visible" in hidden, hidden
+        missing, stale = map(json.loads, c.run(
+            "(set -eu; evidence=/run/psios-boot.json; mv \"$evidence\" \"$evidence.held\"; "
+            "trap 'mv -f \"$evidence.held\" \"$evidence\"' EXIT; psiosctl native-status; "
+            "printf '\\nBOOT-EVIDENCE-CHECK\\n'; "
+            "sed 's/\"boot_id\":\"[^\"]*\"/\"boot_id\":\"00000000-0000-0000-0000-000000000000\"/' "
+            "\"$evidence.held\" > \"$evidence\"; chmod 0444 \"$evidence\"; psiosctl native-status)"
+        ).split("\nBOOT-EVIDENCE-CHECK\n"))
+        assert missing["secure_boot_observation"] == "Unavailable", missing
+        assert stale["secure_boot_observation"] == "Invalid", stale
+        assert missing["boot_id"] == stale["boot_id"] == c.run("cat /proc/sys/kernel/random/boot_id")
         c.send("exit")
         c.login("psios", operator)
         machine_id = check_machine_identity(c)
@@ -730,7 +743,7 @@ def exercise(args, work):
         assert offline.pop("boottime_ms") >= native["boottime_ms"], offline
         assert offline == {key: value for key, value in native.items() if key not in ("core_socket", "boottime_ms")}
         assert c.run("test -S /run/psios/api.sock && psiosctl whoami >/dev/null") == ""
-        print("PASS native diagnostics match Linux mounts and remain available without Core access", flush=True)
+        print("PASS native diagnostics match Linux mounts, distinguish stale boot evidence, and work without Core", flush=True)
         payload = ("/bin/psiosd", "/bin/psiosctl", "/psios-source", "/psios-init",
                    "/psios-disk-uuid", "/psios-home-uuid", "/psios-shutdown", "/psios-dhcp", "/psios-dhcp-event",
                    "/psios-ipv4", "/psios-ipv6", "/psios-static", "/psios-storage", "/psios-storage-layout",

@@ -31,6 +31,7 @@ close_mount() {
 }
 close_mount /home/psios remount,bind,ro
 close_mount /root remount,bind,ro
+close_mount /run remount,ro
 close_mount /dev/shm remount,ro
 close_mount /tmp remount,ro
 close_mount /dev/pts remount,ro

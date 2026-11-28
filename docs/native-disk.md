@@ -33,6 +33,8 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 
 生产模式为 POSIX 共享内存在 `/dev/shm` 单独挂载 tmpfs。程序可以用 `shm_open` 打开命名对象，通过 `mmap(MAP_SHARED)` 交换数据。`shm_unlink` 移除名称后，已取得的映射仍可用。此挂载上限为 16 MiB 和 1024 个 inode，与 `/tmp` 各自计量。根目录为 1777，启用 `nodev,nosuid,noexec`。需要私有数据的程序应创建 0600 对象。对象在重启后消失。[跨进程与容量验收](../tests/native_shm.c)
 
+生产模式在 `/run` 单独挂载 8 MiB、1024 个 inode 的 tmpfs，存放 Core 的本机套接字和临时网络状态。顶层目录由 root 管理，Core 的目录保持 0700。挂载启用 `nodev,nosuid,noexec`，与应用共享内存和普通临时文件分别计量。开机重新建立套接字，持久的状态、见证和主目录仍从各自文件系统读取。
+
 每次开机在 `/tmp` 创建独立的 tmpfs，最多使用 32 MiB 数据空间和 4096 个 inode。普通账户可以创建临时文件，目录的 sticky bit 保护其他账户的条目，挂载启用 `nodev` 与 `nosuid`。达到任一上限时，内核拒绝继续分配。重启后临时文件消失。可将需要保留的用户文件放在持久主目录。
 
 ## Core 资源限额

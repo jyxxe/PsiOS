@@ -362,6 +362,31 @@ def check_temporary_storage(c):
     c.run("rm -rf /tmp/psios-inodes && printf 'volatile\\n' > /tmp/psios-scratch-marker")
 
 
+def check_runtime_directory(c):
+    assert c.run("stat -c '%u:%g:%a' /run") == "0:0:755"
+    assert c.run("stat -c '%u:%g:%a' /run/psios") == "1000:1000:700"
+    c.run("test ! -w /run && test -S /run/psios/api.sock")
+    blocks, block_size, inode_total = map(int, c.run("stat -f -c '%b %S %c' /run").split())
+    assert blocks * block_size == 8 * 1024 * 1024 and inode_total == 1024
+
+    private = "/run/psios"
+    remaining, size = map(int, c.run(f"stat -f -c '%a %S' {private}").split())
+    full = c.run(f"dd if=/dev/zero of={private}/test-bytes bs=64K count=129 2>&1; test $? -ne 0")
+    assert "No space left on device" in full, full
+    assert int(c.run(f"stat -c %s {private}/test-bytes")) == remaining * size
+    c.run(f"rm {private}/test-bytes")
+
+    available = int(c.run(f"mkdir {private}/test-inodes && stat -f -c '%d' {private}/test-inodes"))
+    full = c.run(f"cd {private}/test-inodes || exit 1; i=0; "
+                 'while true 2>&1 > "$i"; do i=$((i+1)); test "$i" -le 1024 || exit 1; done; echo "$i"')
+    assert "No space left on device" in full and int(full.splitlines()[-1]) == available, full
+    c.run("test -S /run/psios/api.sock && touch /tmp/psios-run-independent && rm /tmp/psios-run-independent")
+    task = json.loads(c.run("printf '{}' | psiosctl submit system.status --key native-full-run"))
+    receipt = json.loads(c.run("psiosctl wait " + shlex.quote(task["task_id"])))
+    assert receipt["lifecycle"] == "Succeeded", receipt
+    c.run(f"rm -rf {private}/test-inodes && umask 077 && echo volatile > {private}/psios-run-cut")
+
+
 def check_native_volume_usage(c):
     receipt = json.loads(c.run("printf '{\"name\":\"native-usage\"}' | psiosctl submit volume.create --key native-usage-volume"))
     task = json.loads(c.run("psiosctl wait " + shlex.quote(receipt["task_id"])))
@@ -394,13 +419,15 @@ def check_native_mount_topology(c):
     report = call(c, "Artifact.Read", {"reference": task["result"]["artifact_refs"][0]})
     assert report["mount_namespace_inode"] == c.run("stat -Lc %i /proc/self/ns/mnt")
     mounts = {mount["mount_point"]: mount for mount in report["mounts"] if isinstance(mount["mount_point"], str)}
-    state, settings, homes, local_home, scratch, shared = [mounts[path] for path in
-        ("/var/lib", "/etc", "/mnt/psios-homes", "/home/psios", "/tmp", "/dev/shm")]
+    state, settings, homes, local_home, scratch, shared, runtime = [mounts[path] for path in
+        ("/var/lib", "/etc", "/mnt/psios-homes", "/home/psios", "/tmp", "/dev/shm", "/run")]
     assert state["filesystem_type"] == "ext4" and {"nodev", "nosuid", "noexec"}.issubset(state["flags"]), state
     assert settings["device"] == state["device"] and settings["filesystem_root"] == "/etc", settings
     assert homes["filesystem_type"] == "ext4" and homes["device"] != state["device"], homes
     assert local_home["device"] == homes["device"] and local_home["filesystem_root"] == "/psios", local_home
     assert shared["filesystem_type"] == "tmpfs" and {"nodev", "nosuid", "noexec"}.issubset(shared["flags"]), shared
+    assert runtime["filesystem_type"] == "tmpfs" and {"nodev", "nosuid", "noexec"}.issubset(runtime["flags"]), runtime
+    assert runtime["device"] not in (shared["device"], scratch["device"]), runtime
     assert shared["device"] != scratch["device"], (shared, scratch)
     assert scratch["filesystem_type"] == "tmpfs" and {"nodev", "nosuid"}.issubset(scratch["flags"]), scratch
 
@@ -570,6 +597,7 @@ def exercise(args, work):
         assert c.run("pwd") == "/home/psios"
         assert c.run("stat -c '%u:%g:%a' .") == "1000:1000:700"
         check_temporary_storage(c)
+        check_runtime_directory(c)
         if has_mcp:
             check_native_mcp(c)
         chat = check_native_chat(c)
@@ -598,6 +626,7 @@ def exercise(args, work):
     with boot(work, image) as c:
         c.login("psios", operator)
         assert c.run("./observe") == "persisted"
+        c.run("test ! -e /run/psios/psios-run-cut && touch /run/psios/psios-run-shutdown")
         c.run("test ! -e /dev/shm/psios-cut && touch /dev/shm/psios-shutdown")
         c.run("test ! -e /dev/pts/0 && test ! -e /tmp/psios-scratch-marker && test ! -e /tmp/psios-root-scratch && "
               "touch /tmp/psios-scratch-marker")
@@ -633,6 +662,8 @@ def exercise(args, work):
               "</dev/null >/dev/null 2>&1 & p=$!; sleep 0.1; test \"$(readlink /proc/$p/cwd)\" = /tmp")
         c.run("(cd /dev/shm && trap '' TERM HUP && exec tail -f ./psios-shutdown) "
               "</dev/null >/dev/null 2>&1 & p=$!; sleep 0.1; test \"$(readlink /proc/$p/cwd)\" = /dev/shm")
+        c.run("(cd /run/psios && trap '' TERM HUP && exec tail -f ./psios-run-shutdown) "
+              "</dev/null >/dev/null 2>&1 & p=$!; sleep 0.1; test \"$(readlink /proc/$p/cwd)\" = /run/psios")
         hold_terminal(c)
         c.send("poweroff")
         serial = c.until(b"Power down", timeout=30)
@@ -645,6 +676,7 @@ def exercise(args, work):
         c.login("psios", rotated)
         assert c.run("./observe") == "persisted"
         c.run("test ! -e /tmp/psios-scratch-marker && test ! -e /dev/shm/psios-shutdown")
+        c.run("test ! -e /run/psios/psios-run-shutdown && test -S /run/psios/api.sock")
         c.run("test ! -r /root/maintenance")
         assert json.loads(c.run("psiosctl whoami"))["authority_id"] == first[0]
         c.send("exit")
@@ -711,8 +743,8 @@ def exercise(args, work):
     assert sha(image) == pre_reject
     print(f"Verified source {deployment['source_commit']}, node {first[0]}, task {first[1]['task_id']}, "
           "matched deployment receipt, authenticated UEFI console, private persistent homes, full-home isolation, "
-          "bounded volatile /tmp and /dev/shm, offline management, Task, schedule, workflow and chat recovery after power loss, "
-          "clean shutdown with active home, /tmp, /dev/shm and PTY handles, external rescue, clean ext4 "
+          "bounded volatile /tmp, /dev/shm and /run, offline management, Task, schedule, workflow and chat recovery after power loss, "
+          "clean shutdown with active home, /tmp, /dev/shm, /run and PTY handles, external rescue, clean ext4 "
           "after authority refusal, consumed enrollment and damaged payload and mismatched state/home refusal.")
 
 

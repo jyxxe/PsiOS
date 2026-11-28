@@ -156,7 +156,6 @@ def ubuntu_command(instance, target, rejected, port, serial_log, bus="virtio", c
     manifest = json.loads((instance / "manifest.json").read_bytes())
     assert manifest["firmware"] == "OVMF" and manifest["architecture"] == "amd64"
     assert sha(instance / "uefi-code.fd") == manifest["ovmf"]["code_sha256"]
-    assert sha(instance / "uefi-vars.fd") == manifest["ovmf"]["initial_vars_sha256"]
     cmd = ["qemu-system-x86_64", "-nodefaults", "-no-user-config", "-no-reboot",
            "-machine", "q35", "-accel", accel, "-cpu", "host" if accel == "kvm" else "max",
            "-smp", "1", "-m", "1024", "-display", "none", "-monitor", "none",
@@ -511,6 +510,8 @@ def exercise(args, work):
                    check=True, timeout=80)
     manifest = json.loads((instance / "manifest.json").read_bytes())
     assert manifest["package_sha256"] == sha(args.package)
+    # Verify the initial NVRAM before QEMU writes its persistent boot variables.
+    assert sha(instance / "uefi-vars.fd") == manifest["ovmf"]["initial_vars_sha256"]
     image, receipt, operator, admin = make_source(args, work)
     source_digest = sha(image)
     assert source_digest == json.loads(receipt.read_bytes())["initial_image_sha256"]

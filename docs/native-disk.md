@@ -55,6 +55,8 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 
 构建回执格式 6 与启动清单记录 `core_limits`。停机升级沿用可信回执中的限额及原节点身份。来宾可以经独立授权运行 `node.pressure`，核对同一 cgroup 的限额、节流、OOM 和 PID 事件。[资源压力接口](core-runtime.md#linux-资源压力与守护进程-cgroup) · [内核限额与升级验收](../tests/native_core_limits.py)
 
+受限 Core 进程异常退出时，监督进程在状态卷记录 `/var/lib/.psios-core-last-exit`。root 可以看到启动 ID、`wait` 退出状态及进程启动前与退出后观察到的 `oom_group_kill` 计数。内核未提供该计数时记录 `null`。记录只保留最近一次不同的退出证据，正常关机及停机升级保留原记录。[真实 OOM 与进程退出验收](../tests/native_core_limits.py)
+
 运行中的 Core 遇到内核拒绝分配连接线程或文件描述符时，关闭受影响的连接，原工作线程继续处理已准入的任务。容量释放后，同一守护进程恢复接收。启动阶段先创建全部必要线程，再开放任务派发。线程容量不足会返回可诊断错误，串口仍可用于维护。[文件描述符耗尽验收](../tests/test_server_capacity.py)
 
 ## 可选有线接入

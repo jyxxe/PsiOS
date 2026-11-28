@@ -14,6 +14,7 @@ from native_disk import REPO, boot, call, check_clean_shutdown, check_state, pas
 GROUP = "/sys/fs/cgroup/psios-core"
 LIMITS = {"cpu_millicores": 250, "memory_mib": 96, "pids_max": 24}
 FLAGS = ["--core-cpu-millicores", "250", "--core-memory-mib", "96", "--core-pids-max", "24"]
+EXIT_RECORD = "/var/lib/.psios-core-last-exit"
 
 
 def counter(console, file, name):
@@ -91,8 +92,15 @@ def load_core(console):
     before = counter(console, "memory.events.local", "oom_group_kill")
     script = shlex.quote('BEGIN { s="test"; for(i=0;i<25;i++) s=s s; print length(s) }')
     console.run(f'{enter("awk " + script)} >/dev/null 2>&1; [ "$?" -eq 137 ]')
-    assert counter(console, "memory.events.local", "oom_group_kill") > before
+    after = counter(console, "memory.events.local", "oom_group_kill")
+    assert after > before
     wait_restart(console, daemon)
+    boot_id = console.run("cat /proc/sys/kernel/random/boot_id")
+    assert console.run(f"stat -c '%u:%g:%a:%h' {EXIT_RECORD}") == "0:0:600:1"
+    assert json.loads(console.run(f"cat {EXIT_RECORD}")) == {
+        "format": 1, "boot_id": boot_id, "wait_status": 137,
+        "oom_group_kill_before": before, "oom_group_kill_after": after,
+    }
     print("Observed group OOM and restarted Core in the same cgroup", flush=True)
 
     daemon = console.run("pidof psiosd")
@@ -101,11 +109,21 @@ def load_core(console):
     console.run(f"kill -KILL {daemon}")
     wait_restart(console, daemon)
     console.run(f"! grep -qx {orphan} {GROUP}/cgroup.procs")
+    last_exit = json.loads(console.run(f"cat {EXIT_RECORD}"))
+    assert last_exit == {"format": 1, "boot_id": boot_id, "wait_status": 137,
+                         "oom_group_kill_before": after, "oom_group_kill_after": after}, last_exit
 
     daemon = console.run("pidof psiosd")
+    pending = EXIT_RECORD + ".pending"
+    console.run(f"printf 'canary' > /var/lib/core-exit-canary && ln -s core-exit-canary {pending}")
     console.run(f"echo 'max 100000' > {GROUP}/cpu.max; kill -KILL {daemon}; sleep 4; ! pidof psiosd")
     console.run(f"echo '25000 100000' > {GROUP}/cpu.max")
     wait_restart(console, daemon)
+    assert json.loads(console.run(f"cat {EXIT_RECORD}")) == last_exit
+    assert console.run(f"readlink {pending}") == "core-exit-canary"
+    assert console.run("cat /var/lib/core-exit-canary") == "canary"
+    console.run(f"rm -f {pending} /var/lib/core-exit-canary")
+    return last_exit
 
 
 def refuse_unavailable_controller(args, work, disk, receipt):
@@ -149,9 +167,10 @@ def exercise(args, work):
         assert json.loads(console.run("cat /psios-deployment.json"))["core_limits"] == LIMITS
         check_limits(console)
         initial = check_state(console)
+        console.run(f"test ! -e {EXIT_RECORD}")
         console.send("exit")
         console.login("root", root)
-        load_core(console)
+        exit_record = load_core(console)
         console.send("cd /; exec poweroff")
         assert console.vm.wait(35) == 0
     check_clean_shutdown(disk)
@@ -172,8 +191,11 @@ def exercise(args, work):
         after = check_state(console)
         assert after[0] == initial[0] and after[1]["task_id"] == initial[1]["task_id"] and after[2] == initial[2]
         check_limits(console)
+        console.run(f"test ! -r {EXIT_RECORD}")
         console.send("exit")
         console.login("root", root)
+        assert json.loads(console.run(f"cat {EXIT_RECORD}")) == exit_record
+        assert console.run("cat /proc/sys/kernel/random/boot_id") != exit_record["boot_id"]
         console.send("cd /; exec poweroff")
         assert console.vm.wait(35) == 0
     check_clean_shutdown(upgraded)
@@ -189,7 +211,7 @@ def exercise(args, work):
         console.send("cd /; exec poweroff")
         assert console.vm.wait(35) == 0
     check_clean_shutdown(tiny)
-    print("PASS native CPU, PID and OOM enforcement, RPC and startup pressure, recovery and upgrade")
+    print("PASS native CPU, PID and OOM enforcement, private exit evidence, recovery and upgrade")
 
 
 if __name__ == "__main__":

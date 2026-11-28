@@ -211,6 +211,45 @@ async function verifyWindowTiling() {
   assert.ok(requests.every(url => new URL(url).origin === input.origin));
 }
 
+async function verifyApplicationLauncher() {
+  const labels = 'Array.from(document.querySelectorAll("#launcher-apps button"), button => button.textContent)';
+  await keyboardActivate("#open-launcher");
+  assert.ok(await evaluate('document.getElementById("launcher").matches(":modal") && document.activeElement.id === "launcher-query"'));
+  assert.ok((await evaluate(labels)).includes("节点管理"));
+  assert.ok(!requests.some(url => new URL(url).pathname === "/api/node"));
+  await send("Input.insertText", { text: "<unknown>" });
+  assert.deepEqual(await evaluate(labels), []);
+  assert.ok(await evaluate('!document.getElementById("launcher-empty").hidden'));
+  await send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+  await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+  await waitFor("launcher focus restored after Escape", '!document.getElementById("launcher").open && document.activeElement.id === "open-launcher"');
+
+  await send("Emulation.setDeviceMetricsOverride", {
+    width: 360, height: 800, screenWidth: 360, screenHeight: 800, deviceScaleFactor: 1, mobile: true,
+  });
+  await waitFor("narrow launcher viewport", "window.innerWidth === 360");
+  await keyboardActivate("#open-launcher");
+  assert.ok(await evaluate('document.getElementById("launcher").getBoundingClientRect().right <= 360'));
+  await send("Input.insertText", { text: "ＮＯＤＥ" });
+  assert.deepEqual(await evaluate(labels), ["节点管理"]);
+  await keyboardActivate("#launcher-query");
+  await waitFor("launched Node inventory from Core", 'document.getElementById("node-view").textContent.includes(' + JSON.stringify(input.node) + ')');
+  assert.ok(await evaluate('!document.getElementById("launcher").open && document.activeElement.id === "title-node"'));
+  await keyboardActivate('#window-node [data-action="minimize"]');
+  await keyboardActivate("#nav-tasks");
+  await keyboardActivate("#open-launcher");
+  assert.deepEqual((await evaluate(labels)).slice(0, 2), ["任务中心", "节点管理"]);
+  await send("Input.insertText", { text: "节点" });
+  await keyboardActivate("#launcher-apps button");
+  await waitFor("restored minimized Node", 'document.getElementById("node-view").textContent.includes(' + JSON.stringify(input.node) + ')');
+  assert.equal(await evaluate('document.querySelectorAll("#window-node").length'), 1);
+  await click("#logout");
+  await waitFor("launcher state cleared after logout", 'document.getElementById("workspace").hidden && document.activeElement.id === "code"');
+  assert.deepEqual(await evaluate(labels), []);
+  assert.equal(await evaluate('document.getElementById("launcher-query").value'), "");
+  assert.deepEqual(exceptions, []);
+}
+
 async function test() {
   await send("Browser.getVersion", {}, 35_000);
   if (input.downloads) await send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: input.downloads });
@@ -232,6 +271,7 @@ async function test() {
   await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
   await waitFor("paired desktop", '!document.querySelector("#workspace").hidden && !document.querySelector("#empty-desktop").hidden');
   if (input.windowTiling) return verifyWindowTiling();
+  if (input.applicationLauncher) return verifyApplicationLauncher();
   assert.ok(await evaluate('document.activeElement.id === "nav-node" && document.querySelectorAll(".app-window:not([hidden])").length === 0'));
   assert.ok(!requests.some(url => ["/api/node", "/api/tasks"].includes(new URL(url).pathname)));
   if (input.projectReview) {
@@ -545,6 +585,9 @@ async function test() {
     await waitFor("visible task", 'document.querySelector("#task-rows button") !== null');
     await selectTask(input.task);
     await waitFor("authorized result", 'document.querySelector("#task-content").textContent.includes("成功")');
+    await keyboardActivate("#open-launcher");
+    await send("Input.insertText", { text: "节点" });
+    assert.ok(await evaluate('document.getElementById("launcher").open && document.getElementById("launcher-query").value === "节点"'));
     const reads = requests.filter(url => new URL(url).pathname.startsWith("/api/")).length;
     writeSync(input.control_fd, Buffer.from("R"));
     if (input.realIdle) {
@@ -558,7 +601,9 @@ async function test() {
     await waitFor("redaction after the native Shell session ends", 'document.querySelector("#workspace").hidden');
     assert.ok(await evaluate('document.querySelector("#node-view").textContent === "" && ' +
       'document.querySelector("#task-content").textContent === "" && document.querySelector("#task-rows").textContent === "" && ' +
-      'document.querySelector("#principal").textContent === "" && !document.querySelector("#pairing").hidden'));
+      'document.querySelector("#principal").textContent === "" && !document.querySelector("#pairing").hidden && ' +
+      '!document.getElementById("launcher").open && document.getElementById("launcher-query").value === "" && ' +
+      'document.getElementById("launcher-apps").children.length === 0 && document.activeElement.id === "code"'));
     assert.deepEqual(exceptions, []);
     return;
   }

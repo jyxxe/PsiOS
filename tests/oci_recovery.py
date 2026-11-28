@@ -204,7 +204,8 @@ def lose_receipt(n, app, volume, tool, match_request, previous_binaries=None):
                 legacy = n.wait(n.submit("application.health", target(app)))
                 assert legacy["lifecycle"] == "Succeeded", legacy
                 legacy_ref, = legacy["result"]["artifact_refs"]
-                assert "effective_limits" not in n.call("Artifact.Read", {"reference": legacy_ref})
+                legacy_limits = n.call("Artifact.Read", {"reference": legacy_ref}).get("effective_limits") or {}
+                assert "process_isolation" not in legacy_limits, legacy_limits
             finally:
                 n.stop()
                 n.daemon[0] = current

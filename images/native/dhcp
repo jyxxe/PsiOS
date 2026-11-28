@@ -14,12 +14,12 @@ slaac_dns=
 
 retry() {
     printf '%s\n' "$1" > "$run/status"
-    case "$profile" in dhcp|slaac-rdnss) sleep 15 ;; esac
+    case "$profile" in dhcp|dhcp-slaac|slaac-rdnss) sleep 15 ;; esac
     exit 1
 }
 
 case "$profile" in
-    dhcp)
+    dhcp|dhcp-slaac)
         config=/etc/psios/dhcp-mac
         [ -f "$config" ] && [ ! -L "$config" ] && [ "$(stat -c '%u:%g:%a:%s' "$config")" = 0:0:600:18 ] || retry 'invalid profile file'
         mac=$(head -c 19 "$config")
@@ -88,16 +88,18 @@ if [ "$profile" = slaac-rdnss ]; then
         [ "$(stat -c '%u:%g:%a' /var/lib/dhcpcd)" = 0:0:700 ] || retry 'could not protect router discovery state'
     printf 'IPv6 router discovery with RDNSS on %s\n' "$link" > "$run/status"
     exec /sbin/dhcpcd -6 -B -f /psios-rdnss.conf --env "PSIOS_RDNSS_INTERFACE=$link" "$link"
-elif [ "$profile" = slaac ]; then
+elif [ "$profile" = slaac ] || [ "$profile" = dhcp-slaac ]; then
     for option in accept_ra autoconf accept_ra_defrtr accept_ra_pinfo accept_dad dad_transmits; do
         printf '1\n' > "$ipv6_sysctls/$option" || retry 'could not enable IPv6 router discovery'
     done
     for option in accept_redirects disable_ipv6; do
         printf '0\n' > "$ipv6_sysctls/$option" || retry 'could not apply the IPv6 discovery policy'
     done
-    apply_slaac_profile || retry 'could not start IPv6 router discovery'
-    printf 'IPv6 router discovery enabled on %s\n' "$link" > "$run/status"
-    exit 0
+    if [ "$profile" = slaac ]; then
+        apply_slaac_profile || retry 'could not start IPv6 router discovery'
+        printf 'IPv6 router discovery enabled on %s\n' "$link" > "$run/status"
+        exit 0
+    fi
 elif [ -z "$static6_address" ]; then
     printf '1\n' > "$ipv6_sysctls/disable_ipv6" || retry 'could not apply the IPv4-only profile'
 else
@@ -110,7 +112,7 @@ else
     printf '0\n' > "$ipv6_sysctls/disable_ipv6" || retry 'could not enable IPv6 on the static interface'
 fi
 ip link set dev "$link" up || retry 'could not bring up the interface'
-if [ "$profile" != dhcp ]; then
+if [ "$profile" != dhcp ] && [ "$profile" != dhcp-slaac ]; then
     . /psios-static
     case "$profile" in
         static) family=IPv4; description=$static_address ;;

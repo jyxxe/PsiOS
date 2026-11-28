@@ -52,6 +52,9 @@ TRIAL_RECEIPT_FORMAT = 7
 E1000E_RECEIPT_FORMAT = 8
 E1000E_MODULE = "psios-e1000e.ko"
 DHCP_SERVICE = "::respawn:/bin/sh /psios-dhcp"
+DHCP_SLAAC = "dhcp-slaac"
+DHCP_SLAAC_SERVICE = DHCP_SERVICE + " " + DHCP_SLAAC
+DHCP_SLAAC_RECEIPT_FORMAT = 13
 STATIC_SERVICE = "::once:/bin/sh /psios-dhcp "
 SLAAC_RECEIPT_FORMAT = 10
 SLAAC = "slaac"
@@ -334,15 +337,15 @@ def validate_persisted_static(work, state, version):
         raise ValueError(f"invalid persisted static IPv{version} profile") from e
 
 
-def validate_persisted_e1000e(work, state):
+def validate_persisted_dhcp(work, state, launcher):
     raw = read_root_file(work, state, "/etc/psios/dhcp-mac", 18, "0600")
     try:
         mac = unicast_mac(raw.decode("ascii").removesuffix("\n"))
     except (UnicodeError, argparse.ArgumentTypeError) as error:
-        raise ValueError("invalid persisted e1000e DHCP MAC") from error
+        raise ValueError("invalid persisted DHCP MAC") from error
     inittab = read_root_file(work, state, "/etc/inittab", 16 * 1024, "0(?:600|644)")
-    if raw != (mac + "\n").encode("ascii") or inittab.splitlines().count(DHCP_SERVICE.encode()) != 1:
-        raise ValueError("invalid persisted e1000e DHCP configuration or launcher")
+    if raw != (mac + "\n").encode("ascii") or inittab.splitlines().count(launcher.encode()) != 1:
+        raise ValueError("invalid persisted DHCP configuration or launcher")
 
 
 def validate_persisted_slaac(work, state, mode):
@@ -366,6 +369,9 @@ def validate_persisted_slaac(work, state, mode):
 
 def validate_persisted_network(work, state, receipt):
     profile = receipt.get("network_profile")
+    if profile == DHCP_SLAAC:
+        validate_persisted_dhcp(work, state, DHCP_SLAAC_SERVICE)
+        return
     if profile in RA_SERVICES:
         validate_persisted_slaac(work, state, profile)
         return
@@ -379,7 +385,7 @@ def validate_persisted_network(work, state, receipt):
     if "wired_driver" not in receipt:
         return
     if mode is None:
-        validate_persisted_e1000e(work, state)
+        validate_persisted_dhcp(work, state, DHCP_SERVICE)
         return
     inittab = read_root_file(work, state, "/etc/inittab", 16 * 1024, "0(?:600|644)")
     if inittab.splitlines().count((STATIC_SERVICE + mode).encode()) != 1:
@@ -413,7 +419,10 @@ def host_config(seed, args):
     daemon = LIMITED_SERVICE if args.core_limits else "::respawn:/bin/su -s /bin/sh psios -c 'exec /bin/psiosd serve'"
     inittab = (f"{daemon}\nttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100\n"
                "::shutdown:/bin/sh /psios-shutdown\n")
-    if args.network_profile in RA_SERVICES:
+    if args.dhcp_mac:
+        (seed / "etc/psios/dhcp-mac").write_text(args.dhcp_mac + "\n")
+        inittab += (DHCP_SLAAC_SERVICE if args.network_profile == DHCP_SLAAC else DHCP_SERVICE) + "\n"
+    elif args.network_profile in RA_SERVICES:
         (seed / "etc/psios/slaac").write_text(args.slaac_network)
         inittab += RA_SERVICES[args.network_profile] + "\n"
     elif args.network_profile:
@@ -421,9 +430,6 @@ def host_config(seed, args):
             if config:
                 (seed / "etc/psios" / name).write_text(config)
         inittab += STATIC_SERVICE + STATIC_MODES[args.network_profile] + "\n"
-    elif args.dhcp_mac:
-        (seed / "etc/psios/dhcp-mac").write_text(args.dhcp_mac + "\n")
-        inittab += DHCP_SERVICE + "\n"
     if args.dhcp_mac or args.network_profile:
         (seed / "etc/resolv.conf").symlink_to("/run/psios-network/resolv.conf")
     if args.ssh_authorized_key:
@@ -751,7 +757,8 @@ def parse_receipt(raw):
     if len(raw) > 16 * 1024:
         raise ValueError("previous build receipt exceeds size limit")
     prior = json.loads(raw)
-    extended_formats = (E1000E_RECEIPT_FORMAT, SSH_RECEIPT_FORMAT, SLAAC_RECEIPT_FORMAT, RDNSS_RECEIPT_FORMAT)
+    router_formats = (SLAAC_RECEIPT_FORMAT, RDNSS_RECEIPT_FORMAT, DHCP_SLAAC_RECEIPT_FORMAT)
+    extended_formats = (E1000E_RECEIPT_FORMAT, SSH_RECEIPT_FORMAT, *router_formats)
     if isinstance(prior, dict) and (prior.get("format") == TRIAL_RECEIPT_FORMAT or "boot_mode" in prior):
         raise ValueError("isolated trial disks cannot be upgrade sources; use the original stopped deployment")
     if (not isinstance(prior, dict) or type(prior.get("format")) is not int
@@ -770,7 +777,7 @@ def parse_receipt(raw):
         raise ValueError("larger raw capacity requires a geometry-bearing build receipt")
     layout = Layout.from_receipt(prior) if prior["format"] >= 2 else Layout()
     profiles = {4: (STATIC_IPV4,), 5: (STATIC_IPV6, STATIC_DUAL), SLAAC_RECEIPT_FORMAT: (SLAAC,),
-                RDNSS_RECEIPT_FORMAT: (RDNSS,)}
+                RDNSS_RECEIPT_FORMAT: (RDNSS,), DHCP_SLAAC_RECEIPT_FORMAT: (DHCP_SLAAC,)}
     if prior["format"] in profiles:
         if prior.get("network_profile") not in profiles[prior["format"]]:
             raise ValueError("invalid network profile in previous build receipt")
@@ -782,22 +789,22 @@ def parse_receipt(raw):
         if not isinstance(profile, str) or profile not in supported.get(prior["format"], {}):
             raise ValueError("invalid network profile in previous build receipt")
     if prior["format"] == E1000E_RECEIPT_FORMAT or (
-            prior["format"] == SSH_RECEIPT_FORMAT and "wired_driver" in prior):
+            prior["format"] in (SSH_RECEIPT_FORMAT, DHCP_SLAAC_RECEIPT_FORMAT) and "wired_driver" in prior):
         if prior.get("wired_driver") != "e1000e":
             raise ValueError("invalid wired driver in previous native build receipt")
     elif "wired_driver" in prior:
-        raise ValueError("wired driver evidence requires build receipt format 8 or 9")
+        raise ValueError("wired driver evidence requires build receipt format 8, 9 or 13")
     if prior["format"] == SSH_RECEIPT_FORMAT or (
-            prior["format"] in (SLAAC_RECEIPT_FORMAT, RDNSS_RECEIPT_FORMAT) and "ssh_console" in prior):
+            prior["format"] in router_formats and "ssh_console" in prior):
         if prior.get("ssh_console") != SSH_PROFILE:
             raise ValueError("invalid SSH console in previous build receipt")
     elif "ssh_console" in prior:
-        raise ValueError("SSH console evidence requires build receipt format 9, 10 or 11")
+        raise ValueError("SSH console evidence requires build receipt format 9, 10, 11 or 13")
     limits = None
     if prior["format"] == 6 or (prior["format"] in extended_formats and "core_limits" in prior):
         limits = CoreLimits.from_receipt(prior.get("core_limits"))
     elif "core_limits" in prior:
-        raise ValueError("Core resource limits require build receipt format 6, 8, 9, 10 or 11")
+        raise ValueError("Core resource limits require build receipt format 6, 8, 9, 10, 11 or 13")
     if prior["format"] == 3 or (prior["format"] >= 4 and "secure_boot" in prior):
         trust = prior.get("secure_boot")
         if (not isinstance(trust, dict) or set(trust) != {"scheme", "certificate_sha256", "efi_stub_sha256"}
@@ -1026,6 +1033,8 @@ def prepare_trial_disk(work, disk, layout, configuration, *, secure_boot_require
 
 
 def production_receipt_format(properties):
+    if properties.get("network_profile") == DHCP_SLAAC:
+        return DHCP_SLAAC_RECEIPT_FORMAT
     if properties.get("network_profile") == RDNSS:
         return RDNSS_RECEIPT_FORMAT
     if properties.get("network_profile") == SLAAC:
@@ -1245,6 +1254,8 @@ def main():
     network.add_argument("--dhcp-mac", type=unicast_mac, help="enable IPv4 DHCP on the matching NIC of a new disk")
     network.add_argument("--static-mac", type=unicast_mac, help="enable static networking on the matching NIC of a new disk")
     network.add_argument("--slaac-mac", type=unicast_mac, help="enable IPv6 router discovery on the matching virtio NIC of a new disk")
+    parser.add_argument("--dhcp-slaac", action="store_true",
+                        help="enable kernel IPv6 router discovery with the selected IPv4 DHCP interface")
     parser.add_argument("--dhcp-driver", choices=("virtio", "e1000e"),
                         help="kernel driver for the DHCP NIC (default virtio)")
     parser.add_argument("--static-driver", choices=("virtio", "e1000e"),
@@ -1278,6 +1289,8 @@ def main():
             parser.error("upgrade preserves /etc/localtime from the source")
         if not timezone_name(args.timezone):
             parser.error("invalid time zone name")
+    if args.dhcp_slaac and not args.dhcp_mac:
+        parser.error("--dhcp-slaac requires --dhcp-mac on a new disk")
     if args.dhcp_driver and not args.dhcp_mac:
         parser.error("--dhcp-driver requires --dhcp-mac on a new disk")
     if args.static_driver and not args.static_mac:
@@ -1290,6 +1303,8 @@ def main():
         args.network_profile = STATIC_DUAL if args.static_ipv6_network else STATIC_IPV4
     elif args.static_ipv6_network:
         args.network_profile = STATIC_IPV6
+    elif args.dhcp_slaac:
+        args.network_profile = DHCP_SLAAC
     if args.network_profile and args.wired_driver:
         args.network_profile = args.network_profile.replace("virtio-", "e1000e-", 1)
     if args.slaac_dns and args.slaac_mac is None:

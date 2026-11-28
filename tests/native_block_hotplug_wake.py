@@ -32,7 +32,8 @@ def exercise(args, work):
                     "--core-archive", args.archive, "--core-sha256", sha(args.archive),
                     "--console-hash", operator_hash, "--root-console-hash", admin_hash],
                    check=True, stdout=subprocess.DEVNULL, timeout=180)
-    with boot(work, disk, pace_commands=True) as console:
+    # Keep the installed drive on the same PCI path across both boots.
+    with boot(work, disk, block_hotplug=True, pace_commands=True) as console:
         console.login("root", admin)
         console.run("sed -i 's/^{/{\"block_device_reconcile_ms\":60000,/' /etc/psios/core.json && sync -f /etc")
         console.send("cd /; exec poweroff")

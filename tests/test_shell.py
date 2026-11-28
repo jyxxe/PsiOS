@@ -26,7 +26,8 @@ from support import Failure, Node, key, target
 
 class Shell:
     def __init__(self, node, token_file, endpoint=None, *, cancel_pending=False, send_chat=False,
-                 review_work_items=False, manage_agent_sessions=False, files=None, files_preview=False, resolver_delegation=None):
+                 review_work_items=False, manage_agent_sessions=False, files=None, files_preview=False,
+                 files_download=False, resolver_delegation=None):
         self.process = subprocess.Popen(
             [node.binaries / "psiosctl", "--socket", endpoint or node.socket, "--token-file", token_file, "shell",
              *(["--cancel-pending-tasks"] if cancel_pending else []), *(["--send-chat"] if send_chat else []),
@@ -34,6 +35,7 @@ class Shell:
              *(["--manage-agent-sessions"] if manage_agent_sessions else []),
              *(["--files-volume", files[0], "--files-delegation", files[1]] if files else []),
              *(["--files-preview"] if files_preview else []),
+             *(["--files-download"] if files_download else []),
              *(["--resolver-delegation", resolver_delegation] if resolver_delegation else [])],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
         )
@@ -97,11 +99,12 @@ class ShellTests(unittest.TestCase):
         self.addCleanup(self.node.close)
 
     def shell(self, token_file=None, *, cancel_pending=False, send_chat=False,
-              review_work_items=False, manage_agent_sessions=False, files=None, files_preview=False, resolver_delegation=None):
+              review_work_items=False, manage_agent_sessions=False, files=None, files_preview=False,
+              files_download=False, resolver_delegation=None):
         shell = Shell(self.node, token_file or self.node.witness / "owner.token",
                       cancel_pending=cancel_pending, send_chat=send_chat, review_work_items=review_work_items,
                       manage_agent_sessions=manage_agent_sessions, files=files, files_preview=files_preview,
-                      resolver_delegation=resolver_delegation)
+                      files_download=files_download, resolver_delegation=resolver_delegation)
         self.addCleanup(shell.close)
         return shell
 
@@ -211,6 +214,54 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(shell.http(endpoint, first, token)[2], result)
         self.node.call("Grant.Revoke", target(grant["grant_ref"]))
         self.error(shell, 403, "PermissionDenied", endpoint, data=first, token=token)
+
+    def test_file_download_is_opt_in_and_verifies_binary_content_and_scope(self):
+        root, grant, binding = self.file_volume(preview=True)
+        contents = bytes(range(256)) * 512
+        (root / "documents/binary.bin").write_bytes(contents)
+        (root / "oversized.bin").write_bytes(b"x" * (384 * 1024 + 1))
+        version = self.node.get(binding[0])["reference"]["version"]
+        body = {"path": "documents/binary.bin", "volume_version": version}
+        endpoint = "/api/volume-download"
+        preview = self.shell(files=binding, files_preview=True)
+        paired = preview.pair()
+        self.assertNotIn("download_files", paired)
+        self.error(preview, 404, "NotFound", endpoint, data=body, token=paired["token"])
+        shell = self.shell(files=binding, files_download=True)
+        self.error(shell, 401, "AuthenticationRequired", endpoint, data=body)
+        session = shell.pair()
+        self.assertTrue(session["download_files"])
+        self.assertNotIn("preview_files", session)
+        token = session["token"]
+        for invalid in (dict(body, volume="other"), dict(body, path="../outside")):
+            self.error(shell, 400, "InvalidArgument", endpoint, data=invalid, token=token)
+        self.error(shell, 413, "QuotaExceeded", endpoint, data=dict(body, path="oversized.bin"), token=token)
+        status, headers, data = shell.http(endpoint, body, token)
+        self.assertEqual((status, data), (200, contents))
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(headers["Content-Type"], "application/octet-stream")
+        self.assertTrue(headers["Content-Disposition"].startswith("attachment;"))
+        self.assertEqual(headers["X-PsiOS-Digest"], "sha256:" + hashlib.sha256(contents).hexdigest())
+        self.node.call("Grant.Revoke", target(grant["grant_ref"]))
+        self.error(shell, 403, "PermissionDenied", endpoint, data=body, token=token)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
+    def test_browser_downloads_verified_volume_file_without_enabling_previews(self):
+        root, _, binding = self.file_volume(preview=True)
+        contents = bytes(range(256)) * 512
+        (root / "documents/binary.bin").write_bytes(contents)
+        shell = self.shell(files=binding, files_download=True)
+        downloads = self.node.base / "downloads"
+        downloads.mkdir()
+        digest = "sha256:" + hashlib.sha256(contents).hexdigest()
+        args = dict(origin=shell.origin, code=shell.code, fileDownload=True, digest=digest,
+                    downloads=str(downloads), profile=str(self.node.base / "browser"))
+        subprocess.run(["node", str(Path(__file__).with_name("shell_browser.mjs")),
+                        os.environ.get("PSIOS_TEST_CHROME", "google-chrome")],
+                       input=json.dumps(args), text=True, check=True, timeout=60)
+        self.assertEqual((downloads / f"psios-{digest.removeprefix('sha256:')}.bin").read_bytes(), contents)
+        self.assertEqual(shell.process.wait(timeout=5), 0)
 
     @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
     def test_browser_previews_utf8_files_as_bounded_literal_text(self):
@@ -1707,3 +1758,32 @@ class ShellTests(unittest.TestCase):
             self.assertIsNone(headers["Content-Disposition"])
             self.assertEqual(shell.process.wait(timeout=5), 0)
             self.assertFalse(select.select([listener], [], [], 0)[0], "download requested another Core chunk")
+
+    def test_logout_during_volume_download_stops_before_submitting_the_prepared_task(self):
+        node = self.node
+        _, _, binding = self.file_volume(preview=True)
+        version = node.get(binding[0])["reference"]["version"]
+        proxy = node.base / "volume-download.sock"
+        waiting, release = Event(), Event()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener, ThreadPoolExecutor(2) as pool:
+            listener.bind(str(proxy))
+            listener.listen()
+            listener.settimeout(8)
+            forwarding = pool.submit(self.relay, listener, ("Principal.WhoAmI", "Task.Prepare"),
+                                     "Task.Prepare", waiting, release)
+            shell = Shell(node, node.witness / "owner.token", proxy, files=binding, files_download=True)
+            self.addCleanup(shell.close)
+            token = shell.pair()["token"]
+            body = {"path": "documents/会议记录.txt", "volume_version": version}
+            download = pool.submit(shell.http, "/api/volume-download", body, token)
+            try:
+                self.assertTrue(waiting.wait(8))
+                self.assertEqual(shell.http("/api/logout", {}, token)[0], 200)
+            finally:
+                release.set()
+            forwarding.result(8)
+            status, headers, fault = download.result(8)
+            self.assertEqual((status, fault["error"]["code"]), (401, "AuthenticationRequired"))
+            self.assertIsNone(headers["Content-Disposition"])
+            self.assertEqual(shell.process.wait(timeout=5), 0)
+            self.assertFalse(select.select([listener], [], [], 0)[0], "download submitted a Core Task after logout")

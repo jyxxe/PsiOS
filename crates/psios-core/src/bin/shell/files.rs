@@ -1,6 +1,6 @@
 use psios_api::{
-    ApiError, ApiResult, Client, LocalReadBinding, ResourceRef, VOLUME_FILES_RESULT_BYTES,
-    VolumeFileChunkQuery, VolumeFilesQuery, parse,
+    ApiError, ApiResult, Client, LocalReadBinding, MAX_VOLUME_FILE_READ_BYTES, ResourceRef,
+    VOLUME_FILES_RESULT_BYTES, VolumeFileChunkQuery, VolumeFilesQuery, parse,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -10,6 +10,7 @@ pub(crate) struct VolumeAccess {
     pub volume: String,
     pub delegation: String,
     pub preview: bool,
+    pub download: bool,
 }
 
 #[derive(Deserialize)]
@@ -25,6 +26,31 @@ pub(super) struct Preview {
     pub key: String,
     pub path: String,
     pub volume_version: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Download {
+    path: String,
+    volume_version: String,
+}
+
+impl Download {
+    pub(super) fn read(
+        self,
+        access: VolumeAccess,
+        client: &Client,
+        check: &impl Fn() -> ApiResult<()>,
+    ) -> ApiResult<Vec<u8>> {
+        client.volume_file_bytes_checked(
+            &access.volume,
+            &self.volume_version,
+            &self.path,
+            &access.delegation,
+            MAX_VOLUME_FILE_READ_BYTES,
+            check,
+        )
+    }
 }
 
 impl Directory {

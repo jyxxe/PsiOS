@@ -99,6 +99,7 @@ enum Endpoint {
     ApplicationReleases,
     VolumeDirectory,
     VolumePreview,
+    VolumeDownload,
     Conversations,
     ConversationMessages,
     AgentSessions,
@@ -269,6 +270,7 @@ enum CoreRequest {
     ApplicationReleases(ApplicationReleases),
     VolumeDirectory(files::Directory, VolumeAccess),
     VolumePreview(files::Preview, VolumeAccess),
+    VolumeDownload(files::Download, VolumeAccess),
     Conversations(DirectoryPage),
     ConversationMessages(ConversationMessages),
     AgentSessions(Page),
@@ -308,6 +310,15 @@ impl CoreRequest {
                 StatusCode::OK,
                 preview.read(access, client, &check)?,
             )),
+            Self::VolumeDownload(download, access) => {
+                let bytes = download.read(access, client, &check)?;
+                let digest = HeaderValue::from_str(&psios_api::sha256(&bytes))
+                    .map_err(|_| ApiError::new("RecoveryRequired", "invalid file digest"))?;
+                check()?;
+                let mut file = attachment(bytes, "attachment; filename=\"psios-volume-file.bin\"");
+                file.headers_mut().insert("x-psios-digest", digest);
+                Ok(file)
+            }
             Self::Applications(page) => {
                 let snapshot = client.call(
                     "Resource.List",
@@ -770,16 +781,10 @@ fn bounded_artifact_response(
     check()?;
     confirm()?;
     if download {
-        let mut file = response(
-            StatusCode::OK,
-            "application/octet-stream",
-            Bytes::from(bytes),
-        );
-        file.headers_mut().insert(
-            header::CONTENT_DISPOSITION,
-            HeaderValue::from_static("attachment; filename=\"psios-artifact.bin\""),
-        );
-        return Ok(file);
+        return Ok(attachment(
+            bytes,
+            "attachment; filename=\"psios-artifact.bin\"",
+        ));
     }
     let content = String::from_utf8(bytes)
         .map_err(|_| ApiError::new("RecoveryRequired", "verified artifact is not UTF-8"))?;
@@ -787,6 +792,19 @@ fn bounded_artifact_response(
         StatusCode::OK,
         json!({"reference":reference,"content_json":content}),
     ))
+}
+
+fn attachment(bytes: Vec<u8>, disposition: &'static str) -> HttpResponse {
+    let mut file = response(
+        StatusCode::OK,
+        "application/octet-stream",
+        Bytes::from(bytes),
+    );
+    file.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static(disposition),
+    );
+    file
 }
 
 fn response(status: StatusCode, content_type: &'static str, body: Bytes) -> HttpResponse {
@@ -924,6 +942,10 @@ fn rpc(endpoint: Endpoint, data: Value, options: &Options) -> Result<CoreRequest
             options.files.clone().ok_or(INVALID)?,
         )),
         Endpoint::VolumePreview => Ok(CoreRequest::VolumePreview(
+            serde_json::from_value(data).map_err(|_| INVALID)?,
+            options.files.clone().ok_or(INVALID)?,
+        )),
+        Endpoint::VolumeDownload => Ok(CoreRequest::VolumeDownload(
             serde_json::from_value(data).map_err(|_| INVALID)?,
             options.files.clone().ok_or(INVALID)?,
         )),
@@ -1069,6 +1091,15 @@ impl Shell {
             {
                 Endpoint::VolumePreview
             }
+            "/api/volume-download"
+                if self
+                    .options
+                    .files
+                    .as_ref()
+                    .is_some_and(|files| files.download) =>
+            {
+                Endpoint::VolumeDownload
+            }
             "/api/conversations" => Endpoint::Conversations,
             "/api/conversation-messages" => Endpoint::ConversationMessages,
             "/api/agent-sessions" => Endpoint::AgentSessions,
@@ -1109,6 +1140,9 @@ impl Shell {
                 reply["browse_files"] = json!(true);
                 if files.preview {
                     reply["preview_files"] = json!(true);
+                }
+                if files.download {
+                    reply["download_files"] = json!(true);
                 }
             }
             return Ok(json_response(StatusCode::OK, reply));

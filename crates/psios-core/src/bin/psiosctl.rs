@@ -68,6 +68,9 @@ enum Cmd {
         /// Allow bounded UTF-8 text previews with a volume.read_chunk delegation.
         #[arg(long, requires = "files_volume")]
         files_preview: bool,
+        /// Allow verified downloads from the configured Volume with a volume.read_chunk delegation.
+        #[arg(long, requires = "files_volume")]
+        files_download: bool,
         /// Allow the paired browser to observe the local resolver with this exact delegation.
         #[arg(long)]
         resolver_delegation: Option<String>,
@@ -942,6 +945,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             files_volume,
             files_delegation,
             files_preview,
+            files_download,
             resolver_delegation,
         } => {
             return shell::run(
@@ -957,6 +961,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             volume,
                             delegation,
                             preview: files_preview,
+                            download: files_download,
                         }),
                     resolver_delegation,
                 },

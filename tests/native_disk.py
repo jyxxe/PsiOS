@@ -136,10 +136,10 @@ def boot(work, image, network_mac=None, extra_disk=None, tap=None, *, rtc_base=N
         if extra_disk is not None:
             cmd += ["-drive", f"if=none,format=raw,id=additional,file={extra_disk.name}",
                     "-device", disk_device(extra_bus, "additional")]
-        cmd += ["-drive", f"if=none,format={disk_format},id=installed,file={image.name}",
+        cmd += ["-drive", f"if=none,format={disk_format},id=installed,file={image.resolve()}",
                 "-device", disk_device(disk_bus, "installed") + ",bootindex=1"]
     else:
-        cmd += ["-boot", "order=c,strict=on", "-drive", f"if=virtio,format={disk_format},file={image.name}"]
+        cmd += ["-boot", "order=c,strict=on", "-drive", f"if=virtio,format={disk_format},file={image.resolve()}"]
     if network_mac:
         network = (f"tap,id=network,ifname={tap},script=no,downscript=no" if tap
                    else "user,id=network,net=192.0.2.0/24,dhcpstart=192.0.2.20")

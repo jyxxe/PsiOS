@@ -77,6 +77,8 @@ IPv6 网关可以是链路本地地址。系统先等待 IPv6 重复地址检测
 默认路由。双栈配置成功后一次性发布 DNS。
 该配置写入 root 私有文件，网络状态保存在 /run/psios-network/status。
 静态 IPv4 盘使用格式 4 回执，静态 IPv6 与双栈盘使用格式 5 回执。
+可用 --slaac-mac 为新盘绑定 Virtio 网口并接收 IPv6 路由器通告。
+--slaac-dns 可设显式 IPv6 DNS。此模式使用格式 10 回执，停机更新沿用原配置。
 签名盘的证书信息在 secure_boot 中。
 
 升级已初始化的三分区开发盘时，先停止虚机，保留原 raw 磁盘、EFI

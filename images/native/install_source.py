@@ -141,6 +141,8 @@ def check_state(work, state, receipt):
         mac6, dns6 = create.validate_persisted_static(work, state, 6)
     if network == create.STATIC_DUAL and (mac4 != mac6 or dns4 + dns6 > 3):
         raise ValueError("inconsistent factory dual-stack profile")
+    if network == create.SLAAC:
+        create.validate_persisted_slaac(work, state)
     if "wired_driver" in receipt:
         create.validate_persisted_e1000e(work, state)
     if "core_limits" in receipt:

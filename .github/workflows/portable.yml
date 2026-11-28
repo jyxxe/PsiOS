@@ -240,6 +240,12 @@ jobs:
             --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
             --installer "$RUNNER_TEMP/rescue-core/native/create.py"
 
+      - name: Discover IPv6 routers and retain the native profile through a staged update
+        run: |
+          python3 -B tests/native_slaac.py --kernel-iso "$RUNNER_TEMP/rescue.iso" \
+            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
+            --installer "$RUNNER_TEMP/rescue-core/native/create.py"
+
       - name: Verify native Secure Boot, signed trial, firmware rejection and offline upgrade
         run: |
           secure_tools="$RUNNER_TEMP/psios-secure-boot-tools"

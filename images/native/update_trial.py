@@ -50,7 +50,7 @@ def json_report(body):
 def receipt_lineage(prepared):
     candidate, trial = prepared.candidate_receipt, prepared.trial_receipt
     signed = "secure_boot" in candidate
-    candidate_formats = (3 if signed else 2, 4, 5, 6, create.E1000E_RECEIPT_FORMAT)
+    candidate_formats = (3 if signed else 2, 4, 5, 6, create.E1000E_RECEIPT_FORMAT, create.SLAAC_RECEIPT_FORMAT)
     require(trial.get("boot_mode") == create.TRIAL_BOOT_MODE and trial.get("format") == create.TRIAL_RECEIPT_FORMAT
             and candidate.get("format") in candidate_formats and "boot_mode" not in candidate,
             "expected native trial and normal candidate receipts")

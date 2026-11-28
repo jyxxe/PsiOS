@@ -86,9 +86,13 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 --static-ipv6-gateway fe80::2 --static-ipv6-dns 2001:db8:70::53
 ```
 
-启动时读入 root 私有的 `/etc/psios/static-ipv4` 或 `/etc/psios/static-ipv6`，按 MAC 匹配唯一的 virtio 网口。静态 IPv6 网口关闭路由器通告、自动配置和重定向，等待 Linux 重复地址检测通过后才发布 IPv6 默认路由。静态路由使用 metric 30320。地址或路由配置失败时清理本次添加的地址和路由，保留已有条目与解析器配置。两种地址族都配置成功后一次性更新双栈 DNS。可查看 `/run/psios-network/status` 和 `busybox ip -6 route show`。多网口、无线、DHCPv6、SLAAC 和远程确认回退事务仍待开发。[静态 IPv4 验收](../tests/native_static_ipv4.py) · [静态 IPv6 和双栈验收](../tests/native_static_ipv6.py)
+启动时读入 root 私有的 `/etc/psios/static-ipv4` 或 `/etc/psios/static-ipv6`，按 MAC 匹配唯一的 virtio 网口。静态 IPv6 网口关闭路由器通告、自动配置和重定向，等待 Linux 重复地址检测通过后才发布 IPv6 默认路由。静态路由使用 metric 30320。地址或路由配置失败时清理本次添加的地址和路由，保留已有条目与解析器配置。两种地址族都配置成功后一次性更新双栈 DNS。可查看 `/run/psios-network/status` 和 `busybox ip -6 route show`。多网口、无线、DHCPv6 和远程确认回退事务仍待开发。[静态 IPv4 验收](../tests/native_static_ipv4.py) · [静态 IPv6 和双栈验收](../tests/native_static_ipv6.py)
 
 静态 IPv4 的网络配置对应格式 4 回执，静态 IPv6 和双栈对应格式 5。配有 Core 资源限额的盘在格式 6 中记录同一个 `network_profile`。停机升级会检查保存的配置内容和权限。双栈还会核对两个配置的 MAC 和合计 DNS 数量。配置损坏时保留源盘并拒绝发布候选盘。
+
+新盘可用 `--slaac-mac 52:54:00:51:6f:20` 为指定 Virtio 网口启用 IPv6 路由器发现。Linux 接收路由器通告，按通告形成 IPv6 地址、执行重复地址检测并管理地址与默认路由的有效期。此配置关闭 IPv6 重定向。可用 `--slaac-dns` 指定至多三个不带区标识的 IPv6 DNS 地址。解析器读取显式设置，路由器通告中的 DNS 选项仍待接入。`/run/psios-network/status` 显示发现功能是否启动。地址与路由可用 `busybox ip -6 addr` 和 `busybox ip -6 route` 核对。
+
+SLAAC 使用格式 10 的构建回执。工厂镜像核验和隔离试启动更新都检查 `/etc/psios/slaac` 及服务定义。正常更新保留 MAC 与显式 DNS。该模式使用 IPv6 单栈。DHCPv6、其他网卡驱动和物理硬件的 SLAAC 验证仍待开展。[真实 IPv6 发现验收](../tests/native_slaac.py)
 
 ## 核对安装与运行的制品
 

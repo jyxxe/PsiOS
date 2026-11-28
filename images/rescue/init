@@ -93,6 +93,14 @@ fi
 stage=block-device
 [ -z "$managed_disk" ] || [ "$whole_disk" = "$managed_disk" ]
 [ "$("$bb" cat "/sys/class/block/$whole_disk/ro")" = "$((1-OVERLAY))" ]
+if [ -n "$SOURCE_SHA256" ]; then
+    # Hash the whole source before enabling any optional journal replay.
+    stage=source-digest-read
+    digest=$("$bb" timeout 120 "$bb" sha256sum "/dev/$whole_disk")
+    stage=source-digest-mismatch
+    [ "${digest%% *}" = "$SOURCE_SHA256" ]
+    printf '\nPSIOS-SOURCE/1\n%s\n' "$SOURCE_SHA256" > /dev/ttyS1
+fi
 # ext superblock fields are little-endian on this x86_64 rescue profile.
 stage=unsupported-filesystem
 magic=$("$bb" od -An -j 1080 -N 2 -t u2 "$disk")

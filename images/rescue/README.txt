@@ -29,6 +29,8 @@ xorriso、含 x86_64-efi 模块的 GNU GRUB、mtools 和 mkfs.fat。UEFI
 重新启动时须把源镜像作为第一个只读 virtio 块设备并读取第二串口。
 制作时可提供 --filesystem-uuid 固定源分区的 ext4 UUID。独立光盘按该 UUID
 匹配只读块设备。缺少匹配或发现多个匹配时会停止。
+构建光盘时可提供 --source-sha256 和盘外记录的完整源镜像摘要。光盘在挂载前
+核对整盘，匹配后在第二串口输出 PSIOS-SOURCE/1 和摘要。
 
 签名 UEFI 光盘使用 --firmware uefi、已登记证书的 --ovmf-vars、
 --secure-boot-key、--secure-boot-cert、--efi-stub 和 --efi-stub-sha256。

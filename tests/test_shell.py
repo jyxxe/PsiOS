@@ -19,6 +19,7 @@ from threading import Event
 from urllib.parse import urlsplit
 
 from model_delivery import frame
+from test_model_fallback import publish_skill, register_provider
 from support import Node, key, target
 
 
@@ -101,6 +102,124 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(body["error"]["code"], code)
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertIsNone(headers["Access-Control-Allow-Origin"])
+
+    def agent_sessions(self, count):
+        node = self.node
+        provider, model = register_provider(node, "shell-agent-runtime", strict=True)
+        skill = publish_skill(node)
+
+        def create(name, amount):
+            actor = node.call("Agent.Register", {"name": name})
+            grant = node.call("Grant.Issue", {"principal_id": actor["principal_id"],
+                                              "actions": ["resource.read", "task.read", "session.run",
+                                                          "task.submit", "system.status"],
+                                              "model_calls": 12, "model_lease_ms": 240_000,
+                                              "units": 12, "ttl_seconds": 180})
+            sessions = [node.call("Session.Open", {"key": key(), "goal": "private runtime goal",
+                                                   "model_ref": model, "skill_ref": skill,
+                                                   "context_policy": "ReferencesOnly", "max_turns": 3,
+                                                   "delegation_id": grant["delegation_ref"]["resource_id"]},
+                                  actor["token"])["reference"]["resource_id"] for _ in range(amount)]
+            return actor, grant["grant_ref"], sessions
+
+        actor, grant, visible = create("shell-session-reader", count)
+        _, _, hidden = create("other-session-owner", 1)
+        identity = node.base / "runtime-reader.token"
+        identity.touch(mode=0o600)
+        identity.write_text(actor["token"])
+        return identity, grant, actor, visible, hidden[0], provider
+
+    def finish_agent_session(self, provider, session):
+        lease = self.node.call("Model.Claim", {"session_id": session, "key": key()}, provider["token"])
+        self.node.call("Model.Respond", {"session_id": session, "lease_id": lease["lease_id"],
+                                         "decision": {"action": "finish", "summary": "private model summary"},
+                                         "usage": {"input_tokens": 12, "output_tokens": 3}}, provider["token"])
+        return lease["lease_id"]
+
+    def test_agent_runtime_paginates_owned_sessions_and_projects_model_usage(self):
+        identity, read, actor, visible, hidden, provider = self.agent_sessions(9)
+        session = visible[-1]
+        lease = self.finish_agent_session(provider, session)
+        shell = self.shell(identity)
+        self.error(shell, 401, "AuthenticationRequired", "/api/agent-sessions", data={})
+        token = shell.pair()["token"]
+        self.error(shell, 400, "InvalidArgument", "/api/agent-sessions", data={"kind": "Task"}, token=token)
+        status, headers, page = shell.http("/api/agent-sessions", {}, token)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual([row["reference"]["resource_id"] for row in page["items"]], visible[:8])
+        self.assertNotIn("private runtime goal", json.dumps(page))
+        status, _, page = shell.http("/api/agent-sessions", {"cursor": page["next_cursor"]}, token)
+        self.assertEqual(status, 200)
+        self.assertIsNone(page["next_cursor"])
+        self.assertEqual(len(page["items"]), 1)
+        status, _, detail = shell.http("/api/agent-session", {"id": session}, token)
+        self.assertEqual(status, 200)
+        self.assertEqual(detail["status"], page["items"][0])
+        self.assertEqual(detail["status"]["session"]["lifecycle"], "Succeeded")
+        self.assertEqual((detail["charged_calls"], detail["provider_reported"]),
+                         (1, {"input_tokens": 12, "output_tokens": 3, "reported_calls": 1}))
+        core_usage = self.node.call("Session.ModelUsage", {"id": session}, actor["token"])
+        self.assertEqual(detail["lease_time"], core_usage["lease_time"])
+        self.assertEqual(set(detail), {"status", "charged_calls", "provider_reported", "lease_time"})
+        for secret in ("private runtime goal", "private model summary", lease, hidden):
+            self.assertNotIn(secret, json.dumps(detail))
+        self.error(shell, 403, "PermissionDenied", "/api/agent-session", data={"id": hidden}, token=token)
+        self.node.call("Grant.Revoke", target(read))
+        self.error(shell, 403, "PermissionDenied", "/api/agent-sessions", data={}, token=token)
+        self.error(shell, 403, "PermissionDenied", "/api/agent-session", data={"id": session}, token=token)
+
+    def test_agent_runtime_rejects_model_usage_at_a_different_revision(self):
+        identity, _, actor, sessions, _, _ = self.agent_sessions(1)
+        node = self.node
+        session = sessions[0]
+        listening = node.base / "agent-usage.sock"
+        waiting, release = Event(), Event()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener, ThreadPoolExecutor(2) as pool:
+            listener.bind(str(listening))
+            listener.settimeout(8)
+            listener.listen()
+            relay = pool.submit(self.relay, listener, ("Principal.WhoAmI", "Session.Get", "Session.ModelUsage"),
+                                "Session.Get", waiting, release)
+            shell = Shell(node, identity, listening)
+            self.addCleanup(shell.close)
+            token = shell.pair()["token"]
+            detail = pool.submit(shell.http, "/api/agent-session", {"id": session}, token)
+            try:
+                self.assertTrue(waiting.wait(8))
+                previous = node.call("Session.Get", {"id": session}, actor["token"])["reference"]
+                paused = node.call("Session.Pause", {**target(previous), "reason": "Operator checkpoint"})
+                self.assertEqual(paused["session"]["lifecycle"], "Paused")
+            finally:
+                release.set()
+            relay.result(8)
+            status, _, result = detail.result(8)
+            self.assertEqual((status, result["error"]["code"]), (409, "Conflict"))
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
+    def test_browser_agent_runtime_reads_usage_and_clears_revoked_sessions(self):
+        identity, read, _, visible, hidden, provider = self.agent_sessions(9)
+        self.finish_agent_session(provider, visible[-1])
+        shell = self.shell(identity)
+        parent, child = socket.socketpair()
+        with parent, child:
+            parent.settimeout(35)
+            args = dict(origin=shell.origin, code=shell.code, agentRuntime=True, session=visible[-1], hidden=hidden,
+                        profile=str(self.node.base / "browser"), control_fd=child.fileno())
+            with subprocess.Popen(["node", str(Path(__file__).with_name("shell_browser.mjs")),
+                                   os.environ.get("PSIOS_TEST_CHROME", "google-chrome")],
+                                  stdin=subprocess.PIPE, pass_fds=(child.fileno(),)) as browser:
+                child.close()
+                try:
+                    browser.stdin.write(json.dumps(args).encode())
+                    browser.stdin.close()
+                    self.assertEqual(parent.recv(1), b"V")
+                    self.node.call("Grant.Revoke", target(read))
+                    parent.sendall(b"K")
+                    self.assertEqual(browser.wait(timeout=35), 0)
+                finally:
+                    if browser.poll() is None:
+                        browser.kill()
 
     def test_project_queries_require_session_and_project_grants(self):
         shell = self.shell()

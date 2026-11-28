@@ -510,7 +510,10 @@ jobs:
           trust="$RUNNER_TEMP/trusted_root.jsonl"
           gh attestation trusted-root > "$trust"
           offline=(sudo unshare --net runuser -u "$(id -un)" -- env GH_TOKEN=offline)
-          "${offline[@]}" tools/verify-portable-core "$archive" "$GITHUB_SHA" "$bundle" "$trust"
+          verified=$("${offline[@]}" tools/verify-portable-core "$archive" "$GITHUB_SHA" "$bundle" "$trust")
+          printf '%s\n' "$verified"
+          checksum=$(sha256sum < "$archive")
+          grep -Fxq "SHA-256 ${checksum%% *}" <<< "$verified"
           printf x >> "$archive"
           if "${offline[@]}" tools/verify-portable-core "$archive" "$GITHUB_SHA" "$bundle" "$trust"; then
             echo 'Modified archive unexpectedly verified' >&2

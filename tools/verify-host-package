@@ -15,11 +15,33 @@ if [[ ${#packages[@]} != 1 ]]; then
     echo "expected exactly one amd64 Core package" >&2
     exit 1
 fi
-verify_core_attestation core.yml "$expected" "$root/SHA256SUMS" "$@"
-verify_core_attestation core.yml "$expected" "${packages[0]}" "$@"
-(cd -- "$root" && sha256sum --strict --check SHA256SUMS)
-if [[ $(<"$root/source-commit") != "$expected" ]]; then
+umask 077
+work=$(mktemp -d)
+trap 'rm -rf -- "$work"' EXIT
+mkdir "$work/package"
+snapshot="$work/package"
+package=${packages[0]##*/}
+proof=()
+snapshot_attestation_file "$root/SHA256SUMS" "$snapshot/SHA256SUMS"
+snapshot_attestation_file "${packages[0]}" "$snapshot/$package"
+snapshot_attestation_arguments proof "$work" "$@"
+verify_core_attestation core.yml "$expected" "$snapshot/SHA256SUMS" "${proof[@]}"
+verify_core_attestation core.yml "$expected" "$snapshot/$package" "${proof[@]}"
+manifest_line='^[0-9a-f]{64} [ *]([a-zA-Z0-9][a-zA-Z0-9._+~-]*)$'
+while IFS= read -r entry || [[ -n $entry ]]; do
+    if [[ ! $entry =~ $manifest_line ]]; then
+        echo "invalid artifact name in signed checksum file" >&2
+        exit 1
+    fi
+    member=${BASH_REMATCH[1]}
+    if [[ $member != "$package" ]]; then
+        snapshot_attestation_file "$root/$member" "$snapshot/$member"
+    fi
+done < "$snapshot/SHA256SUMS"
+(cd -- "$snapshot" && sha256sum --strict --check SHA256SUMS)
+if [[ $(<"$snapshot/source-commit") != "$expected" ]]; then
     echo "package source differs from the requested revision" >&2
     exit 1
 fi
-printf 'Verified %s from %s\n' "${packages[0]##*/}" "$expected"
+checksum=$(sha256sum < "$snapshot/$package")
+printf 'Verified %s from %s\nSHA-256 %s\n' "$package" "$expected" "${checksum%% *}"

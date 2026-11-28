@@ -21,6 +21,14 @@ const resolver = byId("node-resolver");
 const resolverRead = byId("node-resolver-read");
 const resolverNotice = byId("node-resolver-status");
 const resolverView = byId("node-resolver-view");
+const pciPanel = byId("node-pci");
+const pciRead = byId("node-pci-read");
+const pciPrevious = byId("node-pci-prev");
+const pciNext = byId("node-pci-next");
+const pciNotice = byId("node-pci-status");
+const pciTable = byId("node-pci-table");
+const pciRows = byId("node-pci-rows");
+const pciMeta = byId("node-pci-meta");
 const taskRows = byId("task-rows");
 const taskDetail = byId("task-detail");
 const taskContent = byId("task-content");
@@ -42,6 +50,9 @@ let maximized = null;
 let recentApps = [];
 let nodeUpdate = 0;
 let resolverUpdate = 0;
+let pciUpdate = 0;
+let pciCursors = [null];
+let pciNextCursor = null;
 let taskUpdate = 0;
 let detailUpdate = 0;
 let cursors = [null];
@@ -67,6 +78,8 @@ function leave(text, error = false) {
   canCancelPending = false;
   resolver.hidden = true;
   clearResolver();
+  pciPanel.hidden = true;
+  clearPci();
   launcher.close();
   launcherQuery.value = "";
   launcherApps.replaceChildren();
@@ -548,6 +561,50 @@ async function loadResolver() {
   }
 }
 
+function clearPci() {
+  pciUpdate += 1;
+  pciCursors = [null];
+  pciNextCursor = null;
+  pciRead.disabled = false;
+  pciPrevious.disabled = pciNext.disabled = true;
+  pciTable.hidden = true;
+  pciRows.replaceChildren();
+  pciMeta.replaceChildren();
+  message(pciNotice, "");
+}
+
+async function loadPci(page = [null]) {
+  clearPci();
+  const revision = pciUpdate;
+  pciRead.disabled = true;
+  message(pciNotice, "正在读取…");
+  try {
+    const result = await request("/api/node-pci", { cursor: page.at(-1) });
+    if (revision !== pciUpdate) return;
+    for (const device of result.devices) {
+      const row = element("tr");
+      const address = element("th", device.address, "mono");
+      address.scope = "row";
+      row.append(address, element("td", device.vendor_id + " / " + device.device_id, "mono"),
+        element("td", device.class_code, "mono"), element("td", device.driver ?? "未绑定", "mono"),
+        element("td", device.parent_address ?? "—", "mono"));
+      pciRows.append(row);
+    }
+    pciTable.hidden = result.devices.length === 0;
+    pciMeta.append(fields([["观测时间", result.observed_at], ["启动 ID", result.boot_id, true]]));
+    pciCursors = page;
+    pciNextCursor = result.next_cursor;
+    pciPrevious.disabled = page.length <= 1;
+    pciNext.disabled = pciNextCursor === null;
+    message(pciNotice, result.devices.length ? "" : "当前未发现 PCI 设备。");
+  } catch (error) {
+    if (revision !== pciUpdate) return;
+    message(pciNotice, error.code === "ResyncRequired" ? "设备已变化，请重新读取首页。" : error.message, true);
+  } finally {
+    if (revision === pciUpdate) pciRead.disabled = false;
+  }
+}
+
 function clearTaskView() {
   detailUpdate += 1;
   taskDetail.hidden = true;
@@ -713,6 +770,7 @@ function showWindow(id, app, shown) {
     nodeUpdate += 1;
     nodeView.replaceChildren();
     clearResolver();
+    clearPci();
   } else if (id === "tasks") {
     taskUpdate += 1;
     clearTaskView();
@@ -909,6 +967,7 @@ byId("pair-form").addEventListener("submit", async (event) => {
     canCancelPending = session.cancel_pending_tasks === true;
     files.capability(session.browse_files === true, session.preview_files === true);
     resolver.hidden = session.observe_resolver !== true;
+    pciPanel.hidden = session.observe_pci !== true;
     chat.capability(session.send_chat === true);
     projects.setReviewer(session.review_work_items === true ? session.principal_id : null);
     agentRuntime.capability(session.manage_agent_sessions === true);
@@ -927,6 +986,9 @@ byId("pair-form").addEventListener("submit", async (event) => {
 });
 
 resolverRead.addEventListener("click", loadResolver);
+pciRead.addEventListener("click", () => loadPci());
+pciPrevious.addEventListener("click", () => loadPci(pciCursors.slice(0, -1)));
+pciNext.addEventListener("click", () => loadPci([...pciCursors, pciNextCursor]));
 
 byId("close-task").addEventListener("click", () => {
   const current = taskRows.querySelector('button[aria-pressed="true"]');

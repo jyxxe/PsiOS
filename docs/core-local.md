@@ -97,6 +97,8 @@ Shell 可以查看节点状态、调度开关、执行队列和权威存储余�
 
 “应用管理”分页显示当前主体获准查看的本机应用名称和状态。选中应用后，使用独立的 `application.releases` 授权读取其固定版本快照。版本列表显示选用、暂存、未选用和退役状态。刷新可取得新快照。窗口被最小化或遮挡后，再次打开会按当前授权取得列表和详情。应用安装、启动、切换或退役继续沿用 Core 的 Task 与审批流程。
 
+以 `ctl shell --pci-delegation "$delegation_id"` 启动，可在“节点管理”分页查看 PCI 设备地址、厂商和设备编号、类别、当前驱动及上级设备。委托须明确限定当前节点，并允许 `node.pci`、`task.submit` 和 `task.read`。每页执行一个 Core Task，返回前再次核对原委托。设备或驱动绑定发生变化时，从首页重新读取。最小化与退出时清除显示内容。[本机 PCI 观察](core-runtime.md#pci-设备与驱动观测) · [Shell 进程与浏览器验收](../tests/test_shell.py)
+
 以 `ctl shell --files-volume "$volume_id" --files-delegation "$delegation_id"` 启动可打开“文件”窗口。当前主体需要对所选卷拥有资源读取权限，委托须允许 `volume.files`、`task.submit` 和 `task.read`。窗口提供目录导航、分页及普通文件大小。每次读取都使用 Core Task，翻页同时核对卷修订和目录修订。目录变动后从第一页重新读取。最小化和会话结束时清除已显示的内容，恢复时按当前委托重新读取。[卷读取规则](core-runtime.md) · [Shell 进程与浏览器验收](../tests/test_shell.py)
 
 加上 `--files-preview` 并为同一委托授予 `volume.read_chunk` 后，可以预览普通文件起始最多 6 KiB 的 UTF-8 文本。预览请求绑定目录列表所见的卷修订，并由 Core 固定这次文件观测。关闭或最小化时清除浏览器内的正文。[分块读取规则](core-runtime.md#卷文件与应用版本)

@@ -59,6 +59,27 @@
             <p id="node-resolver-status" class="message" role="status"></p>
             <div id="node-resolver-view"></div>
           </section>
+          <section id="node-pci" class="content-card" aria-labelledby="node-pci-title" hidden>
+            <h2 id="node-pci-title">PCI 设备</h2>
+            <div class="pagination">
+              <button id="node-pci-read" type="button">读取首页</button>
+              <button id="node-pci-prev" type="button" disabled>上一页</button>
+              <button id="node-pci-next" type="button" disabled>下一页</button>
+            </div>
+            <p id="node-pci-status" class="message" role="status"></p>
+            <div class="table-panel">
+              <table id="node-pci-table" aria-labelledby="node-pci-title" hidden>
+                <thead>
+                  <tr>
+                    <th scope="col">设备地址</th><th scope="col">厂商和设备</th>
+                    <th scope="col">类别</th><th scope="col">驱动</th><th scope="col">上级设备</th>
+                  </tr>
+                </thead>
+                <tbody id="node-pci-rows"></tbody>
+              </table>
+            </div>
+            <div id="node-pci-meta"></div>
+          </section>
         </div>
       </section>
       <section id="window-tasks" class="app-window" aria-labelledby="title-tasks" hidden>

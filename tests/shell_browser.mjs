@@ -135,6 +135,34 @@ async function verifyNodeResolver() {
   assert.ok(requests.every(url => new URL(url).origin === input.origin));
 }
 
+async function verifyNodePci() {
+  await keyboardActivate("#nav-node");
+  const address = value => 'document.querySelector("#node-pci-rows th")?.textContent === ' + JSON.stringify(value);
+  assert.ok(await evaluate('!document.querySelector("#node-pci").hidden'));
+  await keyboardActivate("#node-pci-read");
+  await waitFor("observed PCI device", address(input.addresses[0]));
+  if (input.addresses.length > 6) {
+    await keyboardActivate("#node-pci-next");
+    await waitFor("next PCI page", address(input.addresses[6]));
+    await keyboardActivate("#node-pci-prev");
+    await waitFor("first PCI page", address(input.addresses[0]));
+  }
+  await keyboardActivate('#window-node [data-action="minimize"]');
+  assert.ok(await evaluate('!document.querySelector("#node-pci-rows th") && !document.querySelector("#node-pci-meta").textContent'));
+  writeSync(input.control_fd, Buffer.from("R"));
+  const reply = Buffer.alloc(1);
+  assert.equal(readSync(input.control_fd, reply), 1);
+  assert.equal(reply.toString(), "K");
+  await keyboardActivate("#nav-node");
+  await keyboardActivate("#node-pci-read");
+  await waitFor("revoked PCI grant", 'document.querySelector("#node-pci-status").classList.contains("error")');
+  assert.ok(await evaluate('!document.querySelector("#node-pci-rows th")'));
+  await click("#logout");
+  await waitFor("cleared PCI session", 'document.querySelector("#workspace").hidden && document.querySelector("#node-pci").hidden');
+  assert.deepEqual(exceptions, []);
+  assert.ok(requests.every(url => new URL(url).origin === input.origin));
+}
+
 async function verifyRevokedWindow() {
   await click("#nav-node");
   await waitFor("permitted node inventory", 'document.querySelector("#node-view").textContent.includes(' + JSON.stringify(input.node) + ')');
@@ -379,6 +407,7 @@ async function test() {
   if (input.fileBrowser) return verifyFiles();
   if (input.filePreview) return verifyFilePreview();
   if (input.nodeResolver) return verifyNodeResolver();
+  if (input.nodePci) return verifyNodePci();
   if (input.windowTiling) return verifyWindowTiling();
   if (input.applicationLauncher) return verifyApplicationLauncher();
   assert.ok(await evaluate('document.activeElement.id === "nav-node" && document.querySelectorAll(".app-window:not([hidden])").length === 0'));

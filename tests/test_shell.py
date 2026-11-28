@@ -21,12 +21,14 @@ from urllib.parse import urlsplit
 
 from model_delivery import frame
 from test_model_fallback import publish_skill, register_provider
+from test_pci_observation import DEVICES as PCI_DEVICES, linux_devices
 from support import Failure, Node, key, target
 
 
 class Shell:
     def __init__(self, node, token_file, endpoint=None, *, cancel_pending=False, send_chat=False,
-                 review_work_items=False, manage_agent_sessions=False, files=None, files_preview=False, resolver_delegation=None):
+                 review_work_items=False, manage_agent_sessions=False, files=None, files_preview=False,
+                 resolver_delegation=None, pci_delegation=None):
         self.process = subprocess.Popen(
             [node.binaries / "psiosctl", "--socket", endpoint or node.socket, "--token-file", token_file, "shell",
              *(["--cancel-pending-tasks"] if cancel_pending else []), *(["--send-chat"] if send_chat else []),
@@ -34,7 +36,8 @@ class Shell:
              *(["--manage-agent-sessions"] if manage_agent_sessions else []),
              *(["--files-volume", files[0], "--files-delegation", files[1]] if files else []),
              *(["--files-preview"] if files_preview else []),
-             *(["--resolver-delegation", resolver_delegation] if resolver_delegation else [])],
+             *(["--resolver-delegation", resolver_delegation] if resolver_delegation else []),
+             *(["--pci-delegation", pci_delegation] if pci_delegation else [])],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
         )
         try:
@@ -97,11 +100,12 @@ class ShellTests(unittest.TestCase):
         self.addCleanup(self.node.close)
 
     def shell(self, token_file=None, *, cancel_pending=False, send_chat=False,
-              review_work_items=False, manage_agent_sessions=False, files=None, files_preview=False, resolver_delegation=None):
+              review_work_items=False, manage_agent_sessions=False, files=None, files_preview=False,
+              resolver_delegation=None, pci_delegation=None):
         shell = Shell(self.node, token_file or self.node.witness / "owner.token",
                       cancel_pending=cancel_pending, send_chat=send_chat, review_work_items=review_work_items,
                       manage_agent_sessions=manage_agent_sessions, files=files, files_preview=files_preview,
-                      resolver_delegation=resolver_delegation)
+                      resolver_delegation=resolver_delegation, pci_delegation=pci_delegation)
         self.addCleanup(shell.close)
         return shell
 
@@ -257,6 +261,95 @@ class ShellTests(unittest.TestCase):
             "actions": ["node.resolver", "task.submit", "task.read"], "tool_targets": [scope],
             "units": 3, "ttl_seconds": 120})
         return grant["delegation_ref"]["resource_id"], grant["grant_ref"]
+
+    def pci_grant(self, scope):
+        grant = self.node.call("Grant.Issue", {"principal_id": "local-owner",
+            "actions": ["node.pci", "task.submit", "task.read"], "tool_targets": [scope],
+            "units": 48, "ttl_seconds": 120})
+        return grant["delegation_ref"]["resource_id"], grant["grant_ref"]
+
+    @unittest.skipUnless(PCI_DEVICES.is_dir(), "requires Linux PCI sysfs")
+    def test_pci_observation_pages_are_bound_to_a_current_node_grant(self):
+        expected = linux_devices()
+        if len(expected) > 256:
+            self.skipTest("the host exceeds the supported PCI inventory budget")
+        route = "/api/node-pci"
+        default = self.shell()
+        pair = default.pair()
+        self.assertFalse(pair["observe_pci"])
+        self.error(default, 404, "NotFound", route, data={}, token=pair["token"])
+        wrong, _ = self.pci_grant("profile-local")
+        refused = self.shell(pci_delegation=wrong)
+        self.error(refused, 403, "PermissionDenied", route, data={}, token=refused.pair()["token"])
+
+        node = self.node.call("Node.Get", {})
+        scope = node["reference"]["resource_id"]
+        delegation, grant = self.pci_grant(scope)
+        shell = self.shell(pci_delegation=delegation)
+        self.error(shell, 401, "AuthenticationRequired", route, data={})
+        pair = shell.pair()
+        self.assertTrue(pair["observe_pci"])
+        token = pair["token"]
+        self.error(shell, 400, "InvalidArgument", route, data={"limit": 32}, token=token)
+        unknown = "sha256:" + "f" * 64
+        self.error(shell, 400, "InvalidArgument", route,
+                   data={"cursor": {"snapshot_digest": unknown, "offset": 0}}, token=token)
+        self.error(shell, 409, "ResyncRequired", route,
+                   data={"cursor": {"snapshot_digest": unknown, "offset": 1}}, token=token)
+
+        actual = []
+        cursor = first_cursor = None
+        for page in range(43):
+            status, _, report = shell.http(route, {"cursor": cursor}, token)
+            self.assertEqual(status, 200, report)
+            self.assertEqual(set(report), {"devices", "next_cursor", "boot_id", "observed_at"})
+            self.assertEqual(report["boot_id"], node["state"]["boot_id"])
+            self.assertLessEqual(len(report["devices"]), 6)
+            actual.extend(report["devices"])
+            cursor = report["next_cursor"]
+            if page == 0:
+                first_cursor = cursor
+            if cursor is None:
+                break
+        self.assertIsNone(cursor)
+        self.assertEqual(actual, expected)
+        if first_cursor is not None:
+            other, _ = self.pci_grant(scope)
+            separate = self.shell(pci_delegation=other)
+            self.error(separate, 409, "ResyncRequired", route, data={"cursor": first_cursor},
+                       token=separate.pair()["token"])
+        self.node.call("Grant.Revoke", target(grant))
+        self.error(shell, 403, "PermissionDenied", route, data={}, token=token)
+        self.assertEqual(shell.http("/api/node", {}, token)[0], 200)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER") and PCI_DEVICES.is_dir(),
+                         "requires headless Chrome, Node.js and Linux PCI sysfs")
+    def test_browser_pci_pages_clear_on_minimize_and_recheck_revocation(self):
+        addresses = sorted(path.name for path in PCI_DEVICES.iterdir())
+        if not (1 <= len(addresses) <= 256):
+            self.skipTest("the kernel PCI inventory is empty or exceeds the supported budget")
+        scope = self.node.call("Node.Get", {})["reference"]["resource_id"]
+        delegation, grant = self.pci_grant(scope)
+        shell = self.shell(pci_delegation=delegation)
+        parent, child = socket.socketpair()
+        with parent, child:
+            parent.settimeout(45)
+            args = dict(origin=shell.origin, code=shell.code, nodePci=True, addresses=addresses[:7],
+                        profile=str(self.node.base / "browser"), control_fd=child.fileno())
+            with subprocess.Popen(["node", str(Path(__file__).with_name("shell_browser.mjs")),
+                                   os.environ.get("PSIOS_TEST_CHROME", "google-chrome")],
+                                  stdin=subprocess.PIPE, pass_fds=(child.fileno(),)) as browser:
+                child.close()
+                try:
+                    browser.stdin.write(json.dumps(args).encode())
+                    browser.stdin.close()
+                    self.assertEqual(parent.recv(1), b"R")
+                    self.node.call("Grant.Revoke", target(grant))
+                    parent.sendall(b"K")
+                    self.assertEqual(browser.wait(timeout=45), 0)
+                finally:
+                    if browser.poll() is None:
+                        browser.kill()
 
     def resolver_fixture(self):
         fixture = Path(os.environ["PSIOS_TEST_RESOLVER_FIXTURE"])

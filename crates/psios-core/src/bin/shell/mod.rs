@@ -1,7 +1,7 @@
 //! A browser-facing local client. The Core checks each operation under the paired identity.
 
 mod files;
-mod resolver;
+mod observations;
 mod session;
 pub(super) use files::VolumeAccess;
 
@@ -14,7 +14,7 @@ use hyper::{
     service::service_fn,
 };
 use hyper_util::rt::{TokioIo, TokioTimer};
-use psios_api::{ApiError, ApiResult, Client, ResourceRef, parse};
+use psios_api::{ApiError, ApiResult, Client, DeviceInventoryCursor, ResourceRef, parse};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use session::{Session, now};
@@ -85,6 +85,7 @@ pub(super) struct Options {
     pub manage_agent_sessions: bool,
     pub files: Option<VolumeAccess>,
     pub resolver_delegation: Option<String>,
+    pub pci_delegation: Option<String>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -94,6 +95,7 @@ enum Endpoint {
     ObserveEnd,
     Node,
     NodeResolver,
+    NodePci,
     Tasks,
     Applications,
     ApplicationReleases,
@@ -131,6 +133,12 @@ struct Empty {}
 #[serde(deny_unknown_fields)]
 struct Page {
     cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PciPageRequest {
+    cursor: Option<DeviceInventoryCursor>,
 }
 
 #[derive(Deserialize)]
@@ -265,6 +273,7 @@ struct CancelPendingTask {
 enum CoreRequest {
     Call(&'static str, Value),
     NodeResolver(String),
+    NodePci(String, Option<DeviceInventoryCursor>),
     Applications(Page),
     ApplicationReleases(ApplicationReleases),
     VolumeDirectory(files::Directory, VolumeAccess),
@@ -298,7 +307,11 @@ impl CoreRequest {
             }
             Self::NodeResolver(delegation) => Ok(json_response(
                 StatusCode::OK,
-                resolver::observe(client, &delegation, &check)?,
+                observations::resolver(client, &delegation, &check)?,
+            )),
+            Self::NodePci(delegation, cursor) => Ok(json_response(
+                StatusCode::OK,
+                observations::pci(client, &delegation, cursor, &check)?,
             )),
             Self::VolumeDirectory(directory, access) => Ok(json_response(
                 StatusCode::OK,
@@ -906,6 +919,13 @@ fn rpc(endpoint: Endpoint, data: Value, options: &Options) -> Result<CoreRequest
                 options.resolver_delegation.clone().ok_or(INVALID)?,
             ))
         }
+        Endpoint::NodePci => {
+            let page: PciPageRequest = serde_json::from_value(data).map_err(|_| INVALID)?;
+            Ok(CoreRequest::NodePci(
+                options.pci_delegation.clone().ok_or(INVALID)?,
+                page.cursor,
+            ))
+        }
         Endpoint::Tasks => {
             let page: Page = serde_json::from_value(data).map_err(|_| INVALID)?;
             Ok(CoreRequest::Call(
@@ -990,7 +1010,9 @@ fn core_error(error: &psios_api::ApiError) -> HttpResponse {
         "AuthenticationRequired" => StatusCode::UNAUTHORIZED,
         "PermissionDenied" => StatusCode::FORBIDDEN,
         "NotFound" => StatusCode::NOT_FOUND,
-        "PreconditionFailed" | "CursorExpired" | "Conflict" => StatusCode::CONFLICT,
+        "PreconditionFailed" | "CursorExpired" | "Conflict" | "ResyncRequired" => {
+            StatusCode::CONFLICT
+        }
         "InvalidArgument" => StatusCode::BAD_REQUEST,
         "QuotaExceeded" => StatusCode::PAYLOAD_TOO_LARGE,
         _ => StatusCode::SERVICE_UNAVAILABLE,
@@ -1056,6 +1078,7 @@ impl Shell {
             "/api/node-resolver" if self.options.resolver_delegation.is_some() => {
                 Endpoint::NodeResolver
             }
+            "/api/node-pci" if self.options.pci_delegation.is_some() => Endpoint::NodePci,
             "/api/tasks" => Endpoint::Tasks,
             "/api/applications" => Endpoint::Applications,
             "/api/application-releases" => Endpoint::ApplicationReleases,
@@ -1104,6 +1127,7 @@ impl Shell {
                 "send_chat":self.options.send_chat,"review_work_items":self.options.review_work_items,
                 "manage_agent_sessions":self.options.manage_agent_sessions,
                 "observe_resolver":self.options.resolver_delegation.is_some(),
+                "observe_pci":self.options.pci_delegation.is_some(),
             });
             if let Some(files) = &self.options.files {
                 reply["browse_files"] = json!(true);

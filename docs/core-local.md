@@ -16,13 +16,14 @@ tools/verify-portable-core ./psios-core-linux-amd64.tar.gz "$EXPECTED_MAIN_SHA" 
 
 离线核验时，提前通过受信任的连接执行 `gh attestation trusted-root > trusted_root.jsonl`，将该文件作为上述命令的第四个参数。核验覆盖整个 tar.gz，并绑定仓库、构建工作流、主线提交和 GitHub 托管执行器。只提供文件摘要的早期开发包可从对应提交自行构建。
 
-也可在安装了 Git、GNU tar、gzip 及 Docker Buildx 的 Linux 构建机上直接生成。归档保留可执行权限、完整源码提交、Cargo.lock 和文件校验和。若构建网络使用专用 CA，设置 `CARGO_HTTP_CAINFO` 指向受信任的 CA 文件。
+也可在安装了 Git、GNU tar、gzip、Python 3.11 及 Docker Buildx 的 Linux 构建机上直接生成。归档保留可执行权限、完整源码提交、Cargo.lock 和文件校验和。`build-inputs.json` 记录固定的构建镜像摘要、构建定义和 Cargo 输入的 SHA-256，以及从构建容器采集的 Alpine、rustc、Cargo 版本和编译目标。它与二进制一同接受归档证明和内部校验和的核验。重建没有此记录的历史版本时，继续生成对应版本的归档布局。若构建网络使用专用 CA，设置 `CARGO_HTTP_CAINFO` 指向受信任的 CA 文件。
 
 ```bash
 tools/build-portable-core ./psios-core-linux-amd64.tar.gz HEAD
 mkdir ./portable-core
 tar -xzf ./psios-core-linux-amd64.tar.gz -C ./portable-core
 (cd ./portable-core && sha256sum -c SHA256SUMS && cat source-commit)
+python3 tools/lib/portable_build_inputs.py . "$(git rev-parse HEAD)" ./portable-core/build-inputs.json
 ```
 
 下方本机启动示例中的 `target/debug/` 可替换为 `./portable-core/`，并跳过 Cargo 编译。CI 在只读、断网的 Alpine 用户空间以非特权用户运行同一份二进制，覆盖身份授权、任务幂等和进程崩溃后的恢复。CI 还将同一归档作为只读根文件系统，直接启动两个程序，强制终止服务后以只读方式核验状态卷，再重放原任务。该验收覆盖单节点 Core，系统引导和各发行版安装另行验收。[空根文件系统恢复验收](../tests/portable_recovery.py)

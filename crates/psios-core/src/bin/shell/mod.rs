@@ -89,6 +89,7 @@ enum Endpoint {
     ConversationMessages,
     Projects,
     ProjectWorkItems,
+    WorkItemRevision,
     PrepareChatMessage,
     SendChatMessage,
     Task,
@@ -131,6 +132,12 @@ struct DirectoryPage {
 struct ProjectWorkItems {
     project_id: String,
     after_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkItemRevision {
+    reference: ResourceRef,
 }
 
 #[derive(Deserialize)]
@@ -205,6 +212,7 @@ enum CoreRequest {
     ConversationMessages(ConversationMessages),
     Projects(DirectoryPage),
     ProjectWorkItems(ProjectWorkItems),
+    WorkItemRevision(WorkItemRevision),
     PrepareChatMessage(ChatDraft),
     SendChatMessage(PreparedChatMessage),
     Artifact(TaskArtifact),
@@ -388,6 +396,7 @@ impl CoreRequest {
                     let value = &item["value"];
                     json!({
                         "id": item["reference"]["resource_id"],
+                        "reference": item["reference"],
                         "title": value["title"],
                         "lifecycle": value["lifecycle"],
                         "assignee": value["assignee_principal_id"],
@@ -399,6 +408,47 @@ impl CoreRequest {
                     StatusCode::OK,
                     json!({
                         "title":project["value"]["title"],"items":items,"next_after_id":page["next_after_id"],
+                    }),
+                ))
+            }
+            Self::WorkItemRevision(request) => {
+                let reference = json!(request.reference);
+                let response =
+                    client.call("WorkItem.RevisionGet", json!({"reference":reference}))?;
+                if response["reference"] != reference {
+                    return Err(ApiError::new(
+                        "RecoveryRequired",
+                        "work item reference did not resolve exactly",
+                    )
+                    .into());
+                }
+                let item = &response["value"];
+                let evidence = item.get("evidence").map(|proof| {
+                    json!({
+                        "task_ref": proof["task_ref"],
+                        "artifact_ref": proof["artifact_ref"],
+                        "submitted_at": proof["submitted_at"],
+                    })
+                });
+                let review = item["review"].as_object().map(|review| {
+                    json!({
+                        "accepted": review.get("accepted"),
+                        "reviewer": review.get("reviewer_principal_id"),
+                        "reviewed_at": review.get("reviewed_at"),
+                    })
+                });
+                Ok(json_response(
+                    StatusCode::OK,
+                    json!({
+                        "reference": reference,
+                        "title": item["title"],
+                        "description": item["description"],
+                        "lifecycle": item["lifecycle"],
+                        "assignee": item["assignee_principal_id"],
+                        "priority": item["priority"].as_str().unwrap_or("Normal"),
+                        "has_evidence": item["has_evidence"],
+                        "evidence": evidence,
+                        "review": review,
                     }),
                 ))
             }
@@ -623,6 +673,9 @@ fn rpc(endpoint: Endpoint, data: Value) -> Result<CoreRequest, Fault> {
         Endpoint::ProjectWorkItems => Ok(CoreRequest::ProjectWorkItems(
             serde_json::from_value(data).map_err(|_| INVALID)?,
         )),
+        Endpoint::WorkItemRevision => Ok(CoreRequest::WorkItemRevision(
+            serde_json::from_value(data).map_err(|_| INVALID)?,
+        )),
         Endpoint::PrepareChatMessage => Ok(CoreRequest::PrepareChatMessage(
             serde_json::from_value(data).map_err(|_| INVALID)?,
         )),
@@ -726,6 +779,7 @@ impl Shell {
             "/api/conversation-messages" => Endpoint::ConversationMessages,
             "/api/projects" => Endpoint::Projects,
             "/api/project-work-items" => Endpoint::ProjectWorkItems,
+            "/api/work-item-revision" => Endpoint::WorkItemRevision,
             "/api/chat-prepare" if self.send_chat => Endpoint::PrepareChatMessage,
             "/api/chat-send" if self.send_chat => Endpoint::SendChatMessage,
             "/api/task" => Endpoint::Task,

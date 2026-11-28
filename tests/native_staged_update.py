@@ -21,6 +21,7 @@ from native_upgrade import STATE_MIB, STATE_OFFSET, shutdown
 
 MIB = 1024 * 1024
 LARGE_COPY_MIB = 192
+SOURCE_NIC = "52:54:00:58:3e:25"
 
 
 def invoke(command, timeout):
@@ -107,7 +108,8 @@ def boot_view(work, disk, source_vars, receiver, operator, admin, build, baselin
     assert sha(source_vars) == sha(vars_file)
     succeeded(invoke(["qemu-img", "create", "-q", "-f", "qcow2", "-F", "raw",
                       "-b", str(disk), str(image)], 20))
-    with boot(work, image, disk_format="qcow2", vars_file=vars_file.name) as console:
+    with boot(work, image, disk_format="qcow2", vars_file=vars_file.name,
+              network_mac=SOURCE_NIC, pace_commands=True) as console:
         console.login("psios", operator)
         observed = durable_fact(console)
         assert observed[0] == baseline[0], observed
@@ -205,7 +207,10 @@ def exercise(args, work):
 
     token = secrets.token_hex(12)
     live = work / "must-not-publish-running"
-    with boot(work, old, vars_file=vars_file.name) as console:
+    initial_vars = sha(vars_file)
+    # The NIC changes the source disk's PCI path, even with no network driver
+    # configured in the guest. The isolated trial has the disk alone.
+    with boot(work, old, vars_file=vars_file.name, network_mac=SOURCE_NIC, pace_commands=True) as console:
         console.login("psios", operator)
         baseline = durable_fact(console)
         console.run(f"printf '%s\\n' {shlex.quote(token)} > $HOME/native-staged-update-fact; sync")
@@ -219,6 +224,7 @@ def exercise(args, work):
     large_copy = install_large_wal(work, old, old_build) if args.large_authority else None
     frozen = digest_map((old, receipt, code, vars_file))
     assert frozen[old] != old_build["initial_image_sha256"], "old guest did not persist its new state"
+    assert frozen[vars_file] != initial_vars, "the source firmware did not record its boot entry"
     rejected = work / "must-not-publish-untrusted"
     refused(work, stage(rejected, receipt_digest="0" * 64), r"receipt|digest|sha.?256")
     assert not rejected.exists(), rejected

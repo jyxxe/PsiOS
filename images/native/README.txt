@@ -22,7 +22,8 @@ VERIFIED_CORE_SHA256 是上述完整归档核验后记录的 SHA-256。
 默认及最小容量为 192 MiB 和 64 MiB，整盘上限为 8192 MiB。
 构建回执和来宾部署清单记录 geometry_mib。
 
-新盘也可用 native/install.py 安装到空白同尺寸 Virtio 块设备。
+新盘也可用 native/install.py 安装到空白同尺寸 Virtio、PCIe NVMe 或
+具有可核验序列号和 NAA WWID 的 SATA AHCI 块设备。
 在本机 root 权限下运行 plan，核对序列号、分区和回执摘要，以其
 plan_digest 运行 apply。inspect 可核对原设备的持久安装回执。
 详细操作见 docs/native-disk.md 的「安装到空白块设备」。

@@ -19,8 +19,13 @@ VIRTIO_NAME = re.compile(r"vd[a-z]{1,5}\Z")
 PCI = SYSFS / "bus/pci"
 NVME_DRIVER = PCI / "drivers/nvme"
 NVME_NAME = re.compile(r"nvme[0-9]{1,7}n[0-9]{1,10}\Z")
-NVME_SERIAL = re.compile(r"[ -~]{1,20}\Z")
+DEVICE_SERIAL = re.compile(r"[ -~]{1,20}\Z")
 NVME_WWID = re.compile(r"(?:uuid|eui|nvme)\.[!-~]{1,240}\Z")
+AHCI_DRIVER = PCI / "drivers/ahci"
+SCSI = SYSFS / "bus/scsi"
+SCSI_DISK_DRIVER = SCSI / "drivers/sd"
+SCSI_DISK_NAME = re.compile(r"sd[a-z]{1,6}\Z")
+ATA_WWID = re.compile(r"naa\.5[0-9a-f]{15}\Z")
 LOOP_NAME = re.compile(r"loop(?:0|[1-9][0-9]{0,6})\Z")
 SERIAL = re.compile(r"[A-Za-z0-9_.-]{1,20}\Z")
 UINT = re.compile(r"0|[1-9][0-9]{0,19}\Z")
@@ -49,6 +54,8 @@ def _kind(path):
         return "VirtioBlock"
     if NVME_NAME.fullmatch(path.name):
         return "NVMeNamespace"
+    if SCSI_DISK_NAME.fullmatch(path.name):
+        return "SataAhciDisk"
     if LOOP_NAME.fullmatch(path.name):
         return "TestLoop"
     raise ValueError("installation target is outside the supported whole-device profile")
@@ -92,7 +99,7 @@ def _ioctl(fd, code, layout):
     return layout.unpack(result)
 
 
-def _read_attribute(fd, name):
+def _read_attribute_bytes(fd, name):
     attribute = os.open(name, SAFE_OPEN | os.O_RDONLY, dir_fd=fd)
     with os.fdopen(attribute, "rb") as file:
         info = os.fstat(file.fileno())
@@ -101,7 +108,11 @@ def _read_attribute(fd, name):
         value = file.read(4097)
     if len(value) > 4096:
         raise ValueError("Linux sysfs attribute exceeds the reader limit")
-    return value.decode("ascii").removesuffix("\n")
+    return value
+
+
+def _read_attribute(fd, name):
+    return _read_attribute_bytes(fd, name).decode("ascii").removesuffix("\n")
 
 
 def _number(fd, name):
@@ -229,7 +240,7 @@ def _nvme_attributes(directory, kernel_path, sysfs_device):
 def _nvme_identity(directory, kernel_path, sysfs_device):
     observed = _nvme_attributes(directory, kernel_path, sysfs_device)
     controller, serial, namespace_id, wwid = observed
-    if not NVME_SERIAL.fullmatch(serial):
+    if not DEVICE_SERIAL.fullmatch(serial):
         raise ValueError("NVMe installation target requires a stable printable serial")
     if not 0 < namespace_id < 0xffffffff or not NVME_WWID.fullmatch(wwid):
         raise ValueError("NVMe installation target requires a valid namespace ID and WWID")
@@ -252,6 +263,76 @@ def _nvme_identity(directory, kernel_path, sysfs_device):
             raise ValueError("Linux NVMe inventory changed during namespace verification")
     return {"kind": "NVMeNamespace", "serial": serial, "namespace_id": namespace_id,
             "wwid": wwid, "sysfs_path": str(controller)}
+
+
+def _ahci_device(kernel_path):
+    disk = kernel_path.parent.parent
+    host = disk.parent.parent
+    ata = host.parent
+    pci = ata.parent
+    if (kernel_path.parent.name != "block" or not re.fullmatch(r"ata[0-9]+", ata.name)
+            or not re.fullmatch(r"host[0-9]+", host.name)
+            or (disk / "subsystem").resolve(strict=True) != SCSI
+            or (disk / "driver").resolve(strict=True) != SCSI_DISK_DRIVER
+            or (pci / "subsystem").resolve(strict=True) != PCI
+            or (pci / "driver").resolve(strict=True) != AHCI_DRIVER):
+        return None
+    return disk, pci
+
+
+def _ata_serial(device):
+    try:
+        page = _read_attribute_bytes(device, "vpd_pg80")
+    except FileNotFoundError:
+        return None
+    # The SCSI translation of ATA IDENTIFY exposes the 20-byte serial in VPD page 80.
+    if len(page) < 4 or page[1] != 0x80 or int.from_bytes(page[2:4], "big") != len(page) - 4:
+        return None
+    try:
+        serial = page[4:].decode("ascii").strip(" ")
+    except UnicodeDecodeError:
+        return None
+    return serial if DEVICE_SERIAL.fullmatch(serial) else None
+
+
+def _ahci_attributes(device, sysfs_device):
+    with _directory(device) as opened:
+        if os.fstat(opened).st_dev != sysfs_device or _number(opened, "type") != 0:
+            raise ValueError("SATA installation target requires a local direct-access disk")
+        return _ata_serial(opened), _read_attribute(opened, "wwid")
+
+
+def _ahci_identity(directory, kernel_path, sysfs_device):
+    location = _ahci_device(kernel_path)
+    if location is None or _number(directory, "removable") != 0:
+        raise ValueError("installation target is not a fixed SATA disk from the PCI AHCI driver")
+    device, controller = location
+    with _directory(controller) as pci:
+        if os.fstat(pci).st_dev != sysfs_device or _read_attribute(pci, "class") != "0x010601":
+            raise ValueError("installation target is outside the PCI SATA AHCI profile")
+    serial, wwid = _ahci_attributes(device, sysfs_device)
+    if serial is None:
+        raise ValueError("SATA installation target requires a stable printable serial")
+    if not ATA_WWID.fullmatch(wwid):
+        raise ValueError("SATA installation target requires a registered NAA WWID")
+    with _directory(SYSFS / "block") as block:
+        if os.fstat(block).st_dev != sysfs_device:
+            raise ValueError("Linux block index is outside sysfs")
+        names = _block_names(block, SCSI_DISK_NAME)
+        if kernel_path.name not in names:
+            raise ValueError("installation target is absent from the Linux block index")
+        for name in sorted(names - {kernel_path.name}):
+            sibling = _kernel_path(SYSFS / "block" / name, name)
+            other = _ahci_device(sibling)
+            if other is None:
+                continue
+            serial_other, wwid_other = _ahci_attributes(other[0], sysfs_device)
+            if serial_other == serial or wwid_other == wwid:
+                raise ValueError("SATA installation disk identity is not unique")
+        if (_block_names(block, SCSI_DISK_NAME) != names or _ahci_device(kernel_path) != location
+                or _ahci_attributes(device, sysfs_device) != (serial, wwid)):
+            raise ValueError("Linux SATA inventory changed during identity verification")
+    return {"kind": "SataAhciDisk", "serial": serial, "wwid": wwid, "sysfs_path": str(device)}
 
 
 def _loop_identity(fd, path, kernel_path):
@@ -297,6 +378,8 @@ def read_target(fd, path: Path, *, allow_loop: bool) -> dict:
             transport = _virtio_identity(directory, kernel_path, sysfs_device)
         elif kind == "NVMeNamespace":
             transport = _nvme_identity(directory, kernel_path, sysfs_device)
+        elif kind == "SataAhciDisk":
+            transport = _ahci_identity(directory, kernel_path, sysfs_device)
         else:
             transport = _loop_identity(fd, path, kernel_path)
         if ((size, logical, physical) != _writable_geometry(fd, directory, sysfs_device)

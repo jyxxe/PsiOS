@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install to a disposable virtio or NVMe disk from Ubuntu, then boot the installed PsiOS."""
+"""Install to a disposable Virtio, NVMe or SATA AHCI disk and boot the installed PsiOS."""
 
 import argparse
 import json
@@ -19,7 +19,8 @@ from qemu_boot import boot as boot_ubuntu, identity
 
 
 TARGET_SERIAL = "PSIOS-INSTALL-001"
-BAD_SERIAL = {"virtio": "PSIOS BAD SERIAL", "nvme": "  "}
+BAD_SERIAL = {"virtio": "PSIOS BAD SERIAL", "nvme": "  ", "ahci": "PSIOS-NO-WWN"}
+COLLISION_SERIAL = "PSIOS-COLLISION-"
 GUEST = Path("/var/lib/psios-virtio-acceptance")
 OPERATION = GUEST / "operation"
 BAD_OPERATION = GUEST / "bad-operation"
@@ -51,6 +52,16 @@ if bus == "nvme":
     assert (controller.parent.parent / "driver").resolve() == Path("/sys/bus/pci/drivers/nvme")
     transport = dict(kind="NVMeNamespace", serial=serial, namespace_id=int(read(disk / "nsid")),
                      wwid=read(disk / "wwid"), sysfs_path=str(controller))
+elif bus == "ahci":
+    disk, = (p.resolve(strict=True) for p in Path("/sys/block").glob("sd*")
+             if (p / "device/vpd_pg80").is_file()
+             and (p / "device/vpd_pg80").read_bytes()[4:].decode("ascii").strip(" ") == serial)
+    device = disk.parent.parent
+    assert (device / "driver").resolve() == Path("/sys/bus/scsi/drivers/sd")
+    controller = device.parent.parent.parent.parent
+    assert read(controller / "class") == "0x010601"
+    assert (controller / "driver").resolve() == Path("/sys/bus/pci/drivers/ahci")
+    transport = dict(kind="SataAhciDisk", serial=serial, wwid=read(device / "wwid"), sysfs_path=str(device))
 else:
     disk, = (p.resolve(strict=True) for p in Path("/sys/block").glob("vd*") if read(p / "serial") == serial)
     assert (disk.parent.parent / "driver").resolve() == Path("/sys/bus/virtio/drivers/virtio_blk")
@@ -123,7 +134,7 @@ def make_source(args, work):
     return image, receipt, operator, admin
 
 
-def ubuntu_command(instance, target, rejected, port, serial_log, bus="virtio"):
+def ubuntu_command(instance, target, rejected, port, serial_log, bus="virtio", collisions=()):
     accel = "kvm" if os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
     manifest = json.loads((instance / "manifest.json").read_bytes())
     assert manifest["firmware"] == "OVMF" and manifest["architecture"] == "amd64"
@@ -144,9 +155,21 @@ def ubuntu_command(instance, target, rejected, port, serial_log, bus="virtio"):
         ("rejected", f"../{rejected.name}", "raw", BAD_SERIAL[bus], ""),
     ):
         read_only = ",readonly=on" if name == "seed" else ""
-        device = "nvme" if bus == "nvme" and name in ("installed", "rejected") else "virtio-blk-pci"
+        device = "virtio-blk-pci"
+        if name in ("installed", "rejected"):
+            if bus == "nvme":
+                device = "nvme"
+            elif bus == "ahci":
+                port = 0 if name == "installed" else 1
+                device = f"ide-hd,bus=ide.{port}"
+                if name == "installed":
+                    options += ",wwn=0x5000c500f0120001"
         cmd += ["-drive", f"if=none,id={name},format={fmt},file={path}{read_only}",
                 "-device", f"{device},drive={name},serial={serial}{options}"]
+    for index, collision in enumerate(collisions):
+        cmd += ["-drive", f"if=none,id=collision{index},format=raw,file=../{collision.name}",
+                "-device", f"ide-hd,bus=ide.{index + 2},drive=collision{index},"
+                           f"serial={COLLISION_SERIAL}{index},wwn=0x5000c500f0120002"]
     return cmd
 
 
@@ -182,8 +205,14 @@ def install_in_guest(run, tool_debs, work, source, receipt, source_digest, blank
     plan_options = ("--source-image", guest_image, "--receipt", guest_receipt,
                     "--receipt-sha256", receipt_digest, "--target")
     bad = install(BAD_OPERATION, "plan", *plan_options, bad_evidence["path"], check=False)
-    assert bad.returncode == 1 and "stable printable serial" in bad.stderr, bad.stderr
+    bad_identity = "registered NAA WWID" if bus == "ahci" else "stable printable serial"
+    assert bad.returncode == 1 and bad_identity in bad.stderr, bad.stderr
     remote(run, "sudo", "-n", "test", "!", "-e", BAD_OPERATION / "operation.json")
+    if bus == "ahci":
+        collision = json.loads(remote(run, "python3", "-c", PROBE_DEVICE, bus, COLLISION_SERIAL + "0").stdout)
+        duplicate = install(BAD_OPERATION, "plan", *plan_options, collision["path"], check=False)
+        assert duplicate.returncode == 1 and "SATA installation disk identity is not unique" in duplicate.stderr, duplicate.stderr
+        remote(run, "sudo", "-n", "test", "!", "-e", BAD_OPERATION / "operation.json")
 
     planned = json.loads(install(OPERATION, "plan", *plan_options, evidence["path"]).stdout)
     assert planned["status"] == "Planned" and planned["plan"]["allow_loop"] is False, planned
@@ -247,11 +276,13 @@ def exercise(args, work):
     assert source_digest == json.loads(receipt.read_bytes())["initial_image_sha256"]
     target = sparse(work, "installed.raw", image.stat().st_size)
     rejected = sparse(work, "rejected.raw", image.stat().st_size)
+    collisions = (tuple(sparse(work, f"collision-{index}.raw", image.stat().st_size) for index in range(2))
+                  if args.target_bus == "ahci" else ())
     blank = sha(target)
     assert sha(rejected) == blank
 
     def launch(port, serial_log):
-        return ubuntu_command(instance, target, rejected, port, serial_log, args.target_bus)
+        return ubuntu_command(instance, target, rejected, port, serial_log, args.target_bus, collisions)
 
     with boot_ubuntu(instance, key, 1, launch=launch, readiness_timeout=600) as run:
         print("Ubuntu installer host provisioned from the verified Core package", flush=True)
@@ -263,6 +294,7 @@ def exercise(args, work):
         assert evidence["boot_id"] == ubuntu[2], evidence
     assert sha(image) == sha(target) == source_digest, "installed raw bytes differ after Ubuntu shutdown"
     assert sha(rejected) == blank, "refused block device changed"
+    assert all(sha(disk) == blank for disk in collisions), "duplicate-identity disk changed"
     authority, task = boot_installed(args, work, target, receipt, operator, admin)
     assert authority != ubuntu[0], "the installed raw disk reused the Ubuntu authority"
     print(f"PASS {evidence['transport']['kind']} {TARGET_SERIAL}, full raw image {source_digest}, "
@@ -276,7 +308,7 @@ def main():
     parser.add_argument("--archive", type=Path, required=True, help="authenticated portable Core archive")
     parser.add_argument("--archive-sha256", required=True, help="expected digest of the portable Core archive")
     parser.add_argument("--kernel-iso", type=Path, required=True, help="pinned kernel ISO")
-    parser.add_argument("--target-bus", choices=("virtio", "nvme"), default="virtio")
+    parser.add_argument("--target-bus", choices=("virtio", "nvme", "ahci"), default="virtio")
     parser.add_argument("--tool-deb", type=Path, action="append", default=[],
                         help="trusted offline Ubuntu tool or dependency package, repeat as needed")
     parser.add_argument("--ovmf-dir", type=Path, default=Path("/usr/share/OVMF"))

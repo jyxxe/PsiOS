@@ -304,7 +304,7 @@ pub fn perform(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Resul
         Action::Routes(q) => network::observe_routes(q, w),
         Action::RouteLookup(q) => network::observe_lookup(q),
         Action::Resolver {} => network::resolver::observe(),
-        Action::Pci {} => pci::observe(),
+        Action::Pci(query) => pci::observe(w, query),
         Action::RoutingRules(q) => network::observe_rules(q, w),
         Action::Processes(p) => process::page(&w.target.id, p),
         Action::InspectProcess(expected) => process::inspect(&w.target.id, expected),

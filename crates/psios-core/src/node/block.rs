@@ -1,11 +1,10 @@
 //! Observe Linux block devices and seal their kernel identity for later comparison.
 mod attachment;
 
-use super::sysfs::{BELOW, DIRECTORY, attribute};
+pub(super) use super::sysfs::valid_digest;
+use super::sysfs::{BELOW, DIRECTORY, attribute, inventory_page};
 use crate::{Result, err, host::Work, now, require};
-use psios_api::{
-    BlockInventoryCursor, BlockInventoryQuery, MAX_BLOCK_INVENTORY_PAGE, canonical, sha256,
-};
+use psios_api::{BlockInventoryQuery, canonical, sha256};
 use rustix::{
     fd::OwnedFd,
     fs::{Dir, FileType, Mode, OFlags, fstat, open, openat, openat2, readlinkat},
@@ -25,7 +24,6 @@ pub(crate) const PAGED_INVENTORY_FORMAT: u32 = crate::local_read_tools::NODE_INV
 const SYSFS: &str = "/sys";
 const LAYOUT_ROWS: usize = 512;
 const INVENTORY_ROWS: usize = 1024;
-const INVENTORY_PAGE_BYTES: usize = 12 * 1024;
 
 fn decimal<T: std::str::FromStr + ToString>(value: &str) -> Option<T> {
     let number = value.parse::<T>().ok()?;
@@ -63,15 +61,6 @@ pub(super) fn valid_boot(value: &str) -> bool {
 
 pub(super) fn valid_sequence(value: &str) -> bool {
     decimal::<u64>(value).is_some_and(|sequence| sequence > 0)
-}
-
-pub(super) fn valid_digest(value: &str) -> bool {
-    value.strip_prefix("sha256:").is_some_and(|digest| {
-        digest.len() == 64
-            && digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    })
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -243,22 +232,7 @@ fn inventory_row(expected_number: &str, path: &Path, dir: &OwnedFd) -> Result<In
 }
 
 pub(crate) fn validate_inventory(query: &BlockInventoryQuery) -> Result<()> {
-    require(
-        query
-            .limit
-            .is_none_or(|limit| (1..=MAX_BLOCK_INVENTORY_PAGE).contains(&limit)),
-        "InvalidArgument",
-        "block inventory page limit must be 1 to 32",
-    )?;
-    if let Some(cursor) = &query.cursor {
-        require(
-            (1..INVENTORY_ROWS).contains(&usize::from(cursor.offset))
-                && valid_digest(&cursor.snapshot_digest),
-            "InvalidArgument",
-            "invalid block inventory cursor",
-        )?;
-    }
-    Ok(())
+    super::sysfs::validate_inventory(query, "block inventory", INVENTORY_ROWS)
 }
 
 pub(super) fn inventory(w: &Work, query: &BlockInventoryQuery) -> Result<Value> {
@@ -287,50 +261,10 @@ pub(super) fn inventory(w: &Work, query: &BlockInventoryQuery) -> Result<Value> 
         identities,
         &devices,
     ))?);
-    let offset = if let Some(cursor) = &query.cursor {
-        require(
-            cursor.snapshot_digest == digest,
-            "ResyncRequired",
-            "block inventory changed or cursor scope differs",
-        )?;
-        let offset = usize::from(cursor.offset);
-        require(
-            offset < devices.len(),
-            "InvalidArgument",
-            "block inventory cursor is past the end",
-        )?;
-        offset
-    } else {
-        0
-    };
-    let mut end = offset;
-    let mut bytes = 0;
-    let limit = usize::from(query.limit.unwrap_or(MAX_BLOCK_INVENTORY_PAGE));
-    for row in devices[offset..].iter().take(limit) {
-        bytes += serde_json::to_vec(row)?.len() + 1;
-        if bytes > INVENTORY_PAGE_BYTES {
-            require(
-                end > offset,
-                "QuotaExceeded",
-                "one device exceeds the inventory page byte limit",
-            )?;
-            break;
-        }
-        end += 1;
-    }
-    let next = if end < devices.len() {
-        let offset =
-            u16::try_from(end).map_err(|_| err("HostFailure", "invalid block inventory size"))?;
-        Some(BlockInventoryCursor {
-            snapshot_digest: digest.clone(),
-            offset,
-        })
-    } else {
-        None
-    };
+    let (devices, next) = inventory_page(&devices, query, &digest, "block inventory")?;
     Ok(
-        json!({"devices":&devices[offset..end],"boot_id":boot_id,"observed_at":now(),
-        "snapshot_digest":digest,"next_cursor":next}),
+        json!({"devices":devices,"boot_id":boot_id,"observed_at":now(),
+              "snapshot_digest":digest,"next_cursor":next}),
     )
 }
 

@@ -72,7 +72,7 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 
 最多三个 DNS 服务器按租约配置。普通账户可用 `busybox ip -4 addr show`、`busybox ip -4 route show` 和 `cat /etc/resolv.conf` 检查。最新租约或故障信息在 `/run/psios-network/status`。配置的网口缺失时，串口账户与 Core 可照常使用。[RFC 3442](https://datatracker.ietf.org/doc/html/rfc3442) · [租约续租和释放验收](../tests/native_dhcp.py) · [无类别路由验收](../tests/native_dhcp_routes.py)
 
-对于无 DHCP 的局域网，构建新盘时可使用以下参数绑定一个 virtio 网口。可省略网关和 DNS。网关必须是同子网的另一个主机地址。DNS 参数最多提供三次。
+对于无 DHCP 的局域网，构建新盘时可使用以下参数绑定一个有线网口。默认选择 virtio，添加 `--static-driver e1000e` 使用 Intel e1000e，需要构建工具 `unsquashfs`。可省略网关和 DNS。IPv4 网关必须是同子网的另一个主机地址。DNS 参数最多提供三次。
 
 ```sh
 --static-mac 52:54:00:51:6f:20 --static-address 192.0.2.20/24 \
@@ -86,9 +86,9 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 --static-ipv6-gateway fe80::2 --static-ipv6-dns 2001:db8:70::53
 ```
 
-启动时读入 root 私有的 `/etc/psios/static-ipv4` 或 `/etc/psios/static-ipv6`，按 MAC 匹配唯一的 virtio 网口。静态 IPv6 网口关闭路由器通告、自动配置和重定向，等待 Linux 重复地址检测通过后才发布 IPv6 默认路由。静态路由使用 metric 30320。地址或路由配置失败时清理本次添加的地址和路由，保留已有条目与解析器配置。两种地址族都配置成功后一次性更新双栈 DNS。可查看 `/run/psios-network/status` 和 `busybox ip -6 route show`。多网口、无线、DHCPv6 和远程确认回退事务仍待开发。[静态 IPv4 验收](../tests/native_static_ipv4.py) · [静态 IPv6 和双栈验收](../tests/native_static_ipv6.py)
+启动时读入 root 私有的 `/etc/psios/static-ipv4` 或 `/etc/psios/static-ipv6`，按 MAC 和指定驱动匹配唯一网口。静态 IPv6 网口关闭路由器通告、自动配置和重定向，等待 Linux 重复地址检测通过后才发布 IPv6 默认路由。静态路由使用 metric 30320。地址或路由配置失败时清理本次添加的地址和路由，保留已有条目与解析器配置。两种地址族都配置成功后一次性更新双栈 DNS。可查看 `/run/psios-network/status` 和 `busybox ip -6 route show`。多网口、无线、DHCPv6 和远程确认回退事务仍待开发。[静态 IPv4 验收](../tests/native_static_ipv4.py) · [静态 IPv6 和双栈验收](../tests/native_static_ipv6.py) · [e1000e 双栈验收](../tests/native_static_e1000e.py)
 
-静态 IPv4 的网络配置对应格式 4 回执，静态 IPv6 和双栈对应格式 5。配有 Core 资源限额的盘在格式 6 中记录同一个 `network_profile`。停机升级会检查保存的配置内容和权限。双栈还会核对两个配置的 MAC 和合计 DNS 数量。配置损坏时保留源盘并拒绝发布候选盘。
+virtio 静态 IPv4 对应格式 4 回执，静态 IPv6 和双栈对应格式 5。配有 Core 资源限额的 virtio 盘在格式 6 中记录同一个 `network_profile`。e1000e 的格式 8 回执同时记录驱动和静态模式。停机升级会检查保存的配置内容和权限，并核对 e1000e 的启动方式。双栈还会核对两个配置的 MAC 和合计 DNS 数量。配置损坏时保留源盘并拒绝发布候选盘。
 
 新盘可用 `--slaac-mac 52:54:00:51:6f:20` 为指定 Virtio 网口启用 IPv6 路由器发现。Linux 接收路由器通告，按通告形成 IPv6 地址、执行重复地址检测并管理地址与默认路由的有效期。此配置关闭 IPv6 重定向。可用 `--slaac-dns` 指定至多三个不带区标识的 IPv6 DNS 地址。解析器读取显式设置，路由器通告中的 DNS 选项仍待接入。`/run/psios-network/status` 显示发现功能是否启动。地址与路由可用 `busybox ip -6 addr` 和 `busybox ip -6 route` 核对。
 

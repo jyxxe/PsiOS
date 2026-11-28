@@ -53,8 +53,8 @@ driver=virtio_net
 transport=virtio
 module=/psios-e1000e.ko
 if [ -e "$module" ] || [ -L "$module" ]; then
-    [ "$profile" = dhcp ] && [ -f "$module" ] && [ ! -L "$module" ] &&
-        grep -Eq '^[0-9a-f]{64}  /psios-e1000e\.ko$' /psios-payload.sha256 || retry 'invalid e1000e DHCP deployment'
+    [ -f "$module" ] && [ ! -L "$module" ] &&
+        grep -Eq '^[0-9a-f]{64}  /psios-e1000e\.ko$' /psios-payload.sha256 || retry 'invalid e1000e deployment'
     driver=e1000e
     transport=e1000e
     [ -d /sys/module/e1000e ] || insmod "$module" || retry 'could not load the e1000e network driver'

@@ -33,6 +33,8 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 
 第一次生产启动生成标准的 `/etc/machine-id`，由系统分区中的 root 只读文件提供。每台从同一未启动盘部署的节点在各自启动时生成 ID。之后重启沿用原值，停机升级保留它。早期镜像首次运行新引导时会补建文件。已存在的 ID 必须是非全零的 32 个小写十六进制字符。启动遇到格式、类型或所有者不符时，记录 `machine-identity` 阶段并进入原有救援流程。
 
+正常部署挂载并核验状态卷以后，如早期启动检查失败，会在 `/var/lib/.psios-boot-failure` 保存最近一次失败的启动 ID 和阶段。文件为 root 专用，修复后成功启动仍保留记录。停机时，持有可信磁盘副本的操作者也可只读查看状态分区根目录下的 `/.psios-boot-failure`。状态卷核验前的故障和隔离试启动故障由串口报告。
+
 生成新盘时可用 `--timezone Asia/Shanghai` 选择本地显示时区，默认 UTC。普通账户可用 `psios-timezone show` 查询，或用 `psios-timezone list` 查看随盘提供的 IANA 名称。在本机 root 控制台执行 `psios-timezone set Europe/Berlin` 会原子更新 `/etc/localtime`，重启和停机升级保留该设置。系统 UTC 时钟由原有内核与固件管理。需要 UTC 输出时可用 `date -u`。
 
 当前镜像从固定 Linux 输入取用公有领域的 IANA tzdata 2026f。启动清单记录数据包摘要，启动时校验随盘的时区文件及管理命令。停机升级以新部署内置数据解释已保留的 IANA 名称。[断网与停机升级验收](../tests/native_timezone.py)

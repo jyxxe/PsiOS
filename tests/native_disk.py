@@ -597,19 +597,49 @@ def check_machine_id_clone(work, image, operator, admin):
         c.login("psios", operator)
         observed = check_machine_identity(c)
         node = call(c, "Principal.WhoAmI", {})["authority_id"]
+        initial_boot = c.run("cat /proc/sys/kernel/random/boot_id")
         c.send("exit")
         c.login("root", admin)
+        c.run("test ! -e /var/lib/.psios-boot-failure")
         c.send("poweroff")
         assert c.vm.wait(35) == 0
     check_clean_shutdown(clone)
 
     set_machine_id_fixture(work, clone, "/etc/machine-id", "0" * 32 + "\n", "0100444", replace=True)
+    set_machine_id_fixture(work, clone, "/.psios-boot-failure.pending", "interrupted boot record", "0100600")
     with boot(work, clone, vars_file="machine-identity-vars.fd", pace_commands=True) as c:
         c.until(b"PsiOS boot stopped at machine-identity", reject=b"psios login:")
         assert c.vm.wait(25) == 0
     check_clean_shutdown(clone)
+
+    # Read the last record independently while the failed node is offline.
+    state = work / "boot-failure.ext4"
+    extract_partition(clone, state, 65, 192)
+    raw = subprocess.run(["debugfs", "-R", "cat /.psios-boot-failure", state],
+                         capture_output=True, text=True, check=True, timeout=15).stdout
+    state.unlink()
+    failure = json.loads(raw)
+    assert set(failure) == {"format", "boot_id", "stage"}, failure
+    assert failure["format"] == 1 and failure["stage"] == "machine-identity", failure
+    assert re.fullmatch(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}", failure["boot_id"])
+    assert failure["boot_id"] != initial_boot
+
+    set_machine_id_fixture(work, clone, "/etc/machine-id", observed + "\n", "0100444", replace=True)
+    with boot(work, clone, vars_file="machine-identity-vars.fd", pace_commands=True) as c:
+        c.login("psios", operator)
+        assert call(c, "Principal.WhoAmI", {})["authority_id"] == node
+        assert c.run("cat /proc/sys/kernel/random/boot_id") != failure["boot_id"]
+        c.run("test ! -r /var/lib/.psios-boot-failure")
+        c.send("exit")
+        c.login("root", admin)
+        assert c.run("stat -c '%u:%g:%a:%h' /var/lib/.psios-boot-failure") == "0:0:600:1"
+        assert c.run("cat /var/lib/.psios-boot-failure") + "\n" == raw
+        c.run("test ! -e /var/lib/.psios-boot-failure.pending")
+        c.send("poweroff")
+        assert c.vm.wait(35) == 0
+    check_clean_shutdown(clone)
     clone.unlink()
-    print("PASS stale machine ID preparation recovered and an invalid stored ID refused boot", flush=True)
+    print("PASS invalid machine ID stopped boot, privately persisted the failure, and recovered the same authority", flush=True)
     return observed, node
 
 

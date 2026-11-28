@@ -58,14 +58,15 @@ blocked, not converted into exceptions.
    `git rev-parse HEAD` in the candidate checkout must match the PR head SHA.
 2. Confirm the required-check run points at that same head SHA. A run for a
    previous commit is not evidence for a newer one.
-3. Confirm the target base you reviewed has not moved. Fetch the target branch,
-   compare `git rev-parse origin/<target-branch>` with the reviewed base SHA,
-   and require that fetched tip to be contained in the candidate with
-   `git merge-base --is-ancestor "$(git rev-parse origin/<target-branch>)" HEAD`.
-   If either check differs, bring the current base into the branch with a merge
-   commit, rerun tests, and ask for a fresh review. Never force-push to fake
-   freshness; an ancestor check against a stale `<reviewed-base-sha>` stays true
-   after the target advances.
+3. Confirm the target base you reviewed has not moved. Fetch the target branch
+   from the remote that holds it, compare `git rev-parse
+   <target-remote>/<target-branch>` with the reviewed base SHA, and require that
+   fetched tip to be contained in the candidate with
+   `git merge-base --is-ancestor <target-remote>/<target-branch> HEAD`. If either
+   check differs, bring the current base into the branch with a merge commit,
+   rerun tests, and ask for a fresh review. Never force-push to fake freshness;
+   an ancestor check against a stale `<reviewed-base-sha>` stays true after the
+   target advances.
 4. If workflow files, the test baseline or branch protection changed, treat the
    approval and check set as invalidated until re-reviewed.
 

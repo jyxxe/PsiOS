@@ -19,10 +19,11 @@ use std::{
 };
 use tokio::net::UnixStream;
 
-const TOOLS: [&str; 4] = [
+const TOOLS: [&str; 5] = [
     "node.inventory",
     "node.devices",
     "node.pci",
+    "node.usb",
     "system.status",
 ];
 const CONTEXT_LIMIT: usize = 128 * 1024;
@@ -455,6 +456,44 @@ mod tests {
         assert_eq!(
             model.request_body(&second).unwrap_err().code,
             "PreconditionFailed"
+        );
+    }
+
+    #[test]
+    fn usb_decisions_require_the_skill_and_empty_input() {
+        let (model, mut context) = first_turn();
+        let decision = json!({"action": "tool", "tool": "node.usb", "input": {}});
+        let response = |decision: &Value| {
+            json!({"model": "local", "choices": [{"finish_reason": "stop",
+                "message": {"role": "assistant", "content": decision.to_string()}}]})
+        };
+        let (_, tools) = model.request_body(&context).unwrap();
+        assert_eq!(
+            decode_decision(&response(&decision), "local", tools)
+                .unwrap_err()
+                .code,
+            "PermissionDenied"
+        );
+
+        context["permitted_tools"] = json!(["node.usb"]);
+        let (body, tools) = model.request_body(&context).unwrap();
+        let request = parse(&body).unwrap();
+        assert_eq!(
+            request["response_format"]["json_schema"]["schema"]["oneOf"][0]["properties"]["tool"]["enum"],
+            json!(["node.usb"])
+        );
+        assert!(matches!(
+            decode_decision(&response(&decision), "local", tools).unwrap(),
+            ModelDecision::Tool { tool, input } if tool == "node.usb" && input == json!({})
+        ));
+
+        let with_cursor =
+            json!({"action": "tool", "tool": "node.usb", "input": {"cursor": "next"}});
+        assert_eq!(
+            decode_decision(&response(&with_cursor), "local", tools)
+                .unwrap_err()
+                .code,
+            "PermissionDenied"
         );
     }
 

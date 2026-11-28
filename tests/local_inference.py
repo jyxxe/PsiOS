@@ -16,6 +16,23 @@ from test_pci_observation import linux_devices
 
 PINS = json.loads((Path(__file__).resolve().parent / "fixtures/local-inference.json").read_text())
 GENERATION_TOKENS = 192
+DEVICE_NAMES = {"node.pci": "PCI", "node.usb": "USB"}
+
+
+def linux_usb_devices():
+    bus = Path("/sys/bus/usb/devices")
+    assert bus.is_dir(), "USB observation requires Linux USB sysfs"
+    rows = {}
+    for device in bus.iterdir():
+        if not (device / "idVendor").exists():
+            continue
+        rows[device.name] = {
+            "vendor_id": (device / "idVendor").read_text().strip(),
+            "product_id": (device / "idProduct").read_text().strip(),
+            "device_address": int((device / "devnum").read_text()),
+            "authorized": (device / "authorized").read_text().strip() == "1",
+        }
+    return rows
 
 
 class LocalHTTP(http.client.HTTPConnection):
@@ -57,15 +74,18 @@ def exercise(node, endpoint, work, *, metered, tool):
                       max_output_bytes=4096, max_in_flight=8))
     goal = f"Call {tool} now with an empty input object."
     instructions = f"Call {tool} with an empty input to obtain the local hardware inventory."
-    if tool == "node.pci":
-        goal = "Inspect local PCI devices and their Linux drivers before finishing."
+    if tool in DEVICE_NAMES:
+        device_name = DEVICE_NAMES[tool]
+        goal = f"Inspect local {device_name} devices before finishing."
+        if tool == "node.pci":
+            goal = "Inspect local PCI devices and their Linux drivers before finishing."
         example = json.dumps({"action": "tool", "tool": tool, "input": {}}, separators=(",", ":"))
-        instructions = f"Read the Linux PCI inventory first. Your first decision must be {example}"
+        instructions = f"Read the Linux {device_name} inventory first. Your first decision must be {example}"
     skill = node.call("Skill.Publish", dict(name="read-local-inventory", version="1", tools=[tool],
                      instructions=instructions,
                      license="MIT", source="operator"))
     scope = {}
-    if tool == "node.pci":
+    if tool in DEVICE_NAMES:
         local = node.call("Node.Get", {})["reference"]["resource_id"]
         scope["tool_targets"] = [local, model["resource_id"], skill["resource_id"]]
     grant = node.call("Grant.Issue", dict(principal_id=agent["principal_id"], units=8, model_calls=8,
@@ -102,6 +122,13 @@ def exercise(node, endpoint, work, *, metered, tool):
         assert output["boot_id"] == Path("/proc/sys/kernel/random/boot_id").read_text().strip()
         if tool == "node.pci":
             assert output["devices"] == linux_devices(), output
+        elif tool == "node.usb":
+            expected = linux_usb_devices()
+            devices = output["devices"]
+            assert [row["location"] for row in devices] == sorted(expected)[:len(devices)], output
+            for row in devices:
+                assert all(row[key] == value for key, value in expected[row["location"]].items()), output
+            assert bool(output["next_cursor"]) == (len(devices) < len(expected)), output
         else:
             assert output["memory_bytes"]["MemTotal"] > 0
 
@@ -186,7 +213,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     for flag in ("--bin-dir", "--server", "--weights"):
         parser.add_argument(flag, type=Path, required=True)
-    parser.add_argument("--tool", choices=("node.inventory", "node.pci"), default="node.inventory")
+    parser.add_argument("--tool", choices=("node.inventory", *DEVICE_NAMES), default="node.inventory")
     parser.add_argument("--legacy-unmetered", action="store_true", help="expect a pre-metering authority with the current CLI")
     args = parser.parse_args()
     with args.weights.open("rb") as f:

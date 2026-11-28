@@ -1,6 +1,6 @@
 # 使用本机语言模型执行资产盘点
 
-`psiosctl model-step` 的本机推理适配器通过 Unix socket 调用支持结构化 Chat Completions 的进程。当前配置支持 `system.status`、`node.inventory`、`node.devices`、`node.pci` 及结束或失败决策。盘点工具使用空对象作为输入。PCI 观察须由 Skill 明确允许，委托的 `tool_targets` 须包含当前节点以及会话采用的 Model 和 Skill。Core 负责签发租约、结算模型轮次、提交 Task 并保留结果。CLI 的普通节点和存储操作在推理进程停止时仍可使用。[会话及授权](core-runtime.md) · [PCI Task](core-runtime.md#pci-设备与驱动观测)
+`psiosctl model-step` 的本机推理适配器通过 Unix socket 调用支持结构化 Chat Completions 的进程。当前配置支持 `system.status`、`node.inventory`、`node.devices`、`node.pci`、`node.usb` 及结束或失败决策。盘点工具使用空对象作为输入。PCI 和 USB 观察须由 Skill 明确允许，委托的 `tool_targets` 须包含当前节点以及会话采用的 Model 和 Skill。USB 返回首个有界页面，后续页面由有权主体使用 System API 读取。Core 负责签发租约、结算模型轮次、提交 Task 并保留结果。CLI 的普通节点和存储操作在推理进程停止时仍可使用。[会话及授权](core-runtime.md) · [PCI Task](core-runtime.md#pci-设备与驱动观测) · [USB Task](core-runtime.md#usb-总线与端口观测)
 
 在支持的 Linux 上，以模型服务账户启动可信的 llama.cpp 运行时，用 `--host /绝对路径/inference.sock` 绑定受保护目录中的 Unix socket。已验证的 CPU 组合使用 SmolLM2-135M-Instruct Q4_K_M、`--alias psios-small` 和至少 2048 token 上下文。不要将模型凭据、租约或 PsiOS 令牌加入提示。下载校验在启动前完成，推理进程可以在禁网环境运行。[验收所用版本、来源和摘要](../tests/fixtures/local-inference.json)
 

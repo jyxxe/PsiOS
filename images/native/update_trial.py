@@ -50,9 +50,8 @@ def json_report(body):
 def receipt_lineage(prepared):
     candidate, trial = prepared.candidate_receipt, prepared.trial_receipt
     signed = "secure_boot" in candidate
-    candidate_formats = (3, 4, 5, 6) if signed else (2, 4, 5, 6)
     require(trial.get("boot_mode") == create.TRIAL_BOOT_MODE and trial.get("format") == create.TRIAL_RECEIPT_FORMAT
-            and candidate.get("format") in candidate_formats and "boot_mode" not in candidate,
+            and candidate.get("format") == create.production_receipt_format(candidate) and "boot_mode" not in candidate,
             "expected native trial and normal candidate receipts")
     if signed:
         trust = candidate["secure_boot"]
@@ -70,7 +69,7 @@ def receipt_lineage(prepared):
                 "unsigned candidate has incompatible trial trust")
     require(all(trial[name] == candidate[name] for name in
                 ("geometry_mib", "state_uuid", "home_uuid", "source_commit", "upgrade"))
-            and all(trial.get(name) == candidate.get(name) for name in ("network_profile", "core_limits"))
+            and all(trial.get(name) == candidate.get(name) for name in ("network_profile", "core_limits", "ssh_console"))
             and trial["deployment_manifest_sha256"] != candidate["deployment_manifest_sha256"],
             "trial and candidate deployment lineage differs")
     geometry = trial["geometry_mib"]

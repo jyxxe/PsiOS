@@ -764,6 +764,15 @@ def prepare_trial_disk(work, disk, layout, configuration, *, secure_boot_require
     return trial
 
 
+def production_receipt_format(properties):
+    if "ssh_console" in properties:
+        return SSH_RECEIPT_FORMAT
+    if "core_limits" in properties:
+        return 6
+    static_formats = {STATIC_IPV4: 4, STATIC_IPV6: 5, STATIC_DUAL: 5}
+    return static_formats.get(properties.get("network_profile"), 3 if "secure_boot" in properties else 2)
+
+
 def finish_disk(work, disk, output, *, signing, upgrade):
     manifest_path = work / "psios-deployment.json"
     manifest = json.loads(manifest_path.read_bytes())
@@ -777,14 +786,8 @@ def finish_disk(work, disk, output, *, signing, upgrade):
     write_partition(disk, ESP, esp, replace=upgrade is not None)
     with disk.open("rb") as completed:
         os.fsync(completed.fileno())
-    receipt_format = {STATIC_IPV4: 4, STATIC_IPV6: 5, STATIC_DUAL: 5}
-    format_version = receipt_format.get(manifest.get("network_profile"), 3 if signing else 2)
-    if "core_limits" in manifest:
-        format_version = 6
-    if "ssh_console" in manifest:
-        format_version = SSH_RECEIPT_FORMAT
     receipt = {
-        "format": format_version,
+        "format": production_receipt_format(manifest),
         "image": str(output), "source_commit": manifest["core_source_commit"],
         "geometry_mib": manifest["geometry_mib"], "state_uuid": manifest["required_filesystems"]["state"],
         "home_uuid": manifest["required_filesystems"]["home"],

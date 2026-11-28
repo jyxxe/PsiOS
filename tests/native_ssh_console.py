@@ -122,10 +122,24 @@ def exercise(args, work):
     clone.unlink()
 
     original = sha(image)
-    upgraded = work / "upgraded.raw"
-    raw = subprocess.check_output([sys.executable, args.installer, upgraded, *common,
-                                   "--upgrade-from", image, "--previous-receipt", receipt_path], timeout=360)
-    assert json.loads(raw)["ssh_console"] == receipt["ssh_console"] and sha(image) == original
+    if args.staged:
+        candidate = work / "staged"
+        code, variables = work / "code.fd", work / "vars.fd"
+        firmware_digest = sha(variables)
+        raw = subprocess.check_output([sys.executable, args.installer.with_name("stage_update.py"), candidate, *common,
+                                       "--upgrade-from", image, "--previous-receipt", receipt_path,
+                                       "--previous-receipt-sha256", sha(receipt_path), "--ovmf-code", code,
+                                       "--ovmf-code-sha256", sha(code), "--ovmf-vars", variables,
+                                       "--ovmf-vars-sha256", firmware_digest], timeout=480)
+        assert json.loads(raw)["status"] == "Staged" and sha(variables) == firmware_digest
+        upgraded = candidate / "candidate.raw"
+        observed = json.loads((candidate / "candidate-build.json").read_bytes())
+    else:
+        upgraded = work / "upgraded.raw"
+        raw = subprocess.check_output([sys.executable, args.installer, upgraded, *common,
+                                       "--upgrade-from", image, "--previous-receipt", receipt_path], timeout=360)
+        observed = json.loads(raw)
+    assert observed["ssh_console"] == receipt["ssh_console"] and sha(image) == original
     with boot(work, upgraded, network_mac=MAC, ssh_port=port, pace_commands=True) as console:
         console.login("psios", operator)
         check_lease(console)
@@ -143,6 +157,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kernel-iso", type=Path, required=True)
     parser.add_argument("--archive", type=Path, required=True)
+    parser.add_argument("--staged", action="store_true")
     parser.add_argument("--installer", type=Path, default=REPO / "images/native/create.py")
     parser.add_argument("--ovmf-dir", type=Path, default=Path("/usr/share/OVMF"))
     args = parser.parse_args()

@@ -16,6 +16,7 @@ import sys
 import tempfile
 
 from native_disk import REPO, boot, call, check_state, extract_partition, password, replace_partition, sha
+from native_boot_tools import TOOLS
 from native_upgrade import STATE_MIB, STATE_OFFSET, shutdown
 
 
@@ -25,9 +26,9 @@ SOURCE_NIC = "52:54:00:58:3e:25"
 TAIL_DATA = b"PsiOS unallocated source marker"
 
 
-def invoke(command, timeout):
+def invoke(command, timeout, *, env=None):
     with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                          start_new_session=True) as process:
+                          start_new_session=True, env=env) as process:
         try:
             stdout, stderr = process.communicate(timeout=timeout)
         except BaseException:
@@ -49,9 +50,9 @@ def digest_map(files):
     return {path: sha(path) for path in files}
 
 
-def refused(work, command, message, *, timeout=100):
+def refused(work, command, message, *, timeout=100, env=None):
     before = {path.name for path in work.iterdir()}
-    result = invoke(command, timeout)
+    result = invoke(command, timeout, env=env)
     assert result.returncode != 0, result.stdout[-1000:]
     assert re.search(message, result.stderr + result.stdout, re.I), result.stderr[-2400:]
     assert {path.name for path in work.iterdir()} == before, "refusal left filesystem changes in the work directory"
@@ -145,6 +146,14 @@ def validate_bundle(args, output, stdout, old, frozen, source, receipt, code, va
     staged = stage["candidate"]
     active_build = output / "candidate-build.json"
     build = json.loads(active_build.read_bytes())
+    assembly_tools = set(TOOLS)
+    if "secure_boot" in build:
+        assembly_tools.remove("grub-mkstandalone")
+        assembly_tools.update(("openssl", "sbsign", "sbverify", "ukify"))
+    if build.get("wired_driver") == "e1000e":
+        assembly_tools.add("unsquashfs")
+    executable_hashes = {name: sha(Path(shutil.which(name))) for name in assembly_tools}
+    assert build["boot_assembly_tools"] == {"format": 1, "executable_sha256": executable_hashes}, build
     assert selected["image_sha256"] == frozen[source], selected
     assert selected["previous_receipt_sha256"] == frozen[receipt], selected
     assert selected["node_id"] == authority, selected
@@ -293,9 +302,27 @@ def exercise(args, work):
             assert direct[3].stat().st_size == report["raw_disk_bytes"] == old.stat().st_size
         direct[3].unlink()
 
+    chosen_budget = LARGE_COPY_MIB if large_copy is not None else 128
+    with tempfile.TemporaryDirectory(dir=work, prefix="assembly-tools-") as directory:
+        tools = Path(directory)
+        cpio = tools / "cpio"
+        qemu = tools / "qemu-system-x86_64"
+        host_cpio = shlex.quote(shutil.which(cpio.name))
+        host_qemu = shlex.quote(shutil.which(qemu.name))
+        cpio.write_text(f'#!/bin/sh\nexec {host_cpio} "$@"\n')
+        qemu.write_text(f'#!/bin/sh\nset -e\n{host_qemu} "$@"\n'
+                        f"printf '%s\\n' '# changed after guest exit' >> {shlex.quote(str(cpio))}\n")
+        cpio.chmod(0o700)
+        qemu.chmod(0o700)
+        initial_cpio = sha(cpio)
+        env = {**os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"]}
+        refused(work, stage(rejected, max_copy_mib=chosen_budget),
+                r"boot assembly executable changed before publication: cpio", timeout=850, env=env)
+        assert sha(cpio) != initial_cpio and not rejected.exists()
+        assert digest_map(frozen) == frozen
+
     output = work / "staged"
     before = {path.name for path in work.iterdir()}
-    chosen_budget = LARGE_COPY_MIB if large_copy is not None else 128
     stdout = succeeded(invoke(stage(output, max_copy_mib=chosen_budget), 850))
     assert {path.name for path in work.iterdir()} == before | {output.name}, "stage leaked private scratch paths"
     candidate = validate_bundle(args, output, stdout, old_build, frozen, old, receipt, code,

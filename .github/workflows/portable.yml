@@ -307,7 +307,7 @@ jobs:
           kill "$router"
           wait "$router"
           router=
-          python3 -B tests/native_rdnss.py --tap psios6 --kernel-iso "$1/rescue.iso" \
+          python3 -B tests/native_rdnss.py --tap psios6 --verify-core-resolver --kernel-iso "$1/rescue.iso" \
             --archive "$1/rescue-core/psios-core-linux-amd64.tar.gz" \
             --installer "$1/rescue-core/native/create.py"
           SH

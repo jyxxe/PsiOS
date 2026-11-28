@@ -94,7 +94,7 @@ virtio 静态 IPv4 对应格式 4 回执，静态 IPv6 和双栈对应格式 5�
 
 SLAAC 使用格式 10 的构建回执。工厂镜像核验和隔离试启动更新都检查 `/etc/psios/slaac` 及服务定义。正常更新保留 MAC 与显式 DNS。该模式使用 IPv6 单栈。DHCPv6、其他网卡驱动和物理硬件的 SLAAC 验证仍待开展。[真实 IPv6 发现验收](../tests/native_slaac.py)
 
-连接允许信任路由器 DNS 通告的网络时，可在相同 MAC 配置上选择 `--slaac-rdnss`。它与 `--slaac-dns` 互斥。镜像从已固定的内核介质提取 dhcpcd 10.5.2，在所选 Virtio 网口运行 IPv6 路由器发现。解析器只接收有有效期的 RDNSS 地址，去重并发布前三个，为链路本地地址记录所选网口的作用域。到期、链路断开和重启都会重新核对正在使用的解析器。停机升级通过格式 11 回执核对配置、服务和专用账户。许可副本随镜像提供。[dhcpcd 许可](../images/native/dhcpcd.LICENSE) · [IPv6 TAP 验收](../tests/native_rdnss.py)
+连接允许信任路由器 DNS 通告的网络时，可在相同 MAC 配置上选择 `--slaac-rdnss`。它与 `--slaac-dns` 互斥。镜像从已固定的内核介质提取 dhcpcd 10.5.2，在所选 Virtio 网口运行 IPv6 路由器发现。解析器只接收有有效期的 RDNSS 地址，去重并发布前三个，为链路本地地址记录所选网口的作用域。到期、链路断开和重启都会重新核对正在使用的解析器。停机升级通过格式 11 回执核对配置、服务和专用账户。获得当前 Node 授权的 Agent 可以用 `node.resolver` 核对实时 DNS 服务器、接口作用域和启动身份。隔离来宾已验证到期后默认路由仍有效，升级后可以读取原任务制品并取得新启动的观察。许可副本随镜像提供。[dhcpcd 许可](../images/native/dhcpcd.LICENSE) · [IPv6 TAP 验收](../tests/native_rdnss.py)
 
 ## 可选 SSH 控制台
 

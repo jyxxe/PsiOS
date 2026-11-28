@@ -8,12 +8,13 @@ import subprocess
 import tempfile
 
 from native_dhcp import MAC, OTHER, wait_for
-from native_disk import REPO, boot, call, check_clean_shutdown, password, sha
+from native_disk import REPO, boot, call, check_clean_shutdown, password, sha, stage_guest_token
 from native_slaac import TAP_ADDRESS, TAP_DNS, check_dns
 from native_static_ipv4 import installer, poweroff
 
 
 LINK_RESOLVER = "fe80::2"
+RESOLVER_TOOL = "node.resolver"
 
 
 @contextmanager
@@ -51,6 +52,32 @@ def advertised(console, resolver=TAP_DNS):
     check_dns(console)
 
 
+def grant_resolver(console, node):
+    agent = call(console, "Agent.Register", {"name": "native-rdnss-observer", "peer_uid": 1000})
+    grant = call(console, "Grant.Issue", {
+        "principal_id": agent["principal_id"], "actions": ["task.submit", "task.read", RESOLVER_TOOL],
+        "tool_targets": [node], "units": 4, "ttl_seconds": 900,
+    })
+    return agent["token"], grant["delegation_ref"]["resource_id"]
+
+
+def observe_resolver(console, token_file, delegation, key, node, expected):
+    prepared = call(console, "Task.Prepare", {
+        "tool": RESOLVER_TOOL, "key": key, "delegation_id": delegation, "input": {},
+    }, token_file)
+    receipt = call(console, "Task.Submit", prepared, token_file)
+    task = call(console, "Task.Wait", {"id": receipt["task_id"], "timeout_ms": 5000}, token_file)
+    assert task["lifecycle"] == "Succeeded", task
+    reference, = task["result"]["artifact_refs"]
+    snapshot = call(console, "Artifact.Read", {"reference": reference}, token_file)
+    assert snapshot["path"] == "/etc/resolv.conf" and snapshot["invalid_nameserver_directives"] == 0, snapshot
+    assert snapshot["boot_id"] == node["state"]["boot_id"], snapshot
+    assert snapshot["network_namespace_inode"] == console.run("busybox stat -Lc '%i' /proc/self/ns/net"), snapshot
+    assert snapshot["mount_namespace_inode"] == console.run("busybox stat -Lc '%i' /proc/self/ns/mnt"), snapshot
+    assert snapshot["nameservers"] == expected, snapshot
+    return reference, snapshot
+
+
 def shutdown(console, root):
     console.send("exit")
     console.login("root", root)
@@ -76,16 +103,28 @@ def exercise(args, work):
     with router(work, args.tap, TAP_DNS) as announcements, boot(work, image, network_mac=MAC, tap=args.tap) as console:
         console.login("psios", operator)
         advertised(console)
-        authority = call(console, "Node.Get", {})["reference"]["resource_id"]
+        node = call(console, "Node.Get", {})
+        authority = node["reference"]["resource_id"]
         task = json.loads(console.run("printf '{}' | psiosctl submit system.status --key rdnss-persist"))["task_id"]
         result = call(console, "Task.Wait", {"id": task, "timeout_ms": 5000})["result"]
+        if args.verify_core_resolver:
+            secret, delegation = grant_resolver(console, authority)
+            token = stage_guest_token(console, secret)
+            initial_ref, initial = observe_resolver(console, token, delegation, "rdnss-initial", node,
+                                                   [{"address": str(TAP_DNS)}])
         announcements.kill()
         announcements.wait(10)
         wait_for(console, "test -f /etc/resolv.conf && ! grep -q '^nameserver ' /etc/resolv.conf")
         assert "default via fe80::2 dev eth0" in console.run("busybox ip -6 route show default")
+        if args.verify_core_resolver:
+            observe_resolver(console, token, delegation, "rdnss-expired", node, [])
         with router(work, args.tap, LINK_RESOLVER):
             scoped = LINK_RESOLVER + "%eth0"
             advertised(console, scoped)
+            if args.verify_core_resolver:
+                observe_resolver(console, token, delegation, "rdnss-link-local", node,
+                                 [{"address": LINK_RESOLVER, "zone": "eth0"}])
+                console.run(f"rm -f -- {token}")
             console.send("exit")
             console.login("root", root)
             console.run("busybox ip link set dev eth0 down")
@@ -110,8 +149,16 @@ def exercise(args, work):
     with router(work, args.tap, TAP_DNS), boot(work, candidate, network_mac=MAC, tap=args.tap) as console:
         console.login("psios", operator)
         advertised(console)
-        assert call(console, "Node.Get", {})["reference"]["resource_id"] == authority
+        current = call(console, "Node.Get", {})
+        assert current["reference"]["resource_id"] == authority
         assert call(console, "Task.Wait", {"id": task, "timeout_ms": 5000})["result"] == result
+        if args.verify_core_resolver:
+            token = stage_guest_token(console, secret)
+            assert call(console, "Artifact.Read", {"reference": initial_ref}, token) == initial
+            fresh_ref, fresh = observe_resolver(console, token, delegation, "rdnss-candidate", current,
+                                                [{"address": str(TAP_DNS)}])
+            assert fresh_ref != initial_ref and fresh["boot_id"] != initial["boot_id"], fresh
+            console.run(f"rm -f -- {token}")
         shutdown(console, root)
     with router(work, args.tap, TAP_DNS), boot(work, candidate, network_mac=OTHER, tap=args.tap) as console:
         console.login("psios", operator)
@@ -135,6 +182,8 @@ def exercise(args, work):
     assert not refused.exists() and sha(candidate) == changed
     assert sha(image) == original
     print("Verified native RDNSS, expiration, reacquisition, isolated service identity, staged update and the selected Virtio MAC.")
+    if args.verify_core_resolver:
+        print("Verified Agent resolver Tasks track live RDNSS and retain their exact artifacts through a native update.")
 
 
 if __name__ == "__main__":
@@ -144,6 +193,7 @@ if __name__ == "__main__":
     parser.add_argument("--tap", default="psios6")
     parser.add_argument("--installer", type=Path, default=REPO / "images/native/create.py")
     parser.add_argument("--ovmf-dir", type=Path, default=Path("/usr/share/OVMF"))
+    parser.add_argument("--verify-core-resolver", action="store_true", help="require scoped node.resolver Tasks in the guest")
     args = parser.parse_args()
     assert len(args.tap) <= 15 and args.tap.isascii() and args.tap.isalnum(), args.tap
     with tempfile.TemporaryDirectory(prefix="psios-rdnss-") as root:

@@ -25,6 +25,8 @@ psiosctl --token-file ./provider.token model-step "$SESSION" --key "$TURN" \
 
 每次调用处理一个轮次。传输在发送上下文前核对内核提供的服务 UID 及绑定的 Model 修订；模型输出必须是本次 Skill 允许的结构化决策。模型返回尚未完成的输出、错误别名或超时会造成该次推理失败。重试同一键时使用 Core 回执或已持久化的决策；已经开始推理但缺少决策时，SDK 返回 `OutcomeUnknown`。Core 签发租约时扣减一轮调用额度。支持用量回执时，适配器从推理响应读取提示和生成的 Token 数，随原决策持久交付。通过回执的 `usage_ref` 可读取绑定预算、报告者和计数的 ModelUsage 修订。缺少报告时保留未知值；兼容旧 Core 时仅交付决策。Token 上限及总请求期限可配置，供应商账单和运行时权重证明仍待实现。此适配器不会选择其他端点或发起 TCP 请求。[真实推理与故障测试](../tests/local_inference.py)
 
+终结决策须包含至少一个字符的摘要或失败原因。严格结算模式下，收到空文本响应后会持久记录结果未知。重启后重试原键可读回同一回执。[传输故障与重启验收](../tests/test_model_provider_outcome.py)
+
 打开会话时也可请求 `"provider_queue":true`。把 `Model.Register` 的完整回执保存为 `model-ref.json` 后，使用专用暂存目录运行独立工作进程。该进程会等待所选 Model 的会话并复用同一个推理端点。
 
 ```sh

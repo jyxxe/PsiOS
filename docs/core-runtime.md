@@ -53,7 +53,7 @@ Core 核对本机 sysfs，并比较两次采样中的内核设备目录、设备
 
 格式 103 按 Linux 启动和原附件登记设备。支持不可移除的非堆叠直连整盘，以及可通过只读设备描述符核验文件身份的只读 loop。对登记设备显式授予 `device.block_layout` 后，可用 `BlockDevice.Get` 读取最近观测及 `on_current_boot`，也可提交带设备 ID 和当前修订的 `device.block_layout` 获取新的观测。几何变化推进原设备修订。确认缺席、设备替换或原启动结束时，结果保留原身份以及对应状态。替换附件经所有者重新登记并取得独立授权后可观测。设备状态变化随资源版本发布。[loop 复用与恢复验收](../tests/test_block_layout.py)
 
-在本机 Core 配置中设置 `"block_device_reconcile_ms": 1000` 可开启已登记设备的后台复查。省略或设为 `null` 时关闭。取值 250 至 60000 毫秒，格式 111 起每批从活动索引按首次登记顺序选取最多八台 `Present` 或 `Absent` 的设备。每轮固定扫描终点，轮内新增登记在下一轮检查。只有已核实的生命周期或布局摘要变化才产生新修订，所有者可在 `Event.Poll` 或 `Resource.Watch` 中观察。sysfs 被遮蔽、读取失败或采样中遇到身份变化时，保留上次状态并等待下一轮复查。事件记录实际提交的采样变化，采样间的短暂状态可能未被观察到。[后台复查、重启和 sysfs 遮蔽验收](../tests/test_block_layout.py)
+在本机 Core 配置中设置 `"block_device_reconcile_ms": 1000` 可开启已登记设备的后台复查。省略或设为 `null` 时关闭。取值 250 至 60000 毫秒，格式 111 起每批从活动索引按首次登记顺序选取最多八台 `Present` 或 `Absent` 的设备。能接收 Linux 块设备事件时，Core 可提前开始实际 sysfs 复查，每批至少间隔 250 毫秒。内核提示不可用时按配置间隔复查。每轮固定扫描终点，轮内新增登记在下一轮检查。只有已核实的生命周期或布局摘要变化才产生新修订，所有者可在 `Event.Poll` 或 `Resource.Watch` 中观察。sysfs 被遮蔽、读取失败或采样中遇到身份变化时，保留上次状态并等待下一轮复查。事件记录实际提交的采样变化，采样间的短暂状态可能未被观察到。[后台复查、重启和 sysfs 遮蔽验收](../tests/test_block_layout.py) · [原生热拔插唤醒验收](../tests/native_block_hotplug_wake.py)
 
 本机所有者可用 `psiosctl block-device-retire DEVICE --revision REVISION` 或 `BlockDevice.Retire` 退役一条精确的活动登记。Core 保存终态 `Retired`、原设备身份和上次观测修订，既有读取权限可继续查询保留状态。退役只更新 Core 权威，设备本身仍由 Linux 管理。同一附件的登记 ID 永久保留，重新插入且通过独立身份核验的附件需要重新登记和授权。[退役、事件和附件复用验收](../tests/test_block_layout.py)
 

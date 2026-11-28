@@ -269,9 +269,9 @@ Debian 软件包以 `Type=notify` 启动 Core。主进程在核对权威状态�
 
 使用本机 cgroup v2 时，针对运行中的容器，Core 还会核对宿主 PID 所属的 Docker cgroup，从内核读取 CPU 配额与 burst、内存、swap 和进程数限额。`effective_limits.source` 为 `LinuxCgroupV2` 时，观测附带实际限额及 cgroup inode。旧 cgroup v1 配置沿用引擎检查，观测来源为 `DockerCgroupV1`。[Linux cgroup v2 控制项](https://docs.kernel.org/admin-guide/cgroup-v2.html)
 
-若启动回执丢失，先运行新的 `application.health`，再向 `Operation.Reconcile` 提交该 ArtifactRef。同一引擎须确认原容器仍在运行，镜像、隔离配置和限额观测符合获准范围，Core 才会登记运行实例、挂载卷并结算原任务。容器只完成创建、已经退出、配置或读出的限额不符、引擎不可达，或中断发生在检查点写入之前时，原操作继续保留占用。旧版生成的观测须用新检查刷新后再提交对账。[真实 Docker 对账验收](../tests/oci_recovery.py)
+已提交启动检查点但丢失启动回执时，先运行新的 `application.health`，再向 `Operation.Reconcile` 提交该 ArtifactRef。同一引擎须确认原容器仍在运行，镜像、隔离配置和限额观测符合获准范围，Core 才会登记运行实例、挂载卷并结算原任务。在此边界上，容器从未启动、已经退出、配置或读出的限额不符或引擎不可达时，原操作继续保留占用。旧版生成的观测须用新检查刷新后再提交对账。[真实 Docker 对账验收](../tests/oci_recovery.py)
 
-从格式 109 起，Core 在发送 Docker 创建请求前记录原批准、引擎与启动身份、应用与卷修订，并把一次性标识写入创建请求。收到完整容器 ID 后，先保存创建回执，再进行启动检查或现场补偿。丢失 Docker 创建回执时，可由本地所有者取得限定于原 Operation、应用与绑定卷的两项授权。先用 `application.inspect_start_create` 按原 Operation 的 ID 与修订检查同一引擎。检查核对完整容器 ID、创建标识、从未启动的状态、原静态配置和卷身份。
+从格式 109 起，Core 在发送 Docker 创建请求前记录原批准、引擎与启动身份、应用与卷修订，并把一次性标识写入创建请求。收到完整容器 ID 后，先保存创建回执，再进行启动检查或现场补偿。丢失 Docker 创建回执，或已保存创建回执但尚未提交启动检查点时，本地所有者可取得限定于原 Operation、应用与绑定卷的两项授权。先用 `application.inspect_start_create` 按原 Operation 的 ID 与修订检查同一引擎。检查核对完整容器 ID、创建标识、从未启动的状态、原静态配置和卷身份。已有创建回执时还必须匹配记录中的容器 ID。
 
 确认原容器存在后，提交 `application.discard_start_create`，参数为应用的 `target`、原 `operation_ref` 和检查制品 `evidence_ref`。独立审批后，Core 在同一连接上重新读取确切容器，提交删除检查点，再请求一次不带强制或删卷选项的删除。删除回执丢失时，先用新的独立检查结算清理 Operation。原 Operation 还需由检查制品确认删除后才能结算为已知失败并释放原应用与卷占用。删除前缺少容器、引擎或启动身份变化、旧格式缺少创建证据，以及已经达到启动检查点的记录均不能使用这条清理路径。适用范围为受信任的本地 Docker Engine。[真实回执丢失与格式升级验收](../tests/oci_create_intent.py)
 

@@ -1,0 +1,89 @@
+#!/bin/sh
+# Build the optional local CPU inference engine using a verified local source archive.
+set -eu
+if [ "$#" -ne 2 ]; then
+    echo "usage: $0 LLAMA_SOURCE_TAR_GZ NEW_OUTPUT_TAR_GZ" >&2
+    exit 2
+fi
+if [ -e "$2" ] || [ -L "$2" ]; then
+    echo "output already exists" >&2
+    exit 2
+fi
+
+revision=f5e6915c28f10330885fcb9243a93ae98d3115ab
+build_number=12651
+source_sha=18bf46e6e4299e83ddc5645d6448735c4377671954921d11a6e2db4ec397657a
+export SOURCE_DATE_EPOCH=1795420614 LC_ALL=C
+input=$1
+if [ ! -f "$input" ] || [ "$(stat -c %s -- "$input")" != 39335051 ]; then
+    echo "expected the pinned regular llama.cpp source archive" >&2
+    exit 2
+fi
+out_dir=$(CDPATH= cd -- "$(dirname -- "$2")" && pwd -P)
+output="$out_dir/$(basename -- "$2")"
+umask 077
+work=$(mktemp -d -- "$(dirname -- "$output")/.psios-local-inference.XXXXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+cp -- "$input" "$work/source.tar.gz"
+(
+    cd "$work"
+    printf '%s  source.tar.gz\n' "$source_sha" | sha256sum -c -
+)
+
+cc=${CC:-gcc}
+cxx=${CXX:-g++}
+target=$("$cxx" -dumpmachine)
+case "$target" in
+    x86_64-*-linux-musl|x86_64-linux-musl) ;;
+    *) echo "an amd64 Linux musl compiler is required (found $target)" >&2; exit 2 ;;
+esac
+if [ "$("$cc" -dumpmachine)" != "$target" ]; then
+    echo "C and C++ compilers target different systems" >&2
+    exit 2
+fi
+
+tar -xzf "$work/source.tar.gz" -C "$work"
+source="$work/llama.cpp-$revision"
+build="$work/build"
+bundle="$work/bundle"
+cmake -S "$source" -B "$build" -G Ninja \
+    -DCMAKE_C_COMPILER="$cc" -DCMAKE_CXX_COMPILER="$cxx" \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXE_LINKER_FLAGS=-static \
+    -DBUILD_SHARED_LIBS=OFF -DGGML_STATIC=ON \
+    -DGGML_NATIVE=OFF -DGGML_SSE42=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF \
+    -DGGML_FMA=OFF -DGGML_F16C=OFF -DGGML_BMI2=OFF -DGGML_OPENMP=OFF \
+    -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_OPENSSL=OFF \
+    -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_APP=OFF \
+    -DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_SERVER=ON \
+    -DLLAMA_BUILD_NUMBER="$build_number" -DLLAMA_BUILD_COMMIT="$revision"
+cmake --build "$build" --target llama-server --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
+
+mkdir "$bundle"
+cp "$build/bin/llama-server" "$bundle/"
+strip "$bundle/llama-server"
+readelf --wide --file-header --program-headers --dynamic "$bundle/llama-server" > "$work/elf"
+if ! grep -Eq 'Machine: +Advanced Micro Devices X86-64$' "$work/elf" ||
+    grep -Eq ' INTERP |\(NEEDED\)' "$work/elf"; then
+    echo "inference executable must be static amd64 ELF" >&2
+    exit 1
+fi
+cp "$source/LICENSE" "$bundle/LICENSE"
+(
+    cd "$bundle"
+    printf 'source_commit=%s\nsource_sha256=%s\nbuild_number=%s\ncompiler_target=%s\n' \
+        "$revision" "$source_sha" "$build_number" "$target"
+    "$cxx" --version
+    cmake --version
+) > "$bundle/build-inputs.txt"
+(
+    cd "$bundle"
+    chmod 0644 LICENSE build-inputs.txt
+    chmod 0755 llama-server
+    sha256sum LICENSE build-inputs.txt llama-server > SHA256SUMS
+    chmod 0644 SHA256SUMS
+    # Write first, so no pipe failure can be hidden by gzip.
+    tar --mtime="@$SOURCE_DATE_EPOCH" --owner=0 --group=0 --numeric-owner \
+        -cf "$work/bundle.tar" LICENSE SHA256SUMS build-inputs.txt llama-server
+)
+gzip -n "$work/bundle.tar"
+ln -T -- "$work/bundle.tar.gz" "$output"

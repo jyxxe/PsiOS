@@ -1,9 +1,11 @@
 """Verify and stage the exact factory image for a blank-disk installation."""
+from binascii import crc32
 from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
 import re
+import struct
 import subprocess
 import tempfile
 import uuid
@@ -12,6 +14,10 @@ import create
 
 
 MIB = create.MIB
+SECTOR_BYTES = 512
+# The protective MBR can address at most 2^32 sectors including LBA zero.
+MAX_TARGET_BYTES = (1 << 32) * SECTOR_BYTES
+GPT_HEADER = struct.Struct("<8sIIIIQQQQ16sQIII")
 RECEIPT_LIMIT = 16 * 1024
 DIRECTORY_LIMIT = 16 * 1024
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -44,7 +50,10 @@ def partition_copy(work, image, partition, name):
 
 
 def gpt_facts(work, image, layout, *, pass_fds=()):
-    table = create.validate_layout(work, image, layout, pass_fds=pass_fds)
+    return gpt_identity(create.validate_layout(work, image, layout, pass_fds=pass_fds))
+
+
+def gpt_identity(table):
     disk = uuid.UUID(table["id"])
     identities = {disk}
     partitions = []
@@ -63,6 +72,79 @@ def gpt_facts(work, image, layout, *, pass_fds=()):
     if disk.int == 0:
         raise ValueError("factory disk GUID must be nonzero")
     return {"disk_uuid": str(disk), "partitions": partitions}
+
+
+def read_gpt_copy(disk, header_lba, alternate_lba, entries_lba, usable):
+    disk.seek(header_lba * SECTOR_BYTES)
+    sector = disk.read(SECTOR_BYTES)
+    if len(sector) != SECTOR_BYTES:
+        raise ValueError("relocated image has an incomplete GPT header")
+    (signature, revision, size, checksum, reserved, current, alternate, first, last, disk_id,
+     entries, count, entry_size, entries_checksum) = GPT_HEADER.unpack_from(sector)
+    if (signature != b"EFI PART" or revision != 0x10000 or not GPT_HEADER.size <= size <= SECTOR_BYTES
+            or reserved != 0 or (current, alternate, entries) != (header_lba, alternate_lba, entries_lba)
+            or (first, last) != usable or not 0 < count * entry_size <= MIB):
+        raise ValueError("relocated image has a missing or inconsistent GPT header")
+    if crc32(sector[:16] + bytes(4) + sector[20:size]) != checksum:
+        raise ValueError("relocated image has an invalid GPT header checksum")
+    table_bytes = count * entry_size
+    offset = entries_lba * SECTOR_BYTES
+    boundary = (first if header_lba == 1 else header_lba) * SECTOR_BYTES
+    if entry_size < 128 or offset + table_bytes > boundary:
+        raise ValueError("relocated GPT table exceeds its reserved area")
+    disk.seek(offset)
+    partitions = disk.read(table_bytes)
+    if len(partitions) != table_bytes or crc32(partitions) != entries_checksum:
+        raise ValueError("relocated image has an invalid GPT table checksum")
+    return disk_id, count, entry_size, partitions
+
+
+def verify_relocated_gpt(image, target_size, table):
+    """Require two complete GPT copies with matching identities and partition tables."""
+    last_sector = target_size // SECTOR_BYTES - 1
+    usable = table["firstlba"], table["lastlba"]
+    with image.open("rb") as disk:
+        protective = disk.read(SECTOR_BYTES)
+        if (len(protective) != SECTOR_BYTES or protective[510:] != b"\x55\xaa" or protective[450] != 0xEE
+                or struct.unpack_from("<II", protective, 454) != (1, last_sector)):
+            raise ValueError("relocated image has an invalid protective MBR")
+        primary = read_gpt_copy(disk, 1, last_sector, 2, usable)
+        backup = read_gpt_copy(disk, last_sector, 1, usable[1] + 1, usable)
+    if primary != backup or uuid.UUID(bytes_le=primary[0]) != uuid.UUID(table["id"]):
+        raise ValueError("relocated image GPT copies do not agree")
+
+
+def fit_image(work, image, source, target_size):
+    """Relocate GPT metadata on a private verified image; retain every partition extent."""
+    original_size = source["size_bytes"]
+    if not original_size < target_size <= MAX_TARGET_BYTES or target_size % SECTOR_BYTES:
+        raise ValueError("larger targets require whole 512-byte sectors and at most 2 TiB")
+    layout = create.Layout(source["geometry_mib"]["state_mib"], source["geometry_mib"]["home_mib"])
+    old = create.validate_layout(work, image, layout)
+    old_backup = (old["lastlba"] + 1) * SECTOR_BYTES
+    tail_bytes = original_size - old_backup
+    if not 2 * SECTOR_BYTES <= tail_bytes <= MIB:
+        raise ValueError("unsupported GPT backup area on the factory image")
+    image.chmod(0o600)
+    with image.open("r+b") as disk:
+        disk.truncate(target_size)
+    relocate = ["sfdisk", "--quiet", "--no-reread", "--no-tell-kernel", "--relocate", "gpt-bak-std", image]
+    try:
+        create.boot_media.run(work, relocate)
+    except subprocess.SubprocessError as error:
+        raise ValueError("sfdisk could not relocate the verified GPT to the target capacity") from error
+    new_backup = target_size - tail_bytes
+    # libfdisk retains its old backup bytes. Clear only those outside the new table.
+    with image.open("r+b") as disk:
+        disk.seek(old_backup)
+        disk.write(bytes(min(original_size, new_backup) - old_backup))
+    ready = create.validate_layout(work, image, layout)
+    if ((ready["lastlba"] + 1) * SECTOR_BYTES != new_backup or ready["firstlba"] != old["firstlba"]
+            or gpt_identity(ready) != {field: source[field] for field in ("disk_uuid", "partitions")}):
+        raise ValueError("relocated GPT does not match the verified factory partition layout")
+    verify_relocated_gpt(image, target_size, ready)
+    image.chmod(0o400)
+    return {"size_bytes": target_size, "image_sha256": create.sha256(image), "backup_gpt_offset": new_backup}
 
 
 def check_efi(work, image, expected):

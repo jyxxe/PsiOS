@@ -574,6 +574,8 @@ async function verifyLayoutTransfer() {
   await keyboardActivate("#nav-tasks");
   await waitFor("original Task before layout export", 'document.querySelector("#task-rows button") !== null');
   await keyboardActivate('#window-tasks [data-action="minimize"]');
+  await keyboardActivate("#nav-files");
+  await waitFor("scoped file names before layout export", 'document.getElementById("window-files").textContent.includes("documents")');
   await keyboardActivate("#open-workspaces");
   await keyboardActivate("#export-layout");
   const filename = join(input.downloads, "psios-shell-layout.json");
@@ -585,7 +587,10 @@ async function verifyLayoutTransfer() {
   assert.deepEqual(layout.workspaces.map(workspace => workspace.name), ["桌面", "作业"]);
   assert.equal(layout.current, 1);
   assert.equal(layout.windows.find(window => window.id === "tasks").state, "minimized");
-  assert.ok(!JSON.stringify(layout).includes(input.task));
+  assert.ok(layout.windows.some(window => window.id === "files"));
+  for (const privateValue of [input.task, input.volume, input.node, "documents"]) {
+    assert.ok(!JSON.stringify(layout).includes(privateValue));
+  }
 
   async function leaveWorkspaces() {
     await keyboardActivate("#close-workspaces");
@@ -600,13 +605,15 @@ async function verifyLayoutTransfer() {
   }
 
   await leaveWorkspaces();
-  await pair(input.other.origin, input.other.code);
-  await keyboardActivate("#open-workspaces");
-  await importFile(filename);
-  await waitFor("different Core principal cannot import the layout",
-    'document.getElementById("workspace-message").textContent.includes("其他登录身份或节点")');
-  assert.equal(await evaluate('document.querySelectorAll("#workspace-list [data-workspace-id]").length'), 1);
-  await leaveWorkspaces();
+  for (const foreign of [input.other, input.otherNode]) {
+    await pair(foreign.origin, foreign.code);
+    await keyboardActivate("#open-workspaces");
+    await importFile(filename);
+    await waitFor("another Core principal or Node cannot import the layout",
+      'document.getElementById("workspace-message").textContent.includes("其他登录身份或节点")');
+    assert.equal(await evaluate('document.querySelectorAll("#workspace-list [data-workspace-id]").length'), 1);
+    await leaveWorkspaces();
+  }
 
   await pair(input.reader.origin, input.reader.code);
   await keyboardActivate("#open-workspaces");
@@ -615,12 +622,17 @@ async function verifyLayoutTransfer() {
   await importFile(tampered);
   await waitFor("duplicate window is refused", 'document.getElementById("workspace-message").textContent.includes("格式无效")');
   assert.equal(await evaluate('document.querySelectorAll("#workspace-list [data-workspace-id]").length'), 1);
+  const oversized = join(input.downloads, "oversized-layout.json");
+  writeFileSync(oversized, " ".repeat(8193));
+  await importFile(oversized);
+  await waitFor("oversized layout refused", 'document.getElementById("workspace-message").textContent.includes("超过 8 KiB")');
   await importFile(filename);
   await waitFor("saved workspace and minimized Task window restored",
     'document.getElementById("open-workspaces").textContent.includes("作业") && ' +
     'document.getElementById("nav-tasks").dataset.state === "minimized" && ' +
     'document.getElementById("node-view").textContent === "" && ' +
-    'document.getElementById("task-rows").childElementCount === 0');
+    'document.getElementById("task-rows").childElementCount === 0 && ' +
+    'document.getElementById("nav-files").hidden && document.getElementById("status").textContent.includes("不可用")');
   await keyboardActivate("#open-workspaces");
   await keyboardActivate('#workspace-list [data-workspace-id="0"]');
   await waitFor("saved window reopened through current Core permissions",
@@ -633,7 +645,7 @@ async function verifyLayoutTransfer() {
   await waitFor("imported layout removed on logout", 'document.getElementById("workspace").hidden && ' +
     '!document.getElementById("layout-file").value && document.getElementById("workspace-layout").hidden');
   assert.deepEqual(exceptions, []);
-  const allowedOrigins = new Set([input.origin, input.reader.origin, input.other.origin]);
+  const allowedOrigins = new Set([input.origin, input.reader.origin, input.other.origin, input.otherNode.origin]);
   assert.ok(requests.every(url => allowedOrigins.has(new URL(url).origin)));
 }
 

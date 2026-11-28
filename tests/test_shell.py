@@ -1232,18 +1232,24 @@ class ShellTests(unittest.TestCase):
         identity = self.node.base / "layout-other.token"
         identity.touch(mode=0o600)
         identity.write_text(other["token"])
-        writer, reader, refused = self.shell(), self.shell(), self.shell(identity)
+        _, _, files = self.file_volume()
+        writer, reader, refused = self.shell(files=files), self.shell(), self.shell(identity)
+        another = Node(self.node.binaries)
+        self.addCleanup(another.close)
+        other_node = Shell(another, another.witness / "owner.token")
+        self.addCleanup(other_node.close)
         downloads = self.node.base / "layouts"
         downloads.mkdir(mode=0o700)
         args = dict(origin=writer.origin, code=writer.code, layoutTransfer=True, task=task,
                     reader=dict(origin=reader.origin, code=reader.code),
                     other=dict(origin=refused.origin, code=refused.code),
+                    otherNode=dict(origin=other_node.origin, code=other_node.code), volume=files[0],
                     node=self.node.call("Node.Get", {})["reference"]["resource_id"],
                     profile=str(self.node.base / "browser"), downloads=str(downloads))
         subprocess.run(["node", str(Path(__file__).with_name("shell_browser.mjs")),
                         os.environ.get("PSIOS_TEST_CHROME", "google-chrome")],
                        input=json.dumps(args), text=True, check=True, timeout=75)
-        for shell in (writer, reader, refused):
+        for shell in (writer, reader, refused, other_node):
             self.assertEqual(shell.process.wait(timeout=5), 0)
         self.assertEqual(self.node.call("Task.Get", {"id": task}), before)
 

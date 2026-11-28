@@ -28,7 +28,7 @@ def check_lease(c):
         raise AssertionError(observed) from failure
 
 
-def prepare(args, work):
+def prepare(args, work, *, dhcp_driver="virtio"):
     for name, source in (("code.fd", "OVMF_CODE_4M.fd"), ("vars.fd", "OVMF_VARS_4M.fd")):
         shutil.copyfile(args.ovmf_dir / source, work / name)
     user_secret, user_hash = password(work, "operator.hash")
@@ -39,8 +39,8 @@ def prepare(args, work):
              "--console-hash", user_hash, "--root-console-hash", root_hash, "--dhcp-mac"]
     refused = subprocess.run(build + ["ff:ff:ff:ff:ff:ff"], capture_output=True, text=True, timeout=10)
     assert refused.returncode and "unicast MAC" in refused.stderr and not image.exists(), refused.stderr
-    receipt = json.loads(subprocess.check_output([*build, MAC, "--dhcp-driver", args.dhcp_driver], timeout=150))
-    if args.dhcp_driver == "e1000e":
+    receipt = json.loads(subprocess.check_output([*build, MAC, "--dhcp-driver", dhcp_driver], timeout=150))
+    if dhcp_driver == "e1000e":
         assert (receipt["format"], receipt["wired_driver"]) == (8, "e1000e"), receipt
     else:
         assert (receipt["format"], receipt.get("wired_driver")) == (2, None), receipt
@@ -48,7 +48,7 @@ def prepare(args, work):
 
 
 def exercise(args, work):
-    image, user_secret, root_secret = prepare(args, work)
+    image, user_secret, root_secret = prepare(args, work, dhcp_driver=args.dhcp_driver)
     model, driver = ("e1000e", "e1000e") if args.dhcp_driver == "e1000e" else ("virtio-net-pci", "virtio_net")
     with boot(work, image, network_mac=MAC, network_model=model, pace_commands=True) as c:
         c.login("psios", user_secret)

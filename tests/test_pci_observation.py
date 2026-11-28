@@ -93,6 +93,7 @@ class PciObservation(unittest.TestCase):
         self.assertEqual(previous["lifecycle"], "Succeeded", previous)
         reference, = previous["result"]["artifact_refs"]
         prior_result = node.call("Artifact.Read", {"reference": reference})
+        prior_blocks = node.perform("node.devices", {"limit": 1})
         self.denied("NotFound", lambda: node.get("tool-" + TOOL))
         node.stop()
 
@@ -105,6 +106,9 @@ class PciObservation(unittest.TestCase):
         node.start()
         self.assertEqual(node.call("Task.Get", {"id": saved}), previous)
         self.assertEqual(node.call("Artifact.Read", {"reference": reference}), prior_result)
+        if prior_blocks["next_cursor"] is not None:
+            blocks = node.perform("node.devices", {"limit": 1, "cursor": prior_blocks["next_cursor"]})
+            self.assertEqual(blocks["snapshot_digest"], prior_blocks["snapshot_digest"])
         self.assertEqual(node.get("tool-" + TOOL)["resource"]["spec"]["effect_class"], "ReadOnly")
         self.denied("PermissionDenied", lambda: node.prepare(TOOL, {}))
         node.stop()

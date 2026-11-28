@@ -1,6 +1,7 @@
 //! Bounded, read-only observation of PCI enumeration and driver binding.
-use super::sysfs::{BELOW, DIRECTORY, attribute, is_sysfs};
-use crate::{Result, err, linux_clock, now, require};
+use super::sysfs::{BELOW, DIRECTORY, attribute, inventory_page, is_sysfs};
+use crate::{Result, err, host::Work, linux_clock, now, require};
+use psios_api::{DeviceInventoryQuery, MAX_PCI_INVENTORY_ROWS, sha256};
 use rustix::{
     fd::OwnedFd,
     fs::{Dir, FileType, Mode, OFlags, fstat, open, openat2, readlinkat},
@@ -17,7 +18,7 @@ use std::{
 
 pub(crate) const TOOL: &str = "node.pci";
 pub(crate) const FORMAT: u32 = super::network::resolver::FORMAT + 1;
-const MAX_DEVICES: usize = 256;
+const MAX_DEVICES: usize = MAX_PCI_INVENTORY_ROWS as usize;
 
 fn hex(value: &str) -> bool {
     value
@@ -196,7 +197,11 @@ impl Tree {
     }
 }
 
-pub(super) fn observe() -> Result<Value> {
+pub(crate) fn validate_inventory(query: &DeviceInventoryQuery) -> Result<()> {
+    super::sysfs::validate_inventory(query, "PCI inventory", MAX_DEVICES)
+}
+
+pub(super) fn observe(work: &Work, query: &DeviceInventoryQuery) -> Result<Value> {
     let boot_id = linux_clock::boot_id()?;
     let mount_namespace = fs::metadata("/proc/self/ns/mnt")?.ino();
     let tree = Tree::open()?;
@@ -211,8 +216,24 @@ pub(super) fn observe() -> Result<Value> {
         "Conflict",
         "the PCI inventory or driver binding changed during observation",
     )?;
-    Ok(
-        json!({"boot_id":boot_id,"mount_namespace_inode":mount_namespace.to_string(),
-              "observed_at":now(),"devices":devices}),
-    )
+    let namespace = mount_namespace.to_string();
+    if query.limit.is_none() && query.cursor.is_none() {
+        return Ok(json!({"boot_id":boot_id,"mount_namespace_inode":namespace,
+                        "observed_at":now(),"devices":devices}));
+    }
+    let identities: Vec<_> = devices.iter().map(|device| device.sysfs_identity).collect();
+    let digest = sha256(&serde_json::to_vec(&(
+        "psios/node.pci/1",
+        work.target.reference(),
+        &work.task.owner,
+        &work.task.spec["delegation_ref"],
+        &boot_id,
+        mount_namespace,
+        (before.st_dev, before.st_ino),
+        identities,
+        &devices,
+    ))?);
+    let (devices, next) = inventory_page(&devices, query, &digest, "PCI inventory")?;
+    Ok(json!({"boot_id":boot_id,"mount_namespace_inode":namespace,
+              "observed_at":now(),"devices":devices,"snapshot_digest":digest,"next_cursor":next}))
 }

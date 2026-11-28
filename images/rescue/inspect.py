@@ -166,9 +166,25 @@ def native_boot_failure(body, filesystem, present):
     return report
 
 
+def source_revision(info):
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+def require_unchanged_source(path, fd, expected):
+    message = "rescue source image changed during inspection"
+    try:
+        named = source_revision(path.lstat())
+    except OSError as error:
+        raise ValueError(message) from error
+    if named != expected or source_revision(os.fstat(fd)) != expected:
+        raise ValueError(message)
+
+
 def inspect(args):
     with regular_file(args.image) as disk, tempfile.TemporaryDirectory(prefix="psios-rescue-") as tmp:
-        size = os.fstat(disk.fileno()).st_size
+        fd = disk.fileno()
+        initial = os.fstat(fd)
+        size = initial.st_size
         if args.source_sha256 is not None and (size == 0 or size % 512 != 0):
             raise ValueError("a digest-pinned raw image must consist of complete 512-byte sectors")
         work = Path(tmp)
@@ -181,7 +197,6 @@ def inspect(args):
                 boot_failure_only=args.boot_failure_only)
         # Hand QEMU the exact already-open read-only file. Raw format disables
         # backing-file discovery and the guest gets no interface to the network.
-        fd = disk.fileno()
         accelerator = "kvm" if signing is None and os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
         if args.firmware == "direct":
             boot = ["-machine", "pc", "-kernel", "kernel", "-initrd", "initrd", "-append", boot_media.CMDLINE]
@@ -263,8 +278,11 @@ def inspect(args):
             report["source_sha256"] = args.source_sha256
         if args.journal_overlay_mib is not None:
             report["ext4_journal"] = success[status.strip()]
-        if args.save_rescue_iso is not None:
-            boot_media.publish(work / "rescue.iso", args.save_rescue_iso)
+        unchanged = partial(require_unchanged_source, args.image, fd, source_revision(initial))
+        if args.save_rescue_iso is None:
+            unchanged()
+        else:
+            boot_media.publish(work / "rescue.iso", args.save_rescue_iso, before_publish=unchanged)
         return report
 
 

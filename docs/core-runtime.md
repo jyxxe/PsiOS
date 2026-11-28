@@ -41,6 +41,12 @@ Core 核对本机 sysfs，并比较两次采样中的内核设备目录、设备
 
 空输入返回首个有界页面。每页最多 32 行和 12 KiB，整次观测最多 256 个设备。`next_cursor` 绑定具体启动、挂载命名空间、Node、主体及委托。Core 比较两次 sysfs 观测和内核对象身份。同端口换设备或其他观测变化后，旧游标返回 `ResyncRequired`，已结算的原制品仍可按原权限读取。Linux 设备控制和租用适用独立能力。[原生 USB 热插拔验收](../tests/native_usb_inventory.py)
 
+### 本机 OCI 运行条件
+
+向当前 Node 显式授予 `node.oci_runtime`、`task.submit` 和 `task.read`，使用空输入 `{}` 提交只读 Task。成功的观测制品记录本次 Linux 启动和采样时间。引擎可以提供本机适配器要求的 CPU、内存、swap、PID 和内置 seccomp 时，状态为 `Available`，并报告 cgroup 版本。连接或读取失败时返回 `Unavailable`。必需控制或 Core 的非 root 执行条件缺失时返回 `Unsupported`。制品省略引擎 ID、套接字路径和引擎的原始输出。应用实际启动时仍需按所选 Release 独立检查权限、限额与进程状态。
+
+格式 152 登记此观测工具，升级后的现有委托继续使用原授权范围。[无引擎与权限验收](../tests/test_oci_runtime_observation.py) · [实际引擎验收](../tests/oci.py)
+
 ### 块设备代次与布局核对
 
 `node.devices` 从已核验的 sysfs 块设备索引读取列表。Core 用主次设备号核对同一内核目录，两次采样一致后才发布。列表带当前 Linux 启动 ID，设备提供 `diskseq` 时也报告该值。设备热插拔、同名替换或属性变化时，冲突会阻止发布不一致的快照。登记和写入继续使用独立的设备代次与授权规则。[真实块设备与挂载隔离验收](../tests/test_block_inventory.py)

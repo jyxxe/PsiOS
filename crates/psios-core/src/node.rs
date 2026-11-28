@@ -307,6 +307,7 @@ pub fn perform(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Resul
         Action::Resolver {} => network::resolver::observe(),
         Action::Pci(query) => pci::observe(w, query),
         Action::Usb(query) => usb::observe(w, query),
+        Action::OciRuntime {} => crate::apps::observe_runtime(&w.cfg),
         Action::RoutingRules(q) => network::observe_rules(q, w),
         Action::Processes(p) => process::page(&w.target.id, p),
         Action::InspectProcess(expected) => process::inspect(&w.target.id, expected),

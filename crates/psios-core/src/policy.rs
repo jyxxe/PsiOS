@@ -30,6 +30,7 @@ pub const TOOLS: &[&str] = &[
     node::network::resolver::TOOL,
     node::pci::TOOL,
     node::usb::TOOL,
+    apps::RUNTIME_OBSERVATION_TOOL,
     node::network::probe::TOOL,
     node::network::probe::state::TOOL,
     node::network::trial::TOOL,
@@ -142,6 +143,7 @@ pub fn readonly(tool: &str) -> bool {
             | node::network::resolver::TOOL
             | node::pci::TOOL
             | node::usb::TOOL
+            | apps::RUNTIME_OBSERVATION_TOOL
             | node::network::probe::TOOL
             | node::network::probe::state::TOOL
             | node::network::trial::INSPECT
@@ -225,6 +227,7 @@ fn bootstrap_actions() -> Vec<String> {
                     | node::network::resolver::TOOL
                     | node::pci::TOOL
                     | node::usb::TOOL
+                    | apps::RUNTIME_OBSERVATION_TOOL
                     | node::network::probe::TOOL
                     | node::network::probe::state::TOOL
                     | node::network::trial::TOOL

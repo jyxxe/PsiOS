@@ -345,6 +345,32 @@ pub fn preflight(db: &Db<'_>, w: &Work) -> Result<()> {
     Ok(())
 }
 struct Engine<'a>(&'a Config);
+
+pub(crate) const RUNTIME_OBSERVATION_TOOL: &str = "node.oci_runtime";
+pub(crate) const RUNTIME_OBSERVATION_FORMAT: u32 = crate::node::usb::FORMAT + 1;
+
+pub(crate) fn observe_runtime(config: &Config) -> Result<Value> {
+    let boot = crate::linux_clock::boot_id()?;
+    let mut report = if rustix::process::geteuid().is_root() {
+        json!({"status":"Unsupported", "reason":"NonRootCoreRequired"})
+    } else {
+        match Engine(config).check_engine() {
+            Ok(engine) => json!({
+                "status":"Available", "cgroup_version":if engine.unified_cgroups { 2 } else { 1 },
+                "seccomp_profile":"Builtin",
+            }),
+            Err(error) if error.0.code == "UnsupportedCapability" => {
+                json!({"status":"Unsupported", "reason":"RequiredEngineControlsUnavailable"})
+            }
+            Err(_) => json!({"status":"Unavailable", "reason":"EngineInformationUnavailable"}),
+        }
+    };
+    report["driver"] = json!("Docker");
+    report["boot_id"] = json!(boot);
+    report["observed_at"] = json!(now());
+    Ok(report)
+}
+
 struct EngineProfile {
     id: String,
     unified_cgroups: bool,

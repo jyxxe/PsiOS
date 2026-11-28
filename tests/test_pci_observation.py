@@ -115,7 +115,8 @@ class PciObservation(unittest.TestCase):
         self.denied("PermissionDenied", lambda: node.prepare(TOOL, {}))
         node.stop()
         status = verify()
-        self.assertEqual((status["database_format"], status["witness"]), (151, "Confirmed"))
+        self.assertGreaterEqual(status["database_format"], 151)
+        self.assertEqual(status["witness"], "Confirmed")
 
     @unittest.skipUnless(os.getenv("PSIOS_TEST_USB_PREVIOUS_BIN_DIR"), "requires exact format 150 executables")
     def test_usb_catalog_upgrade_preserves_a_pci_page_and_cursor(self):
@@ -150,4 +151,5 @@ class PciObservation(unittest.TestCase):
         self.denied("PermissionDenied", lambda: node.prepare("node.usb", {}))
         node.stop()
         status = verify()
-        self.assertEqual((status["database_format"], status["witness"]), (151, "Confirmed"))
+        self.assertGreaterEqual(status["database_format"], 151)
+        self.assertEqual(status["witness"], "Confirmed")

@@ -8,11 +8,13 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import socket
 import struct
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 
 from native_disk import REPO, boot as boot_native, check_clean_shutdown, check_state, password, sha
 from native_install import sparse
@@ -20,11 +22,13 @@ from qemu_boot import boot as boot_ubuntu, identity
 
 
 TARGET_SERIAL = "PSIOS-INSTALL-001"
+REPLACEMENT_SERIAL = "PSIOS-REPLACE-002"
 BAD_SERIAL = {"virtio": "PSIOS BAD SERIAL", "nvme": "  ", "ahci": "PSIOS-NO-WWN"}
 COLLISION_SERIAL = "PSIOS-COLLISION-"
 GUEST = Path("/var/lib/psios-virtio-acceptance")
 OPERATION = GUEST / "operation"
 BAD_OPERATION = GUEST / "bad-operation"
+REPLACEMENT_OPERATION = GUEST / "replacement-operation"
 INSTALLER = GUEST / "native/install.py"
 MIB = 1024 * 1024
 TOOLS = {
@@ -33,6 +37,8 @@ TOOLS = {
     "native/install_target.py", "native/ipv4", "native/ipv6", "native/shutdown",
     "native/static", "native/storage", "rescue/base.json", "rescue/boot_media.py",
 }
+BOOT_ASSET_DIRS = ("native", "rescue")
+BOOT_ASSET = re.compile(r"(?:native|rescue)/[A-Za-z0-9_][A-Za-z0-9_.-]*\Z")
 
 # Read kernel evidence independently of the installer. Select by transport
 # identity before comparing the installer plan with the kernel observations.
@@ -100,27 +106,36 @@ def upload(run, source, destination, *, sparse_image=False):
 
 
 def extract_tools(archive, work):
-    pending = TOOLS | {"SHA256SUMS"}
+    # Factory assembly needs its packaged sibling assets. Guest installation
+    # uses the fixed tool set transferred below.
+    extracted = set()
     with tarfile.open(archive, "r|gz") as bundle:
         for member in bundle:
-            if member.name not in TOOLS and member.name != "SHA256SUMS":
+            name = member.name
+            if name in BOOT_ASSET_DIRS and member.isdir():
                 continue
-            assert member.name in pending and member.isfile() and 0 < member.size <= MIB, member.name
-            path = work / member.name
-            with bundle.extractfile(member) as source, path.open("xb") as destination:
+            if name != "SHA256SUMS" and name.split("/", 1)[0] not in BOOT_ASSET_DIRS:
+                continue
+            assert name == "SHA256SUMS" or BOOT_ASSET.fullmatch(name), name
+            assert name not in extracted and member.isfile() and 0 < member.size <= MIB, name
+            with bundle.extractfile(member) as source, (work / name).open("xb") as destination:
                 shutil.copyfileobj(source, destination)
-            pending.remove(member.name)
-    assert not pending, f"portable archive lacks native installer tools: {sorted(pending)}"
+            extracted.add(name)
+    missing = (TOOLS | {"SHA256SUMS"}) - extracted
+    assert not missing, f"portable archive lacks native installer tools: {sorted(missing)}"
     sums = {}
     for line in (work / "SHA256SUMS").read_text().splitlines():
         expected, name = line.split(maxsplit=1)
+        assert name not in sums, f"duplicate portable archive digest: {name}"
         sums[name] = expected
-    for name in TOOLS:
+    assets = extracted - {"SHA256SUMS"}
+    assert assets == {name for name in sums if BOOT_ASSET.fullmatch(name)}, "portable archive assets differ from checksums"
+    for name in sorted(assets):
         assert sha(work / name) == sums[name], f"portable archive tool digest differs: {name}"
 
 
 def make_source(args, work):
-    for directory in ("native", "rescue"):
+    for directory in BOOT_ASSET_DIRS:
         (work / directory).mkdir()
     extract_tools(args.archive, work)
     operator, operator_hash = password(work, "operator.hash")
@@ -135,7 +150,7 @@ def make_source(args, work):
     return image, receipt, operator, admin
 
 
-def ubuntu_command(instance, target, rejected, port, serial_log, bus="virtio", collisions=()):
+def ubuntu_command(instance, target, rejected, port, serial_log, bus="virtio", collisions=(), replacement=None):
     accel = "kvm" if os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
     manifest = json.loads((instance / "manifest.json").read_bytes())
     assert manifest["firmware"] == "OVMF" and manifest["architecture"] == "amd64"
@@ -149,6 +164,11 @@ def ubuntu_command(instance, target, rejected, port, serial_log, bus="virtio", c
            "-drive", "if=pflash,format=raw,unit=1,file=uefi-vars.fd",
            "-netdev", f"user,id=management,restrict=on,hostfwd=tcp:127.0.0.1:{port}-:22",
            "-device", "virtio-net-pci,netdev=management,romfile="]
+    if replacement is not None:
+        assert bus == "nvme"
+        cmd += ["-qmp", "unix:control.sock,server=on,wait=off",
+                "-device", "pcie-root-port,id=install-port,bus=pcie.0,slot=1",
+                "-drive", f"if=none,id=replacement,format=raw,file=../{replacement.name}"]
     for name, path, fmt, serial, options in (
         ("ubuntu", "system.qcow2", "qcow2", "PSIOS-UBUNTU", ",bootindex=1"),
         ("seed", "seed.iso", "raw", "PSIOS-SEED", ""),
@@ -160,6 +180,8 @@ def ubuntu_command(instance, target, rejected, port, serial_log, bus="virtio", c
         if name in ("installed", "rejected"):
             if bus == "nvme":
                 device = "nvme"
+                if name == "installed" and replacement is not None:
+                    options += ",id=planned-disk,bus=install-port"
             elif bus == "ahci":
                 port = 0 if name == "installed" else 1
                 device = f"ide-hd,bus=ide.{port}"
@@ -174,9 +196,63 @@ def ubuntu_command(instance, target, rejected, port, serial_log, bus="virtio", c
     return cmd
 
 
-def install_in_guest(run, tool_debs, work, source, receipt, source_digest, blank_digest, bus, target_size):
+def replace_nvme(run, control, original):
+    # Bound QMP responses and wait for PCIe eject acknowledgement from the guest.
+    with socket.socket(socket.AF_UNIX) as monitor:
+        monitor.settimeout(15)
+        monitor.connect(str(control))
+        with monitor.makefile("rb") as incoming:
+            def receive():
+                line = incoming.readline(64 * 1024)
+                assert line.endswith(b"\n"), "invalid QMP message"
+                return json.loads(line)
+
+            def execute(name, **arguments):
+                message = {"execute": name, "arguments": arguments, "id": name}
+                monitor.sendall(json.dumps(message).encode("ascii") + b"\r\n")
+
+            assert "QMP" in receive()
+            execute("qmp_capabilities")
+            reply = receive()
+            assert reply == {"return": {}, "id": "qmp_capabilities"}, reply
+            execute("device_del", id="planned-disk")
+            reply = receive()
+            assert reply == {"return": {}, "id": "device_del"}, reply
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                message = receive()
+                if message.get("event") == "DEVICE_DELETED" and message["data"].get("device") == "planned-disk":
+                    break
+            else:
+                raise AssertionError("guest did not acknowledge removal of the planned disk")
+            remote(run, "sudo", "-n", "udevadm", "settle", "--timeout=20")
+            remote(run, "test", "!", "-e", original["path"])
+            execute("device_add", driver="nvme", drive="replacement", serial=REPLACEMENT_SERIAL,
+                    id="replacement-disk", bus="install-port")
+            reply = receive()
+            assert reply == {"return": {}, "id": "device_add"}, reply
+
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        result = remote(run, "python3", "-c", PROBE_DEVICE, "nvme", REPLACEMENT_SERIAL, check=False)
+        if result.returncode == 0:
+            observed = json.loads(result.stdout)
+            break
+        time.sleep(1)
+    else:
+        raise AssertionError("the replacement NVMe did not appear in the guest")
+    for field in ("path", "sysfs_path", "boot_id", "size_bytes", "logical_block_bytes"):
+        assert original[field] == observed[field], (field, original, observed)
+    assert original["disk_sequence"] != observed["disk_sequence"], (original, observed)
+    assert original["transport"]["wwid"] != observed["transport"]["wwid"], (original, observed)
+    return observed
+
+
+def install_in_guest(run, tool_debs, work, source, receipt, source_digest, blank_digest, bus, target_size, control=None):
     remote(run, "sudo", "-n", "install", "-d", "-m", "0700",
            GUEST, GUEST / "native", GUEST / "rescue", OPERATION, BAD_OPERATION)
+    if control is not None:
+        remote(run, "sudo", "-n", "install", "-d", "-m", "0700", REPLACEMENT_OPERATION)
     packages = []
     for index, package in enumerate(tool_debs):
         path = GUEST / f"tool-{index}.deb"
@@ -241,12 +317,32 @@ def install_in_guest(run, tool_debs, work, source, receipt, source_digest, blank
     before = remote(run, "sudo", "-n", "sha256sum", "--", evidence["path"], timeout=90).stdout
     assert before.split()[0] == blank_digest, "wrong approval wrote to the blank target"
 
-    verified = json.loads(install(OPERATION, "apply", "--plan-digest", planned["plan_digest"]).stdout)
+    operation = OPERATION
+    if control is not None:
+        replacement = replace_nvme(run, control, evidence)
+        stale = install(OPERATION, "apply", "--plan-digest", planned["plan_digest"], check=False)
+        assert stale.returncode == 1 and "target disk identity or generation differs from plan" in stale.stderr, stale.stderr
+        assert json.loads(install(OPERATION, "inspect").stdout) == planned
+        after = remote(run, "sudo", "-n", "sha256sum", "--", replacement["path"], timeout=90).stdout
+        assert after.split()[0] == blank_digest, "stale plan wrote to the replacement disk"
+        print(f"PASS NVMe path {evidence['path']} reused, WWID {evidence['transport']['wwid']} → "
+              f"{replacement['transport']['wwid']}, kernel sequence {evidence['disk_sequence']} → "
+              f"{replacement['disk_sequence']}; stale plan refused with unchanged bytes {blank_digest}", flush=True)
+        operation = REPLACEMENT_OPERATION
+        evidence = replacement
+        updated = json.loads(install(operation, "plan", *plan_options, evidence["path"], *options).stdout)
+        assert updated["status"] == "Planned", updated
+        assert updated["plan"]["id"] != planned["plan"]["id"], updated
+        assert updated["plan"] == {**planned["plan"], "id": updated["plan"]["id"], "target": evidence}, updated
+        assert updated["plan_digest"] != planned["plan_digest"], updated
+        planned = updated
+
+    verified = json.loads(install(operation, "apply", "--plan-digest", planned["plan_digest"]).stdout)
     assert verified["status"] == "Verified" and verified["plan"] == planned["plan"], verified
     assert verified["plan_digest"] == planned["plan_digest"], verified
     assert verified["image_readback_sha256"] == expected_image, verified
-    assert json.loads(install(OPERATION, "inspect").stdout) == verified
-    assert json.loads(install(OPERATION, "apply", "--plan-digest", planned["plan_digest"]).stdout) == verified
+    assert json.loads(install(operation, "inspect").stdout) == verified
+    assert json.loads(install(operation, "apply", "--plan-digest", planned["plan_digest"]).stdout) == verified
     return evidence, expected_image
 
 
@@ -324,13 +420,14 @@ def exercise(args, work):
     target_size = image.stat().st_size + (4 * MIB + 17 * 512 if args.larger_target else 0)
     target = sparse(work, "installed.raw", target_size)
     rejected = sparse(work, "rejected.raw", target_size)
+    replacement = sparse(work, "replacement.raw", target_size) if args.target_bus == "nvme" else None
     collisions = (tuple(sparse(work, f"collision-{index}.raw", target_size) for index in range(2))
                   if args.target_bus == "ahci" else ())
     blank = sha(target)
     assert sha(rejected) == blank
 
     def launch(port, serial_log):
-        return ubuntu_command(instance, target, rejected, port, serial_log, args.target_bus, collisions)
+        return ubuntu_command(instance, target, rejected, port, serial_log, args.target_bus, collisions, replacement)
 
     with boot_ubuntu(instance, key, 1, launch=launch, readiness_timeout=600) as run:
         print("Ubuntu installer host provisioned from the verified Core package", flush=True)
@@ -338,9 +435,13 @@ def exercise(args, work):
         run("test -d /sys/firmware/efi")
         package = remote(run, "dpkg-query", "-W", "-f=${Version}", "psios-core").stdout.strip()
         assert package == manifest["package_version"], package
+        control = instance / "control.sock" if replacement is not None else None
         evidence, installed_digest = install_in_guest(run, args.tool_deb, work, image, receipt, source_digest,
-                                                      blank, args.target_bus, target_size)
+                                                      blank, args.target_bus, target_size, control)
         assert evidence["boot_id"] == ubuntu[2], evidence
+    if replacement is not None:
+        assert sha(target) == blank, "the removed NVMe changed"
+        target = replacement
     assert sha(image) == source_digest and sha(target) == installed_digest, "installed raw bytes differ after shutdown"
     assert sha(rejected) == blank, "refused block device changed"
     assert all(sha(disk) == blank for disk in collisions), "duplicate-identity disk changed"
@@ -348,7 +449,7 @@ def exercise(args, work):
         check_larger_disk(image, target)
     authority, task = boot_installed(args, work, target, receipt, operator, admin)
     assert authority != ubuntu[0], "the installed raw disk reused the Ubuntu authority"
-    print(f"PASS {evidence['transport']['kind']} {TARGET_SERIAL}, full raw image {installed_digest}, "
+    print(f"PASS {evidence['transport']['kind']} {evidence['transport']['serial']}, full raw image {installed_digest}, "
           f"Ubuntu kernel disk sequence {evidence['disk_sequence']}, native Task {task} survived reboot")
 
 

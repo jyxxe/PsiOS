@@ -76,6 +76,9 @@ if git -C "$repo" cat-file -e "$sha:images/native/README.txt" 2>/dev/null; then
     if git -C "$repo" cat-file -e "$sha:images/native/core-cgroup" 2>/dev/null; then
         native_files+=(core-cgroup)
     fi
+    if git -C "$repo" cat-file -e "$sha:images/native/timezone" 2>/dev/null; then
+        native_files+=(timezone)
+    fi
     if git -C "$repo" cat-file -e "$sha:images/native/ssh" 2>/dev/null; then
         native_files+=(ssh)
     fi

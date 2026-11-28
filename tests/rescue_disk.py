@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import signal
 import socket
@@ -27,6 +28,42 @@ def digest(path):
 def image_file(path, size):
     with path.open("xb") as f:
         f.truncate(size)
+
+
+def reject_source_changes(root, scratch, inspector, volume, options, firmware_media):
+    host_qemu = shlex.quote(shutil.which("qemu-system-x86_64"))
+    tools = root / "private rescue tools"
+    tools.mkdir(mode=0o700)
+    qemu = tools / "qemu-system-x86_64"
+    env = {**os.environ, "TMPDIR": str(scratch), "PATH": str(tools) + os.pathsep + os.environ["PATH"]}
+    expected = digest(volume)
+
+    def refused(image, operation, extra=()):
+        # Let the genuine rescue guest finish before changing its source.
+        qemu.write_text(f'#!/bin/sh\nset -e\n{host_qemu} "$@"\n{operation}\n')
+        qemu.chmod(0o700)
+        result = subprocess.run([sys.executable, inspector, image, *options, "--source-sha256", expected, *extra],
+                                capture_output=True, text=True, timeout=210, env=env)
+        assert result.returncode != 0 and not result.stdout, result
+        assert "rescue source image changed during inspection" in result.stderr, result.stderr
+        assert not list(scratch.iterdir()) and not list(root.glob(".psios-media-*"))
+
+    edited = root / "edited-after-guest.raw"
+    shutil.copyfile(volume, edited)
+    output = root / "changed-source.iso"
+    media = ("--firmware", "bios", "--save-rescue-iso", output) if firmware_media else ()
+    refused(edited, f"printf 'changed' >> {shlex.quote(str(edited))}", extra=media)
+    assert digest(edited) != expected and not output.exists()
+
+    renamed = root / "replaced-after-guest.raw"
+    spare = root / "byte-identical-replacement.raw"
+    shutil.copyfile(volume, renamed)
+    shutil.copyfile(volume, spare)
+    original_inode = renamed.stat().st_ino
+    refused(renamed, shlex.join(("mv", "-f", "--", str(spare), str(renamed))))
+    assert renamed.stat().st_ino != original_inode and digest(renamed) == expected
+    assert digest(volume) == expected
+    print("PASS genuine rescue guest results withheld after a source write or byte-identical pathname replacement", flush=True)
 
 
 def exercise(iso, binaries, inspector, root, firmware_media):
@@ -83,6 +120,7 @@ def exercise(iso, binaries, inspector, root, firmware_media):
     inspect(volume, ["--source-sha256", source_digest], source_digest=source_digest)
     inspect(volume, ["--source-sha256", "0" * 64], "source-digest-mismatch")
     inspect(volume, ["--source-sha256", "invalid"], "invalid expected source image SHA-256")
+    reject_source_changes(root, scratch, inspector, volume, options, firmware_media)
     if firmware_media:
         bios = root / "BIOS rescue.iso"
         uefi = root / "UEFI rescue.iso"

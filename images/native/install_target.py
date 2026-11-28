@@ -366,14 +366,19 @@ def _writable_geometry(fd, directory, sysfs_device):
     return size, logical, physical
 
 
+def kernel_boot_id():
+    boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").removesuffix("\n")
+    if str(uuid.UUID(boot_id)) != boot_id:
+        raise ValueError("invalid Linux boot identity")
+    return boot_id
+
+
 def read_target(fd, path: Path, *, allow_loop: bool) -> dict:
     """Read and cross-check the identity of the block FD held by open_target."""
     kind = _kind(path)
     if kind == "TestLoop" and not allow_loop:
         raise ValueError("loop targets require explicit test-only opt-in")
-    boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").removesuffix("\n")
-    if str(uuid.UUID(boot_id)) != boot_id:
-        raise ValueError("invalid Linux boot identity")
+    boot_id = kernel_boot_id()
     with _disk(fd, path) as (directory, kernel_path, device, sequence, sysfs_device):
         size, logical, physical = _writable_geometry(fd, directory, sysfs_device)
         if kind == "VirtioBlock":

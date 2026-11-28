@@ -477,9 +477,14 @@ def check_reboot_reconciliation(instance, key, launch, target, source, receipt, 
         assert damaged_boot != original["boot_id"]
         bad_approval = recover_install(run, "0" * 64, device["path"], check=False)
         assert bad_approval.returncode == 1 and "approval does not match" in bad_approval.stderr
-        inspect = remote(run, "sudo", "-n", "python3", "-B", INSTALLER, "inspect", "--state-dir", OPERATION,
-                         check=False)
-        assert inspect.returncode == 1 and "identity or generation differs" in json.loads(inspect.stdout)["reason"]
+        inspect = remote(run, "sudo", "-n", "strace", "-qq", "-e", "trace=open,openat,openat2",
+                         "python3", "-B", INSTALLER, "inspect", "--state-dir", OPERATION, check=False)
+        report = json.loads(inspect.stdout)
+        assert inspect.returncode == 1 and report["status"] == "RecoveryRequired", report
+        assert report["reason"] == "installation plan belongs to a different Linux boot", report
+        assert report["plan_digest"] == approval and report["plan"] == json.loads(journal)["plan"], report
+        assert f'"{original["path"]}"' not in inspect.stderr, "inspect opened a path saved on another boot"
+        assert install_journal(run) == journal
         replay = remote(run, "sudo", "-n", "python3", "-B", INSTALLER, "apply", "--state-dir", OPERATION,
                         "--plan-digest", approval, check=False)
         assert replay.returncode == 1 and "writes were already issued" in replay.stderr

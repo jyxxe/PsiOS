@@ -17,7 +17,9 @@ from tempfile import TemporaryDirectory
 import uuid
 
 from install_source import MAX_TARGET_BYTES, SECTOR_BYTES, fit_image, stage_image
-from install_target import filesystem_type, open_target, read_target, require_reboot_target, require_unallocated
+from install_target import (
+    filesystem_type, kernel_boot_id, open_target, read_target, require_reboot_target, require_unallocated,
+)
 
 
 JOURNAL = "operation.json"
@@ -350,6 +352,8 @@ def inspect(directory):
     target = Path(request["target"]["path"])
     installed = expected_image(request)
     try:
+        require(kernel_boot_id() == request["target"].get("boot_id"),
+                "installation plan belongs to a different Linux boot")
         with open_target(target, write=False) as fd:
             exact_target(fd, request)
             observed = block_digest(fd, installed["size_bytes"])

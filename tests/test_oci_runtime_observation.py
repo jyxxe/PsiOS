@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import subprocess
 import unittest
 
 from support import Failure, Node, target
@@ -57,3 +58,43 @@ class OciRuntimeObservation(unittest.TestCase):
             submit(node, delegation)
         self.assertEqual(revoked.exception.code, "PermissionDenied")
         self.assertEqual(node.call("Node.Get", {})["reference"], baseline["reference"])
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_OCI_RUNTIME_PRIOR_BIN_DIR"), "requires exact format 151 binaries")
+    def test_registers_observation_without_changing_existing_scope_on_upgrade(self):
+        previous = Path(os.environ["PSIOS_TEST_OCI_RUNTIME_PRIOR_BIN_DIR"]).resolve()
+        current = Path(os.environ["PSIOS_TEST_BIN_DIR"]).resolve()
+        node = Node(previous)
+        self.addCleanup(node.close)
+        task_id = node.submit("system.status", {})
+        task = node.wait(task_id)
+        self.assertEqual(task["lifecycle"], "Succeeded")
+        artifact, = task["result"]["artifact_refs"]
+        original = node.call("Artifact.Read", {"reference": artifact})
+        node_id = node.call("Node.Get", {})["reference"]["resource_id"]
+        with self.assertRaises(Failure) as missing:
+            node.get("tool-" + TOOL)
+        self.assertEqual(missing.exception.code, "NotFound")
+        node.stop()
+        prior_daemon = node.daemon.copy()
+        node.daemon[0] = str(current / "psiosd")
+        rehearsal = json.loads(subprocess.check_output([*node.daemon, "verify", "--rehearse-migration"], timeout=40))
+        self.assertEqual(rehearsal["database_format"], 151)
+        self.assertTrue(rehearsal["migration_required"])
+        self.assertEqual(rehearsal["migration_rehearsal"]["target_format"], 152)
+        node.start()
+        self.assertEqual(node.call("Task.Get", {"id": task_id}), task)
+        self.assertEqual(node.call("Artifact.Read", {"reference": artifact}), original)
+        descriptor = node.get("tool-" + TOOL)["resource"]["spec"]
+        self.assertEqual(descriptor["effect_class"], "ReadOnly")
+        self.assertFalse(descriptor["requires_approval"])
+        with self.assertRaises(Failure) as denied:
+            submit(node, "owner-delegation")
+        self.assertEqual(denied.exception.code, "PermissionDenied")
+        _, delegation = grant_observation(node, node_id)
+        self.assertEqual(node.wait(submit(node, delegation))["lifecycle"], "Succeeded")
+        node.stop()
+        verified = json.loads(subprocess.check_output([*node.daemon, "verify"], timeout=30))
+        self.assertEqual((verified["database_format"], verified["witness"]), (152, "Confirmed"))
+        refused = subprocess.run([*prior_daemon, "check"], capture_output=True, timeout=15)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn(b"SchemaVersionUnsupported", refused.stderr)

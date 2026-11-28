@@ -1,0 +1,49 @@
+#!/bin/sh
+set -eu
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C
+zoneinfo=/usr/share/zoneinfo
+localtime=/etc/localtime
+
+fail() {
+    printf 'psios-timezone: %s\n' "$1" >&2
+    exit 1
+}
+
+known_zone() {
+    case "$1" in
+        ''|/*|*/|*//*|*[!a-zA-Z0-9_+/\-]*) return 1 ;;
+    esac
+    [ "${#1}" -le 96 ] && [ -f "$zoneinfo/$1" ]
+}
+
+case "$#:${1:-show}" in
+    0:show|1:show)
+        if [ ! -e "$localtime" ] && [ ! -L "$localtime" ]; then
+            printf 'UTC\n'
+            exit 0
+        fi
+        target=$(readlink "$localtime") || fail "/etc/localtime is not a managed time zone link"
+        prefix=..$zoneinfo/
+        name=${target#"$prefix"}
+        [ "$name" != "$target" ] && known_zone "$name" || fail "/etc/localtime is not a managed time zone link"
+        printf '%s\n' "$name"
+        ;;
+    1:list)
+        cd "$zoneinfo"
+        find . -type f -print | sed 's|^\./||' | sort
+        ;;
+    2:set)
+        [ "$(id -u)" = 0 ] || fail "changing the system time zone requires root"
+        known_zone "$2" || fail "unknown IANA time zone"
+        [ -d /etc ] && [ ! -L /etc ] && [ "$(stat -c '%u:%g:%a' /etc)" = 0:0:755 ] ||
+            fail "expected a root-owned configuration directory"
+        pending=$(mktemp -d /etc/.psios-timezone.XXXXXX)
+        trap 'rm -f -- "$pending/localtime"; rmdir -- "$pending"' EXIT
+        ln -s "..$zoneinfo/$2" "$pending/localtime"
+        sync -f /etc
+        mv -T -- "$pending/localtime" "$localtime"
+        sync -f /etc
+        printf '%s\n' "$2"
+        ;;
+    *) fail "usage: psios-timezone [show | list | set ZONE]" ;;
+esac

@@ -1,7 +1,9 @@
 """Exercise native SSH custody and the authorized operator in actual OVMF guests."""
 import argparse
+import hashlib
 import json
 from pathlib import Path
+import shlex
 import shutil
 import socket
 import subprocess
@@ -24,6 +26,47 @@ def connect(port, trusted, login, key, command, *, extra=()):
                            "-o", f"UserKnownHostsFile={trusted}", "-o", "ConnectTimeout=5",
                            "-p", str(port), "-i", key, *extra, f"{login}@127.0.0.1", command],
                           capture_output=True, text=True, timeout=15)
+
+
+def operator_key_line(key):
+    return " ".join(key.with_suffix(".pub").read_text().split()[:2])
+
+
+def operator_key_rotation(digest, key_line):
+    return f"printf '%s\\n' {shlex.quote(key_line)} | sh /psios-ssh rotate-authorized-key {digest}"
+
+
+def require_console_refusal(console, command, reason):
+    output = console.run(f"if ( {command} ); then printf '\\naccepted\\n'; else printf '\\nrefused\\n'; fi")
+    assert output.splitlines()[-1:] == ["refused"] and reason in output, output
+
+
+def rotate_key(console, admin, original, next_key):
+    original_line = operator_key_line(original)
+    next_line = operator_key_line(next_key)
+    current = hashlib.sha256((original_line + "\n").encode()).hexdigest()
+    expected = hashlib.sha256((next_line + "\n").encode()).hexdigest()
+    replace = operator_key_rotation(current, next_line)
+    require_console_refusal(console, replace, "requires local root")
+    console.send("exit")
+    console.login("root", admin)
+    saved = "/etc/psios/ssh-authorized-key"
+    pending = "/etc/psios/.ssh-authorized-key.pending"
+    assert console.run(f"sha256sum {saved}").split()[0] == current
+    require_console_refusal(console, operator_key_rotation("0" * 64, next_line), "differs from the expected digest")
+    require_console_refusal(console, operator_key_rotation(current, next_line + " unexpected"), "without a comment")
+    lock = f"(exec 9< /etc/psios; busybox flock -n 9 && {replace})"
+    require_console_refusal(console, lock, "Another SSH operator key rotation")
+    assert console.run(f"sha256sum {saved}").split()[0] == current
+    console.run(f"(umask 077; printf 'interrupted' > {pending})")
+    assert console.run(replace).split()[0] == expected
+    assert console.run(f"test ! -e {pending} && stat -c '%u:%g:%a:%h' {saved}") == "0:0:644:1"
+    require_console_refusal(console, replace, "differs from the expected digest")
+
+
+def require_revoked_key(port, trusted, key):
+    denied = connect(port, trusted, "psios", key, "id")
+    assert denied.returncode == 255 and "Permission denied (publickey)" in denied.stderr, denied.stderr
 
 
 def serial_host_key(console):
@@ -49,6 +92,7 @@ def exercise(args, work):
     admin, root_hash = password(work, "root.hash")
     key = client_key(work, "operator")
     unknown = client_key(work, "unknown")
+    rotated = client_key(work, "rotated")
     auth = key.with_suffix(".pub")
     common = ["--kernel-iso", args.kernel_iso, "--core-archive", args.archive, "--core-sha256", sha(args.archive)]
     factory = ["--console-hash", console_hash, "--root-console-hash", root_hash,
@@ -107,6 +151,12 @@ def exercise(args, work):
         result = call(console, "Task.Wait", {"id": task, "timeout_ms": 5000})
         assert result["lifecycle"] == "Succeeded"
         console.run("printf 'persisted SSH home\\n' > ~/ssh-persistence; sync")
+        rotate_key(console, admin, key, rotated)
+        assert serial_host_key(console) == host_key
+        require_revoked_key(port, trusted, key)
+        remote = connect(port, trusted, "psios", rotated, "psiosctl node")
+        assert remote.returncode == 0, remote.stderr
+        assert json.loads(remote.stdout)["reference"]["resource_id"] == node
         console.vm.kill()
         console.vm.wait(15)
 
@@ -114,7 +164,8 @@ def exercise(args, work):
         console.login("psios", operator)
         check_lease(console)
         assert serial_host_key(console) == host_key
-        remote = connect(port, trusted, "psios", key, "cat ~/ssh-persistence")
+        require_revoked_key(port, trusted, key)
+        remote = connect(port, trusted, "psios", rotated, "cat ~/ssh-persistence")
         assert (remote.returncode, remote.stdout) == (0, "persisted SSH home\n"), remote.stderr
         assert call(console, "Task.Wait", {"id": task, "timeout_ms": 5000})["result"] == result["result"]
         shutdown(console, admin, image)
@@ -149,13 +200,14 @@ def exercise(args, work):
         console.login("psios", operator)
         check_lease(console)
         assert serial_host_key(console) == host_key
-        remote = connect(port, trusted, "psios", key, "psiosctl node")
+        require_revoked_key(port, trusted, key)
+        remote = connect(port, trusted, "psios", rotated, "psiosctl node")
         assert remote.returncode == 0, remote.stderr
         assert json.loads(remote.stdout)["reference"]["resource_id"] == node
         assert call(console, "Task.Wait", {"id": task, "timeout_ms": 5000})["result"] == result["result"]
         shutdown(console, admin, upgraded)
 
-    print("Verified native SSH authentication and PTY, unique clone keys, and key and Core continuity after a cut and offline upgrade.")
+    print("Verified native SSH authentication, operator key replacement, host key and Core continuity after a cut and offline upgrade.")
 
 
 if __name__ == "__main__":

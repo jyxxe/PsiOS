@@ -106,7 +106,15 @@ SLAAC 使用格式 10 的构建回执。工厂镜像核验和隔离试启动更�
 
 制作新盘时可在已有的 DHCP、静态网络或 SLAAC 配置上加入 `--ssh-authorized-key operator.pub`。文件使用标准 OpenSSH Ed25519 公钥格式。控制台在 TCP 22 监听，只允许 `psios` 用户用该公钥登录。root、密码认证和转发均关闭。SLAAC 的格式 10 回执可同时记录 SSH 配置。串口账户仍使用各自的本机配置。
 
-首次正式引导生成并刷盘保存本部署的 Ed25519 主机密钥。可通过可信串口运行 `ssh-keygen -lf /run/psios-ssh/host-key.pub` 核对首次连接显示的指纹。复制尚未启动的新盘时，每份副本在自己的首次正式引导生成主机密钥。重启和停机升级保留原主机密钥与授权公钥。隔离试启动不运行 SSH。查看 SSH 启动错误可使用本地串口。[真实 SSH 验收](../tests/native_ssh_console.py)
+首次正式引导生成并刷盘保存本部署的 Ed25519 主机密钥。可通过可信串口运行 `ssh-keygen -lf /run/psios-ssh/host-key.pub` 核对首次连接显示的指纹。复制尚未启动的新盘时，每份副本在自己的首次正式引导生成主机密钥。重启和停机升级保留原主机密钥与授权公钥。隔离试启动不运行 SSH。查看 SSH 启动错误可使用本地串口。
+
+可从本机 root 控制台更换 SSH 登录公钥。先用 `sha256sum /etc/psios/ssh-authorized-key` 核对当前文件的摘要，再将该值用于下例。新文件接受一行 OpenSSH Ed25519 公钥，去掉末尾注释并保留换行。
+
+```sh
+sh /psios-ssh rotate-authorized-key "$EXPECTED_SHA256" < operator.pub
+```
+
+命令核对当前摘要后原子替换公钥并刷盘。后续 SSH 登录采用新公钥，已建立的会话和主机密钥继续使用。可从同一本机控制台读取当前公钥摘要，以核实断电或异常退出后的结果。停机升级会检查并保留当前公钥。[真实 SSH 验收](../tests/native_ssh_console.py)
 
 ## 核对安装与运行的制品
 

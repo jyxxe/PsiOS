@@ -391,6 +391,26 @@ def read_target(fd, path: Path, *, allow_loop: bool) -> dict:
                 "read_only": False, "transport": transport}
 
 
+def require_reboot_target(planned, observed):
+    """Require a persistent SATA identity in place of the expired Linux generation."""
+    for target in (planned, observed):
+        transport = target.get("transport")
+        boot = target.get("boot_id")
+        path = target.get("path")
+        if (not isinstance(transport, dict) or transport.get("kind") != "SataAhciDisk"
+                or not isinstance(path, str) or _kind(Path(path)) != "SataAhciDisk"
+                or not isinstance(transport.get("serial"), str) or not DEVICE_SERIAL.fullmatch(transport["serial"])
+                or not isinstance(transport.get("wwid"), str) or not ATA_WWID.fullmatch(transport["wwid"])
+                or not isinstance(boot, str) or str(uuid.UUID(boot)) != boot):
+            raise ValueError("cross-boot installation reconciliation requires a fixed SATA AHCI disk with a registered NAA WWID")
+    if planned["boot_id"] == observed["boot_id"]:
+        raise ValueError("cross-boot installation reconciliation requires a different Linux boot")
+    if (any(planned["transport"][key] != observed["transport"][key] for key in ("serial", "wwid"))
+            or any(planned.get(key) != observed.get(key) for key in (
+                "size_bytes", "logical_block_bytes", "physical_block_bytes", "read_only"))):
+        raise ValueError("target disk persistent identity or geometry differs from the installation plan")
+
+
 def require_unallocated(fd, path: Path):
     """Reject partition children and device relationships before a fresh write."""
     _kind(path)

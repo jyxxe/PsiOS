@@ -150,7 +150,8 @@ def make_source(args, work):
     return image, receipt, operator, admin
 
 
-def ubuntu_command(instance, target, rejected, port, serial_log, bus="virtio", collisions=(), replacement=None):
+def ubuntu_command(instance, target, rejected, port, serial_log, bus="virtio", collisions=(), replacement=None,
+                   *, swap_sata_ports=False):
     accel = "kvm" if os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
     manifest = json.loads((instance / "manifest.json").read_bytes())
     assert manifest["firmware"] == "OVMF" and manifest["architecture"] == "amd64"
@@ -184,6 +185,8 @@ def ubuntu_command(instance, target, rejected, port, serial_log, bus="virtio", c
                     options += ",id=planned-disk,bus=install-port"
             elif bus == "ahci":
                 port = 0 if name == "installed" else 1
+                if swap_sata_ports:
+                    port = 1 - port
                 device = f"ide-hd,bus=ide.{port}"
                 if name == "installed":
                     options += ",wwn=0x5000c500f0120001"
@@ -248,7 +251,8 @@ def replace_nvme(run, control, original):
     return observed
 
 
-def install_in_guest(run, tool_debs, work, source, receipt, source_digest, blank_digest, bus, target_size, control=None):
+def install_in_guest(run, tool_debs, work, source, receipt, source_digest, blank_digest, bus, target_size, control=None,
+                     *, interrupt_receipt=False):
     remote(run, "sudo", "-n", "install", "-d", "-m", "0700",
            GUEST, GUEST / "native", GUEST / "rescue", OPERATION, BAD_OPERATION)
     if control is not None:
@@ -262,6 +266,8 @@ def install_in_guest(run, tool_debs, work, source, receipt, source_digest, blank
         remote(run, "sudo", "-n", "dpkg", "-i", *packages, timeout=120)
     remote(run, "sudo", "-n", "sh", "-c", "for tool in python3 sfdisk mcopy e2fsck debugfs blkid; do "
            "command -v \"$tool\" >/dev/null || { echo \"missing offline installer tool: $tool\" >&2; exit 1; }; done")
+    if interrupt_receipt:
+        remote(run, "sudo", "-n", "strace", "--version")
     for path in sorted(TOOLS):
         upload(run, work / path, GUEST / path)
     guest_image, guest_receipt = GUEST / source.name, GUEST / receipt.name
@@ -337,6 +343,10 @@ def install_in_guest(run, tool_debs, work, source, receipt, source_digest, blank
         assert updated["plan_digest"] != planned["plan_digest"], updated
         planned = updated
 
+    if interrupt_receipt:
+        interrupt_install_receipt(run, planned, evidence["path"], expected_image)
+        return evidence, expected_image
+
     verified = json.loads(install(operation, "apply", "--plan-digest", planned["plan_digest"]).stdout)
     assert verified["status"] == "Verified" and verified["plan"] == planned["plan"], verified
     assert verified["plan_digest"] == planned["plan_digest"], verified
@@ -344,6 +354,93 @@ def install_in_guest(run, tool_debs, work, source, receipt, source_digest, blank
     assert json.loads(install(operation, "inspect").stdout) == verified
     assert json.loads(install(operation, "apply", "--plan-digest", planned["plan_digest"]).stdout) == verified
     return evidence, expected_image
+
+
+def recover_install(run, approval, target, **options):
+    return remote(run, "sudo", "-n", "python3", "-B", INSTALLER, "reconcile-after-reboot",
+                  "--state-dir", OPERATION, "--plan-digest", approval, "--target", target,
+                  timeout=180, **options)
+
+
+def install_journal(run):
+    return remote(run, "sudo", "-n", "cat", OPERATION / "operation.json").stdout
+
+
+def interrupt_install_receipt(run, planned, target, expected_image):
+    approval = planned["plan_digest"]
+    premature = recover_install(run, approval, target, check=False)
+    assert premature.returncode == 1 and "previously issued write" in premature.stderr, premature
+    # The first rename publishes WriteIssued. Fail the second after the installer has flushed
+    # and read back the real target, leaving the persistent journal without its Verified receipt.
+    failed = remote(run, "sudo", "-n", "strace", "-qq", "-e", "trace=renameat",
+                    "-e", "inject=renameat:error=EIO:when=2",
+                    "python3", "-B", INSTALLER, "apply", "--state-dir", OPERATION,
+                    "--plan-digest", approval, timeout=180, check=False)
+    assert failed.returncode == 1 and '"operation.json") = -1 EIO' in failed.stderr, failed.stderr
+    journal = install_journal(run)
+    issued = json.loads(journal)
+    assert issued == {**planned, "status": "WriteIssued", "write_issued_at": issued["write_issued_at"]}, issued
+    same_boot = recover_install(run, approval, target, check=False)
+    status = json.loads(same_boot.stdout)
+    assert same_boot.returncode == 1 and status["status"] == "RecoveryRequired"
+    assert "different Linux boot" in status["reason"], status
+    assert remote(run, "sudo", "-n", "sha256sum", "--", target, timeout=90).stdout.split()[0] == expected_image
+    assert install_journal(run) == journal
+    print(f"PASS real SATA data flushed with journal left at WriteIssued, image {expected_image}", flush=True)
+
+
+def check_reboot_reconciliation(instance, key, launch, target, source, receipt, original, expected_image):
+    offset = 64 * 512
+    with target.open("r+b", buffering=0) as disk:
+        old = os.pread(disk.fileno(), 1, offset)
+        assert len(old) == 1
+        assert os.pwrite(disk.fileno(), bytes([old[0] ^ 1]), offset) == 1
+        os.fsync(disk.fileno())
+    damaged = sha(target)
+    assert damaged != expected_image
+    with boot_ubuntu(instance, key, 2, launch=launch) as run:
+        journal = install_journal(run)
+        approval = json.loads(journal)["plan_digest"]
+        device = json.loads(remote(run, "python3", "-c", PROBE_DEVICE, "ahci", TARGET_SERIAL).stdout)
+        damaged_boot = device["boot_id"]
+        assert damaged_boot != original["boot_id"]
+        bad_approval = recover_install(run, "0" * 64, device["path"], check=False)
+        assert bad_approval.returncode == 1 and "approval does not match" in bad_approval.stderr
+        inspect = remote(run, "sudo", "-n", "python3", "-B", INSTALLER, "inspect", "--state-dir", OPERATION,
+                         check=False)
+        assert inspect.returncode == 1 and "identity or generation differs" in json.loads(inspect.stdout)["reason"]
+        replay = remote(run, "sudo", "-n", "python3", "-B", INSTALLER, "apply", "--state-dir", OPERATION,
+                        "--plan-digest", approval, check=False)
+        assert replay.returncode == 1 and "writes were already issued" in replay.stderr
+        collision = json.loads(remote(run, "python3", "-c", PROBE_DEVICE, "ahci", COLLISION_SERIAL + "0").stdout)
+        ambiguous = recover_install(run, approval, collision["path"], check=False)
+        assert ambiguous.returncode == 1 and "identity is not unique" in json.loads(ambiguous.stdout)["reason"]
+        mismatch = recover_install(run, approval, device["path"], check=False)
+        result = json.loads(mismatch.stdout)
+        assert mismatch.returncode == 1 and result["status"] == "RecoveryRequired"
+        assert result["reason"] == "device bytes do not match the verified image", result
+        assert install_journal(run) == journal
+        remote(run, "sudo", "-n", "rm", "--", GUEST / source.name, GUEST / receipt.name)
+    assert sha(target) == damaged, "reconciliation rewrote an incomplete target"
+    with target.open("r+b", buffering=0) as disk:
+        assert os.pwrite(disk.fileno(), old, offset) == 1
+        os.fsync(disk.fileno())
+    assert sha(target) == expected_image
+    with boot_ubuntu(instance, key, 3, launch=lambda port, log: launch(port, log, swap_sata_ports=True)) as run:
+        device = json.loads(remote(run, "python3", "-c", PROBE_DEVICE, "ahci", TARGET_SERIAL).stdout)
+        assert device["boot_id"] not in (original["boot_id"], damaged_boot)
+        assert device["sysfs_path"] != original["sysfs_path"], (original, device)
+        recovered = json.loads(recover_install(run, approval, device["path"]).stdout)
+        expected = {**json.loads(journal), "status": "Verified", "reconciled": True,
+                    "verified_at": recovered["verified_at"], "reconciled_target": device,
+                    "image_readback_sha256": expected_image}
+        assert recovered == expected == json.loads(install_journal(run)), recovered
+        assert json.loads(recover_install(run, approval, device["path"]).stdout) == expected
+        rejected = recover_install(run, approval, collision["path"], check=False)
+        assert rejected.returncode == 1 and "recorded cross-boot result" in rejected.stderr
+    assert sha(target) == expected_image, "reconciliation changed the installed disk"
+    print(f"PASS reboot {original['boot_id']} to {device['boot_id']} with SATA NAA {device['transport']['wwid']}; "
+          "refused a mismatched disk, settled the original approval by read-back without source files", flush=True)
 
 
 def check_larger_disk(factory, installed):
@@ -426,10 +523,12 @@ def exercise(args, work):
     blank = sha(target)
     assert sha(rejected) == blank
 
-    def launch(port, serial_log):
-        return ubuntu_command(instance, target, rejected, port, serial_log, args.target_bus, collisions, replacement)
+    def launch(port, serial_log, *, swap_sata_ports=False):
+        return ubuntu_command(instance, target, rejected, port, serial_log, args.target_bus, collisions, replacement,
+                              swap_sata_ports=swap_sata_ports)
 
-    with boot_ubuntu(instance, key, 1, launch=launch, readiness_timeout=600) as run:
+    with boot_ubuntu(instance, key, 1, launch=launch, readiness_timeout=600,
+                     power_cut=args.reconcile_after_reboot) as run:
         print("Ubuntu installer host provisioned from the verified Core package", flush=True)
         ubuntu = identity(run)
         run("test -d /sys/firmware/efi")
@@ -437,7 +536,8 @@ def exercise(args, work):
         assert package == manifest["package_version"], package
         control = instance / "control.sock" if replacement is not None else None
         evidence, installed_digest = install_in_guest(run, args.tool_deb, work, image, receipt, source_digest,
-                                                      blank, args.target_bus, target_size, control)
+                                                      blank, args.target_bus, target_size, control,
+                                                      interrupt_receipt=args.reconcile_after_reboot)
         assert evidence["boot_id"] == ubuntu[2], evidence
     if replacement is not None:
         assert sha(target) == blank, "the removed NVMe changed"
@@ -445,6 +545,8 @@ def exercise(args, work):
     assert sha(image) == source_digest and sha(target) == installed_digest, "installed raw bytes differ after shutdown"
     assert sha(rejected) == blank, "refused block device changed"
     assert all(sha(disk) == blank for disk in collisions), "duplicate-identity disk changed"
+    if args.reconcile_after_reboot:
+        check_reboot_reconciliation(instance, key, launch, target, image, receipt, evidence, installed_digest)
     if args.larger_target:
         check_larger_disk(image, target)
     authority, task = boot_installed(args, work, target, receipt, operator, admin)
@@ -462,10 +564,14 @@ def main():
     parser.add_argument("--kernel-iso", type=Path, required=True, help="pinned kernel ISO")
     parser.add_argument("--target-bus", choices=("virtio", "nvme", "ahci"), default="virtio")
     parser.add_argument("--larger-target", action="store_true", help="install to a larger, sector-aligned blank test disk")
+    parser.add_argument("--reconcile-after-reboot", action="store_true",
+                        help="verify cross-boot SATA receipt recovery, with strace installed in the guest")
     parser.add_argument("--tool-deb", type=Path, action="append", default=[],
                         help="trusted offline Ubuntu tool or dependency package, repeat as needed")
     parser.add_argument("--ovmf-dir", type=Path, default=Path("/usr/share/OVMF"))
     args = parser.parse_args()
+    if args.reconcile_after_reboot and args.target_bus != "ahci":
+        parser.error("cross-boot reconciliation requires the AHCI test bus")
     for name in ("base", "package", "archive", "kernel_iso", "ovmf_dir"):
         setattr(args, name, getattr(args, name).resolve(strict=True))
     args.tool_deb = [path.resolve(strict=True) for path in args.tool_deb]

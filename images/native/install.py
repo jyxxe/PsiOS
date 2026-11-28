@@ -17,7 +17,7 @@ from tempfile import TemporaryDirectory
 import uuid
 
 from install_source import MAX_TARGET_BYTES, SECTOR_BYTES, fit_image, stage_image
-from install_target import filesystem_type, open_target, read_target, require_unallocated
+from install_target import filesystem_type, open_target, read_target, require_reboot_target, require_unallocated
 
 
 JOURNAL = "operation.json"
@@ -139,6 +139,11 @@ def read_operation(directory):
                 and entry.get("image_readback_sha256") == expected_image(plan)["image_sha256"]
                 and type(entry.get("reconciled")) is bool,
                 "installation journal lacks a verified receipt")
+    if "reconciled_target" in entry:
+        require(entry["status"] == "Verified" and entry["reconciled"]
+                and isinstance(entry["reconciled_target"], dict),
+                "installation journal has invalid cross-boot evidence")
+        require_reboot_target(target, entry["reconciled_target"])
     return entry
 
 
@@ -272,7 +277,7 @@ def exact_target(fd, request):
     return path
 
 
-def verified(directory, entry, *, reconciled):
+def verified(directory, entry, *, reconciled, reconciled_target=None):
     settled = {
         **entry,
         "status": "Verified",
@@ -280,6 +285,8 @@ def verified(directory, entry, *, reconciled):
         "image_readback_sha256": expected_image(entry["plan"])["image_sha256"],
         "reconciled": reconciled,
     }
+    if reconciled_target is not None:
+        settled["reconciled_target"] = reconciled_target
     save_operation(directory, settled)
     return settled
 
@@ -356,6 +363,30 @@ def inspect(directory):
         return {**entry, "status": "RecoveryRequired", "reason": str(error)}
 
 
+def reconcile_after_reboot(directory, args):
+    entry = read_operation(directory)
+    require(checked_digest(args.plan_digest) == entry["plan_digest"],
+            "approval does not match the exact installation plan")
+    if "reconciled_target" in entry:
+        require(str(args.target) == entry["reconciled_target"]["path"],
+                "target path does not match the recorded cross-boot result")
+        return entry
+    require(entry["status"] == "WriteIssued", "cross-boot reconciliation requires a previously issued write")
+    request = entry["plan"]
+    installed = expected_image(request)
+    try:
+        with open_target(args.target, write=False) as fd:
+            observed = read_target(fd, args.target, allow_loop=False)
+            require_reboot_target(request["target"], observed)
+            require(block_digest(fd, installed["size_bytes"]) == installed["image_sha256"],
+                    "device bytes do not match the verified image")
+            require(read_target(fd, args.target, allow_loop=False) == observed,
+                    "block device changed during cross-boot verification")
+            return verified(directory, entry, reconciled=True, reconciled_target=observed)
+    except (OSError, ValueError) as error:
+        return {**entry, "status": "RecoveryRequired", "reason": str(error)}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -370,7 +401,10 @@ def main():
     execute = commands.add_parser("apply", help="approve and install an exact saved plan")
     execute.add_argument("--plan-digest", required=True)
     read = commands.add_parser("inspect", help="show the outcome and reconcile a prior write")
-    for command in (prepare, execute, read):
+    reconcile = commands.add_parser("reconcile-after-reboot", help="read back a prior SATA write after Linux restarts")
+    reconcile.add_argument("--plan-digest", required=True)
+    reconcile.add_argument("--target", type=Path, required=True)
+    for command in (prepare, execute, read, reconcile):
         command.add_argument("--state-dir", type=Path, required=True)
     args = parser.parse_args()
     try:
@@ -381,8 +415,10 @@ def main():
                 result = plan(directory, args)
             elif args.command == "apply":
                 result = apply(directory, args)
-            else:
+            elif args.command == "inspect":
                 result = inspect(directory)
+            else:
+                result = reconcile_after_reboot(directory, args)
         print(json.dumps(result))
         return 1 if result["status"] == "RecoveryRequired" else 0
     except (OSError, ValueError) as error:

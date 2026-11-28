@@ -1046,12 +1046,12 @@ jobs:
           mkdir "$RUNNER_TEMP/installer-tools"
           (cd "$RUNNER_TEMP/installer-tools" && timeout 180 "$GITHUB_WORKSPACE/tools/ci-ubuntu-apt" download fdisk mtools)
           tools/build-portable-core "$RUNNER_TEMP/native-core.tar.gz"
-      - name: Install onto virtio and PCIe NVMe devices and reboot each installed disk
+      - name: Install onto Virtio, PCIe NVMe and SATA AHCI devices and reboot each installed disk
         run: |
           archive="$RUNNER_TEMP/native-core.tar.gz"
           tool_args=()
           for tool in "$RUNNER_TEMP"/installer-tools/*.deb; do tool_args+=(--tool-deb "$tool"); done
-          for bus in virtio nvme; do
+          for bus in virtio nvme ahci; do
             python3 -B tests/native_install_virtio.py --base "$RUNNER_TEMP/base.img" \
               --package "$RUNNER_TEMP"/psios-package/psios-core_*.deb \
               --archive "$archive" --archive-sha256 "$(sha256sum "$archive" | cut -d ' ' -f1)" \

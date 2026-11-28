@@ -17,7 +17,8 @@ KEYS = {
     " ": ("spc",), "\n": ("ret",), "/": ("slash",), "-": ("minus",),
     "_": ("shift", "minus"), ">": ("shift", "dot"),
 }
-DISPLAY = ("-device", "VGA", "-qmp", "unix:console-control.sock,server=on,wait=off")
+# Keep the boot disk at the same PCI address when VGA is removed.
+DISPLAY = ("-device", "VGA,addr=0x2", "-qmp", "unix:console-control.sock,server=on,wait=off")
 
 
 def type_text(qmp, text):
@@ -125,6 +126,7 @@ def exercise(args, work):
     check_clean_shutdown(candidate)
     with boot(work, candidate, pace_commands=True) as console:
         console.login("psios", operator)
+        console.run('test -z "$(cat /proc/fb)"')
         assert json.loads(console.run("psiosctl whoami"))["authority_id"] == identity
         login_root(console, admin)
         console.run("printf '%s\\n' 'tty1 # local root' >> /etc/securetty")

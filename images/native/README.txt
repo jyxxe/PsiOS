@@ -51,6 +51,11 @@ core_limits，停机升级继承这些限额。
       -drive if=virtio,format=raw,file=node.raw -boot order=c,strict=on \
       -display none -serial stdio -monitor none -nic none
 
+构建时加 --local-vt 可让 psios 在本机 tty1 使用同一密码登录。需要
+unsquashfs 提取固定内核的 EFI 帧缓冲模块。运行上述 QEMU 示例时可将
+-display none 替换为 -device VGA,addr=0x2 -display gtk。串口仍可用于维护。
+构建回执格式 14 记录本地控制台，停机升级沿用该配置。
+
 登录后可执行 psiosctl whoami。含 psios-mcp 的独立 Core 归档也将
 /bin/psios-mcp 纳入部署清单。STDIO 客户端凭独立 Agent 凭据和委托
 按需启动该程序。使用早期归档建盘时保留该归档提供的程序。外部只读核验使用同一归档的

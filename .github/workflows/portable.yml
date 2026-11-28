@@ -287,6 +287,11 @@ jobs:
           python3 -B tests/native_boot_reproducibility.py --rdnss --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
             --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
 
+      - name: Log in with the local EFI display and keyboard before and after a staged upgrade
+        run: |
+          python3 -B tests/native_local_vt.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+
       - name: Recover both DST fold occurrences on a UEFI disk after power cuts
         run: |
           python3 tests/native_calendar.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \

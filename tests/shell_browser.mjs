@@ -142,6 +142,138 @@ async function createWorkspace(name) {
   await keyboardActivate("#workspace-name");
 }
 
+async function verifyWindowGeometry() {
+  const viewport = { width: 1280, height: 860, deviceScaleFactor: 1, mobile: false };
+  await send("Emulation.setDeviceMetricsOverride", viewport);
+  const window = "#window-node";
+  const move = window + ' [data-geometry="move"]';
+  const resize = window + ' [data-geometry="resize"]';
+  const rectangle = selector => evaluate(
+    "document.querySelector(" + JSON.stringify(selector) + ").getBoundingClientRect().toJSON()"
+  );
+  async function key(selector, key, windowsVirtualKeyCode, modifiers = 0) {
+    await evaluate("document.querySelector(" + JSON.stringify(selector) + ").focus()");
+    await send("Input.dispatchKeyEvent", { type: "rawKeyDown", key, code: key, windowsVirtualKeyCode, modifiers });
+    await send("Input.dispatchKeyEvent", { type: "keyUp", key, code: key, windowsVirtualKeyCode, modifiers });
+  }
+  async function drag(selector, dx, dy) {
+    const rect = await rectangle(selector);
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    await send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", buttons: 1, clickCount: 1 });
+    await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: x + dx, y: y + dy, button: "left", buttons: 1 });
+    await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: x + dx, y: y + dy, button: "left" });
+  }
+  function near(actual, expected) {
+    assert.ok(Math.abs(actual - expected) < 1, `expected ${expected}, got ${actual}`);
+  }
+  await keyboardActivate("#nav-node");
+  await waitFor("node loaded before window layout changes", 'document.getElementById("node-view").textContent.includes(' +
+    JSON.stringify(input.node) + ")");
+  const before = await rectangle(window);
+  await key(resize, "ArrowLeft", 37);
+  let resized = await rectangle(window);
+  near(resized.width, before.width - 16);
+  near(resized.x, before.x);
+  await drag(resize, -120, -80);
+  const smaller = await rectangle(window);
+  near(smaller.width, resized.width - 120);
+  near(smaller.x, resized.x);
+  assert.ok(smaller.height <= resized.height);
+
+  await drag(move, 40, 30);
+  const dragged = await rectangle(window);
+  near(dragged.x, smaller.x + 40);
+  near(dragged.y, smaller.y + 30);
+  await key(move, "ArrowDown", 40);
+  const placed = await rectangle(window);
+  near(placed.y, dragged.y + 16);
+  near(placed.width, smaller.width);
+  await key(move, "ArrowLeft", 37, 8);
+  near((await rectangle(window)).x, placed.x - 48);
+  await key(move, "ArrowRight", 39, 8);
+  near((await rectangle(window)).x, placed.x);
+
+  const frontWindow = `(() => {
+    const node = document.getElementById("window-node").getBoundingClientRect();
+    const tasks = document.getElementById("window-tasks").getBoundingClientRect();
+    const left = Math.max(node.left, tasks.left);
+    const right = Math.min(node.right, tasks.right);
+    const top = Math.max(node.top, tasks.top);
+    const bottom = Math.min(node.bottom, tasks.bottom);
+    if (right <= left || bottom <= top) return null;
+    return document.elementFromPoint((left + right) / 2, (top + bottom) / 2)?.closest(".app-window")?.id;
+  })()`;
+  await keyboardActivate("#nav-tasks");
+  assert.equal(await evaluate(frontWindow), "window-tasks");
+  await keyboardActivate("#nav-node");
+  assert.equal(await evaluate(frontWindow), "window-node");
+  await keyboardActivate('#window-tasks [data-tile-side="right"]');
+  near((await rectangle(window)).x, placed.x);
+  await keyboardActivate('#window-tasks [data-tile-side="right"]');
+  await keyboardActivate('#window-tasks [data-action="close"]');
+  await keyboardActivate(window + ' [data-tile-side="left"]');
+  assert.ok(await evaluate('document.querySelector("#window-node").dataset.tile === "left" && ' +
+    'document.querySelector("#window-node [data-geometry=resize]").hidden'));
+  await keyboardActivate(window + ' [data-tile-side="left"]');
+  near((await rectangle(window)).x, placed.x);
+  await keyboardActivate(window + ' [data-action="maximize"]');
+  assert.ok(await evaluate('document.querySelector("#window-node").classList.contains("maximized") && ' +
+    'document.querySelector("#window-node [data-geometry=move]").hidden'));
+  await keyboardActivate(window + ' [data-action="maximize"]');
+  near((await rectangle(window)).width, placed.width);
+  await keyboardActivate(window + ' [data-action="minimize"]');
+  await keyboardActivate("#nav-node");
+  near((await rectangle(window)).y, placed.y);
+
+  await createWorkspace("设备");
+  assert.ok(await evaluate('document.querySelector("#window-node").hidden && ' +
+    '!document.querySelector("#window-node").style.getPropertyValue("--window-width")'));
+  await keyboardActivate("#open-workspaces");
+  await keyboardActivate('#workspace-list [data-workspace-id="0"]');
+  near((await rectangle(window)).x, placed.x);
+  await keyboardActivate("#open-workspaces");
+  const destination = '#workspace-windows [data-move-window="node"]';
+  await key(destination, "End", 35);
+  await waitFor("floating window moved to the second workspace",
+    'document.querySelector("#window-node").hidden && document.querySelector(' + JSON.stringify(destination) + ').value === "1"');
+  await keyboardActivate('#workspace-list [data-workspace-id="1"]');
+  near((await rectangle(window)).x, placed.x);
+  near((await rectangle(window)).width, placed.width);
+
+  await send("Emulation.setDeviceMetricsOverride", {
+    width: 820, height: 490, deviceScaleFactor: 1, mobile: false,
+  });
+  await waitFor("floating window fits a smaller desktop", `(() => {
+    const area = document.getElementById("desktop").getBoundingClientRect();
+    const rect = document.getElementById("window-node").getBoundingClientRect();
+    return rect.left >= area.left && rect.top >= area.top &&
+      rect.right <= area.right + 1 && rect.bottom <= area.bottom + 1;
+  })()`);
+  await send("Emulation.setDeviceMetricsOverride", {
+    width: 360, height: 800, deviceScaleFactor: 1, mobile: false,
+  });
+  await waitFor("normal stacked layout on narrow screens", 'innerWidth === 360 && ' +
+    '!document.querySelector("#window-node").classList.contains("floating") && ' +
+    'document.querySelector("#window-node [data-geometry=resize]").hidden');
+  const narrow = await evaluate("({client: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth})");
+  assert.equal(narrow.scroll, narrow.client, "stacked layout must fit without horizontal scrolling");
+  await send("Emulation.setDeviceMetricsOverride", viewport);
+  await waitFor("geometry restored on wide screens", 'document.querySelector("#window-node").classList.contains("floating")');
+  await key(resize, "Home", 36);
+  assert.ok(await evaluate('!document.querySelector("#window-node").classList.contains("floating")'));
+  await key(resize, "ArrowLeft", 37);
+  assert.ok(await evaluate('document.querySelector("#window-node").classList.contains("floating")'));
+  await keyboardActivate(window + ' [data-action="close"]');
+  await keyboardActivate("#nav-node");
+  assert.ok(await evaluate('!document.querySelector("#window-node").classList.contains("floating")'));
+  await keyboardActivate("#logout");
+  await waitFor("cleared geometry on logout", 'document.getElementById("workspace").hidden && ' +
+    '!document.querySelector("#window-node").style.getPropertyValue("--window-width")');
+  assert.deepEqual(exceptions, []);
+  assert.ok(requests.every(url => new URL(url).origin === input.origin));
+}
+
 async function verifyNamedWorkspaces() {
   await keyboardActivate("#nav-tasks");
   await waitFor("first workspace task", 'document.querySelector("#task-rows button") !== null');
@@ -450,6 +582,7 @@ async function test() {
   if (input.filePreview) return verifyFilePreview();
   if (input.nodeResolver) return verifyNodeResolver();
   if (input.namedWorkspaces) return verifyNamedWorkspaces();
+  if (input.windowGeometry) return verifyWindowGeometry();
   if (input.windowTiling) return verifyWindowTiling();
   if (input.applicationLauncher) return verifyApplicationLauncher();
   assert.ok(await evaluate('document.activeElement.id === "nav-node" && document.querySelectorAll(".app-window:not([hidden])").length === 0'));

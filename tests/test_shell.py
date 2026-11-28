@@ -1224,6 +1224,21 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(self.node.call("Task.Get", {"id": task}), before)
 
     @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
+    def test_browser_moves_and_resizes_windows_without_changing_tasks(self):
+        task = self.node.submit("system.status", {})
+        before = self.node.wait(task)
+        self.assertEqual(before["lifecycle"], "Succeeded")
+        shell = self.shell()
+        args = dict(origin=shell.origin, code=shell.code, windowGeometry=True,
+                    node=self.node.call("Node.Get", {})["reference"]["resource_id"],
+                    profile=str(self.node.base / "browser"))
+        subprocess.run(["node", str(Path(__file__).with_name("shell_browser.mjs")),
+                        os.environ.get("PSIOS_TEST_CHROME", "google-chrome")],
+                       input=json.dumps(args), text=True, check=True, timeout=60)
+        self.assertEqual(shell.process.wait(timeout=5), 0)
+        self.assertEqual(self.node.call("Task.Get", {"id": task}), before)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
     def test_browser_pairs_reads_tasks_and_restores_selection_focus(self):
         task = self.node.submit("system.status", {})
         result = self.node.wait(task)

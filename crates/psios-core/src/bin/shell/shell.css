@@ -156,6 +156,12 @@ input {
 .window-bar h1 { font-size: 1.08rem; }
 .window-tools { display: flex; flex-wrap: wrap; gap: .3rem; }
 .window-tools button { min-height: 36px; padding: .3rem .55rem; font-size: .86rem; }
+.window-tools [data-geometry], .window-resize { touch-action: none; user-select: none; }
+.window-tools [data-geometry="move"] { cursor: move; }
+.window-resize {
+  position: absolute; inset: auto .45rem .45rem auto; z-index: 1;
+  min-width: 36px; min-height: 36px; padding: 0; cursor: nwse-resize;
+}
 .window-body { padding: clamp(.7rem, 2cqw, 1.3rem); min-width: 0; }
 .window-body > .message { margin-bottom: .7rem; }
 .dock {
@@ -251,7 +257,7 @@ dd { margin: 0; overflow-wrap: anywhere; }
 }
 @media (min-width: 761px) {
   .workspace { height: 100vh; height: 100dvh; grid-template-rows: auto auto minmax(0, 1fr) auto; }
-  .desktop { min-height: 0; grid-template-rows: minmax(0, 1fr); }
+  .desktop { position: relative; min-height: 0; grid-template-rows: minmax(0, 1fr); }
   .desktop.has-tiles {
     grid-auto-flow: row; grid-template-columns: repeat(2, minmax(0, 1fr));
     grid-template-rows: minmax(min(100%, 24rem), 1fr); grid-auto-rows: min(100%, 24rem);
@@ -260,7 +266,16 @@ dd { margin: 0; overflow-wrap: anywhere; }
   .has-tiles > .app-window { grid-column: 1 / -1; }
   .has-tiles > .app-window[data-tile="left"] { grid-area: 1 / 1; align-self: stretch; }
   .has-tiles > .app-window[data-tile="right"] { grid-area: 1 / 2; align-self: stretch; }
-  .app-window { min-height: 0; max-height: 100%; }
+  .app-window { position: relative; min-height: 0; max-height: 100%; }
+  .app-window.floating {
+    position: absolute; z-index: 1;
+    left: var(--window-x); top: var(--window-y);
+    width: var(--window-width); height: var(--window-height);
+  }
+  .desktop.has-tiles > .app-window.floating { grid-area: auto; }
+  .app-window.focused { z-index: 2; }
+  .app-window.floating > .window-body { flex: 1; }
+  .app-window:has(.window-resize:not([hidden])) > .window-body { padding-bottom: 3rem; }
   .window-bar { flex-shrink: 0; }
   .window-body { min-height: 0; overflow: auto; overscroll-behavior: contain; }
   .dock { position: static; }

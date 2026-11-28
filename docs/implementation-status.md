@@ -65,6 +65,8 @@ Shell 执行历史按当前任务修订分页读取，显示 Core 的 Run、Oper
 
 ## 原生安装与停机更新
 
+- 本机控制台提供 `psiosctl native-status`，无需联络 Core 即可读取本次启动、部署清单和当前挂载的状态与主目录。报告区分清单预期的卷 UUID、内核实际挂载及固件策略。已有原生测试用真实内核数据与安装回执比对结果。[原生诊断](native-disk.md) · [来宾验收](../tests/native_disk.py)
+- 普通账户可离线查看 IANA 时区，本机管理员可更新显示时区。真实 OVMF 验收覆盖夏令时、正常重启和隔离停机升级，系统 UTC 计时保持独立。[时区验收](../tests/native_timezone.py)
 - 原生盘在生产引导启动服务前应用 `/etc/hostname`，制作新盘时可设置，停机升级保留。真实 OVMF 联合验收核对持久文件及内核主机名。旧官方盘升级后应用原配置，管理员修改后重启生效，含 NUL 的配置在登录前触发救援。[主机配置](native-disk.md) · [联合验收](../tests/native_combined_core.py)
 - 生产引导持久化标准 Linux `/etc/machine-id`。真实来宾验证了同源克隆区分、准备中断恢复、断电后保留和无效 ID 的救援拒绝。正式旧盘升级补建 ID，下一代升级沿用该值。[原生机器标识](native-disk.md) · [来宾验收](../tests/native_disk.py)
 - 便携归档中的安装器核验新盘构建回执和镜像，按强制身份与精确审批写入空白整盘。实际 Linux loop 块设备已验证分区先于 GPT 发布、中断对账和禁止重复写入。隔离 Linux 来宾已验证 Virtio 与 PCIe NVMe 的设备身份、拒绝不匹配的批准、全盘回读和两次 OVMF 启动后保留同一 Task。引导时也验证了混接情况下对重复部署和分属两盘的文件系统拒绝挂载。物理安装和跨宿主启动对账仍待验收。[原生安装说明](native-disk.md#安装到空白块设备) · [隔离来宾验收](../tests/native_install_virtio.py) · [混盘验收](../tests/native_storage.py)

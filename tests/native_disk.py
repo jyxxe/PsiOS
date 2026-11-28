@@ -707,6 +707,9 @@ def exercise(args, work):
         c.until(b"Login incorrect")
         c.login("root", admin)
         c.run("touch /tmp/psios-root-scratch")
+        hidden = c.run("unshare -m sh -c 'set -e; mount --make-rprivate /; "
+                       "mount -o bind /tmp /var; set +e; psiosctl native-status 2>&1; test $? -eq 1'")
+        assert "Conflict: native storage mount is no longer visible" in hidden, hidden
         c.send("exit")
         c.login("psios", operator)
         machine_id = check_machine_identity(c)
@@ -727,6 +730,7 @@ def exercise(args, work):
         assert offline.pop("boottime_ms") >= native["boottime_ms"], offline
         assert offline == {key: value for key, value in native.items() if key not in ("core_socket", "boottime_ms")}
         assert c.run("test -S /run/psios/api.sock && psiosctl whoami >/dev/null") == ""
+        print("PASS native diagnostics match Linux mounts and remain available without Core access", flush=True)
         payload = ("/bin/psiosd", "/bin/psiosctl", "/psios-source", "/psios-init",
                    "/psios-disk-uuid", "/psios-home-uuid", "/psios-shutdown", "/psios-dhcp", "/psios-dhcp-event",
                    "/psios-ipv4", "/psios-ipv6", "/psios-static", "/psios-storage", "/psios-storage-layout",

@@ -352,6 +352,8 @@ pub(super) fn observe() -> Result<Value> {
 }
 
 pub(crate) fn native_storage(root: &rustix::fd::OwnedFd) -> Result<Value> {
+    use rustix::fs::{AtFlags, CWD, StatxFlags, statx};
+
     let thread = crate::linux_proc::thread(root)?;
     let mounts = table(crate::linux_proc::file(&thread, "mountinfo")?)?;
     let mut storage = serde_json::Map::new();
@@ -369,6 +371,25 @@ pub(crate) fn native_storage(root: &rustix::fd::OwnedFd) -> Result<Value> {
             "Conflict",
             "native storage mount is covered by another mount",
         )?;
+        if let Some(mount) = mount {
+            let effective = statx(
+                CWD,
+                path,
+                AtFlags::SYMLINK_NOFOLLOW | AtFlags::NO_AUTOMOUNT,
+                StatxFlags::MNT_ID,
+            )
+            .map_err(|_| err("Conflict", "native storage mount is no longer visible"))?;
+            require(
+                effective.stx_mask & StatxFlags::MNT_ID.bits() != 0,
+                "UnsupportedCapability",
+                "kernel mount identity is unavailable",
+            )?;
+            require(
+                effective.stx_mnt_id == u64::from(mount.mount_id),
+                "Conflict",
+                "native storage mount is no longer visible",
+            )?;
+        }
         storage.insert(
             key.into(),
             mount.map_or(Value::Null, |mount| {

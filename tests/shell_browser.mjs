@@ -134,6 +134,48 @@ async function verifyRevokedWindow() {
   assert.ok(requests.every(url => new URL(url).origin === input.origin));
 }
 
+async function verifyFiles() {
+  await send("Emulation.setDeviceMetricsOverride", {
+    width: 360, height: 800, screenWidth: 360, screenHeight: 800, deviceScaleFactor: 1, mobile: true,
+  });
+  assert.ok(await evaluate('!document.getElementById("nav-files").hidden'));
+  await keyboardActivate("#nav-files");
+  await waitFor("directory first page", 'document.querySelectorAll("#files-rows tr").length === 32');
+  assert.ok(await evaluate('document.getElementById("files-path").textContent === "/" && ' +
+    'document.getElementById("files-previous").disabled && !document.getElementById("files-next").disabled'));
+  assert.equal(await evaluate('document.querySelectorAll("#files-rows button").length'), 1);
+  const entries = element => 'document.getElementById("files-rows").textContent.includes(' + JSON.stringify(element) + ')';
+  assert.ok(await evaluate(entries("host-link")));
+  await keyboardActivate("#files-next");
+  await waitFor("directory second page", entries("item-35.txt"));
+  assert.ok(await evaluate('document.getElementById("files-next").disabled && document.activeElement.id === "files-path"'));
+  await keyboardActivate("#files-previous");
+  await waitFor("directory return", 'document.querySelector("#files-rows button")?.textContent === "documents"');
+  await keyboardActivate("#files-rows button");
+  await waitFor("nested folder entries", entries("会议记录.txt"));
+  assert.ok(await evaluate('document.getElementById("files-path").textContent === "/documents" && ' +
+    'document.activeElement.id === "files-path" && !document.body.textContent.includes("private file contents")'));
+  assert.equal(await evaluate("document.documentElement.scrollWidth"), 360);
+  await keyboardActivate("#files-parent");
+  await waitFor("parent directory", entries("host-link"));
+  await keyboardActivate("#files-rows button");
+  await waitFor("nested folder restored", entries("会议记录.txt"));
+  await keyboardActivate('#window-files [data-action="minimize"]');
+  assert.ok(await evaluate('document.getElementById("files-rows").textContent === "" && ' +
+    'document.getElementById("files-path").textContent === ""'));
+  writeSync(input.control_fd, Buffer.from("R"));
+  const reply = Buffer.alloc(1);
+  assert.equal(readSync(input.control_fd, reply), 1);
+  assert.equal(reply.toString(), "K");
+  await keyboardActivate("#nav-files");
+  await waitFor("revoked directory", 'document.getElementById("status-files").classList.contains("error")');
+  assert.ok(await evaluate('document.getElementById("files-rows").textContent === ""'));
+  await click("#logout");
+  await waitFor("cleared file browser", 'document.getElementById("workspace").hidden && document.getElementById("nav-files").hidden');
+  assert.deepEqual(exceptions, []);
+  assert.ok(requests.every(url => new URL(url).origin === input.origin));
+}
+
 async function test() {
   await send("Browser.getVersion", {}, 35_000);
   if (input.downloads) await send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: input.downloads });
@@ -154,6 +196,7 @@ async function test() {
     text: "\r", unmodifiedText: "\r", windowsVirtualKeyCode: 13 });
   await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
   await waitFor("paired desktop", '!document.querySelector("#workspace").hidden && !document.querySelector("#empty-desktop").hidden');
+  if (input.fileBrowser) return verifyFiles();
   assert.ok(await evaluate('document.activeElement.id === "nav-node" && document.querySelectorAll(".app-window:not([hidden])").length === 0'));
   assert.ok(!requests.some(url => ["/api/node", "/api/tasks"].includes(new URL(url).pathname)));
   if (input.projectReview) {

@@ -343,6 +343,7 @@ fn confirmed(db: &Db<'_>, op: &Doc, app: &Doc, after: &Value) -> Result<Doc> {
         record.custody.app.reference() == app.reference()
             && record.custody.running(after)
             && changed(&checkpoint.body["before"], after)
+            && super::confirms_runtime_limits(&after["effective_limits"])
             && (!(access.read_only()
                 || super::mount_observation::required(&checkpoint)
                 || db.cfg.oci_effective_volume_observation && record.custody.volume.is_some())

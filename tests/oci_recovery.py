@@ -29,12 +29,20 @@ def check_kernel_limits(observed, docker, container):
     group, inspect = kernel_group(docker, container)
     limits = observed["effective_limits"]
     quota, period = map(int, (group / "cpu.max").read_text().split())
+    status = dict(line.split(":", 1) for line in Path(f"/proc/{inspect['State']['Pid']}/status").read_text().splitlines())
     assert limits == {
         "source": "LinuxCgroupV2", "host_pid": inspect["State"]["Pid"], "cgroup_inode": str(group.stat().st_ino),
         "cpu_quota_us": quota, "cpu_period_us": period, "cpu_burst_us": int((group / "cpu.max.burst").read_text()),
         "memory_max_bytes": int((group / "memory.max").read_text()), "swap_max_bytes": int((group / "memory.swap.max").read_text()),
         "pids_max": int((group / "pids.max").read_text()),
+        "process_isolation": {
+            "seccomp_mode": int(status["Seccomp"]),
+            "no_new_privileges": status["NoNewPrivs"].strip() == "1",
+            "capability_sets_empty": all(int(status[field], 16) == 0
+                                         for field in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb")),
+        },
     }, limits
+    assert limits["process_isolation"] == {"seccomp_mode": 2, "no_new_privileges": True, "capability_sets_empty": True}
 
 
 def kernel_limit_drift(n, app, docker, container):
@@ -196,7 +204,8 @@ def lose_receipt(n, app, volume, tool, match_request, previous_binaries=None):
                 legacy = n.wait(n.submit("application.health", target(app)))
                 assert legacy["lifecycle"] == "Succeeded", legacy
                 legacy_ref, = legacy["result"]["artifact_refs"]
-                assert "effective_limits" not in n.call("Artifact.Read", {"reference": legacy_ref})
+                legacy_limits = n.call("Artifact.Read", {"reference": legacy_ref}).get("effective_limits") or {}
+                assert "process_isolation" not in legacy_limits, legacy_limits
             finally:
                 n.stop()
                 n.daemon[0] = current

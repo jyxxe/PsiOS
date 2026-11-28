@@ -105,6 +105,7 @@ Shell 执行历史按当前任务修订分页读取，显示 Core 的 Run、Oper
 
 ## OCI 恢复与网络状态
 
+- OCI 请求创建和启动容器前核对 Docker 的内置 seccomp 策略。cgroup v2 上通过固定的进程身份检查实际 seccomp、`no_new_privs` 和 capabilities，并据此核验待对账的启动及重启代次。原生来宾已验证禁用默认隔离的真实引擎在创建前被拒绝，正常引擎的内核观测可用于丢回执对账。[实际隔离与恢复](../tests/oci_recovery.py)
 - OCI 停止和重启都记录持久命令检查点。停止回执丢失时，可在独立核实原容器已退出后授权清理，始终保留原应用和卷占用，直到观测证实容器已消失。真实 Docker 已验证普通队列满、停止与删除回执先后丢失、重启检查点失败、原审批和占用核验。应用日志按专门授权读取，停止后保留有界私有尾部。[OCI 与卷回归](../tests/oci.py) · [停止故障](../tests/oci_recovery.py) · [重启核验](../tests/oci_restart.py)
 - 注册网络探针可发布有持久证据的状态和生命周期事件。本机 TCP/DNS 验收覆盖状态变化触发 Schedule、撤权后阻止后续连接、跨命名空间重置、证据回收和保留原授权范围的旧格式升级。精确 Watch 支持 200 字节的资源筛选，游标仍满足 v1 长度契约。已验证确认位置经历重启、作用域回收及授权变化后可用同一筛选恢复。[网络探针状态](../tests/test_network_probe_state.py) · [精确作用域](../tests/test_bounded_watch_scopes.py)
 

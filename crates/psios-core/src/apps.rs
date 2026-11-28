@@ -349,6 +349,20 @@ struct EngineProfile {
     id: String,
     unified_cgroups: bool,
 }
+
+pub(crate) fn confirms_runtime_limits(limits: &Value) -> bool {
+    match limits["source"].as_str() {
+        Some("LinuxCgroupV2") => {
+            let isolation = &limits["process_isolation"];
+            isolation["seccomp_mode"] == 2
+                && isolation["no_new_privileges"] == true
+                && isolation["capability_sets_empty"] == true
+        }
+        Some("DockerCgroupV1") => true,
+        _ => false,
+    }
+}
+
 impl EngineProfile {
     fn observe_controls(
         &self,
@@ -473,19 +487,34 @@ impl Engine<'_> {
     }
     fn check_engine(&self) -> Result<EngineProfile> {
         let out = self.command(&["info", "--format", "{{json .}}"].map(String::from), false)?;
+        require(
+            !out.truncated,
+            "DependencyUnavailable",
+            "OCI engine information exceeds the observation limit",
+        )?;
         let v: Value = serde_json::from_slice(&out.stdout)
             .map_err(|_| err("DependencyUnavailable", "cannot inspect engine limits"))?;
         require(
-            v["MemoryLimit"] == true
+            v["OSType"] == "linux"
+                && v["MemoryLimit"] == true
                 && v["SwapLimit"] == true
                 && v["CpuCfsQuota"] == true
-                && v["PidsLimit"] == true
-                && v["SecurityOptions"].as_array().is_some_and(|a| {
-                    a.iter()
-                        .any(|x| x.as_str().is_some_and(|x| x.contains("seccomp")))
-                }),
+                && v["PidsLimit"] == true,
             "UnsupportedCapability",
-            "engine lacks required cgroup or seccomp enforcement",
+            "OCI runtime requires a Linux engine with CPU, memory, swap, and PID controls",
+        )?;
+        require(
+            v["SecurityOptions"].as_array().is_some_and(|options| {
+                options
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|option| {
+                        *option == "name=seccomp" || option.starts_with("name=seccomp,")
+                    })
+                    .eq(["name=seccomp,profile=builtin"])
+            }),
+            "UnsupportedCapability",
+            "OCI runtime requires the built-in Docker seccomp profile",
         )?;
         let engine = v["ID"]
             .as_str()
@@ -761,20 +790,26 @@ pub fn start(
         "OutcomeUnknown",
         "created OCI attempt identity differs from the checkpoint",
     )?;
-    if let Err(error) = verify_isolation(w, &v, s, &user) {
-        if error.0.code == "PreconditionFailed"
-            && e.discard_unstarted(w, &cid, &engine.id, &attempt)
-                .unwrap_or(false)
+    let verified = verify_isolation(w, &v, s, &user).and_then(|()| {
+        let current = e.check_engine()?;
+        require(
+            current.id == engine.id && current.unified_cgroups == engine.unified_cgroups,
+            "PreconditionFailed",
+            "OCI engine or cgroup profile changed after container creation",
+        )
+    });
+    if let Err(error) = verified {
+        if matches!(
+            error.0.code.as_str(),
+            "PreconditionFailed" | "UnsupportedCapability"
+        ) && e
+            .discard_unstarted(w, &cid, &engine.id, &attempt)
+            .unwrap_or(false)
         {
             return Err(error);
         }
         return Err(err("OutcomeUnknown", error.0.message));
     }
-    require(
-        e.identity().is_ok_and(|id| id == engine.id),
-        "OutcomeUnknown",
-        "engine changed after container creation",
-    )?;
     if let Err(denial) = checkpoint(host::Checkpoint::OciStart {
         engine: &engine.id,
         container: &cid,

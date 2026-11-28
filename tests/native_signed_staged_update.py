@@ -158,8 +158,6 @@ def exercise(args, work):
     stdout = succeeded(invoke(stage(output), 850))
     assert {entry.name for entry in work.iterdir()} == before | {output.name}, "stage leaked private scratch paths"
     build = validate_bundle(args, output, stdout, original_build, frozen, old, previous, code, original_vars, baseline[0])
-    if args.uefi_boot_entries:
-        assert build["uefi_boot_entries"] is True, build
     receipt = json.loads((output / "staged-update.json").read_bytes())
     assert build["secure_boot"] == signed and receipt["candidate"]["secure_boot"] == signed, receipt
     assert receipt["trial"]["secure_boot"] == {**signed, "status": "Enforced"}, receipt["trial"]

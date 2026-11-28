@@ -95,6 +95,8 @@ ctl wait "$task" | jq '{reference:.result.artifact_refs[0]}' | ctl call Artifact
 
 `node.resolver` 通过只读 Task 观测 Core 挂载命名空间中可见的 `/etc/resolv.conf`。向目标 Node 显式授予 `node.resolver`、`task.submit` 和 `task.read` 后提交 `{}`。结果按文件顺序保留所配置的 IPv4 和 IPv6 nameserver，并记录 IPv6 区标识、无效地址数量、boot ID 及挂载和网络命名空间。文件可由本机网络服务通过标准符号链接提供。
 
+`Capability.CheckLocalReadTool` 接受 `delegation_id` 和工具名 `tool`，返回当前主体在既有委托下的 `allowed`。它核对任务权限、工具登记及实际资源作用域，无需提交任务或消耗执行预算。Shell 用这个查询在交付 DNS 观测前复核委托。
+
 此能力报告配置文件的 nameserver 项，实际 DNS 可达性由独立的网络探针观测。Core 读取至多 64 KiB 的普通文件和 32 个有效地址。组或其他用户可写的文件、读取期间的替换及超限都会使 Task 失败。已发布的结果随 Task 保存，配置更新后提交新任务可读取当前值。[真实挂载与格式升级验收](../tests/network_resolver.py)
 
 ### 路由表观测

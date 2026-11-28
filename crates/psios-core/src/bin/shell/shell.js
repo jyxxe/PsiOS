@@ -12,6 +12,10 @@ const desktop = byId("desktop");
 const code = byId("code");
 const status = byId("status");
 const nodeView = byId("node-view");
+const resolver = byId("node-resolver");
+const resolverRead = byId("node-resolver-read");
+const resolverNotice = byId("node-resolver-status");
+const resolverView = byId("node-resolver-view");
 const taskRows = byId("task-rows");
 const taskDetail = byId("task-detail");
 const taskContent = byId("task-content");
@@ -31,6 +35,7 @@ const apps = new Map(["node", "tasks", "applications", "chat", "projects", "agen
 let active = null;
 let maximized = null;
 let nodeUpdate = 0;
+let resolverUpdate = 0;
 let taskUpdate = 0;
 let detailUpdate = 0;
 let cursors = [null];
@@ -54,6 +59,8 @@ function leave(text, error = false) {
   sessionRequests.abort();
   sessionRequests = new AbortController();
   canCancelPending = false;
+  resolver.hidden = true;
+  clearResolver();
   workspace.hidden = true;
   for (const app of apps.values()) {
     app.state = "closed";
@@ -494,6 +501,40 @@ async function loadNode() {
   }
 }
 
+function clearResolver() {
+  resolverUpdate += 1;
+  resolverRead.disabled = false;
+  resolverView.replaceChildren();
+  message(resolverNotice, "");
+}
+
+async function loadResolver() {
+  const revision = ++resolverUpdate;
+  resolverRead.disabled = true;
+  resolverView.replaceChildren();
+  message(resolverNotice, "正在读取…");
+  try {
+    const result = await request("/api/node-resolver", {});
+    if (revision !== resolverUpdate) return;
+    const { nameservers, observed_at: observed, boot_id: boot } = result;
+    if (nameservers.length) {
+      const list = element("ol");
+      for (const server of nameservers) {
+        list.append(element("li", server.zone ? server.address + "%" + server.zone : server.address, "mono"));
+      }
+      resolverView.append(list);
+    } else {
+      resolverView.append(element("p", "当前配置没有名称服务器。"));
+    }
+    resolverView.append(fields([["观测时间", observed], ["启动 ID", boot, true]]));
+    message(resolverNotice, "");
+  } catch (error) {
+    if (revision === resolverUpdate) message(resolverNotice, error.message, true);
+  } finally {
+    if (revision === resolverUpdate) resolverRead.disabled = false;
+  }
+}
+
 function clearTaskView() {
   detailUpdate += 1;
   taskDetail.hidden = true;
@@ -657,6 +698,7 @@ function showWindow(id, app, shown) {
   if (id === "node") {
     nodeUpdate += 1;
     nodeView.replaceChildren();
+    clearResolver();
   } else if (id === "tasks") {
     taskUpdate += 1;
     clearTaskView();
@@ -809,6 +851,7 @@ byId("pair-form").addEventListener("submit", async (event) => {
     bearer = session.token;
     void observeSession(bearer);
     canCancelPending = session.cancel_pending_tasks === true;
+    resolver.hidden = session.observe_resolver !== true;
     chat.capability(session.send_chat === true);
     projects.setReviewer(session.review_work_items === true ? session.principal_id : null);
     agentRuntime.capability(session.manage_agent_sessions === true);
@@ -825,6 +868,8 @@ byId("pair-form").addEventListener("submit", async (event) => {
     connect.disabled = false;
   }
 });
+
+resolverRead.addEventListener("click", loadResolver);
 
 byId("close-task").addEventListener("click", () => {
   const current = taskRows.querySelector('button[aria-pressed="true"]');

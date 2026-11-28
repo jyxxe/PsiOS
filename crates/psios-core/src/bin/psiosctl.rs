@@ -59,6 +59,9 @@ enum Cmd {
         /// Allow the paired browser to pause and resume Agent sessions at a model boundary.
         #[arg(long)]
         manage_agent_sessions: bool,
+        /// Allow the paired browser to observe the local resolver with this exact delegation.
+        #[arg(long)]
+        resolver_delegation: Option<String>,
     },
     Status {
         #[arg(long, default_value = "owner-delegation")]
@@ -913,13 +916,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             send_chat,
             review_work_items,
             manage_agent_sessions,
+            resolver_delegation,
         } => {
             return shell::run(
                 c,
-                cancel_pending_tasks,
-                send_chat,
-                review_work_items,
-                manage_agent_sessions,
+                shell::Options {
+                    cancel_pending_tasks,
+                    send_chat,
+                    review_work_items,
+                    manage_agent_sessions,
+                    resolver_delegation,
+                },
             );
         }
         Cmd::ModelStep {

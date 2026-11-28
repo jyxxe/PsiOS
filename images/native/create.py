@@ -51,6 +51,9 @@ TRIAL_BOOT_MODE = "IsolatedTrial"
 TRIAL_RECEIPT_FORMAT = 7
 E1000E_RECEIPT_FORMAT = 8
 E1000E_MODULE = "psios-e1000e.ko"
+LOCAL_VT_MODULES = ("psios-drm-sysfb-helper.ko", "psios-simpledrm.ko")
+LOCAL_VT_RECEIPT_FORMAT = 14
+LOCAL_VT_SERVICE = "tty1::respawn:/sbin/getty 38400 tty1 linux"
 DHCP_SERVICE = "::respawn:/bin/sh /psios-dhcp"
 STATIC_SERVICE = "::once:/bin/sh /psios-dhcp "
 SLAAC_RECEIPT_FORMAT = 10
@@ -386,6 +389,13 @@ def validate_persisted_network(work, state, receipt):
         raise ValueError("invalid persisted e1000e static launcher")
 
 
+def validate_persisted_vt(work, state):
+    inittab = read_root_file(work, state, "/etc/inittab", 16 * 1024, "0(?:600|644)")
+    secure_ttys = read_root_file(work, state, "/etc/securetty", 1024, "0(?:600|644)")
+    if inittab.splitlines().count(LOCAL_VT_SERVICE.encode()) != 1 or b"tty1" in secure_ttys.splitlines():
+        raise ValueError("invalid persisted local console configuration")
+
+
 def validate_persisted_ssh(work, state):
     key = read_root_file(work, state, "/etc/psios/ssh-authorized-key", 512, "0644")
     inittab = read_root_file(work, state, "/etc/inittab", 16 * 1024, "0(?:600|644)")
@@ -439,6 +449,8 @@ def host_config(seed, args):
         for name, (_, account) in RDNSS_ACCOUNT.items():
             with (seed / "etc" / name).open("ab") as accounts:
                 accounts.write(account + b"\n")
+    if args.local_vt:
+        inittab += LOCAL_VT_SERVICE + "\n"
     (seed / "etc/inittab").write_text(inittab)
     # Target permissions are independent of the builder's umask.
     for path in (seed / "etc").rglob("*"):
@@ -527,24 +539,28 @@ def prepare_timezones(work, *, tools=None):
     return zones
 
 
-def prepare_boot_inputs(work, args, *, wired_driver=None, ssh_enabled=False, network_profile=None, tools=None):
+def prepare_boot_inputs(work, args, *, wired_driver=None, ssh_enabled=False, network_profile=None,
+                        local_vt=False, tools=None):
     base = boot_media.prepare_kernel(work, args.kernel_iso, tools=tools)
-    if wired_driver == "e1000e":
+    modules = {E1000E_MODULE: base["e1000e_module"]} if wired_driver == "e1000e" else {}
+    if local_vt:
+        modules.update((name, base["local_vt_modules"][name]) for name in LOCAL_VT_MODULES)
+    if modules:
         if shutil.which("unsquashfs") is None:
-            raise ValueError("building the e1000e profile requires unsquashfs")
+            profile = "local text console" if local_vt else "e1000e"
+            raise ValueError(f"building the {profile} profile requires unsquashfs")
         modloop = work / "modloop"
         with modloop.open("xb") as out:
             command = boot_media.tool_command(["isoinfo", "-R", "-i", work / "base.iso", "-x", "/boot/modloop-virt"], tools)
             subprocess.run(command,
                            stdout=out, check=True, timeout=30, preexec_fn=file_limit(base["size_bytes"]))
-        expected = base["e1000e_module"]
-        module = work / E1000E_MODULE
-        with module.open("xb") as out:
-            command = boot_media.tool_command(["unsquashfs", "-cat", modloop, expected["member"]], tools)
-            subprocess.run(command, stdout=out,
-                           check=True, timeout=30, preexec_fn=file_limit(MIB))
-        if sha256(module) != expected["sha256"]:
-            raise ValueError("e1000e module does not match the pinned Linux media")
+        for name, expected in modules.items():
+            module = work / name
+            with module.open("xb") as out:
+                command = boot_media.tool_command(["unsquashfs", "-cat", modloop, expected["member"]], tools)
+                subprocess.run(command, stdout=out, check=True, timeout=30, preexec_fn=file_limit(MIB))
+            if sha256(module) != expected["sha256"]:
+                raise ValueError(f"{name} does not match the pinned Linux media")
         modloop.unlink()
     (work / "bin").mkdir()
     install_core(work, args.core_archive, args.core_sha256)
@@ -559,7 +575,7 @@ def prepare_boot_inputs(work, args, *, wired_driver=None, ssh_enabled=False, net
 
 
 def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network_profile, *, core_limits, trial,
-                   require_secure_boot=False, wired_driver=None, ssh_enabled=False, tools=None):
+                   require_secure_boot=False, wired_driver=None, ssh_enabled=False, local_vt=False, tools=None):
     (work / "psios-disk-uuid").write_text(str(instance) + "\n")
     (work / "psios-home-uuid").write_text(str(home_id) + "\n")
     sectors = [str(mib * 2048) for start, size, _ in layout.partitions[1:] for mib in (start, size)]
@@ -572,6 +588,8 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
         files.append(RDNSS_PROGRAM)
     if wired_driver:
         files.append(E1000E_MODULE)
+    if local_vt:
+        files.extend(LOCAL_VT_MODULES)
     if ssh_enabled:
         boot_scripts.append("ssh")
         files.extend(SSH_PROGRAMS)
@@ -612,6 +630,8 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
         inputs["wired_driver"] = wired_driver
     if ssh_enabled:
         inputs["ssh_console"] = SSH_PROFILE
+    if local_vt:
+        inputs["local_vt"] = True
     if core_limits:
         inputs["core_limits"] = asdict(core_limits)
     if trial:
@@ -654,11 +674,12 @@ def append_deployment_payload(work, files, *, tools=None):
 
 
 def ramfs(work, args, instance, home_id, layout=Layout(), signing=None, network_profile=None, *, core_limits=None,
-          trial=None, wired_driver=None, ssh_enabled=False, tools=None):
+          trial=None, wired_driver=None, ssh_enabled=False, local_vt=False, tools=None):
     base = prepare_boot_inputs(work, args, wired_driver=wired_driver, ssh_enabled=ssh_enabled,
-                               network_profile=network_profile, tools=tools)
+                               network_profile=network_profile, local_vt=local_vt, tools=tools)
     assemble_ramfs(work, args, base, instance, home_id, layout, signing, network_profile,
-                   core_limits=core_limits, trial=trial, wired_driver=wired_driver, ssh_enabled=ssh_enabled, tools=tools)
+                   core_limits=core_limits, trial=trial, wired_driver=wired_driver, ssh_enabled=ssh_enabled,
+                   local_vt=local_vt, tools=tools)
 
 
 def seeded_ext4(work, name, label, identity, size_mib, seed, owners):
@@ -755,8 +776,15 @@ def parse_receipt(raw):
     if isinstance(prior, dict) and (prior.get("format") == TRIAL_RECEIPT_FORMAT or "boot_mode" in prior):
         raise ValueError("isolated trial disks cannot be upgrade sources; use the original stopped deployment")
     if (not isinstance(prior, dict) or type(prior.get("format")) is not int
-            or prior["format"] not in (*range(1, 7), *extended_formats)):
+            or prior["format"] not in (*range(1, 7), *extended_formats, LOCAL_VT_RECEIPT_FORMAT)):
         raise ValueError("unsupported previous build receipt format")
+    previous_format = prior["format"]
+    if previous_format == LOCAL_VT_RECEIPT_FORMAT:
+        if prior.get("local_vt") is not True:
+            raise ValueError("invalid local console in previous build receipt")
+        previous_format = base_receipt_format(prior)
+    elif "local_vt" in prior:
+        raise ValueError("local console evidence requires build receipt format 14")
     for name, pattern in (("source_commit", r"[0-9a-f]{40}"), ("efi_application_sha256", r"[0-9a-f]{64}")):
         if not isinstance(prior.get(name), str) or not re.fullmatch(pattern, prior[name]):
             raise ValueError(f"invalid previous build receipt field {name}")
@@ -766,39 +794,39 @@ def parse_receipt(raw):
             raise ValueError(f"invalid previous build receipt field {name}")
     if prior["state_uuid"] == prior["home_uuid"]:
         raise ValueError("previous deployment filesystems have identical UUIDs")
-    if prior["format"] == 1 and "raw_disk_bytes" in prior:
+    if previous_format == 1 and "raw_disk_bytes" in prior:
         raise ValueError("larger raw capacity requires a geometry-bearing build receipt")
-    layout = Layout.from_receipt(prior) if prior["format"] >= 2 else Layout()
+    layout = Layout.from_receipt(prior) if previous_format >= 2 else Layout()
     profiles = {4: (STATIC_IPV4,), 5: (STATIC_IPV6, STATIC_DUAL), SLAAC_RECEIPT_FORMAT: (SLAAC,),
                 RDNSS_RECEIPT_FORMAT: (RDNSS,)}
-    if prior["format"] in profiles:
-        if prior.get("network_profile") not in profiles[prior["format"]]:
+    if previous_format in profiles:
+        if prior.get("network_profile") not in profiles[previous_format]:
             raise ValueError("invalid network profile in previous build receipt")
     elif "network_profile" in prior:
         ssh_profiles = E1000E_STATIC_MODES if "wired_driver" in prior else VIRTIO_STATIC_MODES
         supported = {6: VIRTIO_STATIC_MODES, E1000E_RECEIPT_FORMAT: E1000E_STATIC_MODES,
                      SSH_RECEIPT_FORMAT: ssh_profiles}
         profile = prior["network_profile"]
-        if not isinstance(profile, str) or profile not in supported.get(prior["format"], {}):
+        if not isinstance(profile, str) or profile not in supported.get(previous_format, {}):
             raise ValueError("invalid network profile in previous build receipt")
-    if prior["format"] == E1000E_RECEIPT_FORMAT or (
-            prior["format"] == SSH_RECEIPT_FORMAT and "wired_driver" in prior):
+    if previous_format == E1000E_RECEIPT_FORMAT or (
+            previous_format == SSH_RECEIPT_FORMAT and "wired_driver" in prior):
         if prior.get("wired_driver") != "e1000e":
             raise ValueError("invalid wired driver in previous native build receipt")
     elif "wired_driver" in prior:
         raise ValueError("wired driver evidence requires build receipt format 8 or 9")
-    if prior["format"] == SSH_RECEIPT_FORMAT or (
-            prior["format"] in (SLAAC_RECEIPT_FORMAT, RDNSS_RECEIPT_FORMAT) and "ssh_console" in prior):
+    if previous_format == SSH_RECEIPT_FORMAT or (
+            previous_format in (SLAAC_RECEIPT_FORMAT, RDNSS_RECEIPT_FORMAT) and "ssh_console" in prior):
         if prior.get("ssh_console") != SSH_PROFILE:
             raise ValueError("invalid SSH console in previous build receipt")
     elif "ssh_console" in prior:
         raise ValueError("SSH console evidence requires build receipt format 9, 10 or 11")
     limits = None
-    if prior["format"] == 6 or (prior["format"] in extended_formats and "core_limits" in prior):
+    if previous_format == 6 or (previous_format in extended_formats and "core_limits" in prior):
         limits = CoreLimits.from_receipt(prior.get("core_limits"))
     elif "core_limits" in prior:
         raise ValueError("Core resource limits require build receipt format 6, 8, 9, 10 or 11")
-    if prior["format"] == 3 or (prior["format"] >= 4 and "secure_boot" in prior):
+    if previous_format == 3 or (previous_format >= 4 and "secure_boot" in prior):
         trust = prior.get("secure_boot")
         if (not isinstance(trust, dict) or set(trust) != {"scheme", "certificate_sha256", "efi_stub_sha256"}
                 or trust["scheme"] != boot_media.SECURE_BOOT_SCHEME or any(
@@ -976,6 +1004,8 @@ def source_snapshot(work, disk, source_fd, prior, layout, signing):
     validate_persisted_network(work, state, prior)
     if "ssh_console" in prior:
         validate_persisted_ssh(work, state)
+    if prior.get("local_vt"):
+        validate_persisted_vt(work, state)
     if "core_limits" in prior:
         inittab = read_root_file(work, state, "/etc/inittab", 16 * 1024, "0(?:600|644)").split(b"\n")
         if inittab.count(LIMITED_SERVICE.encode()) != 1:
@@ -1026,6 +1056,12 @@ def prepare_trial_disk(work, disk, layout, configuration, *, secure_boot_require
 
 
 def production_receipt_format(properties):
+    if properties.get("local_vt") is True:
+        return LOCAL_VT_RECEIPT_FORMAT
+    return base_receipt_format(properties)
+
+
+def base_receipt_format(properties):
     if properties.get("network_profile") == RDNSS:
         return RDNSS_RECEIPT_FORMAT
     if properties.get("network_profile") == SLAAC:
@@ -1037,7 +1073,10 @@ def production_receipt_format(properties):
     if "core_limits" in properties:
         return 6
     static_formats = {STATIC_IPV4: 4, STATIC_IPV6: 5, STATIC_DUAL: 5}
-    return static_formats.get(properties.get("network_profile"), 3 if "secure_boot" in properties else 2)
+    profile = properties.get("network_profile")
+    if isinstance(profile, str) and profile in static_formats:
+        return static_formats[profile]
+    return 3 if "secure_boot" in properties else 2
 
 
 def finish_disk(work, disk, output, *, signing, upgrade, tools):
@@ -1065,7 +1104,7 @@ def finish_disk(work, disk, output, *, signing, upgrade, tools):
         "efi_application_sha256": sha256(efi), "installed_initramfs_sha256": sha256(work / "initrd"),
         "initial_image_sha256": sha256(disk),
     }
-    for name in ("secure_boot", "network_profile", "wired_driver", "core_limits", "ssh_console", "raw_disk_bytes"):
+    for name in ("secure_boot", "network_profile", "wired_driver", "core_limits", "ssh_console", "raw_disk_bytes", "local_vt"):
         if name in manifest:
             receipt[name] = manifest[name]
     if "boot_mode" in manifest:
@@ -1115,14 +1154,17 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
 
     wired_driver = prior.get("wired_driver")
     ssh_enabled = "ssh_console" in prior
+    local_vt = prior.get("local_vt", False)
     network_profile = prior.get("network_profile")
     base = prepare_boot_inputs(candidate_work, args, wired_driver=wired_driver, ssh_enabled=ssh_enabled,
-                               network_profile=network_profile, tools=tools)
+                               network_profile=network_profile, local_vt=local_vt, tools=tools)
     (trial_work / "bin").mkdir()
     # Share the pinned input kernel and binaries, but each initrd is extended independently.
     boot_inputs = ("kernel", "initrd", *core_programs(candidate_work), "psios-source", ZONE_ARCHIVE, TIMEZONE_COMMAND)
     if wired_driver:
         boot_inputs += (E1000E_MODULE,)
+    if local_vt:
+        boot_inputs += LOCAL_VT_MODULES
     if ssh_enabled:
         boot_inputs += SSH_PROGRAMS
     if network_profile == RDNSS:
@@ -1134,7 +1176,7 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
     for directory, mode in ((candidate_work, None), (trial_work, trial)):
         assemble_ramfs(directory, args, base, instance, home_id, layout, signing, network_profile,
                        core_limits=core_limits, trial=mode, wired_driver=wired_driver, ssh_enabled=ssh_enabled,
-                       require_secure_boot=signing is not None and mode is None, tools=tools)
+                       require_secure_boot=signing is not None and mode is None, local_vt=local_vt, tools=tools)
     candidate_manifest = json.loads((candidate_work / "psios-deployment.json").read_bytes())
     trial_manifest = json.loads((trial_work / "psios-deployment.json").read_bytes())
     del trial_manifest["boot_mode"], trial_manifest["trial_disk_uuid"]
@@ -1173,6 +1215,7 @@ def build(args):
         network_profile = args.network_profile
         wired_driver = args.wired_driver
         ssh_enabled = args.ssh_authorized_key is not None
+        local_vt = args.local_vt
         core_limits = args.core_limits
         signing = None
         tools = boot_media.BootTools()
@@ -1185,6 +1228,7 @@ def build(args):
             network_profile = prior.get("network_profile")
             wired_driver = prior.get("wired_driver")
             ssh_enabled = "ssh_console" in prior
+            local_vt = prior.get("local_vt", False)
             if prior.get("secure_boot") and (signing is None or
                     signing.certificate_sha256 != prior["secure_boot"]["certificate_sha256"]):
                 raise ValueError("a Secure Boot upgrade requires the existing signing certificate")
@@ -1198,7 +1242,7 @@ def build(args):
                             MIN_HOME_MIB if args.home_mib is None else args.home_mib)
             instance, home_id = str(uuid.uuid4()), str(uuid.uuid4())
         ramfs(work, args, instance, home_id, layout, signing, network_profile, core_limits=core_limits,
-              trial=trial, wired_driver=wired_driver, ssh_enabled=ssh_enabled, tools=tools)
+              trial=trial, wired_driver=wired_driver, ssh_enabled=ssh_enabled, local_vt=local_vt, tools=tools)
         if not prior:
             new_disk(work, disk, args, instance, home_id, layout)
         disk.chmod(0o600)
@@ -1238,6 +1282,7 @@ def main():
     parser.add_argument("--trial-boot", action="store_true", help="create an isolated non-activating EFI upgrade candidate")
     parser.add_argument("--max-copy-mib", type=copy_budget_mib,
                         help="authority database and journals to copy during upgrade (default 64 MiB)")
+    parser.add_argument("--local-vt", action="store_true", help="enable the psios text login on the EFI framebuffer")
     parser.add_argument("--root-console-hash", type=Path, help="optional private hash for local system administration; default locks root")
     parser.add_argument("--ssh-authorized-key", type=Path, help="authorize an Ed25519 public key for the psios SSH console")
     boot_media.add_signing_arguments(parser)
@@ -1278,6 +1323,8 @@ def main():
             parser.error("upgrade preserves /etc/localtime from the source")
         if not timezone_name(args.timezone):
             parser.error("invalid time zone name")
+    if args.local_vt and args.upgrade_from:
+        parser.error("upgrade preserves the local console profile from the source")
     if args.dhcp_driver and not args.dhcp_mac:
         parser.error("--dhcp-driver requires --dhcp-mac on a new disk")
     if args.static_driver and not args.static_mac:

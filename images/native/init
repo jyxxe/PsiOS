@@ -191,6 +191,15 @@ run_trial() {
     exec "$bb" poweroff -f
 }
 
+enable_local_framebuffer() {
+    local module
+    for module in drm_client_lib drm_shmem_helper drm_kms_helper syscopyarea sysfillrect sysimgblt fb_sys_fops; do
+        modprobe "$module" || return 1
+    done
+    insmod /psios-drm-sysfb-helper.ko && insmod /psios-simpledrm.ko &&
+        grep -Eq '^[0-9]+ simpledrmdrmfb$' /proc/fb
+}
+
 trap abort_boot EXIT
 "$bb" mount -t devtmpfs devtmpfs /dev
 "$bb" mount -t proc proc /proc
@@ -309,5 +318,8 @@ mount -o bind /mnt/psios-homes/root /root
 stage=authority
 . /psios-enroll
 enroll_authority
+if [ -f /psios-simpledrm.ko ] && ! enable_local_framebuffer; then
+    echo "PsiOS local text console could not enable the EFI framebuffer" >&2
+fi
 trap - EXIT
 exec /bin/busybox init

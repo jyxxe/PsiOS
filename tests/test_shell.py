@@ -1153,10 +1153,29 @@ class ShellTests(unittest.TestCase):
         refs = node.call("Resource.List", {"kind": "Task", "limit": 20})["items"]
         origins = [node.call("Task.Get", {"id": ref["resource_id"]})["origin_ref"]["origin_id"] for ref in refs]
         self.assertEqual(origins.count(request["key"]), 1)
-        shell = self.shell(application_actions_delegation=delegation)
-        token = shell.pair()["token"]
-        node.call("Grant.Revoke", target(grant["grant_ref"]))
-        self.error(shell, 403, "PermissionDenied", endpoint, data=dict(request, key=str(uuid4())), token=token)
+        proxy = node.base / "application-revocation.sock"
+        waiting, release = Event(), Event()
+        revoked = dict(request, key=str(uuid4()))
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener, ThreadPoolExecutor(2) as pool:
+            listener.bind(str(proxy))
+            listener.listen()
+            listener.settimeout(8)
+            methods = ("Principal.WhoAmI", "Resource.Resolve", "Task.Prepare", "Task.Submit")
+            forwarded = pool.submit(self.relay, listener, methods, "Task.Prepare", waiting, release)
+            shell = Shell(node, node.witness / "owner.token", proxy, application_actions_delegation=delegation)
+            self.addCleanup(shell.close)
+            submitted = pool.submit(shell.http, endpoint, revoked, shell.pair()["token"])
+            try:
+                self.assertTrue(waiting.wait(8))
+                node.call("Grant.Revoke", target(grant["grant_ref"]))
+            finally:
+                release.set()
+            status, _, rejection = submitted.result(8)
+            self.assertEqual((status, rejection["error"]["code"]), (403, "PermissionDenied"))
+            forwarded.result(8)
+        refs = node.call("Resource.List", {"kind": "Task", "limit": 20})["items"]
+        origins = [node.call("Task.Get", {"id": ref["resource_id"]})["origin_ref"]["origin_id"] for ref in refs]
+        self.assertNotIn(revoked["key"], origins)
 
     @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_OCI"), "requires real local Docker and Chromium")
     def test_browser_submits_an_application_request_and_opens_its_exact_task(self):

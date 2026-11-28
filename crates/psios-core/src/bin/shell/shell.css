@@ -201,6 +201,7 @@ dl { margin: 0; display: grid; grid-template-columns: max-content minmax(0, 1fr)
 dt { color: var(--muted); }
 dd { margin: 0; overflow-wrap: anywhere; }
 .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: .88em; }
+#node-resolver-view .mono { overflow-wrap: anywhere; }
 .artifacts { display: grid; gap: .6rem; margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--border); }
 .artifact-controls { display: grid; grid-template-columns: minmax(0, 1fr) max-content max-content; gap: .6rem; }
 .artifact-controls select { min-width: 0; padding: .5rem; color: var(--text); background: var(--background); border: 1px solid var(--border); border-radius: .45rem; }

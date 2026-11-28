@@ -42,7 +42,7 @@ fn read(file: File) -> Result<String> {
     require(
         text.len() <= CONTROL_BYTES,
         "PreconditionFailed",
-        "kernel cgroup observation exceeds limit",
+        "kernel process or cgroup observation exceeds limit",
     )?;
     Ok(text)
 }
@@ -141,6 +141,29 @@ pub(super) fn observe(
     include_usage: bool,
 ) -> Result<(Value, Option<Value>)> {
     let process = Process::pin(container, state)?;
+    let status = openat(
+        &process.directory,
+        "status",
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(io::Error::from)?;
+    let status = read(File::from(status))?;
+    let field_is = |field: &str, expected: &str| {
+        status
+            .lines()
+            .filter_map(|line| line.strip_prefix(field).map(str::trim))
+            .eq([expected])
+    };
+    require(
+        field_is("Seccomp:", "2")
+            && field_is("NoNewPrivs:", "1")
+            && ["CapInh:", "CapPrm:", "CapEff:", "CapBnd:", "CapAmb:"]
+                .into_iter()
+                .all(|field| field_is(field, "0000000000000000")),
+        "PreconditionFailed",
+        "live OCI process lacks the approved seccomp, no_new_privs, or empty capability sets",
+    )?;
     let group = linux_cgroup::group(root()?, &process.path)?;
     let control = |name| read(linux_cgroup::control(&group, name)?);
     let cpu = control("cpu.max")?;
@@ -199,6 +222,7 @@ pub(super) fn observe(
         "cgroup_inode": inode.st_ino.to_string(),
         "cpu_quota_us": quota, "cpu_period_us": period, "cpu_burst_us": 0,
         "memory_max_bytes": memory, "swap_max_bytes": swap, "pids_max": pids,
+        "process_isolation": {"seccomp_mode":2, "no_new_privileges":true, "capability_sets_empty":true},
     });
     Ok((limits, usage))
 }

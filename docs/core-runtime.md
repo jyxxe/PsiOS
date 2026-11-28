@@ -267,7 +267,7 @@ Debian 软件包以 `Type=notify` 启动 Core。主进程在核对权威状态�
 
 若 Docker 已返回创建的完整容器 ID，但首次启动前发现配置偏离批准范围，Core 会重新核对同一引擎、容器和未启动状态。仅对确切原容器执行一次不带强制或删卷参数的删除，随后核对同一引擎上的容器与应用实例均已消失。确认后，原任务以已知失败结算并释放占用。引擎不可达、删除回执丢失或无法确认对象时，原任务保留未知结果及应用和卷占用。[真实 Docker 创建与删除回执验收](../tests/oci_unstarted.py)
 
-使用本机 cgroup v2 时，针对运行中的容器，Core 还会核对宿主 PID 所属的 Docker cgroup，从内核读取 CPU 配额与 burst、内存、swap 和进程数限额。`effective_limits.source` 为 `LinuxCgroupV2` 时，观测附带实际限额及 cgroup inode。旧 cgroup v1 配置沿用引擎检查，观测来源为 `DockerCgroupV1`。[Linux cgroup v2 控制项](https://docs.kernel.org/admin-guide/cgroup-v2.html)
+OCI 启动要求 Linux Docker 引擎启用内置 seccomp 策略。创建前和请求启动前均检查引擎设置。使用本机 cgroup v2 时，Core 固定运行进程的 PID 与 cgroup 身份，从内核读取 CPU 配额与 burst、内存、swap 和进程数限额，同时确认进程使用 seccomp filter 模式、`no_new_privs` 已启用且五组 capabilities 为空。`effective_limits.source` 为 `LinuxCgroupV2` 时，观测附带实际限额、cgroup inode 和 `process_isolation`。只有包含这些新观测的制品才能结算 cgroup v2 上待核实的启动或重启。cgroup v1 沿用引擎配置检查，观测来源为 `DockerCgroupV1`。[Linux cgroup v2 控制项](https://docs.kernel.org/admin-guide/cgroup-v2.html) · [Linux proc 状态](https://docs.kernel.org/filesystems/proc.html)
 
 若启动回执丢失，先运行新的 `application.health`，再向 `Operation.Reconcile` 提交该 ArtifactRef。同一引擎须确认原容器仍在运行，镜像、隔离配置和限额观测符合获准范围，Core 才会登记运行实例、挂载卷并结算原任务。容器只完成创建、已经退出、配置或读出的限额不符、引擎不可达，或中断发生在检查点写入之前时，原操作继续保留占用。旧版生成的观测须用新检查刷新后再提交对账。[真实 Docker 对账验收](../tests/oci_recovery.py)
 

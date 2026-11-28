@@ -806,10 +806,7 @@ pub(crate) fn reconcile(
                         && observation["engine_id"] == c.body["engine_id"]
                         && observation["container_id"] == c.body["container_id"]
                         && observation["start_operation_id"] == op.id
-                        && matches!(
-                            observation["effective_limits"]["source"].as_str(),
-                            Some("LinuxCgroupV2" | "DockerCgroupV1")
-                        )
+                        && apps::confirms_runtime_limits(&observation["effective_limits"])
                         && observation["process_running"] == true,
                     "OutcomeUnknown",
                     "inspection does not confirm the checkpointed runtime and resource limits",

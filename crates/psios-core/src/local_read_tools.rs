@@ -9,6 +9,7 @@ use psios_api::{
     LocalReadBinding, LocalReadTool, LocalReadToolsRequest, MAX_LOCAL_READ_BINDINGS,
     ResolveLocalReadToolsRequest, ResolvedLocalReadTool, ResourceRef,
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
@@ -53,6 +54,43 @@ fn read_only(db: &Db<'_>, name: &str) -> Result<()> {
     )
 }
 
+fn available(db: &Db<'_>, actor: &str, delegation_id: &str, tool: LocalReadTool) -> Result<bool> {
+    let name = tool.name();
+    let checked = (|| -> Result<()> {
+        let delegation = policy::delegation(db, actor, delegation_id, name)?;
+        read_only(db, name)?;
+        let action = Action::parse(name, &json!({}))?;
+        let target = action.target(db, actor)?;
+        require(
+            !tool.requires_node_scope() || explicitly_scoped(db, &delegation, &target.id)?,
+            "PermissionDenied",
+            "this diagnostic requires an explicit Node scope",
+        )?;
+        action.audience(db, actor, &delegation.reference(), &target)?;
+        Ok(())
+    })();
+    match checked {
+        Ok(()) => Ok(true),
+        Err(error) if error.0.code == "PermissionDenied" => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckLocalReadTool {
+    delegation_id: String,
+    tool: LocalReadTool,
+}
+
+pub(crate) fn check(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
+    let request: CheckLocalReadTool = decode(params)?;
+    label(&request.delegation_id)?;
+    let allowed = task_authority(db, actor, &request.delegation_id)?
+        && available(db, actor, &request.delegation_id, request.tool)?;
+    Ok(json!({"allowed":allowed}))
+}
+
 pub(crate) fn discover(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value> {
     let request: LocalReadToolsRequest = decode(params)?;
     agent(db, actor)?;
@@ -68,24 +106,8 @@ pub(crate) fn discover(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value
     }
     let mut visible = Vec::<LocalReadTool>::new();
     for tool in request.tools {
-        let name = tool.name();
-        let checked = (|| -> Result<()> {
-            let delegation = policy::delegation(db, actor, &request.delegation_id, name)?;
-            read_only(db, name)?;
-            let action = Action::parse(name, &json!({}))?;
-            let target = action.target(db, actor)?;
-            require(
-                !tool.requires_node_scope() || explicitly_scoped(db, &delegation, &target.id)?,
-                "PermissionDenied",
-                "this diagnostic requires an explicit Node scope",
-            )?;
-            action.audience(db, actor, &delegation.reference(), &target)?;
-            Ok(())
-        })();
-        match checked {
-            Ok(()) => visible.push(tool),
-            Err(error) if error.0.code == "PermissionDenied" => {}
-            Err(error) => return Err(error),
+        if available(db, actor, &request.delegation_id, tool)? {
+            visible.push(tool);
         }
     }
     Ok(json!({"tools":visible}))

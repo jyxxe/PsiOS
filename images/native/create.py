@@ -70,6 +70,11 @@ SSH_PACKAGES = {
     "openssh-keygen-10.2_p1-r1": ("usr/bin/ssh-keygen",),
 }
 SSH_PROGRAMS = tuple(file for files in SSH_PACKAGES.values() for file in files)
+CA_PACKAGE = "ca-certificates-bundle-20261020-r0"
+CA_PACKAGE_SHA256 = "a4c5de1bf37652cd98cbe71aec209512ae0508a964961957a6c9650f795e46c4"
+CA_PEM_SHA256 = "5961c0a3c65459931c023e0075c09733f09aea4ca439cb85bc4a08bb4f3f568b"
+CA_PEM = "psios-ca-certificates.crt"
+CA_LICENSE = "psios-ca-certificates.LICENSE"
 
 
 @dataclass(frozen=True)
@@ -414,12 +419,14 @@ def core_programs(work):
     return programs
 
 
-def prepare_programs(work, packages):
+def prepare_programs(work, packages, *, package_pins=None):
     for package, files in packages.items():
         archive = work / (package + ".apk")
         with archive.open("xb") as output:
             subprocess.run(["isoinfo", "-R", "-i", work / "base.iso", "-x", f"/apks/x86_64/{package}.apk"],
                            stdout=output, check=True, timeout=30, preexec_fn=file_limit(4 * MIB))
+        if package_pins is not None and sha256(archive) != package_pins[package]:
+            raise ValueError(f"{package} does not match the pinned boot media")
         remaining = set(files)
         with tarfile.open(archive, "r:gz", ignore_zeros=True) as bundle:
             for index, entry in enumerate(bundle):
@@ -458,6 +465,12 @@ def prepare_boot_inputs(work, args, *, wired_driver=None, ssh_enabled=False, net
         modloop.unlink()
     (work / "bin").mkdir()
     install_core(work, args.core_archive, args.core_sha256)
+    bundle = "etc/ssl/certs/ca-certificates.crt"
+    prepare_programs(work, {CA_PACKAGE: (bundle,)}, package_pins={CA_PACKAGE: CA_PACKAGE_SHA256})
+    if sha256(work / bundle) != CA_PEM_SHA256:
+        raise ValueError("certificate trust bundle differs from the pinned PEM input")
+    (work / bundle).rename(work / CA_PEM)
+    shutil.copyfile(HERE / "ca-certificates.LICENSE", work / CA_LICENSE)
     if ssh_enabled:
         prepare_programs(work, SSH_PACKAGES)
     if network_profile == RDNSS:
@@ -472,7 +485,8 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
     sectors = [str(mib * 2048) for start, size, _ in layout.partitions[1:] for mib in (start, size)]
     (work / "psios-storage-layout").write_text(" ".join(sectors) + "\n")
     boot_scripts = ["init", "shutdown", "dhcp", "dhcp-event", "ipv4", "ipv6", "static", "storage", "enroll"]
-    files = [*core_programs(work), "psios-source", "psios-disk-uuid", "psios-home-uuid", "psios-storage-layout"]
+    files = [*core_programs(work), "psios-source", "psios-disk-uuid", "psios-home-uuid", "psios-storage-layout",
+             CA_PEM, CA_LICENSE]
     if network_profile == RDNSS:
         boot_scripts.extend(("rdnss-hook", "rdnss.conf", "dhcpcd.LICENSE"))
         files.append(RDNSS_PROGRAM)
@@ -506,6 +520,8 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
         "geometry_mib": layout.receipt(),
         "required_filesystems": {"state": str(instance), "home": str(home_id)},
         "payload_sha256": payload,
+        "tls_trust_bundle": {"package": CA_PACKAGE, "package_sha256": CA_PACKAGE_SHA256,
+                             "pem_sha256": CA_PEM_SHA256},
     }
     if signing:
         inputs["secure_boot"] = signing.receipt()
@@ -975,7 +991,7 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
                                network_profile=network_profile)
     (trial_work / "bin").mkdir()
     # Share the pinned input kernel and binaries, but each initrd is extended independently.
-    boot_inputs = ("kernel", "initrd", *core_programs(candidate_work), "psios-source")
+    boot_inputs = ("kernel", "initrd", *core_programs(candidate_work), "psios-source", CA_PEM, CA_LICENSE)
     if wired_driver:
         boot_inputs += (E1000E_MODULE,)
     if ssh_enabled:

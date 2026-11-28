@@ -84,7 +84,8 @@ jobs:
       - name: Download and configure rescue VM prerequisites
         run: |
           packages=(qemu-system-x86 qemu-utils genisoimage cpio e2fsprogs fdisk acl dnsmasq-base radvd gcc libc6-dev squashfs-tools
-                    xorriso grub-common grub-efi-amd64-bin dosfstools mtools ovmf seabios openssl openssh-client strace)
+                    xorriso grub-common grub-efi-amd64-bin dosfstools mtools ovmf seabios openssl libssl-dev
+                    pkg-config zlib1g-dev libzstd-dev openssh-client strace)
           missing=()
           for pkg in "${packages[@]}"; do
             if [[ $(dpkg-query -W -f='${db:Status-Status}' "$pkg" 2>/dev/null) != installed ]]; then missing+=("$pkg"); fi
@@ -215,6 +216,13 @@ jobs:
             --previous-installer "$RUNNER_TEMP/native-format5/native/create.py" \
             --kernel-iso "$RUNNER_TEMP/rescue.iso" \
             --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
+            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+
+      - name: Verify native TLS roots and preserve an administrator's trust override through upgrade
+        run: |
+          python3 -B tests/native_tls_trust.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --controller "$RUNNER_TEMP/rescue-core/native/stage_update.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
             --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
 
       - name: Verify managed native activation, deployment selection and boot crash fencing

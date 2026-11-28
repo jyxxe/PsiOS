@@ -39,8 +39,8 @@ def on_proxy(node, name, match, *, status, forward):
 
 
 def verify_lost_create(binaries, docker, spec, app_ids, *, lose_removal=False, externally_removed=False,
-                       acknowledged=False):
-    n = Node(binaries)
+                       acknowledged=False, previous_binaries=None):
+    n = Node(previous_binaries or binaries)
     name = ("lost-create-no-candidate" if externally_removed else
             "lost-create-lost-removal" if lose_removal else "lost-create")
     if acknowledged:
@@ -121,6 +121,13 @@ def verify_lost_create(binaries, docker, spec, app_ids, *, lose_removal=False, e
 
         scope = [op_id,app_id,volume_id]
         rig = grant(INSPECT,scope)
+        if previous_binaries:
+            refusal("PreconditionFailed", lambda: submit(INSPECT, target(op), rig))
+            n.stop()
+            n.daemon[0] = str(Path(binaries).absolute() / "psiosd")
+            n.start()
+            assert n.wait(task_id) == lost and holds() == expected_holds
+            print("Verified interrupted acknowledged CREATE and holds from the previous Core", flush=True)
         wrong_scope = grant(INSPECT,scope[:2])
         refusal("PermissionDenied",lambda: submit(INSPECT,target(op),wrong_scope))
         wrong_name = "psios-test-renamed-" + key()

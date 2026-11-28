@@ -13,7 +13,7 @@ from support import Failure, Node, key, target
 from oci_recovery import ReceiptBarrier, check_kernel_limits, continue_after_lost_stop, lose_start_receipt, lose_stop_receipt
 from oci_capture import TOOL as CAPTURE, denied
 from oci_catalog_settlement import verify_catalog_settlement, verify_catalog_upgrade
-from oci_create_intent import verify_create_format_upgrade, verify_lost_create
+from oci_create_intent import verify_create_format_upgrade, verify_create_recovery_cases
 from oci_direct_clone_rebind import verify_direct_clone_rebind
 from oci_direct_clone_rebind_upgrade import verify_direct_clone_rebind_upgrade
 from oci_health import verify_image_health
@@ -379,9 +379,7 @@ int main(void) {
             verify_direct_clone_rebind_upgrade(direct_clone_prior, binaries, docker, spec, app_ids)
             return
         if create_recovery_only:
-            for lose_removal in (False, True):
-                verify_lost_create(binaries, docker, spec, app_ids, lose_removal=lose_removal)
-            verify_lost_create(binaries, docker, spec, app_ids, externally_removed=True)
+            verify_create_recovery_cases(binaries, docker, spec, app_ids)
             if prior := os.getenv("PSIOS_OCI_CREATE_PRIOR_BIN_DIR"):
                 verify_create_format_upgrade(prior, binaries, docker, spec, app_ids)
             return
@@ -576,9 +574,7 @@ int main(void) {
         verify_image_health(node, docker)
         if os.getenv("PSIOS_TEST_OCI_EFFECTIVE_MOUNTS") == "1":
             verify_effective_mounts(node, docker, spec, app_ids)
-        for lose_removal in (False, True):
-            verify_lost_create(binaries, docker, spec, app_ids, lose_removal=lose_removal)
-        verify_lost_create(binaries, docker, spec, app_ids, externally_removed=True)
+        verify_create_recovery_cases(binaries, docker, spec, app_ids)
         if prior := os.getenv("PSIOS_OCI_CREATE_PRIOR_BIN_DIR"):
             verify_create_format_upgrade(prior, binaries, docker, spec, app_ids)
         node.stop()

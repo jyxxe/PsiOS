@@ -1,8 +1,10 @@
-"""Recover an actual Docker create whose successful response never reached Core."""
+"""Recover actual Docker creates interrupted before the durable Start checkpoint."""
 from contextlib import ExitStack, closing, contextmanager
+from http.client import HTTPConnection
 from pathlib import Path
 import json
 import signal
+import socket
 import sqlite3
 import subprocess
 from urllib.parse import parse_qs
@@ -36,10 +38,13 @@ def on_proxy(node, name, match, *, status, forward):
     node.start()
 
 
-def verify_lost_create(binaries, docker, spec, app_ids, *, lose_removal=False, externally_removed=False):
+def verify_lost_create(binaries, docker, spec, app_ids, *, lose_removal=False, externally_removed=False,
+                       acknowledged=False):
     n = Node(binaries)
     name = ("lost-create-no-candidate" if externally_removed else
             "lost-create-lost-removal" if lose_removal else "lost-create")
+    if acknowledged:
+        name += "-acknowledged"
     try:
         volume = n.perform("volume.create", {"name": name})
         volume = n.perform("volume.write", dict(**target(volume), name="evidence", content="original data"))["volume_ref"]
@@ -51,8 +56,14 @@ def verify_lost_create(binaries, docker, spec, app_ids, *, lose_removal=False, e
         n.config.write_text(json.dumps(dict(settings, queue_limit=1, recovery_queue_limit=1)))
         n.start()
         matching = docker + ["ps", "-aq", "--no-trunc", "--filter", f"label=io.psios.application={app_id}"]
-        with on_proxy(n, "create-cut.sock", lambda req: endpoint(req,b"POST",b"/containers/create") is not None,
-                      status=b" 201 ", forward=False) as created:
+        def interrupt(request):
+            if not acknowledged:
+                return endpoint(request, b"POST", b"/containers/create") is not None
+            inspection = endpoint(request, b"GET", b"/json")
+            return inspection is not None and b"/containers/" in inspection.path
+
+        with on_proxy(n, "create-cut.sock", interrupt, status=b" 200 " if acknowledged else b" 201 ",
+                      forward=False) as created:
             task_id = n.submit("application.start",target(app))
             n.approve(task_id)
             assert created.confirmed.wait(15), "Docker never completed the original create"
@@ -76,7 +87,10 @@ def verify_lost_create(binaries, docker, spec, app_ids, *, lose_removal=False, e
             assert not db.execute("SELECT 1 FROM current WHERE id=?",("oci-start-"+op_id,)).fetchone()
         intent = json.loads(intent)
         nonce = intent["attempt"]
-        assert intent["phase"]=="CreateIssued" and "container_id" not in intent,intent
+        if acknowledged:
+            assert intent["phase"] == "CreateAcknowledged" and intent["container_id"] == cid, intent
+        else:
+            assert intent["phase"] == "CreateIssued" and "container_id" not in intent, intent
         assert container["Config"]["Labels"]["io.psios.create-attempt"]==nonce, container
         refusal("PermissionDenied", lambda: n.get(private_intent))
         expected_holds = {app_id:op_id,volume_id:op_id}
@@ -125,9 +139,31 @@ def verify_lost_create(binaries, docker, spec, app_ids, *, lose_removal=False, e
             empty, observed = inspect(rig)
             assert observed["status"] == "UnverifiedAbsence", observed
             refusal("OutcomeUnknown", lambda: reconcile(op, empty))
+            if acknowledged:
+                # A trusted engine operator might reuse all selectors after
+                # removal. Only the immutable ID can distinguish this case.
+                payload = dict(container["Config"], HostConfig=container["HostConfig"])
+                engine_socket = settings.get("docker_socket", "/var/run/docker.sock")
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+                    conn.settimeout(10)
+                    conn.connect(engine_socket)
+                    with closing(HTTPConnection("localhost")) as http:
+                        http.sock = conn
+                        http.request("POST", f"/containers/create?name=psios-{app_id}",
+                                     json.dumps(payload), {"Content-Type": "application/json"})
+                        with http.getresponse() as response:
+                            result = json.load(response)
+                            assert response.status == 201, result
+                replacement = result["Id"]
+                assert replacement != cid
+                new, = json.loads(subprocess.check_output(docker + ["inspect", replacement], timeout=10))
+                for field in ("Name", "Image", "Config", "HostConfig", "Mounts"):
+                    assert new[field] == container[field], (field, new[field], container[field])
+                assert inspect(rig, "Failed")["conditions"][0]["type"] == "PreconditionFailed"
+                assert subprocess.check_output(matching, text=True, timeout=10).split() == [replacement]
             assert holds() == expected_holds
             assert n.wait(task_id) == lost
-            print("Verified absence of a muted original CREATE remains unknown", flush=True)
+            print(f"Verified unproven CREATE absence keeps the original holds ({name})", flush=True)
             return
         if not lose_removal:
             config = json.loads(n.config.read_text())
@@ -215,6 +251,15 @@ def verify_lost_create(binaries, docker, spec, app_ids, *, lose_removal=False, e
         print(f"Verified independently authorized OCI lost-create compensation ({name})",flush=True)
     finally:
         n.close()
+
+
+def verify_create_recovery_cases(binaries, docker, spec, app_ids):
+    for acknowledged in (False, True):
+        for lose_removal in (False, True):
+            verify_lost_create(binaries, docker, spec, app_ids,
+                               lose_removal=lose_removal, acknowledged=acknowledged)
+        verify_lost_create(binaries, docker, spec, app_ids,
+                           externally_removed=True, acknowledged=acknowledged)
 
 
 def verify_create_format_upgrade(previous, current, docker, spec, app_ids):

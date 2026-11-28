@@ -91,6 +91,12 @@ ctl wait "$task" | jq '{reference:.result.artifact_refs[0]}' | ctl call Artifact
 
 使用结果的 `next_after_ifindex` 作为下一次 Task 的 `after_ifindex`，并为新页提供新的幂等键。单页上限 128 个接口。本机 iproute2 后端最多读取 192 KiB 输出；缺少该命令或只有 BusyBox 时，Core 直接读取 Linux RTNETLINK 的接口与地址，每次内核转储上限 1 MiB。两个后端均有五秒期限，权限及结果字段一致。独立 UEFI 开发盘启动时启用环回接口，盘点可在无外部网卡和无 iproute2 时完成。超限或驱动不可用时返回错误。各页反映各次采样时的配置；接口热插拔后 index 可以复用。打包单元允许读取 netlink，服务以普通专用账户运行。
 
+### 本机 DNS 配置观测
+
+`node.resolver` 通过只读 Task 观测 Core 挂载命名空间中可见的 `/etc/resolv.conf`。向目标 Node 显式授予 `node.resolver`、`task.submit` 和 `task.read` 后提交 `{}`。结果按文件顺序保留所配置的 IPv4 和 IPv6 nameserver，并记录 IPv6 区标识、无效地址数量、boot ID 及挂载和网络命名空间。文件可由本机网络服务通过标准符号链接提供。
+
+此能力报告配置文件的 nameserver 项，实际 DNS 可达性由独立的网络探针观测。Core 读取至多 64 KiB 的普通文件和 32 个有效地址。组或其他用户可写的文件、读取期间的替换及超限都会使 Task 失败。已发布的结果随 Task 保存，配置更新后提交新任务可读取当前值。[真实挂载与格式升级验收](../tests/network_resolver.py)
+
 ### 路由表观测
 
 `node.routes` 在本机权威所在的网络命名空间直接读取 RTNETLINK。动态路由和管理员配置均由 Linux 路由表提供。可用 `family`（`inet` 或 `inet6`）和数字 `table` 过滤。省略两者时读取两种地址族的全部路由表。默认路由表示为 `0.0.0.0/0` 或 `::/0`。路由记录包含按 Linux 编号表示的 `kind`、`protocol` 和 `scope`，以及目标、源前缀、优先级 `metric`、首选源、网关、出口 ifindex、多下一跳及可选 `nexthop_id`。内核编号和 ifindex 适用于返回的 boot ID 和网络命名空间。下一跳对象细节与可达性验证仍待开发。[Linux RTNETLINK](https://docs.kernel.org/userspace-api/netlink/intro.html)

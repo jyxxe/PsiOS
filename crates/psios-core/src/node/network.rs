@@ -4,6 +4,7 @@ mod kernel;
 mod lookup;
 pub(crate) mod managed;
 pub(crate) mod probe;
+pub(crate) mod resolver;
 mod routes;
 mod rules;
 mod snapshot;

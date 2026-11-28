@@ -25,6 +25,17 @@ abort_boot() {
     "$bb" poweroff -f
 }
 
+check_home_directories() {
+    local dir name
+    [ "$(stat -c '%u:%g:%a' /mnt/psios-homes)" = 0:0:755 ]
+    for name in psios root; do
+        dir=/mnt/psios-homes/$name
+        [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+    done
+    [ "$(stat -c '%u:%g' /mnt/psios-homes/psios)" = 1000:1000 ]
+    [ "$(stat -c '%u:%g' /mnt/psios-homes/root)" = 0:0 ]
+}
+
 install_default_hosts() {
     local hosts=/etc/hosts pending=/etc/.psios-hosts.pending
     if [ -e "$hosts" ] || [ -L "$hosts" ]; then
@@ -43,17 +54,6 @@ install_default_hosts() {
     sync -f /etc
     mv -T "$pending" "$hosts"
     sync -f /etc
-}
-
-check_home_directories() {
-    local dir name
-    [ "$(stat -c '%u:%g:%a' /mnt/psios-homes)" = 0:0:755 ]
-    for name in psios root; do
-        dir=/mnt/psios-homes/$name
-        [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
-    done
-    [ "$(stat -c '%u:%g' /mnt/psios-homes/psios)" = 1000:1000 ]
-    [ "$(stat -c '%u:%g' /mnt/psios-homes/root)" = 0:0 ]
 }
 
 run_trial() {

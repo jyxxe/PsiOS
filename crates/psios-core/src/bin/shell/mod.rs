@@ -87,6 +87,8 @@ enum Endpoint {
     ApplicationReleases,
     Conversations,
     ConversationMessages,
+    Projects,
+    ProjectWorkItems,
     PrepareChatMessage,
     SendChatMessage,
     Task,
@@ -120,7 +122,14 @@ struct ApplicationReleases {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Conversations {
+struct DirectoryPage {
+    after_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectWorkItems {
+    project_id: String,
     after_id: Option<String>,
 }
 
@@ -192,8 +201,10 @@ enum CoreRequest {
     Call(&'static str, Value),
     Applications(Page),
     ApplicationReleases(ApplicationReleases),
-    Conversations(Conversations),
+    Conversations(DirectoryPage),
     ConversationMessages(ConversationMessages),
+    Projects(DirectoryPage),
+    ProjectWorkItems(ProjectWorkItems),
     PrepareChatMessage(ChatDraft),
     SendChatMessage(PreparedChatMessage),
     Artifact(TaskArtifact),
@@ -336,6 +347,59 @@ impl CoreRequest {
                 Ok(json_response(
                     StatusCode::OK,
                     json!({"items":items,"next_cursor":next}),
+                ))
+            }
+            Self::Projects(request) => {
+                let page = client.call(
+                    "Project.List",
+                    json!({"after_id":request.after_id,"limit":8}),
+                )?;
+                let projects = page["items"].as_array().ok_or_else(|| {
+                    ApiError::new("RecoveryRequired", "project directory is malformed")
+                })?;
+                let items = projects
+                    .iter()
+                    .map(|project| {
+                        json!({
+                            "id": project["reference"]["resource_id"],
+                            "title": project["value"]["title"],
+                            "role": project["value"]["role"],
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                Ok(json_response(
+                    StatusCode::OK,
+                    json!({"items":items,"next_after_id":page["next_after_id"]}),
+                ))
+            }
+            Self::ProjectWorkItems(request) => {
+                let page = client.call(
+                    "WorkItem.List",
+                    json!({
+                        "project_id":request.project_id,"after_id":request.after_id,"limit":12,
+                    }),
+                )?;
+                check()?;
+                let project = client.call("Project.Get", json!({"id":request.project_id}))?;
+                let work_items = page["items"].as_array().ok_or_else(|| {
+                    ApiError::new("RecoveryRequired", "work item page is malformed")
+                })?;
+                let items = work_items.iter().map(|item| {
+                    let value = &item["value"];
+                    json!({
+                        "id": item["reference"]["resource_id"],
+                        "title": value["title"],
+                        "lifecycle": value["lifecycle"],
+                        "assignee": value["assignee_principal_id"],
+                        "priority": value["priority"].as_str().unwrap_or("Normal"),
+                        "blocked": value["blockers"].as_array().is_some_and(|items| !items.is_empty()),
+                    })
+                }).collect::<Vec<_>>();
+                Ok(json_response(
+                    StatusCode::OK,
+                    json!({
+                        "title":project["value"]["title"],"items":items,"next_after_id":page["next_after_id"],
+                    }),
                 ))
             }
             Self::PrepareChatMessage(draft) => {
@@ -482,6 +546,10 @@ fn file(path: &str) -> Option<HttpResponse> {
             "text/javascript; charset=utf-8",
             include_bytes!("shell-chat.js").as_slice(),
         ),
+        "/shell-projects.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("shell-projects.js").as_slice(),
+        ),
         "/shell.js" => (
             "text/javascript; charset=utf-8",
             include_bytes!("shell.js").as_slice(),
@@ -547,6 +615,12 @@ fn rpc(endpoint: Endpoint, data: Value) -> Result<CoreRequest, Fault> {
             serde_json::from_value(data).map_err(|_| INVALID)?,
         )),
         Endpoint::ConversationMessages => Ok(CoreRequest::ConversationMessages(
+            serde_json::from_value(data).map_err(|_| INVALID)?,
+        )),
+        Endpoint::Projects => Ok(CoreRequest::Projects(
+            serde_json::from_value(data).map_err(|_| INVALID)?,
+        )),
+        Endpoint::ProjectWorkItems => Ok(CoreRequest::ProjectWorkItems(
             serde_json::from_value(data).map_err(|_| INVALID)?,
         )),
         Endpoint::PrepareChatMessage => Ok(CoreRequest::PrepareChatMessage(
@@ -650,6 +724,8 @@ impl Shell {
             "/api/application-releases" => Endpoint::ApplicationReleases,
             "/api/conversations" => Endpoint::Conversations,
             "/api/conversation-messages" => Endpoint::ConversationMessages,
+            "/api/projects" => Endpoint::Projects,
+            "/api/project-work-items" => Endpoint::ProjectWorkItems,
             "/api/chat-prepare" if self.send_chat => Endpoint::PrepareChatMessage,
             "/api/chat-send" if self.send_chat => Endpoint::SendChatMessage,
             "/api/task" => Endpoint::Task,

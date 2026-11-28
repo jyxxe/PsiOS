@@ -156,6 +156,49 @@ async function test() {
   await waitFor("paired desktop", '!document.querySelector("#workspace").hidden && !document.querySelector("#empty-desktop").hidden');
   assert.ok(await evaluate('document.activeElement.id === "nav-node" && document.querySelectorAll(".app-window:not([hidden])").length === 0'));
   assert.ok(!requests.some(url => ["/api/node", "/api/tasks"].includes(new URL(url).pathname)));
+  if (input.projects) {
+    const project = '#project-rows button[data-project-id="' + input.project + '"]';
+    const item = '#project-content [data-work-item-id="' + input.work_item + '"]';
+    const present = selector => 'document.querySelector(' + JSON.stringify(selector) + ') !== null';
+    await keyboardActivate("#nav-projects");
+    await waitFor("first project page", 'document.querySelectorAll("#project-rows button").length === 8');
+    assert.ok(!await evaluate(present(project)));
+    await click("#projects-next");
+    await waitFor("second project page", present(project) + ' && document.querySelectorAll("#project-rows button").length === 1');
+    assert.ok(!await evaluate('document.querySelector("#project-rows").textContent.includes("无成员资格的项目")'));
+    await keyboardActivate(project);
+    await waitFor("first work item page", 'document.querySelectorAll("#project-content li").length === 12');
+    await click("#work-items-next");
+    await waitFor("second work item page", 'document.querySelectorAll("#project-content li").length === 1');
+    if (!await evaluate(present(item))) {
+      await click("#work-items-previous");
+      await waitFor("blocked item", present(item));
+    }
+    const selector = 'document.querySelector(' + JSON.stringify(item) + ')';
+    assert.deepEqual(await evaluate(`[${selector}.querySelector("strong").textContent, ${selector}.querySelector("b")]`),
+      ["<b>核对交付条件</b>", null]);
+    assert.ok(await evaluate(`${selector}.textContent.includes("有未完成的依赖") && ${selector}.textContent.includes("优先级 高")`));
+    await send("Emulation.setDeviceMetricsOverride", { width: 360, height: 750, deviceScaleFactor: 1, mobile: true });
+    assert.ok(await evaluate('document.documentElement.scrollWidth <= 360 && !document.querySelector("#project-detail").hidden'));
+    await click('#window-projects [data-action="minimize"]');
+    assert.ok(await evaluate('document.querySelector("#project-content").textContent === "" && ' +
+      'document.querySelector("#project-rows").textContent === "" && document.querySelector("#project-title").textContent === "工作项"'));
+    writeSync(input.control_fd, Buffer.from("R"));
+    const resumed = Buffer.alloc(1);
+    assert.equal(readSync(input.control_fd, resumed), 1);
+    assert.equal(resumed.toString(), "K");
+    await click("#nav-projects");
+    await waitFor("removed project after reopening", '!document.querySelector("#projects-previous").disabled && ' +
+      '!document.querySelector("#projects-empty").hidden');
+    assert.ok(await evaluate('!(' + present(project) + ') && document.querySelector("#project-detail").hidden'));
+    await click("#projects-previous");
+    await waitFor("remaining project directory", 'document.querySelectorAll("#project-rows button").length === 8');
+    await click("#logout");
+    await waitFor("cleared project view", 'document.querySelector("#workspace").hidden && !document.querySelector("#project-rows button")');
+    assert.deepEqual(exceptions, []);
+    assert.ok(requests.every(url => new URL(url).origin === input.origin));
+    return;
+  }
   if (input.chatSend) {
     await click("#nav-chat");
     await waitFor("writable conversation", 'document.querySelector("#chat-rows button") !== null');

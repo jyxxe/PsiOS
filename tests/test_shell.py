@@ -101,6 +101,96 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertIsNone(headers["Access-Control-Allow-Origin"])
 
+    def test_project_queries_require_session_and_project_grants(self):
+        shell = self.shell()
+        self.error(shell, 401, "AuthenticationRequired", "/api/projects", data={})
+        token = shell.pair()["token"]
+        project = self.node.call("Project.Create", {"key": key(), "title": "Private project"})["reference"]
+        query = {"project_id": project["resource_id"]}
+        self.error(shell, 403, "PermissionDenied", "/api/projects", data={}, token=token)
+        self.error(shell, 403, "PermissionDenied", "/api/project-work-items", data=query, token=token)
+        self.error(shell, 400, "InvalidArgument", "/api/projects", data={"limit": 32}, token=token)
+        self.error(shell, 404, "NotFound", "/api/project-create", data={}, token=token)
+        self.node.call("Grant.Issue", {"principal_id": "local-owner", "actions": ["project.read"],
+                                     "tool_targets": [query["project_id"]], "units": 1, "ttl_seconds": 120})
+        status, _, result = shell.http("/api/project-work-items", query, token)
+        self.assertEqual((status, result), (200, {"title": "Private project", "items": [], "next_after_id": None}))
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
+    def test_browser_reads_project_work_items_and_rechecks_membership(self):
+        node = self.node
+        viewer = node.call("Agent.Register", {"name": "shell-project-viewer"})
+        visible = sorted((node.call("Project.Create", {"key": key(), "title": f"实施项目 {n}"})["reference"]
+                          for n in range(9)), key=lambda ref: ref["resource_id"])
+        secret = node.call("Project.Create", {"key": key(), "title": "无成员资格的项目"})["reference"]
+        ids = [ref["resource_id"] for ref in [*visible, secret]]
+        node.call("Grant.Issue", {"principal_id": "local-owner", "actions": ["project.read", "project.manage"],
+                                 "tool_targets": ids, "units": 8, "ttl_seconds": 240})
+        node.call("Grant.Issue", {"principal_id": viewer["principal_id"], "actions": ["project.read"],
+                                 "tool_targets": ids, "units": 1, "ttl_seconds": 240})
+        visible = [node.call("Project.SetMember", {**target(ref), "principal_id": viewer["principal_id"],
+                                                    "role": "Viewer"})["reference"] for ref in visible]
+        active = visible[-1]
+        profile = node.get("profile-local")["reference"]
+
+        def item(project, title, **fields):
+            return node.call("WorkItem.Create", {"key": key(), "title": title, "description": "仅限原始协议详情",
+                "project_id": project["resource_id"], "expected_project_version": project["version"],
+                "assignee_principal_id": "local-owner", "criterion": {"kind": "TaskResult", "tool": "system.status",
+                                                                       "target_ref": profile}, **fields})["reference"]
+
+        predecessor = item(active, "核对准备条件")
+        blocked = item(active, "<b>核对交付条件</b>", priority="High", blocked_by=[predecessor["resource_id"]])
+        abandoned = item(active, "已停止的工作")
+        node.call("WorkItem.Abandon", {**target(abandoned), "reason": "不应出现在项目摘要中的终止原因"})
+        for n in range(10):
+            item(active, f"核对记录 {n}")
+        unrelated = item(visible[0], "另一个项目的工作")
+
+        identity = node.base / "project-viewer.token"
+        identity.touch(mode=0o600)
+        identity.write_text(viewer["token"])
+        inventory = self.shell(identity)
+        token = inventory.pair()["token"]
+        self.error(inventory, 403, "PermissionDenied", "/api/project-work-items", token=token,
+                   data={"project_id": secret["resource_id"]})
+        self.error(inventory, 400, "InvalidArgument", "/api/project-work-items", token=token,
+                   data={"project_id": active["resource_id"], "after_id": unrelated["resource_id"]})
+        status, _, first = inventory.http("/api/project-work-items", {"project_id": active["resource_id"]}, token)
+        self.assertEqual((status, len(first["items"])), (200, 12))
+        status, _, last = inventory.http("/api/project-work-items",
+                                        {"project_id": active["resource_id"], "after_id": first["next_after_id"]}, token)
+        self.assertEqual((status, len(last["items"]), last["next_after_id"]), (200, 1, None))
+        result = {entry["id"]: entry for entry in first["items"] + last["items"]}
+        self.assertEqual(result[blocked["resource_id"]], {"id": blocked["resource_id"], "title": "<b>核对交付条件</b>",
+                         "lifecycle": "Ready", "assignee": "local-owner", "priority": "High", "blocked": True})
+        self.assertEqual(result[abandoned["resource_id"]]["lifecycle"], "Abandoned")
+        self.assertNotIn("仅限原始协议详情", json.dumps(result, ensure_ascii=False))
+        self.assertNotIn("不应出现在项目摘要中的终止原因", json.dumps(result, ensure_ascii=False))
+
+        shell = self.shell(identity)
+        parent, child = socket.socketpair()
+        with parent, child:
+            parent.settimeout(45)
+            args = dict(origin=shell.origin, code=shell.code, projects=True, project=active["resource_id"],
+                        work_item=blocked["resource_id"], profile=str(node.base / "browser"), control_fd=child.fileno())
+            with subprocess.Popen(["node", str(Path(__file__).with_name("shell_browser.mjs")),
+                                   os.environ.get("PSIOS_TEST_CHROME", "google-chrome")],
+                                  stdin=subprocess.PIPE, pass_fds=(child.fileno(),)) as browser:
+                child.close()
+                try:
+                    browser.stdin.write(json.dumps(args).encode())
+                    browser.stdin.close()
+                    self.assertEqual(parent.recv(1), b"R")
+                    node.call("Project.SetMember", {**target(active), "principal_id": viewer["principal_id"], "role": None})
+                    parent.sendall(b"K")
+                    self.assertEqual(browser.wait(timeout=45), 0)
+                finally:
+                    if browser.poll() is None:
+                        browser.kill()
+        self.error(inventory, 403, "PermissionDenied", "/api/project-work-items",
+                   token=token, data={"project_id": active["resource_id"]})
+
     def test_chat_directory_requires_the_paired_principal_scope(self):
         shell = self.shell()
         self.error(shell, 401, "AuthenticationRequired", "/api/conversations", data={})

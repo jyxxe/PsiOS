@@ -306,7 +306,7 @@ def main():
         if args.partition != 2 or args.filesystem_uuid is None:
             parser.error("native boot failure inspection requires --partition 2 and --filesystem-uuid")
         if (any(option is not None for option in (args.core, args.core_sha256, args.uid, args.gid, args.witness,
-                                                   args.migration_config, args.journal_overlay_mib, args.save_rescue_iso))
+                                                   args.migration_config, args.journal_overlay_mib))
                 or args.state != "/var/lib/psios" or args.max_copy_mib != 64):
             parser.error("native boot failure inspection reads a clean source using its fixed state layout")
     else:

@@ -11,6 +11,40 @@ import uuid
 from native_disk import REPO, boot, check_clean_shutdown, extract_partition, password, set_machine_id_fixture, sha
 
 
+def check_signed_export(args, work, disk, inspect, expected):
+    from native_secure_boot import create_signer, signing_args
+    from rescue_secure_boot import reboot_cd
+
+    key, cert = create_signer(work, "boot-failure-rescue")
+    owner = str(uuid.uuid4())
+    blank = args.ovmf_dir / "OVMF_VARS_4M.fd"
+    enrolled = work / "rescue-enrolled.fd"
+    subprocess.run(["virt-fw-vars", "-i", blank, "-o", enrolled, "--set-pk", owner, cert,
+                    "--add-kek", owner, cert, "--add-db", owner, cert, "--sb"], check=True, timeout=40)
+    vars_digest = sha(enrolled)
+    image = work / "native-boot-failure.iso"
+    report = inspect("--firmware", "uefi", "--ovmf-dir", args.ovmf_dir, "--ovmf-vars", enrolled,
+                     "--save-rescue-iso", image, *signing_args(args, key, cert), source_digest=expected["source_sha256"])
+    evidence = report.pop("secure_boot")
+    assert report == expected and evidence["status"] == "Enforced", report
+    assert evidence["efi_stub_sha256"] == sha(args.efi_stub)
+    media_digest = sha(image)
+
+    offline = reboot_cd(args, work, disk, image, enrolled, readonly=True)
+    assert b"\nPSIOS-SECURE-BOOT/1\nEnforced\n" in offline
+    assert f"\nPSIOS-SOURCE/1\n{expected['source_sha256']}\n".encode() in offline
+    serialized = offline.split(b"\nPSIOS-RESCUE/1\nOK found\n", 1)[1]
+    record, _ = json.JSONDecoder().raw_decode(serialized.decode())
+    assert {"status": "Found", **record} == expected["boot_failure"], record
+    disabled = reboot_cd(args, work, disk, image, blank, readonly=True)
+    assert disabled.endswith(b"PSIOS-RESCUE/1\nERROR secure-boot-not-enforced\n"), disabled
+    writable = reboot_cd(args, work, disk, image, enrolled, readonly=False)
+    assert writable.endswith(b"PSIOS-RESCUE/1\nERROR block-device\n"), writable
+    assert b"PSIOS-SOURCE/1" not in disabled and b"PSIOS-SOURCE/1" not in writable
+    assert sha(disk) == expected["source_sha256"] and sha(enrolled) == vars_digest and sha(image) == media_digest
+    print("PASS independently booted signed boot-failure rescue CD with enforced firmware and read-only source")
+
+
 def exercise(args, work):
     _, operator_hash = password(work, "operator.hash")
     disk = work / "native.raw"
@@ -57,9 +91,12 @@ def exercise(args, work):
     state.unlink()
     assert failure["stage"] == "machine-identity" and uuid.UUID(failure["boot_id"]).int != 0
     approved = sha(disk)
-    assert inspect("--disk-transport", "nvme", source_digest=approved) == {
+    expected = {
         "filesystem_uuid": identity, "source_sha256": approved, "boot_failure": {"status": "Found", **failure},
     }
+    assert inspect("--disk-transport", "nvme", source_digest=approved) == expected
+    if args.efi_stub:
+        check_signed_export(args, work, disk, inspect, expected)
     inspect(filesystem=str(uuid.uuid4()), rejection="filesystem-identity")
     inspect("--journal-overlay-mib", "16", rejection="reads a clean source")
     set_machine_id_fixture(work, disk, "/.psios-boot-failure", '{"status":"Missing"}\n',
@@ -77,5 +114,6 @@ if __name__ == "__main__":
     parser.add_argument("--kernel-iso", type=Path, required=True)
     parser.add_argument("--archive", type=Path, required=True)
     parser.add_argument("--ovmf-dir", type=Path, default=Path("/usr/share/OVMF"))
+    parser.add_argument("--efi-stub", type=Path, help="also export and boot the signed read-only diagnostic CD")
     with tempfile.TemporaryDirectory(prefix="psios-rescue-native-boot-") as work:
         exercise(parser.parse_args(), Path(work))

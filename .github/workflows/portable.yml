@@ -383,6 +383,16 @@ jobs:
             --kernel-iso "$RUNNER_TEMP/rescue.iso" --bin-dir "$RUNNER_TEMP/rescue-core" \
             --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py"
 
+      - name: Export and independently boot signed native boot-failure diagnostics without Core
+        run: |
+          secure_tools="$RUNNER_TEMP/psios-secure-boot-tools"
+          export PATH="$secure_tools/root/usr/bin:$PATH"
+          export PYTHONPATH="$secure_tools/root/usr/lib/python3/dist-packages"
+          /usr/bin/python3 -B tests/rescue_native_boot_failure.py \
+            --builder "$RUNNER_TEMP/rescue-core/native/create.py" --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
+            --efi-stub "$secure_tools/root/usr/lib/systemd/boot/efi/linuxx64.efi.stub"
+
   local-inference:
     needs: portable-core
     runs-on: ubuntu-24.04

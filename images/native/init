@@ -223,6 +223,9 @@ for requires_secure_boot in /psios-secure-boot-required /psios-trial-secure-boot
     secure_boot_enforced=yes
 done
 payload_verified=yes
+stage=timezone-data
+mkdir -p /usr/share/zoneinfo
+tar -xf /psios-zoneinfo.tar -C /usr/share/zoneinfo
 "$bb" hostname psios
 if [ -f /psios-core-limits ]; then
     stage=core-resource-limits

@@ -134,15 +134,7 @@ def check_state(work, state, receipt):
     if not isinstance(config, dict) or any(config.get(name) != value for name, value in AUTHORITY_PATHS.items()):
         raise ValueError("factory Core configuration does not name the native authority paths")
 
-    network = receipt.get("network_profile")
-    if network in (create.STATIC_IPV4, create.STATIC_DUAL):
-        mac4, dns4 = create.validate_persisted_static(work, state, 4)
-    if network in (create.STATIC_IPV6, create.STATIC_DUAL):
-        mac6, dns6 = create.validate_persisted_static(work, state, 6)
-    if network == create.STATIC_DUAL and (mac4 != mac6 or dns4 + dns6 > 3):
-        raise ValueError("inconsistent factory dual-stack profile")
-    if "wired_driver" in receipt:
-        create.validate_persisted_e1000e(work, state)
+    create.validate_persisted_network(work, state, receipt)
     if "core_limits" in receipt:
         inittab = create.read_root_file(work, state, "/etc/inittab", 16 * 1024, "0(?:600|644)")
         if inittab.splitlines().count(create.LIMITED_SERVICE.encode()) != 1:

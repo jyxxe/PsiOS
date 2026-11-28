@@ -171,6 +171,8 @@ qemu-img convert -f qcow2 -O raw ./node-a/system.qcow2 "$export_dir/node.raw"
 
 核验快照时，可用 `--source-sha256 "$EXPECTED_IMAGE_SHA256"` 传入从盘外可信记录取得的 SHA-256。救援客体在挂载前核对整盘，包括 GPT 和其他分区，哈希最多运行 120 秒。报告的 `source_sha256` 对应实际读到的原盘字节。启用临时日志重放时，摘要在重放前核对。若内容在记录后改动，检查会在挂载前停止。[全盘摘要验收](../tests/rescue_disk.py)
 
+发布报告或救援光盘前，宿主端还会复核本次打开的镜像及其原路径。源文件在检查期间被写入、移动或换成另一个同字节文件时，检查器会拒绝发布。[实际源盘变化验收](../tests/rescue_disk.py)
+
 ## 从固件启动并导出救援光盘
 
 在前面的检查命令末尾加上 `--firmware bios` 或 `--firmware uefi`，可以从 El Torito 光盘启动同一套检查。再加 `--save-rescue-iso node-rescue.iso`，核验成功后才会发布完整 ISO。输出路径必须尚不存在。光盘同时包含 SeaBIOS 和 amd64 UEFI 的启动入口，带有本次指定的 UID、GID、分区及目录。节点数据库、所有者凭据和 EFI 变量保留在各自设备上。

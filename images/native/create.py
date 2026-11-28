@@ -374,8 +374,11 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
     checks = {**payload, "/psios-deployment.json": sha256(manifest)}
     (work / "psios-payload.sha256").write_text("".join(f"{digest}  {name}\n" for name, digest in checks.items()))
     files.extend(["psios-deployment.json", "psios-payload.sha256"])
+    # GNU cpio's reproducible mode still includes each member's modification time.
     for name in files:
-        (work / name).chmod(0o755 if name.startswith("bin/") or name in ("psios-init", "psios-dhcp-event") else 0o644)
+        path = work / name
+        path.chmod(0o755 if name.startswith("bin/") or name in ("psios-init", "psios-dhcp-event") else 0o644)
+        os.utime(path, (boot_media.EPOCH, boot_media.EPOCH))
     append_deployment_payload(work, files)
 
 

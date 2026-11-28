@@ -105,6 +105,7 @@ Shell 执行历史按当前任务修订分页读取，显示 Core 的 Run、Oper
 
 ## OCI 恢复与网络状态
 
+- OCI Release 可声明有界的 `/run`。真实 Docker 内核验收覆盖应用 UID、0700 权限、挂载限制、`ENOSPC`、`/tmp` 独立可写，以及停止、重新启动和回退后的目录状态。此组合已在使用独立 ext4 根的受信任 Docker 测试来宾中验证。格式 151 到 152 实测保留既有 Release 与 Task。[运行目录](core-runtime.md#重启正在运行的-oci-实例) · [OCI 验收](../tests/oci.py)
 - OCI 停止和重启都记录持久命令检查点。停止回执丢失时，可在独立核实原容器已退出后授权清理，始终保留原应用和卷占用，直到观测证实容器已消失。真实 Docker 已验证普通队列满、停止与删除回执先后丢失、重启检查点失败、原审批和占用核验。应用日志按专门授权读取，停止后保留有界私有尾部。[OCI 与卷回归](../tests/oci.py) · [停止故障](../tests/oci_recovery.py) · [重启核验](../tests/oci_restart.py)
 - 注册网络探针可发布有持久证据的状态和生命周期事件。本机 TCP/DNS 验收覆盖状态变化触发 Schedule、撤权后阻止后续连接、跨命名空间重置、证据回收和保留原授权范围的旧格式升级。精确 Watch 支持 200 字节的资源筛选，游标仍满足 v1 长度契约。已验证确认位置经历重启、作用域回收及授权变化后可用同一筛选恢复。[网络探针状态](../tests/test_network_probe_state.py) · [精确作用域](../tests/test_bounded_watch_scopes.py)
 

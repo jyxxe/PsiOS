@@ -3,7 +3,7 @@ import { projectView } from "./shell-projects.js";
 
 const byId = (id) => document.getElementById(id);
 const chat = chatView(request, byId, element, message);
-const projects = projectView(request, byId, element, message);
+const projects = projectView(request, byId, element, message, fields, downloadEvidence);
 const pairing = byId("pairing");
 const workspace = byId("workspace");
 const code = byId("code");
@@ -59,6 +59,7 @@ function leave(text, error = false) {
   resetApplications();
   chat.capability(false);
   chat.reset();
+  projects.setReviewer(null);
   projects.reset();
   updateDesktop();
   byId("principal").textContent = "";
@@ -206,6 +207,30 @@ const lifecycles = {
   Succeeded: "成功", Failed: "失败", Cancelling: "正在取消", Cancelled: "已取消", Paused: "已暂停",
 };
 
+async function saveVerifiedArtifact(response, reference, host) {
+  const bytes = await response.arrayBuffer();
+  const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  const hex = Array.from(hash, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  if ("sha256:" + hex !== reference.digest) throw new Error("下载内容与所选制品的 SHA-256 不符。");
+  if (!host.isConnected) return false;
+  const url = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
+  const link = element("a");
+  link.href = url;
+  link.download = "psios-" + hex + ".bin";
+  host.append(link);
+  try {
+    link.click();
+  } finally {
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+  return true;
+}
+
+async function downloadEvidence(reference, artifact, host) {
+  return saveVerifiedArtifact(await post("/api/work-item-evidence", { reference }), artifact, host);
+}
+
 function artifactView(taskId, references) {
   const section = element("section", undefined, "artifacts");
   const label = element("label", "任务制品");
@@ -252,23 +277,7 @@ function artifactView(taskId, references) {
     try {
       const response = await post("/api/task-artifact", { task_id: taskId, reference, download: save });
       if (save) {
-        const bytes = await response.arrayBuffer();
-        const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
-        const hex = Array.from(hash, (byte) => byte.toString(16).padStart(2, "0")).join("");
-        if ("sha256:" + hex !== reference.digest) throw new Error("下载内容与所选制品的 SHA-256 不符。");
-        if (!section.isConnected) return;
-        const url = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
-        const link = element("a");
-        link.href = url;
-        link.download = "psios-" + hex + ".bin";
-        section.append(link);
-        try {
-          link.click();
-        } finally {
-          link.remove();
-          setTimeout(() => URL.revokeObjectURL(url), 0);
-        }
-        message(notice, "摘要已核验，已提交浏览器下载。");
+        if (await saveVerifiedArtifact(response, reference, section)) message(notice, "摘要已核验，已提交浏览器下载。");
       } else {
         const result = await response.json();
         if (!section.isConnected) return;
@@ -746,6 +755,7 @@ byId("pair-form").addEventListener("submit", async (event) => {
     void observeSession(bearer);
     canCancelPending = session.cancel_pending_tasks === true;
     chat.capability(session.send_chat === true);
+    projects.setReviewer(session.review_work_items === true ? session.principal_id : null);
     byId("principal").textContent = session.principal_id;
     pairing.hidden = true;
     workspace.hidden = false;

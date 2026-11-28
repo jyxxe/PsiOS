@@ -147,6 +147,13 @@ input {
 .project-items { display: grid; gap: .65rem; list-style: none; padding: 0; margin: 0; }
 .project-items li { padding: .65rem; border: 1px solid var(--border); border-radius: .5rem; overflow-wrap: anywhere; }
 .project-items p { color: var(--muted); margin-top: .2rem; }
+.project-items button { justify-content: start; text-align: start; white-space: normal; overflow-wrap: anywhere; }
+.work-item-detail { border-top: 1px solid var(--border); padding-top: .75rem; }
+.work-item-detail h3 { font-size: 1rem; margin: 0; overflow-wrap: anywhere; }
+#work-item-content { display: grid; gap: .75rem; }
+#work-item-content p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.evidence-download { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+.work-item-review { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
 .chat-composer { display: grid; gap: .55rem; border-top: 1px solid var(--border); padding-top: .75rem; }
 .chat-composer textarea {
   resize: vertical; width: 100%; min-width: 0; font: inherit; color: var(--text);

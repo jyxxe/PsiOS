@@ -66,6 +66,8 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 -device virtio-net-pci,netdev=lan,mac=52:54:00:51:6f:20,romfile=
 ```
 
+用于 Intel e1000e 网口时，另加 `--dhcp-driver e1000e`。构建机需要 `unsquashfs`，安装器从已核验的固定内核介质提取并核对模块，将它和其他引导内容一起纳入启动校验。该 IPv4 DHCP 配置仍按单一 MAC 绑定。格式 8 的构建回执固定驱动，停机升级对试启动及正式候选沿用原配置。QEMU 用 `-device e1000e,netdev=lan,mac=52:54:00:51:6f:20,romfile=`，已验收登记证书的 OVMF Secure Boot 联网。实际网卡与固件待验收。[有线 DHCP 验收](../tests/native_dhcp.py)
+
 该配置管理匹配网口的 IPv4 地址、租约路由和 `/etc/resolv.conf`。收到选项 121 时，最多安装 32 个不同前缀，支持直连、经网关和默认路由。同一租约中的选项 3 仅在缺少选项 121 时提供默认网关。续租与释放按已记录的前缀、网关、接口、协议和 metric 逐条替换或删除租约路由。应用租约失败时清理已配置部分并报告失败。
 
 最多三个 DNS 服务器按租约配置。普通账户可用 `busybox ip -4 addr show`、`busybox ip -4 route show` 和 `cat /etc/resolv.conf` 检查。最新租约或故障信息在 `/run/psios-network/status`。配置的网口缺失时，串口账户与 Core 可照常使用。[RFC 3442](https://datatracker.ietf.org/doc/html/rfc3442) · [租约续租和释放验收](../tests/native_dhcp.py) · [无类别路由验收](../tests/native_dhcp_routes.py)
@@ -98,6 +100,8 @@ sha256sum boot.efi
 ```
 
 构建器保留固定内核的原始 initramfs，将 Core 程序、配置和启动脚本作为独立的 gzip 压缩 cpio 成员追加。文件名、权限和部署清单中的单文件摘要仍按解压后的内容核验。停机升级可从早期未压缩的开发盘生成压缩的候选盘，沿用原 EFI 分区布局。
+
+构建器固定追加成员的修改时间。使用相同 Core、内核介质、文件系统 UUID、部署配置和工具版本，在不同目录及初始 umask 下可比对部署清单、完整 initramfs 和未签名 EFI 的 SHA-256。为每次新安装生成的磁盘身份随该次回执记录。[重复构建验收](../tests/native_boot_reproducibility.py)
 
 将结果与回执的 `efi_application_sha256` 比对。启动后普通账户可运行 `sha256sum /psios-deployment.json` 与回执的 `deployment_manifest_sha256` 比对。该清单列出 Core 源码修订及归档摘要、内核 ISO 及其内核与初始内存盘的输入摘要、两个文件系统 UUID 和 PsiOS 加入启动环境的文件摘要。回执另含组装后的完整 initramfs 摘要。PID 1 在挂载可写分区前核对清单和这些文件，发现不一致时给出 `deployment-payload` 停机阶段。外部回执供操作者比对。
 
@@ -193,7 +197,7 @@ python3 native/stage_update.py next-release \
   --ovmf-vars node-vars.fd --ovmf-vars-sha256 "$VERIFIED_NODE_VARS_SHA256"
 ```
 
-控制器采集一次原盘，在私有副本上处理必要的 ext4 日志，再基于同一份快照生成两份盘。隔离试启动在禁用来宾网络的 QEMU、私有 EFI 变量和限额写时复制层上运行。控制器核对 `Ready`、部署摘要和正常关机，再用目标 Core 离线核对同一节点的迁移结果与见证。发布前重新检查原盘与 EFI 变量。保持原盘停机，直至控制器退出。
+控制器采集一次原盘，在私有副本上处理必要的 ext4 日志，再基于同一份快照生成两份盘。隔离试启动在禁用来宾网络的 QEMU、私有 EFI 变量和限额写时复制层上运行。固件优先选择本次试启动盘，即使原 EFI 变量记录了不同的 PCI 路径。控制器核对 `Ready`、部署摘要和正常关机，再用目标 Core 离线核对同一节点的迁移结果与见证。发布前重新检查原盘与 EFI 变量。保持原盘停机，直至控制器退出。
 
 数据库及其 WAL 和回滚日志合计使用 `--max-copy-mib` 控制核验复制量，范围 1 至 256 MiB。`create.py --upgrade-from` 默认 64 MiB。`stage_update.py` 默认 128 MiB，并在源核验与试启动后核验中执行同一上限。救援来宾为离线迁移预留额外临时空间。构建与分阶段回执均记录实际复制量和采用的上限，超限时原盘留在原位且候选未发布。[大库升级验收](../tests/native_staged_update.py)
 

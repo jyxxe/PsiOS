@@ -101,8 +101,8 @@ async function selectTask(id) {
   await click(selector);
 }
 
-async function verifyDownload(digest) {
-  await click("#download-artifact");
+async function verifyDownload(digest, selector = "#download-artifact") {
+  await click(selector);
   const saved = join(input.downloads, "psios-" + digest.slice("sha256:".length) + ".bin");
   for (let attempt = 0; attempt < 160 && !existsSync(saved); attempt += 1) await delay(50);
   const bytes = readFileSync(saved);
@@ -156,6 +156,78 @@ async function test() {
   await waitFor("paired desktop", '!document.querySelector("#workspace").hidden && !document.querySelector("#empty-desktop").hidden');
   assert.ok(await evaluate('document.activeElement.id === "nav-node" && document.querySelectorAll(".app-window:not([hidden])").length === 0'));
   assert.ok(!requests.some(url => ["/api/node", "/api/tasks"].includes(new URL(url).pathname)));
+  if (input.projectReview) {
+    const project = '#project-rows button[data-project-id="' + input.project + '"]';
+    const opener = '#project-content [data-work-item-id="' + input.work_item.resource_id + '"] button';
+    const present = selector => 'document.querySelector(' + JSON.stringify(selector) + ') !== null';
+    const submit = '.work-item-review button[type="submit"]';
+    const reviews = () => requests.filter(url => new URL(url).pathname === "/api/review-work-item").length;
+    await keyboardActivate("#nav-projects");
+    await waitFor("reviewer's project", present(project));
+    await keyboardActivate(project);
+    await waitFor("pending review", present(opener));
+    await keyboardActivate(opener);
+    await waitFor("review controls", present(submit));
+    assert.ok(await evaluate('document.querySelector(' + JSON.stringify(submit) + ').disabled'));
+    await evaluate('(() => { const select = document.querySelector("#work-item-decision"); select.value = "accept"; ' +
+      'select.dispatchEvent(new Event("change")); })()');
+    assert.equal(reviews(), 0);
+    await keyboardActivate(submit);
+    await waitFor("unknown review reply", 'document.querySelector(".work-item-review p").textContent.includes("审核回执未收到")');
+    assert.ok(await evaluate('document.querySelector(' + JSON.stringify(submit) + ').disabled'));
+    await keyboardActivate('.work-item-review button[type="button"]');
+    const details = 'document.querySelector("#work-item-content").textContent';
+    await waitFor("durable review from Core", details + '.includes("已验证") && ' +
+      details + '.includes(' + JSON.stringify(input.reviewer) + ')');
+    assert.ok(!await evaluate(present(submit)));
+    assert.equal(reviews(), 1);
+    await click("#logout");
+    await waitFor("closed review session", 'document.querySelector("#workspace").hidden');
+    assert.deepEqual(exceptions, []);
+    assert.ok(requests.every(url => new URL(url).origin === input.origin));
+    return;
+  }
+  if (input.projectEvidence) {
+    const project = '#project-rows button[data-project-id="' + input.project + '"]';
+    const opener = '#project-content [data-work-item-id="' + input.work_item.resource_id + '"] button';
+    const present = selector => 'document.querySelector(' + JSON.stringify(selector) + ') !== null';
+    function checkpoint(mark) {
+      writeSync(input.control_fd, Buffer.from(mark));
+      const response = Buffer.alloc(1);
+      assert.equal(readSync(input.control_fd, response), 1);
+      assert.equal(response.toString(), "K");
+    }
+    await keyboardActivate("#nav-projects");
+    await waitFor("evidence project", present(project));
+    await keyboardActivate(project);
+    await waitFor("work item with evidence", present(opener));
+    checkpoint("R");
+    await keyboardActivate(opener);
+    const details = 'document.querySelector("#work-item-content")';
+    const contains = value => details + '.textContent.includes(' + JSON.stringify(value) + ')';
+    await waitFor("fixed work item and its task evidence", [input.evidence_task.resource_id,
+      input.evidence_artifact.digest, input.work_item.version, "审核中"].map(contains).join(" && "));
+    await verifyDownload(input.evidence_artifact.digest, "#download-work-item-evidence");
+    assert.ok(await evaluate(contains("交付说明 <em>原样保留</em>") + ' && !' + details + '.querySelector("em")'));
+    assert.ok(!await evaluate(contains("已终止")));
+    await send("Emulation.setDeviceMetricsOverride", { width: 360, height: 750, deviceScaleFactor: 1, mobile: true });
+    assert.ok(await evaluate('document.documentElement.scrollWidth <= 360 && !document.querySelector("#work-item-detail").hidden'));
+    await click("#close-work-item");
+    assert.ok(await evaluate('document.activeElement === document.querySelector(' + JSON.stringify(opener) + ') && ' + details + '.textContent === ""'));
+    await click(opener);
+    await waitFor("reopened task evidence", contains(input.evidence_artifact.digest));
+    await click('#window-projects [data-action="minimize"]');
+    assert.ok(await evaluate(details + '.textContent === "" && document.querySelector("#work-item-detail").hidden'));
+    checkpoint("V");
+    await click("#nav-projects");
+    await waitFor("revoked project directory", 'document.querySelector("#status-projects").classList.contains("error")');
+    assert.ok(await evaluate('!document.querySelector("#project-rows button") && ' + details + '.textContent === ""'));
+    await click("#logout");
+    await waitFor("closed project session", 'document.querySelector("#workspace").hidden');
+    assert.deepEqual(exceptions, []);
+    assert.ok(requests.every(url => new URL(url).origin === input.origin));
+    return;
+  }
   if (input.projects) {
     const project = '#project-rows button[data-project-id="' + input.project + '"]';
     const item = '#project-content [data-work-item-id="' + input.work_item + '"]';

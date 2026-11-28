@@ -71,6 +71,7 @@ struct Shell {
     principal: String,
     cancel_pending_tasks: bool,
     send_chat: bool,
+    review_work_items: bool,
     client: Client,
     session: Mutex<Session>,
     rpc_slots: Arc<Semaphore>,
@@ -89,6 +90,9 @@ enum Endpoint {
     ConversationMessages,
     Projects,
     ProjectWorkItems,
+    WorkItemRevision,
+    WorkItemEvidence,
+    ReviewWorkItem,
     PrepareChatMessage,
     SendChatMessage,
     Task,
@@ -131,6 +135,19 @@ struct DirectoryPage {
 struct ProjectWorkItems {
     project_id: String,
     after_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkItemRevision {
+    reference: ResourceRef,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewWorkItem {
+    reference: ResourceRef,
+    accept: bool,
 }
 
 #[derive(Deserialize)]
@@ -205,6 +222,9 @@ enum CoreRequest {
     ConversationMessages(ConversationMessages),
     Projects(DirectoryPage),
     ProjectWorkItems(ProjectWorkItems),
+    WorkItemRevision(WorkItemRevision),
+    WorkItemEvidence(WorkItemRevision),
+    ReviewWorkItem(ReviewWorkItem),
     PrepareChatMessage(ChatDraft),
     SendChatMessage(PreparedChatMessage),
     Artifact(TaskArtifact),
@@ -388,6 +408,7 @@ impl CoreRequest {
                     let value = &item["value"];
                     json!({
                         "id": item["reference"]["resource_id"],
+                        "reference": item["reference"],
                         "title": value["title"],
                         "lifecycle": value["lifecycle"],
                         "assignee": value["assignee_principal_id"],
@@ -400,6 +421,73 @@ impl CoreRequest {
                     json!({
                         "title":project["value"]["title"],"items":items,"next_after_id":page["next_after_id"],
                     }),
+                ))
+            }
+            Self::WorkItemRevision(request) => {
+                let item = exact_work_item(client, &request.reference)?;
+                let evidence = item.get("evidence").map(|proof| {
+                    json!({
+                        "task_ref": proof["task_ref"],
+                        "artifact_ref": proof["artifact_ref"],
+                        "submitted_at": proof["submitted_at"],
+                    })
+                });
+                let review = item["review"].as_object().map(|review| {
+                    json!({
+                        "accepted": review.get("accepted"),
+                        "reviewer": review.get("reviewer_principal_id"),
+                        "reviewed_at": review.get("reviewed_at"),
+                    })
+                });
+                Ok(json_response(
+                    StatusCode::OK,
+                    json!({
+                        "reference": request.reference,
+                        "title": item["title"],
+                        "description": item["description"],
+                        "lifecycle": item["lifecycle"],
+                        "assignee": item["assignee_principal_id"],
+                        "priority": item["priority"].as_str().unwrap_or("Normal"),
+                        "has_evidence": item["has_evidence"],
+                        "evidence": evidence,
+                        "review": review,
+                    }),
+                ))
+            }
+            Self::WorkItemEvidence(request) => {
+                let artifact = evidence_artifact(client, &request.reference)?;
+                bounded_artifact_response(client, &artifact, true, &check, || {
+                    if evidence_artifact(client, &request.reference)? != artifact {
+                        return Err(ApiError::new("Conflict", "work item evidence changed").into());
+                    }
+                    Ok(())
+                })
+            }
+            Self::ReviewWorkItem(request) => {
+                let item = exact_work_item(client, &request.reference)?;
+                if item["lifecycle"] != "InReview" {
+                    return Err(ApiError::new(
+                        "PreconditionFailed",
+                        "work item has no pending review",
+                    )
+                    .into());
+                }
+                if !item["evidence"].is_object() {
+                    return Err(ApiError::new(
+                        "PermissionDenied",
+                        "work item evidence is unavailable",
+                    )
+                    .into());
+                }
+                check()?;
+                let reviewed = client.review_work_item(
+                    &request.reference.resource_id,
+                    &request.reference.version,
+                    request.accept,
+                )?;
+                Ok(json_response(
+                    StatusCode::OK,
+                    json!({"reference":reviewed.reference}),
                 ))
             }
             Self::PrepareChatMessage(draft) => {
@@ -463,36 +551,79 @@ impl CoreRequest {
             }
             Self::Artifact(artifact) => {
                 artifact.check_membership(client)?;
-                let limit = if artifact.download {
-                    DOWNLOAD_LIMIT
-                } else {
-                    PREVIEW_LIMIT
-                };
-                let bytes = client.artifact_bytes_checked(&artifact.reference, limit, &check)?;
-                check()?;
-                artifact.check_membership(client)?;
-                if artifact.download {
-                    let mut file = response(
-                        StatusCode::OK,
-                        "application/octet-stream",
-                        Bytes::from(bytes),
-                    );
-                    file.headers_mut().insert(
-                        header::CONTENT_DISPOSITION,
-                        HeaderValue::from_static("attachment; filename=\"psios-artifact.bin\""),
-                    );
-                    return Ok(file);
-                }
-                let content = String::from_utf8(bytes).map_err(|_| {
-                    ApiError::new("RecoveryRequired", "verified artifact is not UTF-8")
-                })?;
-                Ok(json_response(
-                    StatusCode::OK,
-                    json!({"reference":artifact.reference,"content_json":content}),
-                ))
+                bounded_artifact_response(
+                    client,
+                    &artifact.reference,
+                    artifact.download,
+                    &check,
+                    || artifact.check_membership(client),
+                )
             }
         }
     }
+}
+
+fn exact_work_item(client: &Client, reference: &ResourceRef) -> ApiResult<Value> {
+    let reference = json!(reference);
+    let mut record = client.call("WorkItem.RevisionGet", json!({"reference":reference}))?;
+    if record["reference"] != reference {
+        return Err(ApiError::new(
+            "RecoveryRequired",
+            "work item reference did not resolve exactly",
+        )
+        .into());
+    }
+    Ok(record["value"].take())
+}
+
+fn evidence_artifact(client: &Client, reference: &ResourceRef) -> ApiResult<ResourceRef> {
+    let item = exact_work_item(client, reference)?;
+    let artifact = item["evidence"]
+        .get("artifact_ref")
+        .cloned()
+        .ok_or_else(|| ApiError::new("NotFound", "work item evidence is unavailable"))?;
+    serde_json::from_value(artifact).map_err(|_| {
+        ApiError::new(
+            "RecoveryRequired",
+            "work item evidence has a malformed artifact reference",
+        )
+        .into()
+    })
+}
+
+fn bounded_artifact_response(
+    client: &Client,
+    reference: &ResourceRef,
+    download: bool,
+    check: &impl Fn() -> ApiResult<()>,
+    confirm: impl FnOnce() -> ApiResult<()>,
+) -> ApiResult<HttpResponse> {
+    let limit = if download {
+        DOWNLOAD_LIMIT
+    } else {
+        PREVIEW_LIMIT
+    };
+    let bytes = client.artifact_bytes_checked(reference, limit, check)?;
+    check()?;
+    confirm()?;
+    if download {
+        let mut file = response(
+            StatusCode::OK,
+            "application/octet-stream",
+            Bytes::from(bytes),
+        );
+        file.headers_mut().insert(
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_static("attachment; filename=\"psios-artifact.bin\""),
+        );
+        return Ok(file);
+    }
+    let content = String::from_utf8(bytes)
+        .map_err(|_| ApiError::new("RecoveryRequired", "verified artifact is not UTF-8"))?;
+    Ok(json_response(
+        StatusCode::OK,
+        json!({"reference":reference,"content_json":content}),
+    ))
 }
 
 fn response(status: StatusCode, content_type: &'static str, body: Bytes) -> HttpResponse {
@@ -623,6 +754,15 @@ fn rpc(endpoint: Endpoint, data: Value) -> Result<CoreRequest, Fault> {
         Endpoint::ProjectWorkItems => Ok(CoreRequest::ProjectWorkItems(
             serde_json::from_value(data).map_err(|_| INVALID)?,
         )),
+        Endpoint::WorkItemRevision => Ok(CoreRequest::WorkItemRevision(
+            serde_json::from_value(data).map_err(|_| INVALID)?,
+        )),
+        Endpoint::WorkItemEvidence => Ok(CoreRequest::WorkItemEvidence(
+            serde_json::from_value(data).map_err(|_| INVALID)?,
+        )),
+        Endpoint::ReviewWorkItem => Ok(CoreRequest::ReviewWorkItem(
+            serde_json::from_value(data).map_err(|_| INVALID)?,
+        )),
         Endpoint::PrepareChatMessage => Ok(CoreRequest::PrepareChatMessage(
             serde_json::from_value(data).map_err(|_| INVALID)?,
         )),
@@ -726,6 +866,9 @@ impl Shell {
             "/api/conversation-messages" => Endpoint::ConversationMessages,
             "/api/projects" => Endpoint::Projects,
             "/api/project-work-items" => Endpoint::ProjectWorkItems,
+            "/api/work-item-revision" => Endpoint::WorkItemRevision,
+            "/api/work-item-evidence" => Endpoint::WorkItemEvidence,
+            "/api/review-work-item" if self.review_work_items => Endpoint::ReviewWorkItem,
             "/api/chat-prepare" if self.send_chat => Endpoint::PrepareChatMessage,
             "/api/chat-send" if self.send_chat => Endpoint::SendChatMessage,
             "/api/task" => Endpoint::Task,
@@ -744,7 +887,8 @@ impl Shell {
             }
             return Ok(json_response(
                 StatusCode::OK,
-                json!({"token":token,"principal_id":self.principal,"cancel_pending_tasks":self.cancel_pending_tasks,"send_chat":self.send_chat}),
+                json!({"token":token,"principal_id":self.principal,"cancel_pending_tasks":self.cancel_pending_tasks,"send_chat":self.send_chat,
+                       "review_work_items":self.review_work_items}),
             ));
         }
 
@@ -843,6 +987,7 @@ pub(super) fn run(
     client: Client,
     cancel_pending_tasks: bool,
     send_chat: bool,
+    review_work_items: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = client.call("Principal.WhoAmI", json!({}))?;
     let principal = identity["principal_id"]
@@ -861,6 +1006,7 @@ pub(super) fn run(
         principal,
         cancel_pending_tasks,
         send_chat,
+        review_work_items,
         stop,
     ));
     runtime.shutdown_timeout(Duration::from_secs(1));
@@ -872,6 +1018,7 @@ async fn serve(
     principal: String,
     cancel_pending_tasks: bool,
     send_chat: bool,
+    review_work_items: bool,
     stop: Arc<AtomicBool>,
 ) -> io::Result<()> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
@@ -884,6 +1031,7 @@ async fn serve(
         principal,
         cancel_pending_tasks,
         send_chat,
+        review_work_items,
         client,
         session: Mutex::new(Session::new(&code, now())?),
         rpc_slots: Arc::new(Semaphore::new(CORE_CALLS)),

@@ -50,7 +50,7 @@ def json_report(body):
 def receipt_lineage(prepared):
     candidate, trial = prepared.candidate_receipt, prepared.trial_receipt
     signed = "secure_boot" in candidate
-    candidate_formats = (3, 4, 5, 6) if signed else (2, 4, 5, 6)
+    candidate_formats = (3 if signed else 2, 4, 5, 6, create.E1000E_RECEIPT_FORMAT)
     require(trial.get("boot_mode") == create.TRIAL_BOOT_MODE and trial.get("format") == create.TRIAL_RECEIPT_FORMAT
             and candidate.get("format") in candidate_formats and "boot_mode" not in candidate,
             "expected native trial and normal candidate receipts")
@@ -70,7 +70,7 @@ def receipt_lineage(prepared):
                 "unsigned candidate has incompatible trial trust")
     require(all(trial[name] == candidate[name] for name in
                 ("geometry_mib", "state_uuid", "home_uuid", "source_commit", "upgrade"))
-            and all(trial.get(name) == candidate.get(name) for name in ("network_profile", "core_limits"))
+            and all(trial.get(name) == candidate.get(name) for name in ("network_profile", "wired_driver", "core_limits"))
             and trial["deployment_manifest_sha256"] != candidate["deployment_manifest_sha256"],
             "trial and candidate deployment lineage differs")
     geometry = trial["geometry_mib"]
@@ -126,8 +126,9 @@ def readonly_disk(fd, name):
             "-blockdev", f"driver=raw,node-name={name},file={name}-file,read-only=on"]
 
 
-def virtio_disk(name):
-    return ["-device", f"virtio-blk-pci,drive={name},werror=report,rerror=report"]
+def virtio_disk(name, *, boot=False):
+    priority = ",bootindex=1" if boot else ""
+    return ["-device", f"virtio-blk-pci,drive={name},werror=report,rerror=report{priority}"]
 
 
 def run_guest(work, command, fds, purpose, *, file_limit=None):
@@ -202,14 +203,16 @@ def boot_trial(work, disk, code, vars_file, receipt, size):
     machine = ["-machine", "q35"]
     if secure_boot_required:
         machine = ["-machine", "q35,smm=on", "-global", "driver=cfi.pflash01,property=secure,value=on"]
+    # The copied variable store can still refer to the source VM's PCI path.
+    # Give the sole trial disk an explicit firmware boot priority.
     command = virtual_machine() + [
-        *machine, "-boot", "order=c,strict=on", "-serial", "stdio",
+        *machine, "-boot", "strict=on", "-serial", "stdio",
         "-add-fd", f"fd={code_fd},set=2", "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=/dev/fdset/2",
         "-drive", "if=pflash,format=raw,unit=1,file=vars.fd",
         *readonly_disk(disk_fd, "base"),
         "-blockdev", "driver=file,node-name=changes,filename=changes.qcow2",
         "-blockdev", "driver=qcow2,node-name=trial,file=changes,backing=base",
-        *virtio_disk("trial")]
+        *virtio_disk("trial", boot=True)]
     serial = run_guest(work, command, (disk_fd, code_fd), "native trial", file_limit=limit)
     verify_ready(serial, receipt["deployment_manifest_sha256"], secure_boot_required=secure_boot_required)
 

@@ -41,6 +41,9 @@ STATIC_MODES = {STATIC_IPV4: "static", STATIC_IPV6: "static6", STATIC_DUAL: "dua
 LIMITED_SERVICE = "::respawn:/bin/sh /psios-core-cgroup serve"
 TRIAL_BOOT_MODE = "IsolatedTrial"
 TRIAL_RECEIPT_FORMAT = 7
+E1000E_RECEIPT_FORMAT = 8
+E1000E_MODULE = "psios-e1000e.ko"
+DHCP_SERVICE = "::respawn:/bin/sh /psios-dhcp"
 
 
 @dataclass(frozen=True)
@@ -240,6 +243,17 @@ def validate_persisted_static(work, state, version):
         raise ValueError(f"invalid persisted static IPv{version} profile") from e
 
 
+def validate_persisted_e1000e(work, state):
+    raw = read_root_file(work, state, "/etc/psios/dhcp-mac", 18, "0600")
+    try:
+        mac = unicast_mac(raw.decode("ascii").removesuffix("\n"))
+    except (UnicodeError, argparse.ArgumentTypeError) as error:
+        raise ValueError("invalid persisted e1000e DHCP MAC") from error
+    inittab = read_root_file(work, state, "/etc/inittab", 16 * 1024, "0(?:600|644)")
+    if raw != (mac + "\n").encode("ascii") or inittab.splitlines().count(DHCP_SERVICE.encode()) != 1:
+        raise ValueError("invalid persisted e1000e DHCP configuration or launcher")
+
+
 def host_config(seed, args):
     (seed / "etc/psios").mkdir(parents=True)
     operator = password_hash(args.console_hash)
@@ -265,7 +279,7 @@ def host_config(seed, args):
         inittab += f"::once:/bin/sh /psios-dhcp {STATIC_MODES[args.network_profile]}\n"
     elif args.dhcp_mac:
         (seed / "etc/psios/dhcp-mac").write_text(args.dhcp_mac + "\n")
-        inittab += "::respawn:/bin/sh /psios-dhcp\n"
+        inittab += DHCP_SERVICE + "\n"
     if args.dhcp_mac or args.network_profile:
         (seed / "etc/resolv.conf").symlink_to("/run/psios-network/resolv.conf")
     (seed / "etc/inittab").write_text(inittab)
@@ -284,21 +298,38 @@ def core_programs(work):
     return programs
 
 
-def prepare_boot_inputs(work, args):
+def prepare_boot_inputs(work, args, *, wired_driver=None):
     base = boot_media.prepare_kernel(work, args.kernel_iso)
+    if wired_driver == "e1000e":
+        if shutil.which("unsquashfs") is None:
+            raise ValueError("building the e1000e profile requires unsquashfs")
+        modloop = work / "modloop"
+        with modloop.open("xb") as out:
+            subprocess.run(["isoinfo", "-R", "-i", work / "base.iso", "-x", "/boot/modloop-virt"],
+                           stdout=out, check=True, timeout=30, preexec_fn=file_limit(base["size_bytes"]))
+        expected = base["e1000e_module"]
+        module = work / E1000E_MODULE
+        with module.open("xb") as out:
+            subprocess.run(["unsquashfs", "-cat", modloop, expected["member"]], stdout=out,
+                           check=True, timeout=30, preexec_fn=file_limit(MIB))
+        if sha256(module) != expected["sha256"]:
+            raise ValueError("e1000e module does not match the pinned Linux media")
+        modloop.unlink()
     (work / "bin").mkdir()
     install_core(work, args.core_archive, args.core_sha256)
     return base
 
 
 def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network_profile, *, core_limits, trial,
-                   require_secure_boot=False):
+                   require_secure_boot=False, wired_driver=None):
     (work / "psios-disk-uuid").write_text(str(instance) + "\n")
     (work / "psios-home-uuid").write_text(str(home_id) + "\n")
     sectors = [str(mib * 2048) for start, size, _ in layout.partitions[1:] for mib in (start, size)]
     (work / "psios-storage-layout").write_text(" ".join(sectors) + "\n")
     boot_scripts = ["init", "shutdown", "dhcp", "dhcp-event", "ipv4", "ipv6", "static", "storage", "enroll"]
     files = [*core_programs(work), "psios-source", "psios-disk-uuid", "psios-home-uuid", "psios-storage-layout"]
+    if wired_driver:
+        files.append(E1000E_MODULE)
     if core_limits:
         boot_scripts.append("core-cgroup")
         (work / "psios-core-limits").write_text(core_limits.kernel_values())
@@ -329,6 +360,8 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
         inputs["secure_boot"] = signing.receipt()
     if network_profile:
         inputs["network_profile"] = network_profile
+    if wired_driver:
+        inputs["wired_driver"] = wired_driver
     if core_limits:
         inputs["core_limits"] = asdict(core_limits)
     if trial:
@@ -341,8 +374,11 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
     checks = {**payload, "/psios-deployment.json": sha256(manifest)}
     (work / "psios-payload.sha256").write_text("".join(f"{digest}  {name}\n" for name, digest in checks.items()))
     files.extend(["psios-deployment.json", "psios-payload.sha256"])
+    # GNU cpio's reproducible mode still includes each member's modification time.
     for name in files:
-        (work / name).chmod(0o755 if name.startswith("bin/") or name in ("psios-init", "psios-dhcp-event") else 0o644)
+        path = work / name
+        path.chmod(0o755 if name.startswith("bin/") or name in ("psios-init", "psios-dhcp-event") else 0o644)
+        os.utime(path, (boot_media.EPOCH, boot_media.EPOCH))
     append_deployment_payload(work, files)
 
 
@@ -361,10 +397,10 @@ def append_deployment_payload(work, files):
 
 
 def ramfs(work, args, instance, home_id, layout=Layout(), signing=None, network_profile=None, *, core_limits=None,
-          trial=None):
-    base = prepare_boot_inputs(work, args)
+          trial=None, wired_driver=None):
+    base = prepare_boot_inputs(work, args, wired_driver=wired_driver)
     assemble_ramfs(work, args, base, instance, home_id, layout, signing, network_profile,
-                   core_limits=core_limits, trial=trial)
+                   core_limits=core_limits, trial=trial, wired_driver=wired_driver)
 
 
 def seeded_ext4(work, name, label, identity, size_mib, seed, owners):
@@ -454,7 +490,8 @@ def parse_receipt(raw):
     prior = json.loads(raw)
     if isinstance(prior, dict) and (prior.get("format") == TRIAL_RECEIPT_FORMAT or "boot_mode" in prior):
         raise ValueError("isolated trial disks cannot be upgrade sources; use the original stopped deployment")
-    if not isinstance(prior, dict) or type(prior.get("format")) is not int or not 1 <= prior["format"] <= 6:
+    if (not isinstance(prior, dict) or type(prior.get("format")) is not int
+            or prior["format"] not in (1, 2, 3, 4, 5, 6, E1000E_RECEIPT_FORMAT)):
         raise ValueError("unsupported previous build receipt format")
     for name, pattern in (("source_commit", r"[0-9a-f]{40}"), ("efi_application_sha256", r"[0-9a-f]{64}")):
         if not isinstance(prior.get(name), str) or not re.fullmatch(pattern, prior[name]):
@@ -479,11 +516,16 @@ def parse_receipt(raw):
             raise ValueError("invalid network profile in previous build receipt")
     elif "network_profile" in prior and (prior["format"] != 6 or prior["network_profile"] not in tuple(STATIC_MODES)):
         raise ValueError("invalid network profile in previous build receipt")
+    if prior["format"] == E1000E_RECEIPT_FORMAT:
+        if prior.get("wired_driver") != "e1000e":
+            raise ValueError("invalid wired driver in previous e1000e build receipt")
+    elif "wired_driver" in prior:
+        raise ValueError("wired driver evidence requires the e1000e build receipt format")
     limits = None
-    if prior["format"] == 6:
+    if prior["format"] == 6 or (prior["format"] == E1000E_RECEIPT_FORMAT and "core_limits" in prior):
         limits = CoreLimits.from_receipt(prior.get("core_limits"))
     elif "core_limits" in prior:
-        raise ValueError("Core resource limits require build receipt format 6")
+        raise ValueError("Core resource limits require build receipt format 6 or 8")
     if prior["format"] == 3 or (prior["format"] >= 4 and "secure_boot" in prior):
         trust = prior.get("secure_boot")
         if (not isinstance(trust, dict) or set(trust) != {"scheme", "certificate_sha256", "efi_stub_sha256"}
@@ -627,6 +669,8 @@ def source_snapshot(work, disk, source_fd, prior, layout, signing):
         mac6, dns6 = validate_persisted_static(work, state, 6)
         if mac4 != mac6 or dns4 + dns6 > 3:
             raise ValueError("inconsistent persisted dual-stack profile")
+    if "wired_driver" in prior:
+        validate_persisted_e1000e(work, state)
     if "core_limits" in prior:
         inittab = read_root_file(work, state, "/etc/inittab", 16 * 1024, "0(?:600|644)").split(b"\n")
         if inittab.count(LIMITED_SERVICE.encode()) != 1:
@@ -690,8 +734,13 @@ def finish_disk(work, disk, output, *, signing, upgrade):
     with disk.open("rb") as completed:
         os.fsync(completed.fileno())
     receipt_format = {STATIC_IPV4: 4, STATIC_IPV6: 5, STATIC_DUAL: 5}
+    format_version = receipt_format.get(manifest.get("network_profile"), 3 if signing else 2)
+    if "core_limits" in manifest:
+        format_version = 6
+    if "wired_driver" in manifest:
+        format_version = E1000E_RECEIPT_FORMAT
     receipt = {
-        "format": 6 if "core_limits" in manifest else receipt_format.get(manifest.get("network_profile"), 3 if signing else 2),
+        "format": format_version,
         "image": str(output), "source_commit": manifest["core_source_commit"],
         "geometry_mib": manifest["geometry_mib"], "state_uuid": manifest["required_filesystems"]["state"],
         "home_uuid": manifest["required_filesystems"]["home"],
@@ -699,7 +748,7 @@ def finish_disk(work, disk, output, *, signing, upgrade):
         "efi_application_sha256": sha256(efi), "installed_initramfs_sha256": sha256(work / "initrd"),
         "initial_image_sha256": sha256(disk),
     }
-    for name in ("secure_boot", "network_profile", "core_limits"):
+    for name in ("secure_boot", "network_profile", "wired_driver", "core_limits"):
         if name in manifest:
             receipt[name] = manifest[name]
     if "boot_mode" in manifest:
@@ -745,16 +794,20 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
     trial = prepare_trial_disk(trial_work, trial_disk, layout, configuration,
                                secure_boot_required=signing is not None)
 
-    base = prepare_boot_inputs(candidate_work, args)
+    wired_driver = prior.get("wired_driver")
+    base = prepare_boot_inputs(candidate_work, args, wired_driver=wired_driver)
     (trial_work / "bin").mkdir()
     # Share the pinned input kernel and binaries, but each initrd is extended independently.
-    for name in ("kernel", "initrd", *core_programs(candidate_work), "psios-source"):
+    boot_inputs = ["kernel", "initrd", *core_programs(candidate_work), "psios-source"]
+    if wired_driver:
+        boot_inputs.append(E1000E_MODULE)
+    for name in boot_inputs:
         shutil.copyfile(candidate_work / name, trial_work / name)
     instance, home_id = prior["state_uuid"], prior["home_uuid"]
     network_profile = prior.get("network_profile")
     for directory, mode in ((candidate_work, None), (trial_work, trial)):
         assemble_ramfs(directory, args, base, instance, home_id, layout, signing, network_profile,
-                       core_limits=core_limits, trial=mode,
+                       core_limits=core_limits, trial=mode, wired_driver=wired_driver,
                        require_secure_boot=signing is not None and mode is None)
     candidate_manifest = json.loads((candidate_work / "psios-deployment.json").read_bytes())
     trial_manifest = json.loads((trial_work / "psios-deployment.json").read_bytes())
@@ -790,6 +843,7 @@ def build(args):
         prior = None
         trial = None
         network_profile = args.network_profile
+        wired_driver = args.wired_driver
         core_limits = args.core_limits
         signing = None
         if args.secure_boot_key:
@@ -798,6 +852,7 @@ def build(args):
         if args.upgrade_from:
             prior, layout, core_limits = read_receipt(args.previous_receipt)
             network_profile = prior.get("network_profile")
+            wired_driver = prior.get("wired_driver")
             if prior.get("secure_boot") and (signing is None or
                     signing.certificate_sha256 != prior["secure_boot"]["certificate_sha256"]):
                 raise ValueError("a Secure Boot upgrade requires the existing signing certificate")
@@ -812,7 +867,8 @@ def build(args):
             instance, home_id = str(uuid.uuid4()), str(uuid.uuid4())
             new_disk(work, disk, args, instance, home_id, layout)
         disk.chmod(0o600)
-        ramfs(work, args, instance, home_id, layout, signing, network_profile, core_limits=core_limits, trial=trial)
+        ramfs(work, args, instance, home_id, layout, signing, network_profile, core_limits=core_limits,
+              trial=trial, wired_driver=wired_driver)
         upgrade = None
         if prior:
             upgrade = {
@@ -849,8 +905,10 @@ def main():
     parser.add_argument("--root-console-hash", type=Path, help="optional private hash for local system administration; default locks root")
     boot_media.add_signing_arguments(parser)
     network = parser.add_mutually_exclusive_group()
-    network.add_argument("--dhcp-mac", type=unicast_mac, help="enable IPv4 DHCP on the matching virtio NIC of a new disk")
+    network.add_argument("--dhcp-mac", type=unicast_mac, help="enable IPv4 DHCP on the matching NIC of a new disk")
     network.add_argument("--static-mac", type=unicast_mac, help="enable static networking on the matching virtio NIC of a new disk")
+    parser.add_argument("--dhcp-driver", dest="wired_driver", choices=("virtio", "e1000e"),
+                        help="kernel driver for the DHCP NIC (default virtio)")
     parser.add_argument("--static-address", type=ipaddress.IPv4Interface, help="static IPv4 address and prefix")
     parser.add_argument("--static-gateway", type=ipaddress.IPv4Address, help="optional IPv4 gateway on the static subnet")
     parser.add_argument("--static-dns", type=ipaddress.IPv4Address, action="append", default=[], help="optional IPv4 DNS server, repeat up to three times")
@@ -871,6 +929,10 @@ def main():
             parser.error("upgrade preserves /etc/hostname from the source")
         if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", args.hostname):
             parser.error("hostname must be a single DNS label of 1 to 63 ASCII letters, digits or hyphens")
+    if args.wired_driver and not args.dhcp_mac:
+        parser.error("--dhcp-driver requires --dhcp-mac on a new disk")
+    if args.wired_driver == "virtio":
+        args.wired_driver = None
     boot_media.signing_requested(args, parser)
     args.static_network, args.static_ipv6_network = static_config(args, parser)
     args.network_profile = None

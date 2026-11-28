@@ -1,5 +1,5 @@
 #!/bin/sh
-# The DHCP and static profiles share the MAC-bound virtio adapter setup.
+# DHCP and static profiles share MAC-bound wired adapter setup.
 set -eu
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 profile=${1:-dhcp}
@@ -44,17 +44,28 @@ esac
 [ "$(readlink /etc/resolv.conf)" = "$run/resolv.conf" ] || retry 'resolver link does not belong to the wired profile'
 printf '%s\n' "$mac" | grep -Eq '^[0-9a-f][02468ace](:[0-9a-f]{2}){5}$' || retry 'invalid MAC address'
 [ "${#mac}" -eq 17 ] && [ "$mac" != 00:00:00:00:00:00 ] || retry 'invalid MAC address'
-modprobe virtio_net || retry 'could not load the virtio network driver'
+driver=virtio_net
+transport=virtio
+module=/psios-e1000e.ko
+if [ -e "$module" ] || [ -L "$module" ]; then
+    [ "$profile" = dhcp ] && [ -f "$module" ] && [ ! -L "$module" ] &&
+        grep -Eq '^[0-9a-f]{64}  /psios-e1000e\.ko$' /psios-payload.sha256 || retry 'invalid e1000e DHCP deployment'
+    driver=e1000e
+    transport=e1000e
+    [ -d /sys/module/e1000e ] || insmod "$module" || retry 'could not load the e1000e network driver'
+else
+    modprobe "$driver" || retry 'could not load the virtio network driver'
+fi
 
 link=
 for device in /sys/class/net/*; do
     [ -r "$device/address" ] && [ "$(cat "$device/address")" = "$mac" ] || continue
-    driver=$(readlink "$device/device/driver" || :)
-    [ "${driver##*/}" = virtio_net ] || continue
+    bound=$(readlink "$device/device/driver" || :)
+    [ "${bound##*/}" = "$driver" ] || continue
     [ -z "$link" ] || retry 'MAC address matches multiple interfaces'
     link=${device##*/}
 done
-[ -n "$link" ] || retry 'configured virtio interface is absent'
+[ -n "$link" ] || retry "configured $transport interface is absent"
 case "$link" in *[!a-zA-Z0-9_.-]*) retry 'unsupported interface name' ;; esac
 
 ipv6_sysctls=/proc/sys/net/ipv6/conf/$link

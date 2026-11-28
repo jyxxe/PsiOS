@@ -141,13 +141,13 @@ sudo python3 native/install.py inspect --state-dir "$INSTALL_STATE"
 
 默认按工厂镜像的精确容量安装。为较大的空白目标规划时可加 `--allow-larger-target`，上限为 2 TiB，要求 `sfdisk` 支持 `--relocate gpt-bak-std`。安装器保留分区大小、内容与身份，把备份 GPT 移到目标盘末尾，并将余量留为未分配空间。主表和备份表各自通过校验和核验后才可批准安装。批准内容包含 `deployment_image`，记录实际容量、备份表偏移和安装后整盘 SHA-256。空白检查与回读覆盖目标盘的全部字节。[较大 NVMe 来宾验收](../tests/native_install_virtio.py)
 
-操作者从 Plan 核对目标序列号、设备代次、分区和来源摘要，再将该份计划的 `plan_digest` 用于批准。执行会排他打开同一整盘，重新核对身份和空白字节，在首次写入前刷盘保存 `WriteIssued`。各分区内容刷盘后才写入两份 GPT。设备完成刷盘并全盘回读匹配后，回执进入 `Verified`。成功回执可重复读取。执行中断后，同次宿主启动内可用 `inspect` 对原目标核实完全写入的结果。部分写入或目标身份变化保持 `RecoveryRequired`，原计划停止派发。开发验收可通过 `--allow-loop` 选用专用 loop 测试盘。[Linux 块设备排他打开](https://man7.org/linux/man-pages/man2/open.2.html)
+操作者从 Plan 核对目标序列号、设备代次、分区和来源摘要，再将该份计划的 `plan_digest` 用于批准。执行会排他打开同一整盘，重新核对身份和空白字节，在首次写入前刷盘保存 `WriteIssued`。各分区内容刷盘后才写入两份 GPT。设备完成刷盘并全盘回读匹配后，回执进入 `Verified`。成功回执可重复读取。执行中断后，同次宿主启动内可用 `inspect` 对原目标核实完全写入的结果。宿主重启后，`inspect` 先核对启动 ID，再报告待恢复，原计划保存的设备路径不会被打开。部分写入或目标身份变化保持 `RecoveryRequired`，原计划停止派发。开发验收可通过 `--allow-loop` 选用专用 loop 测试盘。[Linux 块设备排他打开](https://man7.org/linux/man-pages/man2/open.2.html)
 
-如果安装主机重启时回执仍停在 `WriteIssued`，可对固定 SATA AHCI 整盘执行只读核验。使用原批准摘要和当前的整盘 `/dev/sd*` 路径。安装器要求 ATA 序列号、唯一的 NAA WWID 和几何参数与原计划一致，并核对完整安装镜像的摘要。成功回执保留原计划和本次读取的 Linux 启动身份及设备证据。源镜像和构建回执可离线保存。摘要不同或设备身份不明确时，操作保持待恢复，设备上的字节保持原样。[断电与跨启动回执验收](../tests/native_install_virtio.py)
+如果安装主机重启时回执仍停在 `WriteIssued`，可对固定 SATA AHCI 整盘或本地 PCIe NVMe 命名空间执行只读核验。请在首次启动目标盘前，提供原批准摘要和当前的整盘路径。SATA 需匹配原 ATA 序列号及唯一的 NAA WWID。NVMe 需匹配原控制器序列号、命名空间 ID 和唯一的非零 EUI、NGUID 或 UUID。内核从控制器型号等信息拼出的 `nvme.*` 标识会被拒绝。两种设备均核对几何参数及完整安装镜像摘要。成功回执保留原计划、本次读取的 Linux 启动身份及设备证据。源镜像和构建回执可离线保存。内容不符或设备身份不明确时，操作保持待恢复，盘上字节保持原样。[断电与跨启动回执验收](../tests/native_install_virtio.py)
 
 ```sh
 sudo python3 native/install.py reconcile-after-reboot --plan-digest "$APPROVED_PLAN_SHA256" \
-  --target "$CURRENT_SATA_DISK" --state-dir "$INSTALL_STATE"
+  --target "$CURRENT_DISK" --state-dir "$INSTALL_STATE"
 ```
 
 在 QEMU 的 PCIe NVMe 热插拔验收中，替换盘复用相同设备路径及 PCI 拓扑，内核代次与 WWID 则改变。执行原批准会在写入前拒绝，保留原 `Planned` 回执及替换盘的全盘摘要。安装替换盘要为其新身份另行生成并批准计划。[NVMe 热插拔验收](../tests/native_install_virtio.py)

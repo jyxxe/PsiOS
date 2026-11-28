@@ -1054,7 +1054,7 @@ jobs:
   native-virtio-install:
     needs: host-package
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -1073,15 +1073,22 @@ jobs:
           mkdir "$RUNNER_TEMP/installer-tools"
           (cd "$RUNNER_TEMP/installer-tools" && timeout 180 "$GITHUB_WORKSPACE/tools/ci-ubuntu-apt" download fdisk mtools strace libunwind8)
           tools/build-portable-core "$RUNNER_TEMP/native-core.tar.gz"
-      - name: Install onto Virtio, PCIe NVMe and SATA AHCI devices and reboot each installed disk
+      - name: Install onto Virtio, PCIe NVMe and SATA AHCI and verify cold restart recovery
         run: |
           archive="$RUNNER_TEMP/native-core.tar.gz"
           tool_args=()
           for tool in "$RUNNER_TEMP"/installer-tools/*.deb; do tool_args+=(--tool-deb "$tool"); done
-          for bus in virtio nvme ahci; do
+          for install_case in virtio nvme ahci nvme-reconcile; do
+            bus="$install_case"
             profile=()
-            if [[ "$bus" == nvme ]]; then profile+=(--larger-target); fi
-            if [[ "$bus" == ahci ]]; then profile+=(--reconcile-after-reboot); fi
+            case "$install_case" in
+              nvme) profile+=(--larger-target) ;;
+              ahci) profile+=(--reconcile-after-reboot) ;;
+              nvme-reconcile)
+                bus=nvme
+                profile+=(--larger-target --reconcile-after-reboot)
+                ;;
+            esac
             python3 -B tests/native_install_virtio.py --base "$RUNNER_TEMP/base.img" \
               --package "$RUNNER_TEMP"/psios-package/psios-core_*.deb \
               --archive "$archive" --archive-sha256 "$(sha256sum "$archive" | cut -d ' ' -f1)" \

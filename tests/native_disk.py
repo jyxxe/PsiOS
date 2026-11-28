@@ -453,6 +453,25 @@ def check_native_mount_topology(c):
     assert scratch["filesystem_type"] == "tmpfs" and {"nodev", "nosuid"}.issubset(scratch["flags"]), scratch
 
 
+def check_native_pci(c):
+    node = call(c, "Node.Get", {})["reference"]["resource_id"]
+    grant = call(c, "Grant.Issue", {"principal_id": "local-owner", "tool_targets": [node],
+                 "actions": ["task.submit", "task.read", "node.pci"], "units": 1, "ttl_seconds": 120})
+    delegation = shlex.quote(grant["delegation_ref"]["resource_id"])
+    receipt = json.loads(c.run(f"printf '{{}}' | psiosctl submit node.pci --delegation {delegation} --key native-pci"))
+    task = call(c, "Task.Wait", {"id": receipt["task_id"], "timeout_ms": 5000})
+    assert task["lifecycle"] == "Succeeded", task
+    reference, = task["result"]["artifact_refs"]
+    report = call(c, "Artifact.Read", {"reference": reference})
+    address = c.run('for path in /sys/bus/pci/devices/*; do '
+                    '[ "$(cat "$path/vendor")" = 0x1af4 ] || continue; '
+                    '[ "$(basename "$(readlink "$path/driver")")" = virtio-pci ] || continue; '
+                    'basename "$path"; break; done')
+    device, = (item for item in report["devices"] if item["address"] == address)
+    assert (device["vendor_id"], device["driver"]) == ("0x1af4", "virtio-pci"), device
+    assert report["boot_id"] == c.run("cat /proc/sys/kernel/random/boot_id")
+
+
 def check_native_network(c):
     node = json.loads(c.run("psiosctl node"))["reference"]["resource_id"]
     grant = call(c, "Grant.Issue", dict(principal_id="local-owner", tool_targets=[node],
@@ -597,19 +616,49 @@ def check_machine_id_clone(work, image, operator, admin):
         c.login("psios", operator)
         observed = check_machine_identity(c)
         node = call(c, "Principal.WhoAmI", {})["authority_id"]
+        initial_boot = c.run("cat /proc/sys/kernel/random/boot_id")
         c.send("exit")
         c.login("root", admin)
+        c.run("test ! -e /var/lib/.psios-boot-failure")
         c.send("poweroff")
         assert c.vm.wait(35) == 0
     check_clean_shutdown(clone)
 
     set_machine_id_fixture(work, clone, "/etc/machine-id", "0" * 32 + "\n", "0100444", replace=True)
+    set_machine_id_fixture(work, clone, "/.psios-boot-failure.pending", "interrupted boot record", "0100600")
     with boot(work, clone, vars_file="machine-identity-vars.fd", pace_commands=True) as c:
         c.until(b"PsiOS boot stopped at machine-identity", reject=b"psios login:")
         assert c.vm.wait(25) == 0
     check_clean_shutdown(clone)
+
+    # Read the last record independently while the failed node is offline.
+    state = work / "boot-failure.ext4"
+    extract_partition(clone, state, 65, 192)
+    raw = subprocess.run(["debugfs", "-R", "cat /.psios-boot-failure", state],
+                         capture_output=True, text=True, check=True, timeout=15).stdout
+    state.unlink()
+    failure = json.loads(raw)
+    assert set(failure) == {"format", "boot_id", "stage"}, failure
+    assert failure["format"] == 1 and failure["stage"] == "machine-identity", failure
+    assert re.fullmatch(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}", failure["boot_id"])
+    assert failure["boot_id"] != initial_boot
+
+    set_machine_id_fixture(work, clone, "/etc/machine-id", observed + "\n", "0100444", replace=True)
+    with boot(work, clone, vars_file="machine-identity-vars.fd", pace_commands=True) as c:
+        c.login("psios", operator)
+        assert call(c, "Principal.WhoAmI", {})["authority_id"] == node
+        assert c.run("cat /proc/sys/kernel/random/boot_id") != failure["boot_id"]
+        c.run("test ! -r /var/lib/.psios-boot-failure")
+        c.send("exit")
+        c.login("root", admin)
+        assert c.run("stat -c '%u:%g:%a:%h' /var/lib/.psios-boot-failure") == "0:0:600:1"
+        assert c.run("cat /var/lib/.psios-boot-failure") + "\n" == raw
+        c.run("test ! -e /var/lib/.psios-boot-failure.pending")
+        c.send("poweroff")
+        assert c.vm.wait(35) == 0
+    check_clean_shutdown(clone)
     clone.unlink()
-    print("PASS stale machine ID preparation recovered and an invalid stored ID refused boot", flush=True)
+    print("PASS invalid machine ID stopped boot, privately persisted the failure, and recovered the same authority", flush=True)
     return observed, node
 
 
@@ -678,6 +727,7 @@ def exercise(args, work):
         assert int(c.run("stat -c %s ./full")) >= 40 * 1024 * 1024
         check_native_volume_usage(c)
         check_native_mount_topology(c)
+        check_native_pci(c)
         check_native_network(c)
         check_resource_watch(c)
         workflow = check_native_workflow(c)

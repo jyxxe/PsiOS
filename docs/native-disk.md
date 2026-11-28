@@ -139,6 +139,8 @@ sudo python3 native/install.py inspect --state-dir "$INSTALL_STATE"
 
 操作者从 Plan 核对目标序列号、设备代次、分区和来源摘要，再将该份计划的 `plan_digest` 用于批准。执行会排他打开同一整盘，重新核对身份和空白字节，在首次写入前刷盘保存 `WriteIssued`。各分区内容刷盘后才写入两份 GPT。设备完成刷盘并全盘回读匹配后，回执进入 `Verified`。成功回执可重复读取。执行中断后，同次宿主启动内可用 `inspect` 对原目标核实完全写入的结果。部分写入或目标身份变化保持 `RecoveryRequired`，原计划停止派发。开发验收可通过 `--allow-loop` 选用专用 loop 测试盘。[Linux 块设备排他打开](https://man7.org/linux/man-pages/man2/open.2.html)
 
+在 QEMU 的 PCIe NVMe 热插拔验收中，替换盘复用相同设备路径及 PCI 拓扑，内核代次与 WWID 则改变。执行原批准会在写入前拒绝，保留原 `Planned` 回执及替换盘的全盘摘要。安装替换盘要为其新身份另行生成并批准计划。[NVMe 热插拔验收](../tests/native_install_virtio.py)
+
 ## 使用已登记证书构建 Secure Boot 盘
 
 构建机需要 `ukify`、`sbsign`、`sbverify` 和 OpenSSL。提供来自可信工具包的 `linuxx64.efi.stub` 及摘要，并使用已登记到目标 UEFI 信任数据库的签名证书和构建者私有 PEM 密钥。将以下参数附加到新盘或升级命令。

@@ -74,14 +74,17 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 50
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - &native_checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - &native_archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: psios-core-linux-amd64
           path: ${{ runner.temp }}/rescue-core
-      - name: Download and configure rescue VM prerequisites
+      - &native_prerequisites
+        name: Download and configure native VM prerequisites
         run: |
           packages=(qemu-system-x86 qemu-utils genisoimage cpio e2fsprogs fdisk acl dnsmasq-base radvd gcc libc6-dev squashfs-tools
                     xorriso grub-common grub-efi-amd64-bin dosfstools mtools ovmf seabios openssl openssh-client strace)
@@ -99,104 +102,24 @@ jobs:
           fi
           if [ -c /dev/kvm ]; then sudo setfacl -m "u:$(id -un):rw" /dev/kvm; fi
 
-      - name: Verify the compressed native member and cpio error propagation
-        run: python3 -B -m unittest discover -s tests -p test_native_ramfs.py -v
-
-      - name: Inspect real ext4 images from an independent read-only rescue boot
+      - &native_verified_media
+        name: Verify the Core archive and fetch the pinned kernel media
         run: |
           cd "$RUNNER_TEMP/rescue-core"
           tar -xzf psios-core-linux-amd64.tar.gz
           sha256sum --strict --check SHA256SUMS
           cd "$GITHUB_WORKSPACE"
           curl --fail --location --retry 3 "$(jq -r .url "$RUNNER_TEMP/rescue-core/rescue/base.json")" -o "$RUNNER_TEMP/rescue.iso"
+
+      - name: Verify the compressed native member and cpio error propagation
+        run: python3 -B -m unittest discover -s tests -p test_native_ramfs.py -v
+
+      - name: Inspect real ext4 images from an independent read-only rescue boot
+        run: |
           python3 tests/rescue_disk.py --bin-dir "$RUNNER_TEMP/rescue-core" --iso "$RUNNER_TEMP/rescue.iso" \
             --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py" --firmware-media
           python3 -B tests/rescue_storage.py --bin-dir "$RUNNER_TEMP/rescue-core" --iso "$RUNNER_TEMP/rescue.iso" \
             --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py"
-
-      - name: Boot an installed PsiOS UEFI disk, power-cut the node and verify its recovery
-        run: |
-          python3 tests/native_disk.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
-            --kernel-iso "$RUNNER_TEMP/rescue.iso" \
-            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
-            --psiosd "$RUNNER_TEMP/rescue-core/psiosd" --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py"
-
-      - name: Rebuild native boot artifacts from matching inputs with independent build metadata
-        run: |
-          python3 -B tests/native_boot_reproducibility.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
-            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
-          python3 -B tests/native_boot_tools.py --builder "$RUNNER_TEMP/rescue-core/native/create.py" \
-            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
-          python3 -B tests/native_boot_reproducibility.py --rdnss --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
-            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
-
-      - name: Recover both DST fold occurrences on a UEFI disk after power cuts
-        run: |
-          python3 tests/native_calendar.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
-            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
-
-      - name: Install to an isolated blank block device, recover missing receipts and boot it
-        run: |
-          if [[ ! -c /dev/loop-control ]]; then sudo modprobe loop; fi
-          sudo -n python3 -B tests/native_install.py \
-            --installer "$RUNNER_TEMP/rescue-core/native/install.py" \
-            --builder "$RUNNER_TEMP/rescue-core/native/create.py" \
-            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
-
-      - name: Enforce native Core cgroup quotas and retain them during upgrade
-        run: |
-          python3 -B tests/native_core_limits.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
-            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
-
-      - name: Verify kernel evidence, task waits, backup export and private PTYs in one guest
-        run: |
-          python3 -B tests/native_combined_core.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
-            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
-
-      - name: Acquire and release DHCP leases on configured virtio and e1000e NICs
-        run: |
-          for driver in virtio e1000e; do
-            sudo unshare --net --propagation private runuser -u "$(id -un)" -- \
-              python3 tests/native_dhcp.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
-              --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
-              --dhcp-driver "$driver"
-          done
-
-      - name: Install and renew DHCPv4 classless routes over an isolated TAP
-        run: |
-          sudo unshare --net --propagation private \
-            python3 tests/native_dhcp_routes.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
-            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
-
-      - name: Configure an e1000e static dual-stack link and preserve it through an offline upgrade
-        run: |
-          sudo unshare --net --propagation private runuser -u "$(id -un)" -- \
-            python3 -B tests/native_static_e1000e.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
-            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
-
-      - name: Bind one native system disk and refuse duplicate or split filesystems
-        run: |
-          python3 tests/native_storage.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
-            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
-
-      - name: Authenticate the native SSH console and preserve its host key across recovery and upgrade
-        run: |
-          python3 -B tests/native_boot_reproducibility.py --ssh-e1000e \
-            --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
-            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
-          python3 -B tests/native_ssh_console.py --staged --dhcp-driver e1000e --disk-bus ahci \
-            --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
-            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
-
-      - name: Recover native authority enrollment across power cuts
-        run: |
-          python3 tests/native_enrollment.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
-            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
-
-      - name: Expire a scoped grant and queued Task after real UTC rollback in a guest
-        run: |
-          python3 -B tests/native_grant_deadline.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
-            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
 
       - name: Trial-boot an isolated UEFI upgrade and boot both production generations
         run: |
@@ -263,59 +186,6 @@ jobs:
             --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
             --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
             --installer "$RUNNER_TEMP/rescue-core/native/create.py"
-
-      - name: Discover IPv6 routers and retain the native profile through a staged update
-        run: |
-          python3 -B tests/native_slaac.py --kernel-iso "$RUNNER_TEMP/rescue.iso" \
-            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
-            --installer "$RUNNER_TEMP/rescue-core/native/create.py"
-
-      - name: Verify native IPv6 DNS, SSH and router DNS lifetime in an isolated network
-        run: |
-          sudo unshare --net --propagation private bash -se -- "$RUNNER_TEMP" <<'SH'
-          scratch=$(mktemp -d)
-          router=
-          resolver=
-          cleanup() {
-            for child in $router $resolver; do
-              kill "$child" 2>/dev/null || true
-              wait "$child" 2>/dev/null || true
-            done
-            rm -rf "$scratch"
-          }
-          trap cleanup EXIT
-          ip link set lo up
-          ip tuntap add dev psios6 mode tap
-          ip link set dev psios6 addrgenmode none
-          ip link set dev psios6 up
-          ip -6 address add fe80::2/64 dev psios6 nodad
-          ip -6 address add 2001:db8:70::1/64 dev psios6 nodad
-          ip -6 address add 2001:db8:70::53/64 dev psios6 nodad
-          printf '1\n' > /proc/sys/net/ipv6/conf/all/forwarding
-          cat > "$scratch/radvd.conf" <<'RA'
-          interface psios6 {
-            AdvSendAdvert on;
-            MaxRtrAdvInterval 4;
-            MinRtrAdvInterval 3;
-            prefix 2001:db8:70::/64 { AdvOnLink on; AdvAutonomous on; };
-          };
-          RA
-          radvd -n -m stderr -C "$scratch/radvd.conf" -p "$scratch/radvd.pid" &
-          router=$!
-          dnsmasq --conf-file=/dev/null --pid-file="$scratch/dnsmasq.pid" \
-            --no-daemon --no-resolv --no-hosts --bind-interfaces \
-            --interface=psios6 --except-interface=lo --address=/node.test/2001:db8:70::77 &
-          resolver=$!
-          python3 -B tests/native_slaac.py --ssh-tap psios6 --kernel-iso "$1/rescue.iso" \
-            --archive "$1/rescue-core/psios-core-linux-amd64.tar.gz" \
-            --installer "$1/rescue-core/native/create.py"
-          kill "$router"
-          wait "$router"
-          router=
-          python3 -B tests/native_rdnss.py --tap psios6 --verify-core-resolver --larger-source --kernel-iso "$1/rescue.iso" \
-            --archive "$1/rescue-core/psios-core-linux-amd64.tar.gz" \
-            --installer "$1/rescue-core/native/create.py"
-          SH
 
       - name: Verify native Secure Boot, signed trial, firmware rejection and offline upgrade
         run: |
@@ -384,6 +254,158 @@ jobs:
             --kernel-iso "$RUNNER_TEMP/rescue.iso" --bin-dir "$RUNNER_TEMP/rescue-core" \
             --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py"
 
+  native-boot-network:
+    needs: portable-core
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - *native_checkout
+      - *native_archive
+      - *native_prerequisites
+      - *native_verified_media
+
+      - name: Boot an installed PsiOS UEFI disk, power-cut the node and verify its recovery
+        run: |
+          python3 tests/native_disk.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" \
+            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
+            --psiosd "$RUNNER_TEMP/rescue-core/psiosd" --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py"
+
+      - name: Rebuild native boot artifacts from matching inputs with independent build metadata
+        run: |
+          python3 -B tests/native_boot_reproducibility.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+          python3 -B tests/native_boot_tools.py --builder "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+          python3 -B tests/native_boot_reproducibility.py --rdnss --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+
+      - name: Recover both DST fold occurrences on a UEFI disk after power cuts
+        run: |
+          python3 tests/native_calendar.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+
+      - name: Install to an isolated blank block device, recover missing receipts and boot it
+        run: |
+          if [[ ! -c /dev/loop-control ]]; then sudo modprobe loop; fi
+          sudo -n python3 -B tests/native_install.py \
+            --installer "$RUNNER_TEMP/rescue-core/native/install.py" \
+            --builder "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+
+      - name: Enforce native Core cgroup quotas and retain them during upgrade
+        run: |
+          python3 -B tests/native_core_limits.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+
+      - name: Verify kernel evidence, task waits, backup export and private PTYs in one guest
+        run: |
+          python3 -B tests/native_combined_core.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+
+      - name: Observe USB attachment and replacement from native Linux sysfs
+        run: |
+          python3 -B tests/native_usb_inventory.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+
+      - name: Acquire and release DHCP leases on configured virtio and e1000e NICs
+        run: |
+          for driver in virtio e1000e; do
+            sudo unshare --net --propagation private runuser -u "$(id -un)" -- \
+              python3 tests/native_dhcp.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+              --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
+              --dhcp-driver "$driver"
+          done
+
+      - name: Install and renew DHCPv4 classless routes over an isolated TAP
+        run: |
+          sudo unshare --net --propagation private \
+            python3 tests/native_dhcp_routes.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+
+      - name: Configure an e1000e static dual-stack link and preserve it through an offline upgrade
+        run: |
+          sudo unshare --net --propagation private runuser -u "$(id -un)" -- \
+            python3 -B tests/native_static_e1000e.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+
+      - name: Bind one native system disk and refuse duplicate or split filesystems
+        run: |
+          python3 tests/native_storage.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+
+      - name: Authenticate the native SSH console and preserve its host key across recovery and upgrade
+        run: |
+          python3 -B tests/native_boot_reproducibility.py --ssh-e1000e \
+            --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+          python3 -B tests/native_ssh_console.py --staged --dhcp-driver e1000e --disk-bus ahci \
+            --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+
+      - name: Recover native authority enrollment across power cuts
+        run: |
+          python3 tests/native_enrollment.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+
+      - name: Expire a scoped grant and queued Task after real UTC rollback in a guest
+        run: |
+          python3 -B tests/native_grant_deadline.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+
+      - name: Discover IPv6 routers and retain the native profile through a staged update
+        run: |
+          python3 -B tests/native_slaac.py --kernel-iso "$RUNNER_TEMP/rescue.iso" \
+            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
+            --installer "$RUNNER_TEMP/rescue-core/native/create.py"
+
+      - name: Verify native IPv6 DNS, SSH and router DNS lifetime in an isolated network
+        run: |
+          sudo unshare --net --propagation private bash -se -- "$RUNNER_TEMP" <<'SH'
+          scratch=$(mktemp -d)
+          router=
+          resolver=
+          cleanup() {
+            for child in $router $resolver; do
+              kill "$child" 2>/dev/null || true
+              wait "$child" 2>/dev/null || true
+            done
+            rm -rf "$scratch"
+          }
+          trap cleanup EXIT
+          ip link set lo up
+          ip tuntap add dev psios6 mode tap
+          ip link set dev psios6 addrgenmode none
+          ip link set dev psios6 up
+          ip -6 address add fe80::2/64 dev psios6 nodad
+          ip -6 address add 2001:db8:70::1/64 dev psios6 nodad
+          ip -6 address add 2001:db8:70::53/64 dev psios6 nodad
+          printf '1\n' > /proc/sys/net/ipv6/conf/all/forwarding
+          cat > "$scratch/radvd.conf" <<'RA'
+          interface psios6 {
+            AdvSendAdvert on;
+            MaxRtrAdvInterval 4;
+            MinRtrAdvInterval 3;
+            prefix 2001:db8:70::/64 { AdvOnLink on; AdvAutonomous on; };
+          };
+          RA
+          radvd -n -m stderr -C "$scratch/radvd.conf" -p "$scratch/radvd.pid" &
+          router=$!
+          dnsmasq --conf-file=/dev/null --pid-file="$scratch/dnsmasq.pid" \
+            --no-daemon --no-resolv --no-hosts --bind-interfaces \
+            --interface=psios6 --except-interface=lo --address=/node.test/2001:db8:70::77 &
+          resolver=$!
+          python3 -B tests/native_slaac.py --ssh-tap psios6 --kernel-iso "$1/rescue.iso" \
+            --archive "$1/rescue-core/psios-core-linux-amd64.tar.gz" \
+            --installer "$1/rescue-core/native/create.py"
+          kill "$router"
+          wait "$router"
+          router=
+          python3 -B tests/native_rdnss.py --tap psios6 --verify-core-resolver --larger-source --kernel-iso "$1/rescue.iso" \
+            --archive "$1/rescue-core/psios-core-linux-amd64.tar.gz" \
+            --installer "$1/rescue-core/native/create.py"
+          SH
+
   local-inference:
     needs: portable-core
     runs-on: ubuntu-24.04
@@ -420,7 +442,7 @@ jobs:
 
   attest:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'jyxxe/PsiOS'
-    needs: [portable-core, rescue-disk, local-inference]
+    needs: [portable-core, rescue-disk, native-boot-network, local-inference]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

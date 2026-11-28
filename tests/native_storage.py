@@ -1,4 +1,4 @@
-"""Boot the identified native disk with an additional virtio block device attached."""
+"""Verify native disk identity on virtio and PCIe NVMe storage."""
 import argparse
 import json
 from pathlib import Path
@@ -51,13 +51,26 @@ def exercise(args, work):
     check_clean_shutdown(installed)
     assert sha(extra) == extra_digest
 
+    with boot(work, installed, extra_disk=extra, disk_bus="nvme", pace_commands=True) as c:
+        c.login("psios", operator)
+        assert json.loads(c.run("psiosctl whoami"))["principal_id"] == "local-owner"
+        assert c.run("awk '$2 == \"/var/lib\" { print $1 }' /proc/mounts") == "/dev/nvme0n1p2"
+        assert c.run("awk '$2 == \"/mnt/psios-homes\" { print $1 }' /proc/mounts") == "/dev/nvme0n1p3"
+        c.send("exit")
+        c.login("root", admin)
+        c.send("poweroff")
+        assert c.vm.wait(35) == 0
+    check_clean_shutdown(installed)
+    assert sha(extra) == extra_digest
+
     duplicate = work / "duplicate.raw"
     shutil.copyfile(installed, duplicate)
     original = sha(installed)
-    with boot(work, installed, extra_disk=duplicate) as c:
-        c.until(b"PsiOS boot stopped at deployment-ambiguity")
-        assert c.vm.wait(25) == 0
-    assert sha(installed) == sha(duplicate) == original
+    for first, second in (("virtio", "virtio"), ("nvme", "virtio"), ("nvme", "nvme")):
+        with boot(work, installed, extra_disk=duplicate, disk_bus=first, extra_bus=second) as c:
+            c.until(b"PsiOS boot stopped at deployment-ambiguity", reject=b" login: ")
+            assert c.vm.wait(25) == 0
+        assert sha(installed) == sha(duplicate) == original
 
     replace_with_unrelated_partition(work, installed, "first-home.ext4", 257, 64)
     replace_with_unrelated_partition(work, duplicate, "second-state.ext4", 65, 192)
@@ -66,7 +79,7 @@ def exercise(args, work):
         c.until(b"PsiOS boot stopped at home-device")
         assert c.vm.wait(25) == 0
     assert (sha(installed), sha(duplicate)) == before
-    print("Verified a native disk boots beside unrelated storage and preserves both disks when identities duplicate or are split.")
+    print("Verified virtio and NVMe boot beside unrelated storage, reject duplicate identities and preserve both disks with split identities.")
 
 
 if __name__ == "__main__":

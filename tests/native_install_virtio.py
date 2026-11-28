@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install to a disposable virtio disk from Ubuntu, then boot the installed PsiOS."""
+"""Install to a disposable virtio or NVMe disk from Ubuntu, then boot the installed PsiOS."""
 
 import argparse
 import json
@@ -19,7 +19,7 @@ from qemu_boot import boot as boot_ubuntu, identity
 
 
 TARGET_SERIAL = "PSIOS-INSTALL-001"
-BAD_SERIAL = "PSIOS BAD SERIAL"
+BAD_SERIAL = {"virtio": "PSIOS BAD SERIAL", "nvme": "  "}
 GUEST = Path("/var/lib/psios-virtio-acceptance")
 OPERATION = GUEST / "operation"
 BAD_OPERATION = GUEST / "bad-operation"
@@ -32,8 +32,8 @@ TOOLS = {
     "native/static", "native/storage", "rescue/base.json", "rescue/boot_media.py",
 }
 
-# Read kernel evidence independently of the installer. Do not assume virtio's
-# enumeration order or select a device merely because its capacity matches.
+# Read kernel evidence independently of the installer. Select by transport
+# identity before comparing the installer plan with the kernel observations.
 PROBE_DEVICE = """
 import json, os, stat, sys
 from pathlib import Path
@@ -41,12 +41,20 @@ from pathlib import Path
 def read(path):
     return path.read_text(encoding="ascii").removesuffix("\\n")
 
-serial = sys.argv[1]
-matches = [p.resolve(strict=True) for p in Path("/sys/block").glob("vd*")
-           if read(p / "serial") == serial]
-assert len(matches) == 1, matches
-disk = matches[0]
-assert (disk.parent.parent / "driver").resolve() == Path("/sys/bus/virtio/drivers/virtio_blk")
+bus, serial = sys.argv[1:]
+if bus == "nvme":
+    serial = serial.strip(" ")
+    disk, = (p.resolve(strict=True) for p in Path("/sys/block").glob("nvme*n*")
+             if read(p.resolve(strict=True).parent / "serial").strip(" ") == serial)
+    controller = disk.parent
+    assert read(controller / "transport") == "pcie"
+    assert (controller.parent.parent / "driver").resolve() == Path("/sys/bus/pci/drivers/nvme")
+    transport = dict(kind="NVMeNamespace", serial=serial, namespace_id=int(read(disk / "nsid")),
+                     wwid=read(disk / "wwid"), sysfs_path=str(controller))
+else:
+    disk, = (p.resolve(strict=True) for p in Path("/sys/block").glob("vd*") if read(p / "serial") == serial)
+    assert (disk.parent.parent / "driver").resolve() == Path("/sys/bus/virtio/drivers/virtio_blk")
+    transport = dict(kind="VirtioBlock", serial=serial, sysfs_path=str(disk.parent.parent))
 device = Path("/dev") / disk.name
 info = device.lstat()
 assert stat.S_ISBLK(info.st_mode), info
@@ -59,7 +67,7 @@ print(json.dumps(dict(
     logical_block_bytes=int(read(disk / "queue/logical_block_size")),
     physical_block_bytes=int(read(disk / "queue/physical_block_size")),
     read_only=bool(int(read(disk / "ro"))),
-    transport=dict(kind="VirtioBlock", serial=serial, sysfs_path=str(disk.parent.parent)),
+    transport=transport,
 )))
 """
 
@@ -68,11 +76,12 @@ def remote(run, *args, **options):
     return run(shlex.join(map(str, args)), **options)
 
 
-def upload(run, source, destination):
+def upload(run, source, destination, *, sparse_image=False):
     expected = sha(source)
+    receive = ('umask 077; dd of="$1" bs=1M iflag=fullblock conv=sparse status=none' if sparse_image
+               else 'umask 077; cat > "$1"')
     with source.open("rb") as data:
-        remote(run, "sudo", "-n", "sh", "-c", 'umask 077; cat > "$1"', "sh",
-               destination, stdin=data, timeout=180)
+        remote(run, "sudo", "-n", "sh", "-c", receive, "sh", destination, stdin=data, timeout=180)
     readback = remote(run, "sudo", "-n", "sha256sum", "--", destination).stdout.split()[0]
     assert readback == expected, f"streamed input differs in Ubuntu: {destination.name}"
     return expected
@@ -114,7 +123,7 @@ def make_source(args, work):
     return image, receipt, operator, admin
 
 
-def ubuntu_command(instance, target, rejected, port, serial_log):
+def ubuntu_command(instance, target, rejected, port, serial_log, bus="virtio"):
     accel = "kvm" if os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
     manifest = json.loads((instance / "manifest.json").read_bytes())
     assert manifest["firmware"] == "OVMF" and manifest["architecture"] == "amd64"
@@ -132,15 +141,16 @@ def ubuntu_command(instance, target, rejected, port, serial_log):
         ("ubuntu", "system.qcow2", "qcow2", "PSIOS-UBUNTU", ",bootindex=1"),
         ("seed", "seed.iso", "raw", "PSIOS-SEED", ""),
         ("installed", f"../{target.name}", "raw", TARGET_SERIAL, ""),
-        ("rejected", f"../{rejected.name}", "raw", BAD_SERIAL, ""),
+        ("rejected", f"../{rejected.name}", "raw", BAD_SERIAL[bus], ""),
     ):
         read_only = ",readonly=on" if name == "seed" else ""
+        device = "nvme" if bus == "nvme" and name in ("installed", "rejected") else "virtio-blk-pci"
         cmd += ["-drive", f"if=none,id={name},format={fmt},file={path}{read_only}",
-                "-device", f"virtio-blk-pci,drive={name},serial={serial}{options}"]
+                "-device", f"{device},drive={name},serial={serial}{options}"]
     return cmd
 
 
-def install_in_guest(run, tool_debs, work, source, receipt, source_digest, blank_digest):
+def install_in_guest(run, tool_debs, work, source, receipt, source_digest, blank_digest, bus):
     remote(run, "sudo", "-n", "install", "-d", "-m", "0700",
            GUEST, GUEST / "native", GUEST / "rescue", OPERATION, BAD_OPERATION)
     packages = []
@@ -155,7 +165,7 @@ def install_in_guest(run, tool_debs, work, source, receipt, source_digest, blank
     for path in sorted(TOOLS):
         upload(run, work / path, GUEST / path)
     guest_image, guest_receipt = GUEST / source.name, GUEST / receipt.name
-    uploaded_image = upload(run, source, guest_image)
+    uploaded_image = upload(run, source, guest_image, sparse_image=True)
     assert uploaded_image == source_digest
     receipt_digest = upload(run, receipt, guest_receipt)
 
@@ -163,8 +173,8 @@ def install_in_guest(run, tool_debs, work, source, receipt, source_digest, blank
         return remote(run, "sudo", "-n", "python3", "-B", INSTALLER, verb, "--state-dir", operation,
                       *args, timeout=180, **options)
 
-    evidence = json.loads(remote(run, "python3", "-c", PROBE_DEVICE, TARGET_SERIAL).stdout)
-    bad_evidence = json.loads(remote(run, "python3", "-c", PROBE_DEVICE, BAD_SERIAL).stdout)
+    evidence = json.loads(remote(run, "python3", "-c", PROBE_DEVICE, bus, TARGET_SERIAL).stdout)
+    bad_evidence = json.loads(remote(run, "python3", "-c", PROBE_DEVICE, bus, BAD_SERIAL[bus]).stdout)
     assert evidence["path"] != bad_evidence["path"]
     assert evidence["size_bytes"] == bad_evidence["size_bytes"] == source.stat().st_size
     assert evidence["disk_sequence"] > 0 and evidence["disk_sequence"] != bad_evidence["disk_sequence"]
@@ -185,7 +195,7 @@ def install_in_guest(run, tool_debs, work, source, receipt, source_digest, blank
     assert refused.returncode == 1 and "approval does not match" in refused.stderr, refused.stderr
     assert json.loads(install(OPERATION, "inspect").stdout) == planned
     before = remote(run, "sudo", "-n", "sha256sum", "--", evidence["path"], timeout=90).stdout
-    assert before.split()[0] == blank_digest, "wrong approval wrote to the blank virtio disk"
+    assert before.split()[0] == blank_digest, "wrong approval wrote to the blank target"
 
     verified = json.loads(install(OPERATION, "apply", "--plan-digest", planned["plan_digest"]).stdout)
     assert verified["status"] == "Verified" and verified["plan"] == planned["plan"], verified
@@ -202,7 +212,7 @@ def boot_installed(args, work, target, receipt, operator, admin):
         shutil.copyfile(args.ovmf_dir / source, work / target_name)
 
     def sample():
-        with boot_native(work, target, vcpus=1) as console:
+        with boot_native(work, target, vcpus=1, disk_bus=args.target_bus, pace_commands=True) as console:
             console.login("psios", operator)
             assert console.run("sha256sum /psios-deployment.json").split()[0] == deployment["deployment_manifest_sha256"]
             state = check_state(console)
@@ -241,7 +251,7 @@ def exercise(args, work):
     assert sha(rejected) == blank
 
     def launch(port, serial_log):
-        return ubuntu_command(instance, target, rejected, port, serial_log)
+        return ubuntu_command(instance, target, rejected, port, serial_log, args.target_bus)
 
     with boot_ubuntu(instance, key, 1, launch=launch, readiness_timeout=600) as run:
         print("Ubuntu installer host provisioned from the verified Core package", flush=True)
@@ -249,13 +259,13 @@ def exercise(args, work):
         run("test -d /sys/firmware/efi")
         package = remote(run, "dpkg-query", "-W", "-f=${Version}", "psios-core").stdout.strip()
         assert package == manifest["package_version"], package
-        evidence = install_in_guest(run, args.tool_deb, work, image, receipt, source_digest, blank)
+        evidence = install_in_guest(run, args.tool_deb, work, image, receipt, source_digest, blank, args.target_bus)
         assert evidence["boot_id"] == ubuntu[2], evidence
     assert sha(image) == sha(target) == source_digest, "installed raw bytes differ after Ubuntu shutdown"
-    assert sha(rejected) == blank, "refused virtio device changed"
+    assert sha(rejected) == blank, "refused block device changed"
     authority, task = boot_installed(args, work, target, receipt, operator, admin)
     assert authority != ubuntu[0], "the installed raw disk reused the Ubuntu authority"
-    print(f"PASS default VirtioBlock {TARGET_SERIAL}, full raw image {source_digest}, "
+    print(f"PASS {evidence['transport']['kind']} {TARGET_SERIAL}, full raw image {source_digest}, "
           f"Ubuntu kernel disk sequence {evidence['disk_sequence']}, native Task {task} survived reboot")
 
 
@@ -266,6 +276,7 @@ def main():
     parser.add_argument("--archive", type=Path, required=True, help="authenticated portable Core archive")
     parser.add_argument("--archive-sha256", required=True, help="expected digest of the portable Core archive")
     parser.add_argument("--kernel-iso", type=Path, required=True, help="pinned kernel ISO")
+    parser.add_argument("--target-bus", choices=("virtio", "nvme"), default="virtio")
     parser.add_argument("--tool-deb", type=Path, action="append", default=[],
                         help="trusted offline Ubuntu tool or dependency package, repeat as needed")
     parser.add_argument("--ovmf-dir", type=Path, default=Path("/usr/share/OVMF"))
@@ -279,7 +290,7 @@ def main():
     if not (re.fullmatch(r"[0-9a-f]{64}", args.archive_sha256) and args.archive.is_file()
             and sha(args.archive) == args.archive_sha256):
         parser.error("portable Core archive differs from its expected SHA-256")
-    with tempfile.TemporaryDirectory(prefix="psios-native-virtio-") as work:
+    with tempfile.TemporaryDirectory(prefix=f"psios-native-install-{args.target_bus}-") as work:
         exercise(args, Path(work).resolve())
 
 

@@ -324,6 +324,15 @@ jobs:
               --dhcp-driver "$driver"
           done
 
+      - name: Keep IPv6 SLAAC active through IPv4 lease release and native upgrade
+        run: |
+          for driver in virtio e1000e; do
+            sudo unshare --net --propagation private runuser -u "$(id -un)" -- \
+              python3 -B tests/native_dhcp.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+              --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
+              --dhcp-driver "$driver" --dual-stack
+          done
+
       - name: Install and renew DHCPv4 classless routes over an isolated TAP
         run: |
           sudo unshare --net --propagation private \

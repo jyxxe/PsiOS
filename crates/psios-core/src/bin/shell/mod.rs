@@ -14,6 +14,7 @@ use hyper::{
     service::service_fn,
 };
 use hyper_util::rt::{TokioIo, TokioTimer};
+use observations::DeviceBus;
 use psios_api::{ApiError, ApiResult, Client, DeviceInventoryCursor, ResourceRef, parse};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -86,6 +87,7 @@ pub(super) struct Options {
     pub files: Option<VolumeAccess>,
     pub resolver_delegation: Option<String>,
     pub pci_delegation: Option<String>,
+    pub usb_delegation: Option<String>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -96,6 +98,7 @@ enum Endpoint {
     Node,
     NodeResolver,
     NodePci,
+    NodeUsb,
     Tasks,
     Applications,
     ApplicationReleases,
@@ -137,7 +140,7 @@ struct Page {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PciPageRequest {
+struct InventoryPageRequest {
     cursor: Option<DeviceInventoryCursor>,
 }
 
@@ -273,7 +276,7 @@ struct CancelPendingTask {
 enum CoreRequest {
     Call(&'static str, Value),
     NodeResolver(String),
-    NodePci(String, Option<DeviceInventoryCursor>),
+    NodeInventory(DeviceBus, String, Option<DeviceInventoryCursor>),
     Applications(Page),
     ApplicationReleases(ApplicationReleases),
     VolumeDirectory(files::Directory, VolumeAccess),
@@ -309,9 +312,9 @@ impl CoreRequest {
                 StatusCode::OK,
                 observations::resolver(client, &delegation, &check)?,
             )),
-            Self::NodePci(delegation, cursor) => Ok(json_response(
+            Self::NodeInventory(bus, delegation, cursor) => Ok(json_response(
                 StatusCode::OK,
-                observations::pci(client, &delegation, cursor, &check)?,
+                observations::inventory(client, &delegation, bus, cursor, &check)?,
             )),
             Self::VolumeDirectory(directory, access) => Ok(json_response(
                 StatusCode::OK,
@@ -919,10 +922,16 @@ fn rpc(endpoint: Endpoint, data: Value, options: &Options) -> Result<CoreRequest
                 options.resolver_delegation.clone().ok_or(INVALID)?,
             ))
         }
-        Endpoint::NodePci => {
-            let page: PciPageRequest = serde_json::from_value(data).map_err(|_| INVALID)?;
-            Ok(CoreRequest::NodePci(
-                options.pci_delegation.clone().ok_or(INVALID)?,
+        Endpoint::NodePci | Endpoint::NodeUsb => {
+            let page: InventoryPageRequest = serde_json::from_value(data).map_err(|_| INVALID)?;
+            let (bus, delegation) = if endpoint == Endpoint::NodePci {
+                (DeviceBus::Pci, &options.pci_delegation)
+            } else {
+                (DeviceBus::Usb, &options.usb_delegation)
+            };
+            Ok(CoreRequest::NodeInventory(
+                bus,
+                delegation.clone().ok_or(INVALID)?,
                 page.cursor,
             ))
         }
@@ -1079,6 +1088,7 @@ impl Shell {
                 Endpoint::NodeResolver
             }
             "/api/node-pci" if self.options.pci_delegation.is_some() => Endpoint::NodePci,
+            "/api/node-usb" if self.options.usb_delegation.is_some() => Endpoint::NodeUsb,
             "/api/tasks" => Endpoint::Tasks,
             "/api/applications" => Endpoint::Applications,
             "/api/application-releases" => Endpoint::ApplicationReleases,
@@ -1128,6 +1138,7 @@ impl Shell {
                 "manage_agent_sessions":self.options.manage_agent_sessions,
                 "observe_resolver":self.options.resolver_delegation.is_some(),
                 "observe_pci":self.options.pci_delegation.is_some(),
+                "observe_usb":self.options.usb_delegation.is_some(),
             });
             if let Some(files) = &self.options.files {
                 reply["browse_files"] = json!(true);

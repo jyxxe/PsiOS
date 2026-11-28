@@ -80,6 +80,28 @@
             </div>
             <div id="node-pci-meta"></div>
           </section>
+          <section id="node-usb" class="content-card" aria-labelledby="node-usb-title" hidden>
+            <h2 id="node-usb-title">USB 设备</h2>
+            <div class="pagination">
+              <button id="node-usb-read" type="button">读取首页</button>
+              <button id="node-usb-prev" type="button" disabled>上一页</button>
+              <button id="node-usb-next" type="button" disabled>下一页</button>
+            </div>
+            <p id="node-usb-status" class="message" role="status"></p>
+            <div class="table-panel">
+              <table id="node-usb-table" aria-labelledby="node-usb-title" hidden>
+                <thead>
+                  <tr>
+                    <th scope="col">接入位置</th><th scope="col">总线和地址</th>
+                    <th scope="col">厂商和产品</th><th scope="col">类别</th>
+                    <th scope="col">速率</th><th scope="col">内核授权</th>
+                  </tr>
+                </thead>
+                <tbody id="node-usb-rows"></tbody>
+              </table>
+            </div>
+            <div id="node-usb-meta"></div>
+          </section>
         </div>
       </section>
       <section id="window-tasks" class="app-window" aria-labelledby="title-tasks" hidden>

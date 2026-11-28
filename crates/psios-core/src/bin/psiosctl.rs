@@ -74,6 +74,9 @@ enum Cmd {
         /// Allow the paired browser to observe PCI devices with this exact Node delegation.
         #[arg(long, value_name = "DELEGATION_ID")]
         pci_delegation: Option<String>,
+        /// Allow the paired browser to observe USB devices with this exact Node delegation.
+        #[arg(long, value_name = "DELEGATION_ID")]
+        usb_delegation: Option<String>,
     },
     Status {
         #[arg(long, default_value = "owner-delegation")]
@@ -933,6 +936,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             files_preview,
             resolver_delegation,
             pci_delegation,
+            usb_delegation,
         } => {
             return shell::run(
                 c,
@@ -950,6 +954,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         }),
                     resolver_delegation,
                     pci_delegation,
+                    usb_delegation,
                 },
             );
         }

@@ -18,6 +18,7 @@ pub use backup::{BackupChunk, BackupMember, BackupMemberReceipt};
 pub use device_inventory::{
     BlockInventoryCursor, BlockInventoryQuery, DeviceInventoryCursor, DeviceInventoryQuery,
     MAX_BLOCK_INVENTORY_PAGE, MAX_DEVICE_INVENTORY_PAGE, MAX_PCI_INVENTORY_ROWS,
+    MAX_USB_INVENTORY_ROWS,
 };
 pub use mcp::{
     LocalReadBinding, LocalReadTool, LocalReadToolsRequest, MAX_LOCAL_READ_BINDINGS,

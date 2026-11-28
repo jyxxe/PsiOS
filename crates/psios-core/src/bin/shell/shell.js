@@ -21,14 +21,15 @@ const resolver = byId("node-resolver");
 const resolverRead = byId("node-resolver-read");
 const resolverNotice = byId("node-resolver-status");
 const resolverView = byId("node-resolver-view");
-const pciPanel = byId("node-pci");
-const pciRead = byId("node-pci-read");
-const pciPrevious = byId("node-pci-prev");
-const pciNext = byId("node-pci-next");
-const pciNotice = byId("node-pci-status");
-const pciTable = byId("node-pci-table");
-const pciRows = byId("node-pci-rows");
-const pciMeta = byId("node-pci-meta");
+const pci = inventoryView("node-pci", device => [
+  device.address, device.vendor_id + " / " + device.device_id, device.class_code,
+  device.driver ?? "未绑定", device.parent_address ?? "—",
+], "当前未发现 PCI 设备。");
+const usb = inventoryView("node-usb", device => [
+  device.location, device.bus_number + ":" + device.device_address, device.vendor_id + " / " + device.product_id,
+  device.class_code, device.speed_mbps === null ? "—" : device.speed_mbps + " Mb/s",
+  device.authorized ? "已授权" : "未授权",
+], "当前未发现 USB 设备。");
 const taskRows = byId("task-rows");
 const taskDetail = byId("task-detail");
 const taskContent = byId("task-content");
@@ -50,9 +51,6 @@ let maximized = null;
 let recentApps = [];
 let nodeUpdate = 0;
 let resolverUpdate = 0;
-let pciUpdate = 0;
-let pciCursors = [null];
-let pciNextCursor = null;
 let taskUpdate = 0;
 let detailUpdate = 0;
 let cursors = [null];
@@ -78,8 +76,8 @@ function leave(text, error = false) {
   canCancelPending = false;
   resolver.hidden = true;
   clearResolver();
-  pciPanel.hidden = true;
-  clearPci();
+  pci.setVisible(false);
+  usb.setVisible(false);
   launcher.close();
   launcherQuery.value = "";
   launcherApps.replaceChildren();
@@ -561,48 +559,70 @@ async function loadResolver() {
   }
 }
 
-function clearPci() {
-  pciUpdate += 1;
-  pciCursors = [null];
-  pciNextCursor = null;
-  pciRead.disabled = false;
-  pciPrevious.disabled = pciNext.disabled = true;
-  pciTable.hidden = true;
-  pciRows.replaceChildren();
-  pciMeta.replaceChildren();
-  message(pciNotice, "");
-}
+function inventoryView(prefix, columns, empty) {
+  const panel = byId(prefix);
+  const read = byId(prefix + "-read");
+  const prev = byId(prefix + "-prev");
+  const next = byId(prefix + "-next");
+  const notice = byId(prefix + "-status");
+  const table = byId(prefix + "-table");
+  const rows = byId(prefix + "-rows");
+  const meta = byId(prefix + "-meta");
+  let update = 0;
+  let cursors = [null];
+  let nextCursor = null;
 
-async function loadPci(page = [null]) {
-  clearPci();
-  const revision = pciUpdate;
-  pciRead.disabled = true;
-  message(pciNotice, "正在读取…");
-  try {
-    const result = await request("/api/node-pci", { cursor: page.at(-1) });
-    if (revision !== pciUpdate) return;
-    for (const device of result.devices) {
-      const row = element("tr");
-      const address = element("th", device.address, "mono");
-      address.scope = "row";
-      row.append(address, element("td", device.vendor_id + " / " + device.device_id, "mono"),
-        element("td", device.class_code, "mono"), element("td", device.driver ?? "未绑定", "mono"),
-        element("td", device.parent_address ?? "—", "mono"));
-      pciRows.append(row);
-    }
-    pciTable.hidden = result.devices.length === 0;
-    pciMeta.append(fields([["观测时间", result.observed_at], ["启动 ID", result.boot_id, true]]));
-    pciCursors = page;
-    pciNextCursor = result.next_cursor;
-    pciPrevious.disabled = page.length <= 1;
-    pciNext.disabled = pciNextCursor === null;
-    message(pciNotice, result.devices.length ? "" : "当前未发现 PCI 设备。");
-  } catch (error) {
-    if (revision !== pciUpdate) return;
-    message(pciNotice, error.code === "ResyncRequired" ? "设备已变化，请重新读取首页。" : error.message, true);
-  } finally {
-    if (revision === pciUpdate) pciRead.disabled = false;
+  function clear() {
+    update += 1;
+    cursors = [null];
+    nextCursor = null;
+    read.disabled = false;
+    prev.disabled = next.disabled = true;
+    table.hidden = true;
+    rows.replaceChildren();
+    meta.replaceChildren();
+    message(notice, "");
   }
+
+  async function load(page = [null]) {
+    clear();
+    const revision = update;
+    read.disabled = true;
+    message(notice, "正在读取…");
+    try {
+      const result = await request("/api/" + prefix, { cursor: page.at(-1) });
+      if (revision !== update) return;
+      for (const device of result.devices) {
+        const [location, ...values] = columns(device);
+        const row = element("tr");
+        const label = element("th", location, "mono");
+        label.scope = "row";
+        row.append(label, ...values.map(value => element("td", value, "mono")));
+        rows.append(row);
+      }
+      table.hidden = result.devices.length === 0;
+      meta.append(fields([["观测时间", result.observed_at], ["启动 ID", result.boot_id, true]]));
+      cursors = page;
+      nextCursor = result.next_cursor;
+      prev.disabled = page.length <= 1;
+      next.disabled = nextCursor === null;
+      message(notice, result.devices.length ? "" : empty);
+    } catch (error) {
+      if (revision === update) {
+        message(notice, error.code === "ResyncRequired" ? "设备已变化，请重新读取首页。" : error.message, true);
+      }
+    } finally {
+      if (revision === update) read.disabled = false;
+    }
+  }
+
+  read.addEventListener("click", () => load());
+  prev.addEventListener("click", () => load(cursors.slice(0, -1)));
+  next.addEventListener("click", () => load([...cursors, nextCursor]));
+  return { clear, setVisible(visible) {
+    panel.hidden = !visible;
+    if (!visible) clear();
+  } };
 }
 
 function clearTaskView() {
@@ -770,7 +790,8 @@ function showWindow(id, app, shown) {
     nodeUpdate += 1;
     nodeView.replaceChildren();
     clearResolver();
-    clearPci();
+    pci.clear();
+    usb.clear();
   } else if (id === "tasks") {
     taskUpdate += 1;
     clearTaskView();
@@ -967,7 +988,8 @@ byId("pair-form").addEventListener("submit", async (event) => {
     canCancelPending = session.cancel_pending_tasks === true;
     files.capability(session.browse_files === true, session.preview_files === true);
     resolver.hidden = session.observe_resolver !== true;
-    pciPanel.hidden = session.observe_pci !== true;
+    pci.setVisible(session.observe_pci === true);
+    usb.setVisible(session.observe_usb === true);
     chat.capability(session.send_chat === true);
     projects.setReviewer(session.review_work_items === true ? session.principal_id : null);
     agentRuntime.capability(session.manage_agent_sessions === true);
@@ -986,9 +1008,6 @@ byId("pair-form").addEventListener("submit", async (event) => {
 });
 
 resolverRead.addEventListener("click", loadResolver);
-pciRead.addEventListener("click", () => loadPci());
-pciPrevious.addEventListener("click", () => loadPci(pciCursors.slice(0, -1)));
-pciNext.addEventListener("click", () => loadPci([...pciCursors, pciNextCursor]));
 
 byId("close-task").addEventListener("click", () => {
   const current = taskRows.querySelector('button[aria-pressed="true"]');

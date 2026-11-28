@@ -959,6 +959,8 @@ jobs:
             trap "rm -f \"$fixture\"" EXIT
             mount --bind "$fixture" /etc/resolv.conf
             python3 -B tests/network_resolver.py --fixture "$fixture" --previous-bin-dir "$1"
+            PSIOS_TEST_RESOLVER_FIXTURE="$fixture" python3 -B -m unittest discover -s tests \
+              -p test_mcp_tasks.py -k test_resolver_diagnostic -v
           ' psios-resolver "$RUNNER_TEMP/psios-compatibility-target/debug"
   oci-archive:
     runs-on: ubuntu-24.04

@@ -120,7 +120,8 @@ class Console:
 @contextmanager
 def boot(work, image, network_mac=None, extra_disk=None, tap=None, *, rtc_base=None,
          disk_format="raw", vars_file="vars.fd", vcpus=2, pace_commands=False,
-         disk_bus="virtio", extra_bus="virtio", network_model="virtio-net-pci", ssh_port=None):
+         disk_bus="virtio", extra_bus="virtio", network_model="virtio-net-pci",
+         ipv6_network=None, ssh_port=None):
     # The privileged TAP fixture has a reproducible serial stall on hosted KVM.
     # Use a portable CPU emulator for that fixture; keep its real virtio and TAP.
     accel = "kvm" if tap is None and os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
@@ -143,6 +144,8 @@ def boot(work, image, network_mac=None, extra_disk=None, tap=None, *, rtc_base=N
     if network_mac:
         network = (f"tap,id=network,ifname={tap},script=no,downscript=no" if tap
                    else "user,id=network,net=192.0.2.0/24,dhcpstart=192.0.2.20")
+        if ipv6_network is not None:
+            network += f",ipv6-net={ipv6_network}"
         if ssh_port is not None:
             network += f",hostfwd=tcp:127.0.0.1:{ssh_port}-192.0.2.20:22"
         cmd += ["-netdev", network,

@@ -161,6 +161,12 @@ jobs:
             python3 tests/native_dhcp_routes.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
             --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
 
+      - name: Configure an e1000e static dual-stack link and preserve it through an offline upgrade
+        run: |
+          sudo unshare --net --propagation private runuser -u "$(id -un)" -- \
+            python3 -B tests/native_static_e1000e.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+
       - name: Bind one native system disk and refuse duplicate or split filesystems
         run: |
           python3 tests/native_storage.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \

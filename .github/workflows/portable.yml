@@ -25,6 +25,7 @@ jobs:
           tar -xzf "$RUNNER_TEMP/psios-core-linux-amd64.tar.gz"
           sha256sum --strict --check SHA256SUMS
           test "$(cat source-commit)" = "$GITHUB_SHA"
+          python3 -B "$GITHUB_WORKSPACE/tools/lib/portable_build_inputs.py" "$GITHUB_WORKSPACE" "$GITHUB_SHA" build-inputs.json
           docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
             --user 65534:65534 --tmpfs /tmp:rw,nosuid,nodev,size=128m,mode=1777 \
             --mount "type=bind,src=$PWD,dst=/core,readonly" \

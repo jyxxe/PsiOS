@@ -23,10 +23,10 @@ from support import Node, key, target
 
 
 class Shell:
-    def __init__(self, node, token_file, endpoint=None, *, cancel_pending=False):
+    def __init__(self, node, token_file, endpoint=None, *, cancel_pending=False, send_chat=False):
         self.process = subprocess.Popen(
             [node.binaries / "psiosctl", "--socket", endpoint or node.socket, "--token-file", token_file, "shell",
-             *(["--cancel-pending-tasks"] if cancel_pending else [])],
+             *(["--cancel-pending-tasks"] if cancel_pending else []), *(["--send-chat"] if send_chat else [])],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
         )
         try:
@@ -88,8 +88,9 @@ class ShellTests(unittest.TestCase):
         self.node = Node(os.environ.get("PSIOS_TEST_BIN_DIR", "target/debug"))
         self.addCleanup(self.node.close)
 
-    def shell(self, token_file=None, *, cancel_pending=False):
-        shell = Shell(self.node, token_file or self.node.witness / "owner.token", cancel_pending=cancel_pending)
+    def shell(self, token_file=None, *, cancel_pending=False, send_chat=False):
+        shell = Shell(self.node, token_file or self.node.witness / "owner.token",
+                      cancel_pending=cancel_pending, send_chat=send_chat)
         self.addCleanup(shell.close)
         return shell
 
@@ -107,7 +108,8 @@ class ShellTests(unittest.TestCase):
         self.error(shell, 403, "PermissionDenied", "/api/conversations", data={}, token=token)
         self.error(shell, 400, "InvalidArgument", "/api/conversation-messages",
                    data={"id": "room-test", "limit": 32}, token=token)
-        self.error(shell, 404, "NotFound", "/api/conversation-send", data={}, token=token)
+        self.error(shell, 404, "NotFound", "/api/chat-prepare", data={}, token=token)
+        self.error(shell, 404, "NotFound", "/api/chat-send", data={}, token=token)
 
     @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
     def test_browser_reads_agent_chat_and_removes_an_ended_membership(self):
@@ -171,6 +173,84 @@ class ShellTests(unittest.TestCase):
                 finally:
                     if browser.poll() is None:
                         browser.kill()
+
+    def chat_sender(self):
+        actor, grant = self.node.agent(["chat.invite", "chat.read", "chat.send"])
+        room = self.node.call("Conversation.OpenRoom",
+                              {"key": key(), "name": "现场交接", "capacity": 2, "ttl_seconds": 240},
+                              actor["token"])
+        token_file = self.node.base / "chat-writer.token"
+        token_file.touch(mode=0o600)
+        token_file.write_text(actor["token"])
+        return actor, grant, room["id"], token_file
+
+    def test_chat_send_requires_explicit_enable_and_rechecks_the_core_grant(self):
+        actor, grant, room, identity = self.chat_sender()
+        shell = self.shell(identity, send_chat=True)
+        session = shell.pair()
+        self.assertTrue(session["send_chat"])
+        token = session["token"]
+        text = '"' * 4096
+        self.error(shell, 400, "InvalidArgument", "/api/chat-prepare",
+                   data={"id": room, "text": text + "x"}, token=token)
+        self.error(shell, 413, "InvalidArgument", "/api/chat-prepare",
+                   data={"id": room, "text": "x" * 13000}, token=token)
+        code, _, draft = shell.http("/api/chat-prepare", {"id": room, "text": text}, token)
+        self.assertEqual(code, 200)
+        self.assertEqual(draft["prepared"]["content"]["parts"][0]["text"], text)
+        accepted_status, _, accepted = shell.http("/api/chat-send", draft, token)
+        self.assertEqual(accepted_status, 200)
+        self.assertFalse(accepted["deduplicated"])
+        response, _, replayed = shell.http("/api/chat-send", draft, token)
+        self.assertEqual(response, 200)
+        self.assertEqual(replayed, dict(accepted, deduplicated=True))
+        items = self.node.call("Message.List", {"id": room}, actor["token"])["items"]
+        self.assertEqual([item["content"]["parts"][0]["text"] for item in items], [text])
+
+        code, _, another = shell.http("/api/chat-prepare", {"id": room, "text": "still pending"}, token)
+        self.assertEqual(code, 200)
+        self.node.call("Grant.Revoke", target(grant["grant_ref"]))
+        self.error(shell, 403, "PermissionDenied", "/api/chat-send", data=another, token=token)
+        self.node.call("Grant.Issue", {"principal_id": actor["principal_id"], "actions": ["chat.read"],
+                                      "units": 1, "ttl_seconds": 120})
+        items = self.node.call("Message.List", {"id": room}, actor["token"])["items"]
+        self.assertEqual(len(items), 1)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
+    def test_browser_chat_retries_only_the_same_send_after_a_lost_receipt(self):
+        actor, _, room, identity = self.chat_sender()
+        proxy = self.node.base / "chat-reply.sock"
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener, ThreadPoolExecutor(max_workers=1) as pool:
+            listener.bind(str(proxy))
+            listener.settimeout(16)
+            listener.listen()
+            methods = ["Principal.WhoAmI", "Conversation.List", "Message.List",
+                       "Message.OpenSendWindow", "Message.Prepare", "Message.Send", "Message.Send", "Message.List"]
+            relaying = pool.submit(self.relay, listener, methods, drop="Message.Send")
+            shell = Shell(self.node, identity, proxy, send_chat=True)
+            self.addCleanup(shell.close)
+            parent, child = socket.socketpair()
+            with parent, child:
+                parent.settimeout(30)
+                args = dict(origin=shell.origin, code=shell.code, chatSend=True, conversation=room,
+                            profile=str(self.node.base / "browser"), control_fd=child.fileno())
+                with subprocess.Popen(["node", str(Path(__file__).with_name("shell_browser.mjs")),
+                                       os.environ.get("PSIOS_TEST_CHROME", "google-chrome")],
+                                      stdin=subprocess.PIPE, pass_fds=(child.fileno(),)) as browser:
+                    child.close()
+                    try:
+                        browser.stdin.write(json.dumps(args).encode())
+                        browser.stdin.close()
+                        self.assertEqual(parent.recv(1), b"R")
+                        committed = self.node.call("Message.List", {"id": room}, actor["token"])["items"]
+                        self.assertEqual(len(committed), 1)
+                        parent.sendall(b"K")
+                        self.assertEqual(browser.wait(timeout=35), 0)
+                    finally:
+                        if browser.poll() is None:
+                            browser.kill()
+            relaying.result(timeout=5)
+        self.assertEqual(self.node.call("Message.List", {"id": room}, actor["token"])["items"], committed)
 
     def test_application_catalog_only_exposes_its_fixed_queries(self):
         shell = self.shell()
@@ -699,7 +779,9 @@ class ShellTests(unittest.TestCase):
                 if method == hold:
                     waiting.set()
                     self.assertTrue(release.wait(8))
-                if method != drop:
+                if method == drop:
+                    drop = None
+                else:
                     peer.sendall(response)
 
     def test_lost_cancellation_reply_is_resolved_by_reading_the_task(self):

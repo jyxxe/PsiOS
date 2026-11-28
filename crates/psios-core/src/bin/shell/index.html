@@ -130,6 +130,15 @@
                 <button id="chat-history-previous" type="button">较早消息</button>
                 <button id="chat-history-next" type="button">较新消息</button>
               </div>
+              <form id="chat-composer" class="chat-composer" hidden>
+                <label for="chat-draft">消息</label>
+                <textarea id="chat-draft" rows="3" maxlength="4096" required></textarea>
+                <p id="chat-send-status" class="message" role="status"></p>
+                <div class="chat-send-buttons">
+                  <button id="chat-send" class="primary" type="submit">发送</button>
+                  <button id="chat-forget" type="button" hidden>清除待确认内容</button>
+                </div>
+              </form>
             </section>
           </div>
         </div>

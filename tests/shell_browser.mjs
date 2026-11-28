@@ -156,6 +156,33 @@ async function test() {
   await waitFor("paired desktop", '!document.querySelector("#workspace").hidden && !document.querySelector("#empty-desktop").hidden');
   assert.ok(await evaluate('document.activeElement.id === "nav-node" && document.querySelectorAll(".app-window:not([hidden])").length === 0'));
   assert.ok(!requests.some(url => ["/api/node", "/api/tasks"].includes(new URL(url).pathname)));
+  if (input.chatSend) {
+    await click("#nav-chat");
+    await waitFor("writable conversation", 'document.querySelector("#chat-rows button") !== null');
+    await click('#chat-rows button[data-conversation-id="' + input.conversation + '"]');
+    await waitFor("enabled composer", '!document.querySelector("#chat-composer").hidden');
+    await evaluate('document.querySelector("#chat-draft").value = "唯一一条交接消息"');
+    await click("#chat-send");
+    await waitFor("lost send receipt", 'document.querySelector("#chat-send-status").textContent.includes("待核实")');
+    assert.ok(await evaluate('document.querySelector("#chat-draft").readOnly && ' +
+      'document.querySelector("#chat-send").textContent === "核对并重试"'));
+    writeSync(input.control_fd, Buffer.from("R"));
+    const signal = Buffer.alloc(1);
+    assert.equal(readSync(input.control_fd, signal), 1);
+    assert.equal(signal.toString(), "K");
+    const count = path => requests.filter(url => new URL(url).pathname === path).length;
+    assert.equal(count("/api/chat-send"), 1);
+    await click("#chat-send");
+    await waitFor("authoritative send after retry", 'document.querySelector("#chat-send-status").textContent === "已记录发送回执。" && ' +
+      'document.querySelector(".chat-entry p")?.textContent === "唯一一条交接消息"');
+    assert.equal(count("/api/chat-prepare"), 1);
+    assert.equal(count("/api/chat-send"), 2);
+    assert.ok(await evaluate('document.querySelectorAll(".chat-entry").length === 1 && !document.querySelector("#chat-draft").value'));
+    await click("#logout");
+    await waitFor("closed Chat session", 'document.querySelector("#workspace").hidden');
+    assert.deepEqual(exceptions, []);
+    return;
+  }
   if (input.chat) {
     await click("#nav-chat");
     await waitFor("first conversation directory page", 'document.querySelectorAll("#chat-rows button").length === 12');
@@ -168,6 +195,7 @@ async function test() {
     await waitFor("room on second directory page again", 'document.querySelector("#chat-rows button")?.textContent === "现场排查"');
     await click('#chat-rows button[data-conversation-id="' + input.conversation + '"]');
     await waitFor("first permitted message page", 'document.querySelectorAll(".chat-entry").length === 16');
+    assert.ok(await evaluate('document.querySelector("#chat-composer").hidden'));
     assert.ok(await evaluate('document.activeElement.id === "chat-detail" && ' +
       'document.querySelector(".chat-entry p").textContent === "现场记录 1\\n<em>以文字显示</em>" && ' +
       '!document.querySelector(".chat-entry em")'));

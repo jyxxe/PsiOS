@@ -35,6 +35,8 @@ use tokio::{
 const CONNECTIONS: usize = 12;
 const CORE_CALLS: usize = 4;
 const BODY_LIMIT: usize = 4 * 1024;
+const CHAT_BODY_LIMIT: usize = 12 * 1024;
+const CHAT_TEXT_BYTES: usize = 4 * 1024;
 const HEADER_WAIT: Duration = Duration::from_secs(3);
 const BODY_WAIT: Duration = Duration::from_secs(2);
 const CORE_WAIT: Duration = Duration::from_secs(16);
@@ -68,6 +70,7 @@ struct Shell {
     origin: String,
     principal: String,
     cancel_pending_tasks: bool,
+    send_chat: bool,
     client: Client,
     session: Mutex<Session>,
     rpc_slots: Arc<Semaphore>,
@@ -84,6 +87,8 @@ enum Endpoint {
     ApplicationReleases,
     Conversations,
     ConversationMessages,
+    PrepareChatMessage,
+    SendChatMessage,
     Task,
     TaskHistory,
     TaskArtifact,
@@ -124,6 +129,19 @@ struct Conversations {
 struct ConversationMessages {
     id: String,
     cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChatDraft {
+    id: String,
+    text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreparedChatMessage {
+    prepared: Value,
 }
 
 #[derive(Deserialize)]
@@ -176,6 +194,8 @@ enum CoreRequest {
     ApplicationReleases(ApplicationReleases),
     Conversations(Conversations),
     ConversationMessages(ConversationMessages),
+    PrepareChatMessage(ChatDraft),
+    SendChatMessage(PreparedChatMessage),
     Artifact(TaskArtifact),
     CancelPending(CancelPendingTask),
 }
@@ -318,6 +338,43 @@ impl CoreRequest {
                     json!({"items":items,"next_cursor":next}),
                 ))
             }
+            Self::PrepareChatMessage(draft) => {
+                if draft.text.is_empty() || draft.text.len() > CHAT_TEXT_BYTES {
+                    return Err(ApiError::new(
+                        "InvalidArgument",
+                        "message must contain 1 to 4096 UTF-8 bytes",
+                    )
+                    .into());
+                }
+                let window = client.call(
+                    "Message.OpenSendWindow",
+                    json!({"id":draft.id,"ttl_seconds":120}),
+                )?;
+                let namespace = window["namespace"].as_str().ok_or_else(|| {
+                    ApiError::new(
+                        "RecoveryRequired",
+                        "Core returned no message send namespace",
+                    )
+                })?;
+                check()?;
+                let key = format!("{namespace}:{}", uuid::Uuid::new_v4().simple());
+                let prepared = client.call(
+                    "Message.Prepare",
+                    json!({"conversation_id":draft.id,"client_send_id":key,"text":draft.text}),
+                )?;
+                Ok(json_response(StatusCode::OK, json!({"prepared":prepared})))
+            }
+            Self::SendChatMessage(request) => {
+                let receipt = client.call("Message.Send", request.prepared)?;
+                Ok(json_response(
+                    StatusCode::OK,
+                    json!({
+                        "message_id":receipt["message_id"],
+                        "accepted_at":receipt["accepted_at"],
+                        "deduplicated":receipt["deduplicated"],
+                    }),
+                ))
+            }
             Self::CancelPending(request) => {
                 let task = client.call("Task.Get", json!({"id":request.id}))?;
                 if task["task_revision"] != request.expected_resource_version {
@@ -434,7 +491,7 @@ fn file(path: &str) -> Option<HttpResponse> {
     Some(response(StatusCode::OK, mime, Bytes::from_static(contents)))
 }
 
-async fn body(request: Request<Incoming>) -> Result<Value, Fault> {
+async fn body(request: Request<Incoming>, limit: usize) -> Result<Value, Fault> {
     if single(request.headers(), header::CONTENT_TYPE.as_str()) != Some("application/json") {
         return Err(Fault(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -442,7 +499,7 @@ async fn body(request: Request<Incoming>) -> Result<Value, Fault> {
             "需要 JSON 请求",
         ));
     }
-    let limited = Limited::new(request.into_body(), BODY_LIMIT);
+    let limited = Limited::new(request.into_body(), limit);
     let bytes = timeout(BODY_WAIT, limited.collect())
         .await
         .map_err(|_| {
@@ -490,6 +547,12 @@ fn rpc(endpoint: Endpoint, data: Value) -> Result<CoreRequest, Fault> {
             serde_json::from_value(data).map_err(|_| INVALID)?,
         )),
         Endpoint::ConversationMessages => Ok(CoreRequest::ConversationMessages(
+            serde_json::from_value(data).map_err(|_| INVALID)?,
+        )),
+        Endpoint::PrepareChatMessage => Ok(CoreRequest::PrepareChatMessage(
+            serde_json::from_value(data).map_err(|_| INVALID)?,
+        )),
+        Endpoint::SendChatMessage => Ok(CoreRequest::SendChatMessage(
             serde_json::from_value(data).map_err(|_| INVALID)?,
         )),
         Endpoint::Task => {
@@ -587,6 +650,8 @@ impl Shell {
             "/api/application-releases" => Endpoint::ApplicationReleases,
             "/api/conversations" => Endpoint::Conversations,
             "/api/conversation-messages" => Endpoint::ConversationMessages,
+            "/api/chat-prepare" if self.send_chat => Endpoint::PrepareChatMessage,
+            "/api/chat-send" if self.send_chat => Endpoint::SendChatMessage,
             "/api/task" => Endpoint::Task,
             "/api/cancel-pending-task" if self.cancel_pending_tasks => Endpoint::CancelPendingTask,
             "/api/task-history" => Endpoint::TaskHistory,
@@ -594,7 +659,8 @@ impl Shell {
             _ => return Err(Fault(StatusCode::NOT_FOUND, "NotFound", "操作不存在")),
         };
         if endpoint == Endpoint::Pair {
-            let pair: Pair = serde_json::from_value(body(request).await?).map_err(|_| INVALID)?;
+            let pair: Pair =
+                serde_json::from_value(body(request, BODY_LIMIT).await?).map_err(|_| INVALID)?;
             let token = session::secret().map_err(|_| UNAVAILABLE)?;
             let mut session = self.session.lock().map_err(|_| UNAVAILABLE)?;
             if !session.pair(&pair.code, &token, now()) {
@@ -602,7 +668,7 @@ impl Shell {
             }
             return Ok(json_response(
                 StatusCode::OK,
-                json!({"token":token,"principal_id":self.principal,"cancel_pending_tasks":self.cancel_pending_tasks}),
+                json!({"token":token,"principal_id":self.principal,"cancel_pending_tasks":self.cancel_pending_tasks,"send_chat":self.send_chat}),
             ));
         }
 
@@ -611,7 +677,8 @@ impl Shell {
             .ok_or(UNAUTHENTICATED)?
             .to_owned();
         if endpoint == Endpoint::ObserveEnd {
-            let _: Empty = serde_json::from_value(body(request).await?).map_err(|_| INVALID)?;
+            let _: Empty =
+                serde_json::from_value(body(request, BODY_LIMIT).await?).map_err(|_| INVALID)?;
             let end = {
                 let mut session = self.session.lock().map_err(|_| UNAVAILABLE)?;
                 if !session.accepts(&token, now()) {
@@ -630,7 +697,15 @@ impl Shell {
         if !self.authorized(&token) {
             return Err(UNAUTHENTICATED);
         }
-        let data = body(request).await?;
+        let limit = if matches!(
+            endpoint,
+            Endpoint::PrepareChatMessage | Endpoint::SendChatMessage
+        ) {
+            CHAT_BODY_LIMIT
+        } else {
+            BODY_LIMIT
+        };
+        let data = body(request, limit).await?;
         if endpoint == Endpoint::Logout {
             let _: Empty = serde_json::from_value(data).map_err(|_| INVALID)?;
             let mut session = self.session.lock().map_err(|_| UNAVAILABLE)?;
@@ -691,6 +766,7 @@ impl Shell {
 pub(super) fn run(
     client: Client,
     cancel_pending_tasks: bool,
+    send_chat: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = client.call("Principal.WhoAmI", json!({}))?;
     let principal = identity["principal_id"]
@@ -704,7 +780,13 @@ pub(super) fn run(
         .enable_all()
         .max_blocking_threads(CORE_CALLS)
         .build()?;
-    let result = runtime.block_on(serve(client, principal, cancel_pending_tasks, stop));
+    let result = runtime.block_on(serve(
+        client,
+        principal,
+        cancel_pending_tasks,
+        send_chat,
+        stop,
+    ));
     runtime.shutdown_timeout(Duration::from_secs(1));
     result.map_err(Into::into)
 }
@@ -713,6 +795,7 @@ async fn serve(
     client: Client,
     principal: String,
     cancel_pending_tasks: bool,
+    send_chat: bool,
     stop: Arc<AtomicBool>,
 ) -> io::Result<()> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
@@ -724,6 +807,7 @@ async fn serve(
         origin: origin.clone(),
         principal,
         cancel_pending_tasks,
+        send_chat,
         client,
         session: Mutex::new(Session::new(&code, now())?),
         rpc_slots: Arc::new(Semaphore::new(CORE_CALLS)),

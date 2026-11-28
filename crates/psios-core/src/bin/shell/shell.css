@@ -144,6 +144,14 @@ input {
 .chat-entry { padding: .75rem; border: 1px solid var(--border); border-radius: .5rem; overflow-wrap: anywhere; }
 .chat-entry time { display: block; color: var(--muted); font-size: .85rem; margin: .2rem 0 .5rem; }
 .chat-entry p { white-space: pre-wrap; }
+.chat-composer { display: grid; gap: .55rem; border-top: 1px solid var(--border); padding-top: .75rem; }
+.chat-composer textarea {
+  resize: vertical; width: 100%; min-width: 0; font: inherit; color: var(--text);
+  background: var(--background); border: 1px solid var(--border); border-radius: .45rem; padding: .6rem .75rem;
+}
+.chat-composer .message:empty { display: none; }
+.chat-send-buttons { display: flex; flex-wrap: wrap; gap: .5rem; }
+
 .dock button::before { content: ""; width: .55rem; height: .55rem; border-radius: 50%; border: 1px solid var(--muted); }
 .dock button[data-state="open"]::before { border-color: var(--accent); background: var(--accent); }
 .dock button[data-state="minimized"]::before { border-color: var(--accent); border-radius: 0; height: .15rem; }

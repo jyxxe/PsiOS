@@ -5,14 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 
 [features]
-local-inference = ["dep:http-body-util", "dep:hyper", "dep:hyper-util", "dep:tokio"]
+local-inference = ["dep:http-body-util", "dep:hyper", "dep:hyper-util", "dep:nix", "dep:tokio"]
 
 [dependencies]
 base64 = "0.22"
 http-body-util = { version = "0.1", optional = true }
 hyper = { version = "1", features = ["client", "http1"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio"], optional = true }
-tokio = { version = "1", features = ["rt", "net", "time", "io-util"], optional = true }
+tokio = { version = "1", features = ["rt", "net", "time", "io-util", "sync"], optional = true }
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 sha2.workspace = true
@@ -22,3 +22,6 @@ ryu-js = "0.2"
 rustix = { version = "1", features = ["fs", "net", "process", "time"] }
 chrono = "0.4"
 zeroize = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.31.4", default-features = false, features = ["socket"], optional = true }

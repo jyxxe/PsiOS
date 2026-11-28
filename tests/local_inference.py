@@ -47,7 +47,7 @@ def ready(server, path):
     raise AssertionError("inference server readiness timeout")
 
 
-def exercise(node, endpoint, work, *, metered):
+def exercise(node, endpoint, work, *, metered, server_digest=None):
     provider = node.call("Agent.Register", {"name": "local-cpu-inference"})
     agent = node.call("Agent.Register", {"name": "local-inventory"})
     node.call("Grant.Issue", dict(principal_id=provider["principal_id"], actions=["model.serve"], units=1, ttl_seconds=300))
@@ -61,6 +61,8 @@ def exercise(node, endpoint, work, *, metered):
                      license="MIT", source="operator"))
     config = dict(socket=str(endpoint), server_uid=os.geteuid(), model_ref=model, model_alias="psios-small",
                   max_tokens=GENERATION_TOKENS, timeout_ms=30000)
+    if server_digest is not None:
+        config["server_executable_sha256"] = server_digest
     cfg = work / "local-model.json"
     credential = work / "provider.token"
     credential.write_text(provider["token"])
@@ -88,7 +90,9 @@ def exercise(node, endpoint, work, *, metered):
     stalled.listen()
     try:
         sid = start()
-        timed = step(sid, dict(config, socket=str(work / "stalled.sock"), timeout_ms=250))
+        stalled_config = dict(config, socket=str(work / "stalled.sock"), timeout_ms=250)
+        stalled_config.pop("server_executable_sha256", None)
+        timed = step(sid, stalled_config)
         assert timed.returncode != 0 and "DeadlineExceeded" in timed.stderr, timed.stderr
         assert not node.call("Session.History", {"id": sid}, agent["token"])["tasks"]
         current = node.call("Session.Get", {"id": sid}, agent["token"])
@@ -170,9 +174,14 @@ if __name__ == "__main__":
     for flag in ("--bin-dir", "--server", "--weights"):
         parser.add_argument(flag, type=Path, required=True)
     parser.add_argument("--legacy-unmetered", action="store_true", help="expect a pre-metering authority with the current CLI")
+    parser.add_argument("--verify-executable", action="store_true", help="pin the actual model server executable")
     args = parser.parse_args()
     with args.weights.open("rb") as f:
         assert hashlib.file_digest(f, "sha256").hexdigest() == PINS["model"]["sha256"]
+    server_digest = None
+    if args.verify_executable:
+        with args.server.open("rb") as f:
+            server_digest = hashlib.file_digest(f, "sha256").hexdigest()
     with tempfile.TemporaryDirectory(prefix="psios-local-model-") as tmp:
         work = Path(tmp)
         endpoint = work / "inference.sock"
@@ -184,7 +193,7 @@ if __name__ == "__main__":
                 ready(server, endpoint)
                 n = Node(args.bin_dir)
                 try:
-                    exercise(n, endpoint, work, metered=not args.legacy_unmetered)
+                    exercise(n, endpoint, work, metered=not args.legacy_unmetered, server_digest=server_digest)
                 finally:
                     n.close()
             finally:

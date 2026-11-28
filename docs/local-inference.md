@@ -17,6 +17,8 @@
 }
 ```
 
+可选字段 `server_executable_sha256` 接受已核验服务端可执行文件的 64 位小写 SHA-256。启用后，适配器先用内核提供的进程句柄及 `/proc` 核验同一 socket 对端的运行文件，再发送上下文。文件上限为 128 MiB，需要 Linux 支持 `SO_PEERPIDFD`。摘要不一致或无法核验时，本次推理在发送前停止。权重沿用独立的下载与核验步骤。
+
 ```sh
 install -d -m 0700 ./provider-decisions
 psiosctl --token-file ./provider.token model-step "$SESSION" --key "$TURN" \

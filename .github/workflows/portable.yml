@@ -436,7 +436,7 @@ jobs:
           lab="$RUNNER_TEMP/inference-core"
           server=$(jq -r .runtime.executable tests/fixtures/local-inference.json)
           sudo unshare --net runuser -u "$(id -un)" -- python3 tests/local_inference.py \
-            --bin-dir "$lab" --server "$lab/$server" --weights "$lab/model"
+            --bin-dir "$lab" --server "$lab/$server" --weights "$lab/model" --verify-executable
 
   attest:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'jyxxe/PsiOS'

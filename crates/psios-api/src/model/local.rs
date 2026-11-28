@@ -19,6 +19,9 @@ use std::{
 };
 use tokio::net::UnixStream;
 
+#[cfg(target_os = "linux")]
+mod peer;
+
 const TOOLS: [&str; 3] = ["node.inventory", "node.devices", "system.status"];
 const CONTEXT_LIMIT: usize = 128 * 1024;
 const BODY_LIMIT: usize = 256 * 1024;
@@ -31,6 +34,7 @@ const DELIVERY_MARGIN: Duration = Duration::from_millis(100);
 pub struct LocalInventoryModel {
     pub socket: PathBuf,
     pub server_uid: u32,
+    pub server_executable_sha256: Option<String>,
     pub model_ref: ResourceRef,
     pub model_alias: String,
     pub max_tokens: u32,
@@ -111,10 +115,27 @@ impl LocalInventoryModel {
             || self.model_alias.is_empty()
             || self.model_alias.len() > 128
             || self.model_alias.chars().any(char::is_control)
+            || self
+                .server_executable_sha256
+                .as_ref()
+                .is_some_and(|digest| {
+                    digest.len() != 64
+                        || !digest
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
             || !(1..=1024).contains(&self.max_tokens)
             || !(1..=300_000).contains(&self.timeout_ms)
         {
             return Err(invalid("invalid local inference configuration"));
+        }
+        #[cfg(not(target_os = "linux"))]
+        if self.server_executable_sha256.is_some() {
+            return Err(ApiError::new(
+                "UnsupportedCapability",
+                "local executable verification requires Linux",
+            )
+            .into());
         }
         Ok(())
     }
@@ -134,6 +155,10 @@ impl LocalInventoryModel {
             return Err(
                 ApiError::new("PermissionDenied", "local inference peer UID mismatch").into(),
             );
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(expected) = &self.server_executable_sha256 {
+            peer::verify_executable(&socket, peer.pid(), expected).await?;
         }
         let (mut sender, connection) = http1::Builder::new()
             .max_headers(32)
@@ -285,7 +310,12 @@ impl LocalInventoryModel {
             )
             .await
             .map_err(|_| deadline_exceeded())?
-        })?;
+        });
+        // Requests can reach their deadline while a bounded file verification is still running.
+        if self.server_executable_sha256.is_some() {
+            runtime.shutdown_background();
+        }
+        let response = response?;
         Ok(ModelOutput {
             decision: decode_decision(&response, &self.model_alias, tools)?,
             usage: decode_usage(&response["usage"])?,
@@ -402,6 +432,7 @@ mod tests {
         let model = LocalInventoryModel {
             socket: "/tmp/inventory-provider.sock".into(),
             server_uid: 1000,
+            server_executable_sha256: None,
             model_ref: ResourceRef {
                 resource_id: "model-private-ref".into(),
                 version: "r1".into(),
@@ -423,6 +454,33 @@ mod tests {
             "context_policy": "ReferencesOnly",
         });
         (model, context)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn executable_mismatch_closes_the_socket_before_sending_context() {
+        use std::{fs, io::Read, os::unix::net::UnixListener};
+
+        let (mut model, context) = first_turn();
+        model.socket =
+            std::env::temp_dir().join(format!("px-{}.sock", uuid::Uuid::new_v4().simple()));
+        model.server_uid = rustix::process::geteuid().as_raw();
+        model.server_executable_sha256 = Some("0".repeat(64));
+        let listener = UnixListener::bind(&model.socket).unwrap();
+        let failure = model.decide_with_outcome(&context).err().unwrap();
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut byte = [0];
+        let received = socket.read(&mut byte);
+        fs::remove_file(&model.socket).unwrap();
+        assert_eq!(failure.outcome, ModelInferenceOutcome::NotStarted);
+        assert_eq!(
+            failure.error.message,
+            "local inference peer executable SHA-256 mismatch"
+        );
+        assert_eq!(received.unwrap(), 0);
     }
 
     #[test]

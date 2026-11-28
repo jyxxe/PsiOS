@@ -1224,6 +1224,30 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(self.node.call("Task.Get", {"id": task}), before)
 
     @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
+    def test_browser_exports_and_restores_only_the_current_identity_layout(self):
+        task = self.node.submit("system.status", {})
+        before = self.node.wait(task)
+        self.assertEqual(before["lifecycle"], "Succeeded")
+        other = self.node.call("Agent.Register", {"name": "layout-other-principal"})
+        identity = self.node.base / "layout-other.token"
+        identity.touch(mode=0o600)
+        identity.write_text(other["token"])
+        writer, reader, refused = self.shell(), self.shell(), self.shell(identity)
+        downloads = self.node.base / "layouts"
+        downloads.mkdir(mode=0o700)
+        args = dict(origin=writer.origin, code=writer.code, layoutTransfer=True, task=task,
+                    reader=dict(origin=reader.origin, code=reader.code),
+                    other=dict(origin=refused.origin, code=refused.code),
+                    node=self.node.call("Node.Get", {})["reference"]["resource_id"],
+                    profile=str(self.node.base / "browser"), downloads=str(downloads))
+        subprocess.run(["node", str(Path(__file__).with_name("shell_browser.mjs")),
+                        os.environ.get("PSIOS_TEST_CHROME", "google-chrome")],
+                       input=json.dumps(args), text=True, check=True, timeout=75)
+        for shell in (writer, reader, refused):
+            self.assertEqual(shell.process.wait(timeout=5), 0)
+        self.assertEqual(self.node.call("Task.Get", {"id": task}), before)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
     def test_browser_moves_and_resizes_windows_without_changing_tasks(self):
         task = self.node.submit("system.status", {})
         before = self.node.wait(task)

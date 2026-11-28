@@ -55,6 +55,11 @@
         <input id="workspace-name" type="text" maxlength="32" required autocomplete="off">
         <button type="submit">创建</button>
       </form>
+      <div id="workspace-layout" hidden>
+        <button id="export-layout" type="button">导出布局</button>
+        <button id="import-layout" type="button" title="导入会用保存的布局重新打开窗口">导入布局</button>
+        <input id="layout-file" type="file" accept=".json,application/json" hidden>
+      </div>
       <p id="workspace-message" class="message" role="status"></p>
       <section id="workspace-open-windows" aria-labelledby="workspace-open-title" hidden>
         <h2 id="workspace-open-title">已打开的窗口</h2>

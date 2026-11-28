@@ -1,7 +1,7 @@
 // Exercise the embedded pages through Chrome's private DevTools pipe.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, readSync, writeSync } from "node:fs";
+import { existsSync, readFileSync, readSync, writeFileSync, writeSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -558,6 +558,100 @@ async function verifyApplicationLauncher() {
   assert.deepEqual(exceptions, []);
 }
 
+async function verifyLayoutTransfer() {
+  const viewport = { width: 1280, height: 860, deviceScaleFactor: 1, mobile: false };
+  await send("Emulation.setDeviceMetricsOverride", viewport);
+  await keyboardActivate("#nav-node");
+  await waitFor("Core Node before layout export", 'document.getElementById("node-view").textContent.includes(' +
+    JSON.stringify(input.node) + ")");
+  await evaluate('document.querySelector("#window-node [data-geometry=resize]").focus()');
+  await send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "ArrowLeft", code: "ArrowLeft", windowsVirtualKeyCode: 37 });
+  await send("Input.dispatchKeyEvent", { type: "keyUp", key: "ArrowLeft", code: "ArrowLeft", windowsVirtualKeyCode: 37 });
+  const width = 'document.getElementById("window-node").style.getPropertyValue("--window-width")';
+  const savedWidth = await evaluate(width);
+  assert.ok(savedWidth.endsWith("px"));
+  await createWorkspace("作业");
+  await keyboardActivate("#nav-tasks");
+  await waitFor("original Task before layout export", 'document.querySelector("#task-rows button") !== null');
+  await keyboardActivate('#window-tasks [data-action="minimize"]');
+  await keyboardActivate("#open-workspaces");
+  await keyboardActivate("#export-layout");
+  const filename = join(input.downloads, "psios-shell-layout.json");
+  for (let attempt = 0; attempt < 160 && !existsSync(filename); attempt += 1) await delay(50);
+  const layout = JSON.parse(readFileSync(filename, "utf8"));
+  assert.deepEqual(Object.keys(layout).sort(), ["current", "scope", "version", "windows", "workspaces"]);
+  assert.equal(layout.version, 1);
+  assert.match(layout.scope, /^[0-9a-f]{64}$/);
+  assert.deepEqual(layout.workspaces.map(workspace => workspace.name), ["桌面", "作业"]);
+  assert.equal(layout.current, 1);
+  assert.equal(layout.windows.find(window => window.id === "tasks").state, "minimized");
+  assert.ok(!JSON.stringify(layout).includes(input.task));
+
+  async function leaveWorkspaces() {
+    await keyboardActivate("#close-workspaces");
+    await keyboardActivate("#logout");
+    await waitFor("paired session closed", 'document.getElementById("workspace").hidden');
+  }
+  async function importFile(path) {
+    const { root } = await send("DOM.getDocument");
+    const { nodeId } = await send("DOM.querySelector", { nodeId: root.nodeId, selector: "#layout-file" });
+    assert.ok(nodeId > 0);
+    await send("DOM.setFileInputFiles", { files: [path], nodeId });
+  }
+
+  await leaveWorkspaces();
+  await pair(input.other.origin, input.other.code);
+  await keyboardActivate("#open-workspaces");
+  await importFile(filename);
+  await waitFor("different Core principal cannot import the layout",
+    'document.getElementById("workspace-message").textContent.includes("其他登录身份或节点")');
+  assert.equal(await evaluate('document.querySelectorAll("#workspace-list [data-workspace-id]").length'), 1);
+  await leaveWorkspaces();
+
+  await pair(input.reader.origin, input.reader.code);
+  await keyboardActivate("#open-workspaces");
+  const tampered = join(input.downloads, "duplicate-window.json");
+  writeFileSync(tampered, JSON.stringify({ ...layout, windows: [...layout.windows, layout.windows[0]] }));
+  await importFile(tampered);
+  await waitFor("duplicate window is refused", 'document.getElementById("workspace-message").textContent.includes("格式无效")');
+  assert.equal(await evaluate('document.querySelectorAll("#workspace-list [data-workspace-id]").length'), 1);
+  await importFile(filename);
+  await waitFor("saved workspace and minimized Task window restored",
+    'document.getElementById("open-workspaces").textContent.includes("作业") && ' +
+    'document.getElementById("nav-tasks").dataset.state === "minimized" && ' +
+    'document.getElementById("node-view").textContent === "" && ' +
+    'document.getElementById("task-rows").childElementCount === 0');
+  await keyboardActivate("#open-workspaces");
+  await keyboardActivate('#workspace-list [data-workspace-id="0"]');
+  await waitFor("saved window reopened through current Core permissions",
+    'document.getElementById("node-view").textContent.includes(' + JSON.stringify(input.node) + ")");
+  assert.equal(await evaluate(width), savedWidth);
+  await keyboardActivate("#nav-tasks");
+  await selectTask(input.task);
+  await waitFor("independent Task remains available", 'document.getElementById("task-content").textContent.includes("成功")');
+  await keyboardActivate("#logout");
+  await waitFor("imported layout removed on logout", 'document.getElementById("workspace").hidden && ' +
+    '!document.getElementById("layout-file").value && document.getElementById("workspace-layout").hidden');
+  assert.deepEqual(exceptions, []);
+  const allowedOrigins = new Set([input.origin, input.reader.origin, input.other.origin]);
+  assert.ok(requests.every(url => allowedOrigins.has(new URL(url).origin)));
+}
+
+async function pair(origin, pairingCode) {
+  await send("Page.navigate", { url: origin }, 25_000);
+  await waitFor("ready pairing page",
+    'document.title === "PsiOS Shell" && document.readyState === "complete" && !document.getElementById("pairing").hidden');
+  await evaluate('document.getElementById("code").focus()');
+  await send("Input.insertText", { text: pairingCode });
+  await send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
+  await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
+  assert.ok(await evaluate('document.activeElement.id === "connect"'));
+  await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter",
+    text: "\r", unmodifiedText: "\r", windowsVirtualKeyCode: 13 });
+  await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+  await waitFor("paired desktop", '!document.querySelector("#workspace").hidden && !document.querySelector("#empty-desktop").hidden');
+}
+
 async function test() {
   await send("Browser.getVersion", {}, 35_000);
   if (input.downloads) await send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: input.downloads });
@@ -566,18 +660,8 @@ async function test() {
   await send("Page.enable");
   await send("Network.enable");
   await send("Runtime.enable");
-  await send("Page.navigate", { url: input.origin }, 25_000);
-  await waitFor("ready pairing page",
-    'document.title === "PsiOS Shell" && document.readyState === "complete" && !document.getElementById("pairing").hidden');
-  await evaluate('document.getElementById("code").focus()');
-  await send("Input.insertText", { text: input.code });
-  await send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
-  await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
-  assert.ok(await evaluate('document.activeElement.id === "connect"'));
-  await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter",
-    text: "\r", unmodifiedText: "\r", windowsVirtualKeyCode: 13 });
-  await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
-  await waitFor("paired desktop", '!document.querySelector("#workspace").hidden && !document.querySelector("#empty-desktop").hidden');
+  await pair(input.origin, input.code);
+  if (input.layoutTransfer) return verifyLayoutTransfer();
   if (input.fileBrowser) return verifyFiles();
   if (input.filePreview) return verifyFilePreview();
   if (input.nodeResolver) return verifyNodeResolver();

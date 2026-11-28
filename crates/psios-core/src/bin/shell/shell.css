@@ -130,6 +130,7 @@ input {
 #workspaces [aria-current="true"] { background: var(--selected); border-color: var(--accent); }
 #workspace-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .4rem; }
 #workspace-form label { grid-column: 1 / -1; }
+#workspace-layout { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .75rem; }
 #workspace-message:empty { display: none; }
 #workspace-open-title { margin-top: 1rem; }
 #workspace-windows label { display: flex; align-items: center; gap: .5rem; min-width: 0; margin-inline-start: auto; }

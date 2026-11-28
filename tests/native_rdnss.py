@@ -10,6 +10,7 @@ import tempfile
 from native_dhcp import MAC, OTHER, wait_for
 from native_disk import REPO, boot, call, check_clean_shutdown, password, sha, stage_guest_token
 from native_slaac import TAP_ADDRESS, TAP_DNS, check_dns
+from native_staged_update import TAIL_DATA, expanded_source
 from native_static_ipv4 import installer, poweroff
 
 
@@ -100,6 +101,10 @@ def exercise(args, work):
     metadata = json.loads(prior.read_bytes())
     assert (metadata["format"], metadata["network_profile"]) == (11, "slaac-rdnss"), metadata
     assert sha(image) == metadata["initial_image_sha256"]
+    capacity = ()
+    if args.larger_source:
+        image, tail_marker = expanded_source(args.installer.parent, work, image, prior)
+        capacity = ("--source-size-bytes", str(image.stat().st_size))
     with router(work, args.tap, TAP_DNS) as announcements, boot(work, image, network_mac=MAC, tap=args.tap) as console:
         console.login("psios", operator)
         advertised(console)
@@ -141,11 +146,17 @@ def exercise(args, work):
     command = installer(args, stage, args.archive, args.installer.with_name("stage_update.py"))
     report = json.loads(subprocess.check_output([*command, "--upgrade-from", image, "--previous-receipt", prior,
         "--previous-receipt-sha256", sha(prior), "--ovmf-code", code, "--ovmf-code-sha256", sha(code),
-        "--ovmf-vars", variables, "--ovmf-vars-sha256", firmware], timeout=480))
+        "--ovmf-vars", variables, "--ovmf-vars-sha256", firmware, *capacity], timeout=480))
     assert report["status"] == "Staged" and sha(image) == original and sha(variables) == firmware
     candidate = stage / "candidate.raw"
     updated = json.loads((stage / "candidate-build.json").read_bytes())
     assert (updated["format"], updated["network_profile"]) == (11, "slaac-rdnss"), updated
+    if args.larger_source:
+        assert candidate.stat().st_size == image.stat().st_size == updated["raw_disk_bytes"], updated
+        assert updated["geometry_mib"] == metadata["geometry_mib"], updated
+        with candidate.open("rb") as disk:
+            disk.seek(tail_marker)
+            assert disk.read(len(TAIL_DATA)) == TAIL_DATA
     with router(work, args.tap, TAP_DNS), boot(work, candidate, network_mac=MAC, tap=args.tap) as console:
         console.login("psios", operator)
         advertised(console)
@@ -184,6 +195,8 @@ def exercise(args, work):
     print("Verified native RDNSS, expiration, reacquisition, isolated service identity, staged update and the selected Virtio MAC.")
     if args.verify_core_resolver:
         print("Verified Agent resolver Tasks track live RDNSS and retain their exact artifacts through a native update.")
+    if args.larger_source:
+        print("Verified the RDNSS update retained the exact raw disk capacity and unallocated tail.")
 
 
 if __name__ == "__main__":
@@ -194,6 +207,7 @@ if __name__ == "__main__":
     parser.add_argument("--installer", type=Path, default=REPO / "images/native/create.py")
     parser.add_argument("--ovmf-dir", type=Path, default=Path("/usr/share/OVMF"))
     parser.add_argument("--verify-core-resolver", action="store_true", help="require scoped node.resolver Tasks in the guest")
+    parser.add_argument("--larger-source", action="store_true", help="verify diagnostics and native update on an expanded source")
     args = parser.parse_args()
     assert len(args.tap) <= 15 and args.tap.isascii() and args.tap.isalnum(), args.tap
     with tempfile.TemporaryDirectory(prefix="psios-rdnss-") as root:

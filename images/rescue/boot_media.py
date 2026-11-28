@@ -25,6 +25,52 @@ def regular_file(path):
     return os.fdopen(fd, "rb")
 
 
+class BootTools:
+    """Resolve and fingerprint the executable used for each boot assembly command."""
+
+    def __init__(self):
+        self.executables = {}
+
+    @staticmethod
+    def digest(path):
+        with regular_file(path.resolve(strict=True)) as source:
+            before = os.fstat(source.fileno())
+            digest = hashlib.file_digest(source, "sha256").hexdigest()
+            after = os.fstat(source.fileno())
+        if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            raise ValueError(f"boot assembly executable changed while reading: {path.name}")
+        return digest
+
+    def command(self, args, cwd):
+        name = args[0]
+        if name not in self.executables:
+            directory = Path.cwd() if cwd is None else Path(cwd).absolute()
+            search = os.pathsep.join(str(directory / part) for part in os.get_exec_path())
+            path = shutil.which(name, path=search)
+            if path is None:
+                raise ValueError(f"boot assembly utility is unavailable: {name}")
+            path = Path(path)
+            self.executables[name] = (path, self.digest(path))
+        else:
+            path, expected = self.executables[name]
+            if self.digest(path) != expected:
+                raise ValueError(f"boot assembly executable changed before reuse: {name}")
+        return [path, *args[1:]]
+
+    def receipt(self):
+        known = {}
+        for name, (path, expected) in sorted(self.executables.items()):
+            if self.digest(path) != expected:
+                raise ValueError(f"boot assembly executable changed before publication: {name}")
+            known[name] = expected
+        return {"format": 1, "executable_sha256": known}
+
+
+def tool_command(args, tools, cwd=None):
+    return args if tools is None else tools.command(args, cwd)
+
+
 def pinned_copy(source, target, expected, limit, *, sparse=False):
     with regular_file(source) as src, target.open("xb") as dst:
         copy_pinned(src, dst, source, expected, limit, sparse=sparse)
@@ -48,7 +94,7 @@ def copy_pinned(src, dst, source, expected, limit, *, sparse=False):
         raise ValueError(f"SHA-256 mismatch: {source}")
 
 
-def prepare_kernel(work, kernel_iso):
+def prepare_kernel(work, kernel_iso, *, tools=None):
     base = json.loads((Path(__file__).resolve().with_name("base.json")).read_text())
     iso = work / "base.iso"
     pinned_copy(kernel_iso, iso, base["sha256"], base["size_bytes"])
@@ -56,20 +102,21 @@ def prepare_kernel(work, kernel_iso):
                                  ("initrd", "initramfs-virt", "initramfs_sha256")]:
         path = work / name
         with path.open("wb") as out:
-            subprocess.run(["isoinfo", "-R", "-i", iso, "-x", "/boot/" + member], stdout=out, check=True, timeout=30)
+            args = tool_command(["isoinfo", "-R", "-i", iso, "-x", "/boot/" + member], tools)
+            subprocess.run(args, stdout=out, check=True, timeout=30)
         with path.open("rb") as f:
             if hashlib.file_digest(f, "sha256").hexdigest() != base[digest]:
                 raise ValueError(f"invalid {member} in boot media")
     return base
 
 
-def run(work, args, *, pass_fds=()):
+def run(work, args, *, pass_fds=(), tools=None):
     env = {**os.environ, "LC_ALL": "C", "TZ": "UTC", "SOURCE_DATE_EPOCH": str(EPOCH)}
-    subprocess.run(args, cwd=work, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+    subprocess.run(tool_command(args, tools, work), cwd=work, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                    pass_fds=pass_fds, timeout=90, check=True)
 
 
-def efi_application(work, cmdline):
+def efi_application(work, cmdline, *, tools=None):
     # Keep the UEFI loader, kernel and initrd together. GRUB boots from its own
     # memory disk without searching the subject volume for configuration or code.
     grub = work / "grub.cfg"
@@ -80,7 +127,7 @@ def efi_application(work, cmdline):
     modules = "linux normal memdisk tar"
     run(work, ["grub-mkstandalone", "--format=x86_64-efi", "--modules=" + modules, "--install-modules=" + modules,
          "--locales=", "--fonts=", "--themes=", "--output", efi, "boot/grub/grub.cfg=grub.cfg",
-         "boot/kernel=kernel", "boot/initrd=initrd"])
+         "boot/kernel=kernel", "boot/initrd=initrd"], tools=tools)
     os.utime(efi, (EPOCH, EPOCH))
     return efi
 
@@ -96,8 +143,8 @@ class SecureBoot(NamedTuple):
         return {"scheme": SECURE_BOOT_SCHEME, "certificate_sha256": self.certificate_sha256,
                 "efi_stub_sha256": self.stub_sha256}
 
-    def verify(self, work, image):
-        run(work, ["sbverify", "--cert", self.certificate, image])
+    def verify(self, work, image, *, tools=None):
+        run(work, ["sbverify", "--cert", self.certificate, image], tools=tools)
 
 
 def add_signing_arguments(parser):
@@ -116,7 +163,7 @@ def signing_requested(args, parser):
     return True
 
 
-def prepare_secure_boot(work, key, certificate, stub, stub_digest):
+def prepare_secure_boot(work, key, certificate, stub, stub_digest, *, tools=None):
     pinned_stub = work / "linuxx64.efi.stub"
     pinned_copy(stub, pinned_stub, stub_digest, 2 * MIB)
     with regular_file(certificate) as source:
@@ -125,24 +172,24 @@ def prepare_secure_boot(work, key, certificate, stub, stub_digest):
             raise ValueError("Secure Boot certificate exceeds size limit")
     trusted = work / "uki-signer.pem"
     trusted.write_bytes(pem)
-    der = subprocess.check_output(["openssl", "x509", "-in", trusted, "-outform", "DER"],
-                                  stdin=subprocess.DEVNULL, timeout=10)
+    command = tool_command(["openssl", "x509", "-in", trusted, "-outform", "DER"], tools)
+    der = subprocess.check_output(command, stdin=subprocess.DEVNULL, timeout=10)
     return SecureBoot(key, trusted, pinned_stub, hashlib.sha256(der).hexdigest(), stub_digest)
 
 
-def secure_efi_application(work, cmdline, signing):
+def secure_efi_application(work, cmdline, signing, *, tools=None):
     unsigned = work / "unsigned.efi"
     efi = work / "BOOTX64.EFI"
     run(work, ["ukify", "build", "--config=/dev/null", "--efi-arch=x64", "--stub", signing.stub,
                "--linux", work / "kernel", "--initrd", work / "initrd", "--cmdline", cmdline,
-               "--os-release=ID=psios\nNAME=PsiOS\n", "--output", unsigned])
+               "--os-release=ID=psios\nNAME=PsiOS\n", "--output", unsigned], tools=tools)
     with regular_file(signing.key) as key:
         info = os.fstat(key.fileno())
         if info.st_uid != os.geteuid() or info.st_mode & 0o077 or not 0 < info.st_size <= 64 * 1024:
             raise ValueError("Secure Boot key must be a private regular file owned by the builder")
         run(work, ["sbsign", "--key", f"/proc/self/fd/{key.fileno()}", "--cert", signing.certificate,
-                   "--output", efi, unsigned], pass_fds=(key.fileno(),))
-    signing.verify(work, efi)
+                   "--output", efi, unsigned], pass_fds=(key.fileno(),), tools=tools)
+    signing.verify(work, efi, tools=tools)
     os.utime(efi, (EPOCH, EPOCH))
     return efi
 

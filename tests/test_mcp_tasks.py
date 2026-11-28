@@ -13,6 +13,7 @@ from support import Failure, Node, key, target
 from network_resolver import RESOLVER
 from test_mcp_modern_stdio import CAPABILITIES_KEY, PROFILE, params, request, send
 from test_mcp_stdio import McpFixture, PROFILE as LEGACY, Wire
+from test_pci_observation import DEVICES as PCI_DEVICES, linux_devices
 
 
 EXTENSION = "io.modelcontextprotocol/tasks"
@@ -63,6 +64,63 @@ class McpTaskFixture(McpFixture):
 
 
 class McpTaskTests(McpTaskFixture, unittest.TestCase):
+    @unittest.skipUnless(PCI_DEVICES.is_dir(), "requires Linux PCI sysfs")
+    def test_pci_observation_pages_require_the_exact_node_scope_and_resume(self):
+        expected = linux_devices()
+        if len(expected) < 2:
+            self.skipTest("requires two PCI devices for continuation")
+        n = self.node
+        tool = "node.pci"
+        flags = ("--tool", tool)
+        grant = self.grant([self.node_id], units=8, tools=[tool])
+        wrong = self.grant([self.profile], tools=[tool])
+
+        def legacy(access, extra=flags):
+            wire = Wire([*self.adapter_command(access), "--protocol", LEGACY, *extra])
+            self.addCleanup(wire.close)
+            wire.initialize()
+            return wire
+
+        def direct(wire, arguments=None):
+            fields = {"name": tool}
+            if arguments is not None:
+                fields["arguments"] = arguments
+            return wire.request("tools/call", fields)["result"]
+
+        self.assertEqual(legacy(wrong).request("tools/list")["result"]["tools"], [])
+        self.assertEqual(legacy(grant, ()).request("tools/list")["result"]["tools"], [])
+        peer = legacy(grant)
+        listed, = peer.request("tools/list")["result"]["tools"]
+        self.assertTrue(listed["annotations"]["readOnlyHint"])
+        properties = listed["inputSchema"]["properties"]
+        self.assertEqual((properties["limit"]["maximum"], properties["cursor"]["properties"]["offset"]["maximum"]),
+                         (32, 255))
+        self.assertEqual(direct(peer, {"path": "/sys"})["structuredContent"], {"code": "InvalidArgument"})
+        first = self.check_receipt(direct(peer, {"limit": 1}), tool, grant)["result"]
+        self.assertEqual(first["devices"], expected[:1])
+        cursor = first["next_cursor"]
+        second = self.check_receipt(direct(peer, {"limit": 1, "cursor": cursor}), tool, grant)["result"]
+        self.assertEqual(second["devices"], expected[1:2])
+        other = legacy(self.grant([self.node_id], tools=[tool]))
+        self.assertEqual(direct(other, {"limit": 1, "cursor": cursor})["structuredContent"]["code"], "ResyncRequired")
+
+        invocation = key()
+        arguments = {"name": tool, "arguments": {"limit": 1, "cursor": cursor}}
+        modern = self.task_wire(grant, extra=flags)
+        task = self.task_call(modern, "tools/call", arguments, invocation=invocation)["result"]["taskId"]
+        settled = self.wait_status(modern, task)
+        page = self.check_receipt(settled["result"], tool, grant)["result"]
+        self.assertEqual((page["devices"], page["snapshot_digest"]), (expected[1:2], first["snapshot_digest"]))
+        modern.close()
+        n.stop(signal.SIGKILL)
+        n.start()
+        resumed = self.task_wire(grant, extra=flags)
+        self.assertEqual(self.task_call(resumed, "tools/call", arguments, invocation=invocation)["result"]["taskId"], task)
+        self.assertEqual(self.wait_status(resumed, task), settled)
+        n.call("Grant.Revoke", target(grant["grant_ref"]))
+        self.assertEqual(self.task_call(resumed, "tools/list")["result"]["tools"], [])
+        self.assertEqual(self.task_call(resumed, "tasks/get", {"taskId": task})["error"]["code"], -32602)
+
     @unittest.skipUnless(os.getenv("PSIOS_TEST_RESOLVER_FIXTURE"), "requires a resolver file in a private mount namespace")
     def test_resolver_diagnostic_requires_scoped_mcp_and_recovers_modern_task(self):
         fixture = Path(os.environ["PSIOS_TEST_RESOLVER_FIXTURE"])

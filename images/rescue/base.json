@@ -9,5 +9,15 @@
   "e1000e_module": {
     "member": "modules/6.18.60-0-virt/kernel/drivers/net/ethernet/intel/e1000e/e1000e.ko",
     "sha256": "08e4a239356e0ba27d652afcfd54b11bddf55b2b4420f931d7d612f07b1c9e4c"
+  },
+  "local_vt_modules": {
+    "psios-drm-sysfb-helper.ko": {
+      "member": "modules/6.18.60-0-virt/kernel/drivers/gpu/drm/sysfb/drm_sysfb_helper.ko",
+      "sha256": "ec4e2ed01e59e4e2270c85f258292f9b47a9e736d448bb4402d9357743cc8566"
+    },
+    "psios-simpledrm.ko": {
+      "member": "modules/6.18.60-0-virt/kernel/drivers/gpu/drm/sysfb/simpledrm.ko",
+      "sha256": "e4634d0c76d6eaa0294e96926091782b4fb36bed9ebf5d21b9fdc276e18c6c0a"
+    }
   }
 }

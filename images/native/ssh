@@ -50,7 +50,8 @@ rotate_authorized_key() (
     fi
     (umask 077; set -C; : > "$staged")
     trap 'rm -f -- "$staged"' EXIT
-    /bin/busybox timeout 8 /bin/busybox head -c 82 > "$staged"
+    # Keep the advisory lock with this shell. BusyBox timeout may leave a short-lived watchdog.
+    /bin/busybox timeout 8 /bin/busybox head -c 82 > "$staged" 9<&-
     chmod 0644 "$staged"
     if ! valid_authorized_key "$staged"; then
         echo "Expected one canonical OpenSSH Ed25519 public key without a comment" >&2

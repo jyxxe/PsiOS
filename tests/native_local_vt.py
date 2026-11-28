@@ -26,7 +26,7 @@ def type_text(qmp, text):
         if keys is None:
             assert character.isascii() and character.isalnum()
             keys = ("shift", character.lower()) if character.isupper() else (character,)
-        qmp("send-key", keys=[{"type": "qcode", "data": key} for key in keys], hold_time=25)
+        qmp("send-key", keys=[{"type": "qcode", "data": key} for key in keys], **{"hold-time": 25})
         time.sleep(0.045)
 
 
@@ -57,9 +57,12 @@ def verify_console(work, console, operator):
     return local["authority_id"]
 
 
-def stop(console, admin):
+def login_root(console, admin):
     console.send("exit")
     console.login("root", admin)
+
+
+def stop(console):
     console.send("cd /; exec poweroff")
     assert console.vm.wait(35) == 0
 
@@ -90,7 +93,8 @@ def exercise(args, work):
         task = json.loads(console.run("printf '{}' | psiosctl submit system.status --key native-virtual-terminal"))["task_id"]
         result = call(console, "Task.Wait", {"id": task, "timeout_ms": 5000})
         assert result["lifecycle"] == "Succeeded"
-        stop(console, admin)
+        login_root(console, admin)
+        stop(console)
     check_clean_shutdown(image)
     print("PASS framebuffer displayed an authenticated local operator running Core CLI on tty1", flush=True)
 
@@ -98,10 +102,15 @@ def exercise(args, work):
     staged = work / "staged"
     code, variables = work / "code.fd", work / "vars.fd"
     original_firmware = sha(variables)
-    staged_report = json.loads(subprocess.check_output([sys.executable, args.installer.with_name("stage_update.py"),
-        staged, *common, "--upgrade-from", image, "--previous-receipt", previous, "--previous-receipt-sha256",
-        sha(previous), "--ovmf-code", code, "--ovmf-code-sha256", sha(code), "--ovmf-vars", variables,
-        "--ovmf-vars-sha256", original_firmware], timeout=480))
+    def stage(output, source, receipt, firmware):
+        return subprocess.run([sys.executable, args.installer.with_name("stage_update.py"), output, *common,
+            "--upgrade-from", source, "--previous-receipt", receipt, "--previous-receipt-sha256", sha(receipt),
+            "--ovmf-code", code, "--ovmf-code-sha256", sha(code), "--ovmf-vars", variables,
+            "--ovmf-vars-sha256", firmware], capture_output=True, timeout=480)
+
+    success = stage(staged, image, previous, original_firmware)
+    assert success.returncode == 0, success.stderr[-4096:]
+    staged_report = json.loads(success.stdout)
     assert staged_report["status"] == "Staged"
     assert (sha(image), sha(variables)) == (source_digest, original_firmware)
     updated = json.loads((staged / "candidate-build.json").read_bytes())
@@ -111,14 +120,24 @@ def exercise(args, work):
         console.login("psios", operator)
         assert verify_console(work, console, operator) == identity
         assert call(console, "Task.Wait", {"id": task, "timeout_ms": 5000})["result"] == result["result"]
-        stop(console, admin)
+        login_root(console, admin)
+        stop(console)
     check_clean_shutdown(candidate)
     with boot(work, candidate, pace_commands=True) as console:
         console.login("psios", operator)
         assert json.loads(console.run("psiosctl whoami"))["authority_id"] == identity
-        stop(console, admin)
+        login_root(console, admin)
+        console.run("printf '%s\\n' 'tty1 # local root' >> /etc/securetty")
+        stop(console)
     check_clean_shutdown(candidate)
-    print("PASS local text console and original Task survived staged upgrade, with headless serial fallback")
+    print("PASS local text console and original Task survived staged upgrade, with headless serial fallback", flush=True)
+
+    refusal_output = work / "refused"
+    candidate_digest, firmware_digest = sha(candidate), sha(variables)
+    refusal = stage(refusal_output, candidate, staged / "candidate-build.json", firmware_digest)
+    assert refusal.returncode and b"invalid persisted local console configuration" in refusal.stderr, refusal.stderr[-4096:]
+    assert not refusal_output.exists() and (sha(candidate), sha(variables)) == (candidate_digest, firmware_digest)
+    print("PASS an upgrade refused a restored local root terminal without modifying its source or firmware")
 
 
 if __name__ == "__main__":

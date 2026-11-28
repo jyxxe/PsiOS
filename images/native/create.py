@@ -392,7 +392,10 @@ def validate_persisted_network(work, state, receipt):
 def validate_persisted_vt(work, state):
     inittab = read_root_file(work, state, "/etc/inittab", 16 * 1024, "0(?:600|644)")
     secure_ttys = read_root_file(work, state, "/etc/securetty", 1024, "0(?:600|644)")
-    if inittab.splitlines().count(LOCAL_VT_SERVICE.encode()) != 1 or b"tty1" in secure_ttys.splitlines():
+    local_entries = [line for line in inittab.splitlines()
+                     if line.lstrip().split(b":", 1)[0] in (b"tty1", b"/dev/tty1")]
+    root_terminals = [line.split(b"#", 1)[0].strip() for line in secure_ttys.splitlines()]
+    if local_entries != [LOCAL_VT_SERVICE.encode()] or {b"tty1", b"/dev/tty1"}.intersection(root_terminals):
         raise ValueError("invalid persisted local console configuration")
 
 

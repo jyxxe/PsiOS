@@ -6,7 +6,8 @@ not reuse the author's credentials and does not treat a green summary as proof.
 Start with the [Agent development](agent-development.md) and
 [quality gates](quality-gates.md) guides; apply the same standard to changes
 produced on either line of the [dual-line synchronization](dual-line-sync.md)
-model.
+model, and confirm the PR's [issue lifecycle](issue-lifecycle.md) state before
+deciding.
 
 ## Establish exactly what is being reviewed
 

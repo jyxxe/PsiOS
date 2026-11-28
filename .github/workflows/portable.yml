@@ -144,6 +144,13 @@ jobs:
               --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
           done
 
+      - name: Change the native time zone offline and preserve it through a verified upgrade
+        run: |
+          python3 -B tests/native_timezone.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --controller "$RUNNER_TEMP/rescue-core/native/stage_update.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
+            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+
       - name: Verify managed native activation, deployment selection and boot crash fencing
         run: |
           prior_activation="$RUNNER_TEMP/native-prior-activation"

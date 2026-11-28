@@ -37,6 +37,8 @@ TOOLS = {
     "native/install_target.py", "native/ipv4", "native/ipv6", "native/shutdown",
     "native/static", "native/storage", "rescue/base.json", "rescue/boot_media.py",
 }
+BOOT_ASSET_DIRS = ("native", "rescue")
+BOOT_ASSET = re.compile(r"(?:native|rescue)/[A-Za-z0-9_][A-Za-z0-9_.-]*\Z")
 
 # Read kernel evidence independently of the installer. Select by transport
 # identity before comparing the installer plan with the kernel observations.
@@ -104,27 +106,36 @@ def upload(run, source, destination, *, sparse_image=False):
 
 
 def extract_tools(archive, work):
-    pending = TOOLS | {"SHA256SUMS"}
+    # Factory assembly needs its packaged sibling assets. Guest installation
+    # uses the fixed tool set transferred below.
+    extracted = set()
     with tarfile.open(archive, "r|gz") as bundle:
         for member in bundle:
-            if member.name not in TOOLS and member.name != "SHA256SUMS":
+            name = member.name
+            if name in BOOT_ASSET_DIRS and member.isdir():
                 continue
-            assert member.name in pending and member.isfile() and 0 < member.size <= MIB, member.name
-            path = work / member.name
-            with bundle.extractfile(member) as source, path.open("xb") as destination:
+            if name != "SHA256SUMS" and name.split("/", 1)[0] not in BOOT_ASSET_DIRS:
+                continue
+            assert name == "SHA256SUMS" or BOOT_ASSET.fullmatch(name), name
+            assert name not in extracted and member.isfile() and 0 < member.size <= MIB, name
+            with bundle.extractfile(member) as source, (work / name).open("xb") as destination:
                 shutil.copyfileobj(source, destination)
-            pending.remove(member.name)
-    assert not pending, f"portable archive lacks native installer tools: {sorted(pending)}"
+            extracted.add(name)
+    missing = (TOOLS | {"SHA256SUMS"}) - extracted
+    assert not missing, f"portable archive lacks native installer tools: {sorted(missing)}"
     sums = {}
     for line in (work / "SHA256SUMS").read_text().splitlines():
         expected, name = line.split(maxsplit=1)
+        assert name not in sums, f"duplicate portable archive digest: {name}"
         sums[name] = expected
-    for name in TOOLS:
+    assets = extracted - {"SHA256SUMS"}
+    assert assets == {name for name in sums if BOOT_ASSET.fullmatch(name)}, "portable archive assets differ from checksums"
+    for name in sorted(assets):
         assert sha(work / name) == sums[name], f"portable archive tool digest differs: {name}"
 
 
 def make_source(args, work):
-    for directory in ("native", "rescue"):
+    for directory in BOOT_ASSET_DIRS:
         (work / directory).mkdir()
     extract_tools(args.archive, work)
     operator, operator_hash = password(work, "operator.hash")

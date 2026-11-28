@@ -9,6 +9,7 @@ import fcntl
 from functools import partial
 import gzip
 import hashlib
+import io
 import ipaddress
 import json
 import os
@@ -73,6 +74,11 @@ SSH_PACKAGES = {
     "openssh-keygen-10.2_p1-r1": ("usr/bin/ssh-keygen",),
 }
 SSH_PROGRAMS = tuple(file for files in SSH_PACKAGES.values() for file in files)
+TZDATA = "tzdata-2026f-r0"
+TZDATA_SHA256 = "29b71c02c289e017ad43a96b00ff6bec39e6e07512cb67a647696320c54d0321"
+ZONEINFO = "usr/share/zoneinfo"
+ZONE_ARCHIVE = "psios-zoneinfo.tar"
+TIMEZONE_COMMAND = "usr/bin/psios-timezone"
 
 
 @dataclass(frozen=True)
@@ -398,6 +404,8 @@ def host_config(seed, args):
     (seed / "etc/os-release").write_text('NAME=PsiOS\nID=psios\nPRETTY_NAME="PsiOS amd64 development image"\n')
     if args.hostname:
         (seed / "etc/hostname").write_text(args.hostname + "\n")
+    if args.timezone:
+        (seed / "etc/localtime").symlink_to("../" + ZONEINFO + "/" + args.timezone)
     (seed / "etc/securetty").write_text("ttyS0\n")
     (seed / "etc/issue").write_text("PsiOS amd64 development console\n")
     (seed / "etc/psios/core.json").write_text(json.dumps({
@@ -474,6 +482,51 @@ def prepare_programs(work, packages, *, tools=None):
         archive.unlink()
 
 
+def timezone_name(value):
+    return len(value) <= 96 and re.fullmatch(r"[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+)*", value)
+
+
+def prepare_timezones(work, *, tools=None):
+    package = work / (TZDATA + ".apk")
+    with package.open("xb") as output:
+        command = boot_media.tool_command(
+            ["isoinfo", "-R", "-i", work / "base.iso", "-x", f"/apks/x86_64/{package.name}"], tools)
+        subprocess.run(command,
+                       stdout=output, check=True, timeout=30, preexec_fn=file_limit(MIB))
+    if sha256(package) != TZDATA_SHA256:
+        raise ValueError("timezone package does not match the pinned Linux media")
+    prefix = ZONEINFO + "/"
+    zones = set()
+    with tarfile.open(package, "r:gz", ignore_zeros=True) as source, \
+            tarfile.open(work / ZONE_ARCHIVE, "x", format=tarfile.USTAR_FORMAT) as archive:
+        for member in sorted(source.getmembers(), key=lambda entry: entry.name):
+            if member.isdir() or not member.name.startswith(prefix):
+                continue
+            if member.islnk() and not member.linkname.startswith(prefix):
+                raise ValueError("invalid timezone package member link")
+            if not (member.isfile() or member.islnk()):
+                raise ValueError("unsupported timezone package member type")
+            with source.extractfile(member) as zone:
+                data = zone.read(16 * 1024 + 1)
+            if not data.startswith(b"TZif"):
+                continue  # Skip zone tables and other non-binary metadata.
+            name = member.name.removeprefix(prefix)
+            if not timezone_name(name) or name in zones or len(data) > 16 * 1024:
+                raise ValueError("invalid timezone package member")
+            info = tarfile.TarInfo(name)
+            info.mode = 0o444
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+            zones.add(name)
+    package.unlink()
+    if "UTC" not in zones:
+        raise ValueError("timezone package is missing UTC data")
+    command = work / TIMEZONE_COMMAND
+    command.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(HERE / "timezone", command)
+    return zones
+
+
 def prepare_boot_inputs(work, args, *, wired_driver=None, ssh_enabled=False, network_profile=None, tools=None):
     base = boot_media.prepare_kernel(work, args.kernel_iso, tools=tools)
     if wired_driver == "e1000e":
@@ -495,6 +548,9 @@ def prepare_boot_inputs(work, args, *, wired_driver=None, ssh_enabled=False, net
         modloop.unlink()
     (work / "bin").mkdir()
     install_core(work, args.core_archive, args.core_sha256)
+    zones = prepare_timezones(work, tools=tools)
+    if getattr(args, "timezone", None) and args.timezone not in zones:
+        raise ValueError("unknown time zone in the pinned IANA data")
     if ssh_enabled:
         prepare_programs(work, SSH_PACKAGES, tools=tools)
     if network_profile == RDNSS:
@@ -509,7 +565,8 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
     sectors = [str(mib * 2048) for start, size, _ in layout.partitions[1:] for mib in (start, size)]
     (work / "psios-storage-layout").write_text(" ".join(sectors) + "\n")
     boot_scripts = ["init", "shutdown", "dhcp", "dhcp-event", "ipv4", "ipv6", "static", "storage", "enroll"]
-    files = [*core_programs(work), "psios-source", "psios-disk-uuid", "psios-home-uuid", "psios-storage-layout"]
+    files = [*core_programs(work), "psios-source", "psios-disk-uuid", "psios-home-uuid", "psios-storage-layout",
+             ZONE_ARCHIVE, TIMEZONE_COMMAND]
     if network_profile == RDNSS:
         boot_scripts.extend(("rdnss-hook", "rdnss.conf", "dhcpcd.LICENSE"))
         files.append(RDNSS_PROGRAM)
@@ -543,6 +600,7 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
         "geometry_mib": layout.receipt(),
         "required_filesystems": {"state": str(instance), "home": str(home_id)},
         "payload_sha256": payload,
+        "timezone_data": {"package": TZDATA, "package_sha256": TZDATA_SHA256},
     }
     if layout.raw_disk_bytes is not None:
         inputs["raw_disk_bytes"] = layout.raw_disk_bytes
@@ -568,7 +626,7 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
     files.extend(["psios-deployment.json", "psios-payload.sha256"])
     for name in files:
         executable = name.startswith("bin/") or name in (
-            "psios-init", "psios-dhcp-event", "psios-rdnss-hook", RDNSS_PROGRAM, *SSH_PROGRAMS)
+            "psios-init", "psios-dhcp-event", "psios-rdnss-hook", RDNSS_PROGRAM, TIMEZONE_COMMAND, *SSH_PROGRAMS)
         (work / name).chmod(0o755 if executable else 0o644)
     if ssh_enabled:
         ssh_directory = "usr/lib/ssh"
@@ -1062,7 +1120,7 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
                                network_profile=network_profile, tools=tools)
     (trial_work / "bin").mkdir()
     # Share the pinned input kernel and binaries, but each initrd is extended independently.
-    boot_inputs = ("kernel", "initrd", *core_programs(candidate_work), "psios-source")
+    boot_inputs = ("kernel", "initrd", *core_programs(candidate_work), "psios-source", ZONE_ARCHIVE, TIMEZONE_COMMAND)
     if wired_driver:
         boot_inputs += (E1000E_MODULE,)
     if ssh_enabled:
@@ -1139,10 +1197,11 @@ def build(args):
             layout = Layout(MIN_STATE_MIB if args.state_mib is None else args.state_mib,
                             MIN_HOME_MIB if args.home_mib is None else args.home_mib)
             instance, home_id = str(uuid.uuid4()), str(uuid.uuid4())
-            new_disk(work, disk, args, instance, home_id, layout)
-        disk.chmod(0o600)
         ramfs(work, args, instance, home_id, layout, signing, network_profile, core_limits=core_limits,
               trial=trial, wired_driver=wired_driver, ssh_enabled=ssh_enabled, tools=tools)
+        if not prior:
+            new_disk(work, disk, args, instance, home_id, layout)
+        disk.chmod(0o600)
         upgrade = None
         if prior:
             upgrade = {
@@ -1175,6 +1234,7 @@ def main():
     parser.add_argument("--previous-receipt", type=Path, help="trusted build receipt for the stopped disk")
     parser.add_argument("--source-size-bytes", type=int, help="installed raw capacity from an approved larger-target plan")
     parser.add_argument("--hostname", help="single DNS-label hostname for a new disk")
+    parser.add_argument("--timezone", help="IANA time zone for a new disk (default UTC)")
     parser.add_argument("--trial-boot", action="store_true", help="create an isolated non-activating EFI upgrade candidate")
     parser.add_argument("--max-copy-mib", type=copy_budget_mib,
                         help="authority database and journals to copy during upgrade (default 64 MiB)")
@@ -1213,6 +1273,11 @@ def main():
             parser.error("upgrade preserves /etc/hostname from the source")
         if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", args.hostname):
             parser.error("hostname must be a single DNS label of 1 to 63 ASCII letters, digits or hyphens")
+    if args.timezone is not None:
+        if args.upgrade_from:
+            parser.error("upgrade preserves /etc/localtime from the source")
+        if not timezone_name(args.timezone):
+            parser.error("invalid time zone name")
     if args.dhcp_driver and not args.dhcp_mac:
         parser.error("--dhcp-driver requires --dhcp-mac on a new disk")
     if args.static_driver and not args.static_mac:

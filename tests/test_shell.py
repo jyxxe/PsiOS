@@ -116,6 +116,88 @@ class ShellTests(unittest.TestCase):
         status, _, result = shell.http("/api/project-work-items", query, token)
         self.assertEqual((status, result), (200, {"title": "Private project", "items": [], "next_after_id": None}))
 
+    def work_item_evidence(self):
+        node = self.node
+        project = node.call("Project.Create", {"key": key(), "title": "交付验收"})["reference"]
+        grant = node.call("Grant.Issue", {"principal_id": "local-owner",
+                                          "actions": ["project.read", "project.manage", "project.contribute"],
+                                          "tool_targets": [project["resource_id"]], "units": 4, "ttl_seconds": 180})
+        ready = node.call("WorkItem.Create", {"project_id": project["resource_id"],
+            "expected_project_version": project["version"], "key": key(), "title": "核对本机盘点",
+            "description": "交付说明 <em>原样保留</em>", "assignee_principal_id": "local-owner",
+            "criterion": {"kind": "TaskResult", "tool": "system.status",
+                          "target_ref": node.get("profile-local")["reference"]}})["reference"]
+        task = node.submit("system.status", {})
+        result = node.wait(task)
+        self.assertEqual(result["lifecycle"], "Succeeded")
+        artifact, = result["result"]["artifact_refs"]
+        task_ref = node.get(task)["reference"]
+        submitted = node.call("WorkItem.SubmitEvidence", {**target(ready), "task_ref": task_ref, "artifact_ref": artifact})
+        self.assertEqual(submitted["value"]["lifecycle"], "InReview")
+        return project, grant["grant_ref"], ready, submitted["reference"], task_ref, artifact
+
+    def test_work_item_revision_is_exact_and_uses_current_evidence_authority(self):
+        project, _, ready, submitted, task, artifact = self.work_item_evidence()
+        shell = self.shell()
+        path = "/api/work-item-revision"
+        self.error(shell, 401, "AuthenticationRequired", path, data={"reference": submitted})
+        token = shell.pair()["token"]
+        status, _, revision = shell.http(path, {"reference": ready}, token)
+        self.assertEqual((status, revision["reference"], revision["lifecycle"], revision["evidence"]),
+                         (200, ready, "Ready", None))
+        self.error(shell, 409, "PreconditionFailed", path, token=token,
+                   data={"reference": dict(submitted, digest="sha256:" + "0" * 64)})
+        status, _, revision = shell.http(path, {"reference": submitted}, token)
+        self.assertEqual((status, revision["reference"], revision["lifecycle"]), (200, submitted, "InReview"))
+        self.assertEqual(set(revision["evidence"]), {"task_ref", "artifact_ref", "submitted_at"})
+        self.assertEqual(revision["evidence"]["task_ref"], task)
+        self.assertEqual(revision["evidence"]["artifact_ref"], artifact)
+
+        viewer = self.node.call("Agent.Register", {"name": "work-item-evidence-viewer"})
+        self.node.call("Project.SetMember", {**target(project), "principal_id": viewer["principal_id"], "role": "Viewer"})
+        self.node.call("Grant.Issue", {"principal_id": viewer["principal_id"], "actions": ["project.read"],
+                                      "tool_targets": [project["resource_id"]], "units": 1, "ttl_seconds": 120})
+        identity = self.node.base / "project-evidence-viewer.token"
+        identity.touch(mode=0o600)
+        identity.write_text(viewer["token"])
+        viewer_shell = self.shell(identity)
+        viewer_token = viewer_shell.pair()["token"]
+        status, _, redacted = viewer_shell.http(path, {"reference": submitted}, viewer_token)
+        self.assertEqual((status, redacted["lifecycle"], redacted["has_evidence"], redacted["evidence"]),
+                         (200, "InReview", True, None))
+        serialized = json.dumps(redacted)
+        self.assertNotIn(task["resource_id"], serialized)
+        self.assertNotIn(artifact["resource_id"], serialized)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
+    def test_browser_reads_fixed_work_item_evidence_and_clears_revoked_project(self):
+        project, grant, _, submitted, task, artifact = self.work_item_evidence()
+        shell = self.shell()
+        parent, child = socket.socketpair()
+        with parent, child:
+            parent.settimeout(35)
+            args = dict(origin=shell.origin, code=shell.code, projectEvidence=True, project=project["resource_id"],
+                        work_item=submitted, evidence_task=task, evidence_artifact=artifact,
+                        profile=str(self.node.base / "browser"), control_fd=child.fileno())
+            with subprocess.Popen(["node", str(Path(__file__).with_name("shell_browser.mjs")),
+                                   os.environ.get("PSIOS_TEST_CHROME", "google-chrome")],
+                                  stdin=subprocess.PIPE, pass_fds=(child.fileno(),)) as browser:
+                child.close()
+                try:
+                    browser.stdin.write(json.dumps(args).encode())
+                    browser.stdin.close()
+                    self.assertEqual(parent.recv(1), b"R")
+                    cancelled = self.node.call("WorkItem.Abandon", {**target(submitted), "reason": "Replacement accepted"})
+                    self.assertEqual(cancelled["value"]["lifecycle"], "Abandoned")
+                    parent.sendall(b"K")
+                    self.assertEqual(parent.recv(1), b"V")
+                    self.node.call("Grant.Revoke", target(grant))
+                    parent.sendall(b"K")
+                    self.assertEqual(browser.wait(timeout=35), 0)
+                finally:
+                    if browser.poll() is None:
+                        browser.kill()
+
     @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
     def test_browser_reads_project_work_items_and_rechecks_membership(self):
         node = self.node
@@ -162,7 +244,8 @@ class ShellTests(unittest.TestCase):
                                         {"project_id": active["resource_id"], "after_id": first["next_after_id"]}, token)
         self.assertEqual((status, len(last["items"]), last["next_after_id"]), (200, 1, None))
         result = {entry["id"]: entry for entry in first["items"] + last["items"]}
-        self.assertEqual(result[blocked["resource_id"]], {"id": blocked["resource_id"], "title": "<b>核对交付条件</b>",
+        self.assertEqual(result[blocked["resource_id"]], {"id": blocked["resource_id"], "reference": blocked,
+                         "title": "<b>核对交付条件</b>",
                          "lifecycle": "Ready", "assignee": "local-owner", "priority": "High", "blocked": True})
         self.assertEqual(result[abandoned["resource_id"]]["lifecycle"], "Abandoned")
         self.assertNotIn("仅限原始协议详情", json.dumps(result, ensure_ascii=False))

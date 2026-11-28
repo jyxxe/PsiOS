@@ -3,7 +3,7 @@ import { projectView } from "./shell-projects.js";
 
 const byId = (id) => document.getElementById(id);
 const chat = chatView(request, byId, element, message);
-const projects = projectView(request, byId, element, message);
+const projects = projectView(request, byId, element, message, fields);
 const pairing = byId("pairing");
 const workspace = byId("workspace");
 const code = byId("code");

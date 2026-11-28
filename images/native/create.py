@@ -75,7 +75,6 @@ SSH_PACKAGES = {
 }
 SSH_PROGRAMS = tuple(file for files in SSH_PACKAGES.values() for file in files)
 TZDATA = "tzdata-2026f-r0"
-TZDATA_SHA256 = "29b71c02c289e017ad43a96b00ff6bec39e6e07512cb67a647696320c54d0321"
 ZONEINFO = "usr/share/zoneinfo"
 ZONE_ARCHIVE = "psios-zoneinfo.tar"
 TIMEZONE_COMMAND = "usr/bin/psios-timezone"
@@ -455,14 +454,20 @@ def core_programs(work):
     return programs
 
 
-def prepare_programs(work, packages, *, tools=None):
+def extract_pinned_apk(work, package, pins, limit, *, tools=None):
+    archive = work / (package + ".apk")
+    with archive.open("xb") as output:
+        command = boot_media.tool_command(
+            ["isoinfo", "-R", "-i", work / "base.iso", "-x", f"/apks/x86_64/{archive.name}"], tools)
+        subprocess.run(command, stdout=output, check=True, timeout=30, preexec_fn=file_limit(limit))
+    if sha256(archive) != pins[package]["sha256"]:
+        raise ValueError(f"{package} package does not match the pinned Linux media")
+    return archive
+
+
+def prepare_programs(work, packages, pins, *, tools=None):
     for package, files in packages.items():
-        archive = work / (package + ".apk")
-        with archive.open("xb") as output:
-            command = boot_media.tool_command(
-                ["isoinfo", "-R", "-i", work / "base.iso", "-x", f"/apks/x86_64/{package}.apk"], tools)
-            subprocess.run(command,
-                           stdout=output, check=True, timeout=30, preexec_fn=file_limit(4 * MIB))
+        archive = extract_pinned_apk(work, package, pins, 4 * MIB, tools=tools)
         remaining = set(files)
         with tarfile.open(archive, "r:gz", ignore_zeros=True) as bundle:
             for index, entry in enumerate(bundle):
@@ -486,15 +491,8 @@ def timezone_name(value):
     return len(value) <= 96 and re.fullmatch(r"[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+)*", value)
 
 
-def prepare_timezones(work, *, tools=None):
-    package = work / (TZDATA + ".apk")
-    with package.open("xb") as output:
-        command = boot_media.tool_command(
-            ["isoinfo", "-R", "-i", work / "base.iso", "-x", f"/apks/x86_64/{package.name}"], tools)
-        subprocess.run(command,
-                       stdout=output, check=True, timeout=30, preexec_fn=file_limit(MIB))
-    if sha256(package) != TZDATA_SHA256:
-        raise ValueError("timezone package does not match the pinned Linux media")
+def prepare_timezones(work, pins, *, tools=None):
+    package = extract_pinned_apk(work, TZDATA, pins, MIB, tools=tools)
     prefix = ZONEINFO + "/"
     zones = set()
     with tarfile.open(package, "r:gz", ignore_zeros=True) as source, \
@@ -548,13 +546,14 @@ def prepare_boot_inputs(work, args, *, wired_driver=None, ssh_enabled=False, net
         modloop.unlink()
     (work / "bin").mkdir()
     install_core(work, args.core_archive, args.core_sha256)
-    zones = prepare_timezones(work, tools=tools)
+    pins = base["embedded_apks"]
+    zones = prepare_timezones(work, pins, tools=tools)
     if getattr(args, "timezone", None) and args.timezone not in zones:
         raise ValueError("unknown time zone in the pinned IANA data")
     if ssh_enabled:
-        prepare_programs(work, SSH_PACKAGES, tools=tools)
+        prepare_programs(work, SSH_PACKAGES, pins, tools=tools)
     if network_profile == RDNSS:
-        prepare_programs(work, RDNSS_PACKAGES, tools=tools)
+        prepare_programs(work, RDNSS_PACKAGES, pins, tools=tools)
     return base
 
 
@@ -593,6 +592,12 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
         shutil.copyfile(HERE / script, work / f"psios-{script}")
     files.extend(f"psios-{script}" for script in boot_scripts)
     payload = {"/" + name: sha256(work / name) for name in files}
+    pins = base["embedded_apks"]
+    packages = [TZDATA]
+    if ssh_enabled:
+        packages.extend(SSH_PACKAGES)
+    if network_profile == RDNSS:
+        packages.extend(RDNSS_PACKAGES)
     inputs = {
         "format": 1, "architecture": "x86_64", "firmware": "UEFI",
         "core_source_commit": (work / "psios-source").read_text().strip(), "core_archive_sha256": args.core_sha256,
@@ -600,7 +605,8 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
         "geometry_mib": layout.receipt(),
         "required_filesystems": {"state": str(instance), "home": str(home_id)},
         "payload_sha256": payload,
-        "timezone_data": {"package": TZDATA, "package_sha256": TZDATA_SHA256},
+        "timezone_data": {"package": TZDATA, "package_sha256": pins[TZDATA]["sha256"]},
+        "embedded_apks": {package: pins[package] for package in packages},
     }
     if layout.raw_disk_bytes is not None:
         inputs["raw_disk_bytes"] = layout.raw_disk_bytes

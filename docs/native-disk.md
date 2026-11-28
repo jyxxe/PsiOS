@@ -125,6 +125,8 @@ sha256sum boot.efi
 
 将结果与回执的 `efi_application_sha256` 比对。启动后普通账户可运行 `sha256sum /psios-deployment.json` 与回执的 `deployment_manifest_sha256` 比对。该清单列出 Core 源码修订及归档摘要、内核 ISO 及其内核与初始内存盘的输入摘要、两个文件系统 UUID 和 PsiOS 加入启动环境的文件摘要。回执另含组装后的完整 initramfs 摘要。PID 1 在挂载可写分区前核对清单和这些文件，发现不一致时给出 `deployment-payload` 停机阶段。外部回执供操作者比对。
 
+清单的 `embedded_apks` 记录从已固定的 Linux 输入介质中额外抽取的时区数据和按配置选入的 OpenSSH 或 dhcpcd。构建器先核对各 APK 的 SHA-256，再读取文件。每条记录附有源包声明的许可证、aports 修订和上游地址。基础内核与初始内存盘仍由输入介质清单绑定，发布许可清单和首批正式平台由 ADR-01 跟踪。[输入清单](../images/rescue/base.json) · [真实输入重建验收](../tests/native_boot_reproducibility.py)
+
 ## 安装到空白块设备
 
 在 Linux amd64 上用本机 root 运行归档中的 `native/install.py`。准备尚未启动的新盘镜像、构建回执以及来自可信构建的回执 SHA-256。目标可为空白 Virtio 整盘、本地 PCIe NVMe 命名空间或固定 SATA AHCI 整盘，逻辑扇区为 512 字节。Virtio 使用唯一序列号。NVMe 计划还固定命名空间 ID 和 WWID。SATA AHCI 要求 ATA 序列号和注册的 NAA WWID，并检查同类已枚举磁盘的身份唯一性。三种设备的计划均固定内核设备代次与拓扑，并在写入前复核。安装记录目录须位于另一个受保护的本机持久文件系统，支持 ext4、XFS 和 Btrfs。由 root 所有，权限为 `0700`。安装器会检查并同步上级目录。[隔离来宾安装与重启验收](../tests/native_install_virtio.py)

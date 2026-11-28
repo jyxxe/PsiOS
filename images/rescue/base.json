@@ -6,6 +6,32 @@
   "sha256": "5e0879304cfbc433bcafd007f5ef88f6c717020bf739a7636b5d5598fd1b4671",
   "kernel_sha256": "0c41150f2c75a1edf0456ffeb54880837fd9cba86cbf3a351c4a1c94b6ab7978",
   "initramfs_sha256": "86657083a70aed7c9e5c5d93fc97b29f989fd3cc6559f16c50d1e702ae927ee7",
+  "embedded_apks": {
+    "dhcpcd-10.5.2-r1": {
+      "sha256": "066197e9a56e7c9f94dfb744c87337a1fe96ebeac93843c5f255df60ec3af7e0",
+      "declared_license": "BSD-2-Clause",
+      "aports_commit": "086ffeb65e7a9ecaa28689e7fbcbfc9d497bfff0",
+      "upstream": "https://roy.marples.name/projects/dhcpcd"
+    },
+    "openssh-keygen-10.2_p1-r1": {
+      "sha256": "29fd67ada00a625eb64609477ae9f635161d419dfb8ee6ecdff1062a17b5da94",
+      "declared_license": "SSH-OpenSSH",
+      "aports_commit": "346b97be82550e66b8f69c5e8e7b0de1b4e04b11",
+      "upstream": "https://www.openssh.com/portable.html"
+    },
+    "openssh-server-10.2_p1-r1": {
+      "sha256": "1ba20b5206db507877b9b59bedbf4d56d46b7fa195b71a978e47e33ceaad169a",
+      "declared_license": "SSH-OpenSSH",
+      "aports_commit": "346b97be82550e66b8f69c5e8e7b0de1b4e04b11",
+      "upstream": "https://www.openssh.com/portable.html"
+    },
+    "tzdata-2026f-r0": {
+      "sha256": "29b71c02c289e017ad43a96b00ff6bec39e6e07512cb67a647696320c54d0321",
+      "declared_license": "Public-Domain",
+      "aports_commit": "77039815ef32831fa87770f5da2b6e85db8c23d4",
+      "upstream": "https://www.iana.org/time-zones"
+    }
+  },
   "e1000e_module": {
     "member": "modules/6.18.60-0-virt/kernel/drivers/net/ethernet/intel/e1000e/e1000e.ko",
     "sha256": "08e4a239356e0ba27d652afcfd54b11bddf55b2b4420f931d7d612f07b1c9e4c"

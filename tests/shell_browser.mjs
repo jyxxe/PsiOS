@@ -101,8 +101,8 @@ async function selectTask(id) {
   await click(selector);
 }
 
-async function verifyDownload(digest) {
-  await click("#download-artifact");
+async function verifyDownload(digest, selector = "#download-artifact") {
+  await click(selector);
   const saved = join(input.downloads, "psios-" + digest.slice("sha256:".length) + ".bin");
   for (let attempt = 0; attempt < 160 && !existsSync(saved); attempt += 1) await delay(50);
   const bytes = readFileSync(saved);
@@ -176,6 +176,7 @@ async function test() {
     const contains = value => details + '.textContent.includes(' + JSON.stringify(value) + ')';
     await waitFor("fixed work item and its task evidence", [input.evidence_task.resource_id,
       input.evidence_artifact.digest, input.work_item.version, "审核中"].map(contains).join(" && "));
+    await verifyDownload(input.evidence_artifact.digest, "#download-work-item-evidence");
     assert.ok(await evaluate(contains("交付说明 <em>原样保留</em>") + ' && !' + details + '.querySelector("em")'));
     assert.ok(!await evaluate(contains("已终止")));
     await send("Emulation.setDeviceMetricsOverride", { width: 360, height: 750, deviceScaleFactor: 1, mobile: true });

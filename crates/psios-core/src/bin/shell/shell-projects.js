@@ -2,7 +2,7 @@ const roles = { Owner: "所有者", Manager: "管理员", Reviewer: "审核者",
 const lifecycles = { Ready: "待处理", InReview: "审核中", Verified: "已验证", Closed: "已关闭", Abandoned: "已终止" };
 const priorities = { Low: "低", Normal: "普通", High: "高", Urgent: "紧急" };
 
-export function projectView(request, byId, element, message, fields) {
+export function projectView(request, byId, element, message, fields, downloadEvidence) {
   const rows = byId("project-rows");
   const empty = byId("projects-empty");
   const notice = byId("status-projects");
@@ -72,10 +72,32 @@ export function projectView(request, byId, element, message, fields) {
         ["任务", task.resource_id, true], ["任务修订", task.version, true],
         ["制品", artifact.resource_id, true], ["制品修订", artifact.version, true],
         ["制品引用摘要", artifact.digest, true], ["提交时间", submitted],
-      ]));
+      ]), evidenceDownload(item.reference, artifact));
     } else if (item.has_evidence) {
       itemContent.append(element("p", "当前授权下无法查看任务证据。", "message"));
     }
+  }
+
+  function evidenceDownload(reference, artifact) {
+    const controls = element("div", undefined, "evidence-download");
+    const download = element("button", "下载证据");
+    download.id = "download-work-item-evidence";
+    download.type = "button";
+    const notice = element("p", "", "message");
+    notice.setAttribute("role", "status");
+    controls.append(download, notice);
+    download.addEventListener("click", async () => {
+      download.disabled = true;
+      message(notice, "正在核对证据…");
+      try {
+        if (await downloadEvidence(reference, artifact, controls)) message(notice, "摘要已核验，已提交浏览器下载。");
+      } catch (error) {
+        if (controls.isConnected) message(notice, error.code === "QuotaExceeded" ? "证据超过 8 MiB。" : error.message, true);
+      } finally {
+        download.disabled = false;
+      }
+    });
+    return controls;
   }
 
   async function inspectItem(reference, button) {

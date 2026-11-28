@@ -168,6 +168,57 @@ class ShellTests(unittest.TestCase):
         serialized = json.dumps(redacted)
         self.assertNotIn(task["resource_id"], serialized)
         self.assertNotIn(artifact["resource_id"], serialized)
+        self.error(viewer_shell, 404, "NotFound", "/api/work-item-evidence", token=viewer_token,
+                   data={"reference": submitted})
+
+    def test_work_item_evidence_download_uses_the_exact_revision(self):
+        _, grant, ready, submitted, task, artifact = self.work_item_evidence()
+        shell = self.shell()
+        path = "/api/work-item-evidence"
+        request = {"reference": submitted}
+        self.error(shell, 401, "AuthenticationRequired", path, data=request)
+        token = shell.pair()["token"]
+        self.error(shell, 404, "NotFound", path, token=token, data={"reference": ready})
+        self.error(shell, 409, "PreconditionFailed", path, token=token,
+                   data={"reference": dict(submitted, digest="sha256:" + "0" * 64)})
+        self.error(shell, 400, "InvalidArgument", path, token=token, data=dict(request, artifact_ref=artifact))
+        status, headers, raw = shell.http(path, request, token)
+        self.assertEqual((status, headers["Content-Type"], headers["Cache-Control"]),
+                         (200, "application/octet-stream", "no-store"))
+        self.assertIn("attachment", headers["Content-Disposition"])
+        self.assertEqual("sha256:" + hashlib.sha256(raw).hexdigest(), artifact["digest"])
+        self.node.call("Grant.Revoke", target(grant))
+        self.error(shell, 403, "PermissionDenied", path, token=token, data=request)
+        status, _, direct = shell.http("/api/task-artifact", {"task_id": task["resource_id"],
+                                       "reference": artifact, "download": True}, token)
+        self.assertEqual((status, direct), (200, raw))
+
+    def test_work_item_evidence_download_rechecks_project_after_reading(self):
+        node = self.node
+        _, grant, _, submitted, _, _ = self.work_item_evidence()
+        proxy = node.base / "project-evidence.sock"
+        waiting, release = Event(), Event()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener, ThreadPoolExecutor(2) as pool:
+            listener.bind(str(proxy))
+            listener.listen()
+            listener.settimeout(8)
+            forwarded = pool.submit(self.relay, listener,
+                                    ("Principal.WhoAmI", "WorkItem.RevisionGet", "Artifact.ReadChunk", "WorkItem.RevisionGet"),
+                                    "Artifact.ReadChunk", waiting, release)
+            shell = Shell(node, node.witness / "owner.token", proxy)
+            self.addCleanup(shell.close)
+            token = shell.pair()["token"]
+            download = pool.submit(shell.http, "/api/work-item-evidence", {"reference": submitted}, token)
+            try:
+                self.assertTrue(waiting.wait(8))
+                node.call("Grant.Revoke", target(grant))
+            finally:
+                release.set()
+            forwarded.result(8)
+            status, headers, fault = download.result(8)
+            self.assertEqual((status, fault["error"]["code"]), (403, "PermissionDenied"))
+            self.assertIsNone(headers["Content-Disposition"])
+            self.assertEqual(headers["Cache-Control"], "no-store")
 
     @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
     def test_browser_reads_fixed_work_item_evidence_and_clears_revoked_project(self):
@@ -176,9 +227,11 @@ class ShellTests(unittest.TestCase):
         parent, child = socket.socketpair()
         with parent, child:
             parent.settimeout(35)
+            downloads = self.node.base / "downloads"
+            downloads.mkdir()
             args = dict(origin=shell.origin, code=shell.code, projectEvidence=True, project=project["resource_id"],
                         work_item=submitted, evidence_task=task, evidence_artifact=artifact,
-                        profile=str(self.node.base / "browser"), control_fd=child.fileno())
+                        profile=str(self.node.base / "browser"), downloads=str(downloads), control_fd=child.fileno())
             with subprocess.Popen(["node", str(Path(__file__).with_name("shell_browser.mjs")),
                                    os.environ.get("PSIOS_TEST_CHROME", "google-chrome")],
                                   stdin=subprocess.PIPE, pass_fds=(child.fileno(),)) as browser:

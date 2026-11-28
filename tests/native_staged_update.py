@@ -150,7 +150,8 @@ def validate_bundle(args, output, stdout, old, frozen, source, receipt, code, va
     if "secure_boot" in build:
         assembly_tools.remove("grub-mkstandalone")
         assembly_tools.update(("openssl", "sbsign", "sbverify", "ukify"))
-    if build.get("wired_driver") == "e1000e":
+    assert build.get("uefi_boot_entries") == old.get("uefi_boot_entries"), build
+    if build.get("wired_driver") == "e1000e" or old.get("uefi_boot_entries") is True:
         assembly_tools.add("unsquashfs")
     executable_hashes = {name: sha(Path(shutil.which(name))) for name in assembly_tools}
     assert build["boot_assembly_tools"] == {"format": 1, "executable_sha256": executable_hashes}, build

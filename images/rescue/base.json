@@ -6,6 +6,10 @@
   "sha256": "5e0879304cfbc433bcafd007f5ef88f6c717020bf739a7636b5d5598fd1b4671",
   "kernel_sha256": "0c41150f2c75a1edf0456ffeb54880837fd9cba86cbf3a351c4a1c94b6ab7978",
   "initramfs_sha256": "86657083a70aed7c9e5c5d93fc97b29f989fd3cc6559f16c50d1e702ae927ee7",
+  "efivarfs_module": {
+    "member": "modules/6.18.60-0-virt/kernel/fs/efivarfs/efivarfs.ko",
+    "sha256": "ca1a919415b074a0cdcc80d0e2bf31480033fad8aa504b3054815205932ca5c5"
+  },
   "e1000e_module": {
     "member": "modules/6.18.60-0-virt/kernel/drivers/net/ethernet/intel/e1000e/e1000e.ko",
     "sha256": "08e4a239356e0ba27d652afcfd54b11bddf55b2b4420f931d7d612f07b1c9e4c"

@@ -43,7 +43,7 @@ def authority(work, binaries, name, identity):
     return disk, report
 
 
-def boot_cd(work, firmware, cd, drives):
+def boot_cd(work, firmware, cd, drives, *, sata=None):
     code = firmware / "OVMF_CODE_4M.fd"
     variables = work / "vars.fd"
     shutil.copyfile(firmware / "OVMF_VARS_4M.fd", variables)
@@ -55,6 +55,10 @@ def boot_cd(work, firmware, cd, drives):
     for index, (disk, readonly) in enumerate(drives):
         command.extend(["-drive", f"if=none,format=raw,id=disk{index},file={disk},readonly={readonly}",
                         "-device", f"virtio-blk-pci,drive=disk{index},addr={index+4}"])
+    if sata is not None:
+        command.extend(["-drive", f"if=none,format=raw,id=sata,file={sata}",
+                        "-device", "ich9-ahci,id=controller,addr=8",
+                        "-device", "ide-hd,drive=sata,bus=controller.0"])
     output = subprocess.check_output(command, stdin=subprocess.DEVNULL, timeout=180).replace(b"\r\n", b"\n")
     assert output.count(MARKER) == 1, output
     return output.split(MARKER, 1)[1].strip()
@@ -67,31 +71,44 @@ def exercise(args, work):
     assert unrelated["node_id"] != expected["node_id"]
     duplicate = work / "duplicate.raw"
     shutil.copyfile(source, duplicate)
-    inputs = {disk: digest(disk) for disk in (source, decoy, duplicate)}
+    dirty = work / "dirty.raw"
+    shutil.copyfile(source, dirty)
+    volume = work / "intended.ext4"
+    subprocess.run(["debugfs", "-w", "-R", "feature needs_recovery", volume], check=True, capture_output=True)
+    with volume.open("rb") as source_fs, dirty.open("r+b") as dirty_disk:
+        dirty_disk.seek(MIB)
+        shutil.copyfileobj(source_fs, dirty_disk)
+    inputs = {disk: digest(disk) for disk in (source, decoy, duplicate, dirty)}
     core = args.bin_dir / "psiosd"
     scratch = work / "scratch"
     scratch.mkdir()
-    call = [sys.executable, args.inspector, source, "--iso", args.iso, "--core", core, "--core-sha256", digest(core),
-            "--uid", str(os.getuid()), "--gid", str(os.getgid()), "--state", "/state", "--witness", "/witness",
-            "--partition", "1", "--ovmf-dir", args.ovmf_dir]
+    settings = ["--iso", args.iso, "--core", core, "--core-sha256", digest(core), "--uid", str(os.getuid()),
+                "--gid", str(os.getgid()), "--state", "/state", "--witness", "/witness", "--partition", "1",
+                "--ovmf-dir", args.ovmf_dir]
 
-    def inspect(*options, rejection=None):
-        result = subprocess.run([*call, *options], text=True, capture_output=True, timeout=210,
+    def inspect(*options, rejection=None, image=source):
+        result = subprocess.run([sys.executable, args.inspector, image, *settings, *options],
+                                text=True, capture_output=True, timeout=210,
                                 env={**os.environ, "TMPDIR": str(scratch)})
         assert not list(scratch.iterdir()), "rescue staging leaked temporary files"
-        assert digest(source) == inputs[source], "rescue changed the source image"
+        assert digest(image) == inputs[image], "rescue changed the source image"
         if rejection is None:
             assert result.returncode == 0, result.stderr
             assert json.loads(result.stdout) == expected
         else:
             assert result.returncode != 0 and not result.stdout and rejection in result.stderr, result
 
-    inspect("--disk-transport", "nvme", rejection="requires direct read-only inspection")
+    inspect("--disk-transport", "nvme", rejection="direct read-only inspection")
     inspect("--filesystem-uuid", "not-a-uuid", rejection="expected a nonzero ext4 UUID")
     inspect("--disk-transport", "nvme", "--filesystem-uuid", str(identity), "--firmware", "uefi",
-            rejection="requires direct read-only inspection")
+            rejection="direct read-only inspection")
     inspect("--disk-transport", "nvme", "--filesystem-uuid", str(identity))
     inspect("--disk-transport", "nvme", "--filesystem-uuid", str(uuid.uuid4()), rejection="filesystem-identity")
+    inspect("--disk-transport", "ahci", "--filesystem-uuid", str(identity))
+    inspect("--disk-transport", "ahci", "--filesystem-uuid", str(identity), image=dirty,
+            rejection="filesystem-recovery-required")
+    inspect("--disk-transport", "ahci", "--filesystem-uuid", str(identity), "--journal-overlay-mib", "16",
+            rejection="direct read-only inspection")
     inspect("--filesystem-uuid", str(identity), "--partition", "2", rejection="filesystem-identity")
 
     cd = work / "pinned.iso"
@@ -102,11 +119,13 @@ def exercise(args, work):
     assert status == b"OK" and json.loads(payload) == expected, report
     assert boot_cd(work, args.ovmf_dir, cd, [(decoy, "on")]) == b"ERROR filesystem-identity"
     assert boot_cd(work, args.ovmf_dir, cd, [(source, "on"), (duplicate, "off")]) == b"ERROR ambiguous-filesystem-identity"
+    assert boot_cd(work, args.ovmf_dir, cd, [(source, "on")], sata=duplicate) == b"ERROR ambiguous-filesystem-identity"
+    assert boot_cd(work, args.ovmf_dir, cd, [(decoy, "on")], sata=source) == b"ERROR block-device"
     assert boot_cd(work, args.ovmf_dir, cd, [(decoy, "on"), (source, "off")]) == b"ERROR block-device"
     assert {disk: digest(disk) for disk in inputs} == inputs
     assert digest(cd) == before
-    print("Verified exact authority on QEMU NVMe and reordered Virtio, GPT partition identity, missing and duplicate "
-          "filesystem refusal, writable-device refusal, and byte-for-byte input preservation.")
+    print("Verified exact authority on QEMU NVMe, AHCI and reordered Virtio, GPT partition identity, missing and "
+          "duplicate filesystem refusal across controllers, writable and dirty-source refusal, and byte preservation.")
 
 
 if __name__ == "__main__":

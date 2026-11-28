@@ -18,6 +18,7 @@ import time
 import unittest
 from threading import Event
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from model_delivery import frame
 from test_model_fallback import publish_skill, register_provider
@@ -26,7 +27,8 @@ from support import Failure, Node, key, target
 
 class Shell:
     def __init__(self, node, token_file, endpoint=None, *, cancel_pending=False, send_chat=False,
-                 review_work_items=False, manage_agent_sessions=False, files=None, files_preview=False, resolver_delegation=None):
+                 review_work_items=False, manage_agent_sessions=False, files=None, files_preview=False,
+                 resolver_delegation=None, application_actions_delegation=None):
         self.process = subprocess.Popen(
             [node.binaries / "psiosctl", "--socket", endpoint or node.socket, "--token-file", token_file, "shell",
              *(["--cancel-pending-tasks"] if cancel_pending else []), *(["--send-chat"] if send_chat else []),
@@ -34,7 +36,8 @@ class Shell:
              *(["--manage-agent-sessions"] if manage_agent_sessions else []),
              *(["--files-volume", files[0], "--files-delegation", files[1]] if files else []),
              *(["--files-preview"] if files_preview else []),
-             *(["--resolver-delegation", resolver_delegation] if resolver_delegation else [])],
+             *(["--resolver-delegation", resolver_delegation] if resolver_delegation else []),
+             *(["--application-actions-delegation", application_actions_delegation] if application_actions_delegation else [])],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
         )
         try:
@@ -97,11 +100,13 @@ class ShellTests(unittest.TestCase):
         self.addCleanup(self.node.close)
 
     def shell(self, token_file=None, *, cancel_pending=False, send_chat=False,
-              review_work_items=False, manage_agent_sessions=False, files=None, files_preview=False, resolver_delegation=None):
+              review_work_items=False, manage_agent_sessions=False, files=None, files_preview=False,
+              resolver_delegation=None, application_actions_delegation=None):
         shell = Shell(self.node, token_file or self.node.witness / "owner.token",
                       cancel_pending=cancel_pending, send_chat=send_chat, review_work_items=review_work_items,
                       manage_agent_sessions=manage_agent_sessions, files=files, files_preview=files_preview,
-                      resolver_delegation=resolver_delegation)
+                      resolver_delegation=resolver_delegation,
+                      application_actions_delegation=application_actions_delegation)
         self.addCleanup(shell.close)
         return shell
 
@@ -1078,15 +1083,15 @@ class ShellTests(unittest.TestCase):
                    data={"id": "app-missing", "limit": 64}, token=bearer)
         self.error(shell, 403, "PermissionDenied", "/api/application-releases",
                    data={"id": "app-missing"}, token=bearer)
+        self.error(shell, 404, "NotFound", "/api/application-action", data={}, token=bearer)
 
-    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_OCI"), "requires real local Docker and Chromium")
-    def test_browser_pages_the_managed_application_catalog_and_fences_revoked_releases(self):
+    def application_image(self, name):
         node = self.node
         docker = ["docker", "--host", "unix:///var/run/docker.sock"]
-        tag = "psios-shell-check:catalog-" + node.base.name
+        tag = f"psios-shell-check:{name}-{node.base.name}"
         source = node.base / "probe.c"
         program = node.base / "probe"
-        source.write_text("int main(void) { return 0; }\n")
+        source.write_text("#include <unistd.h>\nint main(void) { for (;;) pause(); }\n")
         subprocess.run(["cc", "-static", "-o", program, source], check=True, timeout=30)
         archive = io.BytesIO()
         with tarfile.open(fileobj=archive, mode="w") as data:
@@ -1095,16 +1100,138 @@ class ShellTests(unittest.TestCase):
                                            input=archive.getvalue(), timeout=45).decode().strip()
         self.addCleanup(subprocess.run, [*docker, "image", "rm", tag], check=True,
                         stdout=subprocess.DEVNULL, timeout=15)
-        spec = dict(image_id=image_id, name="catalog-0", release_version="1.0.0", argv=["/probe"],
+        return dict(image_id=image_id, name=name, release_version="1.0.0", argv=["/probe"],
                     license_expression="0BSD", cpu_millicores=200, memory_max_bytes=33554432,
                     pids_max=8, ephemeral_max_bytes=1048576)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_OCI"), "requires real local Docker")
+    def test_browser_application_action_api_preserves_scope_and_replays_lost_receipt(self):
+        node = self.node
+        spec = self.application_image("shell-action")
+        first = node.perform("application.install", spec)
+        other = node.perform("application.install", dict(spec, name="outside-scope"))
+        changed = node.call("Application.Configure", dict(**target(first), environment={"TEST_NAME": "revised"}))
+        grant = node.call("Grant.Issue", {"principal_id": "local-owner", "tool_targets": [first["resource_id"]],
+            "actions": ["application.start", "task.submit", "task.read"], "ttl_seconds": 240, "units": 8})
+        delegation = grant["delegation_ref"]["resource_id"]
+        endpoint = "/api/application-action"
+        shell = self.shell(application_actions_delegation=delegation)
+        pair = shell.pair()
+        self.assertTrue(pair["manage_applications"])
+        self.assertNotIn(delegation, json.dumps(pair))
+        token = pair["token"]
+        request = {"action": "Start", "reference": changed, "key": str(uuid4())}
+        self.error(shell, 400, "InvalidArgument", endpoint, data=dict(request, action="Restart"), token=token)
+        self.error(shell, 403, "PermissionDenied", endpoint,
+                   data=dict(request, action="Stop", key=str(uuid4())), token=token)
+        self.error(shell, 403, "PermissionDenied", endpoint,
+                   data=dict(request, reference=other, key=str(uuid4())), token=token)
+        status, _, stale = shell.http(endpoint, dict(request, reference=first, key=str(uuid4())), token)
+        self.assertIn(status, (403, 409), stale)
+        self.assertEqual(shell.http("/api/logout", {}, token)[0], 200)
+
+        proxy = node.base / "application-response.sock"
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener, ThreadPoolExecutor(1) as pool:
+            listener.bind(str(proxy))
+            listener.listen()
+            listener.settimeout(10)
+            methods = ("Principal.WhoAmI", *("Resource.Resolve", "Task.Prepare", "Task.Submit") * 2)
+            forwarded = pool.submit(self.relay, listener, methods, drop="Task.Submit")
+            shell = Shell(node, node.witness / "owner.token", proxy, application_actions_delegation=delegation)
+            self.addCleanup(shell.close)
+            token = shell.pair()["token"]
+            status, _, fault = shell.http(endpoint, request, token)
+            self.assertEqual(status, 503, fault)
+            status, _, accepted = shell.http(endpoint, request, token)
+            self.assertEqual((status, set(accepted)), (202, {"task_id"}), accepted)
+            forwarded.result(8)
+            self.assertFalse(select.select([listener], [], [], 0)[0])
+        task = node.wait(accepted["task_id"])
+        self.assertEqual(task["lifecycle"], "WaitingApproval")
+        self.assertEqual(task["origin_ref"]["origin_id"], request["key"])
+        self.assertEqual(node.get(first["resource_id"])["resource"]["status"]["lifecycle"], "Stopped")
+        refs = node.call("Resource.List", {"kind": "Task", "limit": 20})["items"]
+        origins = [node.call("Task.Get", {"id": ref["resource_id"]})["origin_ref"]["origin_id"] for ref in refs]
+        self.assertEqual(origins.count(request["key"]), 1)
+        proxy = node.base / "application-revocation.sock"
+        waiting, release = Event(), Event()
+        revoked = dict(request, key=str(uuid4()))
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener, ThreadPoolExecutor(2) as pool:
+            listener.bind(str(proxy))
+            listener.listen()
+            listener.settimeout(8)
+            methods = ("Principal.WhoAmI", "Resource.Resolve", "Task.Prepare", "Task.Submit")
+            forwarded = pool.submit(self.relay, listener, methods, "Task.Prepare", waiting, release)
+            shell = Shell(node, node.witness / "owner.token", proxy, application_actions_delegation=delegation)
+            self.addCleanup(shell.close)
+            submitted = pool.submit(shell.http, endpoint, revoked, shell.pair()["token"])
+            try:
+                self.assertTrue(waiting.wait(8))
+                node.call("Grant.Revoke", target(grant["grant_ref"]))
+            finally:
+                release.set()
+            status, _, rejection = submitted.result(8)
+            self.assertEqual((status, rejection["error"]["code"]), (403, "PermissionDenied"))
+            forwarded.result(8)
+        refs = node.call("Resource.List", {"kind": "Task", "limit": 20})["items"]
+        origins = [node.call("Task.Get", {"id": ref["resource_id"]})["origin_ref"]["origin_id"] for ref in refs]
+        self.assertNotIn(revoked["key"], origins)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_OCI"), "requires real local Docker and Chromium")
+    def test_browser_submits_an_application_request_and_opens_its_exact_task(self):
+        node = self.node
+        docker = ["docker", "--host", "unix:///var/run/docker.sock"]
+        application = node.perform("application.install", self.application_image("start-from-shell"))
+        aid = application["resource_id"]
+        grant = node.call("Grant.Issue", {"principal_id": "local-owner", "tool_targets": [aid],
+            "actions": ["application.releases", "application.start", "application.stop", "task.submit", "task.read"],
+            "ttl_seconds": 240, "units": 12})
+        delegation = grant["delegation_ref"]["resource_id"]
+
+        def submit_from_browser(action):
+            shell = self.shell(application_actions_delegation=delegation)
+            args = dict(origin=shell.origin, code=shell.code, applicationAction=action, application=aid,
+                        profile=str(node.base / ("browser-" + action.lower())))
+            return subprocess.check_output(["node", str(Path(__file__).with_name("shell_browser.mjs")),
+                os.environ.get("PSIOS_TEST_CHROME", "google-chrome")], input=json.dumps(args),
+                text=True, timeout=35).strip()
+
+        start = submit_from_browser("Start")
+        pending = node.call("Task.Get", {"id": start})
+        self.assertEqual((pending["lifecycle"], pending["outcome_knowledge"]), ("WaitingApproval", "NotStarted"))
+        self.assertEqual(node.get(aid)["reference"], application)
+        info = json.loads(subprocess.check_output([*docker, "info", "--format", "{{json .}}"], timeout=15))
+        if all(info.get(flag) for flag in ("MemoryLimit", "SwapLimit", "CpuCfsQuota", "PidsLimit")) and any(
+                "seccomp" in feature for feature in info.get("SecurityOptions", [])):
+            try:
+                node.approve(start)
+                outcome = node.wait(start)
+                self.assertEqual(outcome["lifecycle"], "Succeeded", outcome)
+                running = node.get(aid)["reference"]
+                self.assertTrue(node.perform("application.health", target(running))["process_running"])
+                stop = submit_from_browser("Stop")
+                self.assertNotEqual(start, stop)
+                outcome = node.wait(stop)
+                self.assertEqual(outcome["lifecycle"], "Succeeded", outcome)
+                self.assertEqual(node.get(aid)["resource"]["status"]["lifecycle"], "Stopped")
+            finally:
+                containers = subprocess.check_output([*docker, "ps", "-aq", "--filter", "label=io.psios.application=" + aid],
+                                                     timeout=15).decode().split()
+                if containers:
+                    subprocess.run([*docker, "rm", "-f", *containers], check=True, stdout=subprocess.DEVNULL, timeout=30)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_OCI"), "requires real local Docker and Chromium")
+    def test_browser_pages_the_managed_application_catalog_and_fences_revoked_releases(self):
+        node = self.node
+        spec = self.application_image("catalog")
+        image_id = spec["image_id"]
         applications = [node.perform("application.install", dict(spec, name=f"catalog-{i}")) for i in range(9)]
         app = applications[0]
         aid = app["resource_id"]
         for revision in range(2, 10):
             current = node.get(aid)["reference"]
             node.perform("application.stage_release", {
-                "target": target(current), "release": dict(spec, release_version=f"{revision}.0.0"),
+                "target": target(current), "release": dict(spec, name="catalog-0", release_version=f"{revision}.0.0"),
             })
         grant = node.call("Grant.Issue", {"principal_id": "local-owner", "tool_targets": [aid],
                                          "actions": ["application.releases"], "ttl_seconds": 240, "units": 10})

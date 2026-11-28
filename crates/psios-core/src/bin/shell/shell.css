@@ -152,6 +152,8 @@ input {
 .dock button { gap: .5rem; }
 .release-list { display: grid; gap: .75rem; padding-inline-start: 1.3rem; margin: .9rem 0; }
 .release-list li { overflow-wrap: anywhere; }
+.application-actions { margin-top: .75rem; }
+.application-actions .message:empty { display: none; }
 .chat-thread { display: grid; gap: .75rem; list-style: none; padding: 0; margin: 0; }
 .chat-entry { padding: .75rem; border: 1px solid var(--border); border-radius: .5rem; overflow-wrap: anywhere; }
 .chat-entry time { display: block; color: var(--muted); font-size: .85rem; margin: .2rem 0 .5rem; }

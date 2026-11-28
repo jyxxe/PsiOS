@@ -18,6 +18,7 @@ const [, , , commands, replies] = chrome.stdio;
 const pending = new Map();
 const requests = [];
 const exceptions = [];
+let applicationActionResponse;
 let nextId = 0;
 let sessionId;
 let buffer = "";
@@ -45,6 +46,9 @@ replies.setEncoding("utf8").on("data", (chunk) => {
     }
     if (message.method === "Network.requestWillBeSent") {
       requests.push(message.params.request.url);
+    } else if (message.method === "Network.responseReceived" && input.applicationAction &&
+               new URL(message.params.response.url).pathname === "/api/application-action") {
+      applicationActionResponse = message.params;
     } else if (message.method === "Runtime.exceptionThrown") {
       exceptions.push(message.params.exceptionDetails.text);
     }
@@ -640,6 +644,31 @@ async function test() {
     assert.deepEqual(exceptions, []);
     return;
   }
+  if (input.applicationAction) {
+    await keyboardActivate("#nav-applications");
+    const application = '#application-rows button[data-application-id="' + input.application + '"]';
+    await waitFor("scoped application", 'document.querySelector(' + JSON.stringify(application) + ') !== null');
+    await keyboardActivate(application);
+    const action = input.applicationAction === "Stop" ? "申请停止" : "申请启动";
+    await waitFor("application lifecycle request", 'document.querySelector(".application-actions button")?.textContent === ' + JSON.stringify(action));
+    await keyboardActivate(".application-actions button");
+    await waitFor("the accepted application request", 'document.querySelector(".application-actions button")?.textContent === "查看任务"');
+    assert.equal(applicationActionResponse?.response.status, 202);
+    const response = await send("Network.getResponseBody", { requestId: applicationActionResponse.requestId });
+    const { task_id: taskId } = JSON.parse(response.body);
+    assert.match(taskId, /^task-/);
+    await keyboardActivate(".application-actions button");
+    const content = 'document.querySelector("#task-content").textContent';
+    await waitFor("the original application task", '!document.querySelector("#task-detail").hidden && ' +
+      content + '.includes(' + JSON.stringify(taskId) + ')');
+    if (input.applicationAction === "Start") assert.ok(await evaluate(content + '.includes("等待审批")'));
+    assert.equal(requests.filter(url => new URL(url).pathname === "/api/application-action").length, 1);
+    await click("#logout");
+    await waitFor("cleared application controls", 'document.querySelector("#workspace").hidden && document.querySelector(".application-actions") === null');
+    assert.deepEqual(exceptions, []);
+    console.log(taskId);
+    return;
+  }
   if (input.applicationCatalog) {
     await click("#nav-applications");
     await waitFor("first application page", 'document.querySelectorAll("#application-rows button").length === 8');
@@ -649,6 +678,7 @@ async function test() {
     await waitFor("return to the first application page", 'document.querySelectorAll("#application-rows button").length === 8');
     await click('#application-rows button[data-application-id="' + input.application + '"]');
     await waitFor("first release page", 'document.querySelectorAll(".release-list li").length === 8');
+    assert.ok(await evaluate('document.querySelector(".application-actions") === null'));
     assert.ok(await evaluate('document.activeElement.id === "application-detail" && document.querySelector(".release-list").textContent.includes("已选用")'));
     await click("#releases-next");
     await waitFor("second release page", 'document.querySelectorAll(".release-list li").length === 1 && document.querySelector(".release-list li strong").textContent === "9.0.0"');

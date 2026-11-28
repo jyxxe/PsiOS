@@ -33,6 +33,7 @@ const applicationContent = byId("application-content");
 let bearer = null;
 let sessionRequests = new AbortController();
 let canCancelPending = false;
+let canManageApplications = false;
 const apps = new Map(["node", "tasks", "files", "applications", "chat", "projects", "agent-runtime"].map(id => [id, {
   window: byId("window-" + id), title: byId("title-" + id),
   dock: byId("nav-" + id), status: byId("status-" + id), state: "closed", tile: null,
@@ -65,6 +66,7 @@ function leave(text, error = false) {
   sessionRequests.abort();
   sessionRequests = new AbortController();
   canCancelPending = false;
+  canManageApplications = false;
   resolver.hidden = true;
   clearResolver();
   launcher.close();
@@ -591,6 +593,44 @@ const applicationStates = {
 };
 const releaseStates = { Selected: "已选用", Unselected: "未选用", Staged: "已暂存", Retired: "已退役" };
 
+function applicationActions(page, revision) {
+  if (!canManageApplications) return null;
+  const action = { Stopped: "Start", Running: "Stop" }[page.application_lifecycle];
+  if (!action) return null;
+  const controls = element("div", undefined, "application-actions");
+  const button = element("button", action === "Start" ? "申请启动" : "申请停止");
+  button.type = "button";
+  const notice = element("p", "", "message");
+  notice.setAttribute("aria-live", "polite");
+  const input = { reference: page.application_ref, action, key: crypto.randomUUID() };
+  controls.append(button, notice);
+  button.addEventListener("click", async () => {
+    if (revision !== releaseUpdate || button.disabled) return;
+    button.disabled = true;
+    message(notice, "正在提交…");
+    try {
+      const accepted = await request("/api/application-action", input);
+      if (revision !== releaseUpdate) return;
+      const view = element("button", "查看任务");
+      view.type = "button";
+      view.addEventListener("click", async () => {
+        openWindow("tasks");
+        await loadTasks([null], null);
+        if (!apps.get("tasks").window.hidden) await inspectTask(accepted.task_id, true);
+      });
+      message(notice, "申请已提交。");
+      controls.replaceChildren(view, notice);
+      view.focus();
+    } catch (error) {
+      if (revision !== releaseUpdate) return;
+      message(notice, error.message, true);
+      button.textContent = "重试申请";
+      button.disabled = false;
+    }
+  });
+  return controls;
+}
+
 function closeApplicationDetail() {
   releaseUpdate += 1;
   applicationDetail.hidden = true;
@@ -628,7 +668,10 @@ async function loadReleases(id, target = [null], focus = false) {
                   element("p", release.release_ref.resource_id, "mono"));
       list.append(item);
     }
-    applicationContent.replaceChildren(current, page.items.length ? list : element("p", "当前没有可见版本。", "empty"));
+    const actions = applicationActions(page, revision);
+    applicationContent.replaceChildren(current);
+    if (actions) applicationContent.append(actions);
+    applicationContent.append(page.items.length ? list : element("p", "当前没有可见版本。", "empty"));
     byId("releases-previous").disabled = releaseCursors.length === 1;
     byId("releases-next").disabled = !nextReleaseCursor;
   } catch (error) {
@@ -907,6 +950,7 @@ byId("pair-form").addEventListener("submit", async (event) => {
     bearer = session.token;
     void observeSession(bearer);
     canCancelPending = session.cancel_pending_tasks === true;
+    canManageApplications = session.manage_applications === true;
     files.capability(session.browse_files === true, session.preview_files === true);
     resolver.hidden = session.observe_resolver !== true;
     chat.capability(session.send_chat === true);

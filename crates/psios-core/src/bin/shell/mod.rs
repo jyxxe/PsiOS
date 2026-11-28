@@ -85,6 +85,7 @@ pub(super) struct Options {
     pub manage_agent_sessions: bool,
     pub files: Option<VolumeAccess>,
     pub resolver_delegation: Option<String>,
+    pub application_actions_delegation: Option<String>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -97,6 +98,7 @@ enum Endpoint {
     Tasks,
     Applications,
     ApplicationReleases,
+    ApplicationAction,
     VolumeDirectory,
     VolumePreview,
     Conversations,
@@ -138,6 +140,20 @@ struct Page {
 struct ApplicationReleases {
     id: String,
     cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+enum ApplicationAction {
+    Start,
+    Stop,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApplicationActionRequest {
+    reference: ResourceRef,
+    action: ApplicationAction,
+    key: String,
 }
 
 #[derive(Deserialize)]
@@ -267,6 +283,7 @@ enum CoreRequest {
     NodeResolver(String),
     Applications(Page),
     ApplicationReleases(ApplicationReleases),
+    ApplicationAction(ApplicationActionRequest, String),
     VolumeDirectory(files::Directory, VolumeAccess),
     VolumePreview(files::Preview, VolumeAccess),
     Conversations(DirectoryPage),
@@ -454,6 +471,36 @@ impl CoreRequest {
                         "next_cursor": page["next_cursor"],
                     }),
                 ))
+            }
+            Self::ApplicationAction(request, delegation) => {
+                let reference = json!(request.reference);
+                let resolved = client.call("Resource.Resolve", json!({"reference": reference}))?;
+                if resolved["reference"] != reference
+                    || resolved["resource"]["kind"] != "Application"
+                {
+                    return Err(ApiError::new(
+                        "PreconditionFailed",
+                        "expected an exact application reference",
+                    )
+                    .into());
+                }
+                let tool = match request.action {
+                    ApplicationAction::Start => "application.start",
+                    ApplicationAction::Stop => "application.stop",
+                };
+                check()?;
+                let prepared = client.call("Task.Prepare", json!({
+                    "tool": tool,
+                    "input": {"id": request.reference.resource_id, "expected_resource_version": request.reference.version},
+                    "key": request.key,
+                    "delegation_id": delegation,
+                }))?;
+                check()?;
+                let accepted = client.call("Task.Submit", prepared)?;
+                let id = accepted["task_id"].as_str().ok_or_else(|| {
+                    ApiError::new("RecoveryRequired", "application task receipt is malformed")
+                })?;
+                Ok(json_response(StatusCode::ACCEPTED, json!({"task_id": id})))
             }
             Self::Conversations(request) => {
                 let page = client.call(
@@ -919,6 +966,22 @@ fn rpc(endpoint: Endpoint, data: Value, options: &Options) -> Result<CoreRequest
         Endpoint::ApplicationReleases => Ok(CoreRequest::ApplicationReleases(
             serde_json::from_value(data).map_err(|_| INVALID)?,
         )),
+        Endpoint::ApplicationAction => {
+            let request: ApplicationActionRequest =
+                serde_json::from_value(data).map_err(|_| INVALID)?;
+            if !uuid::Uuid::parse_str(&request.key)
+                .is_ok_and(|key| key.hyphenated().to_string() == request.key)
+            {
+                return Err(INVALID);
+            }
+            Ok(CoreRequest::ApplicationAction(
+                request,
+                options
+                    .application_actions_delegation
+                    .clone()
+                    .ok_or(INVALID)?,
+            ))
+        }
         Endpoint::VolumeDirectory => Ok(CoreRequest::VolumeDirectory(
             serde_json::from_value(data).map_err(|_| INVALID)?,
             options.files.clone().ok_or(INVALID)?,
@@ -1059,6 +1122,9 @@ impl Shell {
             "/api/tasks" => Endpoint::Tasks,
             "/api/applications" => Endpoint::Applications,
             "/api/application-releases" => Endpoint::ApplicationReleases,
+            "/api/application-action" if self.options.application_actions_delegation.is_some() => {
+                Endpoint::ApplicationAction
+            }
             "/api/volume-directory" if self.options.files.is_some() => Endpoint::VolumeDirectory,
             "/api/volume-preview"
                 if self
@@ -1105,6 +1171,9 @@ impl Shell {
                 "manage_agent_sessions":self.options.manage_agent_sessions,
                 "observe_resolver":self.options.resolver_delegation.is_some(),
             });
+            if self.options.application_actions_delegation.is_some() {
+                reply["manage_applications"] = json!(true);
+            }
             if let Some(files) = &self.options.files {
                 reply["browse_files"] = json!(true);
                 if files.preview {

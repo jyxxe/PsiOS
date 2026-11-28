@@ -184,6 +184,7 @@ def stage(args):
                 require_unchanged(args.upgrade_from, old, old_identity, original, "source disk")
                 require_unchanged(args.ovmf_vars, old_vars, vars_identity, args.ovmf_vars_sha256, "source firmware variables")
                 open_cold_raw(old)
+                prepared.boot_tools.receipt()
                 publish_bundle(bundle, parent_fd, output.name)
                 return record
 
@@ -193,6 +194,7 @@ def main():
     parser.add_argument("output", type=Path)
     for name in ("upgrade-from", "previous-receipt", "kernel-iso", "core-archive", "ovmf-code", "ovmf-vars"):
         parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--source-size-bytes", type=int, help="installed raw capacity from an approved larger-target plan")
     for name in ("previous-receipt-sha256", "core-sha256", "ovmf-code-sha256", "ovmf-vars-sha256"):
         parser.add_argument("--" + name, type=digest_argument, required=True)
     parser.add_argument("--max-copy-mib", type=copy_budget_mib, default=128,

@@ -7,8 +7,9 @@ import subprocess
 import sys
 import tempfile
 
-from native_disk import REPO, boot, check_clean_shutdown, check_state, password, sha
+from native_disk import REPO, boot, call, check_clean_shutdown, check_state, password, sha
 from native_upgrade import shutdown
+from native_usb_inventory import observe as observe_node_usb
 
 
 PROFILE = "XhciInventory"
@@ -21,7 +22,7 @@ PERIPHERALS = (
 LIMITS = {"cpu_millicores": 500, "memory_mib": 128, "pids_max": 48}
 
 
-def observe(console, receipt):
+def observe(console, receipt, key):
     saved = json.loads(console.run("cat /psios-deployment.json"))
     assert saved["usb_profile"] == PROFILE and saved["core_limits"] == LIMITS, saved
     assert console.run("sha256sum /psios-deployment.json").split()[0] == receipt["deployment_manifest_sha256"]
@@ -40,6 +41,15 @@ def observe(console, receipt):
     ).splitlines()
     assert len(devices) == 2 and devices[0] != devices[1] and any(v.startswith("0627:") for v in devices), devices
     console.run("test ! -e /sys/module/usbhid && test ! -e /sys/module/usb_storage && test ! -e /dev/sda")
+    node = call(console, "Node.Get", {})["reference"]["resource_id"]
+    grant = call(console, "Grant.Issue", {"principal_id": "local-owner", "tool_targets": [node],
+                 "units": 1, "ttl_seconds": 300, "actions": ["node.usb", "task.submit", "task.read"]})
+    _, inventory = observe_node_usb(console, key, grant["delegation_ref"]["resource_id"], {"limit": 16})
+    assert inventory["boot_id"] == console.run("cat /proc/sys/kernel/random/boot_id")
+    assert inventory["next_cursor"] is None
+    peripherals = [row for row in inventory["devices"] if row["parent_location"] is not None]
+    assert all(row["authorized"] is False for row in peripherals), inventory
+    assert sorted(f"{row['vendor_id']}:{row['product_id']}" for row in peripherals) == sorted(devices), inventory
     return sorted(devices)
 
 
@@ -76,7 +86,7 @@ def exercise(args, work):
     with boot(work, original, extra_qemu_args=PERIPHERALS, pace_commands=True) as console:
         console.login("psios", operator)
         baseline = check_state(console)
-        original_devices = observe(console, receipt)
+        original_devices = observe(console, receipt, "native-xhci-original")
         shutdown(console, admin)
     check_clean_shutdown(original)
     frozen = sha(original)
@@ -116,7 +126,7 @@ def exercise(args, work):
         after = check_state(console)
         assert after[0] == baseline[0] and after[1]["task_id"] == baseline[1]["task_id"], after
         assert after[2] == baseline[2] and after[3] != baseline[3], after
-        assert observe(console, updated) == original_devices
+        assert observe(console, updated, "native-xhci-updated") == original_devices
         shutdown(console, admin)
     check_clean_shutdown(candidate)
     assert sha(original) == frozen and sha(firmware) == frozen_vars

@@ -79,6 +79,7 @@ def receipt_lineage(prepared):
     require(len({trial[name] for name in ("state_uuid", "home_uuid", "trial_disk_uuid")}) == 3,
             "trial UUIDs are not distinct")
     upgrade = candidate["upgrade"]
+    create.verified_home_expansion_target(upgrade, layout)
     source = upgrade["verified_authority"]
     rehearsal = source["migration_rehearsal"]
     configuration = hashlib.sha256(prepared.configuration).hexdigest()

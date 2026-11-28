@@ -1054,7 +1054,7 @@ jobs:
   native-virtio-install:
     needs: host-package
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -1097,6 +1097,16 @@ jobs:
           inputs=(--kernel-iso "$RUNNER_TEMP/kernel.iso" --archive "$archive" --installer "$unpacked/native/create.py")
           python3 -B tests/native_expand_home.py "${inputs[@]}"
           python3 -B tests/native_expand_home.py "${inputs[@]}" --preallocated
+      - name: Stage and activate the enlarged home on the runner filesystem
+        timeout-minutes: 8
+        run: |
+          archive="$RUNNER_TEMP/native-core.tar.gz"
+          native="$RUNNER_TEMP/native-home-archive/native"
+          python3 -B tests/native_activation.py --expand-home --kernel-iso "$RUNNER_TEMP/kernel.iso" \
+            --archive "$archive" --previous-archive "$archive" --controller "$native/stage_update.py" \
+            --activator "$native/activate_update.py" --previous-installer "$native/create.py" \
+            --selector "$native/select_update.py" \
+            --work-parent "$RUNNER_TEMP"
 
   package-provenance:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'jyxxe/PsiOS'

@@ -189,6 +189,11 @@ def verify_guest(work, disk, code, variables, operator, admin, build, prior, tok
             assert console.run("cat $HOME/native-activation-fact") == token
             assert console.run("cat /psios-source") == build["source_commit"]
             assert console.run("sha256sum /psios-deployment.json").split()[0] == build["deployment_manifest_sha256"]
+            expansion = build.get("upgrade", {}).get("home_expansion")
+            if expansion is not None:
+                assert int(console.run("cat /sys/class/block/vda3/size")) == expansion["target_mib"] * 2048
+                console.run("dd if=/dev/zero of=expanded-data bs=1M count=96 2>/dev/null; "
+                            "test $(stat -c %s expanded-data) = 100663296")
             shutdown(console, admin)
     return observed[3]
 
@@ -351,11 +356,69 @@ def verified_boot(fixture, work, candidate, frozen, prior, admin):
 
 
 def stage_native(args, stage, source, receipt, code, vars_file, frozen):
+    growth = ("--expand-home-mib", "192") if args.expand_home else ()
     return succeeded(invoke([sys.executable, "-B", args.controller, stage,
         "--upgrade-from", source, "--previous-receipt", receipt, "--previous-receipt-sha256", frozen[receipt],
         "--kernel-iso", args.kernel_iso, "--core-archive", args.archive, "--core-sha256", sha(args.archive),
         "--ovmf-code", code, "--ovmf-code-sha256", frozen[code],
-        "--ovmf-vars", vars_file, "--ovmf-vars-sha256", frozen[vars_file]], 850))
+        "--ovmf-vars", vars_file, "--ovmf-vars-sha256", frozen[vars_file], *growth], 850))
+
+
+def verify_expansion_contract(activator, fixture, candidate):
+    sys.path.insert(0, str(activator.resolve().parent))
+    from activate_update import stage_contract
+
+    assert candidate["upgrade"]["home_expansion"] == {"previous_mib": 64, "target_mib": 192}
+    assert candidate["geometry_mib"]["home_mib"] == 192
+    source_size = fixture.source.stat().st_size
+    checked = stage_contract(fixture.stage, fixture.stage_digest, source_size)
+    assert checked["size_bytes"] == (fixture.stage / "candidate.raw").stat().st_size
+    assert source_size < checked["size_bytes"], (source_size, checked["size_bytes"])
+    try:
+        stage_contract(fixture.stage, fixture.stage_digest, checked["size_bytes"] + 512)
+    except ValueError as error:
+        assert "original disk size does not match the staged home expansion" in str(error), error
+    else:
+        raise AssertionError("activation accepted a source larger than the approved candidate")
+    stage_path = fixture.stage / "staged-update.json"
+    authentic = stage_path.read_bytes()
+    changed = json.loads(authentic)
+    assert changed["inputs"]["expand_home_mib"] == 192
+    try:
+        for requested in (193, 192.0):
+            changed["inputs"]["expand_home_mib"] = requested
+            stage_path.write_text(json.dumps(changed))
+            try:
+                stage_contract(fixture.stage, sha(stage_path), source_size)
+            except ValueError as error:
+                assert "home expansion does not match the candidate geometry" in str(error), error
+            else:
+                raise AssertionError("activation accepted invalid home expansion evidence")
+    finally:
+        stage_path.write_bytes(authentic)
+
+
+def verify_expanded_activation(fixture, work, selector, candidate, prior):
+    state = work / "expanded-activation"
+    plan = fixture.planned(state)
+    evidence = plan["plan"]
+    assert evidence["source_identity"][2] == fixture.source.stat().st_size
+    assert evidence["size_bytes"] == (fixture.stage / "candidate.raw").stat().st_size
+    report = json.loads(succeeded(invoke(fixture.apply(state, plan["plan_digest"]), 300)))
+    assert report["status"] == "BootVerified" and report["proof"]["node_id"] == prior[0], report
+    assert report["proof"]["deployment_manifest_sha256"] == candidate["deployment_manifest_sha256"], report
+    selected_state = work / "expanded-selection"
+    selected_state.mkdir(mode=0o700)
+    select = [sys.executable, "-B", selector]
+    adoption = json.loads(succeeded(invoke([*select, "plan", "--state-dir", selected_state,
+        "--activation-dir", state, "--activation-receipt-sha256", sha(state / JOURNAL),
+        "--expected-generation", "0"], 130)))
+    selected = json.loads(succeeded(invoke([*select, "adopt", "--state-dir", selected_state,
+        "--plan-digest", adoption["plan_digest"]], 170)))
+    assert selected["status"] == "Selected" and selected["proof"] == report["proof"], selected
+    assert selected["deployment"]["source_identity"] == evidence["source_identity"], selected
+    assert selected["deployment"]["size_bytes"] == evidence["size_bytes"], selected
+    return state
 
 
 def refuse_unclean_shutdown(args, work, old, old_build, receipt, code, vars_file, secret, node_id):
@@ -493,6 +556,20 @@ def exercise(args, work):
     candidate = validate_bundle(args, stage, stdout, old_build, frozen, old, receipt, code, vars_file, prior[0])
     bundle = digest_map(stage.iterdir())
     fixture = Activation(args.activator, stage, old, code, vars_file, secret)
+    if args.expand_home:
+        verify_expansion_contract(args.activator, fixture, candidate)
+        if args.staging_only:
+            verify_guest(work, stage / "candidate.raw", code, vars_file, operator, admin, candidate, prior, token)
+            print("PASS isolated trial and candidate boot with verified expansion lineage")
+        else:
+            state = verify_expanded_activation(fixture, work, args.selector, candidate, prior)
+            verify_guest(work, state / "managed.raw", state / "managed-ovmf-code.fd", state / "managed-efi-vars.fd",
+                         operator, admin, candidate, prior, token)
+            print("PASS activated and selected the expanded native home with the original Task")
+        verify_guest(work, old, code, vars_file, operator, admin, old_build, prior, token)
+        assert digest_map(frozen) == frozen and digest_map(bundle) == bundle
+        print("PASS original home and source inputs remained independently bootable and unchanged")
+        return
     rejected_inputs(fixture, work, frozen)
     interrupted_boot(fixture, work)
     state, managed, activated_boot = verified_boot(fixture, work, candidate, frozen, prior, admin)
@@ -535,7 +612,11 @@ def main():
     cases = parser.add_mutually_exclusive_group()
     cases.add_argument("--check-unclean-shutdown", action="store_true")
     cases.add_argument("--unclean-shutdown-only", action="store_true")
+    cases.add_argument("--expand-home", action="store_true", help="stage and activate a 192 MiB home")
+    parser.add_argument("--staging-only", action="store_true", help="verify trial and candidate without managed activation")
     args = parser.parse_args()
+    if args.staging_only and not args.expand_home:
+        parser.error("--staging-only requires --expand-home")
     if os.geteuid() == 0:
         parser.error("run the managed activation acceptance as an unprivileged Linux operator")
     with tempfile.TemporaryDirectory(dir=args.work_parent, prefix="psios-native-activation-") as directory:

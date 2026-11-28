@@ -15,6 +15,8 @@ from install_source import RECEIPT_LIMIT, gpt_facts
 BUILD_RECEIPT = "candidate-build.json"
 SECTOR_BYTES = 512
 SUPERBLOCK_BYTES = 1024
+# Some Python builds omit this Linux amd64 UAPI constant.
+F_OFD_SETLK = getattr(fcntl, "F_OFD_SETLK", 37)
 
 
 @dataclass(frozen=True)
@@ -88,6 +90,6 @@ def lock_cold(fd):
     # its exact descriptor, this also fences cooperating QEMU openers.
     lock = struct.pack("@hhqqi4x", fcntl.F_WRLCK, os.SEEK_SET, 0, 0, 0)
     try:
-        fcntl.fcntl(fd, fcntl.F_OFD_SETLK, lock)
+        fcntl.fcntl(fd, F_OFD_SETLK, lock)
     except OSError as error:
         raise ValueError("managed candidate artifacts could not be locked after shutdown") from error

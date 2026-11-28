@@ -133,7 +133,7 @@ sudo python3 native/install.py inspect --state-dir "$INSTALL_STATE"
 
 安装器在操作记录目录所在的文件系统暂存工厂盘。复制时按完整逻辑内容核对固定的 SHA-256，全零的 1 MiB 区段可在临时普通文件中保留为空洞。记录目录还需要容纳分区检查用的暂存文件。[安装源校验](../images/native/install_source.py) · [安装验收](../tests/native_install.py)
 
-默认按工厂镜像的精确容量安装。为较大的空白目标规划时可加 `--allow-larger-target`，上限为 2 TiB，要求 `sfdisk` 支持 `--relocate gpt-bak-std`。安装器保留分区大小、内容与身份，把备份 GPT 移到目标盘末尾，并将余量留为未分配空间。主表和备份表各自通过校验和核验后才可批准安装。批准内容包含 `deployment_image`，记录实际容量、备份表偏移和安装后整盘 SHA-256。空白检查与回读覆盖目标盘的全部字节。当前停机升级接受构建回执对应的 raw 盘布局，较大安装目标的升级入口仍待开发。[较大 NVMe 来宾验收](../tests/native_install_virtio.py)
+默认按工厂镜像的精确容量安装。为较大的空白目标规划时可加 `--allow-larger-target`，上限为 2 TiB，要求 `sfdisk` 支持 `--relocate gpt-bak-std`。安装器保留分区大小、内容与身份，把备份 GPT 移到目标盘末尾，并将余量留为未分配空间。主表和备份表各自通过校验和核验后才可批准安装。批准内容包含 `deployment_image`，记录实际容量、备份表偏移和安装后整盘 SHA-256。空白检查与回读覆盖目标盘的全部字节。[较大 NVMe 来宾验收](../tests/native_install_virtio.py)
 
 操作者从 Plan 核对目标序列号、设备代次、分区和来源摘要，再将该份计划的 `plan_digest` 用于批准。执行会排他打开同一整盘，重新核对身份和空白字节，在首次写入前刷盘保存 `WriteIssued`。各分区内容刷盘后才写入两份 GPT。设备完成刷盘并全盘回读匹配后，回执进入 `Verified`。成功回执可重复读取。执行中断后，同次宿主启动内可用 `inspect` 对原目标核实完全写入的结果。部分写入或目标身份变化保持 `RecoveryRequired`，原计划停止派发。开发验收可通过 `--allow-loop` 选用专用 loop 测试盘。[Linux 块设备排他打开](https://man7.org/linux/man-pages/man2/open.2.html)
 
@@ -162,7 +162,7 @@ sudo python3 native/install.py inspect --state-dir "$INSTALL_STATE"
 
 ## 停机升级到另一份原生磁盘
 
-适用于已初始化且停机的 323 MiB 三分区开发盘，使用标准 `/var/lib/psios` 和 `/var/lib/psios.witness`。保留当前可用的 EFI 变量文件和节点外可信构建回执。使用目标版本的已核验 Core 归档及安装器。构建机还需 `qemu-img`、`qemu-system-x86_64` 和约 1 GiB 可用工作空间。
+适用于已初始化且停机的三分区开发盘，使用标准 `/var/lib/psios` 和 `/var/lib/psios.witness`。保留当前可用的 EFI 变量文件和节点外可信构建回执。使用目标版本的已核验 Core 归档及安装器。构建机还需 `qemu-img` 和 `qemu-system-x86_64`，临时空间取决于源盘的实际内容及核验副本限额。
 
 ```sh
 umask 077
@@ -170,6 +170,8 @@ python3 native/create.py next.raw --upgrade-from node.raw --previous-receipt nod
   --kernel-iso alpine-virt.iso --core-archive psios-core-linux-amd64.tar.gz \
   --core-sha256 "$VERIFIED_CORE_SHA256" > next-build.json
 ```
+
+从较大空白盘安装的系统第一次使用停机 raw 快照升级时，在 `create.py` 或 `stage_update.py` 中加 `--source-size-bytes "$INSTALLED_RAW_BYTES"`，取值来自该安装计划的 `deployment_image.size_bytes`。系统检查快照长度、两份 GPT 及原分区布局，保留分区外的数据。新构建回执在 `raw_disk_bytes` 中保存这一容量，下一次升级直接使用该回执。[较大原盘的隔离升级验收](../tests/native_staged_update.py)
 
 安装器用 QEMU 的一致性读锁复制源盘，检查原 GPT 布局、旧 EFI 摘要、文件系统 UUID 和部署标记。待重放的 ext4 内部日志在固定大小的私有分区副本上重放，随后执行只读文件系统检查。新版本 Core 由独立救援内核在只读候选盘上核验权威及见证。通过后替换候选盘的 EFI 分区，保留原 GPT、状态、卷、凭据、站点配置和主目录。回执记录源盘摘要、目标制品摘要、升级前的数据库格式及已重放日志的分区。活动的 QEMU 写入、身份不匹配或需要进一步修复时停止发布。创建完成后可核对 `initial_image_sha256`。[QEMU 文件锁](https://www.qemu.org/docs/master/system/qemu-block-drivers.html#disk-image-file-locking) · [ext4 日志重放](https://man7.org/linux/man-pages/man8/e2fsck.8.html) · [救援核验](offline-rescue.md)
 

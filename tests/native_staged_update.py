@@ -22,6 +22,7 @@ from native_upgrade import STATE_MIB, STATE_OFFSET, shutdown
 MIB = 1024 * 1024
 LARGE_COPY_MIB = 192
 SOURCE_NIC = "52:54:00:58:3e:25"
+TAIL_DATA = b"PsiOS unallocated source marker"
 
 
 def invoke(command, timeout):
@@ -177,6 +178,29 @@ def validate_bundle(args, output, stdout, old, frozen, source, receipt, code, va
     return build
 
 
+def expanded_source(installer_dir, work, factory, receipt):
+    sys.path.insert(0, str(installer_dir.resolve()))
+    from install_source import fit_image, stage_image
+
+    expected = sha(factory)
+    initial = factory.stat().st_size
+    target_size = initial + 4 * MIB + 17 * 512
+    destination = work / "expanded.raw"
+    with tempfile.TemporaryDirectory(dir=work) as directory:
+        staging = Path(directory)
+        image, facts = stage_image(staging, factory, receipt, sha(receipt))
+        layout = fit_image(staging, image, facts, target_size)
+        assert layout["size_bytes"] == target_size
+        image.chmod(0o600)
+        os.replace(image, destination)
+    assert sha(factory) == expected
+    marker = initial + MIB
+    with destination.open("r+b") as disk:
+        disk.seek(marker)
+        disk.write(TAIL_DATA)
+    return destination, marker
+
+
 def exercise(args, work):
     operator, operator_hash = password(work, "operator.hash")
     admin, admin_hash = password(work, "root.hash")
@@ -187,7 +211,10 @@ def exercise(args, work):
     shutil.copyfile(args.ovmf_dir / "OVMF_CODE_4M.fd", code)
     shutil.copyfile(args.ovmf_dir / "OVMF_VARS_4M.fd", vars_file)
     vars_file.chmod(0o600)
-    original = succeeded(invoke([sys.executable, "-B", args.previous_installer, old,
+    # The install controller accepts geometry-bearing factory receipts. Keep
+    # the old Core in both cases, and use the current builder for this profile.
+    factory_builder = args.controller.with_name("create.py") if args.larger_source else args.previous_installer
+    original = succeeded(invoke([sys.executable, "-B", factory_builder, old,
         "--kernel-iso", args.kernel_iso, "--core-archive", args.previous_archive,
         "--core-sha256", sha(args.previous_archive), "--console-hash", operator_hash,
         "--root-console-hash", admin_hash], 330))
@@ -196,14 +223,18 @@ def exercise(args, work):
     old_build = json.loads(original)
     assert sha(old) == old_build["initial_image_sha256"], old_build
     pins = {"receipt": sha(receipt), "archive": sha(args.archive), "code": sha(code)}
+    capacity = ()
+    if args.larger_source:
+        old, tail_marker = expanded_source(args.controller.parent, work, old, receipt)
+        capacity = ("--source-size-bytes", str(old.stat().st_size))
 
-    def stage(out, *, receipt_digest=None, code_digest=None, max_copy_mib=128):
+    def stage(out, *, receipt_digest=None, code_digest=None, max_copy_mib=128, capacity_flags=capacity):
         return [sys.executable, "-B", args.controller, out, "--upgrade-from", old,
                 "--previous-receipt", receipt, "--previous-receipt-sha256", receipt_digest or pins["receipt"],
                 "--kernel-iso", args.kernel_iso, "--core-archive", args.archive, "--core-sha256", pins["archive"],
                 "--ovmf-code", code, "--ovmf-code-sha256", code_digest or pins["code"],
                 "--ovmf-vars", vars_file, "--ovmf-vars-sha256", sha(vars_file),
-                "--max-copy-mib", str(max_copy_mib)]
+                "--max-copy-mib", str(max_copy_mib), *capacity_flags]
 
     token = secrets.token_hex(12)
     live = work / "must-not-publish-running"
@@ -230,6 +261,10 @@ def exercise(args, work):
     assert not rejected.exists(), rejected
     refused(work, stage(rejected, code_digest="0" * 64), r"firmware|ovmf|digest|sha.?256")
     assert not rejected.exists(), rejected
+    if args.larger_source:
+        refused(work, stage(rejected, capacity_flags=()), r"previous PsiOS disk size")
+        wrong_capacity = ("--source-size-bytes", str(old.stat().st_size + 512))
+        refused(work, stage(rejected, capacity_flags=wrong_capacity), r"previous PsiOS disk size")
     occupied = work / "existing"
     occupied.mkdir(mode=0o700)
     sentinel = occupied / "prior-result"
@@ -243,7 +278,7 @@ def exercise(args, work):
         small = work / "must-not-publish-under-budget"
         direct = [sys.executable, "-B", args.controller.with_name("create.py"), small,
                   "--upgrade-from", old, "--previous-receipt", receipt, "--kernel-iso", args.kernel_iso,
-                  "--core-archive", args.archive, "--core-sha256", pins["archive"]]
+                  "--core-archive", args.archive, "--core-sha256", pins["archive"], *capacity]
         refused(work, direct, r"authority-QuotaExceeded", timeout=260)
         refused(work, stage(small, max_copy_mib=64), r"authority-QuotaExceeded", timeout=300)
         assert not small.exists() and digest_map(frozen) == frozen
@@ -254,6 +289,8 @@ def exercise(args, work):
         assert observed["node_id"] == baseline[0] and observed["witness"] == "Confirmed", observed
         assert observed["migration_rehearsal"]["status"] == "Verified", observed
         assert sha(direct[3]) == report["initial_image_sha256"]
+        if args.larger_source:
+            assert direct[3].stat().st_size == report["raw_disk_bytes"] == old.stat().st_size
         direct[3].unlink()
 
     output = work / "staged"
@@ -263,6 +300,18 @@ def exercise(args, work):
     assert {path.name for path in work.iterdir()} == before | {output.name}, "stage leaked private scratch paths"
     candidate = validate_bundle(args, output, stdout, old_build, frozen, old, receipt, code,
                                 vars_file, baseline[0])
+    if args.larger_source:
+        from activation_storage import BootStorage
+
+        image = output / "candidate.raw"
+        assert image.stat().st_size == candidate["raw_disk_bytes"] == old.stat().st_size
+        assert candidate["geometry_mib"] == old_build["geometry_mib"]
+        candidate_receipt = output / "candidate-build.json"
+        storage = BootStorage.from_receipt(candidate_receipt, sha(candidate_receipt), image.stat().st_size)
+        with image.open("rb") as disk:
+            storage.verify_shutdown(work, disk.fileno())
+            disk.seek(tail_marker)
+            assert disk.read(len(TAIL_DATA)) == TAIL_DATA
     if large_copy is not None:
         staged = json.loads(stdout)
         source = candidate["upgrade"]["verified_authority"]
@@ -295,6 +344,7 @@ def main():
     parser.add_argument("--expected-source-format", type=int)
     parser.add_argument("--expected-target-format", type=int)
     parser.add_argument("--large-authority", action="store_true", help="prove both build paths with a database and WAL over 64 MiB")
+    parser.add_argument("--larger-source", action="store_true", help="preserve a larger target's exact raw capacity and unused tail")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="psios-native-staged-update-") as directory:
         exercise(args, Path(directory).resolve())

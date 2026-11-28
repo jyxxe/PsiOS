@@ -62,11 +62,11 @@ fn decision_schema(tools: &[Value]) -> Value {
         &["action", "tool", "input"],
     );
     let finish = object(
-        json!({"action": {"const": "finish"}, "summary": {"type": "string"}}),
+        json!({"action": {"const": "finish"}, "summary": {"type": "string", "minLength": 1}}),
         &["action", "summary"],
     );
     let fail = object(
-        json!({"action": {"const": "fail"}, "reason": {"type": "string"}}),
+        json!({"action": {"const": "fail"}, "reason": {"type": "string", "minLength": 1}}),
         &["action", "reason"],
     );
     json!({"oneOf": [tool, finish, fail]})
@@ -379,19 +379,26 @@ fn decode_decision(response: &Value, model: &str, tools: &[Value]) -> ApiResult<
         .ok_or_else(|| bad_response("local model response has no structured decision content"))?;
     let decision: ModelDecision = serde_json::from_value(parse(content.as_bytes())?)
         .map_err(|_| invalid("invalid structured model decision"))?;
-    if let ModelDecision::Tool {
-        ref tool,
-        ref input,
-    } = decision
-        && (!tools.iter().any(|v| v == tool) || !input.as_object().is_some_and(|v| v.is_empty()))
-    {
-        return Err(ApiError::new(
-            "PermissionDenied",
-            "model decision outside the inventory Skill",
-        )
-        .into());
+    match &decision {
+        ModelDecision::Tool { tool, input }
+            if !tools.iter().any(|v| v == tool)
+                || !input.as_object().is_some_and(|v| v.is_empty()) =>
+        {
+            Err(ApiError::new(
+                "PermissionDenied",
+                "model decision outside the inventory Skill",
+            )
+            .into())
+        }
+        ModelDecision::Finish { summary } | ModelDecision::Fail { reason: summary }
+            if summary.is_empty() =>
+        {
+            Err(invalid(
+                "local model terminal decision requires nonempty text",
+            ))
+        }
+        _ => Ok(decision),
     }
-    Ok(decision)
 }
 
 #[cfg(test)]
@@ -578,6 +585,9 @@ mod tests {
             }]})
         };
         let tools = [json!("node.inventory")];
+        let schema = decision_schema(&tools);
+        assert_eq!(schema["oneOf"][1]["properties"]["summary"]["minLength"], 1);
+        assert_eq!(schema["oneOf"][2]["properties"]["reason"]["minLength"], 1);
         for (content, code) in [
             (
                 r#"{"action":"tool","tool":"node.devices","input":{}}"#,
@@ -595,6 +605,8 @@ mod tests {
                 r#"{"action":"finish","summary":"x","extra":1}"#,
                 "InvalidArgument",
             ),
+            (r#"{"action":"finish","summary":""}"#, "InvalidArgument"),
+            (r#"{"action":"fail","reason":""}"#, "InvalidArgument"),
             (
                 r#"{"action":"provider_failure","outcome":"NotStarted"}"#,
                 "InvalidArgument",
@@ -611,6 +623,15 @@ mod tests {
         assert!(matches!(
             decode_decision(&finished, "local", &tools).unwrap(),
             ModelDecision::Finish { .. }
+        ));
+        assert!(matches!(
+            decode_decision(
+                &reply(r#"{"action":"fail","reason":"inventory unavailable"}"#),
+                "local",
+                &tools
+            )
+            .unwrap(),
+            ModelDecision::Fail { .. }
         ));
         assert_eq!(
             decode_decision(&finished, "other", &tools)

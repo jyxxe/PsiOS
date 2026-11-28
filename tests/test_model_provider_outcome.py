@@ -444,6 +444,23 @@ class StrictModelProvider(unittest.TestCase):
         self.assertEqual(self.history(session)["tasks"], [])
         self.assertEqual(len(self.history(session)["turns"]), 1)
 
+    def test_empty_terminal_response_keeps_one_unknown_receipt_across_restart(self):
+        node = self.node
+        session = self.open_session()
+        command = self.step(session, "empty-terminal")
+        with serve_inference(self.endpoint, decision={"action": "finish", "summary": ""}) as calls:
+            receipt = node.cli(self.provider_token, *command)
+            self.assertEqual((receipt["outcome"], receipt["lifecycle"], receipt["outcome_knowledge"]),
+                             ("Unknown", "Paused", "Unknown"))
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(list(self.journal.iterdir()), [])
+            node.stop(signal.SIGKILL)
+            node.start()
+            self.assertEqual(node.cli(self.provider_token, *command), receipt)
+            self.assertEqual(len(calls), 1)
+        self.assertEqual(self.history(session)["tasks"], [])
+        self.assertEqual(self.budget()["model_calls_used"], 1)
+
     def test_equivalent_sessions_share_prompt_and_truncation_is_never_resent(self):
         node = self.node
         completed = self.open_session()

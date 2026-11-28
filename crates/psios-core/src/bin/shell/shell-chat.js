@@ -16,10 +16,14 @@ export function chatView(request, byId, element, message) {
   let history = [null];
   let nextMessage = null;
   let selection = null;
+  const composer = chatComposer(request, byId, message, id => {
+    if (selection === id) void loadHistory(id, title.textContent, history);
+  });
 
   function clearHistory() {
     historyRevision += 1;
     detail.hidden = true;
+    composer.hide();
     title.textContent = "会话历史";
     content.replaceChildren();
     earlier.disabled = later.disabled = true;
@@ -55,6 +59,7 @@ export function chatView(request, byId, element, message) {
 
   async function loadHistory(id, name, pages = [null], focus = false) {
     const revision = ++historyRevision;
+    if (selection !== id) composer.hide();
     selection = id;
     for (const button of rows.querySelectorAll("button")) {
       button.setAttribute("aria-pressed", String(button.dataset.conversationId === id));
@@ -70,6 +75,7 @@ export function chatView(request, byId, element, message) {
       history = pages;
       nextMessage = page.next_cursor;
       renderHistory(page.items);
+      composer.show(id);
       earlier.disabled = history.length === 1;
       later.disabled = !nextMessage;
     } catch (error) {
@@ -78,6 +84,7 @@ export function chatView(request, byId, element, message) {
         await loadHistory(id, name, [null], focus);
         return;
       }
+      composer.hide();
       content.replaceChildren(element("p", error.message, "message error"));
     }
   }
@@ -131,5 +138,105 @@ export function chatView(request, byId, element, message) {
     button?.setAttribute("aria-pressed", "false");
     button?.focus();
   });
-  return { show: loadList, hide, reset, refresh: () => loadList([null], selection, [null]) };
+  return {
+    show: loadList, hide,
+    reset() { reset(); composer.reset(); },
+    capability: composer.capability,
+    refresh: () => loadList([null], selection, [null]),
+  };
+}
+
+
+function chatComposer(request, byId, message, committed) {
+  const form = byId("chat-composer");
+  const draft = byId("chat-draft");
+  const send = byId("chat-send");
+  const forget = byId("chat-forget");
+  const status = byId("chat-send-status");
+  const unconfirmed = new Map();
+  let enabled = false;
+  let conversation = null;
+  let revision = 0;
+  let busy = false;
+  let prepared = null;
+
+  function update() {
+    draft.readOnly = busy || prepared !== null;
+    send.disabled = busy;
+    send.textContent = prepared ? "核对并重试" : "发送";
+    forget.hidden = prepared === null;
+    forget.disabled = busy;
+  }
+
+  function hide() {
+    revision += 1;
+    conversation = null;
+    busy = false;
+    prepared = null;
+    draft.value = "";
+    form.hidden = true;
+    message(status, "");
+    update();
+  }
+
+  function show(id) {
+    if (!enabled || conversation === id) return;
+    hide();
+    conversation = id;
+    form.hidden = false;
+    if (unconfirmed.has(id)) message(status, "上次发送结果待核实。请先查看会话历史。", true);
+  }
+
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (busy || !conversation) return;
+    const id = conversation;
+    const attempt = ++revision;
+    busy = true;
+    update();
+    try {
+      if (!prepared) {
+        if (new TextEncoder().encode(draft.value).length > 4096) {
+          message(status, "消息最多包含 4096 个 UTF-8 字节。", true);
+          return;
+        }
+        message(status, "正在检查消息…");
+        const reply = await request("/api/chat-prepare", { id, text: draft.value });
+        if (attempt !== revision) return;
+        prepared = reply.prepared;
+        update();
+      }
+      unconfirmed.set(id, attempt);
+      message(status, "正在提交消息…");
+      await request("/api/chat-send", { prepared });
+      if (unconfirmed.get(id) === attempt) unconfirmed.delete(id);
+      if (attempt !== revision) return;
+      prepared = null;
+      draft.value = "";
+      message(status, "已记录发送回执。");
+      committed(id);
+    } catch (error) {
+      if (attempt !== revision) return;
+      const note = prepared ? "发送结果待核实。重试会复用同一请求。" : "";
+      message(status, note ? error.message + " " + note : error.message, true);
+    } finally {
+      if (attempt === revision) {
+        busy = false;
+        update();
+      }
+    }
+  });
+
+  forget.addEventListener("click", () => {
+    prepared = null;
+    draft.value = "";
+    message(status, "请先查看会话历史，核对上一次发送结果。");
+    update();
+    draft.focus();
+  });
+  return {
+    show, hide,
+    reset() { hide(); unconfirmed.clear(); },
+    capability(value) { enabled = value; },
+  };
 }

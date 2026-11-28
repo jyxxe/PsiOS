@@ -55,6 +55,7 @@ function leave(text, error = false) {
   cursors = [null];
   nextCursor = selectedTask = null;
   resetApplications();
+  chat.capability(false);
   chat.reset();
   updateDesktop();
   byId("principal").textContent = "";
@@ -736,6 +737,7 @@ byId("pair-form").addEventListener("submit", async (event) => {
     bearer = session.token;
     void observeSession(bearer);
     canCancelPending = session.cancel_pending_tasks === true;
+    chat.capability(session.send_chat === true);
     byId("principal").textContent = session.principal_id;
     pairing.hidden = true;
     workspace.hidden = false;

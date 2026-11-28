@@ -50,6 +50,9 @@ enum Cmd {
         /// Allow the paired browser to cancel queued or approval-pending Tasks.
         #[arg(long)]
         cancel_pending_tasks: bool,
+        /// Allow the paired browser to send plain-text messages through Agent Chat.
+        #[arg(long)]
+        send_chat: bool,
     },
     Status {
         #[arg(long, default_value = "owner-delegation")]
@@ -901,7 +904,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let v = match o.cmd {
         Cmd::Shell {
             cancel_pending_tasks,
-        } => return shell::run(c, cancel_pending_tasks),
+            send_chat,
+        } => return shell::run(c, cancel_pending_tasks, send_chat),
         Cmd::ModelStep {
             session,
             key,

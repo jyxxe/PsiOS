@@ -31,14 +31,14 @@ class BootStorage:
             raise ValueError("candidate build receipt changed before managed boot")
         build, layout, _ = create.parse_receipt(raw)
         state, home = build["state_uuid"], build["home_uuid"]
-        if layout.image_mib * create.MIB != disk_bytes or not all(
+        if layout.disk_bytes != disk_bytes or not all(
                 uuid.UUID(identity).int for identity in (state, home)):
             raise ValueError("candidate storage geometry or filesystem UUID is invalid")
         return cls(layout, state, home)
 
     def gpt(self, work, disk_fd):
         disk = os.fstat(disk_fd)
-        if disk.st_size != self.layout.image_mib * create.MIB:
+        if disk.st_size != self.layout.disk_bytes:
             raise ValueError("managed candidate disk no longer has its approved size")
         image = os.open(f"/proc/self/fd/{disk_fd}", os.O_RDONLY | os.O_CLOEXEC)
         try:
@@ -59,7 +59,7 @@ class BootStorage:
             start = part["start_sector"] * SECTOR_BYTES
             size = part["sector_count"] * SECTOR_BYTES
             if (size < 2 * SUPERBLOCK_BYTES
-                    or start + size > self.layout.image_mib * create.MIB):
+                    or start + size > self.layout.disk_bytes):
                 raise ValueError("managed candidate ext4 superblock is outside its checked partition")
             superblock = os.pread(disk_fd, SUPERBLOCK_BYTES, start + SUPERBLOCK_BYTES)
             try:

@@ -168,6 +168,10 @@ jobs:
           sudo unshare --mount --propagation private env \
             PSIOS_TEST_BLOCK_INVENTORY_MOUNTS=1 PSIOS_TEST_BLOCK_LOOP=1 \
             python3 -B -m unittest discover -s tests -p test_block_inventory.py -v
+          sudo unshare --mount --propagation private sh -ec '
+            mount -t tmpfs -o size=1m,nodev,nosuid,noexec tmpfs /sys
+            PSIOS_TEST_PCI_MASKED=1 python3 -B -m unittest discover -s tests -p test_pci_observation.py -k test_refuses -v
+          '
       - name: Pair and inspect real Tasks and applications in headless Chrome
         run: PSIOS_TEST_SHELL_BROWSER=1 PSIOS_TEST_SHELL_OCI=1 python3 -B -m unittest discover -s tests -p test_shell.py -k test_browser -v
       - name: Verify scoped IPv6 probes across a real private veth pair
@@ -961,7 +965,17 @@ jobs:
             python3 -B tests/network_resolver.py --fixture "$fixture" --previous-bin-dir "$1"
             PSIOS_TEST_RESOLVER_FIXTURE="$fixture" python3 -B -m unittest discover -s tests \
               -p test_mcp_tasks.py -k test_resolver_diagnostic -v
+            ip link set lo up
+            PSIOS_TEST_RESOLVER_FIXTURE="$fixture" python3 -B -m unittest discover -s tests \
+              -p test_shell.py -k test_resolver_observation_ -v
           ' psios-resolver "$RUNNER_TEMP/psios-compatibility-target/debug"
+      - name: Install PCI observation while preserving a format 149 authority
+        run: |
+          mkdir "$RUNNER_TEMP/psios-format149"
+          git archive 36d24e29de2baca6a81a3852cf5e197801bdf62c Cargo.toml Cargo.lock rust-toolchain.toml crates docs/v1/schemas | tar -x -C "$RUNNER_TEMP/psios-format149"
+          tools/build-compatibility-core "$RUNNER_TEMP/psios-format149" "$RUNNER_TEMP/psios-compatibility-target"
+          PSIOS_TEST_PCI_PREVIOUS_BIN_DIR="$RUNNER_TEMP/psios-compatibility-target/debug" \
+            python3 -B -m unittest discover -s tests -p test_pci_observation.py -k test_installing -v
   oci-archive:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

@@ -5,9 +5,9 @@ mod modern;
 use clap::{Parser, ValueEnum};
 use psios_api::{
     ApiError, ApiResult, Client, LocalReadBinding, LocalReadTool, LocalReadToolsRequest,
-    MAX_BLOCK_INVENTORY_PAGE, MAX_VOLUME_FILE_CHUNK, MAX_VOLUME_FILE_OFFSET, MAX_VOLUME_FILES_PAGE,
-    ResolveLocalReadToolsRequest, ResolvedLocalReadTool, ResourceRef, VolumeFileChunkQuery,
-    VolumeFilesQuery, id, parse,
+    MAX_DEVICE_INVENTORY_PAGE, MAX_PCI_INVENTORY_ROWS, MAX_VOLUME_FILE_CHUNK,
+    MAX_VOLUME_FILE_OFFSET, MAX_VOLUME_FILES_PAGE, ResolveLocalReadToolsRequest,
+    ResolvedLocalReadTool, ResourceRef, VolumeFileChunkQuery, VolumeFilesQuery, id, parse,
 };
 use rustix::{fs::OFlags, process::geteuid};
 use serde_json::{Map, Value, json};
@@ -77,7 +77,7 @@ struct Options {
 
 fn parse_tool(name: &str) -> Result<LocalReadTool, &'static str> {
     serde_json::from_value(json!(name)).map_err(
-        |_| "expected system.status, node.pressure, node.inventory, node.devices or node.resolver",
+        |_| "expected system.status, node.pressure, node.inventory, node.devices, node.resolver or node.pci",
     )
 }
 
@@ -319,6 +319,12 @@ impl Adapter {
                     };
                     LocalReadBinding::NodeDevices(query)
                 }
+                LocalReadBinding::NodePci(_) => {
+                    let Ok(query) = serde_json::from_value(Value::Object(args.clone())) else {
+                        return Ok(tool_error("InvalidArgument", None));
+                    };
+                    LocalReadBinding::NodePci(query)
+                }
                 LocalReadBinding::VolumeFiles { target_id, .. } => {
                     let Ok(query) =
                         serde_json::from_value::<VolumeFilesQuery>(Value::Object(args.clone()))
@@ -532,6 +538,9 @@ fn descriptor(tool: &LocalReadBinding, protocol: Protocol) -> Value {
         LocalReadBinding::NodeResolver {} => {
             "Observe the nameservers configured in the Core's mount namespace."
         }
+        LocalReadBinding::NodePci(_) => {
+            "Read a bounded page of verified PCI devices and their bound Linux drivers on the local node."
+        }
         LocalReadBinding::VolumeUsage { .. } => {
             "Measure file and allocation usage of the configured volume root."
         }
@@ -549,13 +558,21 @@ fn descriptor(tool: &LocalReadBinding, protocol: Protocol) -> Value {
     let mut descriptor = json!({"name":tool.name(),"description":description,
         "inputSchema":{"type":"object","additionalProperties":false},
         "annotations":{"readOnlyHint":true}});
-    if matches!(tool, LocalReadBinding::NodeDevices(_)) {
+    if matches!(
+        tool,
+        LocalReadBinding::NodeDevices(_) | LocalReadBinding::NodePci(_)
+    ) {
+        let maximum = if matches!(tool, LocalReadBinding::NodePci(_)) {
+            MAX_PCI_INVENTORY_ROWS - 1
+        } else {
+            1023
+        };
         descriptor["inputSchema"]["properties"] = json!({
-            "limit":{"type":["integer","null"],"minimum":1,"maximum":MAX_BLOCK_INVENTORY_PAGE},
+            "limit":{"type":["integer","null"],"minimum":1,"maximum":MAX_DEVICE_INVENTORY_PAGE},
             "cursor":{"type":["object","null"],"additionalProperties":false,
                 "required":["snapshot_digest","offset"],"properties":{
                     "snapshot_digest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
-                    "offset":{"type":"integer","minimum":1,"maximum":1023}
+                    "offset":{"type":"integer","minimum":1,"maximum":maximum}
                 }
             }
         });

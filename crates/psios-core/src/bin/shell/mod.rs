@@ -1,6 +1,7 @@
 //! A browser-facing local client. The Core checks each operation under the paired identity.
 
 mod files;
+mod resolver;
 mod session;
 pub(super) use files::VolumeAccess;
 
@@ -83,6 +84,7 @@ pub(super) struct Options {
     pub review_work_items: bool,
     pub manage_agent_sessions: bool,
     pub files: Option<VolumeAccess>,
+    pub resolver_delegation: Option<String>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -91,6 +93,7 @@ enum Endpoint {
     Logout,
     ObserveEnd,
     Node,
+    NodeResolver,
     Tasks,
     Applications,
     ApplicationReleases,
@@ -261,6 +264,7 @@ struct CancelPendingTask {
 
 enum CoreRequest {
     Call(&'static str, Value),
+    NodeResolver(String),
     Applications(Page),
     ApplicationReleases(ApplicationReleases),
     VolumeDirectory(files::Directory, VolumeAccess),
@@ -292,6 +296,10 @@ impl CoreRequest {
             Self::Call(method, params) => {
                 Ok(json_response(StatusCode::OK, client.call(method, params)?))
             }
+            Self::NodeResolver(delegation) => Ok(json_response(
+                StatusCode::OK,
+                resolver::observe(client, &delegation, &check)?,
+            )),
             Self::VolumeDirectory(directory, access) => Ok(json_response(
                 StatusCode::OK,
                 directory.read(access, client, &check)?,
@@ -886,15 +894,17 @@ async fn body(request: Request<Incoming>, limit: usize) -> Result<Value, Fault> 
     parse(&bytes).map_err(|_| INVALID)
 }
 
-fn rpc(
-    endpoint: Endpoint,
-    data: Value,
-    files: Option<&VolumeAccess>,
-) -> Result<CoreRequest, Fault> {
+fn rpc(endpoint: Endpoint, data: Value, options: &Options) -> Result<CoreRequest, Fault> {
     match endpoint {
         Endpoint::Node => {
             let _: Empty = serde_json::from_value(data).map_err(|_| INVALID)?;
             Ok(CoreRequest::Call("Node.Get", json!({})))
+        }
+        Endpoint::NodeResolver => {
+            let _: Empty = serde_json::from_value(data).map_err(|_| INVALID)?;
+            Ok(CoreRequest::NodeResolver(
+                options.resolver_delegation.clone().ok_or(INVALID)?,
+            ))
         }
         Endpoint::Tasks => {
             let page: Page = serde_json::from_value(data).map_err(|_| INVALID)?;
@@ -911,11 +921,11 @@ fn rpc(
         )),
         Endpoint::VolumeDirectory => Ok(CoreRequest::VolumeDirectory(
             serde_json::from_value(data).map_err(|_| INVALID)?,
-            files.cloned().ok_or(INVALID)?,
+            options.files.clone().ok_or(INVALID)?,
         )),
         Endpoint::VolumePreview => Ok(CoreRequest::VolumePreview(
             serde_json::from_value(data).map_err(|_| INVALID)?,
-            files.cloned().ok_or(INVALID)?,
+            options.files.clone().ok_or(INVALID)?,
         )),
         Endpoint::Conversations => Ok(CoreRequest::Conversations(
             serde_json::from_value(data).map_err(|_| INVALID)?,
@@ -1043,6 +1053,9 @@ impl Shell {
             "/api/logout" => Endpoint::Logout,
             "/api/session-end" => Endpoint::ObserveEnd,
             "/api/node" => Endpoint::Node,
+            "/api/node-resolver" if self.options.resolver_delegation.is_some() => {
+                Endpoint::NodeResolver
+            }
             "/api/tasks" => Endpoint::Tasks,
             "/api/applications" => Endpoint::Applications,
             "/api/application-releases" => Endpoint::ApplicationReleases,
@@ -1090,6 +1103,7 @@ impl Shell {
                 "token":token,"principal_id":self.principal,"cancel_pending_tasks":self.options.cancel_pending_tasks,
                 "send_chat":self.options.send_chat,"review_work_items":self.options.review_work_items,
                 "manage_agent_sessions":self.options.manage_agent_sessions,
+                "observe_resolver":self.options.resolver_delegation.is_some(),
             });
             if let Some(files) = &self.options.files {
                 reply["browse_files"] = json!(true);
@@ -1143,7 +1157,7 @@ impl Shell {
             session.close();
             return Ok(json_response(StatusCode::OK, json!({})));
         }
-        let operation = rpc(endpoint, data, self.options.files.as_ref())?;
+        let operation = rpc(endpoint, data, &self.options)?;
         let slot = self.rpc_slots.clone().try_acquire_owned().map_err(|_| {
             Fault(
                 StatusCode::TOO_MANY_REQUESTS,

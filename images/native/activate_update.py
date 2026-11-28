@@ -155,7 +155,7 @@ def stage_contract(bundle, stage_sha256):
             "firmware_vars_sha256": checked_digest(inputs["firmware_vars_sha256"]),
             "node_id": source["node_id"],
             "database_format": authority["database_format"],
-            "size_bytes": layout.image_mib * MIB,
+            "size_bytes": layout.disk_bytes,
             "secure_boot": signing,
         }
     except (KeyError, TypeError, AttributeError) as error:

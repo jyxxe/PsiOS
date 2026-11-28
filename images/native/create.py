@@ -408,6 +408,8 @@ def host_config(seed, args):
         (seed / "etc/localtime").symlink_to("../" + ZONEINFO + "/" + args.timezone)
     (seed / "etc/securetty").write_text("ttyS0\n")
     (seed / "etc/issue").write_text("PsiOS amd64 development console\n")
+    if args.maintenance_console:
+        (seed / "etc/psios/maintenance-console").write_text("enabled\n")
     (seed / "etc/psios/core.json").write_text(json.dumps({
         "state_dir": "/var/lib/psios", "witness_dir": "/var/lib/psios.witness", "socket": "/run/psios/api.sock"}))
     daemon = LIMITED_SERVICE if args.core_limits else "::respawn:/bin/su -s /bin/sh psios -c 'exec /bin/psiosd serve'"
@@ -446,6 +448,8 @@ def host_config(seed, args):
             path.chmod(0o755 if path.is_dir() else (0o600 if path.name in
                        ("shadow", "dhcp-mac", "static-ipv4", "static-ipv6", "slaac") else 0o644))
     (seed / "etc").chmod(0o755)
+    if args.maintenance_console:
+        (seed / "etc/psios/maintenance-console").chmod(0o444)
 
 
 def core_programs(work):
@@ -564,7 +568,8 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
     (work / "psios-home-uuid").write_text(str(home_id) + "\n")
     sectors = [str(mib * 2048) for start, size, _ in layout.partitions[1:] for mib in (start, size)]
     (work / "psios-storage-layout").write_text(" ".join(sectors) + "\n")
-    boot_scripts = ["init", "shutdown", "dhcp", "dhcp-event", "ipv4", "ipv6", "static", "storage", "enroll"]
+    boot_scripts = ["init", "shutdown", "dhcp", "dhcp-event", "ipv4", "ipv6", "static", "storage", "enroll",
+                    "maintenance"]
     files = [*core_programs(work), "psios-source", "psios-disk-uuid", "psios-home-uuid", "psios-storage-layout",
              ZONE_ARCHIVE, TIMEZONE_COMMAND]
     if network_profile == RDNSS:
@@ -1239,6 +1244,8 @@ def main():
     parser.add_argument("--max-copy-mib", type=copy_budget_mib,
                         help="authority database and journals to copy during upgrade (default 64 MiB)")
     parser.add_argument("--root-console-hash", type=Path, help="optional private hash for local system administration; default locks root")
+    parser.add_argument("--maintenance-console", action="store_true",
+                        help="allow the local root console to diagnose a failed Core authority on a new disk")
     parser.add_argument("--ssh-authorized-key", type=Path, help="authorize an Ed25519 public key for the psios SSH console")
     boot_media.add_signing_arguments(parser)
     network = parser.add_mutually_exclusive_group()
@@ -1309,6 +1316,8 @@ def main():
             args.ssh_authorized_key = ssh_public_key(key.read(513))
     if args.upgrade_from and (not args.previous_receipt or args.root_console_hash or args.dhcp_mac or args.network_profile):
         parser.error("upgrade requires --previous-receipt and preserves console credentials and network configuration")
+    if args.maintenance_console and (args.upgrade_from or not args.root_console_hash):
+        parser.error("--maintenance-console requires --root-console-hash on a new disk")
     if args.upgrade_from and (args.state_mib is not None or args.home_mib is not None):
         parser.error("upgrade preserves the partition sizes from its previous build receipt")
     if args.console_hash and args.previous_receipt:

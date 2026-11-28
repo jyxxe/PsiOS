@@ -34,7 +34,7 @@ MIB = 1024 * 1024
 TOOLS = {
     "native/core-cgroup", "native/create.py", "native/dhcp", "native/dhcp-event",
     "native/enroll", "native/init", "native/install.py", "native/install_source.py",
-    "native/install_target.py", "native/ipv4", "native/ipv6", "native/shutdown",
+    "native/install_target.py", "native/ipv4", "native/ipv6", "native/maintenance", "native/shutdown",
     "native/static", "native/storage", "rescue/base.json", "rescue/boot_media.py",
 }
 BOOT_ASSET_DIRS = ("native", "rescue")

@@ -175,6 +175,7 @@ class PreparedUpdate:
     normalized_source_sha256: str
     kernel_iso: Path
     max_copy_mib: int
+    boot_tools: boot_media.BootTools
 
 
 def sha256(path):
@@ -448,11 +449,13 @@ def core_programs(work):
     return programs
 
 
-def prepare_programs(work, packages):
+def prepare_programs(work, packages, *, tools=None):
     for package, files in packages.items():
         archive = work / (package + ".apk")
         with archive.open("xb") as output:
-            subprocess.run(["isoinfo", "-R", "-i", work / "base.iso", "-x", f"/apks/x86_64/{package}.apk"],
+            command = boot_media.tool_command(
+                ["isoinfo", "-R", "-i", work / "base.iso", "-x", f"/apks/x86_64/{package}.apk"], tools)
+            subprocess.run(command,
                            stdout=output, check=True, timeout=30, preexec_fn=file_limit(4 * MIB))
         remaining = set(files)
         with tarfile.open(archive, "r:gz", ignore_zeros=True) as bundle:
@@ -473,19 +476,21 @@ def prepare_programs(work, packages):
         archive.unlink()
 
 
-def prepare_boot_inputs(work, args, *, wired_driver=None, ssh_enabled=False, network_profile=None):
-    base = boot_media.prepare_kernel(work, args.kernel_iso)
+def prepare_boot_inputs(work, args, *, wired_driver=None, ssh_enabled=False, network_profile=None, tools=None):
+    base = boot_media.prepare_kernel(work, args.kernel_iso, tools=tools)
     if wired_driver == "e1000e":
         if shutil.which("unsquashfs") is None:
             raise ValueError("building the e1000e profile requires unsquashfs")
         modloop = work / "modloop"
         with modloop.open("xb") as out:
-            subprocess.run(["isoinfo", "-R", "-i", work / "base.iso", "-x", "/boot/modloop-virt"],
+            command = boot_media.tool_command(["isoinfo", "-R", "-i", work / "base.iso", "-x", "/boot/modloop-virt"], tools)
+            subprocess.run(command,
                            stdout=out, check=True, timeout=30, preexec_fn=file_limit(base["size_bytes"]))
         expected = base["e1000e_module"]
         module = work / E1000E_MODULE
         with module.open("xb") as out:
-            subprocess.run(["unsquashfs", "-cat", modloop, expected["member"]], stdout=out,
+            command = boot_media.tool_command(["unsquashfs", "-cat", modloop, expected["member"]], tools)
+            subprocess.run(command, stdout=out,
                            check=True, timeout=30, preexec_fn=file_limit(MIB))
         if sha256(module) != expected["sha256"]:
             raise ValueError("e1000e module does not match the pinned Linux media")
@@ -493,14 +498,14 @@ def prepare_boot_inputs(work, args, *, wired_driver=None, ssh_enabled=False, net
     (work / "bin").mkdir()
     install_core(work, args.core_archive, args.core_sha256)
     if ssh_enabled:
-        prepare_programs(work, SSH_PACKAGES)
+        prepare_programs(work, SSH_PACKAGES, tools=tools)
     if network_profile == RDNSS:
-        prepare_programs(work, RDNSS_PACKAGES)
+        prepare_programs(work, RDNSS_PACKAGES, tools=tools)
     return base
 
 
 def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network_profile, *, core_limits, trial,
-                   require_secure_boot=False, wired_driver=None, ssh_enabled=False, usb_profile=None):
+                   require_secure_boot=False, wired_driver=None, ssh_enabled=False, usb_profile=None, tools=None):
     (work / "psios-disk-uuid").write_text(str(instance) + "\n")
     (work / "psios-home-uuid").write_text(str(home_id) + "\n")
     sectors = [str(mib * 2048) for start, size, _ in layout.partitions[1:] for mib in (start, size)]
@@ -579,11 +584,12 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
     # GNU cpio's reproducible mode still includes each member's modification time.
     for name in files:
         os.utime(work / name, (boot_media.EPOCH, boot_media.EPOCH))
-    append_deployment_payload(work, files)
+    append_deployment_payload(work, files, tools=tools)
 
 
-def append_deployment_payload(work, files):
-    command = ["cpio", "--quiet", "-o", "-H", "newc", "--reproducible", "--owner=0:0"]
+def append_deployment_payload(work, files, *, tools=None):
+    command = boot_media.tool_command(["cpio", "--quiet", "-o", "-H", "newc", "--reproducible", "--owner=0:0"],
+                                      tools, work)
     # Supply the small name list separately so cpio's potentially large output is streamed.
     with tempfile.TemporaryFile(dir=work) as names, (work / "initrd").open("ab") as out:
         names.write(("\n".join(files) + "\n").encode())
@@ -597,12 +603,12 @@ def append_deployment_payload(work, files):
 
 
 def ramfs(work, args, instance, home_id, layout=Layout(), signing=None, network_profile=None, *, core_limits=None,
-          trial=None, wired_driver=None, ssh_enabled=False, usb_profile=None):
+          trial=None, wired_driver=None, ssh_enabled=False, usb_profile=None, tools=None):
     base = prepare_boot_inputs(work, args, wired_driver=wired_driver, ssh_enabled=ssh_enabled,
-                               network_profile=network_profile)
+                               network_profile=network_profile, tools=tools)
     assemble_ramfs(work, args, base, instance, home_id, layout, signing, network_profile,
                    core_limits=core_limits, trial=trial, wired_driver=wired_driver, ssh_enabled=ssh_enabled,
-                   usb_profile=usb_profile)
+                   usb_profile=usb_profile, tools=tools)
 
 
 def seeded_ext4(work, name, label, identity, size_mib, seed, owners):
@@ -998,16 +1004,19 @@ def base_receipt_format(properties):
     return 3 if "secure_boot" in properties else 2
 
 
-def finish_disk(work, disk, output, *, signing, upgrade):
+def finish_disk(work, disk, output, *, signing, upgrade, tools):
     manifest_path = work / "psios-deployment.json"
     manifest = json.loads(manifest_path.read_bytes())
-    efi = boot_media.secure_efi_application(work, CMDLINE, signing) if signing else boot_media.efi_application(work, CMDLINE)
+    if signing:
+        efi = boot_media.secure_efi_application(work, CMDLINE, signing, tools=tools)
+    else:
+        efi = boot_media.efi_application(work, CMDLINE, tools=tools)
     esp = work / "esp.fat"
     with esp.open("xb") as f:
         f.truncate(ESP[1] * MIB)
-    boot_media.run(work, ["mkfs.fat", "-F", "32", "--invariant", "-n", "PSIOSBOOT", esp])
-    boot_media.run(work, ["mmd", "-i", esp, "::/EFI", "::/EFI/BOOT"])
-    boot_media.run(work, ["mcopy", "-i", esp, efi, EFI_PATH])
+    boot_media.run(work, ["mkfs.fat", "-F", "32", "--invariant", "-n", "PSIOSBOOT", esp], tools=tools)
+    boot_media.run(work, ["mmd", "-i", esp, "::/EFI", "::/EFI/BOOT"], tools=tools)
+    boot_media.run(work, ["mcopy", "-i", esp, efi, EFI_PATH], tools=tools)
     write_partition(disk, ESP, esp, replace=upgrade is not None)
     with disk.open("rb") as completed:
         os.fsync(completed.fileno())
@@ -1045,10 +1054,11 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
     if not existing and any(value is not None for value in requested):
         raise ValueError("a signed staged update requires a signed original deployment")
     signing = None
+    tools = boot_media.BootTools()
     if existing:
         if not all(requested):
             raise ValueError("a signed original deployment requires the Secure Boot signing inputs")
-        signing = boot_media.prepare_secure_boot(work, *requested)
+        signing = boot_media.prepare_secure_boot(work, *requested, tools=tools)
         if signing.certificate_sha256 != existing["certificate_sha256"]:
             raise ValueError("a signed staged update requires the original enrolled certificate")
     candidate_work, trial_work = work / "candidate", work / "trial"
@@ -1073,7 +1083,7 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
     network_profile = prior.get("network_profile")
     usb_profile = prior.get("usb_profile")
     base = prepare_boot_inputs(candidate_work, args, wired_driver=wired_driver, ssh_enabled=ssh_enabled,
-                               network_profile=network_profile)
+                               network_profile=network_profile, tools=tools)
     (trial_work / "bin").mkdir()
     # Share the pinned input kernel and binaries, but each initrd is extended independently.
     boot_inputs = ("kernel", "initrd", *core_programs(candidate_work), "psios-source")
@@ -1090,7 +1100,8 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
     for directory, mode in ((candidate_work, None), (trial_work, trial)):
         assemble_ramfs(directory, args, base, instance, home_id, layout, signing, network_profile,
                        core_limits=core_limits, trial=mode, wired_driver=wired_driver, ssh_enabled=ssh_enabled,
-                       require_secure_boot=signing is not None and mode is None, usb_profile=usb_profile)
+                       require_secure_boot=signing is not None and mode is None, usb_profile=usb_profile,
+                       tools=tools)
     candidate_manifest = json.loads((candidate_work / "psios-deployment.json").read_bytes())
     trial_manifest = json.loads((trial_work / "psios-deployment.json").read_bytes())
     del trial_manifest["boot_mode"], trial_manifest["trial_disk_uuid"]
@@ -1108,11 +1119,13 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
     upgrade = {"previous_image_sha256": source_digest, "previous_source_commit": prior["source_commit"],
                "normalized_source_sha256": normalized, "verified_authority": authority,
                "replayed_ext4_partitions": replayed}
-    candidate_receipt = finish_disk(candidate_work, candidate_disk, candidate_disk, signing=signing, upgrade=upgrade)
-    trial_receipt = finish_disk(trial_work, trial_disk, trial_disk, signing=signing, upgrade=upgrade)
+    candidate_receipt = finish_disk(candidate_work, candidate_disk, candidate_disk,
+                                    signing=signing, upgrade=upgrade, tools=tools)
+    trial_receipt = finish_disk(trial_work, trial_disk, trial_disk, signing=signing, upgrade=upgrade, tools=tools)
+    candidate_receipt["boot_assembly_tools"] = trial_receipt["boot_assembly_tools"] = tools.receipt()
     return PreparedUpdate(candidate_disk, trial_disk, candidate_receipt, trial_receipt,
                           candidate_work / "bin/psiosd", configuration, normalized,
-                          candidate_work / "base.iso", args.max_copy_mib)
+                          candidate_work / "base.iso", args.max_copy_mib, tools)
 
 
 def build(args):
@@ -1130,9 +1143,10 @@ def build(args):
         usb_profile = USB_INVENTORY if args.usb_inventory else None
         core_limits = args.core_limits
         signing = None
+        tools = boot_media.BootTools()
         if args.secure_boot_key:
             signing = boot_media.prepare_secure_boot(work, args.secure_boot_key, args.secure_boot_cert,
-                                                    args.efi_stub, args.efi_stub_sha256)
+                                                    args.efi_stub, args.efi_stub_sha256, tools=tools)
         if args.upgrade_from:
             prior, layout, core_limits = read_receipt(args.previous_receipt)
             layout = layout.for_source(args.source_size_bytes)
@@ -1155,7 +1169,7 @@ def build(args):
             new_disk(work, disk, args, instance, home_id, layout)
         disk.chmod(0o600)
         ramfs(work, args, instance, home_id, layout, signing, network_profile, core_limits=core_limits,
-              trial=trial, wired_driver=wired_driver, ssh_enabled=ssh_enabled, usb_profile=usb_profile)
+              trial=trial, wired_driver=wired_driver, ssh_enabled=ssh_enabled, usb_profile=usb_profile, tools=tools)
         upgrade = None
         if prior:
             upgrade = {
@@ -1164,7 +1178,8 @@ def build(args):
                 "verified_authority": verify_authority(work, disk, core_config, args.max_copy_mib),
                 "replayed_ext4_partitions": replayed,
             }
-        receipt = finish_disk(work, disk, output, signing=signing, upgrade=upgrade)
+        receipt = finish_disk(work, disk, output, signing=signing, upgrade=upgrade, tools=tools)
+        receipt["boot_assembly_tools"] = tools.receipt()
         # No existing image or block device is ever an install target.
         os.link(disk, output)
         fd = os.open(output.parent, os.O_DIRECTORY | os.O_RDONLY)

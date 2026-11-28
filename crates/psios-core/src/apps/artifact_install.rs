@@ -224,6 +224,9 @@ pub(crate) fn prepare(db: &Db<'_>, actor: &str, params: &Value, tool: &str) -> R
     if let Some(probe) = &install.health_check {
         preview["health_check"] = json!(probe);
     }
+    if let Some(limit) = install.run_max_bytes {
+        preview["run_max_bytes"] = json!(limit);
+    }
     if tool == STAGE_TOOL {
         response["release"] = preview;
         response["application_ref"] = target.reference();

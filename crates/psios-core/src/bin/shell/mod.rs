@@ -72,6 +72,7 @@ struct Shell {
     cancel_pending_tasks: bool,
     send_chat: bool,
     review_work_items: bool,
+    manage_agent_sessions: bool,
     client: Client,
     session: Mutex<Session>,
     rpc_slots: Arc<Semaphore>,
@@ -90,6 +91,7 @@ enum Endpoint {
     ConversationMessages,
     AgentSessions,
     AgentSession,
+    ControlAgentSession,
     Projects,
     ProjectWorkItems,
     WorkItemRevision,
@@ -197,6 +199,20 @@ struct AgentSessionState {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AgentSessionAction {
+    Pause,
+    Resume,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentSessionControl {
+    reference: ResourceRef,
+    action: AgentSessionAction,
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TaskHistory {
     id: String,
@@ -242,6 +258,7 @@ enum CoreRequest {
     ConversationMessages(ConversationMessages),
     AgentSessions(Page),
     AgentSession(ById),
+    ControlAgentSession(AgentSessionControl),
     Projects(DirectoryPage),
     ProjectWorkItems(ProjectWorkItems),
     WorkItemRevision(WorkItemRevision),
@@ -337,6 +354,45 @@ impl CoreRequest {
                         "status":status,"charged_calls":usage.charged_calls,
                         "lease_time":usage.lease_time,"provider_reported":usage.provider_reported,
                     }),
+                ))
+            }
+            Self::ControlAgentSession(request) => {
+                let reference = &request.reference;
+                let status = session_status(client, &reference.resource_id)?;
+                if status.reference != *reference {
+                    return Err(ApiError::new(
+                        "Conflict",
+                        "agent session changed before the requested action",
+                    )
+                    .into());
+                }
+                let mut params = json!({"id":reference.resource_id,"expected_resource_version":reference.version});
+                let method = match request.action {
+                    AgentSessionAction::Pause if status.session.lifecycle == "AwaitingModel" => {
+                        params["reason"] = json!("Requested from PsiOS Shell");
+                        "Session.Pause"
+                    }
+                    AgentSessionAction::Resume
+                        if status.session.lifecycle == "Paused"
+                            && status.session.pause_reason.as_deref() == Some("OperatorPaused")
+                            && status.session.outcome_knowledge.as_deref() != Some("Unknown") =>
+                    {
+                        "Session.Resume"
+                    }
+                    _ => {
+                        return Err(ApiError::new(
+                            "PreconditionFailed",
+                            "agent session has no eligible model boundary",
+                        )
+                        .into());
+                    }
+                };
+                check()?;
+                let updated =
+                    agent_session_status(client.call(method, params)?, &reference.resource_id)?;
+                Ok(json_response(
+                    StatusCode::OK,
+                    json!({"reference":updated.reference}),
                 ))
             }
             Self::ApplicationReleases(request) => {
@@ -626,7 +682,10 @@ impl CoreRequest {
 }
 
 fn session_status(client: &Client, id: &str) -> ApiResult<AgentSessionStatus> {
-    let record = client.call("Session.Get", json!({"id":id}))?;
+    agent_session_status(client.call("Session.Get", json!({"id":id}))?, id)
+}
+
+fn agent_session_status(record: Value, id: &str) -> ApiResult<AgentSessionStatus> {
     let invalid = || {
         ApiError::new(
             "RecoveryRequired",
@@ -847,6 +906,9 @@ fn rpc(endpoint: Endpoint, data: Value) -> Result<CoreRequest, Fault> {
         Endpoint::AgentSession => Ok(CoreRequest::AgentSession(
             serde_json::from_value(data).map_err(|_| INVALID)?,
         )),
+        Endpoint::ControlAgentSession => Ok(CoreRequest::ControlAgentSession(
+            serde_json::from_value(data).map_err(|_| INVALID)?,
+        )),
         Endpoint::ReviewWorkItem => Ok(CoreRequest::ReviewWorkItem(
             serde_json::from_value(data).map_err(|_| INVALID)?,
         )),
@@ -953,6 +1015,9 @@ impl Shell {
             "/api/conversation-messages" => Endpoint::ConversationMessages,
             "/api/agent-sessions" => Endpoint::AgentSessions,
             "/api/agent-session" => Endpoint::AgentSession,
+            "/api/control-agent-session" if self.manage_agent_sessions => {
+                Endpoint::ControlAgentSession
+            }
             "/api/projects" => Endpoint::Projects,
             "/api/project-work-items" => Endpoint::ProjectWorkItems,
             "/api/work-item-revision" => Endpoint::WorkItemRevision,
@@ -977,7 +1042,7 @@ impl Shell {
             return Ok(json_response(
                 StatusCode::OK,
                 json!({"token":token,"principal_id":self.principal,"cancel_pending_tasks":self.cancel_pending_tasks,"send_chat":self.send_chat,
-                       "review_work_items":self.review_work_items}),
+                       "review_work_items":self.review_work_items,"manage_agent_sessions":self.manage_agent_sessions}),
             ));
         }
 
@@ -1077,6 +1142,7 @@ pub(super) fn run(
     cancel_pending_tasks: bool,
     send_chat: bool,
     review_work_items: bool,
+    manage_agent_sessions: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = client.call("Principal.WhoAmI", json!({}))?;
     let principal = identity["principal_id"]
@@ -1096,6 +1162,7 @@ pub(super) fn run(
         cancel_pending_tasks,
         send_chat,
         review_work_items,
+        manage_agent_sessions,
         stop,
     ));
     runtime.shutdown_timeout(Duration::from_secs(1));
@@ -1108,6 +1175,7 @@ async fn serve(
     cancel_pending_tasks: bool,
     send_chat: bool,
     review_work_items: bool,
+    manage_agent_sessions: bool,
     stop: Arc<AtomicBool>,
 ) -> io::Result<()> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
@@ -1121,6 +1189,7 @@ async fn serve(
         cancel_pending_tasks,
         send_chat,
         review_work_items,
+        manage_agent_sessions,
         client,
         session: Mutex::new(Session::new(&code, now())?),
         rpc_slots: Arc::new(Semaphore::new(CORE_CALLS)),

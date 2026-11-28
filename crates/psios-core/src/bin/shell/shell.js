@@ -63,6 +63,7 @@ function leave(text, error = false) {
   chat.reset();
   projects.setReviewer(null);
   projects.reset();
+  agentRuntime.capability(false);
   agentRuntime.reset();
   updateDesktop();
   byId("principal").textContent = "";
@@ -764,6 +765,7 @@ byId("pair-form").addEventListener("submit", async (event) => {
     canCancelPending = session.cancel_pending_tasks === true;
     chat.capability(session.send_chat === true);
     projects.setReviewer(session.review_work_items === true ? session.principal_id : null);
+    agentRuntime.capability(session.manage_agent_sessions === true);
     byId("principal").textContent = session.principal_id;
     pairing.hidden = true;
     workspace.hidden = false;

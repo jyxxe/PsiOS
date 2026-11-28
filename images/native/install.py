@@ -401,7 +401,7 @@ def main():
     execute = commands.add_parser("apply", help="approve and install an exact saved plan")
     execute.add_argument("--plan-digest", required=True)
     read = commands.add_parser("inspect", help="show the outcome and reconcile a prior write")
-    reconcile = commands.add_parser("reconcile-after-reboot", help="read back a prior SATA write after Linux restarts")
+    reconcile = commands.add_parser("reconcile-after-reboot", help="read back a prior SATA or NVMe write after Linux restarts")
     reconcile.add_argument("--plan-digest", required=True)
     reconcile.add_argument("--target", type=Path, required=True)
     for command in (prepare, execute, read, reconcile):

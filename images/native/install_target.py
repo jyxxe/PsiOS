@@ -21,6 +21,8 @@ NVME_DRIVER = PCI / "drivers/nvme"
 NVME_NAME = re.compile(r"nvme[0-9]{1,7}n[0-9]{1,10}\Z")
 DEVICE_SERIAL = re.compile(r"[ -~]{1,20}\Z")
 NVME_WWID = re.compile(r"(?:uuid|eui|nvme)\.[!-~]{1,240}\Z")
+NVME_EUI = re.compile(r"eui\.([0-9a-f]{16}|[0-9a-f]{32})\Z")
+NVME_UUID = re.compile(r"uuid\.([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\Z")
 AHCI_DRIVER = PCI / "drivers/ahci"
 SCSI = SYSFS / "bus/scsi"
 SCSI_DISK_DRIVER = SCSI / "drivers/sd"
@@ -391,21 +393,37 @@ def read_target(fd, path: Path, *, allow_loop: bool) -> dict:
                 "read_only": False, "transport": transport}
 
 
+def _reboot_disk_identity(target):
+    transport = target.get("transport")
+    boot, path = target.get("boot_id"), target.get("path")
+    if (not isinstance(transport, dict) or not isinstance(path, str)
+            or not isinstance(boot, str) or str(uuid.UUID(boot)) != boot):
+        raise ValueError("invalid cross-boot installation target")
+    kind = _kind(Path(path))
+    serial, wwid = transport.get("serial"), transport.get("wwid")
+    if (kind != transport.get("kind") or not isinstance(serial, str) or not DEVICE_SERIAL.fullmatch(serial)
+            or not isinstance(wwid, str)):
+        raise ValueError("invalid cross-boot installation disk identity")
+    if kind == "SataAhciDisk" and ATA_WWID.fullmatch(wwid):
+        return kind, serial, wwid
+    if kind == "NVMeNamespace":
+        eui = NVME_EUI.fullmatch(wwid)
+        identifier = NVME_UUID.fullmatch(wwid)
+        namespace = transport.get("namespace_id")
+        if (type(namespace) is int and 0 < namespace < 0xffffffff
+                and ((eui and int(eui[1], 16)) or (identifier and uuid.UUID(identifier[1]).int))):
+            return kind, serial, namespace, wwid
+        raise ValueError("cross-boot NVMe reconciliation requires a registered namespace EUI, NGUID, or UUID")
+    raise ValueError("cross-boot installation reconciliation requires a fixed SATA disk or an identified NVMe namespace")
+
+
 def require_reboot_target(planned, observed):
-    """Require a persistent SATA identity in place of the expired Linux generation."""
-    for target in (planned, observed):
-        transport = target.get("transport")
-        boot = target.get("boot_id")
-        path = target.get("path")
-        if (not isinstance(transport, dict) or transport.get("kind") != "SataAhciDisk"
-                or not isinstance(path, str) or _kind(Path(path)) != "SataAhciDisk"
-                or not isinstance(transport.get("serial"), str) or not DEVICE_SERIAL.fullmatch(transport["serial"])
-                or not isinstance(transport.get("wwid"), str) or not ATA_WWID.fullmatch(transport["wwid"])
-                or not isinstance(boot, str) or str(uuid.UUID(boot)) != boot):
-            raise ValueError("cross-boot installation reconciliation requires a fixed SATA AHCI disk with a registered NAA WWID")
+    """Require a persistent device identity in place of the expired Linux generation."""
+    planned_identity = _reboot_disk_identity(planned)
+    observed_identity = _reboot_disk_identity(observed)
     if planned["boot_id"] == observed["boot_id"]:
         raise ValueError("cross-boot installation reconciliation requires a different Linux boot")
-    if (any(planned["transport"][key] != observed["transport"][key] for key in ("serial", "wwid"))
+    if (planned_identity != observed_identity
             or any(planned.get(key) != observed.get(key) for key in (
                 "size_bytes", "logical_block_bytes", "physical_block_bytes", "read_only"))):
         raise ValueError("target disk persistent identity or geometry differs from the installation plan")

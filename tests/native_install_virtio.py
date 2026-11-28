@@ -25,6 +25,8 @@ TARGET_SERIAL = "PSIOS-INSTALL-001"
 REPLACEMENT_SERIAL = "PSIOS-REPLACE-002"
 BAD_SERIAL = {"virtio": "PSIOS BAD SERIAL", "nvme": "  ", "ahci": "PSIOS-NO-WWN"}
 COLLISION_SERIAL = "PSIOS-COLLISION-"
+NVME_WEAK_SERIAL = "PSIOS-WEAK-NVME-001"
+NVME_RECOVERY_EUI = "5254001234567890"
 GUEST = Path("/var/lib/psios-virtio-acceptance")
 OPERATION = GUEST / "operation"
 BAD_OPERATION = GUEST / "bad-operation"
@@ -151,7 +153,7 @@ def make_source(args, work):
 
 
 def ubuntu_command(instance, target, rejected, port, serial_log, bus="virtio", collisions=(), replacement=None,
-                   *, swap_sata_ports=False):
+                   *, move_target=False, recovery_fallback=None):
     accel = "kvm" if os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
     manifest = json.loads((instance / "manifest.json").read_bytes())
     assert manifest["firmware"] == "OVMF" and manifest["architecture"] == "amd64"
@@ -175,6 +177,13 @@ def ubuntu_command(instance, target, rejected, port, serial_log, bus="virtio", c
         ("installed", f"../{target.name}", "raw", TARGET_SERIAL, ""),
         ("rejected", f"../{rejected.name}", "raw", BAD_SERIAL[bus], ""),
     ):
+        if name == "installed" and recovery_fallback is not None:
+            address = "0x08" if move_target else "0x07"
+            cmd += ["-drive", f"if=none,id={name},format={fmt},file={path}",
+                    "-device", f"nvme,id=recovery-nvme,serial={serial},addr={address}",
+                    "-device", f"nvme-ns,bus=recovery-nvme,drive={name},nsid=1,eui64=0x{NVME_RECOVERY_EUI},"
+                               "uuid=00000000-0000-0000-0000-000000000000"]
+            continue
         read_only = ",readonly=on" if name == "seed" else ""
         device = "virtio-blk-pci"
         if name in ("installed", "rejected"):
@@ -184,7 +193,7 @@ def ubuntu_command(instance, target, rejected, port, serial_log, bus="virtio", c
                     options += ",id=planned-disk,bus=install-port"
             elif bus == "ahci":
                 port = 0 if name == "installed" else 1
-                if swap_sata_ports:
+                if move_target:
                     port = 1 - port
                 device = f"ide-hd,bus=ide.{port}"
                 if name == "installed":
@@ -195,6 +204,9 @@ def ubuntu_command(instance, target, rejected, port, serial_log, bus="virtio", c
         cmd += ["-drive", f"if=none,id=collision{index},format=raw,file=../{collision.name}",
                 "-device", f"ide-hd,bus=ide.{index + 2},drive=collision{index},"
                            f"serial={COLLISION_SERIAL}{index},wwn=0x5000c500f0120002"]
+    if recovery_fallback is not None:
+        cmd += ["-drive", f"if=none,id=weak,format=raw,file=../{recovery_fallback.name}",
+                "-device", f"nvme,drive=weak,serial={NVME_WEAK_SERIAL}"]
     return cmd
 
 
@@ -385,10 +397,10 @@ def interrupt_install_receipt(run, planned, target, expected_image):
     assert "different Linux boot" in status["reason"], status
     assert remote(run, "sudo", "-n", "sha256sum", "--", target, timeout=90).stdout.split()[0] == expected_image
     assert install_journal(run) == journal
-    print(f"PASS real SATA data flushed with journal left at WriteIssued, image {expected_image}", flush=True)
+    print(f"PASS real disk data flushed with journal left at WriteIssued, image {expected_image}", flush=True)
 
 
-def check_reboot_reconciliation(instance, key, launch, target, source, receipt, original, expected_image):
+def check_reboot_reconciliation(instance, key, launch, target, source, receipt, original, expected_image, bus):
     offset = 64 * 512
     with target.open("r+b", buffering=0) as disk:
         old = os.pread(disk.fileno(), 1, offset)
@@ -397,10 +409,11 @@ def check_reboot_reconciliation(instance, key, launch, target, source, receipt, 
         os.fsync(disk.fileno())
     damaged = sha(target)
     assert damaged != expected_image
+    refused_serial = NVME_WEAK_SERIAL if bus == "nvme" else COLLISION_SERIAL + "0"
     with boot_ubuntu(instance, key, 2, launch=launch) as run:
         journal = install_journal(run)
         approval = json.loads(journal)["plan_digest"]
-        device = json.loads(remote(run, "python3", "-c", PROBE_DEVICE, "ahci", TARGET_SERIAL).stdout)
+        device = json.loads(remote(run, "python3", "-c", PROBE_DEVICE, bus, TARGET_SERIAL).stdout)
         damaged_boot = device["boot_id"]
         assert damaged_boot != original["boot_id"]
         bad_approval = recover_install(run, "0" * 64, device["path"], check=False)
@@ -411,9 +424,15 @@ def check_reboot_reconciliation(instance, key, launch, target, source, receipt, 
         replay = remote(run, "sudo", "-n", "python3", "-B", INSTALLER, "apply", "--state-dir", OPERATION,
                         "--plan-digest", approval, check=False)
         assert replay.returncode == 1 and "writes were already issued" in replay.stderr
-        collision = json.loads(remote(run, "python3", "-c", PROBE_DEVICE, "ahci", COLLISION_SERIAL + "0").stdout)
-        ambiguous = recover_install(run, approval, collision["path"], check=False)
-        assert ambiguous.returncode == 1 and "identity is not unique" in json.loads(ambiguous.stdout)["reason"]
+        other = json.loads(remote(run, "python3", "-c", PROBE_DEVICE, bus, refused_serial).stdout)
+        refusal = recover_install(run, approval, other["path"], check=False)
+        reason = json.loads(refusal.stdout)["reason"]
+        assert refusal.returncode == 1
+        if bus == "nvme":
+            assert other["transport"]["wwid"].startswith("nvme.")
+            assert "requires a registered namespace EUI, NGUID, or UUID" in reason, reason
+        else:
+            assert "identity is not unique" in reason, reason
         mismatch = recover_install(run, approval, device["path"], check=False)
         result = json.loads(mismatch.stdout)
         assert mismatch.returncode == 1 and result["status"] == "RecoveryRequired"
@@ -425,8 +444,8 @@ def check_reboot_reconciliation(instance, key, launch, target, source, receipt, 
         assert os.pwrite(disk.fileno(), old, offset) == 1
         os.fsync(disk.fileno())
     assert sha(target) == expected_image
-    with boot_ubuntu(instance, key, 3, launch=lambda port, log: launch(port, log, swap_sata_ports=True)) as run:
-        device = json.loads(remote(run, "python3", "-c", PROBE_DEVICE, "ahci", TARGET_SERIAL).stdout)
+    with boot_ubuntu(instance, key, 3, launch=lambda port, log: launch(port, log, move_target=True)) as run:
+        device = json.loads(remote(run, "python3", "-c", PROBE_DEVICE, bus, TARGET_SERIAL).stdout)
         assert device["boot_id"] not in (original["boot_id"], damaged_boot)
         assert device["sysfs_path"] != original["sysfs_path"], (original, device)
         recovered = json.loads(recover_install(run, approval, device["path"]).stdout)
@@ -435,10 +454,11 @@ def check_reboot_reconciliation(instance, key, launch, target, source, receipt, 
                     "image_readback_sha256": expected_image}
         assert recovered == expected == json.loads(install_journal(run)), recovered
         assert json.loads(recover_install(run, approval, device["path"]).stdout) == expected
-        rejected = recover_install(run, approval, collision["path"], check=False)
+        other = json.loads(remote(run, "python3", "-c", PROBE_DEVICE, bus, refused_serial).stdout)
+        rejected = recover_install(run, approval, other["path"], check=False)
         assert rejected.returncode == 1 and "recorded cross-boot result" in rejected.stderr
     assert sha(target) == expected_image, "reconciliation changed the installed disk"
-    print(f"PASS reboot {original['boot_id']} to {device['boot_id']} with SATA NAA {device['transport']['wwid']}; "
+    print(f"PASS reboot {original['boot_id']} to {device['boot_id']} with WWID {device['transport']['wwid']}; "
           "refused a mismatched disk, settled the original approval by read-back without source files", flush=True)
 
 
@@ -518,15 +538,21 @@ def exercise(args, work):
     target_size = image.stat().st_size + (4 * MIB + 17 * 512 if args.larger_target else 0)
     target = sparse(work, "installed.raw", target_size)
     rejected = sparse(work, "rejected.raw", target_size)
-    replacement = sparse(work, "replacement.raw", target_size) if args.target_bus == "nvme" else None
+    replacement = None
+    recovery_fallback = None
+    if args.target_bus == "nvme":
+        if args.reconcile_after_reboot:
+            recovery_fallback = sparse(work, "weak-nvme-identity.raw", target_size)
+        else:
+            replacement = sparse(work, "replacement.raw", target_size)
     collisions = (tuple(sparse(work, f"collision-{index}.raw", target_size) for index in range(2))
                   if args.target_bus == "ahci" else ())
     blank = sha(target)
     assert sha(rejected) == blank
 
-    def launch(port, serial_log, *, swap_sata_ports=False):
+    def launch(port, serial_log, *, move_target=False):
         return ubuntu_command(instance, target, rejected, port, serial_log, args.target_bus, collisions, replacement,
-                              swap_sata_ports=swap_sata_ports)
+                              move_target=move_target, recovery_fallback=recovery_fallback)
 
     with boot_ubuntu(instance, key, 1, launch=launch, readiness_timeout=600,
                      power_cut=args.reconcile_after_reboot) as run:
@@ -547,7 +573,11 @@ def exercise(args, work):
     assert sha(rejected) == blank, "refused block device changed"
     assert all(sha(disk) == blank for disk in collisions), "duplicate-identity disk changed"
     if args.reconcile_after_reboot:
-        check_reboot_reconciliation(instance, key, launch, target, image, receipt, evidence, installed_digest)
+        if recovery_fallback is not None:
+            assert evidence["transport"]["wwid"] == "eui." + NVME_RECOVERY_EUI, evidence
+        check_reboot_reconciliation(instance, key, launch, target, image, receipt, evidence, installed_digest,
+                                    args.target_bus)
+        assert recovery_fallback is None or sha(recovery_fallback) == blank, "weak-identity disk changed"
     if args.larger_target:
         check_larger_disk(image, target)
     authority, task = boot_installed(args, work, target, receipt, operator, admin)
@@ -566,13 +596,13 @@ def main():
     parser.add_argument("--target-bus", choices=("virtio", "nvme", "ahci"), default="virtio")
     parser.add_argument("--larger-target", action="store_true", help="install to a larger, sector-aligned blank test disk")
     parser.add_argument("--reconcile-after-reboot", action="store_true",
-                        help="verify cross-boot SATA receipt recovery, with strace installed in the guest")
+                        help="verify cross-boot SATA or NVMe receipt recovery, with strace installed in the guest")
     parser.add_argument("--tool-deb", type=Path, action="append", default=[],
                         help="trusted offline Ubuntu tool or dependency package, repeat as needed")
     parser.add_argument("--ovmf-dir", type=Path, default=Path("/usr/share/OVMF"))
     args = parser.parse_args()
-    if args.reconcile_after_reboot and args.target_bus != "ahci":
-        parser.error("cross-boot reconciliation requires the AHCI test bus")
+    if args.reconcile_after_reboot and args.target_bus not in ("ahci", "nvme"):
+        parser.error("cross-boot reconciliation requires the AHCI or NVMe test bus")
     for name in ("base", "package", "archive", "kernel_iso", "ovmf_dir"):
         setattr(args, name, getattr(args, name).resolve(strict=True))
     args.tool_deb = [path.resolve(strict=True) for path in args.tool_deb]

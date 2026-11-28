@@ -59,6 +59,15 @@ enum Cmd {
         /// Allow the paired browser to pause and resume Agent sessions at a model boundary.
         #[arg(long)]
         manage_agent_sessions: bool,
+        /// Open the file browser for this exact Volume using the paired Core identity.
+        #[arg(long, requires = "files_delegation", value_name = "VOLUME_ID")]
+        files_volume: Option<String>,
+        /// Authorize the configured Volume through this existing Core Delegation.
+        #[arg(long, requires = "files_volume", value_name = "DELEGATION_ID")]
+        files_delegation: Option<String>,
+        /// Allow bounded UTF-8 text previews with a volume.read_chunk delegation.
+        #[arg(long, requires = "files_volume")]
+        files_preview: bool,
     },
     Status {
         #[arg(long, default_value = "owner-delegation")]
@@ -913,13 +922,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             send_chat,
             review_work_items,
             manage_agent_sessions,
+            files_volume,
+            files_delegation,
+            files_preview,
         } => {
             return shell::run(
                 c,
-                cancel_pending_tasks,
-                send_chat,
-                review_work_items,
-                manage_agent_sessions,
+                shell::Options {
+                    cancel_pending_tasks,
+                    send_chat,
+                    review_work_items,
+                    manage_agent_sessions,
+                    files: files_volume
+                        .zip(files_delegation)
+                        .map(|(volume, delegation)| shell::VolumeAccess {
+                            volume,
+                            delegation,
+                            preview: files_preview,
+                        }),
+                },
             );
         }
         Cmd::ModelStep {

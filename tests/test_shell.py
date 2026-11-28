@@ -4,6 +4,7 @@ from contextlib import closing
 import hashlib
 from http.client import HTTPConnection
 import io
+import base64
 import json
 import os
 from pathlib import Path
@@ -25,12 +26,14 @@ from support import Node, key, target
 
 class Shell:
     def __init__(self, node, token_file, endpoint=None, *, cancel_pending=False, send_chat=False,
-                 review_work_items=False, manage_agent_sessions=False):
+                 review_work_items=False, manage_agent_sessions=False, files=None, files_preview=False):
         self.process = subprocess.Popen(
             [node.binaries / "psiosctl", "--socket", endpoint or node.socket, "--token-file", token_file, "shell",
              *(["--cancel-pending-tasks"] if cancel_pending else []), *(["--send-chat"] if send_chat else []),
              *(["--review-work-items"] if review_work_items else []),
-             *(["--manage-agent-sessions"] if manage_agent_sessions else [])],
+             *(["--manage-agent-sessions"] if manage_agent_sessions else []),
+             *(["--files-volume", files[0], "--files-delegation", files[1]] if files else []),
+             *(["--files-preview"] if files_preview else [])],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
         )
         try:
@@ -93,10 +96,10 @@ class ShellTests(unittest.TestCase):
         self.addCleanup(self.node.close)
 
     def shell(self, token_file=None, *, cancel_pending=False, send_chat=False,
-              review_work_items=False, manage_agent_sessions=False):
+              review_work_items=False, manage_agent_sessions=False, files=None, files_preview=False):
         shell = Shell(self.node, token_file or self.node.witness / "owner.token",
                       cancel_pending=cancel_pending, send_chat=send_chat, review_work_items=review_work_items,
-                      manage_agent_sessions=manage_agent_sessions)
+                      manage_agent_sessions=manage_agent_sessions, files=files, files_preview=files_preview)
         self.addCleanup(shell.close)
         return shell
 
@@ -106,6 +109,146 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(body["error"]["code"], code)
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertIsNone(headers["Access-Control-Allow-Origin"])
+
+    def file_volume(self, *, preview=False):
+        node = self.node
+        volume = node.perform("volume.create", {"name": "shell-files"})
+        volume_id = volume["resource_id"]
+        root = node.state / "volumes" / volume_id / "data"
+        documents = root / "documents"
+        documents.mkdir()
+        (documents / "会议记录.txt").write_text("private file contents")
+        (root / "host-link").symlink_to("/etc/passwd")
+        for index in range(36):
+            (root / f"item-{index:02d}.txt").write_bytes(b"x" * index)
+        owner = node.call("Principal.WhoAmI", {})["principal_id"]
+        actions = ["task.submit", "task.read", "volume.files"]
+        if preview:
+            actions.append("volume.read_chunk")
+        grant = node.call("Grant.Issue", {"principal_id": owner, "actions": actions,
+                                        "tool_targets": [volume_id], "units": 20, "ttl_seconds": 180})
+        return root, grant, (volume_id, grant["delegation_ref"]["resource_id"])
+
+    def test_file_browser_uses_one_volume_and_exact_core_directory_revisions(self):
+        root, grant, binding = self.file_volume()
+        endpoint = "/api/volume-directory"
+
+        def request(query=None):
+            return {"key": key(), "query": query or {}}
+
+        ordinary = self.shell()
+        paired = ordinary.pair()
+        self.assertNotIn("browse_files", paired)
+        self.error(ordinary, 404, "NotFound", endpoint, data=request(), token=paired["token"])
+
+        browser = self.shell(files=binding)
+        self.error(browser, 401, "AuthenticationRequired", endpoint, data=request())
+        paired = browser.pair()
+        self.assertIs(paired["browse_files"], True)
+        token = paired["token"]
+        for params in (request({"target_id": "other-volume"}), request({"path": "../etc"}),
+                       request({"path": "/etc"}), request({"after": "item-00.txt", "volume_version": "r1"})):
+            self.error(browser, 400, "InvalidArgument", endpoint, data=params, token=token)
+        self.error(browser, 503, "StorageUnavailable", endpoint, data=request({"path": "host-link"}), token=token)
+        first_request = request()
+        status, headers, first = browser.http(endpoint, first_request, token)
+        self.assertEqual((status, headers["Cache-Control"]), (200, "no-store"))
+        self.assertEqual(len(first["entries"]), 32)
+        self.assertEqual(first["entries"][:2], [
+            {"name": "documents", "kind": "directory", "bytes": first["entries"][0]["bytes"]},
+            {"name": "host-link", "kind": "unsupported", "bytes": "0"},
+        ])
+        self.assertEqual(browser.http(endpoint, first_request, token)[2], first)
+        continuation = dict(after=first["next_after"], volume_version=first["volume_version"],
+                            directory_revision=first["directory_revision"])
+        status, _, tail = browser.http(endpoint, request(continuation), token)
+        self.assertEqual(status, 200, tail)
+        self.assertEqual((len(tail["entries"]), tail["next_after"]), (6, None))
+        self.assertEqual(tail["directory_revision"], first["directory_revision"])
+        status, _, page = browser.http(endpoint, request({"path": "documents"}), token)
+        self.assertEqual(status, 200, page)
+        self.assertEqual(page["entries"], [{"name": "会议记录.txt", "kind": "file", "bytes": "21"}])
+        (root / "added.txt").touch()
+        self.error(browser, 409, "Conflict", endpoint, data=request(continuation), token=token)
+        self.node.call("Grant.Revoke", target(grant["grant_ref"]))
+        self.error(browser, 403, "PermissionDenied", endpoint, data=request(), token=token)
+        self.error(browser, 403, "PermissionDenied", endpoint, data=first_request, token=token)
+        self.assertEqual((root / "documents/会议记录.txt").read_text(), "private file contents")
+
+    def test_file_preview_requires_explicit_opt_in_and_separate_read_scope(self):
+        root, grant, binding = self.file_volume(preview=True)
+        file = root / "documents/text.txt"
+        file.write_bytes(b"x" * 6144 + b"hidden end")
+        volume = self.node.get(binding[0])["reference"]
+        endpoint = "/api/volume-preview"
+
+        def input_for(path="documents/text.txt", **values):
+            return {"key": key(), "path": path, "volume_version": volume["version"], **values}
+
+        metadata = self.shell(files=binding)
+        paired = metadata.pair()
+        self.assertNotIn("preview_files", paired)
+        self.error(metadata, 404, "NotFound", endpoint, data=input_for(), token=paired["token"])
+        owner = self.node.call("Principal.WhoAmI", {})["principal_id"]
+        list_only = self.node.call("Grant.Issue", {"principal_id": owner, "tool_targets": [binding[0]],
+            "actions": ["task.submit", "task.read", "volume.files"], "units": 4, "ttl_seconds": 180})
+        denied = self.shell(files=(binding[0], list_only["delegation_ref"]["resource_id"]), files_preview=True)
+        self.error(denied, 403, "PermissionDenied", endpoint, data=input_for(), token=denied.pair()["token"])
+        shell = self.shell(files=binding, files_preview=True)
+        paired = shell.pair()
+        token = paired["token"]
+        self.assertIs(paired["preview_files"], True)
+        for data in (input_for(path="../outside"), input_for(offset=20), input_for(target_id="other")):
+            self.error(shell, 400, "InvalidArgument", endpoint, data=data, token=token)
+        first = input_for()
+        status, headers, result = shell.http(endpoint, first, token)
+        self.assertEqual((status, headers["Cache-Control"]), (200, "no-store"))
+        self.assertEqual((result["path"], result["offset"], result["next_offset"], result["eof"]),
+                         ("documents/text.txt", 0, 6144, False))
+        self.assertEqual(base64.b64decode(result["data_base64"]), b"x" * 6144)
+        self.assertEqual(shell.http(endpoint, first, token)[2], result)
+        self.node.call("Grant.Revoke", target(grant["grant_ref"]))
+        self.error(shell, 403, "PermissionDenied", endpoint, data=first, token=token)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
+    def test_browser_previews_utf8_files_as_bounded_literal_text(self):
+        root, _, binding = self.file_volume(preview=True)
+        documents = root / "documents"
+        sample = '<b id="preview-fixture">会议笔记</b>'
+        (documents / "会议记录.txt").write_text(sample)
+        (documents / "binary.bin").write_bytes(b"\xff\x80")
+        (documents / "long.txt").write_bytes(b"q" * 6143 + "界".encode("utf-8"))
+        shell = self.shell(files=binding, files_preview=True)
+        args = dict(origin=shell.origin, code=shell.code, filePreview=True, sample=sample,
+                    profile=str(self.node.base / "browser"))
+        subprocess.run(["node", str(Path(__file__).with_name("shell_browser.mjs")),
+                        os.environ.get("PSIOS_TEST_CHROME", "google-chrome")],
+                       input=json.dumps(args), text=True, check=True, timeout=60)
+        self.assertEqual((documents / "会议记录.txt").read_text(), sample)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
+    def test_browser_files_navigation_rechecks_its_grant_after_restoring(self):
+        _, grant, binding = self.file_volume()
+        shell = self.shell(files=binding)
+        parent, child = socket.socketpair()
+        with parent, child:
+            parent.settimeout(45)
+            args = dict(origin=shell.origin, code=shell.code, fileBrowser=True,
+                        profile=str(self.node.base / "browser"), control_fd=child.fileno())
+            with subprocess.Popen(["node", str(Path(__file__).with_name("shell_browser.mjs")),
+                                   os.environ.get("PSIOS_TEST_CHROME", "google-chrome")],
+                                  stdin=subprocess.PIPE, pass_fds=(child.fileno(),)) as browser:
+                child.close()
+                try:
+                    browser.stdin.write(json.dumps(args).encode())
+                    browser.stdin.close()
+                    self.assertEqual(parent.recv(1), b"R")
+                    self.node.call("Grant.Revoke", target(grant["grant_ref"]))
+                    parent.sendall(b"K")
+                    self.assertEqual(browser.wait(timeout=45), 0)
+                finally:
+                    if browser.poll() is None:
+                        browser.kill()
 
     def agent_sessions(self, count):
         node = self.node

@@ -70,6 +70,38 @@
           </div>
         </div>
       </section>
+      <section id="window-files" class="app-window" aria-labelledby="title-files" hidden>
+        <header class="window-bar">
+          <h1 id="title-files" tabindex="-1">文件</h1>
+        </header>
+        <div class="window-body">
+          <p id="status-files" class="message" role="status"></p>
+          <h2 id="files-path" class="mono" tabindex="-1"></h2>
+          <div class="pagination">
+            <button id="files-parent" type="button" disabled>上一级</button>
+            <button id="files-retry" type="button" hidden>重试</button>
+          </div>
+          <div class="table-wrap">
+            <table aria-label="目录条目">
+              <thead><tr><th scope="col">名称</th><th scope="col">类型</th><th scope="col">大小</th></tr></thead>
+              <tbody id="files-rows"></tbody>
+            </table>
+          </div>
+          <p id="files-empty" class="empty" hidden>这里没有条目。</p>
+          <div class="pagination">
+            <button id="files-previous" type="button" disabled>上一页</button>
+            <button id="files-next" type="button" disabled>下一页</button>
+          </div>
+          <section id="files-preview" class="card" aria-labelledby="files-preview-title" hidden>
+            <div class="pagination">
+              <h3 id="files-preview-title" tabindex="-1"></h3>
+              <button id="files-preview-close" type="button">关闭预览</button>
+            </div>
+            <p id="files-preview-status" class="message" role="status"></p>
+            <pre id="files-preview-text" aria-labelledby="files-preview-title" tabindex="0" hidden></pre>
+          </section>
+        </div>
+      </section>
       <section id="window-applications" class="app-window" aria-labelledby="title-applications" hidden>
         <header class="window-bar">
           <h1 id="title-applications" tabindex="-1">应用管理</h1>
@@ -214,6 +246,7 @@
     <nav class="dock" aria-label="应用 Dock">
       <button id="nav-node" type="button" aria-controls="window-node" aria-expanded="false">节点管理</button>
       <button id="nav-tasks" type="button" aria-controls="window-tasks" aria-expanded="false">任务中心</button>
+      <button id="nav-files" type="button" aria-controls="window-files" aria-expanded="false" hidden>文件</button>
       <button id="nav-applications" type="button" aria-controls="window-applications" aria-expanded="false">应用管理</button>
       <button id="nav-chat" type="button" aria-controls="window-chat" aria-expanded="false">Agent Chat</button>
       <button id="nav-projects" type="button" aria-controls="window-projects" aria-expanded="false">PsiFlow 项目</button>

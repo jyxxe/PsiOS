@@ -23,7 +23,7 @@ def authority(work, binaries, name, identity):
         node.call("Agent.Register", {"name": name})
         node.stop(signal.SIGKILL)
         assert (node.state / "state.db-wal").stat().st_size > 32
-        report = json.loads(subprocess.check_output([*node.daemon, "verify"]))
+        report = json.loads(subprocess.check_output([*node.daemon, "verify", "--scratch-dir", node.base]))
         tree = work / name
         tree.mkdir(mode=0o755)
         shutil.copytree(node.state, tree / "state")
@@ -43,7 +43,7 @@ def authority(work, binaries, name, identity):
     return disk, report
 
 
-def boot_cd(work, firmware, cd, drives, *, sata=None):
+def boot_cd(work, firmware, cd, drives, *, sata=None, source_digest=None):
     code = firmware / "OVMF_CODE_4M.fd"
     variables = work / "vars.fd"
     shutil.copyfile(firmware / "OVMF_VARS_4M.fd", variables)
@@ -61,7 +61,10 @@ def boot_cd(work, firmware, cd, drives, *, sata=None):
                         "-device", "ide-hd,drive=sata,bus=controller.0"])
     output = subprocess.check_output(command, stdin=subprocess.DEVNULL, timeout=180).replace(b"\r\n", b"\n")
     assert output.count(MARKER) == 1, output
-    return output.split(MARKER, 1)[1].strip()
+    boot_log, report = output.split(MARKER, 1)
+    if source_digest is not None:
+        assert f"\nPSIOS-SOURCE/1\n{source_digest}\n".encode() in boot_log, output
+    return report.strip()
 
 
 def exercise(args, work):
@@ -86,7 +89,9 @@ def exercise(args, work):
                 "--gid", str(os.getgid()), "--state", "/state", "--witness", "/witness", "--partition", "1",
                 "--ovmf-dir", args.ovmf_dir]
 
-    def inspect(*options, rejection=None, image=source):
+    def inspect(*options, rejection=None, image=source, source_digest=None):
+        if source_digest is not None:
+            options += ("--source-sha256", source_digest)
         result = subprocess.run([sys.executable, args.inspector, image, *settings, *options],
                                 text=True, capture_output=True, timeout=210,
                                 env={**os.environ, "TMPDIR": str(scratch)})
@@ -94,7 +99,10 @@ def exercise(args, work):
         assert digest(image) == inputs[image], "rescue changed the source image"
         if rejection is None:
             assert result.returncode == 0, result.stderr
-            assert json.loads(result.stdout) == expected
+            report = json.loads(result.stdout)
+            if source_digest is not None:
+                assert report.pop("source_sha256") == source_digest
+            assert report == expected
         else:
             assert result.returncode != 0 and not result.stdout and rejection in result.stderr, result
 
@@ -102,9 +110,11 @@ def exercise(args, work):
     inspect("--filesystem-uuid", "not-a-uuid", rejection="expected a nonzero ext4 UUID")
     inspect("--disk-transport", "nvme", "--filesystem-uuid", str(identity), "--firmware", "uefi",
             rejection="direct read-only inspection")
-    inspect("--disk-transport", "nvme", "--filesystem-uuid", str(identity))
+    inspect("--disk-transport", "nvme", "--filesystem-uuid", str(identity), source_digest=inputs[source])
+    inspect("--disk-transport", "nvme", "--filesystem-uuid", str(identity), source_digest=inputs[decoy],
+            rejection="source-digest-mismatch")
     inspect("--disk-transport", "nvme", "--filesystem-uuid", str(uuid.uuid4()), rejection="filesystem-identity")
-    inspect("--disk-transport", "ahci", "--filesystem-uuid", str(identity))
+    inspect("--disk-transport", "ahci", "--filesystem-uuid", str(identity), source_digest=inputs[source])
     inspect("--disk-transport", "ahci", "--filesystem-uuid", str(identity), image=dirty,
             rejection="filesystem-recovery-required")
     inspect("--disk-transport", "ahci", "--filesystem-uuid", str(identity), "--journal-overlay-mib", "16",
@@ -112,9 +122,10 @@ def exercise(args, work):
     inspect("--filesystem-uuid", str(identity), "--partition", "2", rejection="filesystem-identity")
 
     cd = work / "pinned.iso"
-    inspect("--filesystem-uuid", str(identity), "--firmware", "uefi", "--save-rescue-iso", cd)
+    inspect("--filesystem-uuid", str(identity), "--firmware", "uefi", "--save-rescue-iso", cd,
+            source_digest=inputs[source])
     before = digest(cd)
-    report = boot_cd(work, args.ovmf_dir, cd, [(decoy, "on"), (source, "on")])
+    report = boot_cd(work, args.ovmf_dir, cd, [(decoy, "on"), (source, "on")], source_digest=inputs[source])
     status, _, payload = report.partition(b"\n")
     assert status == b"OK" and json.loads(payload) == expected, report
     assert boot_cd(work, args.ovmf_dir, cd, [(decoy, "on")]) == b"ERROR filesystem-identity"
@@ -124,8 +135,8 @@ def exercise(args, work):
     assert boot_cd(work, args.ovmf_dir, cd, [(decoy, "on"), (source, "off")]) == b"ERROR block-device"
     assert {disk: digest(disk) for disk in inputs} == inputs
     assert digest(cd) == before
-    print("Verified exact authority on QEMU NVMe, AHCI and reordered Virtio, GPT partition identity, missing and "
-          "duplicate filesystem refusal across controllers, writable and dirty-source refusal, and byte preservation.")
+    print("Verified exact authority on QEMU NVMe, AHCI and reordered Virtio, GPT partition identity, selected "
+          "whole-disk digest, duplicate, missing, writable and dirty-source refusal, and byte-for-byte preservation.")
 
 
 if __name__ == "__main__":

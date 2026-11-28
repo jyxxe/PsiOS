@@ -178,8 +178,8 @@ def validate_bundle(args, output, stdout, old, frozen, source, receipt, code, va
     return build
 
 
-def expanded_source(args, work, factory, receipt):
-    sys.path.insert(0, str(args.controller.resolve().parent))
+def expanded_source(installer_dir, work, factory, receipt):
+    sys.path.insert(0, str(installer_dir.resolve()))
     from install_source import fit_image, stage_image
 
     expected = sha(factory)
@@ -225,7 +225,7 @@ def exercise(args, work):
     pins = {"receipt": sha(receipt), "archive": sha(args.archive), "code": sha(code)}
     capacity = ()
     if args.larger_source:
-        old, tail_marker = expanded_source(args, work, old, receipt)
+        old, tail_marker = expanded_source(args.controller.parent, work, old, receipt)
         capacity = ("--source-size-bytes", str(old.stat().st_size))
 
     def stage(out, *, receipt_digest=None, code_digest=None, max_copy_mib=128, capacity_flags=capacity):

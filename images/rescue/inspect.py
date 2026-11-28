@@ -23,6 +23,7 @@ HERE = Path(__file__).resolve().parent
 REPORT_LIMIT = 2 * 1024 * 1024
 BOOT_TIMEOUT = 180
 REPORT_MARKER = b"\nPSIOS-RESCUE/1\n"
+SOURCE_MARKER = b"\nPSIOS-SOURCE/1\n"
 AHCI_VIEW_MIB = 16
 
 
@@ -72,7 +73,7 @@ def configuration(args):
             "witness_dir": "/source" + (args.witness or args.state + ".witness")}
 
 
-def prepare(work, args, require_secure_boot, *, filesystem_uuid=None, disk_transport="virtio"):
+def prepare(work, args, require_secure_boot, *, filesystem_uuid=None, disk_transport="virtio", source_sha256=None):
     scratch = scratch_mib(args)
     boot_media.prepare_kernel(work, args.iso)
     pinned_copy(args.core, work / "psiosd", args.core_sha256, 64 * 1024 * 1024)
@@ -86,7 +87,8 @@ def prepare(work, args, require_secure_boot, *, filesystem_uuid=None, disk_trans
                 f"SECURE_BOOT={int(require_secure_boot)}\n"
                 f"REHEARSE={int(args.migration_config is not None)}\n"
                 f"FILESYSTEM_UUID={filesystem_uuid.hex if filesystem_uuid else ''}\n"
-                f"DISK_TRANSPORT={disk_transport}\n")
+                f"DISK_TRANSPORT={disk_transport}\n"
+                f"SOURCE_SHA256={source_sha256 or ''}\n")
     (work / "rescue-settings").write_text(settings)
     (work / "rescue-settings").chmod(0o600)
     (work / "rescue.json").write_text(json.dumps(configuration(args), allow_nan=False))
@@ -145,13 +147,16 @@ def unique_report(serial, firmware, accelerator):
 
 def inspect(args):
     with regular_file(args.image) as disk, tempfile.TemporaryDirectory(prefix="psios-rescue-") as tmp:
+        size = os.fstat(disk.fileno()).st_size
+        if args.source_sha256 is not None and (size == 0 or size % 512 != 0):
+            raise ValueError("a digest-pinned raw image must consist of complete 512-byte sectors")
         work = Path(tmp)
         signing = None
         if args.secure_boot_key:
             signing = boot_media.prepare_secure_boot(work, args.secure_boot_key, args.secure_boot_cert,
                                                     args.efi_stub, args.efi_stub_sha256)
         prepare(work, args, signing is not None, filesystem_uuid=args.filesystem_uuid,
-                disk_transport=args.disk_transport)
+                disk_transport=args.disk_transport, source_sha256=args.source_sha256)
         # Hand QEMU the exact already-open read-only file. Raw format disables
         # backing-file discovery and the guest gets no interface to the network.
         fd = disk.fileno()
@@ -224,6 +229,11 @@ def inspect(args):
             if output.count(b"\nPSIOS-SECURE-BOOT/1\nEnforced\n") != 1:
                 raise ValueError("rescue guest did not confirm Secure Boot")
             report["secure_boot"] = {"status": "Enforced", **signing.receipt()}
+        if args.source_sha256 is not None:
+            evidence = SOURCE_MARKER + args.source_sha256.encode("ascii") + b"\n"
+            if output.count(SOURCE_MARKER) != 1 or evidence not in output:
+                raise ValueError("rescue guest did not verify the pinned source image digest")
+            report["source_sha256"] = args.source_sha256
         if args.journal_overlay_mib is not None:
             report["ext4_journal"] = success[status.strip()]
         if args.save_rescue_iso is not None:
@@ -237,6 +247,7 @@ def main():
     parser.add_argument("--iso", type=Path, required=True, help="pinned Alpine virt rescue ISO")
     parser.add_argument("--core", type=Path, required=True, help="standalone static psiosd")
     parser.add_argument("--core-sha256", required=True, help="expected psiosd digest from a trusted build manifest")
+    parser.add_argument("--source-sha256", help="expected SHA-256 of the complete raw source from an independent record")
     parser.add_argument("--uid", type=int, required=True, help="numeric UID of the original service account")
     parser.add_argument("--gid", type=int, help="original service GID, defaults to UID")
     parser.add_argument("--partition", type=int, default=0, help="partition number, or 0 for a raw filesystem")
@@ -264,6 +275,8 @@ def main():
         parser.error("signed rescue requires --firmware uefi and a pre-enrolled --ovmf-vars store")
     if not re.fullmatch("[0-9a-f]{64}", args.core_sha256):
         parser.error("invalid expected SHA-256")
+    if args.source_sha256 is not None and not re.fullmatch("[0-9a-f]{64}", args.source_sha256):
+        parser.error("invalid expected source image SHA-256")
     if not 1 <= args.uid < 2**32 - 1 or args.gid is not None and not 0 <= args.gid < 2**32 - 1:
         parser.error("expected a non-root service UID and a valid GID")
     if not 0 <= args.partition <= 128 or not 1 <= args.max_copy_mib <= 256:

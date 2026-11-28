@@ -1,6 +1,8 @@
 //! A browser-facing local client. The Core checks each operation under the paired identity.
 
+mod files;
 mod session;
+pub(super) use files::VolumeAccess;
 
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::{
@@ -69,13 +71,18 @@ struct Shell {
     host: String,
     origin: String,
     principal: String,
-    cancel_pending_tasks: bool,
-    send_chat: bool,
-    review_work_items: bool,
-    manage_agent_sessions: bool,
+    options: Options,
     client: Client,
     session: Mutex<Session>,
     rpc_slots: Arc<Semaphore>,
+}
+
+pub(super) struct Options {
+    pub cancel_pending_tasks: bool,
+    pub send_chat: bool,
+    pub review_work_items: bool,
+    pub manage_agent_sessions: bool,
+    pub files: Option<VolumeAccess>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -87,6 +94,8 @@ enum Endpoint {
     Tasks,
     Applications,
     ApplicationReleases,
+    VolumeDirectory,
+    VolumePreview,
     Conversations,
     ConversationMessages,
     AgentSessions,
@@ -254,6 +263,8 @@ enum CoreRequest {
     Call(&'static str, Value),
     Applications(Page),
     ApplicationReleases(ApplicationReleases),
+    VolumeDirectory(files::Directory, VolumeAccess),
+    VolumePreview(files::Preview, VolumeAccess),
     Conversations(DirectoryPage),
     ConversationMessages(ConversationMessages),
     AgentSessions(Page),
@@ -281,6 +292,14 @@ impl CoreRequest {
             Self::Call(method, params) => {
                 Ok(json_response(StatusCode::OK, client.call(method, params)?))
             }
+            Self::VolumeDirectory(directory, access) => Ok(json_response(
+                StatusCode::OK,
+                directory.read(access, client, &check)?,
+            )),
+            Self::VolumePreview(preview, access) => Ok(json_response(
+                StatusCode::OK,
+                preview.read(access, client, &check)?,
+            )),
             Self::Applications(page) => {
                 let snapshot = client.call(
                     "Resource.List",
@@ -821,6 +840,10 @@ fn file(path: &str) -> Option<HttpResponse> {
             "text/javascript; charset=utf-8",
             include_bytes!("shell-sessions.js").as_slice(),
         ),
+        "/shell-files.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("shell-files.js").as_slice(),
+        ),
         "/shell.js" => (
             "text/javascript; charset=utf-8",
             include_bytes!("shell.js").as_slice(),
@@ -863,7 +886,11 @@ async fn body(request: Request<Incoming>, limit: usize) -> Result<Value, Fault> 
     parse(&bytes).map_err(|_| INVALID)
 }
 
-fn rpc(endpoint: Endpoint, data: Value) -> Result<CoreRequest, Fault> {
+fn rpc(
+    endpoint: Endpoint,
+    data: Value,
+    files: Option<&VolumeAccess>,
+) -> Result<CoreRequest, Fault> {
     match endpoint {
         Endpoint::Node => {
             let _: Empty = serde_json::from_value(data).map_err(|_| INVALID)?;
@@ -881,6 +908,14 @@ fn rpc(endpoint: Endpoint, data: Value) -> Result<CoreRequest, Fault> {
         )),
         Endpoint::ApplicationReleases => Ok(CoreRequest::ApplicationReleases(
             serde_json::from_value(data).map_err(|_| INVALID)?,
+        )),
+        Endpoint::VolumeDirectory => Ok(CoreRequest::VolumeDirectory(
+            serde_json::from_value(data).map_err(|_| INVALID)?,
+            files.cloned().ok_or(INVALID)?,
+        )),
+        Endpoint::VolumePreview => Ok(CoreRequest::VolumePreview(
+            serde_json::from_value(data).map_err(|_| INVALID)?,
+            files.cloned().ok_or(INVALID)?,
         )),
         Endpoint::Conversations => Ok(CoreRequest::Conversations(
             serde_json::from_value(data).map_err(|_| INVALID)?,
@@ -1011,22 +1046,34 @@ impl Shell {
             "/api/tasks" => Endpoint::Tasks,
             "/api/applications" => Endpoint::Applications,
             "/api/application-releases" => Endpoint::ApplicationReleases,
+            "/api/volume-directory" if self.options.files.is_some() => Endpoint::VolumeDirectory,
+            "/api/volume-preview"
+                if self
+                    .options
+                    .files
+                    .as_ref()
+                    .is_some_and(|files| files.preview) =>
+            {
+                Endpoint::VolumePreview
+            }
             "/api/conversations" => Endpoint::Conversations,
             "/api/conversation-messages" => Endpoint::ConversationMessages,
             "/api/agent-sessions" => Endpoint::AgentSessions,
             "/api/agent-session" => Endpoint::AgentSession,
-            "/api/control-agent-session" if self.manage_agent_sessions => {
+            "/api/control-agent-session" if self.options.manage_agent_sessions => {
                 Endpoint::ControlAgentSession
             }
             "/api/projects" => Endpoint::Projects,
             "/api/project-work-items" => Endpoint::ProjectWorkItems,
             "/api/work-item-revision" => Endpoint::WorkItemRevision,
             "/api/work-item-evidence" => Endpoint::WorkItemEvidence,
-            "/api/review-work-item" if self.review_work_items => Endpoint::ReviewWorkItem,
-            "/api/chat-prepare" if self.send_chat => Endpoint::PrepareChatMessage,
-            "/api/chat-send" if self.send_chat => Endpoint::SendChatMessage,
+            "/api/review-work-item" if self.options.review_work_items => Endpoint::ReviewWorkItem,
+            "/api/chat-prepare" if self.options.send_chat => Endpoint::PrepareChatMessage,
+            "/api/chat-send" if self.options.send_chat => Endpoint::SendChatMessage,
             "/api/task" => Endpoint::Task,
-            "/api/cancel-pending-task" if self.cancel_pending_tasks => Endpoint::CancelPendingTask,
+            "/api/cancel-pending-task" if self.options.cancel_pending_tasks => {
+                Endpoint::CancelPendingTask
+            }
             "/api/task-history" => Endpoint::TaskHistory,
             "/api/task-artifact" => Endpoint::TaskArtifact,
             _ => return Err(Fault(StatusCode::NOT_FOUND, "NotFound", "操作不存在")),
@@ -1039,11 +1086,18 @@ impl Shell {
             if !session.pair(&pair.code, &token, now()) {
                 return Err(UNAUTHENTICATED);
             }
-            return Ok(json_response(
-                StatusCode::OK,
-                json!({"token":token,"principal_id":self.principal,"cancel_pending_tasks":self.cancel_pending_tasks,"send_chat":self.send_chat,
-                       "review_work_items":self.review_work_items,"manage_agent_sessions":self.manage_agent_sessions}),
-            ));
+            let mut reply = json!({
+                "token":token,"principal_id":self.principal,"cancel_pending_tasks":self.options.cancel_pending_tasks,
+                "send_chat":self.options.send_chat,"review_work_items":self.options.review_work_items,
+                "manage_agent_sessions":self.options.manage_agent_sessions,
+            });
+            if let Some(files) = &self.options.files {
+                reply["browse_files"] = json!(true);
+                if files.preview {
+                    reply["preview_files"] = json!(true);
+                }
+            }
+            return Ok(json_response(StatusCode::OK, reply));
         }
 
         let token = single(request.headers(), header::AUTHORIZATION.as_str())
@@ -1089,7 +1143,7 @@ impl Shell {
             session.close();
             return Ok(json_response(StatusCode::OK, json!({})));
         }
-        let operation = rpc(endpoint, data)?;
+        let operation = rpc(endpoint, data, self.options.files.as_ref())?;
         let slot = self.rpc_slots.clone().try_acquire_owned().map_err(|_| {
             Fault(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -1137,13 +1191,7 @@ impl Shell {
     }
 }
 
-pub(super) fn run(
-    client: Client,
-    cancel_pending_tasks: bool,
-    send_chat: bool,
-    review_work_items: bool,
-    manage_agent_sessions: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub(super) fn run(client: Client, options: Options) -> Result<(), Box<dyn std::error::Error>> {
     let identity = client.call("Principal.WhoAmI", json!({}))?;
     let principal = identity["principal_id"]
         .as_str()
@@ -1156,15 +1204,7 @@ pub(super) fn run(
         .enable_all()
         .max_blocking_threads(CORE_CALLS)
         .build()?;
-    let result = runtime.block_on(serve(
-        client,
-        principal,
-        cancel_pending_tasks,
-        send_chat,
-        review_work_items,
-        manage_agent_sessions,
-        stop,
-    ));
+    let result = runtime.block_on(serve(client, principal, options, stop));
     runtime.shutdown_timeout(Duration::from_secs(1));
     result.map_err(Into::into)
 }
@@ -1172,10 +1212,7 @@ pub(super) fn run(
 async fn serve(
     client: Client,
     principal: String,
-    cancel_pending_tasks: bool,
-    send_chat: bool,
-    review_work_items: bool,
-    manage_agent_sessions: bool,
+    options: Options,
     stop: Arc<AtomicBool>,
 ) -> io::Result<()> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
@@ -1186,10 +1223,7 @@ async fn serve(
         host,
         origin: origin.clone(),
         principal,
-        cancel_pending_tasks,
-        send_chat,
-        review_work_items,
-        manage_agent_sessions,
+        options,
         client,
         session: Mutex::new(Session::new(&code, now())?),
         rpc_slots: Arc::new(Semaphore::new(CORE_CALLS)),

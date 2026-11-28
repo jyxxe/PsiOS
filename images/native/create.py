@@ -55,6 +55,16 @@ STATIC_SERVICE = "::once:/bin/sh /psios-dhcp "
 SLAAC_RECEIPT_FORMAT = 10
 SLAAC = "slaac"
 SLAAC_SERVICE = STATIC_SERVICE + SLAAC
+RDNSS = "slaac-rdnss"
+RDNSS_RECEIPT_FORMAT = 11
+RDNSS_PROGRAM = "sbin/dhcpcd"
+RDNSS_PACKAGES = {"dhcpcd-10.5.2-r1": (RDNSS_PROGRAM,)}
+RDNSS_ACCOUNT = {
+    "passwd": ("0644", b"dhcpcd:x:76:76:IPv6 router discovery:/var/lib/dhcpcd:/bin/false"),
+    "group": ("0644", b"dhcpcd:x:76:"),
+    "shadow": ("0600", b"dhcpcd:!:0:0:99999:7:::"),
+}
+RA_SERVICES = {SLAAC: SLAAC_SERVICE, RDNSS: "::respawn:/bin/sh /psios-dhcp " + RDNSS}
 SSH_RECEIPT_FORMAT = 9
 SSH_PROFILE = "Ed25519Operator"
 SSH_SERVICE = "::respawn:/bin/sh /psios-ssh"
@@ -328,23 +338,29 @@ def validate_persisted_e1000e(work, state):
         raise ValueError("invalid persisted e1000e DHCP configuration or launcher")
 
 
-def validate_persisted_slaac(work, state):
+def validate_persisted_slaac(work, state, mode):
     try:
         profile = read_root_file(work, state, "/etc/psios/slaac", 160, "0600").decode("ascii")
         mac, *dns = profile.splitlines()
-        if profile != slaac_profile(unicast_mac(mac), [ipaddress.IPv6Address(ip) for ip in dns]):
+        if ((mode == RDNSS and dns)
+                or profile != slaac_profile(unicast_mac(mac), [ipaddress.IPv6Address(ip) for ip in dns])):
             raise ValueError("expected canonical saved IPv6 discovery settings")
     except (OSError, ValueError, argparse.ArgumentTypeError, subprocess.SubprocessError) as error:
         raise ValueError("invalid persisted SLAAC profile") from error
     inittab = read_root_file(work, state, "/etc/inittab", 16 * 1024, "0(?:600|644)")
-    if inittab.splitlines().count(SLAAC_SERVICE.encode()) != 1:
+    if inittab.splitlines().count(RA_SERVICES[mode].encode()) != 1:
         raise ValueError("invalid persisted SLAAC service launcher")
+    if mode == RDNSS:
+        for name, (permissions, expected) in RDNSS_ACCOUNT.items():
+            accounts = read_root_file(work, state, "/etc/" + name, 64 * 1024, permissions)
+            if [line for line in accounts.splitlines() if line.startswith(b"dhcpcd:")] != [expected]:
+                raise ValueError("invalid persisted router discovery service account")
 
 
 def validate_persisted_network(work, state, receipt):
     profile = receipt.get("network_profile")
-    if profile == SLAAC:
-        validate_persisted_slaac(work, state)
+    if profile in RA_SERVICES:
+        validate_persisted_slaac(work, state, profile)
         return
     mode = STATIC_MODES.get(profile)
     if mode in ("static", "dual"):
@@ -388,9 +404,9 @@ def host_config(seed, args):
     daemon = LIMITED_SERVICE if args.core_limits else "::respawn:/bin/su -s /bin/sh psios -c 'exec /bin/psiosd serve'"
     inittab = (f"{daemon}\nttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100\n"
                "::shutdown:/bin/sh /psios-shutdown\n")
-    if args.network_profile == SLAAC:
+    if args.network_profile in RA_SERVICES:
         (seed / "etc/psios/slaac").write_text(args.slaac_network)
-        inittab += SLAAC_SERVICE + "\n"
+        inittab += RA_SERVICES[args.network_profile] + "\n"
     elif args.network_profile:
         for name, config in (("static-ipv4", args.static_network), ("static-ipv6", args.static_ipv6_network)):
             if config:
@@ -410,6 +426,10 @@ def host_config(seed, args):
             shadows.write(b"sshd:!:0:0:99999:7:::\n")
         (seed / "etc/psios/ssh-authorized-key").write_bytes(args.ssh_authorized_key)
         inittab += SSH_SERVICE + "\n"
+    if args.network_profile == RDNSS:
+        for name, (_, account) in RDNSS_ACCOUNT.items():
+            with (seed / "etc" / name).open("ab") as accounts:
+                accounts.write(account + b"\n")
     (seed / "etc/inittab").write_text(inittab)
     # Target permissions are independent of the builder's umask.
     for path in (seed / "etc").rglob("*"):
@@ -426,8 +446,8 @@ def core_programs(work):
     return programs
 
 
-def prepare_ssh_programs(work):
-    for package, files in SSH_PACKAGES.items():
+def prepare_programs(work, packages):
+    for package, files in packages.items():
         archive = work / (package + ".apk")
         with archive.open("xb") as output:
             subprocess.run(["isoinfo", "-R", "-i", work / "base.iso", "-x", f"/apks/x86_64/{package}.apk"],
@@ -436,22 +456,22 @@ def prepare_ssh_programs(work):
         with tarfile.open(archive, "r:gz", ignore_zeros=True) as bundle:
             for index, entry in enumerate(bundle):
                 if index >= 128 or entry.size > 4 * MIB:
-                    raise ValueError("OpenSSH package member limit exceeded")
+                    raise ValueError(f"{package} package member limit exceeded")
                 if entry.name not in files:
                     continue
                 if entry.name not in remaining or not entry.isfile() or not 0 < entry.size <= 2 * MIB:
-                    raise ValueError("invalid native OpenSSH program member")
+                    raise ValueError(f"invalid native program member in {package}")
                 path = work / entry.name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 with path.open("xb") as destination:
                     shutil.copyfileobj(bundle.extractfile(entry), destination)
                 remaining.remove(entry.name)
         if remaining:
-            raise ValueError("native OpenSSH package is missing required programs")
+            raise ValueError(f"{package} package is missing required programs")
         archive.unlink()
 
 
-def prepare_boot_inputs(work, args, *, wired_driver=None, ssh_enabled=False):
+def prepare_boot_inputs(work, args, *, wired_driver=None, ssh_enabled=False, network_profile=None):
     base = boot_media.prepare_kernel(work, args.kernel_iso)
     if wired_driver == "e1000e":
         if shutil.which("unsquashfs") is None:
@@ -471,7 +491,9 @@ def prepare_boot_inputs(work, args, *, wired_driver=None, ssh_enabled=False):
     (work / "bin").mkdir()
     install_core(work, args.core_archive, args.core_sha256)
     if ssh_enabled:
-        prepare_ssh_programs(work)
+        prepare_programs(work, SSH_PACKAGES)
+    if network_profile == RDNSS:
+        prepare_programs(work, RDNSS_PACKAGES)
     return base
 
 
@@ -483,6 +505,9 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
     (work / "psios-storage-layout").write_text(" ".join(sectors) + "\n")
     boot_scripts = ["init", "shutdown", "dhcp", "dhcp-event", "ipv4", "ipv6", "static", "storage", "enroll"]
     files = [*core_programs(work), "psios-source", "psios-disk-uuid", "psios-home-uuid", "psios-storage-layout"]
+    if network_profile == RDNSS:
+        boot_scripts.extend(("rdnss-hook", "rdnss.conf", "dhcpcd.LICENSE"))
+        files.append(RDNSS_PROGRAM)
     if wired_driver:
         files.append(E1000E_MODULE)
     if ssh_enabled:
@@ -537,7 +562,8 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
     (work / "psios-payload.sha256").write_text("".join(f"{digest}  {name}\n" for name, digest in checks.items()))
     files.extend(["psios-deployment.json", "psios-payload.sha256"])
     for name in files:
-        executable = name.startswith("bin/") or name in ("psios-init", "psios-dhcp-event", *SSH_PROGRAMS)
+        executable = name.startswith("bin/") or name in (
+            "psios-init", "psios-dhcp-event", "psios-rdnss-hook", RDNSS_PROGRAM, *SSH_PROGRAMS)
         (work / name).chmod(0o755 if executable else 0o644)
     if ssh_enabled:
         ssh_directory = "usr/lib/ssh"
@@ -565,7 +591,8 @@ def append_deployment_payload(work, files):
 
 def ramfs(work, args, instance, home_id, layout=Layout(), signing=None, network_profile=None, *, core_limits=None,
           trial=None, wired_driver=None, ssh_enabled=False):
-    base = prepare_boot_inputs(work, args, wired_driver=wired_driver, ssh_enabled=ssh_enabled)
+    base = prepare_boot_inputs(work, args, wired_driver=wired_driver, ssh_enabled=ssh_enabled,
+                               network_profile=network_profile)
     assemble_ramfs(work, args, base, instance, home_id, layout, signing, network_profile,
                    core_limits=core_limits, trial=trial, wired_driver=wired_driver, ssh_enabled=ssh_enabled)
 
@@ -660,10 +687,11 @@ def parse_receipt(raw):
     if len(raw) > 16 * 1024:
         raise ValueError("previous build receipt exceeds size limit")
     prior = json.loads(raw)
+    extended_formats = (E1000E_RECEIPT_FORMAT, SSH_RECEIPT_FORMAT, SLAAC_RECEIPT_FORMAT, RDNSS_RECEIPT_FORMAT)
     if isinstance(prior, dict) and (prior.get("format") == TRIAL_RECEIPT_FORMAT or "boot_mode" in prior):
         raise ValueError("isolated trial disks cannot be upgrade sources; use the original stopped deployment")
     if (not isinstance(prior, dict) or type(prior.get("format")) is not int
-            or prior["format"] not in (*range(1, 7), E1000E_RECEIPT_FORMAT, SSH_RECEIPT_FORMAT, SLAAC_RECEIPT_FORMAT)):
+            or prior["format"] not in (*range(1, 7), *extended_formats)):
         raise ValueError("unsupported previous build receipt format")
     for name, pattern in (("source_commit", r"[0-9a-f]{40}"), ("efi_application_sha256", r"[0-9a-f]{64}")):
         if not isinstance(prior.get(name), str) or not re.fullmatch(pattern, prior[name]):
@@ -677,7 +705,8 @@ def parse_receipt(raw):
     if prior["format"] == 1 and "raw_disk_bytes" in prior:
         raise ValueError("larger raw capacity requires a geometry-bearing build receipt")
     layout = Layout.from_receipt(prior) if prior["format"] >= 2 else Layout()
-    profiles = {4: (STATIC_IPV4,), 5: (STATIC_IPV6, STATIC_DUAL), SLAAC_RECEIPT_FORMAT: (SLAAC,)}
+    profiles = {4: (STATIC_IPV4,), 5: (STATIC_IPV6, STATIC_DUAL), SLAAC_RECEIPT_FORMAT: (SLAAC,),
+                RDNSS_RECEIPT_FORMAT: (RDNSS,)}
     if prior["format"] in profiles:
         if prior.get("network_profile") not in profiles[prior["format"]]:
             raise ValueError("invalid network profile in previous build receipt")
@@ -694,17 +723,17 @@ def parse_receipt(raw):
             raise ValueError("invalid wired driver in previous native build receipt")
     elif "wired_driver" in prior:
         raise ValueError("wired driver evidence requires build receipt format 8 or 9")
-    if prior["format"] == SSH_RECEIPT_FORMAT or (prior["format"] == SLAAC_RECEIPT_FORMAT and "ssh_console" in prior):
+    if prior["format"] == SSH_RECEIPT_FORMAT or (
+            prior["format"] in (SLAAC_RECEIPT_FORMAT, RDNSS_RECEIPT_FORMAT) and "ssh_console" in prior):
         if prior.get("ssh_console") != SSH_PROFILE:
             raise ValueError("invalid SSH console in previous build receipt")
     elif "ssh_console" in prior:
-        raise ValueError("SSH console evidence requires build receipt format 9 or 10")
+        raise ValueError("SSH console evidence requires build receipt format 9, 10 or 11")
     limits = None
-    if prior["format"] == 6 or (
-            prior["format"] in (E1000E_RECEIPT_FORMAT, SSH_RECEIPT_FORMAT, SLAAC_RECEIPT_FORMAT) and "core_limits" in prior):
+    if prior["format"] == 6 or (prior["format"] in extended_formats and "core_limits" in prior):
         limits = CoreLimits.from_receipt(prior.get("core_limits"))
     elif "core_limits" in prior:
-        raise ValueError("Core resource limits require build receipt format 6, 8, 9 or 10")
+        raise ValueError("Core resource limits require build receipt format 6, 8, 9, 10 or 11")
     if prior["format"] == 3 or (prior["format"] >= 4 and "secure_boot" in prior):
         trust = prior.get("secure_boot")
         if (not isinstance(trust, dict) or set(trust) != {"scheme", "certificate_sha256", "efi_stub_sha256"}
@@ -933,6 +962,8 @@ def prepare_trial_disk(work, disk, layout, configuration, *, secure_boot_require
 
 
 def production_receipt_format(properties):
+    if properties.get("network_profile") == RDNSS:
+        return RDNSS_RECEIPT_FORMAT
     if properties.get("network_profile") == SLAAC:
         return SLAAC_RECEIPT_FORMAT
     if "ssh_console" in properties:
@@ -1016,7 +1047,9 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
 
     wired_driver = prior.get("wired_driver")
     ssh_enabled = "ssh_console" in prior
-    base = prepare_boot_inputs(candidate_work, args, wired_driver=wired_driver, ssh_enabled=ssh_enabled)
+    network_profile = prior.get("network_profile")
+    base = prepare_boot_inputs(candidate_work, args, wired_driver=wired_driver, ssh_enabled=ssh_enabled,
+                               network_profile=network_profile)
     (trial_work / "bin").mkdir()
     # Share the pinned input kernel and binaries, but each initrd is extended independently.
     boot_inputs = ("kernel", "initrd", *core_programs(candidate_work), "psios-source")
@@ -1024,11 +1057,12 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
         boot_inputs += (E1000E_MODULE,)
     if ssh_enabled:
         boot_inputs += SSH_PROGRAMS
+    if network_profile == RDNSS:
+        boot_inputs += (RDNSS_PROGRAM,)
     for name in boot_inputs:
         (trial_work / name).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(candidate_work / name, trial_work / name)
     instance, home_id = prior["state_uuid"], prior["home_uuid"]
-    network_profile = prior.get("network_profile")
     for directory, mode in ((candidate_work, None), (trial_work, trial)):
         assemble_ramfs(directory, args, base, instance, home_id, layout, signing, network_profile,
                        core_limits=core_limits, trial=mode, wired_driver=wired_driver, ssh_enabled=ssh_enabled,
@@ -1148,6 +1182,7 @@ def main():
     parser.add_argument("--static-ipv6-gateway", type=ipaddress.IPv6Address, help="optional IPv6 on-link or link-local gateway")
     parser.add_argument("--static-ipv6-dns", type=ipaddress.IPv6Address, action="append", default=[], help="optional unscoped IPv6 DNS server")
     parser.add_argument("--slaac-dns", type=ipaddress.IPv6Address, action="append", default=[], help="explicit IPv6 DNS server for SLAAC")
+    parser.add_argument("--slaac-rdnss", action="store_true", help="accept DNS servers advertised by the IPv6 router")
     parser.add_argument("--state-mib", type=int, help=f"state partition size of a new disk (default {MIN_STATE_MIB} MiB)")
     parser.add_argument("--home-mib", type=int, help=f"home partition size of a new disk (default {MIN_HOME_MIB} MiB)")
     core_options = parser.add_argument_group("new disk Core cgroup limits (provide all three to enable)")
@@ -1180,8 +1215,10 @@ def main():
         args.network_profile = args.network_profile.replace("virtio-", "e1000e-", 1)
     if args.slaac_dns and args.slaac_mac is None:
         parser.error("--slaac-dns requires --slaac-mac on a new disk")
+    if args.slaac_rdnss and (args.slaac_mac is None or args.slaac_dns):
+        parser.error("--slaac-rdnss requires --slaac-mac and excludes --slaac-dns")
     if args.slaac_mac is not None:
-        args.network_profile = SLAAC
+        args.network_profile = RDNSS if args.slaac_rdnss else SLAAC
         try:
             args.slaac_network = slaac_profile(args.slaac_mac, args.slaac_dns)
         except ValueError as error:

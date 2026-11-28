@@ -640,6 +640,22 @@ async function test() {
     assert.deepEqual(exceptions, []);
     return;
   }
+  if (input.applicationAction) {
+    await keyboardActivate("#nav-applications");
+    const application = '#application-rows button[data-application-id="' + input.application + '"]';
+    await waitFor("scoped application", 'document.querySelector(' + JSON.stringify(application) + ') !== null');
+    await keyboardActivate(application);
+    await waitFor("application start request", 'document.querySelector(".application-actions button")?.textContent === "申请启动"');
+    await keyboardActivate(".application-actions button");
+    await waitFor("the accepted application request", 'document.querySelector(".application-actions button")?.textContent === "查看任务"');
+    await keyboardActivate(".application-actions button");
+    await waitFor("the original application task", '!document.querySelector("#task-detail").hidden && document.querySelector("#task-content").textContent.includes("等待审批")');
+    assert.equal(requests.filter(url => new URL(url).pathname === "/api/application-action").length, 1);
+    await click("#logout");
+    await waitFor("cleared application controls", 'document.querySelector("#workspace").hidden && document.querySelector(".application-actions") === null');
+    assert.deepEqual(exceptions, []);
+    return;
+  }
   if (input.applicationCatalog) {
     await click("#nav-applications");
     await waitFor("first application page", 'document.querySelectorAll("#application-rows button").length === 8');
@@ -649,6 +665,7 @@ async function test() {
     await waitFor("return to the first application page", 'document.querySelectorAll("#application-rows button").length === 8');
     await click('#application-rows button[data-application-id="' + input.application + '"]');
     await waitFor("first release page", 'document.querySelectorAll(".release-list li").length === 8');
+    assert.ok(await evaluate('document.querySelector(".application-actions") === null'));
     assert.ok(await evaluate('document.activeElement.id === "application-detail" && document.querySelector(".release-list").textContent.includes("已选用")'));
     await click("#releases-next");
     await waitFor("second release page", 'document.querySelectorAll(".release-list li").length === 1 && document.querySelector(".release-list li strong").textContent === "9.0.0"');

@@ -107,6 +107,8 @@ pub enum LocalReadTool {
     NodeInventory,
     #[serde(rename = "node.devices")]
     NodeDevices,
+    #[serde(rename = "node.resolver")]
+    NodeResolver,
 }
 
 impl LocalReadTool {
@@ -116,11 +118,15 @@ impl LocalReadTool {
             Self::NodePressure => "node.pressure",
             Self::NodeInventory => "node.inventory",
             Self::NodeDevices => "node.devices",
+            Self::NodeResolver => "node.resolver",
         }
     }
 
     pub fn requires_node_scope(self) -> bool {
-        matches!(self, Self::NodeInventory | Self::NodeDevices)
+        matches!(
+            self,
+            Self::NodeInventory | Self::NodeDevices | Self::NodeResolver
+        )
     }
 }
 
@@ -143,6 +149,8 @@ pub enum LocalReadBinding {
     NodeInventory {},
     #[serde(rename = "node.devices")]
     NodeDevices(BlockInventoryQuery),
+    #[serde(rename = "node.resolver")]
+    NodeResolver {},
     #[serde(rename = "volume.usage")]
     VolumeUsage { target_id: String },
     #[serde(rename = "volume.files")]
@@ -174,6 +182,7 @@ impl From<LocalReadTool> for LocalReadBinding {
             LocalReadTool::NodePressure => Self::NodePressure {},
             LocalReadTool::NodeInventory => Self::NodeInventory {},
             LocalReadTool::NodeDevices => Self::NodeDevices(BlockInventoryQuery::default()),
+            LocalReadTool::NodeResolver => Self::NodeResolver {},
         }
     }
 }
@@ -185,6 +194,7 @@ impl LocalReadBinding {
             Self::NodePressure {} => LocalReadTool::NodePressure.name(),
             Self::NodeInventory {} => LocalReadTool::NodeInventory.name(),
             Self::NodeDevices(_) => LocalReadTool::NodeDevices.name(),
+            Self::NodeResolver {} => LocalReadTool::NodeResolver.name(),
             Self::VolumeUsage { .. } => "volume.usage",
             Self::VolumeFiles { .. } => "volume.files",
             Self::VolumeReadChunk { .. } => "volume.read_chunk",
@@ -199,6 +209,7 @@ impl LocalReadBinding {
             Self::NodePressure {} => Some(LocalReadTool::NodePressure),
             Self::NodeInventory {} => Some(LocalReadTool::NodeInventory),
             Self::NodeDevices(_) => Some(LocalReadTool::NodeDevices),
+            Self::NodeResolver {} => Some(LocalReadTool::NodeResolver),
             Self::VolumeUsage { .. }
             | Self::VolumeFiles { .. }
             | Self::VolumeReadChunk { .. }
@@ -218,6 +229,7 @@ impl LocalReadBinding {
             Self::SystemStatus {}
             | Self::NodePressure {}
             | Self::NodeInventory {}
+            | Self::NodeResolver {}
             | Self::NodeDevices(_) => None,
         }
     }
@@ -266,6 +278,7 @@ impl LocalReadBinding {
             Self::SystemStatus {}
             | Self::NodePressure {}
             | Self::NodeInventory {}
+            | Self::NodeResolver {}
             | Self::NodeDevices(_) => unreachable!(),
         }
     }

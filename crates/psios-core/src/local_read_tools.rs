@@ -77,7 +77,7 @@ pub(crate) fn discover(db: &Db<'_>, actor: &str, params: &Value) -> Result<Value
             require(
                 !tool.requires_node_scope() || explicitly_scoped(db, &delegation, &target.id)?,
                 "PermissionDenied",
-                "node inventory requires an explicit Node scope",
+                "this diagnostic requires an explicit Node scope",
             )?;
             action.audience(db, actor, &delegation.reference(), &target)?;
             Ok(())

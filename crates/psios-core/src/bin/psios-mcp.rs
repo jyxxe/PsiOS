@@ -76,8 +76,9 @@ struct Options {
 }
 
 fn parse_tool(name: &str) -> Result<LocalReadTool, &'static str> {
-    serde_json::from_value(json!(name))
-        .map_err(|_| "expected system.status, node.pressure, node.inventory or node.devices")
+    serde_json::from_value(json!(name)).map_err(
+        |_| "expected system.status, node.pressure, node.inventory, node.devices or node.resolver",
+    )
 }
 
 fn parse_target(id: &str) -> Result<String, &'static str> {
@@ -527,6 +528,9 @@ fn descriptor(tool: &LocalReadBinding, protocol: Protocol) -> Value {
         }
         LocalReadBinding::NodeDevices(_) => {
             "Read verified local Linux block devices. Provide a limit for a bounded page and use the returned cursor to continue."
+        }
+        LocalReadBinding::NodeResolver {} => {
+            "Observe the nameservers configured in the Core's mount namespace."
         }
         LocalReadBinding::VolumeUsage { .. } => {
             "Measure file and allocation usage of the configured volume root."

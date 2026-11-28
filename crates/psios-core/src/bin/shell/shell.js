@@ -1,11 +1,13 @@
 import { chatView } from "./shell-chat.js";
 import { projectView } from "./shell-projects.js";
 import { sessionsView } from "./shell-sessions.js";
+import { filesView } from "./shell-files.js";
 
 const byId = (id) => document.getElementById(id);
 const chat = chatView(request, byId, element, message);
 const projects = projectView(request, byId, element, message, fields, downloadEvidence);
 const agentRuntime = sessionsView(request, byId, element, message, fields);
+const files = filesView(request, byId, element, message);
 const pairing = byId("pairing");
 const workspace = byId("workspace");
 const desktop = byId("desktop");
@@ -24,7 +26,7 @@ const applicationContent = byId("application-content");
 let bearer = null;
 let sessionRequests = new AbortController();
 let canCancelPending = false;
-const apps = new Map(["node", "tasks", "applications", "chat", "projects", "agent-runtime"].map(id => [id, {
+const apps = new Map(["node", "tasks", "files", "applications", "chat", "projects", "agent-runtime"].map(id => [id, {
   window: byId("window-" + id), title: byId("title-" + id),
   dock: byId("nav-" + id), status: byId("status-" + id), state: "closed", tile: null,
 }]));
@@ -69,6 +71,8 @@ function leave(text, error = false) {
   projects.reset();
   agentRuntime.capability(false);
   agentRuntime.reset();
+  files.capability(false);
+  files.reset();
   updateDesktop();
   byId("principal").textContent = "";
   message(status, "");
@@ -648,6 +652,7 @@ function showWindow(id, app, shown) {
   if (shown) {
     if (id === "node") loadNode();
     else if (id === "tasks") loadTasks();
+    else if (id === "files") files.show();
     else if (id === "applications") loadApplications();
     else if (id === "chat") chat.show();
     else if (id === "projects") projects.show();
@@ -660,6 +665,8 @@ function showWindow(id, app, shown) {
   } else if (id === "tasks") {
     taskUpdate += 1;
     clearTaskView();
+  } else if (id === "files") {
+    files.hide();
   } else if (id === "applications") {
     applicationUpdate += 1;
     clearApplicationsView();
@@ -757,6 +764,7 @@ function hideWindow(id, state) {
     nextCursor = selectedTask = null;
   }
   if (id === "applications" && state === "closed") resetApplications();
+  if (id === "files" && state === "closed") files.reset();
   if (id === "chat" && state === "closed") chat.reset();
   if (id === "projects" && state === "closed") projects.reset();
   if (id === "agent-runtime" && state === "closed") agentRuntime.reset();
@@ -776,6 +784,7 @@ for (const [id, app] of apps) {
   controls.querySelector('[data-action="refresh"]').addEventListener("click", () => {
     if (id === "node") loadNode();
     else if (id === "tasks") loadTasks();
+    else if (id === "files") files.refresh();
     else if (id === "applications") loadApplications([null], selectedApplication, [null]);
     else if (id === "chat") chat.refresh();
     else if (id === "projects") projects.refresh();
@@ -809,6 +818,7 @@ byId("pair-form").addEventListener("submit", async (event) => {
     bearer = session.token;
     void observeSession(bearer);
     canCancelPending = session.cancel_pending_tasks === true;
+    files.capability(session.browse_files === true);
     chat.capability(session.send_chat === true);
     projects.setReviewer(session.review_work_items === true ? session.principal_id : null);
     agentRuntime.capability(session.manage_agent_sessions === true);

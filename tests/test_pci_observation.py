@@ -32,9 +32,9 @@ class PciObservation(unittest.TestCase):
             callback()
         self.assertEqual(failure.exception.code, code)
 
-    def scoped(self, node, principal, scope):
+    def scoped(self, node, principal, scope, tool=TOOL):
         return node.call("Grant.Issue", dict(principal_id=principal, tool_targets=[scope],
-                         actions=[TOOL, "task.submit", "task.read"], units=3, ttl_seconds=180))
+                         actions=[tool, "task.submit", "task.read"], units=3, ttl_seconds=180))
 
     @unittest.skipUnless(DEVICES.is_dir(), "requires Linux PCI sysfs")
     def test_scoped_observation_matches_real_devices_and_preserves_an_exact_result(self):
@@ -78,11 +78,13 @@ class PciObservation(unittest.TestCase):
         node = Node()
         self.addCleanup(node.close)
         local = node.call("Node.Get", {})["reference"]["resource_id"]
-        grant = self.scoped(node, "local-owner", local)
-        task = node.wait(node.call("Task.Submit", node.prepare(
-            TOOL, {}, delegation=grant["delegation_ref"]["resource_id"]))["task_id"])
-        self.assertEqual(task["lifecycle"], "Failed", task)
-        self.assertEqual(task["conditions"][0]["type"], "UnsupportedCapability", task)
+        for tool in (TOOL, "node.usb"):
+            with self.subTest(tool=tool):
+                grant = self.scoped(node, "local-owner", local, tool)
+                task = node.wait(node.call("Task.Submit", node.prepare(
+                    tool, {}, delegation=grant["delegation_ref"]["resource_id"]))["task_id"])
+                self.assertEqual(task["lifecycle"], "Failed", task)
+                self.assertEqual(task["conditions"][0]["type"], "UnsupportedCapability", task)
 
     @unittest.skipUnless(os.getenv("PSIOS_TEST_PCI_PREVIOUS_BIN_DIR"), "requires exact format 149 executables")
     def test_installing_the_pci_catalog_preserves_format_149_authority(self):
@@ -113,4 +115,39 @@ class PciObservation(unittest.TestCase):
         self.denied("PermissionDenied", lambda: node.prepare(TOOL, {}))
         node.stop()
         status = verify()
-        self.assertEqual((status["database_format"], status["witness"]), (150, "Confirmed"))
+        self.assertEqual((status["database_format"], status["witness"]), (151, "Confirmed"))
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_USB_PREVIOUS_BIN_DIR"), "requires exact format 150 executables")
+    def test_usb_catalog_upgrade_preserves_a_pci_page_and_cursor(self):
+        node = Node(Path(os.environ["PSIOS_TEST_USB_PREVIOUS_BIN_DIR"]))
+        self.addCleanup(node.close)
+        node_id = node.call("Node.Get", {})["reference"]["resource_id"]
+        grant = self.scoped(node, "local-owner", node_id)
+        delegation = grant["delegation_ref"]["resource_id"]
+        self.denied("NotFound", lambda: node.get("tool-node.usb"))
+
+        def page(parameters):
+            request = node.prepare(TOOL, parameters, delegation=delegation)
+            outcome = node.wait(node.call("Task.Submit", request)["task_id"])
+            self.assertEqual(outcome["lifecycle"], "Succeeded", outcome)
+            reference, = outcome["result"]["artifact_refs"]
+            return reference, node.call("Artifact.Read", {"reference": reference})
+
+        def verify():
+            return json.loads(subprocess.check_output([*node.daemon, "verify", "--scratch-dir", node.base], timeout=30))
+
+        reference, first = page({"limit": 1})
+        self.assertIsNotNone(first["next_cursor"])
+        node.stop()
+        self.assertEqual(verify()["database_format"], 150)
+        node.binaries = Path(os.environ.get("PSIOS_TEST_BIN_DIR", "target/debug")).resolve()
+        node.daemon[0] = str(node.binaries / "psiosd")
+        node.start()
+        self.assertEqual(node.call("Artifact.Read", {"reference": reference}), first)
+        _, second = page({"limit": 1, "cursor": first["next_cursor"]})
+        self.assertEqual(second["snapshot_digest"], first["snapshot_digest"])
+        self.assertEqual(node.get("tool-node.usb")["resource"]["spec"]["effect_class"], "ReadOnly")
+        self.denied("PermissionDenied", lambda: node.prepare("node.usb", {}))
+        node.stop()
+        status = verify()
+        self.assertEqual((status["database_format"], status["witness"]), (151, "Confirmed"))

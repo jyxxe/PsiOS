@@ -21,19 +21,20 @@ from urllib.parse import urlsplit
 
 from model_delivery import frame
 from test_model_fallback import publish_skill, register_provider
-from support import Node, key, target
+from support import Failure, Node, key, target
 
 
 class Shell:
     def __init__(self, node, token_file, endpoint=None, *, cancel_pending=False, send_chat=False,
-                 review_work_items=False, manage_agent_sessions=False, files=None, files_preview=False):
+                 review_work_items=False, manage_agent_sessions=False, files=None, files_preview=False, resolver_delegation=None):
         self.process = subprocess.Popen(
             [node.binaries / "psiosctl", "--socket", endpoint or node.socket, "--token-file", token_file, "shell",
              *(["--cancel-pending-tasks"] if cancel_pending else []), *(["--send-chat"] if send_chat else []),
              *(["--review-work-items"] if review_work_items else []),
              *(["--manage-agent-sessions"] if manage_agent_sessions else []),
              *(["--files-volume", files[0], "--files-delegation", files[1]] if files else []),
-             *(["--files-preview"] if files_preview else [])],
+             *(["--files-preview"] if files_preview else []),
+             *(["--resolver-delegation", resolver_delegation] if resolver_delegation else [])],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
         )
         try:
@@ -96,10 +97,11 @@ class ShellTests(unittest.TestCase):
         self.addCleanup(self.node.close)
 
     def shell(self, token_file=None, *, cancel_pending=False, send_chat=False,
-              review_work_items=False, manage_agent_sessions=False, files=None, files_preview=False):
+              review_work_items=False, manage_agent_sessions=False, files=None, files_preview=False, resolver_delegation=None):
         shell = Shell(self.node, token_file or self.node.witness / "owner.token",
                       cancel_pending=cancel_pending, send_chat=send_chat, review_work_items=review_work_items,
-                      manage_agent_sessions=manage_agent_sessions, files=files, files_preview=files_preview)
+                      manage_agent_sessions=manage_agent_sessions, files=files, files_preview=files_preview,
+                      resolver_delegation=resolver_delegation)
         self.addCleanup(shell.close)
         return shell
 
@@ -246,6 +248,132 @@ class ShellTests(unittest.TestCase):
                     self.node.call("Grant.Revoke", target(grant["grant_ref"]))
                     parent.sendall(b"K")
                     self.assertEqual(browser.wait(timeout=45), 0)
+                finally:
+                    if browser.poll() is None:
+                        browser.kill()
+
+    def resolver_grant(self, scope):
+        grant = self.node.call("Grant.Issue", {"principal_id": "local-owner",
+            "actions": ["node.resolver", "task.submit", "task.read"], "tool_targets": [scope],
+            "units": 3, "ttl_seconds": 120})
+        return grant["delegation_ref"]["resource_id"], grant["grant_ref"]
+
+    def resolver_fixture(self):
+        fixture = Path(os.environ["PSIOS_TEST_RESOLVER_FIXTURE"])
+        resolver = Path("/etc/resolv.conf")
+        self.assertNotEqual(fixture.resolve(), resolver.resolve())
+        self.assertTrue(fixture.samefile(resolver))
+        return fixture
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_RESOLVER_FIXTURE"), "requires a private resolver mount fixture")
+    def test_resolver_observation_and_file_preview_keep_independent_scopes(self):
+        self.resolver_fixture().write_text("nameserver 192.0.2.53\n")
+        _, _, files = self.file_volume(preview=True)
+        node = self.node.call("Node.Get", {})
+        delegation, grant = self.resolver_grant(node["reference"]["resource_id"])
+        shell = self.shell(files=files, files_preview=True, resolver_delegation=delegation)
+        pair = shell.pair()
+        self.assertTrue(pair["observe_resolver"] and pair["browse_files"] and pair["preview_files"])
+        token = pair["token"]
+        resolver = "/api/node-resolver"
+        status, _, report = shell.http(resolver, {}, token)
+        self.assertEqual(status, 200, report)
+        self.assertEqual(report["nameservers"], [{"address": "192.0.2.53", "zone": None}])
+        self.node.call("Grant.Revoke", target(grant))
+        self.error(shell, 403, "PermissionDenied", resolver, data={}, token=token)
+        volume = self.node.get(files[0])["reference"]
+        status, _, preview = shell.http("/api/volume-preview", {
+            "key": key(), "path": "documents/会议记录.txt", "volume_version": volume["version"],
+        }, token)
+        self.assertEqual(status, 200, preview)
+        self.assertEqual(base64.b64decode(preview["data_base64"]), b"private file contents")
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_RESOLVER_FIXTURE"), "requires a private resolver mount fixture")
+    def test_resolver_observation_requires_explicit_local_scope_and_reads_current_nameservers(self):
+        fixture = self.resolver_fixture()
+        route = "/api/node-resolver"
+        default = self.shell()
+        pair = default.pair()
+        self.assertFalse(pair["observe_resolver"])
+        self.error(default, 404, "NotFound", route, data={}, token=pair["token"])
+
+        wrong, _ = self.resolver_grant("profile-local")
+        refused = self.shell(resolver_delegation=wrong)
+        self.error(refused, 403, "PermissionDenied", route, data={}, token=refused.pair()["token"])
+        node = self.node.call("Node.Get", {})
+        delegation, grant = self.resolver_grant(node["reference"]["resource_id"])
+        with self.assertRaises(Failure) as discovery:
+            self.node.call("Capability.LocalReadTools", {"delegation_id": delegation, "tools": ["node.resolver"]})
+        self.assertEqual(discovery.exception.code, "PermissionDenied")
+        shell = self.shell(resolver_delegation=delegation)
+        self.error(shell, 401, "AuthenticationRequired", route, data={})
+        pair = shell.pair()
+        self.assertTrue(pair["observe_resolver"])
+        bearer = pair["token"]
+        self.error(shell, 400, "InvalidArgument", route, data={"path": "/etc/hosts"}, token=bearer)
+        fixture.write_text("search private.invalid\nnameserver 192.0.2.42\nnameserver fe80::53%eth0\n")
+        status, _, observed = shell.http(route, {}, bearer)
+        self.assertEqual(status, 200, observed)
+        self.assertEqual(set(observed), {"nameservers", "observed_at", "boot_id"})
+        self.assertEqual(observed["boot_id"], node["state"]["boot_id"])
+        self.assertEqual(observed["nameservers"], [{"address": "192.0.2.42", "zone": None},
+                                                   {"address": "fe80::53", "zone": "eth0"}])
+        fixture.write_text("nameserver 2001:db8::53\n")
+        status, _, fresh = shell.http(route, {}, bearer)
+        self.assertEqual((status, fresh["nameservers"]), (200, [{"address": "2001:db8::53", "zone": None}]))
+        self.node.call("Grant.Revoke", target(grant))
+        self.error(shell, 403, "PermissionDenied", route, data={}, token=bearer)
+        self.assertEqual(shell.http("/api/node", {}, bearer)[0], 200)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_RESOLVER_FIXTURE"), "requires a private resolver mount fixture")
+    def test_resolver_observation_rechecks_the_grant_before_releasing_the_artifact(self):
+        self.resolver_fixture().write_text("nameserver 192.0.2.44\n")
+        node = self.node
+        delegation, grant = self.resolver_grant(node.call("Node.Get", {})["reference"]["resource_id"])
+        proxy = node.base / "resolver-race.sock"
+        waiting, release = Event(), Event()
+        methods = ("Principal.WhoAmI", "Capability.CheckLocalReadTool", "Task.Prepare", "Task.Submit", "Task.Wait",
+                   "Artifact.ReadChunk", "Capability.CheckLocalReadTool")
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener, ThreadPoolExecutor(2) as pool:
+            listener.bind(str(proxy))
+            listener.listen()
+            listener.settimeout(8)
+            forwarded = pool.submit(self.relay, listener, methods, "Artifact.ReadChunk", waiting, release)
+            shell = Shell(node, node.witness / "owner.token", proxy, resolver_delegation=delegation)
+            self.addCleanup(shell.close)
+            read = pool.submit(shell.http, "/api/node-resolver", {}, shell.pair()["token"])
+            try:
+                self.assertTrue(waiting.wait(8))
+                node.call("Grant.Revoke", target(grant))
+            finally:
+                release.set()
+            forwarded.result(8)
+            status, _, denied = read.result(8)
+            self.assertEqual((status, denied["error"]["code"]), (403, "PermissionDenied"))
+            self.assertNotIn("nameservers", denied)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
+    def test_browser_resolver_observation_clears_on_minimize_and_checks_revocation(self):
+        node = self.node.call("Node.Get", {})
+        delegation, grant = self.resolver_grant(node["reference"]["resource_id"])
+        shell = self.shell(resolver_delegation=delegation)
+        parent, child = socket.socketpair()
+        with parent, child:
+            parent.settimeout(20)
+            args = dict(origin=shell.origin, code=shell.code, nodeResolver=True, node=node["reference"]["resource_id"],
+                        boot=node["state"]["boot_id"], profile=str(self.node.base / "browser"),
+                        control_fd=child.fileno())
+            with subprocess.Popen(["node", str(Path(__file__).with_name("shell_browser.mjs")),
+                                   os.environ.get("PSIOS_TEST_CHROME", "google-chrome")],
+                                  stdin=subprocess.PIPE, pass_fds=(child.fileno(),)) as browser:
+                child.close()
+                try:
+                    browser.stdin.write(json.dumps(args).encode())
+                    browser.stdin.close()
+                    self.assertEqual(parent.recv(1), b"R")
+                    self.node.call("Grant.Revoke", target(grant))
+                    parent.sendall(b"K")
+                    self.assertEqual(browser.wait(timeout=35), 0)
                 finally:
                     if browser.poll() is None:
                         browser.kill()
@@ -1054,6 +1182,17 @@ class ShellTests(unittest.TestCase):
                         os.environ.get("PSIOS_TEST_CHROME", "google-chrome")],
                        input=json.dumps(args), text=True, check=True, timeout=50)
         self.error(shell, 401, "AuthenticationRequired", "/api/session", data={"code": shell.code})
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
+    def test_browser_application_launcher_filters_opens_and_restores_windows(self):
+        shell = self.shell()
+        args = dict(origin=shell.origin, code=shell.code, applicationLauncher=True,
+                    node=self.node.call("Node.Get", {})["reference"]["resource_id"],
+                    profile=str(self.node.base / "browser"))
+        subprocess.run(["node", str(Path(__file__).with_name("shell_browser.mjs")),
+                        os.environ.get("PSIOS_TEST_CHROME", "google-chrome")],
+                       input=json.dumps(args), text=True, check=True, timeout=60)
+        self.assertEqual(shell.process.wait(timeout=5), 0)
 
     @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_BROWSER"), "requires headless Chrome and Node.js")
     def test_browser_tiles_windows_with_keyboard_and_restores_them_across_viewport_changes(self):

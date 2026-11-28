@@ -138,6 +138,17 @@ def exercise_trial(work, prepare, previous, original_vars, node_id, config_diges
 
     rejected = trial_rejected_overlay(work, disk)
     boot_trial(work, rejected, original_vars, {"status": "Failed", "stage": "trial-configuration"})
+    rejected_raw = work / "rejected-trial-no-record.raw"
+    rejected_state = work / "rejected-trial-no-record.ext4"
+    subprocess.run(["qemu-img", "convert", "-q", "-m", "1", "-f", "qcow2", "-O", "raw",
+                    rejected, rejected_raw], check=True, timeout=90)
+    extract_partition(rejected_raw, rejected_state, STATE_OFFSET, STATE_MIB)
+    for path in ("/.psios-boot-failure", "/.psios-boot-failure.pending"):
+        absent = subprocess.run(["debugfs", "-R", f"stat {path}", rejected_state], check=True,
+                                capture_output=True, timeout=20)
+        assert b"File not found" in absent.stderr, absent
+    rejected_raw.unlink()
+    rejected_state.unlink()
 
     transplanted = work / "trial-transplanted.raw"
     esp = work / "trial-transplanted.fat"

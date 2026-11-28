@@ -22,10 +22,12 @@ VERIFIED_CORE_SHA256 是上述完整归档核验后记录的 SHA-256。
 默认及最小容量为 192 MiB 和 64 MiB，整盘上限为 8192 MiB。
 构建回执和来宾部署清单记录 geometry_mib。
 
-新盘也可用 native/install.py 安装到空白同尺寸 Virtio、PCIe NVMe 或
+新盘也可用 native/install.py 安装到空白 Virtio、PCIe NVMe 或
 具有可核验序列号和 NAA WWID 的 SATA AHCI 块设备。
 在本机 root 权限下运行 plan，核对序列号、分区和回执摘要，以其
 plan_digest 运行 apply。inspect 可核对原设备的持久安装回执。
+默认要求精确匹配工厂盘容量。plan --allow-larger-target 可为较大空白盘
+生成单独的部署摘要，把备份 GPT 移至末尾，其余容量留空。
 详细操作见 docs/native-disk.md 的「安装到空白块设备」。
 
 生成新盘时同时传入 --core-cpu-millicores、--core-memory-mib 和
@@ -97,6 +99,8 @@ IPv6 网关可以是链路本地地址。系统先等待 IPv6 重复地址检测
 日志在限额副本中处理。新盘沿用原节点身份、
 配置和账户。保留原盘及其 EFI 变量，使用变量文件的副本启动候选盘。
 升级尺寸取自已核实的原盘布局。版本 1 回执使用 323 MiB 布局。
+较大目标盘的首次停机快照升级需要 --source-size-bytes，取值来自原
+安装计划的 deployment_image.size_bytes。候选回执保留实际容量和分区。
 
 普通 OVMF 原生盘可用 native/stage_update.py 从一次源盘快照生成并核验
 隔离试启动。在目标 Core 独立验证迁移与见证后，它发布正式候选盘、构建

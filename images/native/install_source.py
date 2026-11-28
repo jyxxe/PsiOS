@@ -12,6 +12,9 @@ import create
 
 
 MIB = create.MIB
+SECTOR_BYTES = create.SECTOR_BYTES
+# The protective MBR can address at most 2^32 sectors including LBA zero.
+MAX_TARGET_BYTES = create.MAX_RAW_BYTES
 RECEIPT_LIMIT = 16 * 1024
 DIRECTORY_LIMIT = 16 * 1024
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -44,7 +47,10 @@ def partition_copy(work, image, partition, name):
 
 
 def gpt_facts(work, image, layout, *, pass_fds=()):
-    table = create.validate_layout(work, image, layout, pass_fds=pass_fds)
+    return gpt_identity(create.validate_layout(work, image, layout, pass_fds=pass_fds))
+
+
+def gpt_identity(table):
     disk = uuid.UUID(table["id"])
     identities = {disk}
     partitions = []
@@ -63,6 +69,39 @@ def gpt_facts(work, image, layout, *, pass_fds=()):
     if disk.int == 0:
         raise ValueError("factory disk GUID must be nonzero")
     return {"disk_uuid": str(disk), "partitions": partitions}
+
+
+def fit_image(work, image, source, target_size):
+    """Relocate GPT metadata on a private verified image; retain every partition extent."""
+    original_size = source["size_bytes"]
+    if not original_size < target_size <= MAX_TARGET_BYTES or target_size % SECTOR_BYTES:
+        raise ValueError("larger targets require whole 512-byte sectors and at most 2 TiB")
+    layout = create.Layout(source["geometry_mib"]["state_mib"], source["geometry_mib"]["home_mib"])
+    old = create.validate_layout(work, image, layout)
+    old_backup = (old["lastlba"] + 1) * SECTOR_BYTES
+    tail_bytes = original_size - old_backup
+    if not 2 * SECTOR_BYTES <= tail_bytes <= MIB:
+        raise ValueError("unsupported GPT backup area on the factory image")
+    image.chmod(0o600)
+    with image.open("r+b") as disk:
+        disk.truncate(target_size)
+    relocate = ["sfdisk", "--quiet", "--no-reread", "--no-tell-kernel", "--relocate", "gpt-bak-std", image]
+    try:
+        create.boot_media.run(work, relocate)
+    except subprocess.SubprocessError as error:
+        raise ValueError("sfdisk could not relocate the verified GPT to the target capacity") from error
+    new_backup = target_size - tail_bytes
+    # libfdisk retains its old backup bytes. Clear only those outside the new table.
+    with image.open("r+b") as disk:
+        disk.seek(old_backup)
+        disk.write(bytes(min(original_size, new_backup) - old_backup))
+    ready = create.validate_layout(work, image, layout)
+    if ((ready["lastlba"] + 1) * SECTOR_BYTES != new_backup or ready["firstlba"] != old["firstlba"]
+            or gpt_identity(ready) != {field: source[field] for field in ("disk_uuid", "partitions")}):
+        raise ValueError("relocated GPT does not match the verified factory partition layout")
+    create.verify_relocated_gpt(image, target_size, ready)
+    image.chmod(0o400)
+    return {"size_bytes": target_size, "image_sha256": create.sha256(image), "backup_gpt_offset": new_backup}
 
 
 def check_efi(work, image, expected):
@@ -169,7 +208,8 @@ def stage_image(work: Path, image: Path, receipt: Path, receipt_sha256: str) -> 
         staged_receipt = scratch / "build-receipt.json"
         create.boot_media.pinned_copy(receipt, staged_receipt, receipt_sha256, RECEIPT_LIMIT)
         manifest, layout, _ = create.read_receipt(staged_receipt)
-        if manifest["format"] < 2 or "upgrade" in manifest or "trial_disk_uuid" in manifest:
+        if (manifest["format"] < 2 or "upgrade" in manifest or "trial_disk_uuid" in manifest
+                or layout.raw_disk_bytes is not None):
             raise ValueError("blank installation requires a supported first-install receipt")
         image_sha256 = digest_field(manifest.get("initial_image_sha256"), "factory image")
         deployment_sha256 = digest_field(manifest.get("deployment_manifest_sha256"), "deployment manifest")

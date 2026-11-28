@@ -16,10 +16,14 @@ def build(args, installer, build_time, mask):
             work = Path(directory)
             options = {"wired_driver": "e1000e", "ssh_enabled": True} if args.ssh_e1000e else {}
             network = "e1000e-dhcp" if args.ssh_e1000e else None
-            base = installer.prepare_boot_inputs(work, args, **options)
+            if args.rdnss:
+                network = installer.RDNSS
+            base = installer.prepare_boot_inputs(work, args, network_profile=network, **options)
             files = [*installer.core_programs(work), "psios-source"]
             if args.ssh_e1000e:
                 files.extend((installer.E1000E_MODULE, *installer.SSH_PROGRAMS, "usr/lib/ssh"))
+            if args.rdnss:
+                files.append(installer.RDNSS_PROGRAM)
             for name in files:
                 os.utime(work / name, (build_time, build_time))
             state = uuid.UUID("4f5f8529-f867-4a80-832d-da687cb5a2f3")
@@ -37,7 +41,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kernel-iso", type=Path, required=True)
     parser.add_argument("--archive", dest="core_archive", type=Path, required=True)
-    parser.add_argument("--ssh-e1000e", action="store_true")
+    profile = parser.add_mutually_exclusive_group()
+    profile.add_argument("--ssh-e1000e", action="store_true")
+    profile.add_argument("--rdnss", action="store_true")
     parser.add_argument("--installer", type=Path, default=REPO / "images/native/create.py")
     args = parser.parse_args()
     args.core_sha256 = sha(args.core_archive)

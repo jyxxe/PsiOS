@@ -6,6 +6,7 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 bb=/bin/busybox
 stage=bootstrap
 payload_verified=no
+state_verified=no
 trial_boot=no
 secure_boot_enforced=no
 # This path is in the EFI application's initramfs and is checked before
@@ -13,12 +14,36 @@ secure_boot_enforced=no
 if [ -e /psios-trial-config.sha256 ] || [ -L /psios-trial-config.sha256 ]; then
     trial_boot=yes
 fi
+
+record_boot_failure() (
+    record=/var/lib/.psios-boot-failure
+    pending=/var/lib/.psios-boot-failure.pending
+    # PID 1 owns the verified root directory and no service has started.
+    # Preserve the last complete record across an interrupted replacement.
+    for path in "$record" "$pending"; do
+        if [ -e "$path" ] || [ -L "$path" ]; then
+            [ -f "$path" ] && [ ! -L "$path" ] || return 1
+            [ "$(stat -c '%u:%g:%a:%h' "$path")" = 0:0:600:1 ] || return 1
+        fi
+    done
+    boot_id=$(cat /proc/sys/kernel/random/boot_id) || return 1
+    printf '%s\n' "$boot_id" | grep -Eq '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' || return 1
+    umask 077
+    rm -f "$pending" || return 1
+    set -C
+    printf '{"format":1,"boot_id":"%s","stage":"%s"}\n' "$boot_id" "$stage" > "$pending" || return 1
+    sync -f /var/lib && mv -T "$pending" "$record" && sync -f /var/lib
+)
+
 abort_boot() {
     trap - EXIT
     if [ "$trial_boot" = yes ]; then
         printf '\nPSIOS-TRIAL/1 {"status":"Failed","stage":"%s"}\n' "$stage" >/dev/console || :
     fi
     echo "PsiOS boot stopped at $stage; use external rescue media" >/dev/console || :
+    if [ "$state_verified" = yes ] && ! record_boot_failure; then
+        echo "PsiOS could not persist the boot failure on the verified state volume" >/dev/console || :
+    fi
     if [ "$payload_verified" = yes ]; then
         "$bb" sh /psios-shutdown --mounts-only || :
     fi
@@ -248,6 +273,7 @@ if [ "$trial_boot" = yes ]; then
     run_trial
     exit 1
 fi
+state_verified=yes
 stage=host-config
 [ -d /var/lib/etc ] && [ ! -L /var/lib/etc ] || exit 1
 [ "$(stat -c '%u:%g:%a' /var/lib/etc)" = 0:0:755 ]

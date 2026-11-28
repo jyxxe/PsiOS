@@ -79,6 +79,9 @@ if git -C "$repo" cat-file -e "$sha:images/native/README.txt" 2>/dev/null; then
     if git -C "$repo" cat-file -e "$sha:images/native/ssh" 2>/dev/null; then
         native_files+=(ssh)
     fi
+    if git -C "$repo" cat-file -e "$sha:images/native/rdnss-hook" 2>/dev/null; then
+        native_files+=(rdnss-hook rdnss.conf dhcpcd.LICENSE)
+    fi
     if git -C "$repo" cat-file -e "$sha:images/native/install.py" 2>/dev/null; then
         native_files+=(install.py install_source.py install_target.py)
     fi

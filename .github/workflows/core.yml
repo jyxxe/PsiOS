@@ -965,6 +965,9 @@ jobs:
             python3 -B tests/network_resolver.py --fixture "$fixture" --previous-bin-dir "$1"
             PSIOS_TEST_RESOLVER_FIXTURE="$fixture" python3 -B -m unittest discover -s tests \
               -p test_mcp_tasks.py -k test_resolver_diagnostic -v
+            ip link set lo up
+            PSIOS_TEST_RESOLVER_FIXTURE="$fixture" python3 -B -m unittest discover -s tests \
+              -p test_shell.py -k test_resolver_observation_ -v
           ' psios-resolver "$RUNNER_TEMP/psios-compatibility-target/debug"
       - name: Install PCI observation while preserving a format 149 authority
         run: |
@@ -1076,10 +1079,12 @@ jobs:
           tool_args=()
           for tool in "$RUNNER_TEMP"/installer-tools/*.deb; do tool_args+=(--tool-deb "$tool"); done
           for bus in virtio nvme ahci; do
+            capacity=()
+            if [[ "$bus" == nvme ]]; then capacity+=(--larger-target); fi
             python3 -B tests/native_install_virtio.py --base "$RUNNER_TEMP/base.img" \
               --package "$RUNNER_TEMP"/psios-package/psios-core_*.deb \
               --archive "$archive" --archive-sha256 "$(sha256sum "$archive" | cut -d ' ' -f1)" \
-              --kernel-iso "$RUNNER_TEMP/kernel.iso" --target-bus "$bus" "${tool_args[@]}"
+              --kernel-iso "$RUNNER_TEMP/kernel.iso" --target-bus "$bus" "${capacity[@]}" "${tool_args[@]}"
           done
 
   package-provenance:

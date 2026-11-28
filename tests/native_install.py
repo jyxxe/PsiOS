@@ -23,6 +23,7 @@ from native_disk import REPO, boot, check_state, password, sha
 LOOP_GET_STATUS64 = 0x4C05
 LOOP_CLR_FD = 0x4C01
 LOOP_INFO64_SIZE = 232
+MIB = 1024 * 1024
 FIXTURE_TIMEOUT = 150
 OUTER_MOUNT_NS = "PSIOS_NATIVE_INSTALL_FIXTURE_OUTER_MOUNT_NAMESPACE"
 MANAGED_SYSCALLS = "pwrite64,pwritev,pwritev2,write,fsync"
@@ -200,10 +201,11 @@ class Installer:
             invocation = [*strace, "--", *invocation]
         return command(invocation)
 
-    def plan(self, directory, loop, *, denial=None, receipt_sha=None):
+    def plan(self, directory, loop, *, denial=None, receipt_sha=None, larger=False):
+        size_options = ("--allow-larger-target",) if larger else ()
         result = self.run(directory, "plan", loop, "--source-image", self.source,
                           "--receipt", self.receipt, "--receipt-sha256",
-                          receipt_sha or self.receipt_sha, "--target", loop.path, "--allow-loop")
+                          receipt_sha or self.receipt_sha, "--target", loop.path, "--allow-loop", *size_options)
         if denial is not None:
             deny(result, denial)
             assert not (directory / "operation.json").exists(), result
@@ -245,6 +247,17 @@ def rejected_media(work, fixture):
     with OwnedLoop(nonzero) as disk:
         fixture.plan(state_dir(work, "dirty"), disk, denial=r"non.?zero|not blank|all.zero")
         assert disk.digest(fixture.size) == before
+
+    larger_size = fixture.size + 2 * MIB
+    occupied_tail = sparse(work, "occupied-tail.raw", larger_size)
+    with occupied_tail.open("r+b", buffering=0) as backing:
+        backing.seek(fixture.size + MIB)
+        backing.write(b"PSIOS: preserve data beyond the factory image")
+        os.fsync(backing.fileno())
+    before = sha(occupied_tail)
+    with OwnedLoop(occupied_tail) as disk:
+        fixture.plan(state_dir(work, "dirty-tail"), disk, larger=True, denial="target is not blank")
+        assert disk.digest(larger_size) == before
 
     short = sparse(work, "short.raw", fixture.size - 512)
     with OwnedLoop(short) as disk:
@@ -446,7 +459,8 @@ def source_fixture(args, work):
 def check_factory_staging(work, installer, source, receipt, approval):
     # Exercise the source validator shipped alongside the installer under test.
     sys.path.insert(0, str(installer.resolve(strict=True).parent))
-    from install_source import stage_image
+    from create import verify_relocated_gpt
+    from install_source import fit_image, stage_image
 
     with tempfile.TemporaryDirectory(dir=work) as staging:
         image, facts = stage_image(Path(staging), source, receipt, approval)
@@ -455,6 +469,21 @@ def check_factory_staging(work, installer, source, receipt, approval):
         assert sha(image) == facts["image_sha256"] == sha(source)
         # The freshly formatted state and home partitions have ample empty space.
         assert copied.st_blocks * 512 < copied.st_size // 2, (copied.st_size, copied.st_blocks)
+        # Moving by one logical sector makes the old and new backup areas overlap.
+        target_size = copied.st_size + 512
+        installed = fit_image(Path(staging), image, facts, target_size)
+        assert installed["image_sha256"] == sha(image) and installed["image_sha256"] != facts["image_sha256"]
+        table = json.loads(checked(command(["sfdisk", "--json", str(image)])))["partitiontable"]
+        image.chmod(0o600)
+        with image.open("r+b") as staged:
+            staged.seek(-512, os.SEEK_END)
+            staged.write(bytes(512))
+        try:
+            verify_relocated_gpt(image, target_size, table)
+        except ValueError as error:
+            assert "GPT header" in str(error), error
+        else:
+            raise AssertionError("a missing backup GPT header passed verification")
 
 
 def exercise(args, work):

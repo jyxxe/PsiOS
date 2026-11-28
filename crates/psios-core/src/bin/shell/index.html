@@ -24,15 +24,28 @@
   <div id="workspace" class="workspace" hidden>
     <header class="desktop-bar">
       <p class="brand"><span aria-hidden="true">Ψ</span> PsiOS Shell</p>
+      <button id="open-launcher" type="button" aria-haspopup="dialog" aria-controls="launcher">应用</button>
       <span id="active-app">桌面</span>
       <div class="identity">
         <strong id="principal" aria-label="已连接的主体"></strong>
         <button id="logout" type="button">断开会话</button>
       </div>
     </header>
+    <dialog id="launcher" aria-labelledby="launcher-title">
+      <header>
+        <h1 id="launcher-title">应用启动器</h1>
+        <button id="close-launcher" type="button">关闭</button>
+      </header>
+      <form id="launcher-form" role="search">
+        <input id="launcher-query" type="text" role="searchbox" enterkeyhint="search" aria-label="搜索应用"
+               placeholder="搜索应用" autocomplete="off" spellcheck="false" maxlength="80">
+      </form>
+      <ul id="launcher-apps"></ul>
+      <p id="launcher-empty" class="message" role="status" hidden>没有匹配的应用。</p>
+    </dialog>
     <p id="status" class="desktop-status message" role="status"></p>
     <main id="desktop" class="desktop" aria-label="桌面">
-      <p id="empty-desktop" class="empty-desktop">从 Dock 打开应用。</p>
+      <p id="empty-desktop" class="empty-desktop">从应用启动器或 Dock 打开应用。</p>
       <section id="window-node" class="app-window" aria-labelledby="title-node" hidden>
         <header class="window-bar">
           <h1 id="title-node" tabindex="-1">节点管理</h1>
@@ -40,6 +53,12 @@
         <div class="window-body">
           <p id="status-node" class="message" role="status"></p>
           <div id="node-view"></div>
+          <section id="node-resolver" class="content-card" aria-labelledby="node-resolver-title" hidden>
+            <h2 id="node-resolver-title">DNS 解析器</h2>
+            <button id="node-resolver-read" type="button">读取当前配置</button>
+            <p id="node-resolver-status" class="message" role="status"></p>
+            <div id="node-resolver-view"></div>
+          </section>
         </div>
       </section>
       <section id="window-tasks" class="app-window" aria-labelledby="title-tasks" hidden>

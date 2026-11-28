@@ -1235,7 +1235,7 @@ class ShellTests(unittest.TestCase):
         for revision in range(2, 10):
             current = node.get(aid)["reference"]
             node.perform("application.stage_release", {
-                "target": target(current), "release": dict(spec, release_version=f"{revision}.0.0"),
+                "target": target(current), "release": dict(spec, name="catalog-0", release_version=f"{revision}.0.0"),
             })
         grant = node.call("Grant.Issue", {"principal_id": "local-owner", "tool_targets": [aid],
                                          "actions": ["application.releases"], "ttl_seconds": 240, "units": 10})

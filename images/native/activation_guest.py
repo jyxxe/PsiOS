@@ -113,12 +113,18 @@ def parent_death_guard():
     return arm
 
 
+class SerialDeadline(ValueError):
+    pass
+
+
 def wait_fd(fd, events, deadline):
     left = deadline - time.monotonic()
-    require(left > 0, "candidate serial console exceeded its deadline")
+    if left <= 0:
+        raise SerialDeadline("candidate serial console exceeded its deadline")
     poller = select.poll()
     poller.register(fd, events)
-    require(poller.poll(math.ceil(left * 1000)), "candidate serial console exceeded its deadline")
+    if not poller.poll(math.ceil(left * 1000)):
+        raise SerialDeadline("candidate serial console exceeded its deadline")
 
 
 class SerialConsole:
@@ -165,36 +171,52 @@ class SerialConsole:
             except BlockingIOError:
                 continue
 
-    def send_line(self, line, deadline):
-        self.write(line.encode("ascii") + b"\r", deadline)
+    def send_line(self, data, deadline):
+        # A pipe write can overrun the emulated UART even when the host pipe
+        # accepted all its bytes. Allow the guest to drain the FIFO between bursts.
+        for start in range(0, len(data), 8):
+            self.write(data[start:start + 8], deadline)
+            time.sleep(0.01)
+        self.write(b"\r", deadline)
 
     def login(self, credential):
         deadline = time.monotonic() + BOOT_SECONDS
-        self.until(b"login: ", deadline)
-        self.send_line("root", deadline)
-        self.until(b"Password: ", deadline)
-        # Allow BusyBox to turn off echo and pace password bytes for the UART.
-        time.sleep(0.03)
-        for start in range(0, len(credential), 8):
-            self.write(credential[start:start + 8], deadline)
-            time.sleep(0.01)
-        self.write(b"\r", deadline)
-        prefix = self.until(b"# ", deadline, reject=b"Login incorrect")
+        phase = "waiting for the login prompt"
+        try:
+            self.until(b"login: ", deadline)
+            phase = "starting root login"
+            self.send_line(b"root", deadline)
+            self.until(b"Password: ", deadline)
+            # Allow BusyBox to switch off echo after printing the password prompt.
+            phase = "authenticating the root console"
+            time.sleep(0.03)
+            self.send_line(credential, deadline)
+            prefix = self.until(b"# ", deadline, reject=b"Login incorrect")
+        except SerialDeadline as exc:
+            raise SerialDeadline(f"{exc} while {phase}") from None
         require(credential not in prefix.splitlines(), "candidate console echoed its credential")
 
-    def command(self, command, deadline):
+    def command(self, command, deadline, *, phase):
         nonce = "PSIOSACT" + secrets.token_hex(12)
-        self.send_line(f"printf '\\n{nonce}\\n'; ( {command} ); r=$?; printf '\\n{nonce}:%s\\n' \"$r\"", deadline)
-        self.until(f"\n{nonce}\n".encode("ascii"), deadline)
-        result = self.until(f"\n{nonce}:".encode("ascii"), deadline)
-        require(self.until(b"\n", deadline) == b"0", "candidate console proof command failed")
+        line = f"printf '\\n{nonce}\\n'; ( {command} ); r=$?; printf '\\n{nonce}:%s\\n' \"$r\""
+        try:
+            self.send_line(line.encode("ascii"), deadline)
+            self.until(f"\n{nonce}\n".encode("ascii"), deadline)
+            result = self.until(f"\n{nonce}:".encode("ascii"), deadline)
+            status = self.until(b"\n", deadline)
+        except SerialDeadline as exc:
+            raise SerialDeadline(f"{exc} while {phase}") from None
+        require(status == b"0", f"candidate console proof command failed while {phase}")
         return result.strip()
 
     def shutdown(self, process):
         deadline = time.monotonic() + SHUTDOWN_SECONDS
-        self.send_line("cd / && exec /bin/busybox poweroff", deadline)
-        while self.receive(deadline):
-            pass
+        try:
+            self.send_line(b"cd / && exec /bin/busybox poweroff", deadline)
+            while self.receive(deadline):
+                pass
+        except SerialDeadline as exc:
+            raise SerialDeadline(f"{exc} while shutting down the guest") from None
         require(b"Power down" in self.received and b"PsiOS shutdown could not close" not in self.received,
                 "candidate did not report a clean shutdown")
         require(process.wait(timeout=max(0, deadline - time.monotonic())) == 0,
@@ -217,17 +239,18 @@ def core_object(body):
 
 
 def verify_secure_boot(console, deadline):
-    console.command("test -f /psios-secure-boot-required && test ! -L /psios-secure-boot-required", deadline)
+    console.command("test -f /psios-secure-boot-required && test ! -L /psios-secure-boot-required", deadline,
+                    phase="checking the Secure Boot requirement")
     mode = console.command(
         "if ! /bin/busybox grep -qw efivarfs /proc/filesystems; then "
         "/bin/busybox modprobe efivarfs >/dev/null 2>&1 || :; fi; "
         "if /bin/busybox grep -qw efivarfs /proc/filesystems; then printf 'efivarfs'; else printf 'kernel'; fi",
-        deadline,
+        deadline, phase="finding Secure Boot evidence",
     )
     if mode == b"kernel":
         console.command(
             "/bin/busybox dmesg | /bin/busybox grep -Eiq 'secure boot enabled|locked down from EFI Secure Boot'",
-            deadline,
+            deadline, phase="checking kernel Secure Boot evidence",
         )
         return
     require(mode == b"efivarfs", "candidate did not report its Secure Boot evidence source")
@@ -240,7 +263,7 @@ def verify_secure_boot(console, deadline):
         f"setup=$(/bin/busybox od -An -j 4 -N 1 -t u1 \"$path/SetupMode-{EFI_GLOBAL_VARIABLE}\") || exit 1; "
         "if [ \"$mounted\" = 1 ]; then /bin/busybox umount \"$path\" || exit 1; fi; "
         "printf '%s %s' \"$secure\" \"$setup\"",
-        deadline,
+        deadline, phase="checking firmware Secure Boot variables",
     )
     require(values.split() == [b"1", b"0"], "candidate firmware did not enforce Secure Boot")
 
@@ -249,27 +272,32 @@ def console_proof(console, credential, expected_node, manifest_sha256, *, secure
     console.login(credential)
     deadline = time.monotonic() + CORE_SECONDS
     console.command("test \"$(/bin/busybox id -u)\" = 0 && test -d /sys/firmware/efi && "
-                    "/bin/busybox stty -echo", deadline)
+                    "/bin/busybox stty -echo", deadline, phase="preparing the authenticated console")
     whoami = f"{AS_OWNER} 'exec /bin/psiosctl whoami'"
     console.command(f"for i in $(/bin/busybox seq 1 120); do "
-                    f"{whoami} >/dev/null 2>&1 && exit 0; /bin/busybox sleep 0.2; done; exit 1", deadline)
+                    f"{whoami} >/dev/null 2>&1 && exit 0; /bin/busybox sleep 0.2; done; exit 1", deadline,
+                    phase="waiting for the candidate Core")
 
+    boot_id_bytes = console.command("/bin/busybox cat /proc/sys/kernel/random/boot_id", deadline,
+                                    phase="reading the Linux boot ID")
     try:
-        boot_id = console.command("/bin/busybox cat /proc/sys/kernel/random/boot_id", deadline).decode("ascii")
+        boot_id = boot_id_bytes.decode("ascii")
         identity = uuid.UUID(boot_id)
         require(str(identity) == boot_id and identity.int != 0, "noncanonical boot identity")
     except ValueError:
         raise ValueError("candidate reported an invalid Linux boot ID") from None
 
-    manifest = console.command("/bin/busybox sha256sum /psios-deployment.json", deadline)
+    manifest = console.command("/bin/busybox sha256sum /psios-deployment.json", deadline,
+                               phase="checking the deployment manifest")
     matches = re.findall(rb"^([0-9a-f]{64})  /psios-deployment\.json$", manifest, re.MULTILINE)
     require(len(matches) == 1, "candidate did not report one deployment digest")
     require(matches[0].decode("ascii") == manifest_sha256,
             f"candidate booted a different deployment ({matches[0].decode('ascii')})")
     if secure_boot_required:
         verify_secure_boot(console, deadline)
-    caller = core_object(console.command(whoami, deadline))
-    node = core_object(console.command(f"{AS_OWNER} 'exec /bin/psiosctl node'", deadline))
+    caller = core_object(console.command(whoami, deadline, phase="reading the Core caller identity"))
+    node = core_object(console.command(f"{AS_OWNER} 'exec /bin/psiosctl node'", deadline,
+                                       phase="reading the Core node identity"))
     reference = node.get("reference")
     require(caller.get("principal_id") == "local-owner" and caller.get("authority_id") == expected_node
             and isinstance(reference, dict) and reference.get("resource_id") == expected_node,

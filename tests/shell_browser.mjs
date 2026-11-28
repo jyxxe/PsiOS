@@ -110,6 +110,31 @@ async function verifyDownload(digest, selector = "#download-artifact") {
   return bytes;
 }
 
+async function verifyNodeResolver() {
+  await keyboardActivate("#nav-node");
+  const node = 'document.getElementById("node-view").textContent.includes(' + JSON.stringify(input.node) + ')';
+  await waitFor("node observation", node);
+  assert.ok(await evaluate('!document.getElementById("node-resolver").hidden'));
+  await keyboardActivate("#node-resolver-read");
+  await waitFor("resolver observation boot", 'document.getElementById("node-resolver-view").textContent.includes(' +
+    JSON.stringify(input.boot) + ')');
+  await keyboardActivate('#window-node [data-action="minimize"]');
+  assert.ok(await evaluate('document.getElementById("node-resolver-view").textContent === ""'));
+  writeSync(input.control_fd, Buffer.from("R"));
+  const reply = Buffer.alloc(1);
+  assert.equal(readSync(input.control_fd, reply), 1);
+  assert.equal(reply.toString(), "K");
+  await keyboardActivate("#nav-node");
+  await waitFor("node remains available", node);
+  await keyboardActivate("#node-resolver-read");
+  await waitFor("revoked resolver observation", 'document.getElementById("node-resolver-status").classList.contains("error")');
+  assert.ok(await evaluate('document.getElementById("node-resolver-view").textContent === ""'));
+  await click("#logout");
+  await waitFor("cleared resolver", 'document.getElementById("workspace").hidden && document.getElementById("node-resolver").hidden');
+  assert.deepEqual(exceptions, []);
+  assert.ok(requests.every(url => new URL(url).origin === input.origin));
+}
+
 async function verifyRevokedWindow() {
   await click("#nav-node");
   await waitFor("permitted node inventory", 'document.querySelector("#node-view").textContent.includes(' + JSON.stringify(input.node) + ')');
@@ -139,7 +164,10 @@ async function verifyFiles() {
     width: 360, height: 800, screenWidth: 360, screenHeight: 800, deviceScaleFactor: 1, mobile: true,
   });
   assert.ok(await evaluate('!document.getElementById("nav-files").hidden'));
-  await keyboardActivate("#nav-files");
+  await keyboardActivate("#open-launcher");
+  await send("Input.insertText", { text: "files" });
+  assert.deepEqual(await evaluate('Array.from(document.querySelectorAll("#launcher-apps button"), button => button.textContent)'), ["文件"]);
+  await keyboardActivate("#launcher-query");
   await waitFor("directory first page", 'document.querySelectorAll("#files-rows tr").length === 32');
   assert.ok(await evaluate('document.getElementById("files-path").textContent === "/" && ' +
     'document.getElementById("files-previous").disabled && !document.getElementById("files-next").disabled'));
@@ -292,7 +320,8 @@ async function verifyApplicationLauncher() {
   const labels = 'Array.from(document.querySelectorAll("#launcher-apps button"), button => button.textContent)';
   await keyboardActivate("#open-launcher");
   assert.ok(await evaluate('document.getElementById("launcher").matches(":modal") && document.activeElement.id === "launcher-query"'));
-  assert.ok((await evaluate(labels)).includes("节点管理"));
+  const available = await evaluate(labels);
+  assert.ok(available.includes("节点管理") && !available.includes("文件"));
   assert.ok(!requests.some(url => new URL(url).pathname === "/api/node"));
   await send("Input.insertText", { text: "<unknown>" });
   assert.deepEqual(await evaluate(labels), []);
@@ -349,6 +378,7 @@ async function test() {
   await waitFor("paired desktop", '!document.querySelector("#workspace").hidden && !document.querySelector("#empty-desktop").hidden');
   if (input.fileBrowser) return verifyFiles();
   if (input.filePreview) return verifyFilePreview();
+  if (input.nodeResolver) return verifyNodeResolver();
   if (input.windowTiling) return verifyWindowTiling();
   if (input.applicationLauncher) return verifyApplicationLauncher();
   assert.ok(await evaluate('document.activeElement.id === "nav-node" && document.querySelectorAll(".app-window:not([hidden])").length === 0'));

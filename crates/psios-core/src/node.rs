@@ -5,12 +5,15 @@ mod inventory;
 pub mod journal;
 pub(crate) mod mounts;
 pub mod network;
+pub(crate) mod pci;
 pub mod pressure;
 pub mod process;
 pub(crate) mod service_control;
 pub(crate) mod service_manager;
 pub(crate) mod service_resources;
 pub mod service_state;
+mod sysfs;
+pub(crate) mod usb;
 pub(crate) mod work_admission;
 use crate::{
     db::{Db, Doc},
@@ -302,6 +305,8 @@ pub fn perform(w: &Work, checkpoint: impl FnOnce(&Value) -> Result<()>) -> Resul
         Action::Routes(q) => network::observe_routes(q, w),
         Action::RouteLookup(q) => network::observe_lookup(q),
         Action::Resolver {} => network::resolver::observe(),
+        Action::Pci(query) => pci::observe(w, query),
+        Action::Usb(query) => usb::observe(w, query),
         Action::RoutingRules(q) => network::observe_rules(q, w),
         Action::Processes(p) => process::page(&w.target.id, p),
         Action::InspectProcess(expected) => process::inspect(&w.target.id, expected),

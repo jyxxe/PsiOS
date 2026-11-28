@@ -1,8 +1,8 @@
 //! Local system API contracts, bounded framing and synchronous Rust client.
 mod artifact;
 mod backup;
-mod block_inventory;
 mod client;
+mod device_inventory;
 mod mcp;
 mod model;
 mod project;
@@ -15,7 +15,10 @@ pub use artifact::{
     ArtifactUploadUsage, PreparedArtifactStage,
 };
 pub use backup::{BackupChunk, BackupMember, BackupMemberReceipt};
-pub use block_inventory::{BlockInventoryCursor, BlockInventoryQuery, MAX_BLOCK_INVENTORY_PAGE};
+pub use device_inventory::{
+    BlockInventoryCursor, BlockInventoryQuery, DeviceInventoryCursor, DeviceInventoryQuery,
+    MAX_BLOCK_INVENTORY_PAGE, MAX_DEVICE_INVENTORY_PAGE, MAX_PCI_INVENTORY_ROWS,
+};
 pub use mcp::{
     LocalReadBinding, LocalReadTool, LocalReadToolsRequest, MAX_LOCAL_READ_BINDINGS,
     MAX_VOLUME_FILE_CHUNK, MAX_VOLUME_FILE_OFFSET, MAX_VOLUME_FILES_PAGE,

@@ -1,5 +1,5 @@
 //! The bounded set of diagnostics available through local adapters.
-use crate::{BlockInventoryQuery, ResourceRef};
+use crate::{BlockInventoryQuery, DeviceInventoryQuery, MAX_DEVICE_INVENTORY_PAGE, ResourceRef};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -109,6 +109,8 @@ pub enum LocalReadTool {
     NodeDevices,
     #[serde(rename = "node.resolver")]
     NodeResolver,
+    #[serde(rename = "node.pci")]
+    NodePci,
 }
 
 impl LocalReadTool {
@@ -119,13 +121,14 @@ impl LocalReadTool {
             Self::NodeInventory => "node.inventory",
             Self::NodeDevices => "node.devices",
             Self::NodeResolver => "node.resolver",
+            Self::NodePci => "node.pci",
         }
     }
 
     pub fn requires_node_scope(self) -> bool {
         matches!(
             self,
-            Self::NodeInventory | Self::NodeDevices | Self::NodeResolver
+            Self::NodeInventory | Self::NodeDevices | Self::NodeResolver | Self::NodePci
         )
     }
 }
@@ -151,6 +154,8 @@ pub enum LocalReadBinding {
     NodeDevices(BlockInventoryQuery),
     #[serde(rename = "node.resolver")]
     NodeResolver {},
+    #[serde(rename = "node.pci")]
+    NodePci(DeviceInventoryQuery),
     #[serde(rename = "volume.usage")]
     VolumeUsage { target_id: String },
     #[serde(rename = "volume.files")]
@@ -183,6 +188,7 @@ impl From<LocalReadTool> for LocalReadBinding {
             LocalReadTool::NodeInventory => Self::NodeInventory {},
             LocalReadTool::NodeDevices => Self::NodeDevices(BlockInventoryQuery::default()),
             LocalReadTool::NodeResolver => Self::NodeResolver {},
+            LocalReadTool::NodePci => Self::NodePci(DeviceInventoryQuery::default()),
         }
     }
 }
@@ -195,6 +201,7 @@ impl LocalReadBinding {
             Self::NodeInventory {} => LocalReadTool::NodeInventory.name(),
             Self::NodeDevices(_) => LocalReadTool::NodeDevices.name(),
             Self::NodeResolver {} => LocalReadTool::NodeResolver.name(),
+            Self::NodePci(_) => LocalReadTool::NodePci.name(),
             Self::VolumeUsage { .. } => "volume.usage",
             Self::VolumeFiles { .. } => "volume.files",
             Self::VolumeReadChunk { .. } => "volume.read_chunk",
@@ -210,6 +217,7 @@ impl LocalReadBinding {
             Self::NodeInventory {} => Some(LocalReadTool::NodeInventory),
             Self::NodeDevices(_) => Some(LocalReadTool::NodeDevices),
             Self::NodeResolver {} => Some(LocalReadTool::NodeResolver),
+            Self::NodePci(_) => Some(LocalReadTool::NodePci),
             Self::VolumeUsage { .. }
             | Self::VolumeFiles { .. }
             | Self::VolumeReadChunk { .. }
@@ -230,6 +238,7 @@ impl LocalReadBinding {
             | Self::NodePressure {}
             | Self::NodeInventory {}
             | Self::NodeResolver {}
+            | Self::NodePci(_)
             | Self::NodeDevices(_) => None,
         }
     }
@@ -239,6 +248,11 @@ impl LocalReadBinding {
         let Some((id, _)) = self.target() else {
             return Some(match self {
                 Self::NodeDevices(query) => json!(query),
+                Self::NodePci(query) => {
+                    let mut page = query.clone();
+                    page.limit.get_or_insert(MAX_DEVICE_INVENTORY_PAGE);
+                    json!(page)
+                }
                 _ => json!({}),
             });
         };
@@ -279,6 +293,7 @@ impl LocalReadBinding {
             | Self::NodePressure {}
             | Self::NodeInventory {}
             | Self::NodeResolver {}
+            | Self::NodePci(_)
             | Self::NodeDevices(_) => unreachable!(),
         }
     }

@@ -4,11 +4,12 @@ import argparse
 import base64
 import binascii
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import fcntl
 from functools import partial
 import gzip
 import hashlib
+import io
 import ipaddress
 import json
 import os
@@ -29,6 +30,9 @@ sys.path.insert(0, str(HERE.parent / "rescue"))
 import boot_media
 
 MIB = 1024 * 1024
+SECTOR_BYTES = 512
+MAX_RAW_BYTES = (1 << 32) * SECTOR_BYTES
+GPT_HEADER = struct.Struct("<8sIIIIQQQQ16sQIII")
 CMDLINE = "console=ttyS0,115200 quiet panic=1 rdinit=/psios-init"
 ESP = (1, 64, "C12A7328-F81F-11D2-BA4B-00A0C93EC93B")
 LINUX_PARTITION = "0FC63DAF-8483-4772-8E79-3D69D8477DE4"
@@ -70,12 +74,18 @@ SSH_PACKAGES = {
     "openssh-keygen-10.2_p1-r1": ("usr/bin/ssh-keygen",),
 }
 SSH_PROGRAMS = tuple(file for files in SSH_PACKAGES.values() for file in files)
+TZDATA = "tzdata-2026f-r0"
+TZDATA_SHA256 = "29b71c02c289e017ad43a96b00ff6bec39e6e07512cb67a647696320c54d0321"
+ZONEINFO = "usr/share/zoneinfo"
+ZONE_ARCHIVE = "psios-zoneinfo.tar"
+TIMEZONE_COMMAND = "usr/bin/psios-timezone"
 
 
 @dataclass(frozen=True)
 class Layout:
     state_mib: int = MIN_STATE_MIB
     home_mib: int = MIN_HOME_MIB
+    raw_disk_bytes: int | None = None
 
     def __post_init__(self):
         if (type(self.state_mib) is not int or type(self.home_mib) is not int
@@ -83,10 +93,25 @@ class Layout:
                 or self.image_mib > MAX_IMAGE_MIB):
             raise ValueError(f"expected at least {MIN_STATE_MIB} MiB of state and {MIN_HOME_MIB} MiB of home "
                              f"within a {MAX_IMAGE_MIB} MiB raw image")
+        size = self.raw_disk_bytes
+        if size is not None and (type(size) is not int or not self.image_mib * MIB < size <= MAX_RAW_BYTES
+                                 or size % SECTOR_BYTES):
+            raise ValueError("larger raw capacity must use whole 512-byte sectors and be at most 2 TiB")
 
     @property
     def image_mib(self):
         return ESP[0] + ESP[1] + self.state_mib + self.home_mib + 2
+
+    @property
+    def disk_bytes(self):
+        return self.raw_disk_bytes or self.image_mib * MIB
+
+    def for_source(self, size):
+        if size is None or size == self.disk_bytes:
+            return self
+        if self.raw_disk_bytes is not None:
+            raise ValueError("source capacity does not match the previously recorded raw disk size")
+        return replace(self, raw_disk_bytes=size)
 
     @property
     def partitions(self):
@@ -96,6 +121,19 @@ class Layout:
 
     def receipt(self):
         return {"state_mib": self.state_mib, "home_mib": self.home_mib, "image_mib": self.image_mib}
+
+    @classmethod
+    def from_receipt(cls, receipt):
+        geometry = receipt.get("geometry_mib")
+        if not isinstance(geometry, dict) or set(geometry) != {"state_mib", "home_mib", "image_mib"}:
+            raise ValueError("invalid build receipt geometry")
+        size = receipt.get("raw_disk_bytes")
+        if "raw_disk_bytes" in receipt and type(size) is not int:
+            raise ValueError("invalid build receipt raw capacity")
+        layout = cls(geometry["state_mib"], geometry["home_mib"], size)
+        if type(geometry["image_mib"]) is not int or geometry != layout.receipt():
+            raise ValueError("invalid build receipt image size")
+        return layout
 
 
 @dataclass(frozen=True)
@@ -141,6 +179,7 @@ class PreparedUpdate:
     normalized_source_sha256: str
     kernel_iso: Path
     max_copy_mib: int
+    boot_tools: boot_media.BootTools
 
 
 def sha256(path):
@@ -365,6 +404,8 @@ def host_config(seed, args):
     (seed / "etc/os-release").write_text('NAME=PsiOS\nID=psios\nPRETTY_NAME="PsiOS amd64 development image"\n')
     if args.hostname:
         (seed / "etc/hostname").write_text(args.hostname + "\n")
+    if args.timezone:
+        (seed / "etc/localtime").symlink_to("../" + ZONEINFO + "/" + args.timezone)
     (seed / "etc/securetty").write_text("ttyS0\n")
     (seed / "etc/issue").write_text("PsiOS amd64 development console\n")
     (seed / "etc/psios/core.json").write_text(json.dumps({
@@ -414,11 +455,13 @@ def core_programs(work):
     return programs
 
 
-def prepare_programs(work, packages):
+def prepare_programs(work, packages, *, tools=None):
     for package, files in packages.items():
         archive = work / (package + ".apk")
         with archive.open("xb") as output:
-            subprocess.run(["isoinfo", "-R", "-i", work / "base.iso", "-x", f"/apks/x86_64/{package}.apk"],
+            command = boot_media.tool_command(
+                ["isoinfo", "-R", "-i", work / "base.iso", "-x", f"/apks/x86_64/{package}.apk"], tools)
+            subprocess.run(command,
                            stdout=output, check=True, timeout=30, preexec_fn=file_limit(4 * MIB))
         remaining = set(files)
         with tarfile.open(archive, "r:gz", ignore_zeros=True) as bundle:
@@ -439,40 +482,91 @@ def prepare_programs(work, packages):
         archive.unlink()
 
 
-def prepare_boot_inputs(work, args, *, wired_driver=None, ssh_enabled=False, network_profile=None):
-    base = boot_media.prepare_kernel(work, args.kernel_iso)
+def timezone_name(value):
+    return len(value) <= 96 and re.fullmatch(r"[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+)*", value)
+
+
+def prepare_timezones(work, *, tools=None):
+    package = work / (TZDATA + ".apk")
+    with package.open("xb") as output:
+        command = boot_media.tool_command(
+            ["isoinfo", "-R", "-i", work / "base.iso", "-x", f"/apks/x86_64/{package.name}"], tools)
+        subprocess.run(command,
+                       stdout=output, check=True, timeout=30, preexec_fn=file_limit(MIB))
+    if sha256(package) != TZDATA_SHA256:
+        raise ValueError("timezone package does not match the pinned Linux media")
+    prefix = ZONEINFO + "/"
+    zones = set()
+    with tarfile.open(package, "r:gz", ignore_zeros=True) as source, \
+            tarfile.open(work / ZONE_ARCHIVE, "x", format=tarfile.USTAR_FORMAT) as archive:
+        for member in sorted(source.getmembers(), key=lambda entry: entry.name):
+            if member.isdir() or not member.name.startswith(prefix):
+                continue
+            if member.islnk() and not member.linkname.startswith(prefix):
+                raise ValueError("invalid timezone package member link")
+            if not (member.isfile() or member.islnk()):
+                raise ValueError("unsupported timezone package member type")
+            with source.extractfile(member) as zone:
+                data = zone.read(16 * 1024 + 1)
+            if not data.startswith(b"TZif"):
+                continue  # Skip zone tables and other non-binary metadata.
+            name = member.name.removeprefix(prefix)
+            if not timezone_name(name) or name in zones or len(data) > 16 * 1024:
+                raise ValueError("invalid timezone package member")
+            info = tarfile.TarInfo(name)
+            info.mode = 0o444
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+            zones.add(name)
+    package.unlink()
+    if "UTC" not in zones:
+        raise ValueError("timezone package is missing UTC data")
+    command = work / TIMEZONE_COMMAND
+    command.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(HERE / "timezone", command)
+    return zones
+
+
+def prepare_boot_inputs(work, args, *, wired_driver=None, ssh_enabled=False, network_profile=None, tools=None):
+    base = boot_media.prepare_kernel(work, args.kernel_iso, tools=tools)
     if wired_driver == "e1000e":
         if shutil.which("unsquashfs") is None:
             raise ValueError("building the e1000e profile requires unsquashfs")
         modloop = work / "modloop"
         with modloop.open("xb") as out:
-            subprocess.run(["isoinfo", "-R", "-i", work / "base.iso", "-x", "/boot/modloop-virt"],
+            command = boot_media.tool_command(["isoinfo", "-R", "-i", work / "base.iso", "-x", "/boot/modloop-virt"], tools)
+            subprocess.run(command,
                            stdout=out, check=True, timeout=30, preexec_fn=file_limit(base["size_bytes"]))
         expected = base["e1000e_module"]
         module = work / E1000E_MODULE
         with module.open("xb") as out:
-            subprocess.run(["unsquashfs", "-cat", modloop, expected["member"]], stdout=out,
+            command = boot_media.tool_command(["unsquashfs", "-cat", modloop, expected["member"]], tools)
+            subprocess.run(command, stdout=out,
                            check=True, timeout=30, preexec_fn=file_limit(MIB))
         if sha256(module) != expected["sha256"]:
             raise ValueError("e1000e module does not match the pinned Linux media")
         modloop.unlink()
     (work / "bin").mkdir()
     install_core(work, args.core_archive, args.core_sha256)
+    zones = prepare_timezones(work, tools=tools)
+    if getattr(args, "timezone", None) and args.timezone not in zones:
+        raise ValueError("unknown time zone in the pinned IANA data")
     if ssh_enabled:
-        prepare_programs(work, SSH_PACKAGES)
+        prepare_programs(work, SSH_PACKAGES, tools=tools)
     if network_profile == RDNSS:
-        prepare_programs(work, RDNSS_PACKAGES)
+        prepare_programs(work, RDNSS_PACKAGES, tools=tools)
     return base
 
 
 def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network_profile, *, core_limits, trial,
-                   require_secure_boot=False, wired_driver=None, ssh_enabled=False):
+                   require_secure_boot=False, wired_driver=None, ssh_enabled=False, tools=None):
     (work / "psios-disk-uuid").write_text(str(instance) + "\n")
     (work / "psios-home-uuid").write_text(str(home_id) + "\n")
     sectors = [str(mib * 2048) for start, size, _ in layout.partitions[1:] for mib in (start, size)]
     (work / "psios-storage-layout").write_text(" ".join(sectors) + "\n")
     boot_scripts = ["init", "shutdown", "dhcp", "dhcp-event", "ipv4", "ipv6", "static", "storage", "enroll"]
-    files = [*core_programs(work), "psios-source", "psios-disk-uuid", "psios-home-uuid", "psios-storage-layout"]
+    files = [*core_programs(work), "psios-source", "psios-disk-uuid", "psios-home-uuid", "psios-storage-layout",
+             ZONE_ARCHIVE, TIMEZONE_COMMAND]
     if network_profile == RDNSS:
         boot_scripts.extend(("rdnss-hook", "rdnss.conf", "dhcpcd.LICENSE"))
         files.append(RDNSS_PROGRAM)
@@ -506,7 +600,10 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
         "geometry_mib": layout.receipt(),
         "required_filesystems": {"state": str(instance), "home": str(home_id)},
         "payload_sha256": payload,
+        "timezone_data": {"package": TZDATA, "package_sha256": TZDATA_SHA256},
     }
+    if layout.raw_disk_bytes is not None:
+        inputs["raw_disk_bytes"] = layout.raw_disk_bytes
     if signing:
         inputs["secure_boot"] = signing.receipt()
     if network_profile:
@@ -529,7 +626,7 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
     files.extend(["psios-deployment.json", "psios-payload.sha256"])
     for name in files:
         executable = name.startswith("bin/") or name in (
-            "psios-init", "psios-dhcp-event", "psios-rdnss-hook", RDNSS_PROGRAM, *SSH_PROGRAMS)
+            "psios-init", "psios-dhcp-event", "psios-rdnss-hook", RDNSS_PROGRAM, TIMEZONE_COMMAND, *SSH_PROGRAMS)
         (work / name).chmod(0o755 if executable else 0o644)
     if ssh_enabled:
         ssh_directory = "usr/lib/ssh"
@@ -538,11 +635,12 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
     # GNU cpio's reproducible mode still includes each member's modification time.
     for name in files:
         os.utime(work / name, (boot_media.EPOCH, boot_media.EPOCH))
-    append_deployment_payload(work, files)
+    append_deployment_payload(work, files, tools=tools)
 
 
-def append_deployment_payload(work, files):
-    command = ["cpio", "--quiet", "-o", "-H", "newc", "--reproducible", "--owner=0:0"]
+def append_deployment_payload(work, files, *, tools=None):
+    command = boot_media.tool_command(["cpio", "--quiet", "-o", "-H", "newc", "--reproducible", "--owner=0:0"],
+                                      tools, work)
     # Supply the small name list separately so cpio's potentially large output is streamed.
     with tempfile.TemporaryFile(dir=work) as names, (work / "initrd").open("ab") as out:
         names.write(("\n".join(files) + "\n").encode())
@@ -556,11 +654,11 @@ def append_deployment_payload(work, files):
 
 
 def ramfs(work, args, instance, home_id, layout=Layout(), signing=None, network_profile=None, *, core_limits=None,
-          trial=None, wired_driver=None, ssh_enabled=False):
+          trial=None, wired_driver=None, ssh_enabled=False, tools=None):
     base = prepare_boot_inputs(work, args, wired_driver=wired_driver, ssh_enabled=ssh_enabled,
-                               network_profile=network_profile)
+                               network_profile=network_profile, tools=tools)
     assemble_ramfs(work, args, base, instance, home_id, layout, signing, network_profile,
-                   core_limits=core_limits, trial=trial, wired_driver=wired_driver, ssh_enabled=ssh_enabled)
+                   core_limits=core_limits, trial=trial, wired_driver=wired_driver, ssh_enabled=ssh_enabled, tools=tools)
 
 
 def seeded_ext4(work, name, label, identity, size_mib, seed, owners):
@@ -599,7 +697,7 @@ def new_disk(work, disk, args, instance, home_id, layout):
         (homes / name).chmod(0o700)
     home = seeded_ext4(work, "home.ext4", "PSIOSHOME", home_id, layout.home_mib, homes, {"psios": 1000})
     with disk.open("xb") as f:
-        f.truncate(layout.image_mib * MIB)
+        f.truncate(layout.disk_bytes)
     gpt = "label: gpt\nunit: sectors\n" + "".join(
         f"start={start * 2048},size={size * 2048},type={kind}\n" for start, size, kind in layout.partitions)
     subprocess.run(["sfdisk", "--quiet", disk], input=gpt, text=True, check=True, timeout=30)
@@ -609,23 +707,28 @@ def new_disk(work, disk, args, instance, home_id, layout):
 
 
 def copy_mib(src, dst, count, *, replace):
+    copy_sparse(src, dst, count * MIB, replace=replace)
+
+
+def copy_sparse(src, dst, size, *, replace):
     # New regions are already zero. During journal replay and EFI replacement,
     # omit a zero block only if the destination still contains those same bytes.
     zero = bytes(MIB)
-    for _ in range(count):
-        chunk = src.read(MIB)
-        if len(chunk) != MIB:
+    for offset in range(0, size, MIB):
+        length = min(MIB, size - offset)
+        chunk = src.read(length)
+        if len(chunk) != length:
             raise ValueError("incomplete partition data")
-        if chunk == zero:
+        if chunk == zero[:length]:
             if not replace:
-                dst.seek(MIB, os.SEEK_CUR)
+                dst.seek(length, os.SEEK_CUR)
                 continue
-            previous = dst.read(MIB)
-            if len(previous) != MIB:
+            previous = dst.read(length)
+            if len(previous) != length:
                 raise ValueError("incomplete destination partition data")
-            if previous == zero:
+            if previous == chunk:
                 continue
-            dst.seek(-MIB, os.SEEK_CUR)
+            dst.seek(-length, os.SEEK_CUR)
         dst.write(chunk)
 
 
@@ -663,14 +766,9 @@ def parse_receipt(raw):
             raise ValueError(f"invalid previous build receipt field {name}")
     if prior["state_uuid"] == prior["home_uuid"]:
         raise ValueError("previous deployment filesystems have identical UUIDs")
-    layout = Layout()
-    if prior["format"] >= 2:
-        geometry = prior.get("geometry_mib")
-        if not isinstance(geometry, dict) or set(geometry) != {"state_mib", "home_mib", "image_mib"}:
-            raise ValueError("invalid previous build receipt geometry")
-        layout = Layout(geometry["state_mib"], geometry["home_mib"])
-        if type(geometry["image_mib"]) is not int or geometry != layout.receipt():
-            raise ValueError("invalid previous build receipt image size")
+    if prior["format"] == 1 and "raw_disk_bytes" in prior:
+        raise ValueError("larger raw capacity requires a geometry-bearing build receipt")
+    layout = Layout.from_receipt(prior) if prior["format"] >= 2 else Layout()
     profiles = {4: (STATIC_IPV4,), 5: (STATIC_IPV6, STATIC_DUAL), SLAAC_RECEIPT_FORMAT: (SLAAC,),
                 RDNSS_RECEIPT_FORMAT: (RDNSS,)}
     if prior["format"] in profiles:
@@ -712,6 +810,46 @@ def parse_receipt(raw):
     return prior, layout, limits
 
 
+def read_gpt_copy(disk, header_lba, alternate_lba, entries_lba, usable):
+    disk.seek(header_lba * SECTOR_BYTES)
+    sector = disk.read(SECTOR_BYTES)
+    if len(sector) != SECTOR_BYTES:
+        raise ValueError("relocated image has an incomplete GPT header")
+    (signature, revision, size, checksum, reserved, current, alternate, first, last, disk_id,
+     entries, count, entry_size, entries_checksum) = GPT_HEADER.unpack_from(sector)
+    if (signature != b"EFI PART" or revision != 0x10000 or not GPT_HEADER.size <= size <= SECTOR_BYTES
+            or reserved != 0 or (current, alternate, entries) != (header_lba, alternate_lba, entries_lba)
+            or (first, last) != usable or not 0 < count * entry_size <= MIB):
+        raise ValueError("relocated image has a missing or inconsistent GPT header")
+    if binascii.crc32(sector[:16] + bytes(4) + sector[20:size]) != checksum:
+        raise ValueError("relocated image has an invalid GPT header checksum")
+    table_bytes = count * entry_size
+    offset = entries_lba * SECTOR_BYTES
+    boundary = (first if header_lba == 1 else header_lba) * SECTOR_BYTES
+    if entry_size < 128 or offset + table_bytes > boundary:
+        raise ValueError("relocated GPT table exceeds its reserved area")
+    disk.seek(offset)
+    partitions = disk.read(table_bytes)
+    if len(partitions) != table_bytes or binascii.crc32(partitions) != entries_checksum:
+        raise ValueError("relocated image has an invalid GPT table checksum")
+    return disk_id, count, entry_size, partitions
+
+
+def verify_relocated_gpt(image, target_size, table):
+    """Require two complete GPT copies with matching identities and partition tables."""
+    last_sector = target_size // SECTOR_BYTES - 1
+    usable = table["firstlba"], table["lastlba"]
+    with open(image, "rb") as disk:
+        protective = disk.read(SECTOR_BYTES)
+        if (len(protective) != SECTOR_BYTES or protective[510:] != b"\x55\xaa" or protective[450] != 0xEE
+                or struct.unpack_from("<II", protective, 454) != (1, last_sector)):
+            raise ValueError("relocated image has an invalid protective MBR")
+        primary = read_gpt_copy(disk, 1, last_sector, 2, usable)
+        backup = read_gpt_copy(disk, last_sector, 1, usable[1] + 1, usable)
+    if primary != backup or uuid.UUID(bytes_le=primary[0]) != uuid.UUID(table["id"]):
+        raise ValueError("relocated image GPT copies do not agree")
+
+
 def validate_layout(work, disk, layout, *, pass_fds=()):
     boot_media.run(work, ["sfdisk", "--verify", disk], pass_fds=pass_fds)
     limit = 16 * 1024
@@ -724,6 +862,8 @@ def validate_layout(work, disk, layout, *, pass_fds=()):
     if (gpt["label"], gpt["unit"], gpt["sectorsize"]) != ("gpt", "sectors", 512) or [
             (p["start"], p["size"], p["type"]) for p in gpt["partitions"]] != expected:
         raise ValueError("unsupported previous PsiOS GPT layout")
+    if layout.raw_disk_bytes is not None:
+        verify_relocated_gpt(disk, layout.disk_bytes, gpt)
     return gpt
 
 
@@ -801,7 +941,7 @@ def read_root_file(work, fs, member, limit, modes):
 
 
 def source_snapshot(work, disk, source_fd, prior, layout, signing):
-    disk_size = layout.image_mib * MIB
+    disk_size = layout.disk_bytes
     before = os.fstat(source_fd)
     flags = fcntl.fcntl(source_fd, fcntl.F_GETFL)
     if not stat.S_ISREG(before.st_mode) or flags & os.O_PATH or flags & os.O_ACCMODE != os.O_RDONLY:
@@ -900,16 +1040,19 @@ def production_receipt_format(properties):
     return static_formats.get(properties.get("network_profile"), 3 if "secure_boot" in properties else 2)
 
 
-def finish_disk(work, disk, output, *, signing, upgrade):
+def finish_disk(work, disk, output, *, signing, upgrade, tools):
     manifest_path = work / "psios-deployment.json"
     manifest = json.loads(manifest_path.read_bytes())
-    efi = boot_media.secure_efi_application(work, CMDLINE, signing) if signing else boot_media.efi_application(work, CMDLINE)
+    if signing:
+        efi = boot_media.secure_efi_application(work, CMDLINE, signing, tools=tools)
+    else:
+        efi = boot_media.efi_application(work, CMDLINE, tools=tools)
     esp = work / "esp.fat"
     with esp.open("xb") as f:
         f.truncate(ESP[1] * MIB)
-    boot_media.run(work, ["mkfs.fat", "-F", "32", "--invariant", "-n", "PSIOSBOOT", esp])
-    boot_media.run(work, ["mmd", "-i", esp, "::/EFI", "::/EFI/BOOT"])
-    boot_media.run(work, ["mcopy", "-i", esp, efi, EFI_PATH])
+    boot_media.run(work, ["mkfs.fat", "-F", "32", "--invariant", "-n", "PSIOSBOOT", esp], tools=tools)
+    boot_media.run(work, ["mmd", "-i", esp, "::/EFI", "::/EFI/BOOT"], tools=tools)
+    boot_media.run(work, ["mcopy", "-i", esp, efi, EFI_PATH], tools=tools)
     write_partition(disk, ESP, esp, replace=upgrade is not None)
     with disk.open("rb") as completed:
         os.fsync(completed.fileno())
@@ -922,7 +1065,7 @@ def finish_disk(work, disk, output, *, signing, upgrade):
         "efi_application_sha256": sha256(efi), "installed_initramfs_sha256": sha256(work / "initrd"),
         "initial_image_sha256": sha256(disk),
     }
-    for name in ("secure_boot", "network_profile", "wired_driver", "core_limits", "ssh_console"):
+    for name in ("secure_boot", "network_profile", "wired_driver", "core_limits", "ssh_console", "raw_disk_bytes"):
         if name in manifest:
             receipt[name] = manifest[name]
     if "boot_mode" in manifest:
@@ -938,6 +1081,7 @@ def finish_disk(work, disk, output, *, signing, upgrade):
 def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
     """Prepare two private EFI variants of one stopped source; publish neither."""
     prior, layout, core_limits = read_receipt(args.previous_receipt)
+    layout = layout.for_source(getattr(args, "source_size_bytes", None))
     work = work.absolute()
     requested = tuple(getattr(args, name, None) for name in (
         "secure_boot_key", "secure_boot_cert", "efi_stub", "efi_stub_sha256"))
@@ -945,10 +1089,11 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
     if not existing and any(value is not None for value in requested):
         raise ValueError("a signed staged update requires a signed original deployment")
     signing = None
+    tools = boot_media.BootTools()
     if existing:
         if not all(requested):
             raise ValueError("a signed original deployment requires the Secure Boot signing inputs")
-        signing = boot_media.prepare_secure_boot(work, *requested)
+        signing = boot_media.prepare_secure_boot(work, *requested, tools=tools)
         if signing.certificate_sha256 != existing["certificate_sha256"]:
             raise ValueError("a signed staged update requires the original enrolled certificate")
     candidate_work, trial_work = work / "candidate", work / "trial"
@@ -959,8 +1104,8 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
         candidate_work, candidate_disk, source_fd, prior, layout, signing)
     normalized = sha256(candidate_disk)
     with candidate_disk.open("rb") as frozen, trial_disk.open("xb") as clone:
-        copy_mib(frozen, clone, layout.image_mib, replace=False)
-        clone.truncate(layout.image_mib * MIB)
+        copy_sparse(frozen, clone, layout.disk_bytes, replace=False)
+        clone.truncate(layout.disk_bytes)
     if sha256(trial_disk) != normalized:
         raise ValueError("trial disk clone does not match the normalized source")
     for disk in (candidate_disk, trial_disk):
@@ -972,10 +1117,10 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
     ssh_enabled = "ssh_console" in prior
     network_profile = prior.get("network_profile")
     base = prepare_boot_inputs(candidate_work, args, wired_driver=wired_driver, ssh_enabled=ssh_enabled,
-                               network_profile=network_profile)
+                               network_profile=network_profile, tools=tools)
     (trial_work / "bin").mkdir()
     # Share the pinned input kernel and binaries, but each initrd is extended independently.
-    boot_inputs = ("kernel", "initrd", *core_programs(candidate_work), "psios-source")
+    boot_inputs = ("kernel", "initrd", *core_programs(candidate_work), "psios-source", ZONE_ARCHIVE, TIMEZONE_COMMAND)
     if wired_driver:
         boot_inputs += (E1000E_MODULE,)
     if ssh_enabled:
@@ -989,7 +1134,7 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
     for directory, mode in ((candidate_work, None), (trial_work, trial)):
         assemble_ramfs(directory, args, base, instance, home_id, layout, signing, network_profile,
                        core_limits=core_limits, trial=mode, wired_driver=wired_driver, ssh_enabled=ssh_enabled,
-                       require_secure_boot=signing is not None and mode is None)
+                       require_secure_boot=signing is not None and mode is None, tools=tools)
     candidate_manifest = json.loads((candidate_work / "psios-deployment.json").read_bytes())
     trial_manifest = json.loads((trial_work / "psios-deployment.json").read_bytes())
     del trial_manifest["boot_mode"], trial_manifest["trial_disk_uuid"]
@@ -1007,11 +1152,13 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
     upgrade = {"previous_image_sha256": source_digest, "previous_source_commit": prior["source_commit"],
                "normalized_source_sha256": normalized, "verified_authority": authority,
                "replayed_ext4_partitions": replayed}
-    candidate_receipt = finish_disk(candidate_work, candidate_disk, candidate_disk, signing=signing, upgrade=upgrade)
-    trial_receipt = finish_disk(trial_work, trial_disk, trial_disk, signing=signing, upgrade=upgrade)
+    candidate_receipt = finish_disk(candidate_work, candidate_disk, candidate_disk,
+                                    signing=signing, upgrade=upgrade, tools=tools)
+    trial_receipt = finish_disk(trial_work, trial_disk, trial_disk, signing=signing, upgrade=upgrade, tools=tools)
+    candidate_receipt["boot_assembly_tools"] = trial_receipt["boot_assembly_tools"] = tools.receipt()
     return PreparedUpdate(candidate_disk, trial_disk, candidate_receipt, trial_receipt,
                           candidate_work / "bin/psiosd", configuration, normalized,
-                          candidate_work / "base.iso", args.max_copy_mib)
+                          candidate_work / "base.iso", args.max_copy_mib, tools)
 
 
 def build(args):
@@ -1028,11 +1175,13 @@ def build(args):
         ssh_enabled = args.ssh_authorized_key is not None
         core_limits = args.core_limits
         signing = None
+        tools = boot_media.BootTools()
         if args.secure_boot_key:
             signing = boot_media.prepare_secure_boot(work, args.secure_boot_key, args.secure_boot_cert,
-                                                    args.efi_stub, args.efi_stub_sha256)
+                                                    args.efi_stub, args.efi_stub_sha256, tools=tools)
         if args.upgrade_from:
             prior, layout, core_limits = read_receipt(args.previous_receipt)
+            layout = layout.for_source(args.source_size_bytes)
             network_profile = prior.get("network_profile")
             wired_driver = prior.get("wired_driver")
             ssh_enabled = "ssh_console" in prior
@@ -1048,10 +1197,11 @@ def build(args):
             layout = Layout(MIN_STATE_MIB if args.state_mib is None else args.state_mib,
                             MIN_HOME_MIB if args.home_mib is None else args.home_mib)
             instance, home_id = str(uuid.uuid4()), str(uuid.uuid4())
+        ramfs(work, args, instance, home_id, layout, signing, network_profile, core_limits=core_limits,
+              trial=trial, wired_driver=wired_driver, ssh_enabled=ssh_enabled, tools=tools)
+        if not prior:
             new_disk(work, disk, args, instance, home_id, layout)
         disk.chmod(0o600)
-        ramfs(work, args, instance, home_id, layout, signing, network_profile, core_limits=core_limits,
-              trial=trial, wired_driver=wired_driver, ssh_enabled=ssh_enabled)
         upgrade = None
         if prior:
             upgrade = {
@@ -1060,7 +1210,8 @@ def build(args):
                 "verified_authority": verify_authority(work, disk, core_config, args.max_copy_mib),
                 "replayed_ext4_partitions": replayed,
             }
-        receipt = finish_disk(work, disk, output, signing=signing, upgrade=upgrade)
+        receipt = finish_disk(work, disk, output, signing=signing, upgrade=upgrade, tools=tools)
+        receipt["boot_assembly_tools"] = tools.receipt()
         # No existing image or block device is ever an install target.
         os.link(disk, output)
         fd = os.open(output.parent, os.O_DIRECTORY | os.O_RDONLY)
@@ -1081,7 +1232,9 @@ def main():
     mode.add_argument("--console-hash", type=Path, help="private file containing an operator SHA-512 crypt hash")
     mode.add_argument("--upgrade-from", type=Path, help="stopped native development disk to copy without changes")
     parser.add_argument("--previous-receipt", type=Path, help="trusted build receipt for the stopped disk")
+    parser.add_argument("--source-size-bytes", type=int, help="installed raw capacity from an approved larger-target plan")
     parser.add_argument("--hostname", help="single DNS-label hostname for a new disk")
+    parser.add_argument("--timezone", help="IANA time zone for a new disk (default UTC)")
     parser.add_argument("--trial-boot", action="store_true", help="create an isolated non-activating EFI upgrade candidate")
     parser.add_argument("--max-copy-mib", type=copy_budget_mib,
                         help="authority database and journals to copy during upgrade (default 64 MiB)")
@@ -1113,11 +1266,18 @@ def main():
     args = parser.parse_args()
     if not re.fullmatch(r"[0-9a-f]{64}", args.core_sha256):
         parser.error("invalid Core archive SHA-256")
+    if args.source_size_bytes is not None and not args.upgrade_from:
+        parser.error("--source-size-bytes requires --upgrade-from")
     if args.hostname is not None:
         if args.upgrade_from:
             parser.error("upgrade preserves /etc/hostname from the source")
         if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", args.hostname):
             parser.error("hostname must be a single DNS label of 1 to 63 ASCII letters, digits or hyphens")
+    if args.timezone is not None:
+        if args.upgrade_from:
+            parser.error("upgrade preserves /etc/localtime from the source")
+        if not timezone_name(args.timezone):
+            parser.error("invalid time zone name")
     if args.dhcp_driver and not args.dhcp_mac:
         parser.error("--dhcp-driver requires --dhcp-mac on a new disk")
     if args.static_driver and not args.static_mac:

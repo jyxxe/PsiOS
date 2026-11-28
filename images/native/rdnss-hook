@@ -1,0 +1,54 @@
+#!/bin/sh
+# Publish only live RDNSS addresses from the matched interface.
+set -eu
+set -f
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+run=/run/psios-network
+destination=$run/resolv.conf
+[ -n "${PSIOS_RDNSS_INTERFACE:-}" ] && [ "${interface:-}" = "$PSIOS_RDNSS_INTERFACE" ] || exit 0
+[ "$(readlink /etc/resolv.conf)" = "$destination" ] || exit 1
+
+publish() {
+    local router option acquired now lifetime servers address server seen=' ' count=0
+    [ "$reason" = ROUTERADVERT ] || return 0
+    for router in $(seq 1 16); do
+        acquired=$(printenv "nd${router}_acquired") || break
+        now=$(printenv "nd${router}_now") || break
+        case "$acquired:$now" in :*|*:|*[!0-9:]*) continue ;; esac
+        [ "${#acquired}" -le 10 ] && [ "${#now}" -le 10 ] && [ "$now" -ge "$acquired" ] || continue
+        for option in $(seq 1 16); do
+            lifetime=$(printenv "nd${router}_rdnss${option}_lifetime") || break
+            case "$lifetime" in ''|*[!0-9]*) continue ;; esac
+            [ "${#lifetime}" -le 10 ] && [ "$lifetime" -gt "$((now - acquired))" ] || continue
+            servers=$(printenv "nd${router}_rdnss${option}_servers") || continue
+            for server in $servers; do
+                address=${server%%\%*}
+                case "$address" in
+                    ::|::1|ff*|*[!0-9a-f:]*|*%*) continue ;;
+                    *:*) ;;
+                    *) continue ;;
+                esac
+                [ "${#address}" -le 39 ] || continue
+                case "$address" in fe[89ab]*) address="$address%$interface" ;; esac
+                case "$seen" in *" $address "*) continue ;; esac
+                printf 'nameserver %s\n' "$address" || return 1
+                seen="$seen$address "
+                count=$((count + 1))
+                [ "$count" -lt 3 ] || return 0
+            done
+        done
+    done
+}
+
+case "${reason:-}" in
+    ROUTERADVERT|PREINIT|NOCARRIER|STOP|STOP6|DEPARTED|FAIL|EXPIRE) ;;
+    *) exit 0 ;;
+esac
+temporary=$(mktemp "$run/.rdnss-resolver.XXXXXXXX") || { rm -f -- "$destination"; exit 1; }
+trap 'rm -f -- "$temporary"' EXIT
+trap 'exit 1' HUP INT TERM
+if ! publish > "$temporary" || ! chmod 0644 "$temporary" || ! mv -fT "$temporary" "$destination"; then
+    rm -f -- "$destination"
+    exit 1
+fi

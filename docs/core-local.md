@@ -95,6 +95,8 @@ Shell 可以查看节点状态、调度开关、执行队列和权威存储余�
 
 以 `ctl shell --files-volume "$volume_id" --files-delegation "$delegation_id"` 启动可打开“文件”窗口。当前主体需要对所选卷拥有资源读取权限，委托须允许 `volume.files`、`task.submit` 和 `task.read`。窗口提供目录导航、分页及普通文件大小。每次读取都使用 Core Task，翻页同时核对卷修订和目录修订。目录变动后从第一页重新读取。最小化和会话结束时清除已显示的内容，恢复时按当前委托重新读取。[卷读取规则](core-runtime.md) · [Shell 进程与浏览器验收](../tests/test_shell.py)
 
+加上 `--files-preview` 并为同一委托授予 `volume.read_chunk` 后，可以预览普通文件起始最多 6 KiB 的 UTF-8 文本。预览请求绑定目录列表所见的卷修订，并由 Core 固定这次文件观测。关闭或最小化时清除浏览器内的正文。[分块读取规则](core-runtime.md#卷文件与应用版本)
+
 在任务详情展开“执行历史”可读取截至当前详情修订的历史，每页最多三条。各条显示 Core 记录的时间、当时的生命周期、结果确认程度和关联的 Run 或 Operation。翻页期间任务即使继续运行，历史上界仍固定。刷新详情后可查看更晚的修订。每次翻页都重新检查当前 `task.read` 授权和任务归属。
 
 以 `ctl shell --cancel-pending-tasks` 启动时，可以在详情中取消排队或等待审批的任务。Shell 先用当前主体读取任务，随后带同一修订调用 `Task.Cancel`。Core 在同一事务内核对修订、归属和 `task.submit` 权限。如果任务已经开始，刷新可查看新的状态。请求中断时也可刷新核实结果。

@@ -65,6 +65,9 @@ enum Cmd {
         /// Authorize the configured Volume through this existing Core Delegation.
         #[arg(long, requires = "files_volume", value_name = "DELEGATION_ID")]
         files_delegation: Option<String>,
+        /// Allow bounded UTF-8 text previews with a volume.read_chunk delegation.
+        #[arg(long, requires = "files_volume")]
+        files_preview: bool,
     },
     Status {
         #[arg(long, default_value = "owner-delegation")]
@@ -921,6 +924,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             manage_agent_sessions,
             files_volume,
             files_delegation,
+            files_preview,
         } => {
             return shell::run(
                 c,
@@ -931,7 +935,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     manage_agent_sessions,
                     files: files_volume
                         .zip(files_delegation)
-                        .map(|(volume, delegation)| shell::VolumeAccess { volume, delegation }),
+                        .map(|(volume, delegation)| shell::VolumeAccess {
+                            volume,
+                            delegation,
+                            preview: files_preview,
+                        }),
                 },
             );
         }

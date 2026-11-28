@@ -453,6 +453,25 @@ def check_native_mount_topology(c):
     assert scratch["filesystem_type"] == "tmpfs" and {"nodev", "nosuid"}.issubset(scratch["flags"]), scratch
 
 
+def check_native_pci(c):
+    node = call(c, "Node.Get", {})["reference"]["resource_id"]
+    grant = call(c, "Grant.Issue", {"principal_id": "local-owner", "tool_targets": [node],
+                 "actions": ["task.submit", "task.read", "node.pci"], "units": 1, "ttl_seconds": 120})
+    delegation = shlex.quote(grant["delegation_ref"]["resource_id"])
+    receipt = json.loads(c.run(f"printf '{{}}' | psiosctl submit node.pci --delegation {delegation} --key native-pci"))
+    task = call(c, "Task.Wait", {"id": receipt["task_id"], "timeout_ms": 5000})
+    assert task["lifecycle"] == "Succeeded", task
+    reference, = task["result"]["artifact_refs"]
+    report = call(c, "Artifact.Read", {"reference": reference})
+    address = c.run('for path in /sys/bus/pci/devices/*; do '
+                    '[ "$(cat "$path/vendor")" = 0x1af4 ] || continue; '
+                    '[ "$(basename "$(readlink "$path/driver")")" = virtio-pci ] || continue; '
+                    'basename "$path"; break; done')
+    device, = (item for item in report["devices"] if item["address"] == address)
+    assert (device["vendor_id"], device["driver"]) == ("0x1af4", "virtio-pci"), device
+    assert report["boot_id"] == c.run("cat /proc/sys/kernel/random/boot_id")
+
+
 def check_native_network(c):
     node = json.loads(c.run("psiosctl node"))["reference"]["resource_id"]
     grant = call(c, "Grant.Issue", dict(principal_id="local-owner", tool_targets=[node],
@@ -708,6 +727,7 @@ def exercise(args, work):
         assert int(c.run("stat -c %s ./full")) >= 40 * 1024 * 1024
         check_native_volume_usage(c)
         check_native_mount_topology(c)
+        check_native_pci(c)
         check_native_network(c)
         check_resource_watch(c)
         workflow = check_native_workflow(c)

@@ -54,6 +54,8 @@ SLAAC = "slaac"
 SLAAC_SERVICE = STATIC_SERVICE + SLAAC
 RDNSS = "slaac-rdnss"
 RDNSS_RECEIPT_FORMAT = 11
+USB_RECEIPT_FORMAT = 12
+USB_INVENTORY = "XhciInventory"
 RDNSS_PROGRAM = "sbin/dhcpcd"
 RDNSS_PACKAGES = {"dhcpcd-10.5.2-r1": (RDNSS_PROGRAM,)}
 RDNSS_ACCOUNT = {
@@ -466,7 +468,7 @@ def prepare_boot_inputs(work, args, *, wired_driver=None, ssh_enabled=False, net
 
 
 def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network_profile, *, core_limits, trial,
-                   require_secure_boot=False, wired_driver=None, ssh_enabled=False):
+                   require_secure_boot=False, wired_driver=None, ssh_enabled=False, usb_profile=None):
     (work / "psios-disk-uuid").write_text(str(instance) + "\n")
     (work / "psios-home-uuid").write_text(str(home_id) + "\n")
     sectors = [str(mib * 2048) for start, size, _ in layout.partitions[1:] for mib in (start, size)]
@@ -478,6 +480,9 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
         files.append(RDNSS_PROGRAM)
     if wired_driver:
         files.append(E1000E_MODULE)
+    if usb_profile:
+        (work / "psios-usb-profile").write_text(usb_profile + "\n")
+        files.append("psios-usb-profile")
     if ssh_enabled:
         boot_scripts.append("ssh")
         files.extend(SSH_PROGRAMS)
@@ -513,6 +518,8 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
         inputs["network_profile"] = network_profile
     if wired_driver:
         inputs["wired_driver"] = wired_driver
+    if usb_profile:
+        inputs["usb_profile"] = usb_profile
     if ssh_enabled:
         inputs["ssh_console"] = SSH_PROFILE
     if core_limits:
@@ -556,11 +563,12 @@ def append_deployment_payload(work, files):
 
 
 def ramfs(work, args, instance, home_id, layout=Layout(), signing=None, network_profile=None, *, core_limits=None,
-          trial=None, wired_driver=None, ssh_enabled=False):
+          trial=None, wired_driver=None, ssh_enabled=False, usb_profile=None):
     base = prepare_boot_inputs(work, args, wired_driver=wired_driver, ssh_enabled=ssh_enabled,
                                network_profile=network_profile)
     assemble_ramfs(work, args, base, instance, home_id, layout, signing, network_profile,
-                   core_limits=core_limits, trial=trial, wired_driver=wired_driver, ssh_enabled=ssh_enabled)
+                   core_limits=core_limits, trial=trial, wired_driver=wired_driver, ssh_enabled=ssh_enabled,
+                   usb_profile=usb_profile)
 
 
 def seeded_ext4(work, name, label, identity, size_mib, seed, owners):
@@ -652,8 +660,15 @@ def parse_receipt(raw):
     if isinstance(prior, dict) and (prior.get("format") == TRIAL_RECEIPT_FORMAT or "boot_mode" in prior):
         raise ValueError("isolated trial disks cannot be upgrade sources; use the original stopped deployment")
     if (not isinstance(prior, dict) or type(prior.get("format")) is not int
-            or prior["format"] not in (*range(1, 7), *extended_formats)):
+            or prior["format"] not in (*range(1, 7), *extended_formats, USB_RECEIPT_FORMAT)):
         raise ValueError("unsupported previous build receipt format")
+    previous_format = prior["format"]
+    if previous_format == USB_RECEIPT_FORMAT:
+        if prior.get("usb_profile") != USB_INVENTORY:
+            raise ValueError("invalid USB profile in previous build receipt")
+        previous_format = base_receipt_format(prior)
+    elif "usb_profile" in prior:
+        raise ValueError("USB profile requires build receipt format 12")
     for name, pattern in (("source_commit", r"[0-9a-f]{40}"), ("efi_application_sha256", r"[0-9a-f]{64}")):
         if not isinstance(prior.get(name), str) or not re.fullmatch(pattern, prior[name]):
             raise ValueError(f"invalid previous build receipt field {name}")
@@ -664,7 +679,7 @@ def parse_receipt(raw):
     if prior["state_uuid"] == prior["home_uuid"]:
         raise ValueError("previous deployment filesystems have identical UUIDs")
     layout = Layout()
-    if prior["format"] >= 2:
+    if previous_format >= 2:
         geometry = prior.get("geometry_mib")
         if not isinstance(geometry, dict) or set(geometry) != {"state_mib", "home_mib", "image_mib"}:
             raise ValueError("invalid previous build receipt geometry")
@@ -673,34 +688,34 @@ def parse_receipt(raw):
             raise ValueError("invalid previous build receipt image size")
     profiles = {4: (STATIC_IPV4,), 5: (STATIC_IPV6, STATIC_DUAL), SLAAC_RECEIPT_FORMAT: (SLAAC,),
                 RDNSS_RECEIPT_FORMAT: (RDNSS,)}
-    if prior["format"] in profiles:
-        if prior.get("network_profile") not in profiles[prior["format"]]:
+    if previous_format in profiles:
+        if prior.get("network_profile") not in profiles[previous_format]:
             raise ValueError("invalid network profile in previous build receipt")
     elif "network_profile" in prior:
         ssh_profiles = E1000E_STATIC_MODES if "wired_driver" in prior else VIRTIO_STATIC_MODES
         supported = {6: VIRTIO_STATIC_MODES, E1000E_RECEIPT_FORMAT: E1000E_STATIC_MODES,
                      SSH_RECEIPT_FORMAT: ssh_profiles}
         profile = prior["network_profile"]
-        if not isinstance(profile, str) or profile not in supported.get(prior["format"], {}):
+        if not isinstance(profile, str) or profile not in supported.get(previous_format, {}):
             raise ValueError("invalid network profile in previous build receipt")
-    if prior["format"] == E1000E_RECEIPT_FORMAT or (
-            prior["format"] == SSH_RECEIPT_FORMAT and "wired_driver" in prior):
+    if previous_format == E1000E_RECEIPT_FORMAT or (
+            previous_format == SSH_RECEIPT_FORMAT and "wired_driver" in prior):
         if prior.get("wired_driver") != "e1000e":
             raise ValueError("invalid wired driver in previous native build receipt")
     elif "wired_driver" in prior:
         raise ValueError("wired driver evidence requires build receipt format 8 or 9")
-    if prior["format"] == SSH_RECEIPT_FORMAT or (
-            prior["format"] in (SLAAC_RECEIPT_FORMAT, RDNSS_RECEIPT_FORMAT) and "ssh_console" in prior):
+    if previous_format == SSH_RECEIPT_FORMAT or (
+            previous_format in (SLAAC_RECEIPT_FORMAT, RDNSS_RECEIPT_FORMAT) and "ssh_console" in prior):
         if prior.get("ssh_console") != SSH_PROFILE:
             raise ValueError("invalid SSH console in previous build receipt")
     elif "ssh_console" in prior:
         raise ValueError("SSH console evidence requires build receipt format 9, 10 or 11")
     limits = None
-    if prior["format"] == 6 or (prior["format"] in extended_formats and "core_limits" in prior):
+    if previous_format == 6 or (previous_format in extended_formats and "core_limits" in prior):
         limits = CoreLimits.from_receipt(prior.get("core_limits"))
     elif "core_limits" in prior:
         raise ValueError("Core resource limits require build receipt format 6, 8, 9, 10 or 11")
-    if prior["format"] == 3 or (prior["format"] >= 4 and "secure_boot" in prior):
+    if previous_format == 3 or (previous_format >= 4 and "secure_boot" in prior):
         trust = prior.get("secure_boot")
         if (not isinstance(trust, dict) or set(trust) != {"scheme", "certificate_sha256", "efi_stub_sha256"}
                 or trust["scheme"] != boot_media.SECURE_BOOT_SCHEME or any(
@@ -886,6 +901,10 @@ def prepare_trial_disk(work, disk, layout, configuration, *, secure_boot_require
 
 
 def production_receipt_format(properties):
+    return USB_RECEIPT_FORMAT if "usb_profile" in properties else base_receipt_format(properties)
+
+
+def base_receipt_format(properties):
     if properties.get("network_profile") == RDNSS:
         return RDNSS_RECEIPT_FORMAT
     if properties.get("network_profile") == SLAAC:
@@ -897,7 +916,10 @@ def production_receipt_format(properties):
     if "core_limits" in properties:
         return 6
     static_formats = {STATIC_IPV4: 4, STATIC_IPV6: 5, STATIC_DUAL: 5}
-    return static_formats.get(properties.get("network_profile"), 3 if "secure_boot" in properties else 2)
+    profile = properties.get("network_profile")
+    if isinstance(profile, str) and profile in static_formats:
+        return static_formats[profile]
+    return 3 if "secure_boot" in properties else 2
 
 
 def finish_disk(work, disk, output, *, signing, upgrade):
@@ -922,7 +944,7 @@ def finish_disk(work, disk, output, *, signing, upgrade):
         "efi_application_sha256": sha256(efi), "installed_initramfs_sha256": sha256(work / "initrd"),
         "initial_image_sha256": sha256(disk),
     }
-    for name in ("secure_boot", "network_profile", "wired_driver", "core_limits", "ssh_console"):
+    for name in ("secure_boot", "network_profile", "wired_driver", "core_limits", "ssh_console", "usb_profile"):
         if name in manifest:
             receipt[name] = manifest[name]
     if "boot_mode" in manifest:
@@ -971,6 +993,7 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
     wired_driver = prior.get("wired_driver")
     ssh_enabled = "ssh_console" in prior
     network_profile = prior.get("network_profile")
+    usb_profile = prior.get("usb_profile")
     base = prepare_boot_inputs(candidate_work, args, wired_driver=wired_driver, ssh_enabled=ssh_enabled,
                                network_profile=network_profile)
     (trial_work / "bin").mkdir()
@@ -989,7 +1012,7 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
     for directory, mode in ((candidate_work, None), (trial_work, trial)):
         assemble_ramfs(directory, args, base, instance, home_id, layout, signing, network_profile,
                        core_limits=core_limits, trial=mode, wired_driver=wired_driver, ssh_enabled=ssh_enabled,
-                       require_secure_boot=signing is not None and mode is None)
+                       require_secure_boot=signing is not None and mode is None, usb_profile=usb_profile)
     candidate_manifest = json.loads((candidate_work / "psios-deployment.json").read_bytes())
     trial_manifest = json.loads((trial_work / "psios-deployment.json").read_bytes())
     del trial_manifest["boot_mode"], trial_manifest["trial_disk_uuid"]
@@ -1026,6 +1049,7 @@ def build(args):
         network_profile = args.network_profile
         wired_driver = args.wired_driver
         ssh_enabled = args.ssh_authorized_key is not None
+        usb_profile = USB_INVENTORY if args.usb_inventory else None
         core_limits = args.core_limits
         signing = None
         if args.secure_boot_key:
@@ -1036,6 +1060,7 @@ def build(args):
             network_profile = prior.get("network_profile")
             wired_driver = prior.get("wired_driver")
             ssh_enabled = "ssh_console" in prior
+            usb_profile = prior.get("usb_profile")
             if prior.get("secure_boot") and (signing is None or
                     signing.certificate_sha256 != prior["secure_boot"]["certificate_sha256"]):
                 raise ValueError("a Secure Boot upgrade requires the existing signing certificate")
@@ -1051,7 +1076,7 @@ def build(args):
             new_disk(work, disk, args, instance, home_id, layout)
         disk.chmod(0o600)
         ramfs(work, args, instance, home_id, layout, signing, network_profile, core_limits=core_limits,
-              trial=trial, wired_driver=wired_driver, ssh_enabled=ssh_enabled)
+              trial=trial, wired_driver=wired_driver, ssh_enabled=ssh_enabled, usb_profile=usb_profile)
         upgrade = None
         if prior:
             upgrade = {
@@ -1087,6 +1112,8 @@ def main():
                         help="authority database and journals to copy during upgrade (default 64 MiB)")
     parser.add_argument("--root-console-hash", type=Path, help="optional private hash for local system administration; default locks root")
     parser.add_argument("--ssh-authorized-key", type=Path, help="authorize an Ed25519 public key for the psios SSH console")
+    parser.add_argument("--usb-inventory", action="store_true",
+                        help="enumerate PCI xHCI USB devices on a new disk with device authorization disabled")
     boot_media.add_signing_arguments(parser)
     network = parser.add_mutually_exclusive_group()
     network.add_argument("--dhcp-mac", type=unicast_mac, help="enable IPv4 DHCP on the matching NIC of a new disk")
@@ -1151,6 +1178,8 @@ def main():
         parser.error("upgrade requires --previous-receipt and preserves console credentials and network configuration")
     if args.upgrade_from and (args.state_mib is not None or args.home_mib is not None):
         parser.error("upgrade preserves the partition sizes from its previous build receipt")
+    if args.upgrade_from and args.usb_inventory:
+        parser.error("upgrade preserves the USB profile from its previous build receipt")
     if args.console_hash and args.previous_receipt:
         parser.error("--previous-receipt requires --upgrade-from")
     if args.trial_boot and not args.upgrade_from:

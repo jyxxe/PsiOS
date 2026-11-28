@@ -18,6 +18,8 @@ VERIFIED_CORE_SHA256 是上述完整归档核验后记录的 SHA-256。
 
 将 node-build.json 保存在节点外。首次启动前可核对 initial_image_sha256，
 启动后可核对 /psios-deployment.json 的 SHA-256 和记录的 Core 修订。
+新盘可传入 --usb-inventory，启用 PCI xHCI 枚举并将新增 USB 设备保持未授权。
+停机升级沿用构建回执中记录的 USB 配置。
 新盘可用 --state-mib 与 --home-mib 分别设置状态分区和主目录容量。
 默认及最小容量为 192 MiB 和 64 MiB，整盘上限为 8192 MiB。
 构建回执和来宾部署清单记录 geometry_mib。

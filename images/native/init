@@ -224,6 +224,21 @@ for requires_secure_boot in /psios-secure-boot-required /psios-trial-secure-boot
 done
 payload_verified=yes
 "$bb" hostname psios
+if [ -e /psios-usb-profile ] || [ -L /psios-usb-profile ]; then
+    stage=usb-inventory
+    [ -f /psios-usb-profile ] && [ ! -L /psios-usb-profile ] || exit 1
+    "$bb" grep -Eq '^[0-9a-f]{64}  /psios-usb-profile$' /psios-payload.sha256
+    printf 'XhciInventory\n' | "$bb" cmp -s - /psios-usb-profile
+    # Load the USB core with its authorization policy before any controller
+    # can configure a device, including devices attached before boot.
+    [ ! -e /sys/module/usbcore ] || exit 1
+    /usr/sbin/modprobe usbcore authorized_default=0
+    /usr/sbin/modprobe xhci_pci
+    for hub in /sys/bus/usb/devices/usb*; do
+        [ -e "$hub" ] || continue
+        [ "$(cat "$hub/authorized_default")" = 0 ] || exit 1
+    done
+fi
 if [ -f /psios-core-limits ]; then
     stage=core-resource-limits
     /bin/sh /psios-core-cgroup setup

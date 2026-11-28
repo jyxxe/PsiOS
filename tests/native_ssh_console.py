@@ -51,7 +51,10 @@ def exercise(args, work):
     unknown = client_key(work, "unknown")
     auth = key.with_suffix(".pub")
     common = ["--kernel-iso", args.kernel_iso, "--core-archive", args.archive, "--core-sha256", sha(args.archive)]
-    factory = ["--console-hash", console_hash, "--root-console-hash", root_hash, "--dhcp-mac", MAC]
+    factory = ["--console-hash", console_hash, "--root-console-hash", root_hash,
+               "--dhcp-mac", MAC, "--dhcp-driver", args.dhcp_driver]
+    guest = {"disk_bus": args.disk_bus, "network_mac": MAC, "pace_commands": True,
+             "network_model": "e1000e" if args.dhcp_driver == "e1000e" else "virtio-net-pci"}
     image = work / "ssh.raw"
     refused_path = work / "invalid.raw"
     malformed = work / "invalid.pub"
@@ -66,6 +69,7 @@ def exercise(args, work):
                                    "--ssh-authorized-key", auth], timeout=160)
     receipt = json.loads(raw)
     assert (receipt["format"], receipt["ssh_console"]) == (9, "Ed25519Operator"), receipt
+    assert receipt.get("wired_driver") == ("e1000e" if args.dhcp_driver == "e1000e" else None), receipt
     receipt_path = work / "ssh.json"
     receipt_path.write_bytes(raw)
     stage = work / "install-source"
@@ -84,7 +88,7 @@ def exercise(args, work):
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
     trusted = work / "known_hosts"
-    with boot(work, image, network_mac=MAC, ssh_port=port, pace_commands=True) as console:
+    with boot(work, image, ssh_port=port, **guest) as console:
         console.login("psios", operator)
         check_lease(console)
         host_key = serial_host_key(console)
@@ -106,7 +110,7 @@ def exercise(args, work):
         console.vm.kill()
         console.vm.wait(15)
 
-    with boot(work, image, network_mac=MAC, ssh_port=port, pace_commands=True) as console:
+    with boot(work, image, ssh_port=port, **guest) as console:
         console.login("psios", operator)
         check_lease(console)
         assert serial_host_key(console) == host_key
@@ -115,7 +119,7 @@ def exercise(args, work):
         assert call(console, "Task.Wait", {"id": task, "timeout_ms": 5000})["result"] == result["result"]
         shutdown(console, admin, image)
 
-    with boot(work, clone, network_mac=MAC, pace_commands=True) as console:
+    with boot(work, clone, **guest) as console:
         console.login("psios", operator)
         assert serial_host_key(console) != host_key
         shutdown(console, admin, clone)
@@ -140,7 +144,8 @@ def exercise(args, work):
                                        "--upgrade-from", image, "--previous-receipt", receipt_path], timeout=360)
         observed = json.loads(raw)
     assert observed["ssh_console"] == receipt["ssh_console"] and sha(image) == original
-    with boot(work, upgraded, network_mac=MAC, ssh_port=port, pace_commands=True) as console:
+    assert observed.get("wired_driver") == receipt.get("wired_driver")
+    with boot(work, upgraded, ssh_port=port, **guest) as console:
         console.login("psios", operator)
         check_lease(console)
         assert serial_host_key(console) == host_key
@@ -158,6 +163,8 @@ if __name__ == "__main__":
     parser.add_argument("--kernel-iso", type=Path, required=True)
     parser.add_argument("--archive", type=Path, required=True)
     parser.add_argument("--staged", action="store_true")
+    parser.add_argument("--dhcp-driver", choices=("virtio", "e1000e"), default="virtio")
+    parser.add_argument("--disk-bus", choices=("virtio", "ahci"), default="virtio")
     parser.add_argument("--installer", type=Path, default=REPO / "images/native/create.py")
     parser.add_argument("--ovmf-dir", type=Path, default=Path("/usr/share/OVMF"))
     args = parser.parse_args()

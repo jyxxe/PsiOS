@@ -163,7 +163,8 @@ jobs:
 
       - name: Authenticate the native SSH console and preserve its host key across recovery and upgrade
         run: |
-          python3 -B tests/native_ssh_console.py --staged --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+          python3 -B tests/native_ssh_console.py --staged --dhcp-driver e1000e --disk-bus ahci \
+            --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
             --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
 
       - name: Recover native authority enrollment across power cuts

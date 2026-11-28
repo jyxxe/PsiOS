@@ -27,6 +27,14 @@
 - `Task.Wait` 接受 Task 的 `id`、1 至 10000 毫秒的 `timeout_ms` 和可选 `after_version`。传入此前读到的 `task_revision` 可等待新修订。省略时等待 `Succeeded`、`Failed`、`Cancelled`、`Paused`、`WaitingApproval` 或 `WaitingInput`。到期返回最新快照。每次唤醒均复核 `Task.Get` 的同一读取权限，连接关闭会释放名额。CLI 和 Rust SDK 的完成等待使用此接口，等待名额用完时按退避间隔读取任务。
 - 回执丢失后，`Task.Cancel` 可用当前 Task 修订关闭 `Paused / Unknown` 任务的执行流程。`Task.CancelOrigin` 也可用原始提交的来源、键、摘要和取消范围记录此请求。此时 Task 为 `Cancelled / Unknown`，保留原 Run、Operation、效果证据及资源占用。原 Operation 完成对账时，Task 保持 `Cancelled`，同时更新结果知识并保存已核实的效果。待核实时仍无法重试、归档或回收结果。[真实写入故障后的取消验收](../tests/test_volume_write_reconciliation.py)
 
+### PCI 设备与驱动观测
+
+`node.pci` 是显式授权的只读 Task。向目标 Node 授予 `node.pci`、`task.submit` 和 `task.read`，再提交空参数 `{}`。结果按 PCI 地址排序，记录厂商、设备与子系统标识、类别、修订、上游 PCI 地址及当前绑定的驱动。未绑定驱动的条目中 `driver` 为 `null`。制品记录 Linux 启动 ID 和 Core 的挂载命名空间。
+
+Core 核对本机 sysfs，并比较两次采样中的内核设备目录、设备属性和驱动绑定。最多观测 256 个设备，采样冲突或超限时拒绝发布部分结果。PCI 地址可随设备替换复用。修改设备、驱动生命周期和设备租用需要各自的身份校验和授权。[进程验收](../tests/test_pci_observation.py) · [原生引导验收](../tests/native_disk.py)
+
+提交 `{"limit":16}` 可读取一页，范围为 1 至 32 行，条目编码总量最多 12 KiB。使用返回的 `next_cursor` 继续读取，最后一页返回 `null`。继续时重新核对设备、驱动、启动与挂载命名空间，以及 Node 和委托范围。任一条件变化时返回 `ResyncRequired`，可重新读取第一页。空参数仍返回完整的有界观测。[分页与持久结果验收](../tests/test_mcp_tasks.py)
+
 ### 块设备代次与布局核对
 
 `node.devices` 从已核验的 sysfs 块设备索引读取列表。Core 用主次设备号核对同一内核目录，两次采样一致后才发布。列表带当前 Linux 启动 ID，设备提供 `diskseq` 时也报告该值。设备热插拔、同名替换或属性变化时，冲突会阻止发布不一致的快照。登记和写入继续使用独立的设备代次与授权规则。[真实块设备与挂载隔离验收](../tests/test_block_inventory.py)
@@ -785,6 +793,8 @@ psios-mcp --socket /run/psios/api.sock --service-uid PSIOS_UID \
 格式 138 也允许显式配置 `--tool node.inventory` 或 `--tool node.devices`。它们采用同一个只读 Task 执行路径。根 Grant 或叶 Delegation 须显式列入当前 Node ID。两种 MCP 协议均可直接调用，现代协议启用 Tasks 后也可通过原句柄管理持续运行、查询和取消。大结果沿用适配器的有界响应和系统制品读取接口。[授权、真实诊断和重启验收](../tests/test_mcp_bound_read_tools.py) · [持久 MCP 任务](../tests/test_mcp_tasks.py)
 
 格式 149 可显式配置 `--tool node.resolver`。在当前 Node 的精确授权下，两种协议都可读取 Core 挂载命名空间的解析器配置。工具接受空参数。现代 Tasks 句柄在适配器和 Core 重启后可核对原观测，配置变化后提交新任务即可读取当前值。[MCP 授权与持久结果验收](../tests/test_mcp_tasks.py)
+
+使用 `--tool node.pci` 可在两种 MCP 协议中读取当前 Node 的 PCI 设备页。部署者须指定该 Node 的委托。MCP 空参数返回有界的第一页，`limit` 和 `next_cursor` 沿用 `node.pci` 的系统接口。现代持久句柄可重连读取原页。撤销委托后停止列出工具，并拒绝读取该委托下的 MCP 句柄。[授权、分页及进程恢复验收](../tests/test_mcp_tasks.py)
 
 调用使用正常的 `Task.Prepare`、`Task.Submit`、任务等候和 `Artifact.Read`，并在返回结果前重新核对指定授权。成功结果包含本地 Task ID 和受权结果。提交回执丢失时，SDK 用原始提交键查找已接受的 Task 或核对是否可重试。连接关闭或客户端取消通知不改变已经提交的只读 Task。它可在授权与 30 秒 Task 截止时间内继续，由 Core 保存结果。本地所有者可按原 Task 修订调用 `Task.Cancel`。适配器对结果等待 10 秒，Core Unix 套接字无法立即连接时返回传输错误，连接建立后沿用 SDK 的读写超时。每个 STDIO 连接串行处理，限制单帧 64 KiB，并按秒限制该连接的工具调用次数。
 

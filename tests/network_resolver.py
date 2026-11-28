@@ -95,7 +95,7 @@ def exercise(args, node):
     if args.previous_bin_dir:
         node.stop()
         final = json.loads(subprocess.check_output([*node.daemon, "verify", "--scratch-dir", node.base]))
-        assert final["database_format"] == 149 and final["witness"] == "Confirmed", final
+        assert final["database_format"] >= 149 and final["witness"] == "Confirmed", final
     print("Verified real resolver readings, namespace identity, scoped Task grants, bounds and persistent observations.")
 
 

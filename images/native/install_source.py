@@ -1,11 +1,9 @@
 """Verify and stage the exact factory image for a blank-disk installation."""
-from binascii import crc32
 from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
 import re
-import struct
 import subprocess
 import tempfile
 import uuid
@@ -14,10 +12,9 @@ import create
 
 
 MIB = create.MIB
-SECTOR_BYTES = 512
+SECTOR_BYTES = create.SECTOR_BYTES
 # The protective MBR can address at most 2^32 sectors including LBA zero.
-MAX_TARGET_BYTES = (1 << 32) * SECTOR_BYTES
-GPT_HEADER = struct.Struct("<8sIIIIQQQQ16sQIII")
+MAX_TARGET_BYTES = create.MAX_RAW_BYTES
 RECEIPT_LIMIT = 16 * 1024
 DIRECTORY_LIMIT = 16 * 1024
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -74,46 +71,6 @@ def gpt_identity(table):
     return {"disk_uuid": str(disk), "partitions": partitions}
 
 
-def read_gpt_copy(disk, header_lba, alternate_lba, entries_lba, usable):
-    disk.seek(header_lba * SECTOR_BYTES)
-    sector = disk.read(SECTOR_BYTES)
-    if len(sector) != SECTOR_BYTES:
-        raise ValueError("relocated image has an incomplete GPT header")
-    (signature, revision, size, checksum, reserved, current, alternate, first, last, disk_id,
-     entries, count, entry_size, entries_checksum) = GPT_HEADER.unpack_from(sector)
-    if (signature != b"EFI PART" or revision != 0x10000 or not GPT_HEADER.size <= size <= SECTOR_BYTES
-            or reserved != 0 or (current, alternate, entries) != (header_lba, alternate_lba, entries_lba)
-            or (first, last) != usable or not 0 < count * entry_size <= MIB):
-        raise ValueError("relocated image has a missing or inconsistent GPT header")
-    if crc32(sector[:16] + bytes(4) + sector[20:size]) != checksum:
-        raise ValueError("relocated image has an invalid GPT header checksum")
-    table_bytes = count * entry_size
-    offset = entries_lba * SECTOR_BYTES
-    boundary = (first if header_lba == 1 else header_lba) * SECTOR_BYTES
-    if entry_size < 128 or offset + table_bytes > boundary:
-        raise ValueError("relocated GPT table exceeds its reserved area")
-    disk.seek(offset)
-    partitions = disk.read(table_bytes)
-    if len(partitions) != table_bytes or crc32(partitions) != entries_checksum:
-        raise ValueError("relocated image has an invalid GPT table checksum")
-    return disk_id, count, entry_size, partitions
-
-
-def verify_relocated_gpt(image, target_size, table):
-    """Require two complete GPT copies with matching identities and partition tables."""
-    last_sector = target_size // SECTOR_BYTES - 1
-    usable = table["firstlba"], table["lastlba"]
-    with image.open("rb") as disk:
-        protective = disk.read(SECTOR_BYTES)
-        if (len(protective) != SECTOR_BYTES or protective[510:] != b"\x55\xaa" or protective[450] != 0xEE
-                or struct.unpack_from("<II", protective, 454) != (1, last_sector)):
-            raise ValueError("relocated image has an invalid protective MBR")
-        primary = read_gpt_copy(disk, 1, last_sector, 2, usable)
-        backup = read_gpt_copy(disk, last_sector, 1, usable[1] + 1, usable)
-    if primary != backup or uuid.UUID(bytes_le=primary[0]) != uuid.UUID(table["id"]):
-        raise ValueError("relocated image GPT copies do not agree")
-
-
 def fit_image(work, image, source, target_size):
     """Relocate GPT metadata on a private verified image; retain every partition extent."""
     original_size = source["size_bytes"]
@@ -142,7 +99,7 @@ def fit_image(work, image, source, target_size):
     if ((ready["lastlba"] + 1) * SECTOR_BYTES != new_backup or ready["firstlba"] != old["firstlba"]
             or gpt_identity(ready) != {field: source[field] for field in ("disk_uuid", "partitions")}):
         raise ValueError("relocated GPT does not match the verified factory partition layout")
-    verify_relocated_gpt(image, target_size, ready)
+    create.verify_relocated_gpt(image, target_size, ready)
     image.chmod(0o400)
     return {"size_bytes": target_size, "image_sha256": create.sha256(image), "backup_gpt_offset": new_backup}
 
@@ -251,7 +208,8 @@ def stage_image(work: Path, image: Path, receipt: Path, receipt_sha256: str) -> 
         staged_receipt = scratch / "build-receipt.json"
         create.boot_media.pinned_copy(receipt, staged_receipt, receipt_sha256, RECEIPT_LIMIT)
         manifest, layout, _ = create.read_receipt(staged_receipt)
-        if manifest["format"] < 2 or "upgrade" in manifest or "trial_disk_uuid" in manifest:
+        if (manifest["format"] < 2 or "upgrade" in manifest or "trial_disk_uuid" in manifest
+                or layout.raw_disk_bytes is not None):
             raise ValueError("blank installation requires a supported first-install receipt")
         image_sha256 = digest_field(manifest.get("initial_image_sha256"), "factory image")
         deployment_sha256 = digest_field(manifest.get("deployment_manifest_sha256"), "deployment manifest")

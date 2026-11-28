@@ -5,7 +5,7 @@ use crate::{
     db::{Db, Doc},
     policy, storage, *,
 };
-use psios_api::{BlockInventoryQuery, VERSION};
+use psios_api::{BlockInventoryQuery, DeviceInventoryQuery, VERSION};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{fs::File, path::PathBuf};
@@ -115,6 +115,8 @@ pub enum Action {
     RouteLookup(node::network::LookupQuery),
     #[serde(rename = "node.resolver")]
     Resolver {},
+    #[serde(rename = "node.pci")]
+    Pci(DeviceInventoryQuery),
     #[serde(rename = "node.routing_rules")]
     RoutingRules(node::network::RuleQuery),
     #[serde(rename = "node.network_probe")]
@@ -274,6 +276,7 @@ impl Action {
             Self::RouteLookup(q) => q.validate()?,
             Self::RoutingRules(q) => q.validate()?,
             Self::Devices(q) => node::block::validate_inventory(q)?,
+            Self::Pci(q) => node::pci::validate_inventory(q)?,
             Self::BlockLayout(q) => q.validate()?,
             Self::TrackBlockDevice(q) => q.validate()?,
             Self::ServiceLogs(q) => q.validate()?,
@@ -476,6 +479,7 @@ impl Action {
             | Self::Routes(_)
             | Self::RouteLookup(_)
             | Self::Resolver {}
+            | Self::Pci(_)
             | Self::RoutingRules(_)
             | Self::Inventory {}
             | Self::Pressure {}
@@ -993,6 +997,7 @@ impl Work {
             | Action::Routes(_)
             | Action::RouteLookup(_)
             | Action::Resolver {}
+            | Action::Pci(_)
             | Action::RoutingRules(_)
             | Action::Mounts {}
             | Action::BlockLayout(_)

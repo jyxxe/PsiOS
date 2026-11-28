@@ -1,17 +1,17 @@
 {
   "document_version": "1.0.0",
-  "checked_at": "2026-11-25T07:40:27.899572+00:00",
+  "checked_at": "2026-11-28T19:09:24.640481+00:00",
   "scope": "DocumentationPackageStaticValidationOnly",
   "result": "Passed",
   "counts": {
     "schema_definitions": 33,
-    "schema_references": 236,
+    "schema_references": 237,
     "positive_examples": 35,
     "negative_examples": 35,
     "digest_vectors": 5,
     "strict_json_files": 116,
     "normative_requirements": 265,
-    "local_markdown_links": 4592,
+    "local_markdown_links": 4593,
     "product_test_plans_not_run": 160,
     "requirements_with_validation_plan": 265,
     "proposed_adrs": 25,
@@ -23,7 +23,8 @@
     "legacy_tests": 141,
     "html_internal_anchors": 1948,
     "html_document_sections": 68,
-    "archived_sources": 14
+    "archived_sources": 14,
+    "manifest_files": 212
   },
   "failures": [],
   "example_results": [

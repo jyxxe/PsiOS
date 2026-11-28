@@ -37,3 +37,7 @@
 - 说明能力发现、拟定逻辑操作、来源关联、幂等回执、预授权与断线恢复；复用 Application/Release/Deployment、Task/Operation 和现有权限模型。
 - 新增 WI-028 与 AT-AIF-001～010，优先静态 Web/OCI；接入消息 Schema、运行实现和验收仍待完成。
 - 同步架构、接口目录、任务结果边界、实现差距及派生文档；明确 GitHub 当前文档为唯一权威，历史 ZIP 保持不变。文档版本为 1.0.0，新增功能为 NotVerified/NotRun。
+
+## OCI 私有运行目录（2026-11-28）
+
+Release 资源规格新增可选 `run_max_bytes`，用于声明独立的 `/run` 临时空间。旧规格可继续验证。该字段按字节编码，具体页对齐、临时目录上限和运行身份由适用的 Runtime Profile 校验。此修订对应 AT-STA-013 中的临时挂载要求。[Release 资源规格](schemas/application-release-spec.schema.json)

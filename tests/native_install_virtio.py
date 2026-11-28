@@ -91,6 +91,46 @@ print(json.dumps(dict(
 )))
 """
 
+# Linux normally discards namespace identifiers exposed by QEMU's emulated
+# controller. Reprobe only the identified disposable fixture controller with
+# generic PCI properties so the installed kernel can read the configured EUI.
+REPROBE_NVME_FIXTURE = """
+from pathlib import Path
+import sys
+import time
+
+bdf, serial, eui = sys.argv[1:]
+driver = Path("/sys/bus/pci/drivers/nvme")
+device = (driver / bdf).resolve(strict=True)
+assert bdf in ("0000:00:07.0", "0000:00:08.0")
+assert (device / "driver").resolve(strict=True) == driver
+assert (device / "vendor").read_text().strip() == "0x1b36"
+assert (device / "device").read_text().strip() == "0x0010"
+
+def identity():
+    controller, = (device / "nvme").glob("nvme[0-9]*")
+    assert (controller / "serial").read_text().strip() == serial
+    assert (controller / "model").read_text().strip() == "QEMU NVMe Ctrl"
+    return (controller / (controller.name + "n1") / "wwid").read_text().strip()
+
+old = identity()
+if old != eui:
+    assert old.startswith("nvme."), old
+    (driver / "new_id").write_text("1b36 0010 ffffffff ffffffff 0 0 0\\n")
+    (driver / "unbind").write_text(bdf + "\\n")
+    (driver / "bind").write_text(bdf + "\\n")
+    for _ in range(100):
+        try:
+            if identity() == eui:
+                break
+        except (FileNotFoundError, ValueError):
+            pass
+        time.sleep(.1)
+    else:
+        raise AssertionError("Linux did not expose the configured fixture EUI")
+print(eui)
+"""
+
 
 def remote(run, *args, **options):
     return run(shlex.join(map(str, args)), **options)
@@ -377,6 +417,14 @@ def install_journal(run):
     return remote(run, "sudo", "-n", "cat", OPERATION / "operation.json").stdout
 
 
+def recognize_nvme_fixture(run, *, moved=False):
+    bdf = "0000:00:08.0" if moved else "0000:00:07.0"
+    eui = "eui." + NVME_RECOVERY_EUI
+    report = remote(run, "sudo", "-n", "python3", "-B", "-c", REPROBE_NVME_FIXTURE,
+                    bdf, TARGET_SERIAL, eui, timeout=45)
+    assert report.stdout.strip() == eui, report
+
+
 def interrupt_install_receipt(run, planned, target, expected_image):
     approval = planned["plan_digest"]
     premature = recover_install(run, approval, target, check=False)
@@ -411,6 +459,8 @@ def check_reboot_reconciliation(instance, key, launch, target, source, receipt, 
     assert damaged != expected_image
     refused_serial = NVME_WEAK_SERIAL if bus == "nvme" else COLLISION_SERIAL + "0"
     with boot_ubuntu(instance, key, 2, launch=launch) as run:
+        if bus == "nvme":
+            recognize_nvme_fixture(run)
         journal = install_journal(run)
         approval = json.loads(journal)["plan_digest"]
         device = json.loads(remote(run, "python3", "-c", PROBE_DEVICE, bus, TARGET_SERIAL).stdout)
@@ -445,6 +495,8 @@ def check_reboot_reconciliation(instance, key, launch, target, source, receipt, 
         os.fsync(disk.fileno())
     assert sha(target) == expected_image
     with boot_ubuntu(instance, key, 3, launch=lambda port, log: launch(port, log, move_target=True)) as run:
+        if bus == "nvme":
+            recognize_nvme_fixture(run, moved=True)
         device = json.loads(remote(run, "python3", "-c", PROBE_DEVICE, bus, TARGET_SERIAL).stdout)
         assert device["boot_id"] not in (original["boot_id"], damaged_boot)
         assert device["sysfs_path"] != original["sysfs_path"], (original, device)
@@ -561,6 +613,8 @@ def exercise(args, work):
         run("test -d /sys/firmware/efi")
         package = remote(run, "dpkg-query", "-W", "-f=${Version}", "psios-core").stdout.strip()
         assert package == manifest["package_version"], package
+        if recovery_fallback is not None:
+            recognize_nvme_fixture(run)
         control = instance / "control.sock" if replacement is not None else None
         evidence, installed_digest = install_in_guest(run, args.tool_deb, work, image, receipt, source_digest,
                                                       blank, args.target_bus, target_size, control,

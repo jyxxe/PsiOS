@@ -1,5 +1,6 @@
 """Boot an installed UEFI disk with real DHCP inside a private host network namespace."""
 import argparse
+from ipaddress import IPv6Address
 import json
 from pathlib import Path
 import shutil
@@ -12,7 +13,7 @@ from native_disk import REPO, boot, call, check_clean_shutdown, password, sha
 MAC = "52:54:00:51:6f:20"
 OTHER = "52:54:00:51:6f:21"
 IPV6_PREFIX = "2001:db8:70::/64"
-IPV6_ADDRESS = "2001:db8:70::5054:ff:fe51:6f20"
+IPV6_ADDRESS = IPv6Address("2001:db8:70::5054:ff:fe51:6f20")
 
 
 def wait_for(c, command):
@@ -33,8 +34,10 @@ def check_lease(c):
 def check_slaac(c):
     wait_for(c, 'flags=$(awk \'$1 == "20010db800700000505400fffe516f20" && $6 == "eth0" {print $5}\' '
                 '/proc/net/if_inet6); test -n "$flags" && test "$((0x$flags & 72))" -eq 0')
-    assert f"{IPV6_ADDRESS}/64" in c.run("busybox ip -6 addr show dev eth0")
-    assert "default via fe80::2 dev eth0" in c.run("busybox ip -6 route show default")
+    addresses = c.run("busybox ip -6 addr show dev eth0")
+    assert f"{IPV6_ADDRESS}/64" in addresses, addresses
+    routes = c.run("busybox ip -6 route show default")
+    assert "default via fe80::2 dev eth0" in routes, routes
     assert c.run("cat /proc/sys/net/ipv6/conf/eth0/accept_redirects") == "0"
 
 

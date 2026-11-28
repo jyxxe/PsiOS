@@ -53,6 +53,9 @@ enum Cmd {
         /// Allow the paired browser to send plain-text messages through Agent Chat.
         #[arg(long)]
         send_chat: bool,
+        /// Allow the paired browser to accept or return pending PsiFlow evidence.
+        #[arg(long)]
+        review_work_items: bool,
     },
     Status {
         #[arg(long, default_value = "owner-delegation")]
@@ -905,7 +908,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::Shell {
             cancel_pending_tasks,
             send_chat,
-        } => return shell::run(c, cancel_pending_tasks, send_chat),
+            review_work_items,
+        } => return shell::run(c, cancel_pending_tasks, send_chat, review_work_items),
         Cmd::ModelStep {
             session,
             key,

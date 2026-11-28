@@ -174,7 +174,8 @@ def activation_context(directory, existing, path, expected):
         managed = fd_path(activation) / DISK
         size = deployment["size_bytes"]
         sources = []
-        hold_source(custody, sources, original, deployment["source_sha256"], size, deployment["source_identity"])
+        predecessor = deployment["source_identity"]
+        hold_source(custody, sources, original, deployment["source_sha256"], predecessor[2], predecessor)
         managed_identity = hold_source(custody, sources, managed, current["image_sha256"], size)
         hold_variables(custody, sources, activation, current["efi_vars_sha256"])
         previous = check_successor(directory, existing, deployment, custody)

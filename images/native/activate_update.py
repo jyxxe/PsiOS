@@ -17,7 +17,7 @@ import uuid
 
 from activation_guest import artifact_digest, boot_candidate, bound_artifacts, open_file
 from activation_storage import BUILD_RECEIPT, BootStorage
-from create import MIB, boot_media, read_receipt, verified_home_expansion_target
+from create import MIB, Layout, boot_media, read_receipt, verified_home_expansion_target
 from install import (
     JOURNAL, JOURNAL_LIMIT, checked_digest, digest, encode, lock_directory, require, save_operation,
     timestamp, valid_instant,
@@ -91,7 +91,7 @@ def digest_json(path, expected):
     return value
 
 
-def stage_contract(bundle, stage_sha256):
+def stage_contract(bundle, stage_sha256, source_size):
     stage = digest_json(bundle / "staged-update.json", stage_sha256)
     require(stage.get("format") == 1 and stage.get("status") == "Staged"
             and stage.get("rollback_mode") == "ManualRecoveryOnly",
@@ -110,6 +110,14 @@ def stage_contract(bundle, stage_sha256):
         require((expanded_home is None and "expand_home_mib" not in inputs)
                 or (type(requested_home) is int and requested_home == expanded_home),
                 "staged home expansion does not match the candidate geometry")
+        require(type(source_size) is int, "original disk size is invalid")
+        source_layout = layout
+        if expanded_home is not None:
+            previous_home = upgrade["home_expansion"]["previous_mib"]
+            source_layout = Layout(layout.state_mib, previous_home).for_source(source_size)
+            require(source_layout.with_expanded_home(expanded_home) == layout,
+                    "original disk size does not match the staged home expansion")
+        require(source_size == source_layout.disk_bytes, "original disk size differs from the staged update")
         source_authority = upgrade["verified_authority"]
         require(receipt == parsed
                 and receipt["initial_image_sha256"] == candidate["image_sha256"]
@@ -183,6 +191,9 @@ def read_operation(directory, name=JOURNAL):
             and isinstance(entry.get("plan"), dict) and entry.get("plan_digest") == digest(entry["plan"])
             and entry["plan"].get("action") == "ManagedNativeFirstBoot",
             "managed activation journal is invalid")
+    source = entry["plan"].get("source_identity")
+    require(isinstance(source, list) and len(source) == 5 and all(type(value) is int for value in source),
+            "managed activation journal has invalid original disk evidence")
     if entry["status"] != "BootPending":
         require(valid_instant(entry.get("boot_issued_at")), "activation lacks its boot witness")
     if entry["status"] == "BootVerified":
@@ -230,8 +241,9 @@ def prepare(directory, args):
             "cannot prepare a plan after a boot has been issued")
     bundle = args.stage_dir.absolute()
     original = args.source_disk.absolute()
-    accepted = stage_contract(bundle, checked_digest(args.stage_receipt_sha256))
-    with stopped_source(original, accepted["source_sha256"], accepted["size_bytes"]) as frozen:
+    source_size = original.stat(follow_symlinks=False).st_size
+    accepted = stage_contract(bundle, checked_digest(args.stage_receipt_sha256), source_size)
+    with stopped_source(original, accepted["source_sha256"], source_size) as frozen:
         facts = {**accepted, "action": "ManagedNativeFirstBoot", "stage_dir": str(bundle),
                  "source_disk": str(original), "source_identity": frozen}
         if existing is not None:
@@ -326,13 +338,14 @@ def activate(directory, work, args):
     original, bundle = Path(plan["source_disk"]), Path(plan["stage_dir"])
     disk, code, variables = (work / name for name in (DISK, CODE, VARS))
     size = plan["size_bytes"]
-    accepted = stage_contract(bundle, plan["stage_receipt_sha256"])
+    source_size = plan["source_identity"][2]
+    accepted = stage_contract(bundle, plan["stage_receipt_sha256"], source_size)
     require(all(plan.get(key) == value for key, value in accepted.items()), "staged update differs from plan")
     require(file_sha256(bundle / "candidate.raw", size) == plan["candidate_sha256"],
             "managed boot inputs changed after planning")
     secret = secret_at(args.root_console_password_file)
 
-    with stopped_source(original, plan["source_sha256"], size, plan["source_identity"]) as frozen:
+    with stopped_source(original, plan["source_sha256"], source_size, plan["source_identity"]) as frozen:
         return activate_frozen(directory, work, entry, original, frozen, (disk, code, variables), secret)
 
 

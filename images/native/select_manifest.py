@@ -149,7 +149,8 @@ def prepare_activation(directory, activation_dir, receipt_digest):
             "managed selection requires a complete BootVerified receipt")
     activation = entry["plan"]
     stage = Path(activation["stage_dir"])
-    accepted = stage_contract(stage, checked_digest(activation["stage_receipt_sha256"]))
+    source_size = activation["source_identity"][2]
+    accepted = stage_contract(stage, checked_digest(activation["stage_receipt_sha256"]), source_size)
     require(all(activation.get(key) == value for key, value in accepted.items()),
             "activation no longer matches the approved staged update")
     size = accepted["size_bytes"]

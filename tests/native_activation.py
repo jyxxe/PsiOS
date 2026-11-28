@@ -370,8 +370,16 @@ def verify_expansion_contract(activator, fixture, candidate):
 
     assert candidate["upgrade"]["home_expansion"] == {"previous_mib": 64, "target_mib": 192}
     assert candidate["geometry_mib"]["home_mib"] == 192
-    checked = stage_contract(fixture.stage, fixture.stage_digest)
+    source_size = fixture.source.stat().st_size
+    checked = stage_contract(fixture.stage, fixture.stage_digest, source_size)
     assert checked["size_bytes"] == (fixture.stage / "candidate.raw").stat().st_size
+    assert source_size < checked["size_bytes"], (source_size, checked["size_bytes"])
+    try:
+        stage_contract(fixture.stage, fixture.stage_digest, checked["size_bytes"] + 512)
+    except ValueError as error:
+        assert "original disk size does not match the staged home expansion" in str(error), error
+    else:
+        raise AssertionError("activation accepted a source larger than the approved candidate")
     stage_path = fixture.stage / "staged-update.json"
     authentic = stage_path.read_bytes()
     changed = json.loads(authentic)
@@ -381,7 +389,7 @@ def verify_expansion_contract(activator, fixture, candidate):
             changed["inputs"]["expand_home_mib"] = requested
             stage_path.write_text(json.dumps(changed))
             try:
-                stage_contract(fixture.stage, sha(stage_path))
+                stage_contract(fixture.stage, sha(stage_path), source_size)
             except ValueError as error:
                 assert "home expansion does not match the candidate geometry" in str(error), error
             else:
@@ -390,12 +398,26 @@ def verify_expansion_contract(activator, fixture, candidate):
         stage_path.write_bytes(authentic)
 
 
-def verify_expanded_activation(fixture, work, candidate, prior):
+def verify_expanded_activation(fixture, work, selector, candidate, prior):
     state = work / "expanded-activation"
     plan = fixture.planned(state)
+    evidence = plan["plan"]
+    assert evidence["source_identity"][2] == fixture.source.stat().st_size
+    assert evidence["size_bytes"] == (fixture.stage / "candidate.raw").stat().st_size
     report = json.loads(succeeded(invoke(fixture.apply(state, plan["plan_digest"]), 300)))
     assert report["status"] == "BootVerified" and report["proof"]["node_id"] == prior[0], report
     assert report["proof"]["deployment_manifest_sha256"] == candidate["deployment_manifest_sha256"], report
+    selected_state = work / "expanded-selection"
+    selected_state.mkdir(mode=0o700)
+    select = [sys.executable, "-B", selector]
+    adoption = json.loads(succeeded(invoke([*select, "plan", "--state-dir", selected_state,
+        "--activation-dir", state, "--activation-receipt-sha256", sha(state / JOURNAL),
+        "--expected-generation", "0"], 130)))
+    selected = json.loads(succeeded(invoke([*select, "adopt", "--state-dir", selected_state,
+        "--plan-digest", adoption["plan_digest"]], 170)))
+    assert selected["status"] == "Selected" and selected["proof"] == report["proof"], selected
+    assert selected["deployment"]["source_identity"] == evidence["source_identity"], selected
+    assert selected["deployment"]["size_bytes"] == evidence["size_bytes"], selected
     return state
 
 
@@ -540,10 +562,10 @@ def exercise(args, work):
             verify_guest(work, stage / "candidate.raw", code, vars_file, operator, admin, candidate, prior, token)
             print("PASS isolated trial and candidate boot with verified expansion lineage")
         else:
-            state = verify_expanded_activation(fixture, work, candidate, prior)
+            state = verify_expanded_activation(fixture, work, args.selector, candidate, prior)
             verify_guest(work, state / "managed.raw", state / "managed-ovmf-code.fd", state / "managed-efi-vars.fd",
                          operator, admin, candidate, prior, token)
-            print("PASS activated the expanded native home with the original Task")
+            print("PASS activated and selected the expanded native home with the original Task")
         verify_guest(work, old, code, vars_file, operator, admin, old_build, prior, token)
         assert digest_map(frozen) == frozen and digest_map(bundle) == bundle
         print("PASS original home and source inputs remained independently bootable and unchanged")

@@ -1105,6 +1105,7 @@ jobs:
           python3 -B tests/native_activation.py --expand-home --kernel-iso "$RUNNER_TEMP/kernel.iso" \
             --archive "$archive" --previous-archive "$archive" --controller "$native/stage_update.py" \
             --activator "$native/activate_update.py" --previous-installer "$native/create.py" \
+            --selector "$native/select_update.py" \
             --work-parent "$RUNNER_TEMP"
 
   package-provenance:

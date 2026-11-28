@@ -121,7 +121,7 @@ class Console:
 def boot(work, image, network_mac=None, extra_disk=None, tap=None, *, rtc_base=None,
          disk_format="raw", vars_file="vars.fd", vcpus=2, pace_commands=False,
          disk_bus="virtio", extra_bus="virtio", network_model="virtio-net-pci",
-         ipv6_network=None, ssh_port=None):
+         ipv6_network=None, ssh_port=None, usb_control=False):
     # The privileged TAP fixture has a reproducible serial stall on hosted KVM.
     # Use a portable CPU emulator for that fixture; keep its real virtio and TAP.
     accel = "kvm" if tap is None and os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"
@@ -132,6 +132,8 @@ def boot(work, image, network_mac=None, extra_disk=None, tap=None, *, rtc_base=N
            "-drive", f"if=pflash,format=raw,unit=1,file={vars_file}"]
     if rtc_base is not None:
         cmd += ["-rtc", f"base={rtc_base},clock=vm"]
+    if usb_control:
+        cmd += ["-device", "qemu-xhci,id=psios-usb", "-qmp", "unix:usb-control.sock,server=on,wait=off"]
     if extra_disk is not None or disk_bus != "virtio":
         cmd += ["-boot", "strict=on"]
         if extra_disk is not None:

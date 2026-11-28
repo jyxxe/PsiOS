@@ -117,6 +117,8 @@ pub enum Action {
     Resolver {},
     #[serde(rename = "node.pci")]
     Pci(DeviceInventoryQuery),
+    #[serde(rename = "node.usb")]
+    Usb(DeviceInventoryQuery),
     #[serde(rename = "node.routing_rules")]
     RoutingRules(node::network::RuleQuery),
     #[serde(rename = "node.network_probe")]
@@ -277,6 +279,7 @@ impl Action {
             Self::RoutingRules(q) => q.validate()?,
             Self::Devices(q) => node::block::validate_inventory(q)?,
             Self::Pci(q) => node::pci::validate_inventory(q)?,
+            Self::Usb(q) => node::usb::validate_inventory(q)?,
             Self::BlockLayout(q) => q.validate()?,
             Self::TrackBlockDevice(q) => q.validate()?,
             Self::ServiceLogs(q) => q.validate()?,
@@ -480,6 +483,7 @@ impl Action {
             | Self::RouteLookup(_)
             | Self::Resolver {}
             | Self::Pci(_)
+            | Self::Usb(_)
             | Self::RoutingRules(_)
             | Self::Inventory {}
             | Self::Pressure {}
@@ -998,6 +1002,7 @@ impl Work {
             | Action::RouteLookup(_)
             | Action::Resolver {}
             | Action::Pci(_)
+            | Action::Usb(_)
             | Action::RoutingRules(_)
             | Action::Mounts {}
             | Action::BlockLayout(_)

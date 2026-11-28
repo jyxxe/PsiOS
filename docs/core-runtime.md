@@ -35,6 +35,12 @@ Core 核对本机 sysfs，并比较两次采样中的内核设备目录、设备
 
 提交 `{"limit":16}` 可读取一页，范围为 1 至 32 行，条目编码总量最多 12 KiB。使用返回的 `next_cursor` 继续读取，最后一页返回 `null`。继续时重新核对设备、驱动、启动与挂载命名空间，以及 Node 和委托范围。任一条件变化时返回 `ResyncRequired`，可重新读取第一页。空参数仍返回完整的有界观测。[分页与持久结果验收](../tests/test_mcp_tasks.py)
 
+### USB 总线与端口观测
+
+`node.usb` 读取当前 Linux 节点的 USB 根集线器和物理设备。主体需要指定 Node 的 `node.usb`、`task.submit` 和 `task.read` 授权。结果给出总线、内核分配的设备地址、包含父级的端口位置、厂商和产品 ID、协议类别、协商速率以及内核授权状态。报告省略设备序列号和接口程序。
+
+空输入返回首个有界页面。每页最多 32 行和 12 KiB，整次观测最多 256 个设备。`next_cursor` 绑定具体启动、挂载命名空间、Node、主体及委托。Core 比较两次 sysfs 观测和内核对象身份。同端口换设备或其他观测变化后，旧游标返回 `ResyncRequired`，已结算的原制品仍可按原权限读取。Linux 设备控制和租用适用独立能力。[原生 USB 热插拔验收](../tests/native_usb_inventory.py)
+
 ### 块设备代次与布局核对
 
 `node.devices` 从已核验的 sysfs 块设备索引读取列表。Core 用主次设备号核对同一内核目录，两次采样一致后才发布。列表带当前 Linux 启动 ID，设备提供 `diskseq` 时也报告该值。设备热插拔、同名替换或属性变化时，冲突会阻止发布不一致的快照。登记和写入继续使用独立的设备代次与授权规则。[真实块设备与挂载隔离验收](../tests/test_block_inventory.py)
@@ -797,6 +803,8 @@ psios-mcp --socket /run/psios/api.sock --service-uid PSIOS_UID \
 格式 149 可显式配置 `--tool node.resolver`。在当前 Node 的精确授权下，两种协议都可读取 Core 挂载命名空间的解析器配置。工具接受空参数。现代 Tasks 句柄在适配器和 Core 重启后可核对原观测，配置变化后提交新任务即可读取当前值。[MCP 授权与持久结果验收](../tests/test_mcp_tasks.py)
 
 使用 `--tool node.pci` 可在两种 MCP 协议中读取当前 Node 的 PCI 设备页。部署者须指定该 Node 的委托。MCP 空参数返回有界的第一页，`limit` 和 `next_cursor` 沿用 `node.pci` 的系统接口。现代持久句柄可重连读取原页。撤销委托后停止列出工具，并拒绝读取该委托下的 MCP 句柄。[授权、分页及进程恢复验收](../tests/test_mcp_tasks.py)
+
+用 `--tool node.usb` 可在两种 MCP 协议中以同一 Node 委托读取 USB 设备页。使用返回的 `next_cursor` 继续读取。换设备后需从首页重新枚举，已完成的现代 Tasks 句柄可以重新读取原制品。[真实 USB 热插拔与 MCP 验收](../tests/native_usb_inventory.py)
 
 调用使用正常的 `Task.Prepare`、`Task.Submit`、任务等候和 `Artifact.Read`，并在返回结果前重新核对指定授权。成功结果包含本地 Task ID 和受权结果。提交回执丢失时，SDK 用原始提交键查找已接受的 Task 或核对是否可重试。连接关闭或客户端取消通知不改变已经提交的只读 Task。它可在授权与 30 秒 Task 截止时间内继续，由 Core 保存结果。本地所有者可按原 Task 修订调用 `Task.Cancel`。适配器对结果等待 10 秒，Core Unix 套接字无法立即连接时返回传输错误，连接建立后沿用 SDK 的读写超时。每个 STDIO 连接串行处理，限制单帧 64 KiB，并按秒限制该连接的工具调用次数。
 

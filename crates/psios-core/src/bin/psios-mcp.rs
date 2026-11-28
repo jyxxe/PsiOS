@@ -5,9 +5,10 @@ mod modern;
 use clap::{Parser, ValueEnum};
 use psios_api::{
     ApiError, ApiResult, Client, LocalReadBinding, LocalReadTool, LocalReadToolsRequest,
-    MAX_DEVICE_INVENTORY_PAGE, MAX_PCI_INVENTORY_ROWS, MAX_VOLUME_FILE_CHUNK,
-    MAX_VOLUME_FILE_OFFSET, MAX_VOLUME_FILES_PAGE, ResolveLocalReadToolsRequest,
-    ResolvedLocalReadTool, ResourceRef, VolumeFileChunkQuery, VolumeFilesQuery, id, parse,
+    MAX_DEVICE_INVENTORY_PAGE, MAX_PCI_INVENTORY_ROWS, MAX_USB_INVENTORY_ROWS,
+    MAX_VOLUME_FILE_CHUNK, MAX_VOLUME_FILE_OFFSET, MAX_VOLUME_FILES_PAGE,
+    ResolveLocalReadToolsRequest, ResolvedLocalReadTool, ResourceRef, VolumeFileChunkQuery,
+    VolumeFilesQuery, id, parse,
 };
 use rustix::{fs::OFlags, process::geteuid};
 use serde_json::{Map, Value, json};
@@ -77,7 +78,7 @@ struct Options {
 
 fn parse_tool(name: &str) -> Result<LocalReadTool, &'static str> {
     serde_json::from_value(json!(name)).map_err(
-        |_| "expected system.status, node.pressure, node.inventory, node.devices, node.resolver or node.pci",
+        |_| "expected system.status, node.pressure, node.inventory, node.devices, node.resolver, node.pci or node.usb",
     )
 }
 
@@ -319,11 +320,15 @@ impl Adapter {
                     };
                     LocalReadBinding::NodeDevices(query)
                 }
-                LocalReadBinding::NodePci(_) => {
+                LocalReadBinding::NodePci(_) | LocalReadBinding::NodeUsb(_) => {
                     let Ok(query) = serde_json::from_value(Value::Object(args.clone())) else {
                         return Ok(tool_error("InvalidArgument", None));
                     };
-                    LocalReadBinding::NodePci(query)
+                    if matches!(configured, LocalReadBinding::NodePci(_)) {
+                        LocalReadBinding::NodePci(query)
+                    } else {
+                        LocalReadBinding::NodeUsb(query)
+                    }
                 }
                 LocalReadBinding::VolumeFiles { target_id, .. } => {
                     let Ok(query) =
@@ -541,6 +546,9 @@ fn descriptor(tool: &LocalReadBinding, protocol: Protocol) -> Value {
         LocalReadBinding::NodePci(_) => {
             "Read a bounded page of verified PCI devices and their bound Linux drivers on the local node."
         }
+        LocalReadBinding::NodeUsb(_) => {
+            "Read a bounded page of verified USB devices, ports and root hubs on the local node."
+        }
         LocalReadBinding::VolumeUsage { .. } => {
             "Measure file and allocation usage of the configured volume root."
         }
@@ -558,15 +566,13 @@ fn descriptor(tool: &LocalReadBinding, protocol: Protocol) -> Value {
     let mut descriptor = json!({"name":tool.name(),"description":description,
         "inputSchema":{"type":"object","additionalProperties":false},
         "annotations":{"readOnlyHint":true}});
-    if matches!(
-        tool,
-        LocalReadBinding::NodeDevices(_) | LocalReadBinding::NodePci(_)
-    ) {
-        let maximum = if matches!(tool, LocalReadBinding::NodePci(_)) {
-            MAX_PCI_INVENTORY_ROWS - 1
-        } else {
-            1023
-        };
+    let inventory_offset_maximum = match tool {
+        LocalReadBinding::NodeDevices(_) => Some(1023),
+        LocalReadBinding::NodePci(_) => Some(MAX_PCI_INVENTORY_ROWS - 1),
+        LocalReadBinding::NodeUsb(_) => Some(MAX_USB_INVENTORY_ROWS - 1),
+        _ => None,
+    };
+    if let Some(maximum) = inventory_offset_maximum {
         descriptor["inputSchema"]["properties"] = json!({
             "limit":{"type":["integer","null"],"minimum":1,"maximum":MAX_DEVICE_INVENTORY_PAGE},
             "cursor":{"type":["object","null"],"additionalProperties":false,

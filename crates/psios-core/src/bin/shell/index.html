@@ -70,10 +70,43 @@
           </div>
         </div>
       </section>
+      <section id="window-applications" class="app-window" aria-labelledby="title-applications" hidden>
+        <header class="window-bar">
+          <h1 id="title-applications" tabindex="-1">应用管理</h1>
+        </header>
+        <div class="window-body">
+          <p id="status-applications" class="message" role="status"></p>
+          <div class="columns">
+            <div class="table-panel">
+              <table>
+                <thead><tr><th scope="col">应用</th><th scope="col">状态</th></tr></thead>
+                <tbody id="application-rows"></tbody>
+              </table>
+              <p id="applications-empty" class="empty" hidden>当前没有可见应用。</p>
+              <div class="pagination" aria-label="应用列表分页">
+                <button id="applications-previous" type="button" disabled>上一页</button>
+                <button id="applications-next" type="button" disabled>下一页</button>
+              </div>
+            </div>
+            <section id="application-detail" class="card" aria-labelledby="application-detail-title" tabindex="-1" hidden>
+              <header class="detail-header">
+                <h2 id="application-detail-title">应用版本</h2>
+                <button id="close-application" type="button">返回列表</button>
+              </header>
+              <div id="application-content" aria-live="polite"></div>
+              <div class="pagination" aria-label="应用版本分页">
+                <button id="releases-previous" type="button" disabled>上一页</button>
+                <button id="releases-next" type="button" disabled>下一页</button>
+              </div>
+            </section>
+          </div>
+        </div>
+      </section>
     </main>
     <nav class="dock" aria-label="应用 Dock">
       <button id="nav-node" type="button" aria-controls="window-node" aria-expanded="false">节点管理</button>
       <button id="nav-tasks" type="button" aria-controls="window-tasks" aria-expanded="false">任务中心</button>
+      <button id="nav-applications" type="button" aria-controls="window-applications" aria-expanded="false">应用管理</button>
     </nav>
   </div>
   <template id="window-tools">

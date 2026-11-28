@@ -11,11 +11,14 @@ const taskDetail = byId("task-detail");
 const taskContent = byId("task-content");
 const previous = byId("previous");
 const next = byId("next");
+const applicationRows = byId("application-rows");
+const applicationDetail = byId("application-detail");
+const applicationContent = byId("application-content");
 
 let bearer = null;
 let sessionRequests = new AbortController();
 let canCancelPending = false;
-const apps = new Map(["node", "tasks"].map(id => [id, {
+const apps = new Map(["node", "tasks", "applications"].map(id => [id, {
   window: byId("window-" + id), title: byId("title-" + id),
   dock: byId("nav-" + id), status: byId("status-" + id), state: "closed",
 }]));
@@ -27,6 +30,13 @@ let detailUpdate = 0;
 let cursors = [null];
 let nextCursor = null;
 let selectedTask = null;
+let applicationUpdate = 0;
+let releaseUpdate = 0;
+let applicationCursors = [null];
+let nextApplicationCursor = null;
+let releaseCursors = [null];
+let nextReleaseCursor = null;
+let selectedApplication = null;
 
 function message(element, text, error = false) {
   element.textContent = text;
@@ -43,6 +53,7 @@ function leave(text, error = false) {
   active = maximized = null;
   cursors = [null];
   nextCursor = selectedTask = null;
+  resetApplications();
   updateDesktop();
   byId("principal").textContent = "";
   message(status, "");
@@ -498,20 +509,134 @@ async function loadTasks(target = cursors, task = selectedTask) {
   }
 }
 
+const applicationStates = {
+  Installed: "已安装", Ready: "就绪", Running: "运行中", Stopped: "已停止", Uninstalled: "已卸载",
+};
+const releaseStates = { Selected: "已选用", Unselected: "未选用", Staged: "已暂存", Retired: "已退役" };
+
+function closeApplicationDetail() {
+  releaseUpdate += 1;
+  applicationDetail.hidden = true;
+  applicationContent.replaceChildren();
+  byId("releases-previous").disabled = true;
+  byId("releases-next").disabled = true;
+}
+
+async function loadReleases(id, target = [null], focus = false) {
+  const revision = ++releaseUpdate;
+  selectedApplication = id;
+  for (const button of applicationRows.querySelectorAll("button")) {
+    button.setAttribute("aria-pressed", String(button.dataset.applicationId === id));
+  }
+  applicationDetail.hidden = false;
+  applicationContent.replaceChildren(element("p", "正在读取版本…"));
+  byId("releases-previous").disabled = byId("releases-next").disabled = true;
+  if (focus) applicationDetail.focus();
+  try {
+    const page = await request("/api/application-releases", { id, cursor: target.at(-1) });
+    if (revision !== releaseUpdate) return;
+    releaseCursors = target;
+    nextReleaseCursor = page.next_cursor;
+    const current = fields([
+      ["应用 ID", page.application_ref.resource_id, true],
+      ["应用修订", page.application_ref.version, true],
+      ["状态", applicationStates[page.application_lifecycle] ?? page.application_lifecycle],
+      ["已选用版本 ID", page.selected_release_ref?.resource_id, true],
+    ]);
+    const list = element("ol", undefined, "release-list");
+    for (const release of page.items) {
+      const item = element("li");
+      item.append(element("strong", release.release_version),
+                  element("p", release.package_format + " · " + (releaseStates[release.state] ?? release.state)),
+                  element("p", release.release_ref.resource_id, "mono"));
+      list.append(item);
+    }
+    applicationContent.replaceChildren(current, page.items.length ? list : element("p", "当前没有可见版本。", "empty"));
+    byId("releases-previous").disabled = releaseCursors.length === 1;
+    byId("releases-next").disabled = !nextReleaseCursor;
+  } catch (error) {
+    if (revision !== releaseUpdate) return;
+    if (error.code === "CursorExpired" && target.length > 1) {
+      await loadReleases(id, [null], focus);
+      return;
+    }
+    applicationContent.replaceChildren(element("p", error.message, "message error"));
+  }
+}
+
+async function loadApplications(target = applicationCursors, selected = selectedApplication, priorReleases = releaseCursors) {
+  const revision = ++applicationUpdate;
+  const notice = apps.get("applications").status;
+  clearApplicationsView();
+  message(notice, "正在读取…");
+  try {
+    const page = await request("/api/applications", { cursor: target.at(-1) });
+    if (revision !== applicationUpdate) return;
+    applicationCursors = target;
+    nextApplicationCursor = page.next_cursor;
+    const rows = document.createDocumentFragment();
+    for (const application of page.items) {
+      const id = application.reference.resource_id;
+      const name = element("button", application.name || id);
+      name.type = "button";
+      name.dataset.applicationId = id;
+      name.setAttribute("aria-pressed", "false");
+      name.addEventListener("click", () => loadReleases(id, [null], true));
+      const row = element("tr");
+      const nameCell = element("td");
+      nameCell.append(name);
+      row.append(nameCell, element("td", applicationStates[application.lifecycle] ?? application.lifecycle));
+      rows.append(row);
+    }
+    applicationRows.append(rows);
+    byId("applications-empty").hidden = page.items.length !== 0;
+    byId("applications-previous").disabled = applicationCursors.length === 1;
+    byId("applications-next").disabled = !nextApplicationCursor;
+    selectedApplication = null;
+    if (selected && page.items.some(item => item.reference.resource_id === selected)) {
+      void loadReleases(selected, priorReleases);
+    }
+    message(notice, "");
+  } catch (error) {
+    if (revision !== applicationUpdate) return;
+    if (error.code === "CursorExpired" && target.length > 1) {
+      await loadApplications([null], null, [null]);
+      return;
+    }
+    message(notice, error.message, true);
+  }
+}
+
+function clearApplicationsView() {
+  applicationRows.replaceChildren();
+  byId("applications-empty").hidden = true;
+  byId("applications-previous").disabled = byId("applications-next").disabled = true;
+  closeApplicationDetail();
+}
+
+function resetApplications() {
+  applicationCursors = releaseCursors = [null];
+  nextApplicationCursor = nextReleaseCursor = selectedApplication = null;
+}
+
 function showWindow(id, app, shown) {
   if (app.window.hidden === !shown) return;
   app.window.hidden = !shown;
   if (shown) {
     if (id === "node") loadNode();
-    else loadTasks();
+    else if (id === "tasks") loadTasks();
+    else loadApplications();
     return;
   }
   if (id === "node") {
     nodeUpdate += 1;
     nodeView.replaceChildren();
-  } else {
+  } else if (id === "tasks") {
     taskUpdate += 1;
     clearTaskView();
+  } else {
+    applicationUpdate += 1;
+    clearApplicationsView();
   }
   message(app.status, "");
 }
@@ -560,6 +685,7 @@ function hideWindow(id, state) {
     cursors = [null];
     nextCursor = selectedTask = null;
   }
+  if (id === "applications" && state === "closed") resetApplications();
   if (active === id) active = Array.from(apps.keys()).find(key => apps.get(key).state === "open") ?? null;
   updateDesktop();
   if (!workspace.hidden) {
@@ -572,7 +698,8 @@ for (const [id, app] of apps) {
   const controls = byId("window-tools").content.cloneNode(true);
   controls.querySelector('[data-action="refresh"]').addEventListener("click", () => {
     if (id === "node") loadNode();
-    else loadTasks();
+    else if (id === "tasks") loadTasks();
+    else loadApplications([null], selectedApplication, [null]);
   });
   controls.querySelector('[data-action="close"]').addEventListener("click", () => hideWindow(id, "closed"));
   controls.querySelector('[data-action="minimize"]').addEventListener("click", () => hideWindow(id, "minimized"));
@@ -627,6 +754,18 @@ byId("close-task").addEventListener("click", () => {
 });
 previous.addEventListener("click", () => loadTasks(cursors.slice(0, -1), null));
 next.addEventListener("click", () => loadTasks([...cursors, nextCursor], null));
+byId("applications-previous").addEventListener("click", () => loadApplications(applicationCursors.slice(0, -1), null));
+byId("applications-next").addEventListener("click", () => loadApplications([...applicationCursors, nextApplicationCursor], null));
+byId("releases-previous").addEventListener("click", () => loadReleases(selectedApplication, releaseCursors.slice(0, -1)));
+byId("releases-next").addEventListener("click", () => loadReleases(selectedApplication, [...releaseCursors, nextReleaseCursor]));
+byId("close-application").addEventListener("click", () => {
+  const selected = applicationRows.querySelector('button[aria-pressed="true"]');
+  selectedApplication = null;
+  releaseCursors = [null];
+  closeApplicationDetail();
+  selected?.setAttribute("aria-pressed", "false");
+  selected?.focus();
+});
 byId("logout").addEventListener("click", async () => {
   if (!bearer) return;
   const button = byId("logout");

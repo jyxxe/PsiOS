@@ -3,6 +3,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import closing
 import hashlib
 from http.client import HTTPConnection
+import io
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ import signal
 import sqlite3
 import socket
 import subprocess
+import tarfile
 import time
 import unittest
 from threading import Event
@@ -97,6 +99,95 @@ class ShellTests(unittest.TestCase):
         self.assertEqual(body["error"]["code"], code)
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertIsNone(headers["Access-Control-Allow-Origin"])
+
+    def test_application_catalog_only_exposes_its_fixed_queries(self):
+        shell = self.shell()
+        self.error(shell, 401, "AuthenticationRequired", "/api/applications", data={})
+        bearer = shell.pair()["token"]
+        status, _, page = shell.http("/api/applications", {}, bearer)
+        self.assertEqual((status, page), (200, {"items": [], "next_cursor": None}))
+        self.error(shell, 400, "InvalidArgument", "/api/applications",
+                   data={"kind": "Secret"}, token=bearer)
+        self.error(shell, 400, "InvalidArgument", "/api/application-releases",
+                   data={"id": "app-missing", "limit": 64}, token=bearer)
+        self.error(shell, 403, "PermissionDenied", "/api/application-releases",
+                   data={"id": "app-missing"}, token=bearer)
+
+    @unittest.skipUnless(os.getenv("PSIOS_TEST_SHELL_OCI"), "requires real local Docker and Chromium")
+    def test_browser_pages_the_managed_application_catalog_and_fences_revoked_releases(self):
+        node = self.node
+        docker = ["docker", "--host", "unix:///var/run/docker.sock"]
+        tag = "psios-shell-check:catalog-" + node.base.name
+        source = node.base / "probe.c"
+        program = node.base / "probe"
+        source.write_text("int main(void) { return 0; }\n")
+        subprocess.run(["cc", "-static", "-o", program, source], check=True, timeout=30)
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w") as data:
+            data.add(program, arcname="probe")
+        image_id = subprocess.check_output([*docker, "import", "-", tag],
+                                           input=archive.getvalue(), timeout=45).decode().strip()
+        self.addCleanup(subprocess.run, [*docker, "image", "rm", tag], check=True,
+                        stdout=subprocess.DEVNULL, timeout=15)
+        spec = dict(image_id=image_id, name="catalog-0", release_version="1.0.0", argv=["/probe"],
+                    license_expression="0BSD", cpu_millicores=200, memory_max_bytes=33554432,
+                    pids_max=8, ephemeral_max_bytes=1048576)
+        applications = [node.perform("application.install", dict(spec, name=f"catalog-{i}")) for i in range(9)]
+        app = applications[0]
+        aid = app["resource_id"]
+        for revision in range(2, 10):
+            current = node.get(aid)["reference"]
+            node.perform("application.stage_release", {
+                "target": target(current), "release": dict(spec, release_version=f"{revision}.0.0"),
+            })
+        grant = node.call("Grant.Issue", {"principal_id": "local-owner", "tool_targets": [aid],
+                                         "actions": ["application.releases"], "ttl_seconds": 240, "units": 10})
+        inventory = self.shell()
+        token = inventory.pair()["token"]
+        status, _, page = inventory.http("/api/applications", {}, token)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(page["items"]), 8)
+        self.assertNotIn(image_id, json.dumps(page))
+        for item in page["items"]:
+            self.assertEqual(set(item), {"reference", "name", "lifecycle"})
+        status, _, final_page = inventory.http("/api/applications", {"cursor": page["next_cursor"]}, token)
+        self.assertEqual(status, 200)
+        self.assertEqual([item["reference"]["resource_id"] for item in final_page["items"]], [applications[-1]["resource_id"]])
+        self.error(inventory, 409, "CursorExpired", "/api/application-releases",
+                   data={"id": aid, "cursor": page["next_cursor"]}, token=token)
+        self.assertEqual(inventory.http("/api/logout", {}, token)[0], 200)
+
+        other, _ = node.agent(["resource.read", "task.read"])
+        token_file = node.base / "catalog-reader.token"
+        token_file.touch(mode=0o600)
+        token_file.write_text(other["token"])
+        unrelated = self.shell(token_file)
+        token = unrelated.pair()["token"]
+        self.assertEqual(unrelated.http("/api/applications", {}, token)[2]["items"], [])
+        self.error(unrelated, 403, "PermissionDenied", "/api/application-releases",
+                   data={"id": aid}, token=token)
+        self.assertEqual(unrelated.http("/api/logout", {}, token)[0], 200)
+
+        shell = self.shell()
+        parent, child = socket.socketpair()
+        with parent, child:
+            parent.settimeout(45)
+            args = dict(origin=shell.origin, code=shell.code, applicationCatalog=True, application=aid,
+                        profile=str(node.base / "browser"), control_fd=child.fileno())
+            with subprocess.Popen(["node", str(Path(__file__).with_name("shell_browser.mjs")),
+                                   os.environ.get("PSIOS_TEST_CHROME", "google-chrome")],
+                                  stdin=subprocess.PIPE, pass_fds=(child.fileno(),)) as browser:
+                child.close()
+                try:
+                    browser.stdin.write(json.dumps(args).encode())
+                    browser.stdin.close()
+                    self.assertEqual(parent.recv(1), b"R")
+                    node.call("Grant.Revoke", target(grant["grant_ref"]))
+                    parent.sendall(b"K")
+                    self.assertEqual(browser.wait(timeout=45), 0)
+                finally:
+                    if browser.poll() is None:
+                        browser.kill()
 
     def test_one_passive_session_observer_leaves_core_calls_available(self):
         shell = self.shell()

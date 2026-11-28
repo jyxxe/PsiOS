@@ -138,6 +138,8 @@ input {
   border: 1px solid var(--border); border-radius: .9rem; background: var(--rail);
 }
 .dock button { gap: .5rem; }
+.release-list { display: grid; gap: .75rem; padding-inline-start: 1.3rem; margin: .9rem 0; }
+.release-list li { overflow-wrap: anywhere; }
 .dock button::before { content: ""; width: .55rem; height: .55rem; border-radius: 50%; border: 1px solid var(--muted); }
 .dock button[data-state="open"]::before { border-color: var(--accent); background: var(--accent); }
 .dock button[data-state="minimized"]::before { border-color: var(--accent); border-radius: 0; height: .15rem; }
@@ -191,7 +193,7 @@ dd { margin: 0; overflow-wrap: anywhere; }
 
 @container (max-width: 750px) {
   .columns { grid-template-columns: minmax(0, 1fr); }
-  #task-detail { grid-row: 1; }
+  #task-detail, #application-detail { grid-row: 1; }
 }
 @container (max-width: 490px) {
   .node-grid { grid-template-columns: minmax(0, 1fr); }
@@ -214,4 +216,9 @@ dd { margin: 0; overflow-wrap: anywhere; }
   .identity { flex: 1 1 100%; justify-content: space-between; gap: .5rem; }
   .identity button { min-height: 36px; }
   #active-app { padding-left: .65rem; }
+}
+
+@media (max-width: 380px) {
+  .dock { max-width: calc(100% - 1rem); gap: .2rem; }
+  .dock button { padding-inline: .55rem; gap: .3rem; }
 }

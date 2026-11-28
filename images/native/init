@@ -192,11 +192,22 @@ run_trial() {
 }
 
 trap abort_boot EXIT
-"$bb" mount -t devtmpfs devtmpfs /dev
-"$bb" mount -t proc proc /proc
-"$bb" mount -t sysfs sysfs /sys
-"$bb" chmod 0755 /
-"$bb" --install -s
+case "${1-}" in
+    '')
+        "$bb" mount -t devtmpfs devtmpfs /dev
+        "$bb" mount -t proc proc /proc
+        "$bb" mount -t sysfs sysfs /sys
+        "$bb" chmod 0755 /
+        "$bb" --install -s
+        ;;
+    --mounted-root)
+        stage=mounted-system-root
+        [ "$$" = 1 ]
+        "$bb" awk '$5 == "/" && / - tmpfs psios-system / { mounted = 1 }
+                   END { exit !mounted }' /proc/self/mountinfo
+        ;;
+    *) exit 1 ;;
+esac
 stage=deployment-payload
 "$bb" sha256sum -c /psios-payload.sha256 >/dev/null
 if [ "$trial_boot" = yes ]; then
@@ -223,6 +234,29 @@ for requires_secure_boot in /psios-secure-boot-required /psios-trial-secure-boot
     secure_boot_enforced=yes
 done
 payload_verified=yes
+if [ "${1-}" != --mounted-root ]; then
+    stage=mounted-system-root
+    system_root=/psios-system-root
+    mkdir -m 0755 "$system_root"
+    # The factory accepts 128 MiB of Core archive members. Allow room for the
+    # pinned kernel's boot tree and the additional verified runtime payloads.
+    mount -t tmpfs -o nodev,nosuid,size=256m,nr_inodes=16384,mode=0755 psios-system "$system_root"
+    for entry in /* /.[!.]* /..?*; do
+        case "$entry" in
+            "$system_root") continue ;;
+            /dev|/proc|/sys) mkdir -m 0755 "$system_root$entry" ;;
+            *)
+                if [ -e "$entry" ] || [ -L "$entry" ]; then
+                    cp -a "$entry" "$system_root/"
+                fi
+                ;;
+        esac
+    done
+    mount --move /proc "$system_root/proc"
+    mount --move /sys "$system_root/sys"
+    mount --move /dev "$system_root/dev"
+    exec "$bb" switch_root "$system_root" /psios-init --mounted-root
+fi
 stage=timezone-data
 mkdir -p /usr/share/zoneinfo
 tar -xf /psios-zoneinfo.tar -C /usr/share/zoneinfo

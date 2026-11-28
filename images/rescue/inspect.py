@@ -72,7 +72,7 @@ def configuration(args):
             "witness_dir": "/source" + (args.witness or args.state + ".witness")}
 
 
-def prepare(work, args, require_secure_boot):
+def prepare(work, args, require_secure_boot, *, filesystem_uuid=None, disk_transport="virtio"):
     scratch = scratch_mib(args)
     boot_media.prepare_kernel(work, args.iso)
     pinned_copy(args.core, work / "psiosd", args.core_sha256, 64 * 1024 * 1024)
@@ -85,8 +85,8 @@ def prepare(work, args, require_secure_boot):
                 f"SCRATCH_MIB={scratch}\nOVERLAY={int(args.journal_overlay_mib is not None)}\n"
                 f"SECURE_BOOT={int(require_secure_boot)}\n"
                 f"REHEARSE={int(args.migration_config is not None)}\n"
-                f"FILESYSTEM_UUID={args.filesystem_uuid.hex if args.filesystem_uuid else ''}\n"
-                f"DISK_TRANSPORT={args.disk_transport}\n")
+                f"FILESYSTEM_UUID={filesystem_uuid.hex if filesystem_uuid else ''}\n"
+                f"DISK_TRANSPORT={disk_transport}\n")
     (work / "rescue-settings").write_text(settings)
     (work / "rescue-settings").chmod(0o600)
     (work / "rescue.json").write_text(json.dumps(configuration(args), allow_nan=False))
@@ -150,7 +150,8 @@ def inspect(args):
         if args.secure_boot_key:
             signing = boot_media.prepare_secure_boot(work, args.secure_boot_key, args.secure_boot_cert,
                                                     args.efi_stub, args.efi_stub_sha256)
-        prepare(work, args, signing is not None)
+        prepare(work, args, signing is not None, filesystem_uuid=args.filesystem_uuid,
+                disk_transport=args.disk_transport)
         # Hand QEMU the exact already-open read-only file. Raw format disables
         # backing-file discovery and the guest gets no interface to the network.
         fd = disk.fileno()

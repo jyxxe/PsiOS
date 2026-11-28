@@ -4,7 +4,7 @@ import argparse
 import base64
 import binascii
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import fcntl
 from functools import partial
 import gzip
@@ -29,6 +29,9 @@ sys.path.insert(0, str(HERE.parent / "rescue"))
 import boot_media
 
 MIB = 1024 * 1024
+SECTOR_BYTES = 512
+MAX_RAW_BYTES = (1 << 32) * SECTOR_BYTES
+GPT_HEADER = struct.Struct("<8sIIIIQQQQ16sQIII")
 CMDLINE = "console=ttyS0,115200 quiet panic=1 rdinit=/psios-init"
 ESP = (1, 64, "C12A7328-F81F-11D2-BA4B-00A0C93EC93B")
 LINUX_PARTITION = "0FC63DAF-8483-4772-8E79-3D69D8477DE4"
@@ -78,6 +81,7 @@ SSH_PROGRAMS = tuple(file for files in SSH_PACKAGES.values() for file in files)
 class Layout:
     state_mib: int = MIN_STATE_MIB
     home_mib: int = MIN_HOME_MIB
+    raw_disk_bytes: int | None = None
 
     def __post_init__(self):
         if (type(self.state_mib) is not int or type(self.home_mib) is not int
@@ -85,10 +89,25 @@ class Layout:
                 or self.image_mib > MAX_IMAGE_MIB):
             raise ValueError(f"expected at least {MIN_STATE_MIB} MiB of state and {MIN_HOME_MIB} MiB of home "
                              f"within a {MAX_IMAGE_MIB} MiB raw image")
+        size = self.raw_disk_bytes
+        if size is not None and (type(size) is not int or not self.image_mib * MIB < size <= MAX_RAW_BYTES
+                                 or size % SECTOR_BYTES):
+            raise ValueError("larger raw capacity must use whole 512-byte sectors and be at most 2 TiB")
 
     @property
     def image_mib(self):
         return ESP[0] + ESP[1] + self.state_mib + self.home_mib + 2
+
+    @property
+    def disk_bytes(self):
+        return self.raw_disk_bytes or self.image_mib * MIB
+
+    def for_source(self, size):
+        if size is None or size == self.disk_bytes:
+            return self
+        if self.raw_disk_bytes is not None:
+            raise ValueError("source capacity does not match the previously recorded raw disk size")
+        return replace(self, raw_disk_bytes=size)
 
     @property
     def partitions(self):
@@ -98,6 +117,19 @@ class Layout:
 
     def receipt(self):
         return {"state_mib": self.state_mib, "home_mib": self.home_mib, "image_mib": self.image_mib}
+
+    @classmethod
+    def from_receipt(cls, receipt):
+        geometry = receipt.get("geometry_mib")
+        if not isinstance(geometry, dict) or set(geometry) != {"state_mib", "home_mib", "image_mib"}:
+            raise ValueError("invalid build receipt geometry")
+        size = receipt.get("raw_disk_bytes")
+        if "raw_disk_bytes" in receipt and type(size) is not int:
+            raise ValueError("invalid build receipt raw capacity")
+        layout = cls(geometry["state_mib"], geometry["home_mib"], size)
+        if type(geometry["image_mib"]) is not int or geometry != layout.receipt():
+            raise ValueError("invalid build receipt image size")
+        return layout
 
 
 @dataclass(frozen=True)
@@ -512,6 +544,8 @@ def assemble_ramfs(work, args, base, instance, home_id, layout, signing, network
         "required_filesystems": {"state": str(instance), "home": str(home_id)},
         "payload_sha256": payload,
     }
+    if layout.raw_disk_bytes is not None:
+        inputs["raw_disk_bytes"] = layout.raw_disk_bytes
     if signing:
         inputs["secure_boot"] = signing.receipt()
     if network_profile:
@@ -607,7 +641,7 @@ def new_disk(work, disk, args, instance, home_id, layout):
         (homes / name).chmod(0o700)
     home = seeded_ext4(work, "home.ext4", "PSIOSHOME", home_id, layout.home_mib, homes, {"psios": 1000})
     with disk.open("xb") as f:
-        f.truncate(layout.image_mib * MIB)
+        f.truncate(layout.disk_bytes)
     gpt = "label: gpt\nunit: sectors\n" + "".join(
         f"start={start * 2048},size={size * 2048},type={kind}\n" for start, size, kind in layout.partitions)
     subprocess.run(["sfdisk", "--quiet", disk], input=gpt, text=True, check=True, timeout=30)
@@ -617,23 +651,28 @@ def new_disk(work, disk, args, instance, home_id, layout):
 
 
 def copy_mib(src, dst, count, *, replace):
+    copy_sparse(src, dst, count * MIB, replace=replace)
+
+
+def copy_sparse(src, dst, size, *, replace):
     # New regions are already zero. During journal replay and EFI replacement,
     # omit a zero block only if the destination still contains those same bytes.
     zero = bytes(MIB)
-    for _ in range(count):
-        chunk = src.read(MIB)
-        if len(chunk) != MIB:
+    for offset in range(0, size, MIB):
+        length = min(MIB, size - offset)
+        chunk = src.read(length)
+        if len(chunk) != length:
             raise ValueError("incomplete partition data")
-        if chunk == zero:
+        if chunk == zero[:length]:
             if not replace:
-                dst.seek(MIB, os.SEEK_CUR)
+                dst.seek(length, os.SEEK_CUR)
                 continue
-            previous = dst.read(MIB)
-            if len(previous) != MIB:
+            previous = dst.read(length)
+            if len(previous) != length:
                 raise ValueError("incomplete destination partition data")
-            if previous == zero:
+            if previous == chunk:
                 continue
-            dst.seek(-MIB, os.SEEK_CUR)
+            dst.seek(-length, os.SEEK_CUR)
         dst.write(chunk)
 
 
@@ -678,14 +717,9 @@ def parse_receipt(raw):
             raise ValueError(f"invalid previous build receipt field {name}")
     if prior["state_uuid"] == prior["home_uuid"]:
         raise ValueError("previous deployment filesystems have identical UUIDs")
-    layout = Layout()
-    if previous_format >= 2:
-        geometry = prior.get("geometry_mib")
-        if not isinstance(geometry, dict) or set(geometry) != {"state_mib", "home_mib", "image_mib"}:
-            raise ValueError("invalid previous build receipt geometry")
-        layout = Layout(geometry["state_mib"], geometry["home_mib"])
-        if type(geometry["image_mib"]) is not int or geometry != layout.receipt():
-            raise ValueError("invalid previous build receipt image size")
+    if previous_format == 1 and "raw_disk_bytes" in prior:
+        raise ValueError("larger raw capacity requires a geometry-bearing build receipt")
+    layout = Layout.from_receipt(prior) if previous_format >= 2 else Layout()
     profiles = {4: (STATIC_IPV4,), 5: (STATIC_IPV6, STATIC_DUAL), SLAAC_RECEIPT_FORMAT: (SLAAC,),
                 RDNSS_RECEIPT_FORMAT: (RDNSS,)}
     if previous_format in profiles:
@@ -727,6 +761,46 @@ def parse_receipt(raw):
     return prior, layout, limits
 
 
+def read_gpt_copy(disk, header_lba, alternate_lba, entries_lba, usable):
+    disk.seek(header_lba * SECTOR_BYTES)
+    sector = disk.read(SECTOR_BYTES)
+    if len(sector) != SECTOR_BYTES:
+        raise ValueError("relocated image has an incomplete GPT header")
+    (signature, revision, size, checksum, reserved, current, alternate, first, last, disk_id,
+     entries, count, entry_size, entries_checksum) = GPT_HEADER.unpack_from(sector)
+    if (signature != b"EFI PART" or revision != 0x10000 or not GPT_HEADER.size <= size <= SECTOR_BYTES
+            or reserved != 0 or (current, alternate, entries) != (header_lba, alternate_lba, entries_lba)
+            or (first, last) != usable or not 0 < count * entry_size <= MIB):
+        raise ValueError("relocated image has a missing or inconsistent GPT header")
+    if binascii.crc32(sector[:16] + bytes(4) + sector[20:size]) != checksum:
+        raise ValueError("relocated image has an invalid GPT header checksum")
+    table_bytes = count * entry_size
+    offset = entries_lba * SECTOR_BYTES
+    boundary = (first if header_lba == 1 else header_lba) * SECTOR_BYTES
+    if entry_size < 128 or offset + table_bytes > boundary:
+        raise ValueError("relocated GPT table exceeds its reserved area")
+    disk.seek(offset)
+    partitions = disk.read(table_bytes)
+    if len(partitions) != table_bytes or binascii.crc32(partitions) != entries_checksum:
+        raise ValueError("relocated image has an invalid GPT table checksum")
+    return disk_id, count, entry_size, partitions
+
+
+def verify_relocated_gpt(image, target_size, table):
+    """Require two complete GPT copies with matching identities and partition tables."""
+    last_sector = target_size // SECTOR_BYTES - 1
+    usable = table["firstlba"], table["lastlba"]
+    with open(image, "rb") as disk:
+        protective = disk.read(SECTOR_BYTES)
+        if (len(protective) != SECTOR_BYTES or protective[510:] != b"\x55\xaa" or protective[450] != 0xEE
+                or struct.unpack_from("<II", protective, 454) != (1, last_sector)):
+            raise ValueError("relocated image has an invalid protective MBR")
+        primary = read_gpt_copy(disk, 1, last_sector, 2, usable)
+        backup = read_gpt_copy(disk, last_sector, 1, usable[1] + 1, usable)
+    if primary != backup or uuid.UUID(bytes_le=primary[0]) != uuid.UUID(table["id"]):
+        raise ValueError("relocated image GPT copies do not agree")
+
+
 def validate_layout(work, disk, layout, *, pass_fds=()):
     boot_media.run(work, ["sfdisk", "--verify", disk], pass_fds=pass_fds)
     limit = 16 * 1024
@@ -739,6 +813,8 @@ def validate_layout(work, disk, layout, *, pass_fds=()):
     if (gpt["label"], gpt["unit"], gpt["sectorsize"]) != ("gpt", "sectors", 512) or [
             (p["start"], p["size"], p["type"]) for p in gpt["partitions"]] != expected:
         raise ValueError("unsupported previous PsiOS GPT layout")
+    if layout.raw_disk_bytes is not None:
+        verify_relocated_gpt(disk, layout.disk_bytes, gpt)
     return gpt
 
 
@@ -816,7 +892,7 @@ def read_root_file(work, fs, member, limit, modes):
 
 
 def source_snapshot(work, disk, source_fd, prior, layout, signing):
-    disk_size = layout.image_mib * MIB
+    disk_size = layout.disk_bytes
     before = os.fstat(source_fd)
     flags = fcntl.fcntl(source_fd, fcntl.F_GETFL)
     if not stat.S_ISREG(before.st_mode) or flags & os.O_PATH or flags & os.O_ACCMODE != os.O_RDONLY:
@@ -944,7 +1020,8 @@ def finish_disk(work, disk, output, *, signing, upgrade):
         "efi_application_sha256": sha256(efi), "installed_initramfs_sha256": sha256(work / "initrd"),
         "initial_image_sha256": sha256(disk),
     }
-    for name in ("secure_boot", "network_profile", "wired_driver", "core_limits", "ssh_console", "usb_profile"):
+    for name in ("secure_boot", "network_profile", "wired_driver", "core_limits", "ssh_console",
+                 "raw_disk_bytes", "usb_profile"):
         if name in manifest:
             receipt[name] = manifest[name]
     if "boot_mode" in manifest:
@@ -960,6 +1037,7 @@ def finish_disk(work, disk, output, *, signing, upgrade):
 def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
     """Prepare two private EFI variants of one stopped source; publish neither."""
     prior, layout, core_limits = read_receipt(args.previous_receipt)
+    layout = layout.for_source(getattr(args, "source_size_bytes", None))
     work = work.absolute()
     requested = tuple(getattr(args, name, None) for name in (
         "secure_boot_key", "secure_boot_cert", "efi_stub", "efi_stub_sha256"))
@@ -981,8 +1059,8 @@ def build_update_pair(work: Path, args, source_fd: int) -> PreparedUpdate:
         candidate_work, candidate_disk, source_fd, prior, layout, signing)
     normalized = sha256(candidate_disk)
     with candidate_disk.open("rb") as frozen, trial_disk.open("xb") as clone:
-        copy_mib(frozen, clone, layout.image_mib, replace=False)
-        clone.truncate(layout.image_mib * MIB)
+        copy_sparse(frozen, clone, layout.disk_bytes, replace=False)
+        clone.truncate(layout.disk_bytes)
     if sha256(trial_disk) != normalized:
         raise ValueError("trial disk clone does not match the normalized source")
     for disk in (candidate_disk, trial_disk):
@@ -1057,6 +1135,7 @@ def build(args):
                                                     args.efi_stub, args.efi_stub_sha256)
         if args.upgrade_from:
             prior, layout, core_limits = read_receipt(args.previous_receipt)
+            layout = layout.for_source(args.source_size_bytes)
             network_profile = prior.get("network_profile")
             wired_driver = prior.get("wired_driver")
             ssh_enabled = "ssh_console" in prior
@@ -1106,6 +1185,7 @@ def main():
     mode.add_argument("--console-hash", type=Path, help="private file containing an operator SHA-512 crypt hash")
     mode.add_argument("--upgrade-from", type=Path, help="stopped native development disk to copy without changes")
     parser.add_argument("--previous-receipt", type=Path, help="trusted build receipt for the stopped disk")
+    parser.add_argument("--source-size-bytes", type=int, help="installed raw capacity from an approved larger-target plan")
     parser.add_argument("--hostname", help="single DNS-label hostname for a new disk")
     parser.add_argument("--trial-boot", action="store_true", help="create an isolated non-activating EFI upgrade candidate")
     parser.add_argument("--max-copy-mib", type=copy_budget_mib,
@@ -1140,6 +1220,8 @@ def main():
     args = parser.parse_args()
     if not re.fullmatch(r"[0-9a-f]{64}", args.core_sha256):
         parser.error("invalid Core archive SHA-256")
+    if args.source_size_bytes is not None and not args.upgrade_from:
+        parser.error("--source-size-bytes requires --upgrade-from")
     if args.hostname is not None:
         if args.upgrade_from:
             parser.error("upgrade preserves /etc/hostname from the source")

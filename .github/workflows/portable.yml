@@ -215,12 +215,14 @@ jobs:
 
       - name: Freeze one native source and publish a candidate after an isolated health proof
         run: |
-          python3 -B tests/native_staged_update.py --large-authority \
-            --controller "$RUNNER_TEMP/rescue-core/native/stage_update.py" \
-            --previous-installer "$RUNNER_TEMP/native-format5/native/create.py" \
-            --kernel-iso "$RUNNER_TEMP/rescue.iso" \
-            --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
-            --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+          for mode in --large-authority --larger-source; do
+            python3 -B tests/native_staged_update.py "$mode" \
+              --controller "$RUNNER_TEMP/rescue-core/native/stage_update.py" \
+              --previous-installer "$RUNNER_TEMP/native-format5/native/create.py" \
+              --kernel-iso "$RUNNER_TEMP/rescue.iso" \
+              --previous-archive "$RUNNER_TEMP/native-format5/core.tar.gz" \
+              --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+          done
 
       - name: Verify managed native activation, deployment selection and boot crash fencing
         run: |
@@ -313,7 +315,7 @@ jobs:
           kill "$router"
           wait "$router"
           router=
-          python3 -B tests/native_rdnss.py --tap psios6 --verify-core-resolver --kernel-iso "$1/rescue.iso" \
+          python3 -B tests/native_rdnss.py --tap psios6 --verify-core-resolver --larger-source --kernel-iso "$1/rescue.iso" \
             --archive "$1/rescue-core/psios-core-linux-amd64.tar.gz" \
             --installer "$1/rescue-core/native/create.py"
           SH

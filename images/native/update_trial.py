@@ -70,12 +70,10 @@ def receipt_lineage(prepared):
     require(all(trial[name] == candidate[name] for name in
                 ("geometry_mib", "state_uuid", "home_uuid", "source_commit", "upgrade"))
             and all(trial.get(name) == candidate.get(name) for name in
-                    ("network_profile", "wired_driver", "core_limits", "ssh_console", "usb_profile"))
+                    ("network_profile", "wired_driver", "core_limits", "ssh_console", "raw_disk_bytes", "usb_profile"))
             and trial["deployment_manifest_sha256"] != candidate["deployment_manifest_sha256"],
             "trial and candidate deployment lineage differs")
-    geometry = trial["geometry_mib"]
-    layout = create.Layout(geometry["state_mib"], geometry["home_mib"])
-    require(geometry == layout.receipt(), "invalid trial geometry")
+    layout = create.Layout.from_receipt(trial)
     for field in ("state_uuid", "home_uuid", "trial_disk_uuid"):
         require(str(uuid.UUID(trial[field])) == trial[field], "invalid trial UUID")
     require(len({trial[name] for name in ("state_uuid", "home_uuid", "trial_disk_uuid")}) == 3,
@@ -97,18 +95,19 @@ def receipt_lineage(prepared):
 
 
 def verify_base_images(candidate, trial, prepared, layout):
-    size = layout.image_mib * MIB
+    size = layout.disk_bytes
     require(os.fstat(candidate.fileno()).st_size == os.fstat(trial.fileno()).st_size == size,
             "unexpected candidate or trial image size")
     candidate_hash, trial_hash = hashlib.sha256(), hashlib.sha256()
-    data_start = layout.partitions[1][0]
-    data_end = data_start + layout.state_mib + layout.home_mib
-    for block in range(layout.image_mib):
-        left, right = candidate.read(MIB), trial.read(MIB)
-        require(len(left) == len(right) == MIB, "incomplete candidate or trial image")
+    data_start = layout.partitions[1][0] * MIB
+    data_end = data_start + (layout.state_mib + layout.home_mib) * MIB
+    for offset in range(0, size, MIB):
+        length = min(MIB, size - offset)
+        left, right = candidate.read(length), trial.read(length)
+        require(len(left) == len(right) == length, "incomplete candidate or trial image")
         candidate_hash.update(left)
         trial_hash.update(right)
-        if data_start <= block < data_end:
+        if data_start <= offset < data_end:
             require(left == right, "trial starts with different state or home bytes than the candidate")
     require(candidate_hash.hexdigest() == prepared.candidate_receipt["initial_image_sha256"]
             and trial_hash.hexdigest() == prepared.trial_receipt["initial_image_sha256"],
@@ -242,7 +241,7 @@ def verify_overlay(work, disk, prepared, layout, core_hash, node, target_format)
     # Bake a sparse inspection copy of the exact explicit backing graph. The
     # QCOW2 contains no backing filename and QEMU never discovers a host path.
     fd = disk.fileno()
-    size = layout.image_mib * MIB
+    size = layout.disk_bytes
     image = work / "trial-verified.raw"
     options = ("driver=qcow2,file.driver=file,file.filename=changes.qcow2,"
                f"backing.driver=raw,backing.file.driver=file,backing.file.filename=/proc/self/fd/{fd},"
@@ -301,7 +300,7 @@ def prove_trial(work: Path, prepared, firmware_code: Path, firmware_vars: Path) 
         verify_base_images(candidate, trial, prepared, layout)
         code_hash, vars_hash = digest(code), digest(vars_file)
         vars_file.seek(0)
-        boot_trial(work, trial, code, vars_file, prepared.trial_receipt, layout.image_mib * MIB)
+        boot_trial(work, trial, code, vars_file, prepared.trial_receipt, layout.disk_bytes)
         authority = verify_overlay(work, trial, prepared, layout, core_hash, node, target_format)
         require(digest(trial) == prepared.trial_receipt["initial_image_sha256"]
                 and digest(code) == code_hash and digest(vars_file) == vars_hash,

@@ -25,6 +25,7 @@ from oci_volume_rebind import verify_rebind
 from test_artifact_install import TOOL as ARTIFACT_INSTALL, grant as artifact_grant
 from test_artifact_ingress import chunk, upload_request
 from test_oci_publisher import local_signature
+from test_oci_runtime_observation import grant_observation, submit as submit_runtime_observation
 from test_session_output import generate_artifact
 
 
@@ -335,6 +336,15 @@ def main(binaries, previous_binaries=None, create_recovery_only=False, direct_cl
     app_ids = []
     docker = ["docker", "--host", "unix:///var/run/docker.sock"]
     try:
+        node_id = node.call("Node.Get", {})["reference"]["resource_id"]
+        _, delegation = grant_observation(node, node_id)
+        observed = node.wait(submit_runtime_observation(node, delegation))
+        assert observed["lifecycle"] == "Succeeded", observed
+        evidence, = observed["result"]["artifact_refs"]
+        report = node.call("Artifact.Read", {"reference": evidence})
+        cgroup_version = int(subprocess.check_output(docker + ["info", "--format", "{{.CgroupVersion}}"], timeout=15))
+        assert (report["status"], report["driver"], report["seccomp_profile"], report["cgroup_version"]) == (
+            "Available", "Docker", "Builtin", cgroup_version), report
         c = node.base / "probe.c"
         c.write_text('''#include <stdio.h>
 #include <stdlib.h>

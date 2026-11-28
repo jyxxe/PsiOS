@@ -119,6 +119,8 @@ pub enum Action {
     Pci(DeviceInventoryQuery),
     #[serde(rename = "node.usb")]
     Usb(DeviceInventoryQuery),
+    #[serde(rename = "node.oci_runtime")]
+    OciRuntime {},
     #[serde(rename = "node.routing_rules")]
     RoutingRules(node::network::RuleQuery),
     #[serde(rename = "node.network_probe")]
@@ -484,6 +486,7 @@ impl Action {
             | Self::Resolver {}
             | Self::Pci(_)
             | Self::Usb(_)
+            | Self::OciRuntime {}
             | Self::RoutingRules(_)
             | Self::Inventory {}
             | Self::Pressure {}
@@ -1003,6 +1006,7 @@ impl Work {
             | Action::Resolver {}
             | Action::Pci(_)
             | Action::Usb(_)
+            | Action::OciRuntime {}
             | Action::RoutingRules(_)
             | Action::Mounts {}
             | Action::BlockLayout(_)

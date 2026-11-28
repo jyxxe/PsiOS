@@ -15,6 +15,13 @@ if [ -e /psios-trial-config.sha256 ] || [ -L /psios-trial-config.sha256 ]; then
     trial_boot=yes
 fi
 
+kernel_boot_id() {
+    local identity
+    identity=$(cat /proc/sys/kernel/random/boot_id) || return 1
+    printf '%s\n' "$identity" | grep -Eq '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' || return 1
+    printf '%s\n' "$identity"
+}
+
 record_boot_failure() (
     record=/var/lib/.psios-boot-failure
     pending=/var/lib/.psios-boot-failure.pending
@@ -26,13 +33,25 @@ record_boot_failure() (
             [ "$(stat -c '%u:%g:%a:%h' "$path")" = 0:0:600:1 ] || return 1
         fi
     done
-    boot_id=$(cat /proc/sys/kernel/random/boot_id) || return 1
-    printf '%s\n' "$boot_id" | grep -Eq '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' || return 1
+    boot_id=$(kernel_boot_id) || return 1
     umask 077
     rm -f "$pending" || return 1
     set -C
     printf '{"format":1,"boot_id":"%s","stage":"%s"}\n' "$boot_id" "$stage" > "$pending" || return 1
     sync -f /var/lib && mv -T "$pending" "$record" && sync -f /var/lib
+)
+
+record_boot_evidence() (
+    boot_id=$(kernel_boot_id) || return 1
+    digest=$(sha256sum /psios-deployment.json) || return 1
+    observed=Unmeasured
+    if [ "$secure_boot_enforced" = yes ]; then observed=Enforced; fi
+    umask 077
+    pending=$(mktemp /run/.psios-boot.XXXXXX) || return 1
+    trap 'rm -f -- "$pending"' EXIT
+    printf '{"format":1,"boot_id":"%s","deployment_manifest_sha256":"sha256:%s","secure_boot":"%s"}\n' \
+        "$boot_id" "${digest%% *}" "$observed" > "$pending" &&
+        chmod 0444 "$pending" && mv -T "$pending" /run/psios-boot.json
 )
 
 abort_boot() {
@@ -240,6 +259,9 @@ if [ "$trial_boot" = no ]; then
     mkdir -p /run
     [ -d /run ] && [ ! -L /run ] || exit 1
     mount -t tmpfs -o nodev,nosuid,noexec,size=8m,nr_inodes=1024,mode=0755 tmpfs /run
+    if ! record_boot_evidence; then
+        echo 'PsiOS could not publish the current native boot evidence' >/dev/console
+    fi
     stage=shared-memory
     mkdir -p /dev/shm
     mount -t tmpfs -o nodev,nosuid,noexec,size=16m,nr_inodes=1024,mode=1777 tmpfs /dev/shm

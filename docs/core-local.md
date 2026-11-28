@@ -16,13 +16,14 @@ tools/verify-portable-core ./psios-core-linux-amd64.tar.gz "$EXPECTED_MAIN_SHA" 
 
 离线核验时，提前通过受信任的连接执行 `gh attestation trusted-root > trusted_root.jsonl`，将该文件作为上述命令的第四个参数。核验覆盖整个 tar.gz，并绑定仓库、构建工作流、主线提交和 GitHub 托管执行器。只提供文件摘要的早期开发包可从对应提交自行构建。
 
-也可在安装了 Git、GNU tar、gzip 及 Docker Buildx 的 Linux 构建机上直接生成。归档保留可执行权限、完整源码提交、Cargo.lock 和文件校验和。若构建网络使用专用 CA，设置 `CARGO_HTTP_CAINFO` 指向受信任的 CA 文件。
+也可在安装了 Git、GNU tar、gzip、Python 3.11 及 Docker Buildx 的 Linux 构建机上直接生成。归档保留可执行权限、完整源码提交、Cargo.lock 和文件校验和。`build-inputs.json` 记录固定的构建镜像摘要、构建定义和 Cargo 输入的 SHA-256，以及从构建容器采集的 Alpine、rustc、Cargo 版本和编译目标。它与二进制一同接受归档证明和内部校验和的核验。重建没有此记录的历史版本时，继续生成对应版本的归档布局。若构建网络使用专用 CA，设置 `CARGO_HTTP_CAINFO` 指向受信任的 CA 文件。
 
 ```bash
 tools/build-portable-core ./psios-core-linux-amd64.tar.gz HEAD
 mkdir ./portable-core
 tar -xzf ./psios-core-linux-amd64.tar.gz -C ./portable-core
 (cd ./portable-core && sha256sum -c SHA256SUMS && cat source-commit)
+python3 tools/lib/portable_build_inputs.py . "$(git rev-parse HEAD)" ./portable-core/build-inputs.json
 ```
 
 下方本机启动示例中的 `target/debug/` 可替换为 `./portable-core/`，并跳过 Cargo 编译。CI 在只读、断网的 Alpine 用户空间以非特权用户运行同一份二进制，覆盖身份授权、任务幂等和进程崩溃后的恢复。CI 还将同一归档作为只读根文件系统，直接启动两个程序，强制终止服务后以只读方式核验状态卷，再重放原任务。该验收覆盖单节点 Core，系统引导和各发行版安装另行验收。[空根文件系统恢复验收](../tests/portable_recovery.py)
@@ -93,6 +94,10 @@ ctl task-verify-results TASK_ID --revision TASK_REVISION
 Shell 可以查看节点状态、调度开关、执行队列和权威存储余量，以及分页浏览当前主体可见的任务和最新状态。状态盘与见证盘分别显示字节和 inode 的可用量及预留值。低于阈值、已配置 inode 预留但文件系统无法计数，以及只读挂载均有相应提示。节点面板要求 `node.inventory`。列表要求 `resource.read` 和 `task.read`，详情按 `task.read` 及任务归属检查。任务列表使用 Core 签发的快照游标。返回首页或快照过期后重新刷新会读取新快照。Core 暂停服务后可在同一会话刷新。 任务详情可按固定引用预览不超过 64 KiB 的结果制品。Shell 在展示前向 Core 核对任务归属和制品权限，再校验完整 SHA-256。选择“下载”可保存不超过 8 MiB 的原始字节。Shell 逐块读取，核对完整摘要并复核任务引用后才发送附件。浏览器复核接收到的字节，文件名包含同一 SHA-256。超过界面上限时可将固定引用交给 `psiosctl artifact` 并显式指定字节上限。
 
 “应用管理”分页显示当前主体获准查看的本机应用名称和状态。选中应用后，使用独立的 `application.releases` 授权读取其固定版本快照。版本列表显示选用、暂存、未选用和退役状态。刷新可取得新快照。窗口被最小化或遮挡后，再次打开会按当前授权取得列表和详情。应用安装、启动、切换或退役继续沿用 Core 的 Task 与审批流程。
+
+以 `ctl shell --files-volume "$volume_id" --files-delegation "$delegation_id"` 启动可打开“文件”窗口。当前主体需要对所选卷拥有资源读取权限，委托须允许 `volume.files`、`task.submit` 和 `task.read`。窗口提供目录导航、分页及普通文件大小。每次读取都使用 Core Task，翻页同时核对卷修订和目录修订。目录变动后从第一页重新读取。最小化和会话结束时清除已显示的内容，恢复时按当前委托重新读取。[卷读取规则](core-runtime.md) · [Shell 进程与浏览器验收](../tests/test_shell.py)
+
+加上 `--files-preview` 并为同一委托授予 `volume.read_chunk` 后，可以预览普通文件起始最多 6 KiB 的 UTF-8 文本。预览请求绑定目录列表所见的卷修订，并由 Core 固定这次文件观测。关闭或最小化时清除浏览器内的正文。[分块读取规则](core-runtime.md#卷文件与应用版本)
 
 在任务详情展开“执行历史”可读取截至当前详情修订的历史，每页最多三条。各条显示 Core 记录的时间、当时的生命周期、结果确认程度和关联的 Run 或 Operation。翻页期间任务即使继续运行，历史上界仍固定。刷新详情后可查看更晚的修订。每次翻页都重新检查当前 `task.read` 授权和任务归属。
 

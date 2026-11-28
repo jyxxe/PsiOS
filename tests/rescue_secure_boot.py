@@ -61,12 +61,13 @@ def exercise(args, work):
     core = args.bin_dir / "psiosd"
     cd = work / "verified.iso"
     call = [sys.executable, args.inspector, volume, "--iso", args.kernel_iso, "--core", core,
-            "--core-sha256", digest(core), "--uid", str(os.getuid()), "--gid", str(os.getgid()),
-            "--state", "/state", "--witness", "/witness", "--ovmf-dir", args.ovmf_dir,
+            "--core-sha256", digest(core), "--source-sha256", source_disk, "--uid", str(os.getuid()),
+            "--gid", str(os.getgid()), "--state", "/state", "--witness", "/witness", "--ovmf-dir", args.ovmf_dir,
             "--firmware", "uefi", "--ovmf-vars", enrolled, "--save-rescue-iso", cd,
             *signing_args(args, key, cert)]
     verified = json.loads(subprocess.check_output(call, timeout=210))
     evidence = verified.pop("secure_boot")
+    assert verified.pop("source_sha256") == source_disk
     assert verified == expected and evidence["status"] == "Enforced", (verified, evidence)
     assert evidence["efi_stub_sha256"] == digest(args.efi_stub)
     assert digest(volume) == source_disk and digest(enrolled) == source_vars
@@ -74,16 +75,19 @@ def exercise(args, work):
 
     offline = reboot_cd(args, work, volume, cd, enrolled, readonly=True)
     assert b"\nPSIOS-SECURE-BOOT/1\nEnforced\n" in offline
+    assert f"\nPSIOS-SOURCE/1\n{source_disk}\n".encode() in offline
     independent = offline.split(b"\nPSIOS-RESCUE/1\nOK\n", 1)[1]
     recovered, _ = json.JSONDecoder().raw_decode(independent.decode().lstrip())
     assert recovered == verified, recovered
     disabled = reboot_cd(args, work, volume, cd, blank, readonly=True)
     assert disabled.endswith(b"PSIOS-RESCUE/1\nERROR secure-boot-not-enforced\n"), disabled
+    assert b"\nPSIOS-SOURCE/1\n" not in disabled, disabled
     writable = reboot_cd(args, work, volume, cd, enrolled, readonly=False)
     assert b"\nPSIOS-SECURE-BOOT/1\nEnforced\n" in writable
     assert writable.endswith(b"PSIOS-RESCUE/1\nERROR block-device\n"), writable
+    assert b"\nPSIOS-SOURCE/1\n" not in writable, writable
     assert digest(volume) == source_disk and digest(cd) == cd_digest and digest(enrolled) == source_vars
-    print("PASS signed standalone rescue CD, firmware enforcement and writable-source refusal")
+    print("PASS signed standalone rescue CD, firmware and source digest enforcement, and writable-source refusal")
 
 
 if __name__ == "__main__":

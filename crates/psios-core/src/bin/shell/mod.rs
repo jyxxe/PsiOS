@@ -1,7 +1,9 @@
 //! A browser-facing local client. The Core checks each operation under the paired identity.
 
+mod files;
 mod resolver;
 mod session;
+pub(super) use files::VolumeAccess;
 
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::{
@@ -81,6 +83,7 @@ pub(super) struct Options {
     pub send_chat: bool,
     pub review_work_items: bool,
     pub manage_agent_sessions: bool,
+    pub files: Option<VolumeAccess>,
     pub resolver_delegation: Option<String>,
 }
 
@@ -94,6 +97,8 @@ enum Endpoint {
     Tasks,
     Applications,
     ApplicationReleases,
+    VolumeDirectory,
+    VolumePreview,
     Conversations,
     ConversationMessages,
     AgentSessions,
@@ -262,6 +267,8 @@ enum CoreRequest {
     NodeResolver(String),
     Applications(Page),
     ApplicationReleases(ApplicationReleases),
+    VolumeDirectory(files::Directory, VolumeAccess),
+    VolumePreview(files::Preview, VolumeAccess),
     Conversations(DirectoryPage),
     ConversationMessages(ConversationMessages),
     AgentSessions(Page),
@@ -292,6 +299,14 @@ impl CoreRequest {
             Self::NodeResolver(delegation) => Ok(json_response(
                 StatusCode::OK,
                 resolver::observe(client, &delegation, &check)?,
+            )),
+            Self::VolumeDirectory(directory, access) => Ok(json_response(
+                StatusCode::OK,
+                directory.read(access, client, &check)?,
+            )),
+            Self::VolumePreview(preview, access) => Ok(json_response(
+                StatusCode::OK,
+                preview.read(access, client, &check)?,
             )),
             Self::Applications(page) => {
                 let snapshot = client.call(
@@ -833,6 +848,10 @@ fn file(path: &str) -> Option<HttpResponse> {
             "text/javascript; charset=utf-8",
             include_bytes!("shell-sessions.js").as_slice(),
         ),
+        "/shell-files.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("shell-files.js").as_slice(),
+        ),
         "/shell.js" => (
             "text/javascript; charset=utf-8",
             include_bytes!("shell.js").as_slice(),
@@ -899,6 +918,14 @@ fn rpc(endpoint: Endpoint, data: Value, options: &Options) -> Result<CoreRequest
         )),
         Endpoint::ApplicationReleases => Ok(CoreRequest::ApplicationReleases(
             serde_json::from_value(data).map_err(|_| INVALID)?,
+        )),
+        Endpoint::VolumeDirectory => Ok(CoreRequest::VolumeDirectory(
+            serde_json::from_value(data).map_err(|_| INVALID)?,
+            options.files.clone().ok_or(INVALID)?,
+        )),
+        Endpoint::VolumePreview => Ok(CoreRequest::VolumePreview(
+            serde_json::from_value(data).map_err(|_| INVALID)?,
+            options.files.clone().ok_or(INVALID)?,
         )),
         Endpoint::Conversations => Ok(CoreRequest::Conversations(
             serde_json::from_value(data).map_err(|_| INVALID)?,
@@ -1032,6 +1059,16 @@ impl Shell {
             "/api/tasks" => Endpoint::Tasks,
             "/api/applications" => Endpoint::Applications,
             "/api/application-releases" => Endpoint::ApplicationReleases,
+            "/api/volume-directory" if self.options.files.is_some() => Endpoint::VolumeDirectory,
+            "/api/volume-preview"
+                if self
+                    .options
+                    .files
+                    .as_ref()
+                    .is_some_and(|files| files.preview) =>
+            {
+                Endpoint::VolumePreview
+            }
             "/api/conversations" => Endpoint::Conversations,
             "/api/conversation-messages" => Endpoint::ConversationMessages,
             "/api/agent-sessions" => Endpoint::AgentSessions,
@@ -1062,13 +1099,19 @@ impl Shell {
             if !session.pair(&pair.code, &token, now()) {
                 return Err(UNAUTHENTICATED);
             }
-            return Ok(json_response(
-                StatusCode::OK,
-                json!({"token":token,"principal_id":self.principal,"cancel_pending_tasks":self.options.cancel_pending_tasks,
-                       "send_chat":self.options.send_chat,"review_work_items":self.options.review_work_items,
-                       "manage_agent_sessions":self.options.manage_agent_sessions,
-                       "observe_resolver":self.options.resolver_delegation.is_some()}),
-            ));
+            let mut reply = json!({
+                "token":token,"principal_id":self.principal,"cancel_pending_tasks":self.options.cancel_pending_tasks,
+                "send_chat":self.options.send_chat,"review_work_items":self.options.review_work_items,
+                "manage_agent_sessions":self.options.manage_agent_sessions,
+                "observe_resolver":self.options.resolver_delegation.is_some(),
+            });
+            if let Some(files) = &self.options.files {
+                reply["browse_files"] = json!(true);
+                if files.preview {
+                    reply["preview_files"] = json!(true);
+                }
+            }
+            return Ok(json_response(StatusCode::OK, reply));
         }
 
         let token = single(request.headers(), header::AUTHORIZATION.as_str())

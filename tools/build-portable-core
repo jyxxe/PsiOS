@@ -36,6 +36,13 @@ if grep -Fxq psios-mcp "$work/exported-members"; then
     checks+=(psios-mcp)
     members+=(psios-mcp)
 fi
+if grep -Fxq toolchain/platform "$work/exported-members"; then
+    tar -xf "$work/binaries.tar" -C "$work" toolchain
+    python3 -B "$repo/tools/lib/portable_build_inputs.py" "$repo" "$sha" build-inputs.json \
+        --toolchain "$work/toolchain"
+    checks+=(build-inputs.json)
+    members+=(build-inputs.json)
+fi
 # The selected revision determines its archive layout, including when rebuilding
 # an older release with this launcher. Fetch every rescue file from that tree.
 if git -C "$repo" cat-file -e "$sha:images/rescue/README.txt" 2>/dev/null; then

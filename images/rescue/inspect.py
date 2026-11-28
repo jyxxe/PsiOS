@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 import boot_media
 from boot_media import pinned_copy, regular_file
 
@@ -22,6 +23,7 @@ HERE = Path(__file__).resolve().parent
 REPORT_LIMIT = 2 * 1024 * 1024
 BOOT_TIMEOUT = 180
 REPORT_MARKER = b"\nPSIOS-RESCUE/1\n"
+AHCI_VIEW_MIB = 16
 
 
 def scratch_mib(args):
@@ -38,6 +40,16 @@ def guest_path(value):
             or value != str(path) or ".." in path.parts or "\0" in value):
         raise argparse.ArgumentTypeError("expected a normalized absolute path inside the mounted filesystem")
     return value
+
+
+def filesystem_uuid(value):
+    try:
+        identity = uuid.UUID(value)
+        if identity.int == 0 or str(identity) != value.lower():
+            raise ValueError()
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("expected a nonzero ext4 UUID in standard form") from error
+    return identity
 
 
 def configuration(args):
@@ -60,19 +72,21 @@ def configuration(args):
             "witness_dir": "/source" + (args.witness or args.state + ".witness")}
 
 
-def prepare(work, args, require_secure_boot):
+def prepare(work, args, require_secure_boot, *, filesystem_uuid=None, disk_transport="virtio"):
     scratch = scratch_mib(args)
     boot_media.prepare_kernel(work, args.iso)
     pinned_copy(args.core, work / "psiosd", args.core_sha256, 64 * 1024 * 1024)
     shutil.copyfile(HERE / "init", work / "psios-rescue")
     for name in ["psiosd", "psios-rescue"]:
         (work / name).chmod(0o755)
-    # Keep input paths in JSON. The init script sources only these numeric settings.
+    # Keep input paths in JSON. The shell settings contain only validated literals.
     settings = (f"PARTITION={args.partition}\nSERVICE_UID={args.uid}\n"
                 f"SERVICE_GID={args.gid if args.gid is not None else args.uid}\nCOPY_MIB={args.max_copy_mib}\n"
                 f"SCRATCH_MIB={scratch}\nOVERLAY={int(args.journal_overlay_mib is not None)}\n"
                 f"SECURE_BOOT={int(require_secure_boot)}\n"
-                f"REHEARSE={int(args.migration_config is not None)}\n")
+                f"REHEARSE={int(args.migration_config is not None)}\n"
+                f"FILESYSTEM_UUID={filesystem_uuid.hex if filesystem_uuid else ''}\n"
+                f"DISK_TRANSPORT={disk_transport}\n")
     (work / "rescue-settings").write_text(settings)
     (work / "rescue-settings").chmod(0o600)
     (work / "rescue.json").write_text(json.dumps(configuration(args), allow_nan=False))
@@ -136,7 +150,8 @@ def inspect(args):
         if args.secure_boot_key:
             signing = boot_media.prepare_secure_boot(work, args.secure_boot_key, args.secure_boot_cert,
                                                     args.efi_stub, args.efi_stub_sha256)
-        prepare(work, args, signing is not None)
+        prepare(work, args, signing is not None, filesystem_uuid=args.filesystem_uuid,
+                disk_transport=args.disk_transport)
         # Hand QEMU the exact already-open read-only file. Raw format disables
         # backing-file discovery and the guest gets no interface to the network.
         fd = disk.fileno()
@@ -155,25 +170,38 @@ def inspect(args):
                    "-blockdev", "driver=raw,node-name=source,file=disk,read-only=on"]
         drive = "source"
         limit_child = None
-        if args.journal_overlay_mib is not None:
+        overlay_mib = args.journal_overlay_mib
+        if args.disk_transport == "ahci":
+            # QEMU's ATA disk requires a writable top-level node. Its source
+            # remains behind the same read-only raw and file nodes.
+            overlay_mib = AHCI_VIEW_MIB
+        if overlay_mib is not None:
             # Limit the length of the host's QCOW2 file, including its metadata.
             # A guest virtual disk can be much larger. Inherit stricter host limits.
-            limit = args.journal_overlay_mib * 1024 * 1024
+            limit = overlay_mib * 1024 * 1024
             soft, _ = resource.getrlimit(resource.RLIMIT_FSIZE)
             if soft != resource.RLIM_INFINITY:
                 limit = min(soft, limit)
 
             limit_child = partial(resource.setrlimit, resource.RLIMIT_FSIZE, (limit, limit))
-            scratch = str(work / "journal.qcow2")
+            scratch = str(work / "source-view.qcow2")
             subprocess.run(["qemu-img", "create", "-q", "-f", "qcow2", scratch, str(os.fstat(fd).st_size)],
                            preexec_fn=limit_child, timeout=20, check=True)
             command += ["-blockdev", json.dumps({"driver": "file", "node-name": "changes", "filename": scratch}),
                         "-blockdev", "driver=qcow2,node-name=view,file=changes,backing=source"]
             drive = "view"
-        command += ["-device", f"virtio-blk-pci,drive={drive},werror=report,rerror=report"]
+        if args.disk_transport == "nvme":
+            command += ["-device", "nvme,id=controller,serial=PSIOS-RESCUE",
+                        "-device", f"nvme-ns,drive={drive},bus=controller,nsid=1"]
+        elif args.disk_transport == "ahci":
+            command += ["-device", "ich9-ahci,id=controller",
+                        "-device", f"ide-hd,drive={drive},bus=controller.0,werror=report,rerror=report"]
+        else:
+            command += ["-device", f"virtio-blk-pci,drive={drive},werror=report,rerror=report"]
         result = capture_report(command, cwd=work, pass_fds=(fd,), preexec_fn=limit_child)
         if limit_child is not None and result.returncode == -signal.SIGXFSZ:
-            raise ValueError("journal overlay file size limit reached")
+            purpose = "AHCI inspection" if args.disk_transport == "ahci" else "journal"
+            raise ValueError(f"{purpose} overlay file size limit reached")
         result.check_returncode()
         output = unique_report(result.stdout, args.firmware, accelerator)
         status, _, body = output.partition(REPORT_MARKER)[2].strip().partition(b"\n")
@@ -212,6 +240,10 @@ def main():
     parser.add_argument("--uid", type=int, required=True, help="numeric UID of the original service account")
     parser.add_argument("--gid", type=int, help="original service GID, defaults to UID")
     parser.add_argument("--partition", type=int, default=0, help="partition number, or 0 for a raw filesystem")
+    parser.add_argument("--filesystem-uuid", type=filesystem_uuid, metavar="UUID",
+                        help="require a unique ext4 UUID at the given partition number")
+    parser.add_argument("--disk-transport", choices=("virtio", "nvme", "ahci"), default="virtio",
+                        help="QEMU attachment for the image (default virtio)")
     parser.add_argument("--state", type=guest_path, default="/var/lib/psios")
     parser.add_argument("--witness", type=guest_path, help="defaults to STATE.witness")
     parser.add_argument("--max-copy-mib", type=int, default=64, help="database and journal copy limit (1–256 MiB)")
@@ -240,6 +272,9 @@ def main():
         parser.error("journal overlay limit must be 16–512 MiB")
     if args.firmware != "direct" and args.journal_overlay_mib is not None:
         parser.error("firmware media require a read-only block device")
+    if args.disk_transport != "virtio" and (args.firmware != "direct" or args.journal_overlay_mib is not None
+                                           or args.filesystem_uuid is None):
+        parser.error("NVMe and AHCI require direct read-only inspection and --filesystem-uuid")
     if args.migration_config is not None and (args.firmware != "direct" or args.journal_overlay_mib is not None):
         parser.error("migration rehearsal requires direct boot and a clean read-only disk")
     if args.save_rescue_iso is not None:

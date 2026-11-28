@@ -176,6 +176,83 @@ async function verifyFiles() {
   assert.ok(requests.every(url => new URL(url).origin === input.origin));
 }
 
+async function verifyWindowTiling() {
+  const viewport = { width: 1280, height: 860, screenWidth: 1280, screenHeight: 860, deviceScaleFactor: 1, mobile: false };
+  await send("Emulation.setDeviceMetricsOverride", viewport);
+  await click("#nav-node");
+  await waitFor("node observation", 'document.querySelector("#node-view").textContent.includes(' + JSON.stringify(input.node) + ')');
+  await click("#nav-tasks");
+  await waitFor("task list", 'document.querySelector("#task-rows button") !== null');
+  await selectTask(input.task);
+  const detail = 'document.querySelector("#task-content").textContent.includes(' + JSON.stringify(input.task) + ')';
+  await waitFor("task details", detail);
+  await click("#nav-applications");
+  await waitFor("application list", '!document.querySelector("#applications-empty").hidden');
+  const initialRequests = requests.length;
+  const nodeRight = '#window-node [data-tile-side="right"]';
+  const taskLeft = '#window-tasks [data-tile-side="left"]';
+  const taskRight = '#window-tasks [data-tile-side="right"]';
+  const positions = `(() => {
+    const bounds = id => document.getElementById("window-" + id).getBoundingClientRect();
+    const tasks = bounds("tasks"), node = bounds("node"), applications = bounds("applications");
+    return { tasksFirst: tasks.right <= node.left, nodeFirst: node.right <= tasks.left,
+      appBelow: applications.top >= Math.max(tasks.bottom, node.bottom),
+      equalHeight: tasks.height === node.height, stacked: node.bottom <= tasks.top,
+      equalWidth: tasks.width === node.width };
+  })()`;
+
+  await keyboardActivate(nodeRight);
+  await keyboardActivate(taskLeft);
+  assert.ok(await evaluate('document.activeElement.matches(' + JSON.stringify(taskLeft) + ')'));
+  assert.ok(await evaluate('document.activeElement.getAttribute("aria-pressed") === "true"'));
+  assert.ok(await evaluate(detail));
+  assert.equal(requests.length, initialRequests);
+  let layout = await evaluate(positions);
+  assert.ok(layout.tasksFirst && layout.appBelow && layout.equalHeight && layout.equalWidth, JSON.stringify(layout));
+  assert.deepEqual(await evaluate(`[...document.querySelectorAll("#desktop > section:not([hidden])")].map(window => window.id)`),
+    ["window-tasks", "window-node", "window-applications"]);
+
+  await keyboardActivate(taskRight);
+  layout = await evaluate(positions);
+  assert.ok(layout.nodeFirst && layout.appBelow, JSON.stringify(layout));
+  assert.ok(await evaluate('document.activeElement.matches(' + JSON.stringify(taskRight) + ')'));
+
+  const maximize = '#window-tasks [data-action="maximize"]';
+  await keyboardActivate(maximize);
+  assert.ok(await evaluate(`document.getElementById("window-node").hidden &&
+    document.getElementById("node-view").textContent === "" && !document.getElementById("desktop").classList.contains("has-tiles")`));
+  await keyboardActivate(maximize);
+  await waitFor("restored tiles", 'document.getElementById("node-view").textContent.includes(' + JSON.stringify(input.node) + ')');
+  assert.ok((await evaluate(positions)).nodeFirst);
+  await keyboardActivate('#window-tasks [data-action="minimize"]');
+  assert.ok(await evaluate('document.getElementById("task-content").textContent === ""'));
+  await keyboardActivate("#nav-tasks");
+  await waitFor("reopened Task details", detail);
+  assert.ok((await evaluate(positions)).nodeFirst);
+
+  await send("Emulation.setDeviceMetricsOverride", {
+    width: 360, height: 800, screenWidth: 360, screenHeight: 800, deviceScaleFactor: 1, mobile: true,
+  });
+  await waitFor("narrow width", "window.innerWidth === 360");
+  assert.ok((await evaluate(positions)).stacked);
+  assert.equal(await evaluate("document.documentElement.scrollWidth"), 360);
+  assert.ok(await evaluate('getComputedStyle(document.querySelector(' + JSON.stringify(taskRight) + ')).display === "none"'));
+  await send("Emulation.setDeviceMetricsOverride", viewport);
+  await waitFor("wide width", "window.innerWidth === 1280");
+  assert.ok((await evaluate(positions)).nodeFirst);
+  await keyboardActivate(taskRight);
+  assert.ok(await evaluate('document.activeElement.getAttribute("aria-pressed") === "false" && !document.getElementById("window-tasks").hasAttribute("data-tile")'));
+  await keyboardActivate('#window-node [data-action="close"]');
+  await keyboardActivate("#nav-node");
+  assert.ok(await evaluate('document.querySelector("#desktop > [data-tile]") === null'));
+  await keyboardActivate(nodeRight);
+  await click("#logout");
+  await waitFor("cleared layout and Task data", `document.getElementById("workspace").hidden &&
+    !document.querySelector("#desktop > [data-tile]") && document.getElementById("task-content").textContent === ""`);
+  assert.deepEqual(exceptions, []);
+  assert.ok(requests.every(url => new URL(url).origin === input.origin));
+}
+
 async function test() {
   await send("Browser.getVersion", {}, 35_000);
   if (input.downloads) await send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: input.downloads });
@@ -197,6 +274,7 @@ async function test() {
   await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
   await waitFor("paired desktop", '!document.querySelector("#workspace").hidden && !document.querySelector("#empty-desktop").hidden');
   if (input.fileBrowser) return verifyFiles();
+  if (input.windowTiling) return verifyWindowTiling();
   assert.ok(await evaluate('document.activeElement.id === "nav-node" && document.querySelectorAll(".app-window:not([hidden])").length === 0'));
   assert.ok(!requests.some(url => ["/api/node", "/api/tasks"].includes(new URL(url).pathname)));
   if (input.projectReview) {

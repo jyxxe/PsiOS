@@ -90,6 +90,12 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 
 virtio 静态 IPv4 对应格式 4 回执，静态 IPv6 和双栈对应格式 5。配有 Core 资源限额的 virtio 盘在格式 6 中记录同一个 `network_profile`。e1000e 的格式 8 回执同时记录驱动和静态模式。停机升级会检查保存的配置内容和权限，并核对 e1000e 的启动方式。双栈还会核对两个配置的 MAC 和合计 DNS 数量。配置损坏时保留源盘并拒绝发布候选盘。
 
+## 可选 SSH 控制台
+
+制作新盘时可在已有的 DHCP 或静态网络配置上加入 `--ssh-authorized-key operator.pub`。文件使用标准 OpenSSH Ed25519 公钥格式。控制台在 TCP 22 监听，只允许 `psios` 用户用该公钥登录。root、密码认证和转发均关闭。串口账户仍使用各自的本机配置。
+
+首次正式引导生成并刷盘保存本部署的 Ed25519 主机密钥。可通过可信串口运行 `ssh-keygen -lf /run/psios-ssh/host-key.pub` 核对首次连接显示的指纹。复制尚未启动的新盘时，每份副本在自己的首次正式引导生成主机密钥。重启和停机升级保留原主机密钥与授权公钥。隔离试启动不运行 SSH。查看 SSH 启动错误可使用本地串口。[真实 SSH 验收](../tests/native_ssh_console.py)
+
 ## 核对安装与运行的制品
 
 构建成功后，将 `node-build.json` 保存在节点外。其中 `initial_image_sha256` 可在首次启动前与 `sha256sum node.raw` 比对。启动会改变数据分区，离线核对引导程序可单独读取 EFI 系统分区。
@@ -107,7 +113,7 @@ sha256sum boot.efi
 
 ## 安装到空白块设备
 
-在 Linux amd64 上用本机 root 运行归档中的 `native/install.py`。准备尚未启动的新盘镜像、构建回执以及来自可信构建的回执 SHA-256。目标可为空白 Virtio 整盘或本地 PCIe NVMe 命名空间，容量须与镜像完全相同，逻辑扇区为 512 字节。Virtio 使用唯一序列号。NVMe 计划同时固定控制器序列号、命名空间 ID、WWID、内核设备代次与拓扑，并在写入前复核。安装记录目录须位于另一个受保护的本机持久文件系统，支持 ext4、XFS 和 Btrfs。由 root 所有，权限为 `0700`。安装器会检查并同步上级目录。[隔离来宾安装与重启验收](../tests/native_install_virtio.py)
+在 Linux amd64 上用本机 root 运行归档中的 `native/install.py`。准备尚未启动的新盘镜像、构建回执以及来自可信构建的回执 SHA-256。目标可为空白 Virtio 整盘、本地 PCIe NVMe 命名空间或固定 SATA AHCI 整盘，容量须与镜像完全相同，逻辑扇区为 512 字节。Virtio 使用唯一序列号。NVMe 计划还固定命名空间 ID 和 WWID。SATA AHCI 要求 ATA 序列号和注册的 NAA WWID，并检查同类已枚举磁盘的身份唯一性。三种设备的计划均固定内核设备代次与拓扑，并在写入前复核。安装记录目录须位于另一个受保护的本机持久文件系统，支持 ext4、XFS 和 Btrfs。由 root 所有，权限为 `0700`。安装器会检查并同步上级目录。[隔离来宾安装与重启验收](../tests/native_install_virtio.py)
 
 ```sh
 sudo install -d -m 0700 "$INSTALL_STATE"
@@ -136,7 +142,7 @@ sudo python3 native/install.py inspect --state-dir "$INSTALL_STATE"
 
 ## 持久性与救援
 
-同一原生 GPT 镜像可在 OVMF 的 virtio-blk、PCIe NVMe 和 SATA AHCI 磁盘上引导，验收使用 512 字节逻辑扇区。启动核对初始枚举中这些设备的文件系统 UUID 及分区布局。发现重复身份或状态与主目录分属两个盘时，在挂载前停机。实机固件、控制器和 SATA 安装器写盘仍待验收。[混合磁盘验收](../tests/native_storage.py)
+同一原生 GPT 镜像可在 OVMF 的 virtio-blk、PCIe NVMe 和 SATA AHCI 磁盘上引导，验收使用 512 字节逻辑扇区。启动核对初始枚举中这些设备的文件系统 UUID 及分区布局。发现重复身份或状态与主目录分属两个盘时，在挂载前停机。实机固件和控制器仍待验收。[混合磁盘验收](../tests/native_storage.py)
 
 首次启动核对部署记录，在私有暂存目录创建并核验 Core 状态与见证，再逐个发布两个目录。在准备期间断电，可重新准备未发布的权威。发布开始后断电，启动会核验并继续安装原节点的状态与见证。初始化完成标记持久落盘后才开启本机管理。已有节点丢失状态时，启动检查会报错并保留原见证供救援。启动检查失败时，串口会指明失败阶段，系统关闭已经挂载的持久分区后停机。保留原盘，使用同版本救援归档检查 `--partition 2 --state /psios --uid 1000`。强制断电产生的待重放日志可用有容量限制的临时覆盖层检查。[首次启动断电验收](../tests/native_enrollment.py) · [离线救援](offline-rescue.md)
 

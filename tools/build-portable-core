@@ -73,6 +73,9 @@ if git -C "$repo" cat-file -e "$sha:images/native/README.txt" 2>/dev/null; then
     if git -C "$repo" cat-file -e "$sha:images/native/enroll" 2>/dev/null; then
         native_files+=(enroll)
     fi
+    if git -C "$repo" cat-file -e "$sha:images/native/maintenance" 2>/dev/null; then
+        native_files+=(maintenance)
+    fi
     if git -C "$repo" cat-file -e "$sha:images/native/core-cgroup" 2>/dev/null; then
         native_files+=(core-cgroup)
     fi

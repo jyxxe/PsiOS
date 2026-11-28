@@ -1,0 +1,58 @@
+#!/bin/sh
+# Prepare BusyBox init for a local-only recovery session from a verified boot.
+set -eu
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C
+[ "$PPID" = 1 ] && [ "$(id -u)" = 0 ] || exit 1
+
+regular() {
+    [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -c '%u:%g:%a:%h' "$1")" = "0:0:$2:1" ]
+}
+
+bounded() {
+    [ "$(stat -c '%s' "$1")" -le 65536 ]
+}
+
+[ -d /etc/psios ] && [ ! -L /etc/psios ] && [ "$(stat -c '%u:%g:%a' /etc/psios)" = 0:0:755 ]
+marker=/etc/psios/maintenance-console
+regular "$marker" 444
+[ "$(stat -c '%s' "$marker")" -eq 8 ]
+printf 'enabled\n' | cmp -s - "$marker"
+
+regular /etc/passwd 644
+regular /etc/shadow 600
+regular /etc/securetty 644
+bounded /etc/passwd
+bounded /etc/shadow
+bounded /etc/securetty
+grep -Fxq ttyS0 /etc/securetty
+root_entry=$(awk -F: '$1 == "root" { count++; line=$0 } END { if (count != 1) exit 1; print line }' /etc/passwd)
+printf '%s\n' "$root_entry" | grep -Eq '^root:x:0:0:[^:]*:/root:/bin/sh$'
+root_shadow=$(awk -F: '$1 == "root" { count++; line=$0 } END { if (count != 1) exit 1; print line }' /etc/shadow)
+# Preserve the installed password hash and expiry fields. Empty, locked and
+# unsupported hashes do not make a maintenance authentication database.
+printf '%s\n' "$root_shadow" | grep -Eq '^root:\$6\$[./A-Za-z0-9]{1,16}\$[./A-Za-z0-9]{86}(:[0-9]*){7}$'
+
+sync -f /var/lib
+sync -f /mnt/psios-homes
+umount /home/psios
+umount /root
+umount /etc
+mount -o remount,ro,nodev,nosuid,noexec /mnt/psios-homes
+mount -o remount,ro,nodev,nosuid,noexec /var/lib
+awk '$5=="/var/lib" && $6~/^ro(,|$)/ { state=1 }
+     $5=="/mnt/psios-homes" && $6~/^ro(,|$)/ { homes=1 }
+     END { exit !(state && homes) }' /proc/self/mountinfo
+
+# The underlying initramfs /etc and /root are now visible again. No installed
+# inittab, login shell configuration, or persistent root profile is used.
+umask 077
+printf 'root:x:0:0:PsiOS maintenance:/root:/bin/sh\n' > /etc/passwd
+printf 'root:x:0:\n' > /etc/group
+printf '%s\n' "$root_shadow" > /etc/shadow
+unset root_shadow
+chmod 0600 /etc/shadow
+printf 'ttyS0\n' > /etc/securetty
+printf 'PsiOS local maintenance console\n' > /etc/issue
+printf '%s\n' 'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100' \
+    '::shutdown:/bin/sh /psios-shutdown' > /etc/inittab
+printf 'PsiOS local maintenance: Core authority unavailable; persistent volumes mounted read-only\n' >/dev/console

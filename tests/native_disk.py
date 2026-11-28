@@ -680,7 +680,7 @@ def exercise(args, work):
         payload = ("/bin/psiosd", "/bin/psiosctl", "/psios-source", "/psios-init",
                    "/psios-disk-uuid", "/psios-home-uuid", "/psios-shutdown", "/psios-dhcp", "/psios-dhcp-event",
                    "/psios-ipv4", "/psios-ipv6", "/psios-static", "/psios-storage", "/psios-storage-layout",
-                   "/psios-enroll")
+                   "/psios-enroll", "/psios-maintenance")
         with tarfile.open(args.archive, "r:gz") as archive:
             has_mcp = "psios-mcp" in archive.getnames()
             if has_mcp:

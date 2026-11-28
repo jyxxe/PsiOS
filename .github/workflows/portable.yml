@@ -191,6 +191,11 @@ jobs:
           python3 tests/native_enrollment.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
             --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
 
+      - name: Authenticate the local maintenance console after a failed Core authority check
+        run: |
+          python3 -B tests/native_maintenance.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz"
+
       - name: Expire a scoped grant and queued Task after real UTC rollback in a guest
         run: |
           python3 -B tests/native_grant_deadline.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
@@ -379,6 +384,15 @@ jobs:
             --efi-stub "$secure_tools/root/usr/lib/systemd/boot/efi/linuxx64.efi.stub" \
             --kernel-iso "$RUNNER_TEMP/rescue.iso" --bin-dir "$RUNNER_TEMP/rescue-core" \
             --inspector "$RUNNER_TEMP/rescue-core/rescue/inspect.py"
+
+      - name: Keep Secure Boot enforced in the authenticated local maintenance console
+        run: |
+          secure_tools="$RUNNER_TEMP/psios-secure-boot-tools"
+          export PATH="$secure_tools/root/usr/bin:$PATH"
+          export PYTHONPATH="$secure_tools/root/usr/lib/python3/dist-packages"
+          /usr/bin/python3 -B tests/native_maintenance.py --installer "$RUNNER_TEMP/rescue-core/native/create.py" \
+            --kernel-iso "$RUNNER_TEMP/rescue.iso" --archive "$RUNNER_TEMP/rescue-core/psios-core-linux-amd64.tar.gz" \
+            --efi-stub "$secure_tools/root/usr/lib/systemd/boot/efi/linuxx64.efi.stub"
 
   local-inference:
     needs: portable-core

@@ -29,6 +29,8 @@ qemu-system-x86_64 -nodefaults -no-user-config -machine q35 -m 768 -smp 2 \
 
 串口账户 `psios` 和服务使用 UID 1000。登录后可运行 `psiosctl whoami`、`psiosctl node`，或用 `printf '{}' | psiosctl submit system.status --key first-status` 提交任务。需要传统系统管理时，可在生成新盘时传入 `--root-console-hash root.hash` 设置独立的本机 root 密码。默认锁定 root。启用后可用 root 在串口执行 `poweroff`。关机钩子先允许 Core 结算，随后关闭其余会话与进程，刷盘并卸载状态和主目录。运行时生成的所有者令牌位于服务账户的私有见证目录。[关机验收](../tests/native_disk.py)
 
+设置独立的本机 root 密码时还可传入 `--maintenance-console`。已核验的生产启动遇到 Core 权威检查失败时，系统可切换到串口维护控制台。它使用当前磁盘上有效的 root 串口凭据，只在本机接受 root 登录。持久状态和主目录初始以只读方式挂载，原 root 主目录可在 `/mnt/psios-homes/root` 查阅。维护登录使用内存中的独立账户文件和系统启动配置。使用 `poweroff` 安全退出并继续通过外部介质修复。授权配置缺失或不符合要求时，启动关闭磁盘并提示使用外部救援。[本机维护验收](../tests/native_maintenance.py)
+
 制作新盘时可用 `--hostname psi-edge-17` 设置本机名。生产引导在启动服务前从 root 所有的 `/etc/hostname` 读取一个 DNS 标签，缺省名称为 `psios`。root 可更新该文件，并在重启后应用。停机升级沿用源盘配置。无效文件会在 `host-name` 阶段进入救援流程。
 
 第一次生产启动生成标准的 `/etc/machine-id`，由系统分区中的 root 只读文件提供。每台从同一未启动盘部署的节点在各自启动时生成 ID。之后重启沿用原值，停机升级保留它。早期镜像首次运行新引导时会补建文件。已存在的 ID 必须是非全零的 32 个小写十六进制字符。启动遇到格式、类型或所有者不符时，记录 `machine-identity` 阶段并进入原有救援流程。

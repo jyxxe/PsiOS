@@ -40,10 +40,14 @@ abort_boot() {
     if [ "$trial_boot" = yes ]; then
         printf '\nPSIOS-TRIAL/1 {"status":"Failed","stage":"%s"}\n' "$stage" >/dev/console || :
     fi
-    echo "PsiOS boot stopped at $stage; use external rescue media" >/dev/console || :
     if [ "$state_verified" = yes ] && ! record_boot_failure; then
         echo "PsiOS could not persist the boot failure on the verified state volume" >/dev/console || :
     fi
+    if [ "$payload_verified" = yes ] && [ "$state_verified" = yes ] && [ "$stage" = authority ] &&
+        "$bb" sh /psios-maintenance; then
+        exec "$bb" init
+    fi
+    echo "PsiOS boot stopped at $stage; use external rescue media" >/dev/console || :
     if [ "$payload_verified" = yes ]; then
         "$bb" sh /psios-shutdown --mounts-only || :
     fi

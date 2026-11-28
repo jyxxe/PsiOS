@@ -36,27 +36,32 @@ def operator_key_rotation(digest, key_line):
     return f"printf '%s\\n' {shlex.quote(key_line)} | sh /psios-ssh rotate-authorized-key {digest}"
 
 
+def require_console_refusal(console, command, reason):
+    output = console.run(f"if ( {command} ); then printf '\\naccepted\\n'; else printf '\\nrefused\\n'; fi")
+    assert output.splitlines()[-1:] == ["refused"] and reason in output, output
+
+
 def rotate_key(console, admin, original, next_key):
     original_line = operator_key_line(original)
     next_line = operator_key_line(next_key)
     current = hashlib.sha256((original_line + "\n").encode()).hexdigest()
     expected = hashlib.sha256((next_line + "\n").encode()).hexdigest()
     replace = operator_key_rotation(current, next_line)
-    assert "requires local root" in console.run(replace)
+    require_console_refusal(console, replace, "requires local root")
     console.send("exit")
     console.login("root", admin)
     saved = "/etc/psios/ssh-authorized-key"
     pending = "/etc/psios/.ssh-authorized-key.pending"
     assert console.run(f"sha256sum {saved}").split()[0] == current
-    assert "differs from the expected digest" in console.run(operator_key_rotation("0" * 64, next_line))
-    assert "without a comment" in console.run(operator_key_rotation(current, next_line + " unexpected"))
+    require_console_refusal(console, operator_key_rotation("0" * 64, next_line), "differs from the expected digest")
+    require_console_refusal(console, operator_key_rotation(current, next_line + " unexpected"), "without a comment")
     lock = f"(exec 9< /etc/psios; busybox flock -n 9 && {replace})"
-    assert "Another SSH operator key rotation" in console.run(lock)
+    require_console_refusal(console, lock, "Another SSH operator key rotation")
     assert console.run(f"sha256sum {saved}").split()[0] == current
     console.run(f"(umask 077; printf 'interrupted' > {pending})")
     assert console.run(replace).split()[0] == expected
     assert console.run(f"test ! -e {pending} && stat -c '%u:%g:%a:%h' {saved}") == "0:0:644:1"
-    assert "differs from the expected digest" in console.run(replace)
+    require_console_refusal(console, replace, "differs from the expected digest")
 
 
 def require_revoked_key(port, trusted, key):

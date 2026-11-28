@@ -95,7 +95,7 @@ sha256sum boot.efi
 
 ## 安装到空白块设备
 
-在 Linux amd64 上用本机 root 运行归档中的 `native/install.py`。准备尚未启动的新盘镜像、构建回执以及来自可信构建的回执 SHA-256。目标应为容量与镜像完全相同的空白 Virtio 整盘，具备唯一序列号和 512 字节逻辑扇区。安装记录目录须位于另一个受保护的本机持久文件系统，支持 ext4、XFS 和 Btrfs。由 root 所有，权限为 `0700`。安装器会检查并同步上级目录。
+在 Linux amd64 上用本机 root 运行归档中的 `native/install.py`。准备尚未启动的新盘镜像、构建回执以及来自可信构建的回执 SHA-256。目标可为空白 Virtio 整盘或本地 PCIe NVMe 命名空间，容量须与镜像完全相同，逻辑扇区为 512 字节。Virtio 使用唯一序列号。NVMe 计划同时固定控制器序列号、命名空间 ID、WWID、内核设备代次与拓扑，并在写入前复核。安装记录目录须位于另一个受保护的本机持久文件系统，支持 ext4、XFS 和 Btrfs。由 root 所有，权限为 `0700`。安装器会检查并同步上级目录。[隔离来宾安装与重启验收](../tests/native_install_virtio.py)
 
 ```sh
 sudo install -d -m 0700 "$INSTALL_STATE"

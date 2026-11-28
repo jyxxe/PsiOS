@@ -16,6 +16,11 @@ BLOCK = SYSFS / "dev/block"
 VIRTIO = SYSFS / "bus/virtio"
 VIRTIO_DRIVER = VIRTIO / "drivers/virtio_blk"
 VIRTIO_NAME = re.compile(r"vd[a-z]{1,5}\Z")
+PCI = SYSFS / "bus/pci"
+NVME_DRIVER = PCI / "drivers/nvme"
+NVME_NAME = re.compile(r"nvme[0-9]{1,7}n[0-9]{1,10}\Z")
+NVME_SERIAL = re.compile(r"[ -~]{1,20}\Z")
+NVME_WWID = re.compile(r"(?:uuid|eui|nvme)\.[!-~]{1,240}\Z")
 LOOP_NAME = re.compile(r"loop(?:0|[1-9][0-9]{0,6})\Z")
 SERIAL = re.compile(r"[A-Za-z0-9_.-]{1,20}\Z")
 UINT = re.compile(r"0|[1-9][0-9]{0,19}\Z")
@@ -42,6 +47,8 @@ def _kind(path):
         raise ValueError("installation target must be a canonical /dev whole-device path")
     if VIRTIO_NAME.fullmatch(path.name):
         return "VirtioBlock"
+    if NVME_NAME.fullmatch(path.name):
+        return "NVMeNamespace"
     if LOOP_NAME.fullmatch(path.name):
         return "TestLoop"
     raise ValueError("installation target is outside the supported whole-device profile")
@@ -170,13 +177,13 @@ def _virtio_device(kernel_path):
     return device
 
 
-def _virtio_names(directory):
+def _block_names(directory, pattern):
     names = set()
     with os.scandir(directory) as entries:
         for index, entry in enumerate(entries):
             if index >= MAX_SYSFS_ENTRIES:
                 raise ValueError("Linux block inventory exceeds the installation target limit")
-            if VIRTIO_NAME.fullmatch(entry.name):
+            if pattern.fullmatch(entry.name):
                 names.add(entry.name)
     return names
 
@@ -189,7 +196,7 @@ def _virtio_identity(directory, kernel_path, sysfs_device):
     with _directory(SYSFS / "block") as block:
         if os.fstat(block).st_dev != sysfs_device:
             raise ValueError("Linux block index is outside sysfs")
-        names = _virtio_names(block)
+        names = _block_names(block, VIRTIO_NAME)
         if kernel_path.name not in names:
             raise ValueError("installation target is absent from the Linux block index")
         for name in sorted(names - {kernel_path.name}):
@@ -200,9 +207,51 @@ def _virtio_identity(directory, kernel_path, sysfs_device):
                     raise ValueError("Linux virtio inventory is outside sysfs")
                 if _read_attribute(other, "serial") == serial:
                     raise ValueError("virtio installation serial is not unique")
-        if _virtio_names(block) != names or _read_attribute(directory, "serial") != serial:
+        if _block_names(block, VIRTIO_NAME) != names or _read_attribute(directory, "serial") != serial:
             raise ValueError("Linux virtio inventory changed during serial verification")
     return {"kind": "VirtioBlock", "serial": serial, "sysfs_path": str(device)}
+
+
+def _nvme_attributes(directory, kernel_path, sysfs_device):
+    controller = kernel_path.parent
+    pci = controller.parent.parent
+    if (controller.parent.name != "nvme" or not re.fullmatch(r"nvme[0-9]+", controller.name)
+            or (pci / "subsystem").resolve(strict=True) != PCI
+            or (pci / "driver").resolve(strict=True) != NVME_DRIVER):
+        raise ValueError("installation target is not a local PCIe NVMe namespace")
+    with _directory(controller) as opened:
+        if os.fstat(opened).st_dev != sysfs_device or _read_attribute(opened, "transport") != "pcie":
+            raise ValueError("Linux NVMe controller is outside the PCIe profile")
+        serial = _read_attribute(opened, "serial").strip(" ")
+    return controller, serial, _number(directory, "nsid"), _read_attribute(directory, "wwid")
+
+
+def _nvme_identity(directory, kernel_path, sysfs_device):
+    observed = _nvme_attributes(directory, kernel_path, sysfs_device)
+    controller, serial, namespace_id, wwid = observed
+    if not NVME_SERIAL.fullmatch(serial):
+        raise ValueError("NVMe installation target requires a stable printable serial")
+    if not 0 < namespace_id < 0xffffffff or not NVME_WWID.fullmatch(wwid):
+        raise ValueError("NVMe installation target requires a valid namespace ID and WWID")
+    with _directory(SYSFS / "block") as block:
+        if os.fstat(block).st_dev != sysfs_device:
+            raise ValueError("Linux block index is outside sysfs")
+        names = _block_names(block, NVME_NAME)
+        if kernel_path.name not in names:
+            raise ValueError("installation target is absent from the Linux block index")
+        for name in sorted(names - {kernel_path.name}):
+            sibling = _kernel_path(SYSFS / "block" / name, name)
+            with _directory(sibling) as other:
+                if os.fstat(other).st_dev != sysfs_device:
+                    raise ValueError("Linux NVMe inventory is outside sysfs")
+                _, other_serial, other_namespace, other_wwid = _nvme_attributes(other, sibling, sysfs_device)
+                if (other_serial, other_namespace) == (serial, namespace_id) or other_wwid == wwid:
+                    raise ValueError("NVMe installation namespace identity is not unique")
+        if (_block_names(block, NVME_NAME) != names
+                or _nvme_attributes(directory, kernel_path, sysfs_device) != observed):
+            raise ValueError("Linux NVMe inventory changed during namespace verification")
+    return {"kind": "NVMeNamespace", "serial": serial, "namespace_id": namespace_id,
+            "wwid": wwid, "sysfs_path": str(controller)}
 
 
 def _loop_identity(fd, path, kernel_path):
@@ -244,8 +293,12 @@ def read_target(fd, path: Path, *, allow_loop: bool) -> dict:
         raise ValueError("invalid Linux boot identity")
     with _disk(fd, path) as (directory, kernel_path, device, sequence, sysfs_device):
         size, logical, physical = _writable_geometry(fd, directory, sysfs_device)
-        transport = (_virtio_identity(directory, kernel_path, sysfs_device) if kind == "VirtioBlock"
-                     else _loop_identity(fd, path, kernel_path))
+        if kind == "VirtioBlock":
+            transport = _virtio_identity(directory, kernel_path, sysfs_device)
+        elif kind == "NVMeNamespace":
+            transport = _nvme_identity(directory, kernel_path, sysfs_device)
+        else:
+            transport = _loop_identity(fd, path, kernel_path)
         if ((size, logical, physical) != _writable_geometry(fd, directory, sysfs_device)
                 or (kind == "TestLoop" and transport != _loop_identity(fd, path, kernel_path))):
             raise ValueError("installation target identity changed during inspection")
